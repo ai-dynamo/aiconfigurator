@@ -1,0 +1,43 @@
+backend: pytorch
+
+{% if dynamo_config.moe_backend is defined %}  # dynamo_config.moe_backend TRTLLM MOE backend to use
+moe_backend: {{ dynamo_config.moe_backend }}
+{% endif %}
+
+{% if dynamo_config.moe_load_balancer is defined %}  # Configuration for MoE load balancing
+moe_load_balancer: {{ dynamo_config.moe_load_balancer }} # moe load balancer
+{% endif %}
+
+{% if is_moe is defined %}  # is_moe from sdk
+moe_expert_parallel_size: {{ moe_ep }}
+moe_tensor_parallel_size: {{ moe_tp }}
+{% endif %}
+
+tensor_parallel_size: {{ tp }}
+pipeline_parallel_size: {{ pp }}
+enable_attention_dp: {{ enable_attention_dp | default(false) }}
+enable_chunked_prefill: {{ dynamo_config.enable_chunked_prefill | default(false) }}
+
+max_batch_size: {{ bs }}
+max_num_tokens: {{ max_num_tokens }}
+max_seq_len: {{ max_seq_len }}
+
+kv_cache_config:
+  enable_block_reuse: {{ dynamo_config.enable_block_reuse | default(true) }}
+  free_gpu_memory_fraction: {{ dynamo_config.free_gpu_memory_fraction | default(0.80) }}  # dynamo_config.free_gpu_memory_fraction The maximum number of tokens that should be stored in the KV cache.
+  
+cuda_graph_config:
+  padding_enabled: {{ cuda_graph_padding_enabled | default(true) }} # dynamo_config.cuda_graph_padding_enabled Pad CUDA graph
+  batch_sizes: [{% for s in dynamo_config.cuda_graph_batch_sizes
+                               | default([1,2,4,8,16,32,64,128,256]) -%}
+                    {{- s }}{{ ',' if not loop.last else '' }} {%- endfor %}]
+
+disable_overlap_scheduler: {{ dynamo_config.disable_overlap_scheduler | default(true) }}
+print_iter_log: {{ dynamo_config.print_iter_log | default(false) }}  # dynamo_config.print_iter_log Print iteration logs
+kv_cache_dtype: {{ kv_cache_dtype | default('auto') }}  # kv_cache_dtype Data type for KV cache
+
+{% if is_speculative is defined %}  # speculative decoding
+speculative_config:
+  decoding_type: {{ decoding_type }}
+  num_nextn_predict_layers: {{ num_nextn_predict_layers }}
+{% endif %}

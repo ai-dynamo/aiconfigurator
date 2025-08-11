@@ -1,0 +1,2 @@
+src/aiconfigurator/systems/**/*.txt filter=lfs diff=lfs merge=lfs -text
+ATTRIBUTIONS.md filter=lfs diff=lfs merge=lfs -text

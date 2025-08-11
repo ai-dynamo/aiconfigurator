@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+.vscode/
+__pycache__/
+.DS_Store
+dev/
+results/
+archived/
+*.egg-info/
+.VSCodeCounter/
+build/
+dist/
+
+venv/
+env/
+.venv/
+
+*.pyc
+*.pyo
+*.pyd

@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+data_dir: data/gb200_sxm # relative to systems_dir
+gpu:
+  mem_bw: 13400000000000 # 13.4TB/s
+  mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_capacity: 206158430208 # 192GiB
+  float16_tc_flops: 2500000000000000 # 2500TFLOPS
+  int8_tc_flops: 5000000000000000 # 5000TFLOPS
+  fp8_tc_flops: 5000000000000000 # 5000TFLOPS
+  power: 1200  # Watt
+  sm_version: 100
+
+node:
+  num_gpus_per_node: 72
+  inter_node_bw: 25000000000  # Byte/s per GPU, single direction, CX7 1:1
+  intra_node_bw: 900000000000  # Byte/s per gpu, single direction
+  pcie_bw: 64000000000  # Byte/s, single direction, pcie 5.0
+  p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
+
+misc:
+  nccl_mem: # some nonofficial correction based on observations, you should try to modify based on your own observations
+    1: 0
+    2: 358612992 # 342MB
+    4: 411041792 # 392MB
+    8: 411041792 # 392MB
+  other_mem: 577765376 # 551MB
+  nccl_version: '2.23'

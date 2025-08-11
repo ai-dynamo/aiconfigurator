@@ -1,0 +1,100 @@
+set -euo pipefail
+
+# ============== General Envrionment Variable ==============
+export MODEL_PATH=${MODEL_PATH:-"{{ dynamo_config.model_path | default(model_name) }}"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"{{ dynamo_config.served_model_name | default(model_name) }}"}
+
+# ----------- ETCD / NATS address -----------
+export HEAD_NODE_IP=${HEAD_NODE_IP:-"{{ dynamo_config.head_node_ip | default('0.0.0.0') }}"}  # dynamo_config.head_node_ip Make sure the head node has started etcd and NATs, as the other node will connect to them
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+
+{% set router_mode = dynamo_config.router_mode | default('') %}  # dynamo_config.router_mode setting to kv for using kv router, other for without router
+{% set is_kv = router_mode == 'kv' %}
+
+{% if mode == "agg" %}
+# ================= AGG =====================
+export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"{{ agg_engine_args }}"}
+{% else %}
+
+# =============== DISAGG ====================
+export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"{{ dynamo_config.disaggregation_strategy | default('prefill_first') }}"} # dynamo_config.disaggregation_strategy prefill_first or decode_first
+
+{% if is_kv %}
+# ------- KV‑router related metrics ------------
+EXTRA_PREFILL_ARGS=()
+EXTRA_DECODE_ARGS=()
+if [ "$DISAGGREGATION_STRATEGY" == "prefill_first" ]; then
+  EXTRA_PREFILL_ARGS+=(--publish-events-and-metrics)
+else
+  EXTRA_DECODE_ARGS+=(--publish-events-and-metrics)
+fi
+{% endif %}
+{% endif %}
+
+# ============== cleaning & Frontend ==============
+cleanup(){ kill $(jobs -pr) 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+{% if include_frontend %}
+python3 utils/clear_namespace.py --namespace dynamo
+{% if is_kv %}
+python3 -m dynamo.frontend --router-mode kv --http-port 8000 &
+{% else %}
+python3 -m dynamo.frontend --http-port 8000 &
+{% endif %}
+{% endif %}
+
+{% if mode == "agg" %}
+# ---------------- AGG Worker ----------------
+python3 -m dynamo.trtllm \
+        --model-path "$MODEL_PATH" \
+        --served-model-name "$SERVED_MODEL_NAME" \
+        --extra-engine-args "$AGG_ENGINE_ARGS" \
+        {% if is_kv %}
+        --publish-events-and-metrics
+        {% endif %}&
+wait
+{% else %}
+# --------------- DISAGG Prefill -------------
+{% if prefill_workers|int > 0 %}
+PREFILL_GPU={{ prefill_gpu }}
+PREFILL_WORKERS={{ prefill_workers }}
+for ((w=0; w<PREFILL_WORKERS; w++)); do
+  BASE=$(( w * PREFILL_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+PREFILL_GPU-1)))
+  CUDA_VISIBLE_DEVICES=$GPU_LIST TRTLLM_ENABLE_XQA_JIT=0 \
+    python3 -m dynamo.trtllm \
+      --model-path "$MODEL_PATH" \
+      --served-model-name "$SERVED_MODEL_NAME" \
+      --extra-engine-args "{{ prefill_engine_args }}" \
+      --disaggregation-mode prefill \
+      --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
+      {% if is_kv %}
+      "${EXTRA_PREFILL_ARGS[@]}"
+      {% endif %}&
+done
+{% endif %}
+
+# --------------- DISAGG Decode --------------
+{% if decode_workers|int > 0 %}
+DECODE_GPU={{ decode_gpu }}
+DECODE_WORKERS={{ decode_workers }}
+DECODE_GPU_OFFSET={{ decode_gpu_offset }}
+for ((w=0; w<DECODE_WORKERS; w++)); do
+  BASE=$(( DECODE_GPU_OFFSET + w * DECODE_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+DECODE_GPU-1)))
+  CUDA_VISIBLE_DEVICES=$GPU_LIST TRTLLM_ENABLE_XQA_JIT=1 \
+    python3 -m dynamo.trtllm \
+      --model-path "$MODEL_PATH" \
+      --served-model-name "$SERVED_MODEL_NAME" \
+      --extra-engine-args "{{ decode_engine_args }}" \
+      --disaggregation-mode decode \
+      --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
+      {% if is_kv %}
+      "${EXTRA_DECODE_ARGS[@]}"
+      {% endif %}&
+done
+{% endif %}
+wait
+{% endif %}

@@ -1,0 +1,25 @@
+backend: pytorch
+
+{% if is_moe is defined %}  # is_moe from sdk
+moe_expert_parallel_size: {{ moe_ep }}
+moe_tensor_parallel_size: {{ moe_tp }}
+{% endif %}
+
+tensor_parallel_size: {{ tp }}
+pipeline_parallel_size: {{ pp }}
+enable_attention_dp: {{ enable_attention_dp | default(false) }}
+enable_chunked_prefill: {{ dynamo_config.enable_chunked_prefill | default(false) }}
+
+max_batch_size: {{ bs }}
+max_num_tokens: {{ max_num_tokens }}
+max_seq_len: {{ max_seq_len }}
+
+kv_cache_config:
+  enable_block_reuse: {{ dynamo_config.enable_block_reuse | default(true) }}
+  free_gpu_memory_fraction: {{ dynamo_config.free_gpu_memory_fraction | default(0.80) }}  # dynamo_config.free_gpu_memory_fraction Fraction for KV‑cache
+
+{% if is_speculative is defined %}  # speculative decoding
+speculative_config:
+  decoding_type: {{ decoding_type }}
+  num_nextn_predict_layers: {{ num_nextn_predict_layers }}
+{% endif %}

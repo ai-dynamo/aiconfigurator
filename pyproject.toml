@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "aiconfigurator"
+version = "0.1.0"
+authors = [
+    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
+]
+description = "aiconfigurator: automatic disaggregated serving offline configuration"
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Information Technology",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+keywords = [
+    "decode",
+    "distributed",
+    "dynamo",
+    "gpu",
+    "inference",
+    "llm",
+    "nvidia",
+    "prefill",
+]
+
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+
+requires-python = ">=3.9"
+
+dependencies = [
+    "fastapi>=0.115.12",
+    "gradio==4.44.1",
+    "jinja2>=3.1.0",
+    "matplotlib>=3.9.4",
+    "numpy>=2.0.2",
+    "orjson>=3.10.16",
+    "pandas>=2.2.3",
+    "plotext>=5.3.2",
+    "plotly>=6.0.1",
+    "prettytable>=3.16.0",
+    "pydantic==2.10.6",
+    "pyyaml>=6.0",
+    "scipy>=1.13.1",
+    "uvicorn>=0.34.2",
+]
+
+[project.optional-dependencies]
+dev-test = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+    "pytest-cov>=6.1.1",
+    "pytest-md-report==0.7.0",
+    "pytest-mock>=3.14.0",
+    "pytest-split>=0.10.0",
+    "pytest-timeout>=2.3.1",
+    "pytest-xdist==3.8.0"
+]
+
+[project.urls]
+GitHub = "https://github.com/ai-dynamo/aiconfigurator"
+Repository = "https://github.com/ai-dynamo/aiconfigurator.git"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+aiconfigurator = "aiconfigurator.main:main"
+
+[tool.setuptools.package-data]
+"aiconfigurator.cli" = ["templates/**/*.yaml", "templates/**/**/*.j2"]
+"aiconfigurator" = ["systems/*.yaml", "systems/**/*.txt"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]
+exclude = ["tests", "docker", "collector", "systems"]
+
+

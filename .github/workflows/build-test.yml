@@ -1,0 +1,46 @@
+name: "Build and Test"
+
+on:
+  push:
+    branches:
+      - main
+      - "release/*"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Git LFS Pull
+        run: git lfs pull
+      - name: Build wheel in container
+        run: |
+          docker build -f docker/Dockerfile -t aiconfigurator:build --target build .
+      - name: Run tests in container
+        run: |
+          docker build -f docker/Dockerfile -t aiconfigurator:test --target test .
+          docker run --name aic aiconfigurator:test \
+            pytest tests/cli/e2e_validation/test_e2e_sweep.py \
+            -v --tb=short --maxfail=1 --timeout=600 \
+            -n 1 \
+            -k '(model_QWEN3_32B) and (h200_sxm) and (-8-) and (-4000-) and (-10-)' \
+            --md-report --md-report-verbose=1 --md-report-flavor gfm --md-report-output test_report.md
+      - name: Copy test report from test Container
+        if: always()
+        run: |
+            docker cp aic:/workspace/test_report.md ./test_report.md
+      - name: Render the report to the PR when tests fail
+        uses: marocchino/sticky-pull-request-comment@v2
+        if: failure()
+        with:
+          header: test-report
+          recreate: true
+          path: test_report.md
