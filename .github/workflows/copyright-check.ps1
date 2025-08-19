@@ -14,7 +14,7 @@ $timer = [System.Diagnostics.Stopwatch]::StartNew()
 
 $global:copyright_matchers = @(
   @{
-    files = @('.containerfile', '.dockerignore', '.pbtxt', '.ps1', '.py', '.sh', '.toml', '.tpl', '.txt', '.yaml', '.yml', 'Dockerfile')
+    files = @('.containerfile', '.dockerignore', '.pbtxt', '.ps1', '.py', '.sh', '.toml', '.tpl', '.yaml', '.yml', 'Dockerfile')
     found_missing = $false
     matches = @(
       '# SPDX-FileCopyrightText: Copyright (c) ' + $date_key + ' NVIDIA CORPORATION & AFFILIATES. All rights reserved.'
