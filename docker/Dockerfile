@@ -1,3 +1,7 @@
+
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 FROM nvcr.io/nvidia/base/ubuntu:jammy-20250619 AS base
 
 WORKDIR /workspace
