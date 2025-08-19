@@ -8,7 +8,7 @@ from aiconfigurator.webapp.main import main as webapp_main, configure_parser as 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Dynamo aiconfigurator for disaggregated serving deployment.'
+        description='Dynamo AIConfigurator for disaggregated serving deployment.'
     )
     subparsers = parser.add_subparsers(dest='command', help='Command to run', required=True)
     

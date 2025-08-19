@@ -3,14 +3,14 @@ SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# aiconfigurator
+# AIConfigurator
 Today, in disaggregated serving, it's quite difficult to find a proper config
 to get benefits from disaggregation such as how many prefill workers and decode workers 
 do I need and what about the parallelism for each worker. Combined with SLA: 
 TTFT(Time-To-First-Token) and TPOT(Time-Per-Output-Token), it becomes even more complicated 
 to solve the throughput @ latency problem.
 
-We're introducing aiconfigurator to help you find a good reference to start with in your 
+We're introducing AIConfigurator to help you find a good reference to start with in your 
 disaggregated serving journey. The tool will try to search the space to get a good deployment config 
 based on your requirement including which model you want to serve, how many GPUs you have and what's 
 the GPU. Automatically generate the config files for you to deploy with Dynamo.
@@ -52,7 +52,7 @@ With **-h**, you can have more information about optional args to customize your
 
 ```
 ********************************************************************************
-*                      Dynamo aiconfigurator Final Results                     *
+*                      Dynamo AIConfigurator Final Results                     *
 ********************************************************************************
   ----------------------------------------------------------------------------
   Input Configuration & SLA Target:
@@ -204,6 +204,15 @@ OPs: MHA/GQA/MLA(FP8,FP16,FP32 fmha), 8bit kvcache, GEMM(FP16, 8/4bit WO, SQ, FP
 TRTLLM Versions: 0.20.0, 1.0.0rc3  
 Parallel modes: Tensor-parallel; Pipeline-parallel; Expert Tensor-parallel/Expert-parallell; Attention DP for DEEPSEEK and MoE  
 Scheduling: Static; IFB(continuous batching); Disaggregated serving; MTP for DEEPSEEK
+
+### System Data Support Matrix
+
+| System | Framework(Version) | Status |
+|--------|-------------------|--------|
+| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
+| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
+| b200_sxm | TRTLLM(NA) | 🚧 |
+
 
 ## Data Collection
 Data collection is a standalone process for collecting the database for aiconfigurator. By default, you don't have to collect the data by yourself.

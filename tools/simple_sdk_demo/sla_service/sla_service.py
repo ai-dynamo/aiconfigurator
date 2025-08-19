@@ -27,7 +27,7 @@ class PrettyJSONResponse(Response):
     def render(self, content: Any) -> bytes:
         return orjson.dumps(content, option=orjson.OPT_INDENT_2)
 
-app = FastAPI(title="Dynamo aiconfigurator SLA API", description="Dynamo aiconfigurator SLA API", default_response_class=PrettyJSONResponse)
+app = FastAPI(title="Dynamo AIConfigurator SLA API", description="Dynamo AIConfigurator SLA API", default_response_class=PrettyJSONResponse)
 
 @app.get("/sla/supported_models")
 def get_supported_models():

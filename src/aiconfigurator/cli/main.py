@@ -89,7 +89,7 @@ class AIConfiguratorConfig:
 
 @dataclass
 class AIConfiguratorResult:
-    """Result of Dynamo aiconfigurator"""
+    """Result of Dynamo AIConfigurator"""
     chosen_system_type: str # "agg" or "disagg" or "none"    
     has_disagg_benefit: bool
     benefit_ratio: float # disagg_throughput / agg_throughput
@@ -997,7 +997,7 @@ def main(args):
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO, 
                         format='%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s')
     
-    logger.info(f"Loading Dynamo aiconfigurator version: {__version__}")
+    logger.info(f"Loading Dynamo AIConfigurator version: {__version__}")
 
     # Create aiconfigurator and its config
     aiconfigurator = AIConfigurator()
@@ -1037,7 +1037,7 @@ def main(args):
         logger.info(f"Configuration completed in {end_time - start_time:.2f} seconds")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Dynamo aiconfigurator for Disaggregated Serving Deployment")
+    parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for Disaggregated Serving Deployment")
     configure_parser(parser)
     args = parser.parse_args()
     main(args)
