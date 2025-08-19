@@ -39,9 +39,9 @@ trap cleanup EXIT INT TERM
 {% if include_frontend %}
 python3 utils/clear_namespace.py --namespace dynamo
 {% if is_kv %}
-python3 -m dynamo.frontend --router-mode kv --http-port 8000 &
+python3 -m dynamo.frontend --router-mode kv --http-port "{{ dynamo_config.port | default(8000) }}" & # dynamo_config.port Frontend port of generated configs
 {% else %}
-python3 -m dynamo.frontend --http-port 8000 &
+python3 -m dynamo.frontend --http-port "{{ dynamo_config.port | default(8000) }}" &
 {% endif %}
 {% endif %}
 
