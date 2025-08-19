@@ -136,7 +136,7 @@ Please modify based on your own path '/raid/hub/qwen3-32b-fp8'
 On **Node 0**, start etcd and NATS.io:
 
 ```bash
-docker compose -f deploy/metrics/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ---
