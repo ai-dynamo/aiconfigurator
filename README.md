@@ -171,6 +171,12 @@ backend_configs/
 ````
 Please refer to [Deployment Guide](docs/dynamo_deployment_guide.md) for details
 
+### All-in-one automation
+To further simpify the end-to-end user experience, we're now supporting automate everything in one script, starting from configuring the deployment, generating the configs, preparing docker image and container, pulling model checkpoints, deploying the service, benchmarking and summarizing. 
+```bash
+  bash launch_eval.sh config.env
+```
+Everything is in one command! We're trying to integrate our expertise to make the deployment smarter. Refer to [Automation](tools/automation/README.md) for more details.
 
 ## Webapp
 ```bash
