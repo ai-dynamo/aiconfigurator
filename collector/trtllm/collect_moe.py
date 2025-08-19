@@ -36,7 +36,7 @@ def sample_power_law(size, alpha, xmin, xmax):
     inv_cdf = ((xmax**(1-alpha) - xmin**(1-alpha)) * u + xmin**(1-alpha))**(1/(1-alpha))
     return inv_cdf
 
-def power_law_logits_v2(num_tokens, num_experts, topk, ep, alpha):
+def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
     if num_tokens*topk > num_experts:
         num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens*0.8)
     else:
@@ -44,7 +44,6 @@ def power_law_logits_v2(num_tokens, num_experts, topk, ep, alpha):
 
     target_sum = num_tokens * topk
     
-    original_max = num_tokens_per_expert.max()
     original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
     
     target_distribution = original_distribution * target_sum
@@ -91,32 +90,14 @@ def power_law_logits_v2(num_tokens, num_experts, topk, ep, alpha):
     if pet_debug == 1:
         print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
 
-    h_selected_experts = torch.full((num_tokens, topk), -1, dtype=torch.long)
-    token_expert_count = torch.zeros(num_tokens, dtype=torch.long)
-    token_expert_sets = [set() for _ in range(num_tokens)]
+    _, num_tokens_per_expert_sorted_index = torch.sort(num_tokens_per_expert, descending=True)
     expert_assignments = []
-    for expert_id in range(num_experts):
+    num_tokens_per_expert_sorted_index_lists = num_tokens_per_expert_sorted_index.tolist()
+    for expert_id in num_tokens_per_expert_sorted_index_lists:
         expert_assignments.extend([expert_id] * num_tokens_per_expert[expert_id])
-    
-    if len(expert_assignments) > 0:
-        # Convert to tensor and randomize
-        expert_assignments = torch.tensor(expert_assignments, dtype=torch.long)
-        expert_assignments = expert_assignments[torch.randperm(len(expert_assignments))]
-        
-        # Use ultimate batch allocation algorithm
-        for expert_id in expert_assignments:
-            # Quickly find available tokens
-            available_mask = token_expert_count < topk
-            
-            if available_mask.any():
-                # Find the first available token
-                token_idx = available_mask.nonzero(as_tuple=True)[0][0]
-                # Use set to quickly check if this expert already exists (O(1) complexity)
-                if expert_id not in token_expert_sets[token_idx]:
-                    current_count = token_expert_count[token_idx]
-                    h_selected_experts[token_idx, current_count] = expert_id
-                    token_expert_sets[token_idx].add(expert_id)
-                    token_expert_count[token_idx] += 1
+
+    expert_assignments = torch.tensor(expert_assignments, dtype=torch.long)
+    h_selected_experts = expert_assignments.reshape(topk, num_tokens).T
 
     expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
     router_logits = F.softmax(expert_map.bfloat16(), dim=1)
@@ -127,7 +108,7 @@ def get_moe_test_cases():
     tp_list = [1,2,4,8,16,32]
     ep_list = [1,2,4,8,16,32,64,128,256]
     num_gpu_list = [1,2,4,8,16,32,64,128,256]
-    alpha_list = [0.5]
+    alpha_list = [0.5, 1.2]
     #hidden_size,inter_s,topk,num_expert, gated act
     #[15360,30720,2,16],# GPT-MOE-1.8T
     #[15360,3840,16,128],# GPT-MOE-1.8T-FineGrained
@@ -181,11 +162,11 @@ def get_moe_test_cases():
                                     if num_experts <= 256:
                                         for power_law_alpha in alpha_list:
                                             test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "power_law", power_law_alpha])
-                                        test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, False, model_name, 'moe_perf.txt', "balanced"])
+                                        test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
                             
                             for power_law_alpha in alpha_list:
                                 test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,False,model_name,'moe_perf.txt', "power_law", power_law_alpha])
-                            test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, False, model_name, 'moe_perf.txt', "balanced"])
+                            test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, False, model_name, 'moe_perf.txt', "balanced", 0])
     return test_cases
 
 def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, min_latency_mode, model_name, perf_filename, distributed = "power_law", power_law_alpha = 0.5, device='cuda:0'):
@@ -268,7 +249,7 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
 
     num_iter = 5 if distributed == "power_law" else 1
     if distributed == "power_law":
-        actual_logits_list = [power_law_logits_v2(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype).to(torch.device(device)) for _ in range(num_iter)]
+        actual_logits_list = [power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype).to(torch.device(device)) for _ in range(num_iter)]
     elif distributed == "balanced":
         actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype).to(torch.device(device))
     else:
@@ -320,8 +301,7 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
                         'num_experts': num_experts, 
                         'moe_tp_size': moe_tp_size, 
                         'moe_ep_size': moe_ep_size, 
-                        'distribution': distributed,
-                        'alpha': power_law_alpha,
+                        'distribution': "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed,
                         'latency': latency
                         }], 
                 framework='TRTLLM', 
