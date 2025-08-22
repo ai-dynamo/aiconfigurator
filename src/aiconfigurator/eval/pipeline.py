@@ -1,0 +1,432 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import json
+import logging
+import os
+import re
+import math
+import shutil
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+
+import yaml
+
+from aiconfigurator.eval.utils import run_stream, find_newest_subdir, mkdir_p, write_json, parse_disagg_start_script
+from aiconfigurator.eval.service import ServiceManager
+from aiconfigurator.eval.gpu import GPUWatcher
+from aiconfigurator.eval.benchmarks.genai_perf_runner import run as run_genai_perf, parse as parse_genai_perf
+from aiconfigurator.eval.plots.pareto import ParetoPlot
+from aiconfigurator.eval.plots.timeseries import plot_gpu_timeseries
+
+LOG = logging.getLogger(__name__)
+
+@dataclass
+class EvalConfig:
+    mode: str
+    service_dir: str
+    start_script: str
+    port: int
+    health_timeout_s: int
+    coldstart_wait_s: int
+    no_generate: bool
+    gpu_monitor: bool
+    nvml_interval_s: float
+    bench_concurrency: List[int]
+    runs: int
+    artifact_root: str
+    cli_args: Any
+
+class Pipeline:
+    def __init__(self, cfg: EvalConfig):
+        self.cfg = cfg
+        self.service: Optional[ServiceManager] = None
+        self.last_config_dir: Optional[Path] = None
+        self.art_root: Optional[Path] = None
+        self._gpu_watcher = None
+        self._gpu_csv: Optional[Path] = None
+
+    def _generate_configs(self) -> Path:
+        """
+        Call existing CLI.
+        """
+        from aiconfigurator.cli import main as cli_runner
+
+        args = self.cfg.cli_args
+        save_dir = getattr(args, "save_dir", None)
+        if not save_dir:
+            raise ValueError("--save_dir is required for eval to pick artifacts.")
+
+        pre_existing = set(p.name for p in Path(save_dir).glob("*") if p.is_dir())
+
+        LOG.info("Generating configs via `cli`...")
+        t0 = time.time()
+        rc = cli_runner.main(args)
+        if rc not in (None, 0):
+            raise RuntimeError(f"`aiconfigurator cli` returned rc={rc}")
+
+        base = Path(save_dir)
+        new_dirs = [p for p in base.glob("*") if p.is_dir() and p.name not in pre_existing]
+        result_dir = max(new_dirs, key=lambda p: p.stat().st_mtime) if new_dirs else find_newest_subdir(base)
+        if not result_dir:
+            raise FileNotFoundError("No new result folder found in save_dir.")
+        LOG.info("Config generated in %.1fs: %s", time.time() - t0, result_dir)
+        return result_dir
+
+    def _copy_backend_configs(self, run_dir: Path, dest_root: Path) -> Dict[str, Path]:
+        """Copy backend_configs/{disagg,agg} into service dir (overwrite)."""
+        src_root = run_dir / "backend_configs"
+        if not src_root.exists():
+            raise FileNotFoundError(f"{src_root} does not exist")
+
+        copied: Dict[str, Path] = {}
+        for mode in ("disagg", "agg"):
+            src = src_root / mode
+            if src.exists():
+                dst = dest_root / mode
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+                copied[mode] = dst
+                LOG.info("Copied backend configs: %s -> %s", src, dst)
+            else:
+                LOG.info("No '%s' backend config in %s (skip)", mode, src_root)
+        if not copied:
+            raise FileNotFoundError("No backend config folders found to copy.")
+        return copied
+
+    def _ensure_art_root(self, save_dir: Path, run_name: str) -> Path:
+        base = Path(self.cfg.artifact_root) if self.cfg.artifact_root else save_dir
+        out = base / "eval_runs" / run_name
+        mkdir_p(out)
+        return out
+
+    def _read_max_batch_size(self, service_dir: Path, mode: str) -> Optional[int]:
+        cfg_path = service_dir / ("agg/agg_config.yaml" if mode == "agg" else "disagg/decode_config.yaml")
+        if not cfg_path.exists():
+            LOG.warning("YAML not found for auto concurrency: %s", cfg_path)
+            return None
+        try:
+            with cfg_path.open() as f:
+                y = yaml.safe_load(f) or {}
+            mbs = y.get("max_batch_size")
+            if isinstance(mbs, int) and mbs >= 1:
+                return mbs
+            LOG.warning("max_batch_size not found or invalid in %s", cfg_path)
+            return None
+        except Exception as e:
+            LOG.warning("Failed to read %s: %s", cfg_path, e)
+            return None
+
+    def _snap_to_grid(self, target: float, g: int, lo: int, hi: int) -> int:
+        if lo > hi:
+            return hi
+
+        down = int(math.floor(target / g) * g)
+        up   = int(math.ceil(target / g) * g)
+
+        cands = []
+        if lo <= down <= hi and down > 0:
+            cands.append(down)
+        if lo <= up <= hi and up > 0 and up != down:
+            cands.append(up)
+
+        if cands:
+            cands.sort(key=lambda x: (abs(x - target), -x))
+            return cands[0]
+
+        first_ge_lo = int(math.ceil(lo / g) * g)
+        if lo <= first_ge_lo <= hi:
+            return first_ge_lo
+
+        return lo
+
+
+    def _auto_concurrency_values(self, max_bs: int) -> List[int]:
+        K = 6
+        if max_bs <= 1:
+            return [1]
+
+        if max_bs >= 32:
+            g = 8
+        elif max_bs >= 8:
+            g = 4
+        elif max_bs >= 4:
+            g = 2
+        else:
+            g = 1
+
+        fracs = [1/8, 1/4, 1/2, 3/4]
+        pts = [1]
+        n_int = len(fracs)
+
+        for i, f in enumerate(fracs):
+            lo = pts[-1] + 1
+            hi = max_bs - (n_int - (i + 1))
+            if lo > hi:
+                lo = hi
+            target = f * max_bs
+            v = self._snap_to_grid(target, g, lo, hi)
+            if v <= pts[-1]:
+                v = min(hi, pts[-1] + 1)
+            pts.append(int(v))
+
+        pts.append(max_bs)
+
+        out = []
+        for v in pts:
+            if not out or v > out[-1]:
+                out.append(int(v))
+
+        if len(out) > K:
+            mids = out[1:-1]
+            need = K - 2
+            idxs = [round(j * (len(mids) - 1) / (need - 1)) for j in range(need)]
+            out = [out[0]] + [mids[i] for i in idxs] + [out[-1]]
+
+        while len(out) < K:
+            ins = min(out[-1] - 1, out[-2] + g if len(out) >= 2 else 2)
+            if ins > out[-2]:
+                out.insert(-1, ins)
+            else:
+                break
+
+        return out[:K]
+
+
+    def _start_service(self, service_dir: Path, log_file: Path) -> ServiceManager:
+        start_rel = self.cfg.start_script.strip() or ("disagg/node_0_run.sh" if self.cfg.mode == "disagg" else "agg/node_0_run.sh")
+        sm = ServiceManager(
+            workdir=service_dir,
+            start_cmd=["bash", start_rel],
+            port=self.cfg.port,
+        )
+        sm.start(log_path=log_file, cold_wait_s=self.cfg.coldstart_wait_s)
+        sm.wait_healthy(timeout_s=self.cfg.health_timeout_s)
+        return sm
+
+    def _collect_gpu_once(self, where: Path) -> Dict[str, Any]:
+        """Quick NVML snapshot before benchmark for worker sanity check."""
+        # Lazy import since monitoring might be disabled
+        from .gpu import quick_nvml_snapshot
+        snap = quick_nvml_snapshot()
+        write_json(where / "gpu_snapshot_prebench.json", snap)
+        return snap
+
+    def _run_benchmark(self, art_dir: Path, url: str, isl: int, osl: int, concurrency: List[int]) -> Path:
+        args = self.cfg.cli_args
+        model_path = str(getattr(args, "model_path", ""))
+        served_model_name = str(getattr(args, "served_model_name", ""))
+
+        cfg = {
+            "name": "genai_perf_eval",
+            "base_folder": str(art_dir),
+            "result_folder": "bench",
+            "model": served_model_name or "unknown-model",
+            "tokenizer": model_path or "unknown-tokenizer",
+            "url": url,
+            "endpoint_type": "chat",
+            "input_sequence_length": int(isl),
+            "output_sequence_length": int(osl),
+            "concurrency": list(concurrency),
+        }
+        run_genai_perf(cfg)
+        return art_dir / "bench"
+
+
+
+    def _analyze_and_plot(
+        self,
+        art_dir: Path,
+        bench_dir: Path,
+        workers_info: Dict[str, int],
+        mode: str,
+        gpu_monitor_enabled: bool,
+        gpu_csv: Optional[Path],
+    ) -> None:
+        """Parse genai-perf JSON and create plots."""
+        df = parse_genai_perf(bench_dir)
+        out_csv = art_dir / "bench_summary.csv"
+        df.to_csv(out_csv, index=False)
+        LOG.info("Saved summary: %s", out_csv)
+
+        legend = "agg"
+        total_gpus = 1
+        if mode == "disagg":
+            p_workers = int(workers_info.get("PREFILL_WORKERS", 0) or 0)
+            d_workers = int(workers_info.get("DECODE_WORKERS", 0) or 0)
+            p_gpu = int(workers_info.get("PREFILL_GPU", 0) or 0)
+            d_gpu = int(workers_info.get("DECODE_GPU", 0) or 0)
+            total_gpus = p_workers * p_gpu + d_workers * d_gpu
+            legend = f"disagg_{p_workers}p({p_gpu} gpu){d_workers}d({d_gpu} gpu)"
+            if total_gpus <= 0:
+                LOG.warning("Total GPUs computed as 0; skip per-GPU normalization.")
+                total_gpus = None
+
+        x_metric = "output_token_throughput_per_user::avg"
+        y_metric = "output_token_throughput::avg"
+        if f"{x_metric.split('::')[0]}_avg" not in df.columns:
+            x_metric = "request_throughput::avg"
+            LOG.warning("Per-user throughput missing; fallback to request_throughput::avg for X-axis.")
+
+        import matplotlib.pyplot as plt
+        fig = plt.figure(figsize=(8, 5))
+        ax = fig.add_subplot(111)
+
+        p = ParetoPlot(
+            x_metric=x_metric,
+            y_metric=y_metric,
+            merge=True,
+            num_gpus=total_gpus if total_gpus else None,
+            plot_label=legend,
+            show_cc_label=True,
+            expand_x=True,
+        )
+        p.add_series("bench", df)
+        p.render(
+            ax,
+            title="Throughput(per gpu)/Throughput(per user)",
+            x_label="Throughput (per user)",
+            y_label="Throughput (per gpu)",
+        )
+        fig.savefig(art_dir / "pareto.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        LOG.info("Saved plot: %s", art_dir / "pareto.png")
+
+        if gpu_monitor_enabled and gpu_csv and gpu_csv.exists():
+            from .plots.gpu_timeseries import plot_gpu_timeseries_bokeh
+            out_html = art_dir / "gpu_timeseries.html"
+            plot_gpu_timeseries_bokeh(gpu_csv, out_html, title="GPU Utilization (%)")
+            LOG.info("Saved plot: %s", out_html)
+
+
+    def _extract_workers_from_start_script(self, service_dir: Path) -> Dict[str, int]:
+        """
+        For disagg, read disagg/node_0_run.sh and extract:
+          PREFILL_GPU, PREFILL_WORKERS, DECODE_GPU, DECODE_WORKERS
+        For agg, return workers=1; gpu_per_worker unknown (-1).
+        """
+        if self.cfg.mode == "disagg":
+            start_rel = self.cfg.start_script.strip() or "disagg/node_0_run.sh"
+            script = service_dir / start_rel
+            vals = parse_disagg_start_script(script)
+            LOG.info("Parsed workers from %s: %s", script, vals)
+            return vals
+        else:
+            return {
+                "PREFILL_GPU": -1,
+                "PREFILL_WORKERS": 0,
+                "DECODE_GPU": -1,
+                "DECODE_WORKERS": 0,
+                "AGG_WORKERS": 1,
+            }
+
+    def stop_service(self):
+        if self.service:
+            self.service.stop()
+            LOG.info("Service stopped.")
+
+    def run(self, run_name: str) -> int:
+        """
+        Procedures:
+          1) (optional) generate configs
+          2) start service + health check
+          3) (optional) NVML snapshot + GPU watcher
+          4) run benchmark using args.isl/args.osl
+          5) analyze + plots
+        """
+        args = self.cfg.cli_args
+        save_dir = Path(getattr(args, "save_dir", None) or "")
+        if not save_dir:
+            raise ValueError("--save_dir is required")
+
+        # 1) generate configs
+        if not self.cfg.no_generate:
+            self.last_config_dir = self._generate_configs()
+        else:
+            self.last_config_dir = find_newest_subdir(save_dir)
+            if not self.last_config_dir:
+                raise FileNotFoundError(f"No runs in {save_dir} and --no-generate was set.")
+
+        # 2) copy configs to dynamo trtllm folder
+        service_dir = Path(self.cfg.service_dir)
+        _ = self._copy_backend_configs(self.last_config_dir, service_dir)
+
+        # determine cc
+        if self.cfg.bench_concurrency and len(self.cfg.bench_concurrency) > 0:
+            conc_list = list(self.cfg.bench_concurrency)
+            LOG.info("Using provided benchmark concurrency: %s", conc_list)
+        else:
+            mbs = self._read_max_batch_size(service_dir, self.cfg.mode)
+            if not mbs:
+                # safe fallback if YAML missing
+                conc_list = [1, 2, 4, 8, 16, 32]
+                LOG.warning("Auto concurrency: max_batch_size not found -> fallback %s", conc_list)
+            else:
+                conc_list = self._auto_concurrency_values(int(mbs))
+                LOG.info("Auto concurrency from max_batch_size=%s -> %s", mbs, conc_list)
+
+
+        # prepare log path
+        log_dir = Path(getattr(args, "save_dir")).resolve() / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"{run_name}_{self.cfg.mode}_p{self.cfg.port}.log"
+
+        # 3) start + health
+        self.service = self._start_service(service_dir, log_file)
+
+        # artifacts root
+        self.art_root = self._ensure_art_root(save_dir, run_name)
+
+        # Worker info from script (disagg) or default (agg)
+        workers_info = self._extract_workers_from_start_script(service_dir)
+        write_json(self.art_root / "workers_extracted.json", workers_info)
+
+        # GPU monitoring (conditional)
+        if self.cfg.gpu_monitor:
+            LOG.info("GPU monitor enabled")
+            # lazy import to avoid NVML dependency when disabled
+            from .gpu import GPUWatcher
+            self._gpu_csv = self.art_root / "gpu_stats.csv"
+            self._gpu_watcher = GPUWatcher(interval_s=self.cfg.nvml_interval_s, out_csv=self._gpu_csv)
+            # optional one-shot snapshot before benchmark
+            self._collect_gpu_once(self.art_root)
+            self._gpu_watcher.start()
+        else:
+            LOG.info("GPU monitor disabled: skipping NVML sampling and timeseries.")
+            self._gpu_csv = None
+
+        # benchmark tokens
+        isl = int(getattr(args, "isl", 0) or 0) or 1024
+        osl = int(getattr(args, "osl", 0) or 0) or 128
+        LOG.info("Benchmark tokens: isl=%d osl=%d", isl, osl)
+
+        # wait 30s after health OK, before running benchmarks
+        LOG.info("Health OK. Waiting 30 seconds before starting benchmark...")
+        import time as _time
+        _time.sleep(30)
+
+
+        try:
+            base_url = f"http://0.0.0.0:{self.cfg.port}"
+            for i in range(self.cfg.runs):
+                tag = f"{run_name}_r{i+1}"
+                art_dir = self.art_root / tag
+                mkdir_p(art_dir)
+                LOG.info("Run %d/%d -> %s (concurrency=%s)", i + 1, self.cfg.runs, art_dir, conc_list)
+                bench_dir = self._run_benchmark(art_dir, url=base_url, isl=isl, osl=osl, concurrency=conc_list)
+                self._analyze_and_plot(
+                    art_dir=art_dir,
+                    bench_dir=bench_dir,
+                    workers_info=workers_info,
+                    mode=self.cfg.mode,
+                    gpu_monitor_enabled=self.cfg.gpu_monitor,
+                    gpu_csv=self._gpu_csv,
+                )
+        finally:
+            if self._gpu_watcher:
+                self._gpu_watcher.stop()
+
+        return 0

@@ -45,7 +45,7 @@ dependencies = [
     "gradio==4.44.1",
     "jinja2>=3.1.0",
     "matplotlib>=3.9.4",
-    "numpy>=2.0.2",
+    "numpy==1.26.4",
     "orjson>=3.10.16",
     "pandas>=2.2.3",
     "plotext>=5.3.2",
@@ -55,6 +55,9 @@ dependencies = [
     "pyyaml>=6.0",
     "scipy>=1.13.1",
     "uvicorn>=0.34.2",
+    "genai-perf",
+    "bokeh",
+    "nvidia-ml-py"
 ]
 
 [project.optional-dependencies]

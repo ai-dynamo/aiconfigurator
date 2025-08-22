@@ -5,6 +5,8 @@ import argparse
 import sys
 from aiconfigurator.cli.main import main as cli_main, configure_parser as configure_cli_parser
 from aiconfigurator.webapp.main import main as webapp_main, configure_parser as configure_webapp_parser
+from aiconfigurator.eval.main import main as eval_main, configure_parser as configure_eval_parser
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -21,6 +23,11 @@ def main():
     webapp_parser = subparsers.add_parser('webapp', help='Run Web interface')
     configure_webapp_parser(webapp_parser)
     webapp_parser.set_defaults(func=webapp_main)
+
+    # Eval subcommand  
+    eval_parser = subparsers.add_parser('eval', help='Generate config -> Launch Service -> Benchmarking -> Analysis')
+    configure_eval_parser(eval_parser)
+    eval_parser.set_defaults(func=eval_main)
 
     # Parse args
     args = parser.parse_args()

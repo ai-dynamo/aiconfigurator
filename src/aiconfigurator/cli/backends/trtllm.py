@@ -112,6 +112,9 @@ def generate_backend_config(cfg_res,
         else:
             agg_config["max_num_tokens"] = agg_config["bs"] + cfg_cfg.isl + 1500
 
+        agg_config["cuda_graph_batch_sizes"] = [i for i in range(1, agg_config["bs"]+1)]
+        agg_config["disable_overlap_scheduler"] = False
+
         agg_yaml = parse_eng({**agg_config, "dynamo_config": global_args})
 
         script = sh_tpl.render(
@@ -137,7 +140,14 @@ def generate_backend_config(cfg_res,
 
         # setting max_num_tokens
         disagg_prefill_config["max_num_tokens"] = disagg_prefill_config["bs"] * cfg_cfg.isl + 1500
+        
         disagg_decode_config["max_num_tokens"] = disagg_decode_config["bs"]
+        disagg_decode_config["cuda_graph_batch_sizes"] = [i for i in range(1, disagg_decode_config["bs"]+1)]
+        
+        # overlap scheduler
+        disagg_prefill_config["disable_overlap_scheduler"] = True
+        disagg_decode_config["disable_overlap_scheduler"] = False
+
         if cfg_cfg.nextn >= 1:
             disagg_decode_config["max_num_tokens"] = agg_config["max_num_tokens"] * (1+cfg_cfg.nextn)
         
