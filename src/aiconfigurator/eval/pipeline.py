@@ -216,8 +216,8 @@ class Pipeline:
         write_json(where / "gpu_snapshot_prebench.json", snap)
         return snap
 
-    def _load_optimal_configs(self, config_dir: Path) -> Dict[str, pd.DataFrame]:
-        """Load optimal configuration data from saved aiconfigurator results."""
+    def _load_optimal_configs(self, config_dir: Path, target_tpot: Optional[float] = None) -> Dict[str, pd.DataFrame]:
+        """Load optimal configuration data from saved aiconfigurator results with TPOT filtering."""
         optimal_configs = {}
         
         # Try to load from CSV files first (more complete data)
@@ -228,10 +228,13 @@ class Pipeline:
             try:
                 agg_pareto = pd.read_csv(agg_pareto_path)
                 if not agg_pareto.empty:
-                    # Get the best configuration (highest throughput per GPU)
-                    best_agg = agg_pareto.loc[agg_pareto['tokens/s/gpu'].idxmax()].to_frame().T
-                    optimal_configs['agg'] = best_agg
-                    LOG.info(f"Loaded optimal agg config: {best_agg['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu")
+                    best_agg = self._get_best_config_under_tpot_constraint(agg_pareto, target_tpot)
+                    if not best_agg.empty:
+                        optimal_configs['agg'] = best_agg
+                        LOG.info(f"Loaded optimal agg config: {best_agg['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu, "
+                                f"TPOT: {best_agg.get('tpot', [None]).iloc[0]} ms")
+                    else:
+                        LOG.warning("No agg config found that meets TPOT constraint")
             except Exception as e:
                 LOG.warning(f"Failed to load agg pareto data: {e}")
         
@@ -239,14 +242,46 @@ class Pipeline:
             try:
                 disagg_pareto = pd.read_csv(disagg_pareto_path)
                 if not disagg_pareto.empty:
-                    # Get the best configuration (highest throughput per GPU)
-                    best_disagg = disagg_pareto.loc[disagg_pareto['tokens/s/gpu'].idxmax()].to_frame().T
-                    optimal_configs['disagg'] = best_disagg
-                    LOG.info(f"Loaded optimal disagg config: {best_disagg['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu")
+                    best_disagg = self._get_best_config_under_tpot_constraint(disagg_pareto, target_tpot)
+                    if not best_disagg.empty:
+                        optimal_configs['disagg'] = best_disagg
+                        LOG.info(f"Loaded optimal disagg config: {best_disagg['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu, "
+                                f"TPOT: {best_disagg.get('tpot', [None]).iloc[0]} ms")
+                    else:
+                        LOG.warning("No disagg config found that meets TPOT constraint")
             except Exception as e:
                 LOG.warning(f"Failed to load disagg pareto data: {e}")
         
         return optimal_configs
+
+    def _get_best_config_under_tpot_constraint(self, pareto_df: pd.DataFrame, target_tpot: Optional[float]) -> pd.DataFrame:
+        """Get the best configuration that meets TPOT constraint, similar to CLI logic."""
+        if pareto_df.empty:
+            return pd.DataFrame()
+        
+        # If no TPOT constraint, return the best overall configuration
+        if target_tpot is None:
+            best_config = pareto_df.loc[pareto_df['tokens/s/gpu'].idxmax()].to_frame().T
+            LOG.info("No TPOT constraint specified, using best overall configuration")
+            return best_config
+        
+        # Filter configurations that meet TPOT constraint
+        if 'tpot' not in pareto_df.columns:
+            LOG.warning("TPOT column not found in pareto data, using best overall configuration")
+            return pareto_df.loc[pareto_df['tokens/s/gpu'].idxmax()].to_frame().T
+        
+        # Find configurations that meet the TPOT constraint
+        candidate_configs = pareto_df[pareto_df['tpot'] <= target_tpot].copy()
+        
+        if not candidate_configs.empty:
+            # Among valid candidates, pick the one with highest tokens/s/gpu
+            best_config = candidate_configs.loc[candidate_configs['tokens/s/gpu'].idxmax()].to_frame().T
+            LOG.info(f"Found {len(candidate_configs)} configs meeting TPOT <= {target_tpot}ms, "
+                    f"selected best with {best_config['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu")
+            return best_config
+        else:
+            LOG.warning(f"No config found with TPOT <= {target_tpot}ms, using best overall configuration")
+            return pareto_df.loc[pareto_df['tokens/s/gpu'].idxmax()].to_frame().T
 
     def _convert_optimal_config_to_plot_format(self, config_df: pd.DataFrame, config_type: str) -> pd.DataFrame:
         """Convert optimal configuration DataFrame to format expected by ParetoPlot."""
@@ -427,8 +462,9 @@ class Pipeline:
         service_dir = Path(self.cfg.service_dir)
         _ = self._copy_backend_configs(self.last_config_dir, service_dir)
         
-        # Load optimal configurations from the saved results
-        optimal_configs = self._load_optimal_configs(self.last_config_dir)
+        # Load optimal configurations from the saved results with TPOT filtering
+        target_tpot = getattr(args, "tpot", None)
+        optimal_configs = self._load_optimal_configs(self.last_config_dir, target_tpot)
 
         # determine cc
         if self.cfg.bench_concurrency and len(self.cfg.bench_concurrency) > 0:

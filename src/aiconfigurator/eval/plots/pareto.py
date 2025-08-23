@@ -95,8 +95,8 @@ class ParetoPlot:
                 
             x_vals = self._col(df, self._x_spec)
             y_vals = self._col(df, self._y_spec)
-            if self._num_gpus and self._num_gpus > 0:
-                y_vals = y_vals / self._num_gpus
+            # NOTE: Optimal points from pareto CSV already have per-GPU values, 
+            # so we don't divide by num_gpus again to avoid double normalization
 
             all_x_vals = pd.concat([all_x_vals, x_vals])
 
