@@ -349,8 +349,7 @@ class Pipeline:
         df.to_csv(out_csv, index=False)
         LOG.info("Saved summary: %s", out_csv)
 
-        legend = "agg"
-        total_gpus = 1
+        # Extract GPU count based on mode
         if mode == "disagg":
             p_workers = int(workers_info.get("PREFILL_WORKERS", 0) or 0)
             d_workers = int(workers_info.get("DECODE_WORKERS", 0) or 0)
@@ -358,9 +357,15 @@ class Pipeline:
             d_gpu = int(workers_info.get("DECODE_GPU", 0) or 0)
             total_gpus = p_workers * p_gpu + d_workers * d_gpu
             legend = f"disagg_{p_workers}p({p_gpu} gpu){d_workers}d({d_gpu} gpu)"
-            if total_gpus <= 0:
-                LOG.warning("Total GPUs computed as 0; skip per-GPU normalization.")
-                total_gpus = None
+        else:
+            # For agg mode, extract GPU count from config
+            total_gpus = self._get_agg_gpu_count(workers_info)
+            legend = f"agg_{total_gpus}gpu"
+        
+        # Validate GPU count
+        if total_gpus <= 0:
+            LOG.warning("Total GPUs computed as 0; skip per-GPU normalization.")
+            total_gpus = None
 
         x_metric = "output_token_throughput_per_user::avg"
         y_metric = "output_token_throughput::avg"
@@ -409,12 +414,14 @@ class Pipeline:
             plot_gpu_timeseries_bokeh(gpu_csv, out_html, title="GPU Utilization (%)")
             LOG.info("Saved plot: %s", out_html)
 
+    def _get_agg_gpu_count(self, workers_info: Dict[str, int]) -> int:
+        """Simple helper to get GPU count for agg mode."""
+        return workers_info.get("AGG_GPU_COUNT", 1)
 
     def _extract_workers_from_start_script(self, service_dir: Path) -> Dict[str, int]:
         """
-        For disagg, read disagg/node_0_run.sh and extract:
-          PREFILL_GPU, PREFILL_WORKERS, DECODE_GPU, DECODE_WORKERS
-        For agg, return workers=1; gpu_per_worker unknown (-1).
+        For disagg, read disagg/node_0_run.sh and extract worker/GPU info.
+        For agg, extract GPU count from agg_config.yaml.
         """
         if self.cfg.mode == "disagg":
             start_rel = self.cfg.start_script.strip() or "disagg/node_0_run.sh"
@@ -423,13 +430,39 @@ class Pipeline:
             LOG.info("Parsed workers from %s: %s", script, vals)
             return vals
         else:
+            # For agg mode, extract GPU count from config
+            agg_gpu_count = self._extract_agg_gpu_count_from_config(service_dir)
             return {
                 "PREFILL_GPU": -1,
                 "PREFILL_WORKERS": 0,
                 "DECODE_GPU": -1,
                 "DECODE_WORKERS": 0,
                 "AGG_WORKERS": 1,
+                "AGG_GPU_COUNT": agg_gpu_count,
             }
+
+    def _extract_agg_gpu_count_from_config(self, service_dir: Path) -> int:
+        """Extract GPU count from agg config file (TP * PP for TRT-LLM)."""
+        try:
+            config_path = service_dir / "agg" / "agg_config.yaml"
+            if not config_path.exists():
+                LOG.warning(f"Agg config not found: {config_path}")
+                return 1
+            
+            with config_path.open() as f:
+                config = yaml.safe_load(f) or {}
+            
+            # For TRT-LLM, GPU count is TP * PP (DP is handled through TP)
+            tp = config.get("tensor_parallel_size", 1)
+            pp = config.get("pipeline_parallel_size", 1)
+            gpu_count = tp * pp
+            
+            LOG.info(f"Extracted agg GPU count (TRT-LLM): TP={tp} * PP={pp} = {gpu_count}")
+            return gpu_count
+            
+        except Exception as e:
+            LOG.warning(f"Failed to extract agg GPU count: {e}")
+            return 1
 
     def stop_service(self):
         if self.service:
