@@ -292,6 +292,8 @@ class TRTLLMBackend(BaseBackend):
             num_tokens = isl*batch_size
         
         # ==== this below section is backend specific ====
+        # FIXME: the measurement is done based on trt workflow and traditional moe.
+        #        needs to study the new model again. Expecially fine-grained moe will introduce more act/workspace memory.
         if get_model_family(model.model_name) == 'GPT':
             c_dict = {1:10, 2:6, 4:5, 8:5}
             activations = 2*num_tokens*h*c_dict[min(model.config.tp_size, 8)]

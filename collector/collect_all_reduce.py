@@ -1,147 +1,151 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""
+AllReduce Performance Collector
+
+This script uses CUDA Graph based benchmarking for AllReduce operations,
+providing efficient and accurate performance measurements.
+
+Usage:
+    # With MPI
+    mpirun -n 4 python collect_all_reduce.py
+    
+    # With SLURM
+    python collect_all_reduce.py --use-slurm
+    
+    # Custom range and output file
+    python collect_all_reduce.py --range "128,1000000,2" --perf-filename "my_perf.txt"
+"""
+
 from argparse import ArgumentParser
+import os
 
 # isort: off
 import torch
 # isort: on
 from cuda import cuda, cudart
-from polygraphy.backend.trt import CreateConfig, EngineFromNetwork
 
 import tensorrt_llm as tllm
-from tensorrt_llm import Mapping, Tensor
+from tensorrt_llm import Mapping
 from tensorrt_llm._utils import OMPI_COMM_TYPE_HOST, mpi_comm
-from tensorrt_llm.functional import (AllReduceParams, AllReduceStrategy, allreduce)
-from tensorrt_llm.plugin.plugin import current_all_reduce_helper,CustomAllReduceHelper
-import tensorrt as trt
-from statistics import mean
+from tensorrt_llm.functional import AllReduceStrategy
+from tensorrt_llm._torch.distributed import (AllReduce, AllReduceFusionOp,
+                                             AllReduceParams as TorchAllReduceParams)
+from helper import log_perf
 
-class AllReduceProfiler(trt.IProfiler):
-    def __init__(self, perf_filename='custom_allreduce_perf.txt', prefix='', target_layers=[0,1,2]):
-        trt.IProfiler.__init__(self)
-        self._counter = 0
-        self._prefix = prefix
-        self._target_layers = target_layers
-        self._latencies = []
-        self._layer_names = []
-        self._perf_filename = perf_filename
 
-    def report_layer_time(self, layer_name, ms):
-        
-        if self._counter in self._target_layers:
-            self._layer_names.append(layer_name)
-            self._latencies.append(ms)
-        self._counter += 1
-    
-    def write_to_file(self):
-        #return
-
-        num_cases = len(self._latencies)
-        assert(num_cases > 2)
-        latencies = sorted(self._latencies)
-        latencies = latencies[1:-1]
-        latency = mean(latencies)
-        with open(self._perf_filename, 'a') as f:
-            f.write(self._prefix + f',{self._layer_names[-1]},{latency}\n')
+def get_input_shape_and_comm_size(size, token_dim=4096):
+    """Convert size to appropriate input shape for AllReduce operations"""
+    if size <= token_dim:
+        return [1, size]
+    else:
+        num_token = size // token_dim
+        return [num_token, token_dim]
 
 
 def allreduce_benchmark(dtype: str,
-                        test_range: str = "10,10000000,10",
-                        no_header: bool = False):
-    tllm.logger.set_level('error')
-    world_size = tllm.mpi_world_size()
-    rank = tllm.mpi_rank()
-    local_comm = mpi_comm().Split_type(split_type=OMPI_COMM_TYPE_HOST)
-    local_rank = local_comm.Get_rank()
-    gpus_per_node = local_comm.Get_size()
+                        test_range: str = "128,1073741824,2",
+                        use_slurm: bool = False,
+                        perf_filename: str = 'custom_allreduce_perf.txt'):
+    """
+    CUDA Graph based AllReduce benchmark method
+    """
+    # Setup distributed environment
+    if use_slurm:
+        # Use SLURM environment variables
+        world_size = int(os.environ["SLURM_NTASKS"])
+        rank = int(os.environ["RANK"])
+        gpus_per_node = int(os.environ["SLURM_NTASKS_PER_NODE"])
+        local_rank = int(os.environ["SLURM_LOCALID"])
+    else:
+        # Use MPI
+        world_size = tllm.mpi_world_size()
+        rank = tllm.mpi_rank()
+        local_comm = mpi_comm().Split_type(split_type=OMPI_COMM_TYPE_HOST)
+        local_rank = local_comm.Get_rank()
+        gpus_per_node = local_comm.Get_size()
+
+    if world_size == 1:
+        raise RuntimeError("Benchmark must run with world_size > 1")
 
     torch.cuda.set_device(local_rank)
     cudart.cudaSetDevice(local_rank)
-
     mapping = Mapping(world_size=world_size, rank=rank, gpus_per_node=gpus_per_node, tp_size=world_size)
 
-    if world_size == 1:
-        raise RuntimeError("Benchmark must run with mpi_world_size > 1")
-
-    torch_dtype = tllm._utils.str_dtype_to_torch(dtype)
+    # Parse test range
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
+    torch_dtype = tllm._utils.str_dtype_to_torch(dtype)
+    
+    # AllReduce parameters
+    all_reduce_params = TorchAllReduceParams(strategy=AllReduceStrategy.AUTO,
+                                           fusion_op=AllReduceFusionOp.NONE,
+                                           residual=None,
+                                           norm_weight=None,
+                                           scale=None,
+                                           bias=None,
+                                           eps=1e-6)
+
+    # Benchmark parameters
+    repeat_n = 5
+    num_warmups = 3
+    num_runs = 20
 
     size = min_size
-    dtype_size = torch.finfo(torch_dtype).bits // 8
     while size < max_size:
-        inner_loop = 100 if size <= 16777216 else 15
+        input_shape = get_input_shape_and_comm_size(size)
+        input = torch.ones(input_shape, dtype=torch_dtype, device="cuda")
 
-        input = torch.ones(size, dtype=torch_dtype, device="cuda")
+        op_list = []
+        for i in range(repeat_n):
+            allreduce = AllReduce(mapping=mapping).cuda()
+            output = allreduce(input, all_reduce_params=all_reduce_params)  # dry run to init        
+            op_list.append(allreduce)
 
-        for strategy in [
-                AllReduceStrategy.AUTO,
-                AllReduceStrategy.NCCL,
-                AllReduceStrategy.ONESHOT,
-                AllReduceStrategy.TWOSHOT,
-        ]:
-            builder = tllm.Builder()
-            builder.strongly_typed = False
-            net = builder.create_network()
-            net.plugin_config.set_nccl_plugin(dtype)
-            _buffers, workspace = current_all_reduce_helper(
-            ).allocate_workspace(mapping, CustomAllReduceHelper.max_workspace_size_auto(
-                    mapping.tp_size))
+        # Capture CUDA Graph
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            for op in op_list:
+                op(input, all_reduce_params=all_reduce_params)
+
+        # Warmup and timing
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        torch.cuda.synchronize()
+        for i in range(num_warmups):
+            g.replay()
+        torch.cuda.synchronize()
+        
+        start_event.record()
+        for i in range(num_runs):
+            g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
+
+        latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
+        
+        if rank == 0 and local_rank == 0:
+            print(f"Size: {size}, Latency: {latency:.4f} ms")
             
-
-            with tllm.net_guard(net):
-                network = tllm.default_trtnet()
-
-                x = Tensor(name='x',
-                           shape=input.shape,
-                           dtype=tllm.str_dtype_to_trt(dtype))
-
-                current_all_reduce_helper().set_workspace_tensor(mapping)
-
-                current = x
-                for _ in range(inner_loop):
-                    current = allreduce(current, mapping.tp_group, all_reduce_params=AllReduceParams(strategy=strategy))
-                output = current.trt_tensor
-
-                network.mark_output(output)
-                output.name = 'output'
-                output.dtype = tllm.str_dtype_to_trt(dtype)
-
-            build_engine = EngineFromNetwork(
-                (builder.trt_builder, net.trt_network),
-                config=CreateConfig(
-                    fp16=(dtype == 'float16'),
-                    bf16=(dtype == 'bfloat16'),
-                    precision_constraints='obey',
-                ))
-
-            output = torch.zeros_like(input)
-
-            stream = torch.cuda.current_stream()
-            feed_dict = {'x': input, 'all_reduce_workspace': workspace}
-
-            session = tllm.runtime.Session.from_engine(build_engine())
-            if mapping.rank == 0:
-                session._context.profiler = AllReduceProfiler(prefix=f'{dtype},{world_size},{size},{strategy.name}',target_layers=[i for i in range(inner_loop-12,inner_loop-5)])
-            _, start = cuda.cuEventCreate(0)
-            _, stop = cuda.cuEventCreate(0)
-
-            tllm.mpi_barrier()
-
-            cuda.cuEventRecord(start, stream.cuda_stream)
-            session.run(inputs=feed_dict,
-                        outputs={"output": output},
-                        stream=stream.cuda_stream)
-            cuda.cuEventRecord(stop, stream.cuda_stream)
-            torch.cuda.synchronize()
-            _, ms = cuda.cuEventElapsedTime(start, stop)
-
-            if mapping.rank == 0:
-                print(f"{size=}, {strategy=}, {ms=}")
-                session._context.profiler.write_to_file()
+            # Get TensorRT-LLM version
+            trtllm_version = tllm.__version__ if hasattr(tllm, '__version__') else 'unknown'
+            
+            # Use log_perf directly, similar to collect_NCCL.py
+            log_perf(item_list=[{
+                        'allreduce_dtype': dtype,
+                        'num_gpus': world_size,
+                        'message_size': size, # element count, not bytes
+                        'latency': latency
+                        }], 
+                    framework='TRTLLM', 
+                    version=trtllm_version, 
+                    device_name=torch.cuda.get_device_name(), 
+                    op_name='all_reduce', 
+                    kernel_source='TRTLLM', 
+                    perf_filename=perf_filename)
+        
         size *= ratio
-        if mapping.rank == 0:
-            print("")
 
 
 if __name__ == "__main__":
@@ -150,10 +154,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--range",
         "-r",
-        default="2048,536870913,2",  # 256 to 256M
+        default="128,1073741824,2",  # 128B to 1024MB
         help="min_size,max_size,multiplicative_ratio")
-    parser.add_argument("--no-header", action="store_true")
+    parser.add_argument("--use-slurm", action="store_true",
+                       help="Use SLURM environment variables instead of MPI")
+    parser.add_argument("--perf-filename", "-f", default="custom_allreduce_perf.txt",
+                       help="Output performance file name")
     args = parser.parse_args()
 
-    allreduce_benchmark(args.dtype, args.range, args.no_header)
-
+    allreduce_benchmark(args.dtype, args.range, args.use_slurm, args.perf_filename)
