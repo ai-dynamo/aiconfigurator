@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import yaml
+import pandas as pd
 
 from aiconfigurator.eval.utils import run_stream, find_newest_subdir, mkdir_p, write_json, parse_disagg_start_script
 from aiconfigurator.eval.service import ServiceManager
@@ -215,6 +216,66 @@ class Pipeline:
         write_json(where / "gpu_snapshot_prebench.json", snap)
         return snap
 
+    def _load_optimal_configs(self, config_dir: Path) -> Dict[str, pd.DataFrame]:
+        """Load optimal configuration data from saved aiconfigurator results."""
+        optimal_configs = {}
+        
+        # Try to load from CSV files first (more complete data)
+        agg_pareto_path = config_dir / "agg_pareto.csv"
+        disagg_pareto_path = config_dir / "disagg_pareto.csv"
+        
+        if agg_pareto_path.exists():
+            try:
+                agg_pareto = pd.read_csv(agg_pareto_path)
+                if not agg_pareto.empty:
+                    # Get the best configuration (highest throughput per GPU)
+                    best_agg = agg_pareto.loc[agg_pareto['tokens/s/gpu'].idxmax()].to_frame().T
+                    optimal_configs['agg'] = best_agg
+                    LOG.info(f"Loaded optimal agg config: {best_agg['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu")
+            except Exception as e:
+                LOG.warning(f"Failed to load agg pareto data: {e}")
+        
+        if disagg_pareto_path.exists():
+            try:
+                disagg_pareto = pd.read_csv(disagg_pareto_path)
+                if not disagg_pareto.empty:
+                    # Get the best configuration (highest throughput per GPU)
+                    best_disagg = disagg_pareto.loc[disagg_pareto['tokens/s/gpu'].idxmax()].to_frame().T
+                    optimal_configs['disagg'] = best_disagg
+                    LOG.info(f"Loaded optimal disagg config: {best_disagg['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu")
+            except Exception as e:
+                LOG.warning(f"Failed to load disagg pareto data: {e}")
+        
+        return optimal_configs
+
+    def _convert_optimal_config_to_plot_format(self, config_df: pd.DataFrame, config_type: str) -> pd.DataFrame:
+        """Convert optimal configuration DataFrame to format expected by ParetoPlot."""
+        try:
+            # Create a DataFrame with the required columns for plotting
+            plot_df = pd.DataFrame()
+            
+            # Map the columns from the optimal config to the expected plot format
+            if 'tokens/s/user' in config_df.columns:
+                plot_df['output_token_throughput_per_user_avg'] = config_df['tokens/s/user']
+            
+            if 'tokens/s/gpu' in config_df.columns:
+                plot_df['output_token_throughput_avg'] = config_df['tokens/s/gpu']
+            
+            # Add concurrency information if available
+            if 'concurrency' in config_df.columns:
+                plot_df['load_label'] = config_df['concurrency'].astype(str)
+            elif 'bs' in config_df.columns:
+                plot_df['load_label'] = config_df['bs'].astype(str)
+            else:
+                plot_df['load_label'] = f"{config_type}_optimal"
+            
+            LOG.debug(f"Converted optimal {config_type} config to plot format: {plot_df.to_dict()}")
+            return plot_df
+            
+        except Exception as e:
+            LOG.warning(f"Failed to convert optimal {config_type} config to plot format: {e}")
+            return pd.DataFrame()
+
     def _run_benchmark(self, art_dir: Path, url: str, isl: int, osl: int, concurrency: List[int]) -> Path:
         args = self.cfg.cli_args
         model_path = str(getattr(args, "model_path", ""))
@@ -245,6 +306,7 @@ class Pipeline:
         mode: str,
         gpu_monitor_enabled: bool,
         gpu_csv: Optional[Path],
+        optimal_configs: Optional[Dict[str, pd.DataFrame]] = None,
     ) -> None:
         """Parse genai-perf JSON and create plots."""
         df = parse_genai_perf(bench_dir)
@@ -285,6 +347,17 @@ class Pipeline:
             expand_x=True,
         )
         p.add_series("bench", df)
+        
+        # Add optimal configuration points if available
+        if optimal_configs:
+            for config_type, config_df in optimal_configs.items():
+                if not config_df.empty:
+                    # Convert the optimal config data to match the expected format
+                    optimal_point_df = self._convert_optimal_config_to_plot_format(config_df, config_type)
+                    if not optimal_point_df.empty:
+                        p.add_optimal_point(config_type.capitalize(), optimal_point_df)
+                        LOG.info(f"Added optimal {config_type} point to plot")
+        
         p.render(
             ax,
             title="Throughput(per gpu)/Throughput(per user)",
@@ -353,6 +426,9 @@ class Pipeline:
         # 2) copy configs to dynamo trtllm folder
         service_dir = Path(self.cfg.service_dir)
         _ = self._copy_backend_configs(self.last_config_dir, service_dir)
+        
+        # Load optimal configurations from the saved results
+        optimal_configs = self._load_optimal_configs(self.last_config_dir)
 
         # determine cc
         if self.cfg.bench_concurrency and len(self.cfg.bench_concurrency) > 0:
@@ -424,6 +500,7 @@ class Pipeline:
                     mode=self.cfg.mode,
                     gpu_monitor_enabled=self.cfg.gpu_monitor,
                     gpu_csv=self._gpu_csv,
+                    optimal_configs=optimal_configs,
                 )
         finally:
             if self._gpu_watcher:
