@@ -98,7 +98,7 @@ disagg_config:
       moe_ep_list: [1, 2, 4, 8]
 
 # advanced tuning config
-prefill_correction_scale: 1.0 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * prefill_correction_scale
-decode_correction_scale: 1.0 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * decode_correction_scale
+prefill_correction_scale: 0.9 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * prefill_correction_scale
+decode_correction_scale: 0.92 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * decode_correction_scale
 prefill_max_batch_size: 1
 decode_max_batch_size: 512
