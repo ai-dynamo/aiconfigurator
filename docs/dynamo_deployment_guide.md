@@ -2,10 +2,16 @@
 
 This guide walks through installing aiconfigurator, building the Dynamo container, generating configuration files, deploying Dynamo (single-node and two-node). Using the qwen3-32b-fp8 model as an example.
 
-# Introduction
 > Currently auto configuration / script generation only support trtllm backend
 
-When running the `aiconfigurator cli`, engine configuration files and executable scripts are automatically generated under the `--save_dir`, in the `backend_configs` folder. The directory structure is:
+# All-in-one Automation process
+
+e're now supporting automate everything in one script, starting from configuring the deployment, generating the configs, preparing docker image and container, pulling model checkpoints, deploying the service, benchmarking and summarizing. Refer to [Automation](../tools/automation/README.md) for more details.
+
+# Step-by-step Manual Deployment Guide
+## Introduction
+
+If you would like to deploy by your own, when running the `aiconfigurator cli`, engine configuration files and executable scripts are automatically generated under the `--save_dir`, in the `backend_configs` folder. The directory structure is:
 
 ````
 backend_configs/
@@ -85,7 +91,7 @@ bash node_x_run.sh
 > Note: The generated configs are for deploying 1 replica instead of the cluster (defined as total_gpus). We'll bridge this gap in future.
 
 ---
-# Step-by-step Deployment Guide
+
 ## Prerequisites
 
 * Docker with GPU support
@@ -136,7 +142,7 @@ Please modify based on your own path '/raid/hub/qwen3-32b-fp8'
 On **Node 0**, start etcd and NATS.io:
 
 ```bash
-docker compose -f deploy/metrics/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ---

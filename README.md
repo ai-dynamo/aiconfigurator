@@ -64,7 +64,7 @@ aiconfigurator cli --model QWEN3_32B --total_gpus 32 --system h200_sxm
 
 ```text
 ********************************************************************************
-*                      Dynamo aiconfigurator Final Results                     *
+*                      Dynamo AIConfigurator Final Results                     *
 ********************************************************************************
   ----------------------------------------------------------------------------
   Input Configuration & SLA Target:
@@ -192,6 +192,14 @@ backend_configs/
 
 Refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details.
 
+### All-in-one automation
+
+To further simpify the end-to-end user experience, we're now supporting automate everything in one script, starting from configuring the deployment, generating the configs, preparing docker image and container, pulling model checkpoints, deploying the service, benchmarking and summarizing. 
+```bash
+  bash launch_eval.sh config.env
+```
+Everything is in one command! We're trying to integrate our expertise to make the deployment smarter. Refer to [Automation](tools/automation/README.md) for more details.
+
 ## Webapp
 
 ```bash
@@ -264,6 +272,14 @@ Data collection is a standalone process for building the database used by aiconf
 Small changes to the database may not materially change performance estimates. For example, you can use 1.0.0rc3 data of `trtllm` on `h200_sxm` and deploy the generated configuration with Dynamo and a `trtllm` 1.0.0rc4 worker.
 
 To go through the process, refer to the [guidance](collector/README.md) under the `collector` folder.
+
+### System Data Support Matrix
+
+| System | Framework(Version) | Status |
+|--------|-------------------|--------|
+| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
+| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
+| b200_sxm | TRTLLM(NA) | 🚧 |
 
 ## Known Issues
 

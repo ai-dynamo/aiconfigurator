@@ -30,11 +30,11 @@ cache_transceiver_config:
 
 cuda_graph_config:
   enable_padding: {{ dynamo_config.cuda_graph_padding_enabled | default(true) }} # dynamo_config.cuda_graph_padding_enabled Pad CUDA graph
-  batch_sizes: [{% for s in dynamo_config.cuda_graph_batch_sizes
+  batch_sizes: [{% for s in cuda_graph_batch_sizes
                                | default([1,2,4,8,16,32,64,128,256]) -%}
                     {{- s }}{{ ',' if not loop.last else '' }} {%- endfor %}]
 
-disable_overlap_scheduler: {{ dynamo_config.disable_overlap_scheduler | default(true) }}
+disable_overlap_scheduler: {{ disable_overlap_scheduler | default(true) }}
 print_iter_log: {{ dynamo_config.print_iter_log | default(false) }}  # dynamo_config.print_iter_log Print iteration logs
 
 {% if is_speculative is defined %}  # speculative decoding
