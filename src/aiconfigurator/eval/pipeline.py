@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import yaml
+import pandas as pd
 
 from aiconfigurator.eval.utils import run_stream, find_newest_subdir, mkdir_p, write_json, parse_disagg_start_script
 from aiconfigurator.eval.service import ServiceManager
@@ -215,6 +216,101 @@ class Pipeline:
         write_json(where / "gpu_snapshot_prebench.json", snap)
         return snap
 
+    def _load_optimal_configs(self, config_dir: Path, target_tpot: Optional[float] = None) -> Dict[str, pd.DataFrame]:
+        """Load optimal configuration data from saved aiconfigurator results with TPOT filtering."""
+        optimal_configs = {}
+        
+        # Try to load from CSV files first (more complete data)
+        agg_pareto_path = config_dir / "agg_pareto.csv"
+        disagg_pareto_path = config_dir / "disagg_pareto.csv"
+        
+        if agg_pareto_path.exists():
+            try:
+                agg_pareto = pd.read_csv(agg_pareto_path)
+                if not agg_pareto.empty:
+                    best_agg = self._get_best_config_under_tpot_constraint(agg_pareto, target_tpot)
+                    if not best_agg.empty:
+                        optimal_configs['agg'] = best_agg
+                        LOG.info(f"Loaded optimal agg config: {best_agg['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu, "
+                                f"TPOT: {best_agg.get('tpot', [None]).iloc[0]} ms")
+                    else:
+                        LOG.warning("No agg config found that meets TPOT constraint")
+            except Exception as e:
+                LOG.warning(f"Failed to load agg pareto data: {e}")
+        
+        if disagg_pareto_path.exists():
+            try:
+                disagg_pareto = pd.read_csv(disagg_pareto_path)
+                if not disagg_pareto.empty:
+                    best_disagg = self._get_best_config_under_tpot_constraint(disagg_pareto, target_tpot)
+                    if not best_disagg.empty:
+                        optimal_configs['disagg'] = best_disagg
+                        LOG.info(f"Loaded optimal disagg config: {best_disagg['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu, "
+                                f"TPOT: {best_disagg.get('tpot', [None]).iloc[0]} ms")
+                    else:
+                        LOG.warning("No disagg config found that meets TPOT constraint")
+            except Exception as e:
+                LOG.warning(f"Failed to load disagg pareto data: {e}")
+        
+        return optimal_configs
+
+    def _get_best_config_under_tpot_constraint(self, pareto_df: pd.DataFrame, target_tpot: Optional[float]) -> pd.DataFrame:
+        """Get the best configuration that meets TPOT constraint, similar to CLI logic."""
+        if pareto_df.empty:
+            return pd.DataFrame()
+        
+        # If no TPOT constraint, return the best overall configuration
+        if target_tpot is None:
+            best_config = pareto_df.loc[pareto_df['tokens/s/gpu'].idxmax()].to_frame().T
+            LOG.info("No TPOT constraint specified, using best overall configuration")
+            return best_config
+        
+        # Filter configurations that meet TPOT constraint
+        if 'tpot' not in pareto_df.columns:
+            LOG.warning("TPOT column not found in pareto data, using best overall configuration")
+            return pareto_df.loc[pareto_df['tokens/s/gpu'].idxmax()].to_frame().T
+        
+        # Find configurations that meet the TPOT constraint
+        candidate_configs = pareto_df[pareto_df['tpot'] <= target_tpot].copy()
+        
+        if not candidate_configs.empty:
+            # Among valid candidates, pick the one with highest tokens/s/gpu
+            best_config = candidate_configs.loc[candidate_configs['tokens/s/gpu'].idxmax()].to_frame().T
+            LOG.info(f"Found {len(candidate_configs)} configs meeting TPOT <= {target_tpot}ms, "
+                    f"selected best with {best_config['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu")
+            return best_config
+        else:
+            LOG.warning(f"No config found with TPOT <= {target_tpot}ms, using best overall configuration")
+            return pareto_df.loc[pareto_df['tokens/s/gpu'].idxmax()].to_frame().T
+
+    def _convert_optimal_config_to_plot_format(self, config_df: pd.DataFrame, config_type: str) -> pd.DataFrame:
+        """Convert optimal configuration DataFrame to format expected by ParetoPlot."""
+        try:
+            # Create a DataFrame with the required columns for plotting
+            plot_df = pd.DataFrame()
+            
+            # Map the columns from the optimal config to the expected plot format
+            if 'tokens/s/user' in config_df.columns:
+                plot_df['output_token_throughput_per_user_avg'] = config_df['tokens/s/user']
+            
+            if 'tokens/s/gpu' in config_df.columns:
+                plot_df['output_token_throughput_avg'] = config_df['tokens/s/gpu']
+            
+            # Add concurrency information if available
+            if 'concurrency' in config_df.columns:
+                plot_df['load_label'] = config_df['concurrency'].astype(str)
+            elif 'bs' in config_df.columns:
+                plot_df['load_label'] = config_df['bs'].astype(str)
+            else:
+                plot_df['load_label'] = f"{config_type}_optimal"
+            
+            LOG.debug(f"Converted optimal {config_type} config to plot format: {plot_df.to_dict()}")
+            return plot_df
+            
+        except Exception as e:
+            LOG.warning(f"Failed to convert optimal {config_type} config to plot format: {e}")
+            return pd.DataFrame()
+
     def _run_benchmark(self, art_dir: Path, url: str, isl: int, osl: int, concurrency: List[int]) -> Path:
         args = self.cfg.cli_args
         model_path = str(getattr(args, "model_path", ""))
@@ -245,6 +341,7 @@ class Pipeline:
         mode: str,
         gpu_monitor_enabled: bool,
         gpu_csv: Optional[Path],
+        optimal_configs: Optional[Dict[str, pd.DataFrame]] = None,
     ) -> None:
         """Parse genai-perf JSON and create plots."""
         df = parse_genai_perf(bench_dir)
@@ -252,8 +349,7 @@ class Pipeline:
         df.to_csv(out_csv, index=False)
         LOG.info("Saved summary: %s", out_csv)
 
-        legend = "agg"
-        total_gpus = 1
+        # Extract GPU count based on mode
         if mode == "disagg":
             p_workers = int(workers_info.get("PREFILL_WORKERS", 0) or 0)
             d_workers = int(workers_info.get("DECODE_WORKERS", 0) or 0)
@@ -261,9 +357,15 @@ class Pipeline:
             d_gpu = int(workers_info.get("DECODE_GPU", 0) or 0)
             total_gpus = p_workers * p_gpu + d_workers * d_gpu
             legend = f"disagg_{p_workers}p({p_gpu} gpu){d_workers}d({d_gpu} gpu)"
-            if total_gpus <= 0:
-                LOG.warning("Total GPUs computed as 0; skip per-GPU normalization.")
-                total_gpus = None
+        else:
+            # For agg mode, extract GPU count from config
+            total_gpus = self._get_agg_gpu_count(workers_info)
+            legend = f"agg_{total_gpus}gpu"
+        
+        # Validate GPU count
+        if total_gpus <= 0:
+            LOG.warning("Total GPUs computed as 0; skip per-GPU normalization.")
+            total_gpus = None
 
         x_metric = "output_token_throughput_per_user::avg"
         y_metric = "output_token_throughput::avg"
@@ -285,6 +387,17 @@ class Pipeline:
             expand_x=True,
         )
         p.add_series("bench", df)
+        
+        # Add optimal configuration points if available
+        if optimal_configs:
+            for config_type, config_df in optimal_configs.items():
+                if not config_df.empty:
+                    # Convert the optimal config data to match the expected format
+                    optimal_point_df = self._convert_optimal_config_to_plot_format(config_df, config_type)
+                    if not optimal_point_df.empty:
+                        p.add_optimal_point(config_type.capitalize(), optimal_point_df)
+                        LOG.info(f"Added optimal {config_type} point to plot")
+        
         p.render(
             ax,
             title="Throughput(per gpu)/Throughput(per user)",
@@ -301,12 +414,14 @@ class Pipeline:
             plot_gpu_timeseries_bokeh(gpu_csv, out_html, title="GPU Utilization (%)")
             LOG.info("Saved plot: %s", out_html)
 
+    def _get_agg_gpu_count(self, workers_info: Dict[str, int]) -> int:
+        """Simple helper to get GPU count for agg mode."""
+        return workers_info.get("AGG_GPU_COUNT", 1)
 
     def _extract_workers_from_start_script(self, service_dir: Path) -> Dict[str, int]:
         """
-        For disagg, read disagg/node_0_run.sh and extract:
-          PREFILL_GPU, PREFILL_WORKERS, DECODE_GPU, DECODE_WORKERS
-        For agg, return workers=1; gpu_per_worker unknown (-1).
+        For disagg, read disagg/node_0_run.sh and extract worker/GPU info.
+        For agg, extract GPU count from agg_config.yaml.
         """
         if self.cfg.mode == "disagg":
             start_rel = self.cfg.start_script.strip() or "disagg/node_0_run.sh"
@@ -315,13 +430,39 @@ class Pipeline:
             LOG.info("Parsed workers from %s: %s", script, vals)
             return vals
         else:
+            # For agg mode, extract GPU count from config
+            agg_gpu_count = self._extract_agg_gpu_count_from_config(service_dir)
             return {
                 "PREFILL_GPU": -1,
                 "PREFILL_WORKERS": 0,
                 "DECODE_GPU": -1,
                 "DECODE_WORKERS": 0,
                 "AGG_WORKERS": 1,
+                "AGG_GPU_COUNT": agg_gpu_count,
             }
+
+    def _extract_agg_gpu_count_from_config(self, service_dir: Path) -> int:
+        """Extract GPU count from agg config file (TP * PP for TRT-LLM)."""
+        try:
+            config_path = service_dir / "agg" / "agg_config.yaml"
+            if not config_path.exists():
+                LOG.warning(f"Agg config not found: {config_path}")
+                return 1
+            
+            with config_path.open() as f:
+                config = yaml.safe_load(f) or {}
+            
+            # For TRT-LLM, GPU count is TP * PP (DP is handled through TP)
+            tp = config.get("tensor_parallel_size", 1)
+            pp = config.get("pipeline_parallel_size", 1)
+            gpu_count = tp * pp
+            
+            LOG.info(f"Extracted agg GPU count (TRT-LLM): TP={tp} * PP={pp} = {gpu_count}")
+            return gpu_count
+            
+        except Exception as e:
+            LOG.warning(f"Failed to extract agg GPU count: {e}")
+            return 1
 
     def stop_service(self):
         if self.service:
@@ -353,6 +494,10 @@ class Pipeline:
         # 2) copy configs to dynamo trtllm folder
         service_dir = Path(self.cfg.service_dir)
         _ = self._copy_backend_configs(self.last_config_dir, service_dir)
+        
+        # Load optimal configurations from the saved results with TPOT filtering
+        target_tpot = getattr(args, "tpot", None)
+        optimal_configs = self._load_optimal_configs(self.last_config_dir, target_tpot)
 
         # determine cc
         if self.cfg.bench_concurrency and len(self.cfg.bench_concurrency) > 0:
@@ -424,6 +569,7 @@ class Pipeline:
                     mode=self.cfg.mode,
                     gpu_monitor_enabled=self.cfg.gpu_monitor,
                     gpu_csv=self._gpu_csv,
+                    optimal_configs=optimal_configs,
                 )
         finally:
             if self._gpu_watcher:
