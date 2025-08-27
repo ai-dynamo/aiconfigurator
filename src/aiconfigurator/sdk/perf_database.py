@@ -94,10 +94,14 @@ def load_custom_allreduce_data(custom_allreduce_file):
     custom_allreduce_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))
 
     with open(custom_allreduce_file, mode='r') as f:
-        lines = f.readlines()
-    
-    for line in lines:
-        dtype, tp_size, message_size, allreduce_strategy, layer_name, latency = line.split(',')
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames
+        rows = list(reader)
+
+    for row in rows:
+        dtype, tp_size, message_size, latency = \
+            row['allreduce_dtype'], row['num_gpus'], row['message_size'], row['latency']
+        allreduce_strategy = 'AUTO'
         message_size  = int(message_size)
         latency = float(latency)
         tp_size = int(tp_size)
@@ -105,7 +109,7 @@ def load_custom_allreduce_data(custom_allreduce_file):
 
         try:
             latency = custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
-            logger.debug('value conflict in custom allreduce data: {} {} {} {} {} {}'.format(dtype, tp_size, allreduce_strategy, message_size, latency))
+            logger.debug('value conflict in custom allreduce data: {} {} {} {} {}'.format(dtype, tp_size, allreduce_strategy, message_size, latency))
         except KeyError:
             custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = latency
 
