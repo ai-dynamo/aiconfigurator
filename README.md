@@ -3,54 +3,66 @@ SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# AIConfigurator
-Today, in disaggregated serving, it's quite difficult to find a proper config
-to get benefits from disaggregation such as how many prefill workers and decode workers 
-do I need and what about the parallelism for each worker. Combined with SLA: 
-TTFT(Time-To-First-Token) and TPOT(Time-Per-Output-Token), it becomes even more complicated 
-to solve the throughput @ latency problem.
+# aiconfigurator
 
-We're introducing AIConfigurator to help you find a good reference to start with in your 
-disaggregated serving journey. The tool will try to search the space to get a good deployment config 
-based on your requirement including which model you want to serve, how many GPUs you have and what's 
-the GPU. Automatically generate the config files for you to deploy with Dynamo.
+In disaggregated serving, configuring an effective deployment is challenging: you need to decide how many prefill and decode
+workers to run, and the parallelism for each worker. Combined with SLA targets for TTFT (Time to First Token) and
+TPOT (Time per Output Token), optimizing throughput at a given latency becomes even more complex.
 
-It's based on modeling the LLM inference with collected data on a target machine with a specific framework.
-It searches thousands of different configurations in the background in tens of seconds and runs on any machine 
-with a CLI tool and a webapp provided.
+`aiconfigurator` helps you find a strong starting configuration for disaggregated serving. Given your model, GPU
+count, and GPU type, it searches the configuration space and generates configuration files you can use for deployment with Dynamo.
+
+The tool models LLM inference using collected data for a target machine and framework. It evaluates thousands of
+configurations and runs anywhere via the CLI and the web app.
 
 Let's get started.
 
+## Build and Install
 
-# Build and Install
-## Install from PyPI
+### Install from PyPI
+
 ```bash
 pip3 install aiconfigurator
 ```
-## Build and install from source
-1. apt-get install git-lfs (linux) or brew install git-lfs (macos)
-2. clone the repo
-3. (optional) python3 -m venv myenv && source myenv/bin/activate  (need to have python >= 3.9)
-4. (optional) pip3 install --upgrade pip (if you encounter issue that didn't find setup.py)
-5. pip3 install "."
 
-## Build with Dockerfile
+### Build and Install from Source
+
 ```bash
-  # This will create a ./dist/ folder containing the wheel file
-  docker build -f docker/Dockerfile --no-cache --target build -t aiconfigurator:latest .
-  docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist dist/ && docker rm aic
+# 1. Install Git LFS
+apt-get install git-lfs  # (Linux)
+# brew install git-lfs   # (macOS)
+
+# 2. Clone the repo
+git clone https://github.com/ai-dynamo/aiconfigurator.git
+
+# 3. Create and activate a virtual environment
+python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.9 or later)
+
+# 4. Install aiconfigurator
+pip3 install .
 ```
 
-# Run
-## CLI
+### Build with Docker
+
 ```bash
-  aiconfigurator cli --model QWEN3_32B --total_gpus 32 --system h200_sxm
+# This will create a ./dist/ folder containing the wheel file
+docker build -f docker/Dockerfile --no-cache --target build -t aiconfigurator:latest .
+docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist dist/ && docker rm aic
 ```
-With **3 basic args**, it will report out the estimated best deployment result and the deployment details  
-With **--save_dir DIR**, you can output the framework configs automatically to deploy with Dynamo  
-With **-h**, you can have more information about optional args to customize your deployment target  
 
+## Run
+
+### CLI
+
+```bash
+aiconfigurator cli --model QWEN3_32B --total_gpus 32 --system h200_sxm
 ```
+
+- With **three basic arguments**, it prints the estimated best deployment and the deployment details.
+- Use `--save_dir DIR` to generate framework configuration files for Dynamo.
+- Use `-h` for more options and customization.
+
+```text
 ********************************************************************************
 *                      Dynamo AIConfigurator Final Results                     *
 ********************************************************************************
@@ -66,7 +78,7 @@ With **-h**, you can have more information about optional args to customize your
     - Disagg Actual Best: 812.48 tokens/s/gpu  109.12 tokens/s/user | TTFT: 276.94ms TPOT: 9.16ms
   ----------------------------------------------------------------------------
   Pareto Frontier:
-               QWEN3_32B Pareto Frontier: tokens/s/gpu vs tokens/s/user         
+               QWEN3_32B Pareto Frontier: tokens/s/gpu vs tokens/s/user
       ┌────────────────────────────────────────────────────────────────────────┐
 1600.0┤ dd Disagg                                                              │
       │ aa Agg                                                                 │
@@ -94,8 +106,8 @@ With **-h**, you can have more information about optional args to customize your
       │                                                                        │
    0.0┤                                                                        │
       └┬─────────────────┬─────────────────┬────────────────┬─────────────────┬┘
-       0                45                90               135              180 
-tokens/s/gpu                         tokens/s/user                              
+       0                45                90               135              180
+tokens/s/gpu                         tokens/s/user
 
   ----------------------------------------------------------------------------
   Worker Setup:
@@ -136,27 +148,35 @@ Agg Top Configurations: (Sorted by tokens/s/gpu)
 ********************************************************************************
 INFO 2025-07-28 17:23:10,701 main.py:1035] Configuration completed in 48.18 seconds
 ```
-The results indicate that, when you want to deploy Qwen3-32B on h200_sxm in fp8, you can get **2.39x** of disagg over agg deployment under SLA TTFT<=300ms and TPOT<=10ms with ISL:OSL as 4000:500  
-Try different ISL:OSL for differnt TTFT and TPOT limit with, say, 
-```bash
-  aiconfigurator cli --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200
-```
-You will get different answers.  
 
-### Customized config for aiconfigurator
-If you want to even customize more, including the search space, quantization for each component, we define all these parameters in a yaml file.  
-The built-in yaml files are under src/aiconigurator/cli/templates/trtllm/xxx_default.yaml (in future, trtllm can be other backend names)  
-Please refer to the yaml file and modify what you want. Pass your customized yaml file by **--yaml_path**, 
-```bash
-  aiconfigurator cli --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200 --yaml_path customized_config.yaml
-```
-About how to tune these parameters, please refer to [Advanced Tuning](docs/advanced_tuning.md) for details
+These results indicate that deploying Qwen3-32B on `h200_sxm` in FP8 can achieve **2.39x** higher tokens/s/gpu for disaggregated versus aggregated deployment under the SLA targets TTFT ≤ 300 ms and TPOT ≤ 10 ms, with ISL:OSL of 4000:500.
+Try different ISL:OSL values and SLA limits to fit your use case, for example:
 
-### Generate configs for Dynamo
-In aiconfigurator cli, if you specify --save_dir, we'll generate configs for deploying with Dynamo.
-This is an **important** feature to bridge the gap between configuration and Dynamo deployment.  
-The folder structure will be like this,
-````
+```bash
+aiconfigurator cli --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200
+```
+
+You will get different results.
+
+### Customized Configuration for aiconfigurator
+
+To customize further (including the search space and per-component quantization) parameters are defined in a YAML file.
+Built-in YAML files are under `src/aiconfigurator/cli/templates/trtllm/xxx_default.yaml` (in the future, `trtllm` can be replaced by other backend names).
+Refer to the YAML file and modify as needed. Pass your customized YAML file with `--yaml_path`:
+
+```bash
+aiconfigurator cli --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200 --yaml_path customized_config.yaml
+```
+
+For guidance on tuning these parameters, refer to [Advanced Tuning](docs/advanced_tuning.md).
+
+### Generate Configurations for Dynamo
+
+In the `aiconfigurator` CLI, if you specify `--save_dir`, the tool generates configuration files for deploying with Dynamo.
+This feature bridges the gap between configuration and Dynamo deployment.
+The folder structure looks like this:
+
+```text
 backend_configs/
 ├── agg/
 │   ├── agg_config.yaml
@@ -168,10 +188,12 @@ backend_configs/
 │   ├── node_1_run.sh
 │   └── ...
 └──
-````
-Please refer to [Deployment Guide](docs/dynamo_deployment_guide.md) for details
+```
+
+Refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details.
 
 ### All-in-one automation
+
 To further simpify the end-to-end user experience, we're now supporting automate everything in one script, starting from configuring the deployment, generating the configs, preparing docker image and container, pulling model checkpoints, deploying the service, benchmarking and summarizing. 
 ```bash
   bash launch_eval.sh config.env
@@ -179,37 +201,77 @@ To further simpify the end-to-end user experience, we're now supporting automate
 Everything is in one command! We're trying to integrate our expertise to make the deployment smarter. Refer to [Automation](tools/automation/README.md) for more details.
 
 ## Webapp
+
 ```bash
-  aiconfigurator webapp
+aiconfigurator webapp
 ```
-Visit 127.0.0.1:7860  
-Make sure to read [Advanced Tuning](docs/advanced_tuning.md) and the readme tab of webapp before you do experiments.
 
+Visit `127.0.0.1:7860`.
+Refer to [Advanced Tuning](docs/advanced_tuning.md) and the webapp README tab before running experiments.
 
-## Tuning with advanced features
-There're a lot of features like different quantizations, different parallel strategies for you to tune the performance 
-beyond the default configurations. This is common for both CLI and Webapp. Please refer to [Advanced Tuning](docs/advanced_tuning.md) for details
+## Tuning with Advanced Features
 
+There are many features, such as different quantizations and parallelism strategies, to tune performance beyond the default configurations.
+These apply to both the CLI and the webapp. Refer to [Advanced Tuning](docs/advanced_tuning.md) for details.
 
-# How it works
-## Modeling and mechanism
+## How It Works
 
-If we want to estimate the inference perf for a LLM, below should be considered,
-1. compute cost, gemm, attention, others
-2. communication cost, all-reduce for tensor-parallel, p2p for pipeline-parallel
+### Modeling and Mechanism
 
-Based on breaking down the LLM inference process into operations, i.e., gemm, attention, communication, embedding, elementwise operations, others.  
-Collect operation execution time on a given hardware  
-Estimate the given config execution time composed of operation execution time based on interpolation/extrapolation.  
-We then model the inflight-batching (aggregated) and disaggregated serving on top of that.  
-Search for the best config among those thousands of possible combinations and generate configs for Dynamo based on the results.
+LLM inference performance is dominated by:
 
-## Support list 
-Models: GPT, LLAMA(2,3), MOE, QWEN, DEEPSEEK_V3  
-OPs: MHA/GQA/MLA(FP8,FP16,FP32 fmha), 8bit kvcache, GEMM(FP16, 8/4bit WO, SQ, FP8), AllReduce(FP16), Embedding, P2P, ElementWise, NCCL(all2all, allgather, reducescatter), MoE(FP16, FP8, W4AFP8)  
-TRTLLM Versions: 0.20.0, 1.0.0rc3  
-Parallel modes: Tensor-parallel; Pipeline-parallel; Expert Tensor-parallel/Expert-parallell; Attention DP for DEEPSEEK and MoE  
-Scheduling: Static; IFB(continuous batching); Disaggregated serving; MTP for DEEPSEEK
+1. Compute cost (such as GEMM and attention).
+2. Communication cost (such as all-reduce for tensor parallel and P2P for pipeline parallel).
+
+To estimate performance, we take the following steps:
+
+1. Break down LLM inference into operations: GEMM, attention, communication, embedding, element-wise operations, and others.
+2. Collect operation execution times on the target hardware.
+3. Estimate end-to-end execution time for a configuration by composing operation times using interpolation and extrapolation.
+4. Model in-flight batching (aggregated) and disaggregated serving on top of that.
+5. Search thousands of combinations to find strong configurations and generate Dynamo configuration files based on the results.
+
+### Supported Features
+
+- Models:
+  - GPT
+  - LLAMA (2, 3)
+  - MOE
+  - QWEN
+  - DEEPSEEK_V3
+- Operations:
+  - Attention
+    - MHA/GQA (FP8, FP16)
+    - MLA (FP8, FP16)
+  - KV Cache (FP16, FP8, INT8)
+  - GEMM (FP16, FP8, FP8-Block, FP8-OOTB, SQ, INT8 WO, INT4 WO, NVFP4)
+  - AllReduce (FP16)
+  - Embedding
+  - P2P
+  - ElementWise
+  - NCCL (all_reduce, all_gather, all-to-all, reduce_scatter)
+  - MoE (FP16, FP8, FP8-Block, W4A-FP8, INT4 WO, NVFP4)
+  - MLA BMM (FP16, FP8)
+- TRTLLM Versions
+  - 0.20.0
+  - 1.0.0rc3
+- Parallel modes:
+  - Tensor-parallel
+  - Pipeline-parallel
+  - Expert Tensor-parallel/Expert-parallel
+  - Attention DP (for DEEPSEEK and MoE)
+- Scheduling:
+  - Static
+  - IFB (continuous batching)
+  - Disaggregated serving
+  - MTP (for DEEPSEEK)
+
+### Data Collection
+
+Data collection is a standalone process for building the database used by aiconfigurator. By default, you do not need to collect data yourself.
+Small changes to the database may not materially change performance estimates. For example, you can use 1.0.0rc3 data of `trtllm` on `h200_sxm` and deploy the generated configuration with Dynamo and a `trtllm` 1.0.0rc4 worker.
+
+To go through the process, refer to the [guidance](collector/README.md) under the `collector` folder.
 
 ### System Data Support Matrix
 
@@ -219,16 +281,9 @@ Scheduling: Static; IFB(continuous batching); Disaggregated serving; MTP for DEE
 | h200_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
 | b200_sxm | TRTLLM(NA) | 🚧 |
 
+## Known Issues
 
-## Data Collection
-Data collection is a standalone process for collecting the database for aiconfigurator. By default, you don't have to collect the data by yourself.
-Small versions of database will not introduce huge perf difference. Say, you can use 1.0.0rc3 data of trtllm on h200_sxm and deploy the generated 
-configs with Dynamo + trtllm 1.0.0rc4 worker.
+1. MoE memory estimation for the `trtllm` backend needs to consider workspace.
+2. Results can be overly optimistic in the low-speed, high-throughput region.
 
-If you want to go through the process, please refer to this [guidance](collector/README.md) under collector folder
-
-
-# Known issues
-1. moe memory estimation of trtllm backend needs to consider workspace  
-2. result is relatively too optimisitc in low-speed high-throughput region.  
-> **Note**: the result is not final absolute one. It can be inaccurate due to modeling gap or indicate performance improvement opportunity. It's trying to align with framework's current implementation and aming to provide configuration suggestion. Please verify it in real benchmark with our generated configs and do follow-up tuning.
+> **Note**: The results are not final or absolute. They can be inaccurate due to modeling gaps or indicate performance improvement opportunities. The tool aims to align with the framework's current implementation and to provide configuration suggestions. Verify results in real benchmarks with the generated configurations and perform follow-up tuning.
