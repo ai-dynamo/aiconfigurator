@@ -244,6 +244,8 @@ class MOEModel(BaseModel):
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
 
+        self._power_law_alpha = 1.2
+
         moe_quant_mode = self.config.moe_quant_mode
 
         h = self._hidden_size
@@ -256,7 +258,7 @@ class MOEModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        workload_distribution = self.config.workload_distribution
+        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
 
         self.context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
@@ -337,6 +339,7 @@ class DeepSeekModel(BaseModel):
          # 3. special correction in ifb step due to we leveraging ctx phase for gen tokens non-attn part
          # meanwhile, needs to scale the actual bs of generation by nextn, this is covered in inferencesession
         self._mtp_scale_factor = 1./(1+calc_expectation(self._nextn, self._nextn_accept_rates))*(self._nextn+self._num_layers)/self._num_layers
+        self._power_law_alpha = 1.01
 
         gemm_quant_mode = self.config.gemm_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
@@ -353,7 +356,7 @@ class DeepSeekModel(BaseModel):
 
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        workload_distribution = self.config.workload_distribution
+        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
 
         self.context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
