@@ -20,7 +20,7 @@ class ModelConfig:
     moe_tp_size: int = None
     moe_ep_size: int = None
     attention_dp_size: int = 1
-    workload_distribution: str = "power_law_0.5"
+    workload_distribution: str = "power_law"
     nextn: int = 0 # at most mtp5
     nextn_accept_rates: list = None
     overwrite_num_layers: int = 0
