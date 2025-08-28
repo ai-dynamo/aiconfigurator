@@ -11,7 +11,7 @@ archived/
 .VSCodeCounter/
 build/
 dist/
-dynamo/
+*/automation/dynamo/
 aiconf_save/
 
 venv/

@@ -72,7 +72,7 @@ aiconfigurator eval ...
    * If not, it clones/updates the **dynamo** repo and **builds** the image:
 
      ```
-     ./container/build.sh --framework tensorrtllm \
+     ./container/build.sh --framework TRTLLM \
        --tensorrtllm-pip-wheel <TRTLLM_PIP> \
        --tag <DYNAMO_IMAGE>
      ```

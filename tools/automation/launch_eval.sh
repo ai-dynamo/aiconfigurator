@@ -178,18 +178,30 @@ ensure_image() {
     DYNAMO_IMAGE="dynamo:0.4.0-trtllm-${tag_ver}"
     log "DYNAMO_IMAGE not set. Using ${DYNAMO_IMAGE}"
   fi
+
   if docker image inspect "$DYNAMO_IMAGE" >/dev/null 2>&1; then
     log "Image exists: $DYNAMO_IMAGE"
     return 0
   fi
+
   [[ -n "$TRTLLM_PIP" ]] || err "TRTLLM_PIP is required to build image (e.g., tensorrt-llm==1.0.0rc4)"
   ensure_dynamo_repo
   require docker
-  log "Building image: $DYNAMO_IMAGE"
+
+  local framework="TRTLLM"
+  if [[ -n "$DYNAMO_BRANCH" && "$DYNAMO_BRANCH" =~ 0\.([0-9]+)\.([0-9]+)$ ]]; then
+    local x="${BASH_REMATCH[1]}"
+    local x_dec=$((10#$x))
+    if (( x_dec <= 4 )); then
+      framework="tensorrtllm"
+    fi
+  fi
+
+  log "Building image: $DYNAMO_IMAGE (framework: $framework, branch: ${DYNAMO_BRANCH:-<unset>})"
   (
     cd "$DYNAMO_DIR"
     ./container/build.sh \
-      --framework tensorrtllm \
+      --framework "$framework" \
       --tensorrtllm-pip-wheel "$TRTLLM_PIP" \
       --tag "$DYNAMO_IMAGE"
   )
