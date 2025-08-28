@@ -147,6 +147,8 @@ def get_moe_test_cases():
                             continue
                         if ep > num_experts:
                             continue
+                        if num_experts % ep != 0:
+                            continue
                         # we need to ensure inter_s can be divided by tp.
                         if inter_s % tp != 0:
                             continue
@@ -247,6 +249,13 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
 
     hidden_states_max_tokens = torch.randn([num_tokens_lists[-1], hidden_size]).bfloat16().to(torch.device(device))
     logits_max_tokens = torch.randn([num_tokens_lists[-1], num_experts]).bfloat16().to(torch.device(device))
+
+    ffn1_weights = Parameter(torch.randn(moe.w3_w1_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(dtype=moe.w3_w1_weight.dtype), requires_grad=False)
+    ffn2_weights = Parameter(torch.randn(moe.w2_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(dtype=moe.w2_weight.dtype), requires_grad=False)
+
+    moe.w3_w1_weight = ffn1_weights
+    moe.w2_weight = ffn2_weights
+
     torch.cuda.synchronize()
     AutoTuner.get().clear_cache()
     with torch.inference_mode(), autotune():
@@ -264,11 +273,7 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 
-        ffn1_weights = Parameter(torch.randn(moe.w3_w1_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(dtype=moe.w3_w1_weight.dtype), requires_grad=False)
-        ffn2_weights = Parameter(torch.randn(moe.w2_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(dtype=moe.w2_weight.dtype), requires_grad=False)
 
-        moe.w3_w1_weight = ffn1_weights
-        moe.w2_weight = ffn2_weights
 
         num_warmups = 3
         num_runs = 6
