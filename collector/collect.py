@@ -60,7 +60,7 @@ def parallel_run(tasks, func, num_processes):
             for i, p in enumerate(processes):
                 if not p.is_alive():
                     print(f"Process {i} died with exit code {p.exitcode}, restarting...")
-                    processes[i] = start_process(i)
+                    #processes[i] = start_process(i)
 
             progress_bar.n = progress_value.value
             progress_bar.refresh()
