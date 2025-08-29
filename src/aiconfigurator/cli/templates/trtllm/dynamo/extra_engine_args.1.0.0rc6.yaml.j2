@@ -7,7 +7,7 @@ moe_tensor_parallel_size: {{ moe_tp }}
 moe_config:
     backend: {{ dynamo_config.moe_backend | default('CUTLASS') }} # dynamo_config.moe_backend MOE backend to use (CUTLASS, CUTEDSL, WIDEEP, TRTLLM, VANILLA)
     {% if dynamo_config.moe_load_balancer is defined %}  # Configuration for MoE load balancing
-    load_balancer: {{ dynamo_config.moe_load_balancer }} # dynamo_config.moe_load_balancer moe load balancer
+    load_balancer: {{ dynamo_config.moe_load_balancer }} # dynamo_config.moe_load_balancer MOE load balancer
     {% endif %}
 {% endif %}
 
@@ -37,8 +37,14 @@ cuda_graph_config:
 disable_overlap_scheduler: {{ disable_overlap_scheduler | default(true) }}
 print_iter_log: {{ dynamo_config.print_iter_log | default(false) }}  # dynamo_config.print_iter_log Print iteration logs
 
-{% if is_speculative is defined %}  # speculative decoding
+{% if is_speculative is defined %}
+{% set dt = decoding_type %}
 speculative_config:
-  decoding_type: {{ decoding_type }}
+  decoding_type: {{ dt }}
+  {% if dt == 'MTP' %}
   num_nextn_predict_layers: {{ num_nextn_predict_layers }}
+  {% endif %}
+  {% if dt == 'Eagle' and eagle_speculative_model_dir is defined %}
+  speculative_model_dir: {{ eagle_speculative_model_dir }}
+  {% endif %}
 {% endif %}
