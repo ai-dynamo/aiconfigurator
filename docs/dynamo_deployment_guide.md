@@ -117,7 +117,7 @@ pip3 install "."
 ```
 
 ### 1.2 Build the Dynamo Container
-In this example, we're using Dynamo 0.4.0, please switch to release/0.5.0 first.
+In this example, we're using Dynamo 0.5.0, please switch to release/0.5.0 first.
 ```bash
 # other version of trtllm can be used as well
 # currently dynamo is at version 0.4.0, indicated in the tag
