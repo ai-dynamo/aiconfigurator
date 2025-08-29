@@ -167,6 +167,11 @@ def get_moe_test_cases():
                             for power_law_alpha in alpha_list:
                                 test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,False,model_name,'moe_perf.txt', "power_law", power_law_alpha])
                             test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, False, model_name, 'moe_perf.txt', "balanced", 0])
+
+                            for power_law_alpha in alpha_list:
+                                test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,True,model_name,'moe_perf.txt', "power_law", power_law_alpha])
+                            test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
+                            
     return test_cases
 
 def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, min_latency_mode, model_name, perf_filename, distributed = "power_law", power_law_alpha = 0.5, device='cuda:0'):
