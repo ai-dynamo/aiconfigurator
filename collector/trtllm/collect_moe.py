@@ -167,9 +167,18 @@ def get_moe_test_cases():
                             for power_law_alpha in alpha_list:
                                 test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,False,model_name,'moe_perf.txt', "power_law", power_law_alpha])
                             test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, False, model_name, 'moe_perf.txt', "balanced", 0])
-                            for power_law_alpha in alpha_list:
-                                test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,True,model_name,'moe_perf.txt', "power_law", power_law_alpha])
-                            test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
+
+                            can_min_latency = False
+                            if getSMVersion()>=100 and (moe_type == 'nvfp4' or moe_type == 'fp8_block'):
+                                can_min_latency = True # can use trtllm backend
+                            elif tuple(map(int, tensorrt_llm.__version__.split('rc')[0].split('.'))) >= (1, 1, 0) and (moe_type == 'fp8' or moe_type == 'w4a8_mxfp4_fp8' or moe_type == 'w4a16_mxfp4'):
+                                # only version >= "1.1.0" support triton backend:
+                                # only support FP8, W4A8_MXFP4_FP8, and W4A16_MXFP4
+                                can_min_latency = True # can use triton backend
+                            if can_min_latency:
+                                for power_law_alpha in alpha_list:
+                                    test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,True,model_name,'moe_perf.txt', "power_law", power_law_alpha])
+                                test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
 
     return test_cases
 
