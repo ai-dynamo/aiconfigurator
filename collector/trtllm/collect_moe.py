@@ -275,14 +275,19 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
     if distributed == "power_law":
         num_warmups = 1
         num_runs = 1
+
+    do_finalize = not min_latency_mode
+    if min_latency_mode and moe_type == "fp8_block":
+        do_finalize = True # fp8_block min_latency_mode does not support no_finalize
+
     # capture
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
         if distributed == "power_law":
             for actual_logits in actual_logits_list:
-                moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+                moe.forward(hidden_states, actual_logits, do_finalize=do_finalize)
         else:
-            moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+            moe.forward(hidden_states, actual_logits, do_finalize=do_finalize)
     # warmup
     for i in range(num_warmups):
         g.replay()
