@@ -131,7 +131,7 @@ def get_moe_test_cases():
            moe_list += ['w4afp8', 'fp8_block'] # though trtllm gen kernel source supports fp8_block, it only provides min-latency data. not practical
     
     if getSMVersion() >= 100:
-        moe_list += ['nvfp4']
+        moe_list += ['nvfp4', 'w4a8_mxfp4_fp8', 'w4a16_mxfp4'] # TODO: check last two quant
 
     test_cases=[]
 
@@ -191,7 +191,11 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
         dtype = torch.float8_e4m3fn
     elif moe_type == 'nvfp4':
         quant_algo = QuantAlgo.NVFP4
-    
+    elif moe_type == 'w4a8_mxfp4_fp8':
+        quant_algo = QuantAlgo.W4A8_MXFP4_FP8
+    elif moe_type == 'w4a16_mxfp4':
+        quant_algo = QuantAlgo.W4A16_MXFP4
+
     quant_group_size = 128
     if moe_type == 'nvfp4':
         quant_group_size = 16
@@ -219,8 +223,9 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
         prop = torch.cuda.get_device_properties(0)
         if prop.major == 10 and (moe_type == 'nvfp4' or moe_type == 'fp8_block'):
             model_config.moe_backend = 'trtllm'
-        elif tuple(map(int, tensorrt_llm.__version__.split('rc')[0].split('.'))) >= (1, 1, 0):
+        elif tuple(map(int, tensorrt_llm.__version__.split('rc')[0].split('.'))) >= (1, 1, 0) and (moe_type == 'fp8' or moe_type == 'w4a8_mxfp4_fp8' or moe_type == 'w4a16_mxfp4'):
             # only version >= "1.1.0" support triton backend:
+            # only support FP8, W4A8_MXFP4_FP8, and W4A16_MXFP4
             model_config.moe_backend = 'triton'
         else:
             raise RuntimeError(f"Unsupported MOE backend configuration: {prop=}, {tensorrt_llm.__version__=}, {moe_type=}")
