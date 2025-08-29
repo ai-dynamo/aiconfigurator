@@ -9,7 +9,6 @@ from tensorrt_llm.models.modeling_utils import QuantConfig, QuantAlgo
 from tensorrt_llm._torch.modules.fused_moe import create_moe, RenormalizeMoeRoutingMethod
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
-from tensorrt_llm._torch.modules.fused_moe.fused_moe_trtllm_gen import TRTLLMGenFusedMoE
 from torch.nn.parameter import Parameter
 from helper import getSMVersion, log_perf
 import torch.nn.functional as F
@@ -259,9 +258,6 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
             reduce_results=
             False,  # In both low latency and attention dp scenarios, create_moe needs not to do allreduce inside op.
             model_config=model_config)
-
-    if min_latency_mode:
-        assert isinstance(moe, TRTLLMGenFusedMoE)
 
     hidden_states = torch.randn([num_tokens, hidden_size]).bfloat16().to(torch.device(device))
 
