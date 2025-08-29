@@ -168,10 +168,9 @@ def get_moe_test_cases():
                             for power_law_alpha in alpha_list:
                                 test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,False,model_name,'moe_perf.txt', "power_law", power_law_alpha])
                             test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, False, model_name, 'moe_perf.txt', "balanced", 0])
-                            if moe_type == 'fp8_block':
-                                for power_law_alpha in alpha_list:
-                                    test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,True,model_name,'moe_perf.txt', "power_law", power_law_alpha])
-                                test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
+                            for power_law_alpha in alpha_list:
+                                test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,True,model_name,'moe_perf.txt', "power_law", power_law_alpha])
+                            test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
 
     return test_cases
 
@@ -217,7 +216,17 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
     model_config.mapping = mapping
     model_config.quant_config = quant_config
     model_config.moe_max_num_tokens = 65536 # to avoid multi-chunk auxi stream in cuda-graph mode.
-    model_config.moe_backend = 'cutlass' if not min_latency_mode else 'trtllm'
+    if min_latency_mode:
+        prop = torch.cuda.get_device_properties(0)
+        if prop.major == 10 and (moe_type == 'nvfp4' or moe_type == 'fp8_block'):
+            model_config.moe_backend = 'trtllm'
+        elif tuple(map(int, tensorrt_llm.__version__.split('rc')[0].split('.'))) >= (1, 1, 0):
+            # only version >= "1.1.0" support triton backend:
+            model_config.moe_backend = 'triton'
+        else:
+            raise RuntimeError(f"Unsupported MOE backend configuration: {prop=}, {tensorrt_llm.__version__=}, {moe_type=}")
+    else:
+        model_config.moe_backend = 'cutlass'
 
     router_logits_dtype = torch.bfloat16
     # current min_latency mode only support experts <= 256. Thus K2 will not have min_latency mode.
@@ -277,8 +286,8 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
         num_runs = 1
 
     do_finalize = not min_latency_mode
-    if min_latency_mode and moe_type == "fp8_block":
-        do_finalize = True # fp8_block min_latency_mode does not support no_finalize
+    if min_latency_mode:
+        do_finalize = True # triton and trtllm backend does not support no_finalize
 
     # capture
     g = torch.cuda.CUDAGraph()
@@ -302,7 +311,7 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
     latency = start_event.elapsed_time(end_event)/num_runs/num_iter
 
     if min_latency_mode:
-        source = 'moe_torch_flow_min_latency' # trtllm gen
+        source = 'moe_torch_flow_min_latency' # trtllm(SM100) gen or triton(others)
     else:
         source = 'moe_torch_flow' # cutlass
 
