@@ -31,28 +31,52 @@ This folder contains `launch_eval.sh`, a script that:
 Example `config.env` (minimum):
 
 ```bash
-# run inside a prebuilt container
-IN_CONTAINER=true
-
-# model + deployment
-MODEL=QWEN3_32B
-MODEL_LOCAL_DIR=/workspace/model_hub/qwen3-32b-fp8   # already present in the container
+# --- Required paths ---
+MODEL_LOCAL_DIR=/raid/hub/qwen3-32b-fp8
 MODEL_HF_REPO=Qwen/Qwen3-32B-FP8
 
-SERVED_MODEL_NAME=Qwen3/Qwen3-32B-FP8
+# --- Deployment knobs ---
 SYSTEM=h200_sxm
+MODEL=QWEN3_32B
 VERSION=1.0.0rc3
-GENERATED_CONFIG_VERSION=1.0.0rc4
+GENERATED_CONFIG_VERSION=1.0.0rc6
 ISL=5000
 OSL=1000
 TTFT=1000
 TPOT=10
 TOTAL_GPUS=8
 HEAD_NODE_IP=0.0.0.0
+PREFILL_FREE_GPU_MEM_FRAC=0.9
+FREE_GPU_MEM_FRAC=0.7
+DECODE_FREE_GPU_MEM_FRAC=0.5
 PORT=8000
+MODE=disagg
 
-# optional
-ENABLE_MODEL_DOWNLOAD=false
+# --- Container image ---
+DYNAMO_IMAGE=dynamo:0.5.0-trtllm-1.0.0rc6
+TRTLLM_PIP=tensorrt-llm==1.0.0rc6
+
+# --- Dynamo repo settings ---
+# DYNAMO_DIR=/path/to/existing/dynamo  # Optional
+DYNAMO_BRANCH=main
+DYNAMO_GIT=https://github.com/ai-dynamo/dynamo
+
+# --- Service naming ---
+SERVED_MODEL_NAME=Qwen3/Qwen3-32B-FP8
+CONTAINER_NAME=dynamo-single-node
+
+# --- Benchmarking settings ---
+BENCHMARK_CONCURRENCY=auto   # can be auto or cc list likes BENCHMARK_CONCURRENCY="1 4 8 12 16 20"
+#BENCHMARK_CONCURRENCY="1 4 8"
+
+# --- Optional: download model if not present ---
+ENABLE_MODEL_DOWNLOAD=true
+
+# --- Optional: run-time save dir mapping for host ---
+# SAVE_DIR_HOST=/workspace/aiconf_save
+
+# --- Optional: already inside the image ---
+IN_CONTAINER=false
 ```
 
 The script will skip image build and compose, and directly run:
@@ -95,38 +119,52 @@ aiconfigurator eval ...
 Example `config.env` (minimum):
 
 ```bash
-# run from host
-IN_CONTAINER=false
-
-# model paths on host
+# --- Required paths ---
 MODEL_LOCAL_DIR=/raid/hub/qwen3-32b-fp8
 MODEL_HF_REPO=Qwen/Qwen3-32B-FP8
-ENABLE_MODEL_DOWNLOAD=true   # auto-download if missing
 
-# deployment knobs
-MODEL=QWEN3_32B
-SERVED_MODEL_NAME=Qwen3/Qwen3-32B-FP8
+# --- Deployment knobs ---
 SYSTEM=h200_sxm
-AICONFIGURATOR_TRTLLM_VERSION=1.0.0rc3
+MODEL=QWEN3_32B
+VERSION=1.0.0rc3
+GENERATED_CONFIG_VERSION=1.0.0rc6
 ISL=5000
 OSL=1000
 TTFT=1000
 TPOT=10
 TOTAL_GPUS=8
 HEAD_NODE_IP=0.0.0.0
+PREFILL_FREE_GPU_MEM_FRAC=0.9
+FREE_GPU_MEM_FRAC=0.7
+DECODE_FREE_GPU_MEM_FRAC=0.5
 PORT=8000
+MODE=disagg
 
-# container image (build if not found)
-DYNAMO_IMAGE=dynamo:0.4.0-trtllm-1.0.0rc4
-TRTLLM_PIP=tensorrt-llm==1.0.0rc4
+# --- Container image ---
+DYNAMO_IMAGE=dynamo:0.5.0-trtllm-1.0.0rc6
+TRTLLM_PIP=tensorrt-llm==1.0.0rc6
 
-# dynamo repo (for compose + build)
-# DYNAMO_DIR=/path/to/existing/dynamo   # optional; will clone if missing
-DYNAMO_BRANCH=release/0.4.0
+# --- Dynamo repo settings ---
+# DYNAMO_DIR=/path/to/existing/dynamo  # Optional
+DYNAMO_BRANCH=main
 DYNAMO_GIT=https://github.com/ai-dynamo/dynamo
 
-# optional: where eval results land on host (mounted to /workspace/aiconf_save)
-# SAVE_DIR_HOST=/<path>/aiconf_save
+# --- Service naming ---
+SERVED_MODEL_NAME=Qwen3/Qwen3-32B-FP8
+CONTAINER_NAME=dynamo-single-node
+
+# --- Benchmarking settings ---
+BENCHMARK_CONCURRENCY=auto   # can be auto or cc list likes BENCHMARK_CONCURRENCY="1 4 8 12 16 20"
+#BENCHMARK_CONCURRENCY="1 4 8"
+
+# --- Optional: download model if not present ---
+ENABLE_MODEL_DOWNLOAD=true
+
+# --- Optional: run-time save dir mapping for host ---
+# SAVE_DIR_HOST=/workspace/aiconf_save
+
+# --- Optional: already inside the image ---
+IN_CONTAINER=false
 ```
 
 ---
