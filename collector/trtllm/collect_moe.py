@@ -230,7 +230,7 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
 
     router_logits_dtype = torch.bfloat16
     # current min_latency mode only support experts <= 256. Thus K2 will not have min_latency mode.
-    if min_latency_mode:
+    if min_latency_mode and model_config.moe_backend == 'trtllm':
         # FIXME: all use deepseek setting for now. 
         n_group = 8
         topk_group = 4
