@@ -9,6 +9,7 @@ from tensorrt_llm.models.modeling_utils import QuantConfig, QuantAlgo
 from tensorrt_llm._torch.modules.fused_moe import create_moe, RenormalizeMoeRoutingMethod
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
+from tensorrt_llm._torch.modules.fused_moe.fused_moe_trtllm_gen import TRTLLMGenFusedMoE
 from torch.nn.parameter import Parameter
 from helper import getSMVersion, log_perf
 import torch.nn.functional as F
@@ -116,12 +117,12 @@ def get_moe_test_cases():
     #[2048,1408,4,60], #qwen1.5_moe
     #[2048,1408,6,64], #deepseekv1_moe
     #[5120,1536,6,160], #deepseekv2    
-    model_config_list=[[4096,14336,2,8,'MOE_Mixtral8x7B'],# mixtral_8x7b
-                  [6144,16384,2,8,'MOE_Mixtral8x22B'],# mixtral_8x22b
+    model_config_list=[#[4096,14336,2,8,'MOE_Mixtral8x7B'],# mixtral_8x7b
+                  #[6144,16384,2,8,'MOE_Mixtral8x22B'],# mixtral_8x22b
                   [7168,2048,8,256,'DEEPSEEK_V3'], # deepseekv3, will have 1 shared expert
-                  [4096,1536,8,128, 'QWEN3_235B'], # qwen3-moe, 235b-a22b
-                  [6144,2560,8,160, 'QWEN3_480B'], # qwen3-moe, 480b-a35b
-                  [7168,2048,8,384, 'KIMI_K2'], # kimi k2
+                  #[4096,1536,8,128, 'QWEN3_235B'], # qwen3-moe, 235b-a22b
+                  #[6144,2560,8,160, 'QWEN3_480B'], # qwen3-moe, 480b-a35b
+                  #[7168,2048,8,384, 'KIMI_K2'], # kimi k2
                   ]
     moe_list=['float16']
 
@@ -167,11 +168,11 @@ def get_moe_test_cases():
                             for power_law_alpha in alpha_list:
                                 test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,False,model_name,'moe_perf.txt', "power_law", power_law_alpha])
                             test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, False, model_name, 'moe_perf.txt', "balanced", 0])
+                            if moe_type == 'fp8_block':
+                                for power_law_alpha in alpha_list:
+                                    test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,True,model_name,'moe_perf.txt', "power_law", power_law_alpha])
+                                test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
 
-                            for power_law_alpha in alpha_list:
-                                test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep,True,model_name,'moe_perf.txt', "power_law", power_law_alpha])
-                            test_cases.append([moe_type,num_token,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
-                            
     return test_cases
 
 def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, min_latency_mode, model_name, perf_filename, distributed = "power_law", power_law_alpha = 0.5, device='cuda:0'):
@@ -249,6 +250,9 @@ def run_moe_torch(moe_type, num_tokens, hidden_size, inter_size, topk, num_exper
             reduce_results=
             False,  # In both low latency and attention dp scenarios, create_moe needs not to do allreduce inside op.
             model_config=model_config)
+
+    if min_latency_mode:
+        assert isinstance(moe, TRTLLMGenFusedMoE)
 
     hidden_states = torch.randn([num_tokens, hidden_size]).bfloat16().to(torch.device(device))
 
