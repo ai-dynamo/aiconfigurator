@@ -86,7 +86,7 @@ def collect_trtllm(num_processes : int):
     try:
         if version.startswith('0.20.0'):
             import trtllm.collect_moe_pre_0_20 as collect_moe
-        elif version.startswith('0.21.0') or version.startswith('1.0.0'):
+        elif version.startswith('0.21.0') or version.startswith('1.0.0') or version.startswith('1.1.0'):
             import trtllm.collect_moe as collect_moe
         else:
             raise ValueError(f"cannot collect moe test cases for TensorRT LLM {version}, skipping...")
