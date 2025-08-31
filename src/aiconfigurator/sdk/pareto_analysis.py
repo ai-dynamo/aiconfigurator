@@ -15,6 +15,7 @@ from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends.factory import get_backend
 import logging
 import traceback
+from aiconfigurator.sdk.utils import safe_mkdir
 
 logger = logging.getLogger(__name__)
 
@@ -276,7 +277,7 @@ def compare_results(label_results_dict: dict[str, pd.DataFrame], title: str, wri
     if write_results:
         dir_name = f'results/{title}_{random.randint(0,1000000)}'
         logger.info('saving results to ', dir_name)
-        os.makedirs(dir_name, exist_ok=True)
+        safe_mkdir(dir_name, exist_ok=True)
         for label, results_df in label_results_dict.items():
             results_df.to_csv(f'{dir_name}/{label}.csv', index=False)
 

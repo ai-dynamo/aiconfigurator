@@ -8,6 +8,7 @@ import re, argparse, logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, Any, Tuple
+from aiconfigurator.sdk.utils import safe_mkdir
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +177,7 @@ def _dump_backend_file(path: str, content: Any) -> None:
     YAML  → safe_dump  
     *.sh  → write text (keep LF endings)
     """
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    safe_mkdir(os.path.dirname(path), exist_ok=True)
 
     def _render_shell_text(val: Any) -> str:
         """Return shell script text without comment"""

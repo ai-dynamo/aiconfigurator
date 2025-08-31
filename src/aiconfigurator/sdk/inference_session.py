@@ -365,7 +365,7 @@ class DisaggInferenceSession(object):
                                                prefill_summary_df:pd.DataFrame, 
                                                decode_summary_df:pd.DataFrame, 
                                                return_top_k:int, 
-                                               num_gpu_list:Optional[List[int]]) -> Optional[pd.DataFrame]:
+                                               num_gpu_list:Optional[List[int]]) -> InferenceSummary:
             """
             Find the best result under constraints
             """
@@ -423,15 +423,20 @@ class DisaggInferenceSession(object):
         
         max_prefill_batch_size = prefill_max_num_tokens // runtime_config.isl
         prefill_batch_size_range = range(1, max_prefill_batch_size+1)
+
+        # initialize disagg summary
+        disagg_summary = InferenceSummary(runtime_config=runtime_config)
+        disagg_summary_df = pd.DataFrame(columns=common.ColumnsDisagg)
+        disagg_summary.set_summary_df(disagg_summary_df)
         
+        # find prefill and decode workers
         prefill_summary_df = get_summary_df(prefill_model_config, prefill_parallel_config_list, prefill_batch_size_range, runtime_config, 'static_ctx')
         decode_summary_df = get_summary_df(decode_model_config, decode_parallel_config_list, decode_batch_size_range, runtime_config, 'static_gen')
-
         if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:
             logger.debug(f"No prefill or decode workers found for {model_name} with given configs.")
-            return None
+            return disagg_summary
         
-        disagg_summary_df = pd.DataFrame(columns=common.ColumnsDisagg)
+        # find best result under constraints
         ttft = runtime_config.ttft
         tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
         for tpot in tpot_list:
@@ -441,8 +446,8 @@ class DisaggInferenceSession(object):
                 disagg_summary_df = pd.concat([disagg_summary_df, filtered_disagg_summary_df], axis=0, ignore_index=True)
         if len(disagg_summary_df) == 0:
             logger.debug(f"No disagg result found for {model_name} with given constraints.")
-            return None
+            return disagg_summary
         
-        disagg_summary = InferenceSummary(runtime_config=runtime_config)
+        # set final disagg summary
         disagg_summary.set_summary_df(disagg_summary_df)
         return disagg_summary
