@@ -15,8 +15,11 @@ for n in "${num_gpus_nccl[@]}"; do
     done
 done
 
-# TRTLLM allreduce
+# TRTLLM allreduce (CUDA Graph based)
 num_gpus_trtllm=(2 4 8)
+
 for n in "${num_gpus_trtllm[@]}"; do
-    mpirun -n "$n" --allow-run-as-root python collect_all_reduce.py
+    echo "Running AllReduce benchmark with $n GPUs using CUDA Graph method"
+    mpirun -n "$n" --allow-run-as-root python3 collect_all_reduce.py \
+        --perf-filename "custom_allreduce_perf.txt"
 done

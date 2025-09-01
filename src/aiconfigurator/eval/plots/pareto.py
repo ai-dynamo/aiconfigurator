@@ -26,9 +26,14 @@ class ParetoPlot:
         self.show_cc_label = show_cc_label
         self._expand_x = expand_x
         self._series: list[tuple[str, pd.DataFrame]] = []
+        self._optimal_points: list[tuple[str, pd.DataFrame]] = []
 
     def add_series(self, label: str, df: pd.DataFrame):
         self._series.append((label, df))
+
+    def add_optimal_point(self, label: str, df: pd.DataFrame):
+        """Add optimal configuration point to be plotted with special markers."""
+        self._optimal_points.append((label, df))
 
     def _col(self, df: pd.DataFrame, spec: str):
         m, s = _split(spec)
@@ -82,6 +87,28 @@ class ParetoPlot:
                     if tag:
                         ax.annotate(tag, (xv, yv), textcoords="offset points",
                                     xytext=(2, 2), fontsize=6, ha="left", va="bottom")
+
+        # Plot optimal configuration points with special markers
+        for label, df in self._optimal_points:
+            if df.empty:
+                continue
+                
+            x_vals = self._col(df, self._x_spec)
+            y_vals = self._col(df, self._y_spec)
+            # NOTE: Optimal points from pareto CSV already have per-GPU values, 
+            # so we don't divide by num_gpus again to avoid double normalization
+
+            all_x_vals = pd.concat([all_x_vals, x_vals])
+
+            # Plot with distinctive markers (star shape, larger size, different color)
+            ax.scatter(x_vals, y_vals, label=f"{label} (Optimal)", 
+                      marker='*', s=150, c='red', edgecolors='black', linewidth=1, zorder=10)
+            
+            # Add labels for optimal points
+            for xv, yv in zip(x_vals, y_vals):
+                ax.annotate(f"Optimal\n{label}", (xv, yv), textcoords="offset points",
+                           xytext=(5, 5), fontsize=8, ha="left", va="bottom", 
+                           bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7))
 
         if self._expand_x and not all_x_vals.empty:
             min_x = 0.0
