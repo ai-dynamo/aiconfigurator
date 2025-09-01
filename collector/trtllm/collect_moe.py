@@ -284,10 +284,14 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
     moe.w3_w1_weight = ffn1_weights
     moe.w2_weight = ffn2_weights
 
+    do_finalize = not min_latency_mode
+    if min_latency_mode:
+        do_finalize = True # triton and trtllm backend does not support no_finalize
+
     torch.cuda.synchronize()
     AutoTuner.get().clear_cache()
     with torch.inference_mode(), autotune():
-        moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
+        moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=do_finalize)
     torch.cuda.synchronize()
 
     for num_tokens in num_tokens_lists:
@@ -308,11 +312,6 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
         if distributed == "power_law":
             num_warmups = 1
             num_runs = 1
-
-        do_finalize = not min_latency_mode
-        if min_latency_mode:
-            do_finalize = True # triton and trtllm backend does not support no_finalize
-
 
         # capture
         g = torch.cuda.CUDAGraph()
