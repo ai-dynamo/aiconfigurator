@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 import json
 from prettytable import PrettyTable
 from aiconfigurator import __version__
+from aiconfigurator.sdk.utils import safe_mkdir
 
 
 logger = logging.getLogger(__name__)
@@ -789,50 +790,62 @@ class AIConfigurator:
         Returns:
             None
         """
-        result_prefix = f"{aiconfigurator_config.model_name}_isl{aiconfigurator_config.isl}_osl{aiconfigurator_config.osl}_ttft{int(aiconfigurator_config.ttft)}_tpot{int(aiconfigurator_config.tpot)}"
-        result_dir_path = os.path.join(dir_path, f'{result_prefix}_{random.randint(0,1000000)}')
-        logger.info('saving results to ' + result_dir_path)
+        # Create result directory name
+        result_dir_name = f"{aiconfigurator_config.model_name}_isl{aiconfigurator_config.isl}_osl{aiconfigurator_config.osl}_ttft{int(aiconfigurator_config.ttft)}_tpot{int(aiconfigurator_config.tpot)}_{random.randint(0,1000000)}"
+        result_dir_path = os.path.join(dir_path, result_dir_name)
+        
+        logger.info(f'saving results to {result_dir_path}')
         try:
-            os.makedirs(result_dir_path, exist_ok=True)
-            logger.debug(f"Saving aiconfigurator config to {os.path.join(result_dir_path, 'aiconfigurator_config.yaml')}")
-            with open(os.path.join(result_dir_path, 'aiconfigurator_config.yaml'), 'w') as f:
+            # Use safe_mkdir with automatic sanitization and security validation
+            safe_result_dir = safe_mkdir(result_dir_path, exist_ok=True)
+
+            config_file = safe_result_dir / 'aiconfigurator_config.yaml'
+            logger.debug(f"Saving aiconfigurator config to {config_file}")
+            with config_file.open('w') as f:
                 yaml.safe_dump(aiconfigurator_config.aiconfigurator_yaml_data, f, sort_keys=False, allow_unicode=True)
 
-            logger.debug(f"Saving aiconfigurator result to {os.path.join(result_dir_path, 'aiconfigurator_result.yaml')}")
-            with open(os.path.join(result_dir_path, 'aiconfigurator_result.json'), 'w') as f:
+            result_file = safe_result_dir / 'aiconfigurator_result.json'
+            logger.debug(f"Saving aiconfigurator result to {result_file}")
+            with result_file.open('w') as f:
                 json.dump(aiconfigurator_result.to_dict(), f, indent=4)
 
-            logger.debug(f"Saving pareto frontiers to {os.path.join(result_dir_path, 'pareto_frontier.png')}")
+            plot_file = safe_result_dir / 'pareto_frontier.png'
+            logger.debug(f"Saving pareto frontiers to {plot_file}")
             fig, ax = plt.subplots(1,1, figsize=(8,5))
             plt.title(f"{aiconfigurator_config.model_name} tokens/s/gpu vs tokens/s/user")
             if not aiconfigurator_result.agg_pareto.empty:
                 pareto_analysis.draw_pareto(aiconfigurator_result.agg_pareto, 'tokens/s/user', 'tokens/s/gpu', ax, 'blue', 'Agg')
             if not aiconfigurator_result.disagg_pareto.empty:
                 pareto_analysis.draw_pareto(aiconfigurator_result.disagg_pareto, 'tokens/s/user', 'tokens/s/gpu', ax, 'red', 'Disagg')
-            plt.savefig(os.path.join(result_dir_path, 'pareto_frontier.png'))
+            plt.savefig(str(plot_file))
             plt.close()
 
-            logger.debug(f"Saving agg pareto frontier raw data to {os.path.join(result_dir_path, 'agg_pareto.csv')}")
+            agg_csv_file = safe_result_dir / 'agg_pareto.csv'
+            logger.debug(f"Saving agg pareto frontier raw data to {agg_csv_file}")
             if not aiconfigurator_result.agg_pareto.empty:
-                aiconfigurator_result.agg_pareto.to_csv(os.path.join(result_dir_path, 'agg_pareto.csv'), index=False)
+                aiconfigurator_result.agg_pareto.to_csv(str(agg_csv_file), index=False)
 
-            logger.debug(f"Saving disagg pareto frontier raw data to {os.path.join(result_dir_path, 'disagg_pareto.csv')}")
+            disagg_csv_file = safe_result_dir / 'disagg_pareto.csv'
+            logger.debug(f"Saving disagg pareto frontier raw data to {disagg_csv_file}")
             if not aiconfigurator_result.disagg_pareto.empty:
-                aiconfigurator_result.disagg_pareto.to_csv(os.path.join(result_dir_path, 'disagg_pareto.csv'), index=False)
+                aiconfigurator_result.disagg_pareto.to_csv(str(disagg_csv_file), index=False)
             
-            logger.debug(f"Saving backend configs to {os.path.join(result_dir_path, 'backend_configs')}")
-            os.makedirs(os.path.join(result_dir_path, 'backend_configs'), exist_ok=True)
-            backend_root = os.path.join(result_dir_path, "backend_configs")
+            # Use safe_mkdir for backend configs directory with automatic sanitization
+            backend_configs_path = safe_result_dir / 'backend_configs'
+            logger.debug(f"Saving backend configs to {backend_configs_path}")
+            backend_configs_dir = safe_mkdir(str(backend_configs_path))
+            
             for mode, mode_backend_configs in backend_configs.items():
-                logger.debug(f"Saving {mode} backend configs to {os.path.join(result_dir_path, 'backend_configs', mode)}")
-                os.makedirs(os.path.join(backend_root, mode), exist_ok=True)
-                mode_dir = os.path.join(backend_root, mode)
+                mode_path = backend_configs_dir / mode
+                logger.debug(f"Saving {mode} backend configs to {mode_path}")
+                mode_dir = safe_mkdir(str(mode_path))
+                
                 for file_name, mode_backend_config in mode_backend_configs.items():
-                    out_path = os.path.join(mode_dir, file_name)
-                    _dump_backend_file(out_path, mode_backend_config)
+                    out_path = mode_dir / file_name
+                    _dump_backend_file(str(out_path), mode_backend_config)
 
         except Exception as e:
-            logger.error(f"Failed to save aiconfigurator result to {result_dir_path}: {e}")
+            logger.error(f"Failed to save aiconfigurator result to {dir_path}/{result_dir_name}: {e}")
 
 def load_config_from_yaml(model_name: str,
                             system_name: str,
