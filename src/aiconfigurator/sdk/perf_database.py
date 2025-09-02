@@ -824,7 +824,7 @@ class PerfDatabase(object):
             Get the sol time, sol math and sol mem
             """
             # only consider fp16 mmha
-            ops = 2 * b * n * 128 * 2 # 2 for fma, 2 for q*k^t+*v
+            ops = 2 * b * n * 128 * 2 * s # 2 for fma, 2 for q*k^t+*v
             # kvcache load bytes will depend on kvcache quant. while input q and output might be in fp16.
             mem_bytes = b * (n*128*2 + 2*n_kv*(s-1)*128*kvcache_quant_mode.value.memory + n*128*2)
             
