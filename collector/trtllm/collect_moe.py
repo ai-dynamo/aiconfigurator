@@ -117,12 +117,12 @@ def get_moe_test_cases():
     #[2048,1408,4,60], #qwen1.5_moe
     #[2048,1408,6,64], #deepseekv1_moe
     #[5120,1536,6,160], #deepseekv2    
-    model_config_list=[[4096,14336,2,8,'MOE_Mixtral8x7B'],# mixtral_8x7b
-                  [6144,16384,2,8,'MOE_Mixtral8x22B'],# mixtral_8x22b
+    model_config_list=[#[4096,14336,2,8,'MOE_Mixtral8x7B'],# mixtral_8x7b
+                  #[6144,16384,2,8,'MOE_Mixtral8x22B'],# mixtral_8x22b
                   [7168,2048,8,256,'DEEPSEEK_V3'], # deepseekv3, will have 1 shared expert
-                  [4096,1536,8,128, 'QWEN3_235B'], # qwen3-moe, 235b-a22b
-                  [6144,2560,8,160, 'QWEN3_480B'], # qwen3-moe, 480b-a35b
-                  [7168,2048,8,384, 'KIMI_K2'], # kimi k2
+                  #[4096,1536,8,128, 'QWEN3_235B'], # qwen3-moe, 235b-a22b
+                  #[6144,2560,8,160, 'QWEN3_480B'], # qwen3-moe, 480b-a35b
+                  #[7168,2048,8,384, 'KIMI_K2'], # kimi k2
                   ]
     moe_list=['float16']
 
@@ -132,7 +132,7 @@ def get_moe_test_cases():
            moe_list += ['w4afp8', 'fp8_block'] # though trtllm gen kernel source supports fp8_block, it only provides min-latency data. not practical
     
     if getSMVersion() >= 100:
-        moe_list += ['nvfp4']
+        moe_list += ['nvfp4', 'w4a8_mxfp4_fp8', 'w4a16_mxfp4'] # TODO: check last two quant
 
     test_cases=[]
 
@@ -164,11 +164,24 @@ def get_moe_test_cases():
                                 if num_experts <= 256:
                                     for power_law_alpha in alpha_list:
                                         test_cases.append([moe_type,num_tokens,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "power_law", power_law_alpha])
-                                    # test_cases.append([moe_type,num_tokens,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
+                                    test_cases.append([moe_type,num_tokens,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
 
                         for power_law_alpha in alpha_list:
                             test_cases.append([moe_type,num_tokens,hs,inter_s,topk,num_experts,tp,ep,False,model_name,'moe_perf.txt', "power_law", power_law_alpha])
-                        # test_cases.append([moe_type,num_tokens,hs,inter_s,topk,num_experts,tp,ep, False, model_name, 'moe_perf.txt', "balanced", 0])
+                        test_cases.append([moe_type,num_tokens,hs,inter_s,topk,num_experts,tp,ep, False, model_name, 'moe_perf.txt', "balanced", 0])
+
+                        can_min_latency = False
+                        if getSMVersion()>=100 and (moe_type == 'nvfp4' or moe_type == 'fp8_block'):
+                            can_min_latency = True # can use trtllm backend
+                        elif tuple(map(int, tensorrt_llm.__version__.split('rc')[0].split('.'))) >= (1, 1, 0) and (moe_type == 'fp8' or moe_type == 'w4a8_mxfp4_fp8' or moe_type == 'w4a16_mxfp4'):
+                            # only version >= "1.1.0" support triton backend:
+                            # only support FP8, W4A8_MXFP4_FP8, and W4A16_MXFP4
+                            can_min_latency = True # can use triton backend
+                        if can_min_latency:
+                            for power_law_alpha in alpha_list:
+                                test_cases.append([moe_type,num_tokens,hs,inter_s,topk,num_experts,tp,ep,True,model_name,'moe_perf.txt', "power_law", power_law_alpha])
+                            test_cases.append([moe_type,num_tokens,hs,inter_s,topk,num_experts,tp,ep, True, model_name, 'moe_perf.txt', "balanced", 0])
+
     return test_cases
 
 def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, min_latency_mode, model_name, perf_filename, distributed = "power_law", power_law_alpha = 0., device='cuda:0'):
@@ -189,7 +202,11 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
         dtype = torch.float8_e4m3fn
     elif moe_type == 'nvfp4':
         quant_algo = QuantAlgo.NVFP4
-    
+    elif moe_type == 'w4a8_mxfp4_fp8':
+        quant_algo = QuantAlgo.W4A8_MXFP4_FP8
+    elif moe_type == 'w4a16_mxfp4':
+        quant_algo = QuantAlgo.W4A16_MXFP4
+
     quant_group_size = 128
     if moe_type == 'nvfp4':
         quant_group_size = 16
@@ -213,11 +230,22 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
     model_config.mapping = mapping
     model_config.quant_config = quant_config
     model_config.moe_max_num_tokens = num_tokens_lists[-1] # to avoid multi-chunk auxi stream in cuda-graph mode.
-    model_config.moe_backend = 'cutlass' if not min_latency_mode else 'trtllm'
+    if min_latency_mode:
+        prop = torch.cuda.get_device_properties(0)
+        if prop.major == 10 and (moe_type == 'nvfp4' or moe_type == 'fp8_block'):
+            model_config.moe_backend = 'trtllm'
+        elif tuple(map(int, tensorrt_llm.__version__.split('rc')[0].split('.'))) >= (1, 1, 0) and (moe_type == 'fp8' or moe_type == 'w4a8_mxfp4_fp8' or moe_type == 'w4a16_mxfp4'):
+            # only version >= "1.1.0" support triton backend:
+            # only support FP8, W4A8_MXFP4_FP8, and W4A16_MXFP4
+            model_config.moe_backend = 'triton'
+        else:
+            raise RuntimeError(f"Unsupported MOE backend configuration: {prop=}, {tensorrt_llm.__version__=}, {moe_type=}")
+    else:
+        model_config.moe_backend = 'cutlass'
 
     router_logits_dtype = torch.bfloat16
     # current min_latency mode only support experts <= 256. Thus K2 will not have min_latency mode.
-    if min_latency_mode:
+    if min_latency_mode and model_config.moe_backend == 'trtllm':
         # FIXME: all use deepseek setting for now. 
         n_group = 8
         topk_group = 4
@@ -256,10 +284,14 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
     moe.w3_w1_weight = ffn1_weights
     moe.w2_weight = ffn2_weights
 
+    do_finalize = not min_latency_mode
+    if min_latency_mode:
+        do_finalize = True # triton and trtllm backend does not support no_finalize
+
     torch.cuda.synchronize()
     AutoTuner.get().clear_cache()
     with torch.inference_mode(), autotune():
-        moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
+        moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=do_finalize)
     torch.cuda.synchronize()
 
     for num_tokens in num_tokens_lists:
@@ -286,9 +318,9 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
         with torch.cuda.graph(g):
             if distributed == "power_law":
                 for actual_logits in actual_logits_list:
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+                    moe.forward(hidden_states, actual_logits, do_finalize=do_finalize)
             else:
-                moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+                moe.forward(hidden_states, actual_logits, do_finalize=do_finalize)
         # warmup
         for i in range(num_warmups):
             g.replay()
@@ -303,7 +335,7 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
         latency = start_event.elapsed_time(end_event)/num_runs/num_iter
 
         if min_latency_mode:
-            source = 'moe_torch_flow_min_latency' # trtllm gen
+            source = 'moe_torch_flow_min_latency' # trtllm(SM100) gen or triton(others)
         else:
             source = 'moe_torch_flow' # cutlass
 
