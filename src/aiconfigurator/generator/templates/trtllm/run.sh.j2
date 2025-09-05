@@ -4,7 +4,7 @@ set -euo pipefail
 export MODEL_PATH=${MODEL_PATH:-"{{ dynamo_config.model_path | default(model_name) }}"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"{{ dynamo_config.served_model_name | default(model_name) }}"}
 
-# ----------- ETCD / NATS address -----------
+# ----------- ETCD / NATS address -----------
 export HEAD_NODE_IP=${HEAD_NODE_IP:-"{{ dynamo_config.head_node_ip | default('0.0.0.0') }}"}  # dynamo_config.head_node_ip Make sure the head node has started etcd and NATs, as the other node will connect to them
 export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
 export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
@@ -21,7 +21,7 @@ export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"{{ agg_engine_args }}"}
 export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"{{ dynamo_config.disaggregation_strategy | default('prefill_first') }}"} # dynamo_config.disaggregation_strategy prefill_first or decode_first
 
 {% if is_kv %}
-# ------- KV‑router related metrics ------------
+# ------- KV-router related metrics ------------
 EXTRA_PREFILL_ARGS=()
 EXTRA_DECODE_ARGS=()
 if [ "$DISAGGREGATION_STRATEGY" == "prefill_first" ]; then
@@ -32,7 +32,7 @@ fi
 {% endif %}
 {% endif %}
 
-# ============== cleaning & Frontend ==============
+# ============== cleaning & Frontend ==============
 cleanup(){ kill $(jobs -pr) 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
