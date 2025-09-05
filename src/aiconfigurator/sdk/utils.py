@@ -83,6 +83,7 @@ def safe_mkdir(target_path: str, exist_ok: bool = True) -> Path:
             current_dir,
             Path.home(),
             Path('/tmp'),
+            Path('/workspace'),
             Path('/var/tmp'),
             Path(tempfile.gettempdir()).resolve(),
         ]
