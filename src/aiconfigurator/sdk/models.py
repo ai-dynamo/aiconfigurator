@@ -269,20 +269,24 @@ class MOEModel(BaseModel):
                                                          num_kv_heads_per_GPU, 
                                                          kvcache_quant_mode, 
                                                          fmha_quant_mode,
-                                                         sliding_window))
+                                                         sliding_window,
+                                                         self._head_size))
             self.generation_ops.append(ops.GenerationAttention(f'generation_attention', 
                                                                self._num_layers/attn_scale_factor, 
                                                                self._num_heads//tp_size, 
                                                                num_kv_heads_per_GPU, 
                                                                kvcache_quant_mode,
-                                                               sliding_window))
+                                                               sliding_window,
+                                                               self._head_size))
         else:
             attn_scale_factor = 1
             
         self.context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
                                 ops.GEMM(f'context_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode),
-                                ops.ContextAttention(f'context_attention', self._num_layers/attn_scale_factor, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode),
+                                ops.ContextAttention(f'context_attention', self._num_layers/attn_scale_factor, 
+                                                     self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, 
+                                                     fmha_quant_mode, head_size=self._head_size),
                                 ops.GEMM(f'context_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
                                 ops.ElementWise(f'context_add_norm_2', self._num_layers, 2*h, 2*h, 0.8)])
         
@@ -303,7 +307,9 @@ class MOEModel(BaseModel):
         self.generation_ops.extend([ops.Embedding(f'generation_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'generation_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
                                 ops.GEMM(f'generation_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode),
-                                ops.GenerationAttention(f'generation_attention', self._num_layers/attn_scale_factor, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode),
+                                ops.GenerationAttention(f'generation_attention', self._num_layers/attn_scale_factor, 
+                                                        self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, 
+                                                        head_size=self._head_size),
                                 ops.GEMM(f'generation_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
                                 ops.ElementWise(f'generation_add_norm_2', self._num_layers, 2*h, 2*h, 0.8)])
 
