@@ -12,6 +12,7 @@ class ModelConfig:
     """
     tp_size: int = 1
     pp_size: int = 1
+    sliding_window: int = 0
     gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16
     moe_quant_mode: common.MoEQuantMode = common.MoEQuantMode.float16
     kvcache_quant_mode: common.KVCacheQuantMode = common.KVCacheQuantMode.float16

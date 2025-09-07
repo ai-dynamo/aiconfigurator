@@ -778,7 +778,8 @@ class PerfDatabase(object):
                                 n_kv : int, 
                                 kvcache_quant_mode : common.KVCacheQuantMode, 
                                 fmha_quant_mode : common.FMHAQuantMode, 
-                                sol_mode : Optional[common.SOLMode] = None) -> float:
+                                sol_mode : Optional[common.SOLMode] = None,
+                                sliding_window : int = 0) -> float:
         """
         Query the context attention data
         """
@@ -815,7 +816,8 @@ class PerfDatabase(object):
                                    n : int, 
                                    n_kv : int, 
                                    kvcache_quant_mode : common.KVCacheQuantMode, 
-                                   sol_mode : Optional[common.SOLMode] = None) -> float:
+                                   sol_mode : Optional[common.SOLMode] = None,
+                                   sliding_window : int = 0) -> float:
         """
         Query the generation attention data
         """
