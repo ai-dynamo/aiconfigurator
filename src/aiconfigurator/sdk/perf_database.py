@@ -834,7 +834,7 @@ class PerfDatabase(object):
             if w > 0:
                 kv_len = min(s - 1, w)
             else:
-                kv_len = s -1
+                kv_len = s - 1
             # only consider fp16 mmha
             ops = 2 * b * n * h * 2 * (kv_len) # 2 for fma, 2 for q*k^t+*v
             # kvcache load bytes will depend on kvcache quant. while input q and output might be in fp16.

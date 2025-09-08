@@ -667,7 +667,7 @@ if __name__ == '__main__':
         moe_ep_size=1,
         attention_dp_size=1,
         gemm_quant_mode=common.GEMMQuantMode.fp8_ootb,
-        kvcache_quant_mode=common.KVCacheQuantMode.fp8,s
+        kvcache_quant_mode=common.KVCacheQuantMode.fp8,
         fmha_quant_mode=common.FMHAQuantMode.fp8,
         moe_quant_mode=common.MoEQuantMode.w4afp8,
         nextn=2,
