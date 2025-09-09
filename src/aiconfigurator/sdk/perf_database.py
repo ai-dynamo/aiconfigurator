@@ -778,16 +778,22 @@ class PerfDatabase(object):
                                 n_kv : int, 
                                 kvcache_quant_mode : common.KVCacheQuantMode, 
                                 fmha_quant_mode : common.FMHAQuantMode, 
-                                sol_mode : Optional[common.SOLMode] = None) -> float:
+                                sol_mode : Optional[common.SOLMode] = None,
+                                sliding_window : int = 0,
+                                head_size : int = 128) -> float:
         """
         Query the context attention data
         """
-        def get_sol(b : int, s : int, n : int, n_kv : int, kvcache_quant_mode : common.KVCacheQuantMode, fmha_quant_mode : common.FMHAQuantMode) -> Tuple[float, float, float]:
+        def get_sol(b : int, s : int, n : int, n_kv : int, h : int, w : int,
+                    kvcache_quant_mode : common.KVCacheQuantMode, fmha_quant_mode : common.FMHAQuantMode,) -> Tuple[float, float, float]:
             """
             Get the sol time, sol math and sol mem
             """
-            ops = 2 * b * s * s * n * 128 * 2 / 2 # 2 for fma, 2 for q*k^t+*v, 2 for causality.
-            mem_bytes = 2 * b * (n*s*128 + 2*n_kv*s*128 + n*s*128) # 2 for fp16 TODO
+            if w > 0 and s > w:
+                ops = 4 * b * n * (s-w) * w * d + 4 * b * n * w * w * d / 2
+            else:
+                ops = 2 * b * s * s * n * h * 2 / 2 # 2 for fma, 2 for q*k^t+*v, /2 for causality.
+            mem_bytes = 2 * b * (n*s*h + 2*n_kv*s*h + n*s*h) # 2 for fp16 TODO
             sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
             sol_time = max(sol_math, sol_mem)
@@ -797,10 +803,12 @@ class PerfDatabase(object):
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(b, s, n, n_kv, kvcache_quant_mode, fmha_quant_mode)[0]
+            return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode, fmha_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(b, s, n, n_kv, kvcache_quant_mode, fmha_quant_mode)
+            return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode, fmha_quant_mode)
         else:
+            if head_size != 128:
+                return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode, fmha_quant_mode)[0]
             if n_kv == n:
                 attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][0]
             else:
@@ -815,18 +823,24 @@ class PerfDatabase(object):
                                    n : int, 
                                    n_kv : int, 
                                    kvcache_quant_mode : common.KVCacheQuantMode, 
-                                   sol_mode : Optional[common.SOLMode] = None) -> float:
+                                   sol_mode : Optional[common.SOLMode] = None,
+                                   sliding_window : int = 0,
+                                   head_size : int = 128 ) -> float:
         """
         Query the generation attention data
         """
-        def get_sol(b : int, s : int, n : int, n_kv : int, kvcache_quant_mode : common.KVCacheQuantMode) -> Tuple[float, float, float]:
+        def get_sol(b : int, s : int, n : int, n_kv : int, h : int, w : int, kvcache_quant_mode : common.KVCacheQuantMode) -> Tuple[float, float, float]:
             """
             Get the sol time, sol math and sol mem
             """
+            if w > 0:
+                kv_len = min(s - 1, w)
+            else:
+                kv_len = s - 1
             # only consider fp16 mmha
-            ops = 2 * b * n * 128 * 2 * s # 2 for fma, 2 for q*k^t+*v
+            ops = 2 * b * n * h * 2 * (kv_len) # 2 for fma, 2 for q*k^t+*v
             # kvcache load bytes will depend on kvcache quant. while input q and output might be in fp16.
-            mem_bytes = b * (n*128*2 + 2*n_kv*(s-1)*128*kvcache_quant_mode.value.memory + n*128*2)
+            mem_bytes = b * (n*h*2 + 2*n_kv*(kv_len)*h*kvcache_quant_mode.value.memory + n*h*2)
             
             sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
@@ -837,10 +851,12 @@ class PerfDatabase(object):
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(b, s, n, n_kv, kvcache_quant_mode)[0]
+            return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(b, s, n, n_kv, kvcache_quant_mode)
+            return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode)
         else:
+            if head_size != 128:
+                return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode)[0]
             if n_kv == n:
                 attention_dict = self._generation_attention_data[kvcache_quant_mode][0]
             else:
@@ -1077,7 +1093,9 @@ class PerfDatabase(object):
                     moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
                 else:
                     moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-
+            
+            if not moe_dict:
+                 return get_sol(num_tokens, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, quant_mode, workload_distribution)[0]
             num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
             lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
             return lat
