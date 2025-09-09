@@ -807,6 +807,8 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode, fmha_quant_mode)
         else:
+            if head_size != 128:
+                return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode, fmha_quant_mode)[0]
             if n_kv == n:
                 attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][0]
             else:
@@ -853,6 +855,8 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode)
         else:
+            if head_size != 128:
+                return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode)[0]
             if n_kv == n:
                 attention_dict = self._generation_attention_data[kvcache_quant_mode][0]
             else:
@@ -1089,7 +1093,9 @@ class PerfDatabase(object):
                     moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
                 else:
                     moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-
+            
+            if not moe_dict:
+                 return get_sol(num_tokens, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, quant_mode, workload_distribution)[0]
             num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
             lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
             return lat
