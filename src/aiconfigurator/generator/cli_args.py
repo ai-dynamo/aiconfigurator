@@ -38,7 +38,7 @@ def _scan_templates_for_help(backend: str) -> Dict[str, Dict[str, str]]:
     var_pat = re.compile(rf"{_PREFIX}\.([A-Za-z_][\w]*)")
 
     meta: Dict[str, Dict[str, str]] = {}
-    for name in ("run.sh.j2", "extra_engine_args.yaml.j2"):
+    for name in ("run.sh.j2", "extra_engine_args.yaml.j2", "k8s_deploy.yaml.j2"):
         p = tmpl_dir / name
         if not p.exists():
             continue

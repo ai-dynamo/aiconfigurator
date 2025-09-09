@@ -75,7 +75,7 @@ class TRTLLMGenerator(BaseGenerator):
             cfg["decoding_type"] = "MTP"
             cfg["num_nextn_predict_layers"] = int(ctx.runtime.nextn)
 
-    def _engine_yaml(self, tpl_name: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
+    def _get_yaml_tpl(self, tpl_name: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
         import yaml
         tpl = self.env.get_template(tpl_name)
         return yaml.safe_load(tpl.render(**ctx))
@@ -115,6 +115,7 @@ class TRTLLMGenerator(BaseGenerator):
     def generate(self, ctx: GeneratorContext) -> ArtifactBundle:
         engine_tpl = _pick_engine_tpl(ctx.version)
         run_tpl = self.env.get_template("run.sh.j2")
+        k8s_tpl = (TEMPLATE_ROOT / "k8s_deploy.yaml.j2").name
         global_args, worker_args = ctx.overrides.split_by_worker_type()
 
         out: Dict[str, Dict[str, Any]] = {}
@@ -129,7 +130,7 @@ class TRTLLMGenerator(BaseGenerator):
             else:
                 agg_cfg["max_num_tokens"] = agg_cfg["bs"] + ctx.runtime.isl + 1500
 
-            agg_yaml = self._engine_yaml(engine_tpl, {**agg_cfg, "dynamo_config": global_args})
+            agg_yaml = self._get_yaml_tpl(engine_tpl, {**agg_cfg, "dynamo_config": global_args})
 
             script = run_tpl.render(
                 mode="agg",
@@ -140,9 +141,20 @@ class TRTLLMGenerator(BaseGenerator):
                 model_name=ctx.model_name,
             )
 
+            k8s_agg = {
+                "mode": "agg",
+                "agg_workers": int(global_args.get("agg_workers", 1)),
+                "agg_gpu": int(agg_cfg["gpu"]),
+                "agg_engine_args": "/workspace/engine_configs/agg_config.yaml",
+                "dynamo_config": global_args,
+            }
+
+            k8s_yaml_agg = self._get_yaml_tpl(k8s_tpl, k8s_agg)
+
             out["agg"] = {
                 "agg_config.yaml": agg_yaml,
                 "node_0_run.sh": script,
+                "k8s_deploy.yaml": k8s_yaml_agg
             }
 
         # --- DISAGG ---
@@ -170,8 +182,8 @@ class TRTLLMGenerator(BaseGenerator):
             # cuda graph sizes for decode (kept)
             dec_cfg["cuda_graph_batch_sizes"] = [i for i in range(1, dec_cfg["bs"] + 1)]
 
-            pre_yaml = self._engine_yaml(engine_tpl, {**pre_cfg, "dynamo_config": {**global_args, **worker_args["prefill"]}})
-            dec_yaml = self._engine_yaml(engine_tpl, {**dec_cfg, "dynamo_config": {**global_args, **worker_args["decode"]}})
+            pre_yaml = self._get_yaml_tpl(engine_tpl, {**pre_cfg, "dynamo_config": {**global_args, **worker_args["prefill"]}})
+            dec_yaml = self._get_yaml_tpl(engine_tpl, {**dec_cfg, "dynamo_config": {**global_args, **worker_args["decode"]}})
 
             plan = allocate_disagg_nodes(pre_cfg.get("workers", 1), pre_cfg["gpu"], dec_cfg.get("workers", 1), dec_cfg["gpu"])
 
@@ -193,9 +205,22 @@ class TRTLLMGenerator(BaseGenerator):
                 )
                 node_files[f"node_{idx}_run.sh"] = script
 
+            k8s_disagg = {
+                "mode": "disagg",
+                "prefill_workers": int(pre_cfg.get("workers", 1)),
+                "decode_workers": int(dec_cfg.get("workers", 1)),
+                "prefill_gpu": int(pre_cfg["gpu"]),
+                "decode_gpu": int(dec_cfg["gpu"]),
+                "prefill_engine_args": "/workspace/engine_configs/prefill_config.yaml",
+                "decode_engine_args": "/workspace/engine_configs/decode_config.yaml",
+                "dynamo_config": global_args,
+            }
+            k8s_yaml_disagg = self._get_yaml_tpl(k8s_tpl, k8s_disagg)
+
             out["disagg"] = {
                 "prefill_config.yaml": pre_yaml,
                 "decode_config.yaml": dec_yaml,
+                "k8s_deploy.yaml": k8s_yaml_disagg,
                 **node_files,
             }
 
