@@ -259,10 +259,10 @@ class MOEModel(BaseModel):
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
         workload_distribution = f"{self.config.workload_distribution}_{self._power_law_alpha}"
-        sliding_window = self.config.sliding_window
 
         if self.model_name in ['GPT_OSS_120B','GPT_OSS_20B']:
             attn_scale_factor = 2
+            sliding_window = 128
             self.context_ops.append(ops.ContextAttention(f'context_attention', 
                                                          self._num_layers/attn_scale_factor, 
                                                          self._num_heads//tp_size, 
