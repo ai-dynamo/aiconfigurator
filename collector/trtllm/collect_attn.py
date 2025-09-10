@@ -25,6 +25,7 @@ def run_attention_torch(batch_size,
                         use_fp8_context_fmha,
                         is_context_phase,                        
                         perf_filename,
+                        attention_window_size=None,
                         device='cuda:0'):
     torch.cuda.set_device(device)
 
@@ -160,6 +161,7 @@ def run_attention_torch(batch_size,
         None,
         None,
         attn_metadata,
+        attention_window_size=attention_window_size
         out_scale=out_scale
     )
     out_dtype = None if not use_fp8_context_fmha else torch.float8_e4m3fn
@@ -172,6 +174,7 @@ def run_attention_torch(batch_size,
             None,
             None,
             attn_metadata,
+            attention_window_size=attention_window_size
             out_scale=out_scale
         )
     # warmup
