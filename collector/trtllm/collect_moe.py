@@ -17,7 +17,7 @@ import torch
 import random
 from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 
-pet_debug = int(os.getenv("PET_DEBUG", "0"))
+aic_debug = int(os.getenv("aic_moe_debug", "0"))
 
 def balanced_logits(num_tokens, num_experts, topk):
     h_selected_experts = -torch.ones([num_tokens, topk])
@@ -89,7 +89,7 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
             num_tokens_per_expert_reshaped[max_ep_idx].clone(), num_tokens_per_expert_reshaped[0].clone()
         num_tokens_per_expert = num_tokens_per_expert_reshaped.view(-1)
 
-    if pet_debug == 2:
+    if aic_debug == 2:
         print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
 
     _, num_tokens_per_expert_sorted_index = torch.sort(num_tokens_per_expert, descending=True)
@@ -258,17 +258,17 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
     while True:
         try:
             hidden_states_max_tokens = torch.randn([num_tokens_lists[max_index], hidden_size]).bfloat16().to(torch.device(device))
-            logits_max_tokens = torch.randn([num_tokens_lists[max_index], num_experts]).bfloat16().to(torch.device(device))
+            logits_max_tokens = torch.randn([num_tokens_lists[max_index], num_experts]).to(router_logits_dtype).to(torch.device(device))
             torch.cuda.synchronize()
             AutoTuner.get().clear_cache()
             with torch.inference_mode(), autotune():
                 moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
             torch.cuda.synchronize()
-            if pet_debug == 1:
+            if aic_debug == 1:
                 print("tune success for tokens size {}".format(num_tokens_lists[max_index]))
             break
         except Exception as e:
-            if pet_debug == 1:
+            if aic_debug == 1:
                print("tune failed for tokens size {}, fallback to tokens size {}".format(num_tokens_lists[max_index], num_tokens_lists[max_index-1]))
             max_index -= 1
             if max_index == -len(num_tokens_lists):
