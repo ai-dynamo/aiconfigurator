@@ -48,6 +48,37 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     g.add_argument("--artifact-root", type=str, default="",
                    help="Optional base folder for eval outputs (default under save_dir).")
+    g.add_argument("--tokenizer-path", dest="tokenizer_path", type=str, default="",
+                   help=("Override tokenizer path used by genai-perf. "
+                         "Recommended in k8s mode where the served model is remote but the tokenizer is local."))
+ 
+    # --- Kubernetes args ---
+    gk = parser.add_argument_group("Kubernetes")
+    gk.add_argument("--k8s", action="store_true",
+                    help="Enable Kubernetes deployment mode.")
+    gk.add_argument("--k8s-namespace", type=str, default="ets-dynamo",
+                    help="Kubernetes namespace. Default: ets-dynamo")
+    gk.add_argument("--k8s-deploy-file", type=str, default="",
+                    help="Override path to k8s_deploy.yaml; if empty, auto-detect under backend_configs/<mode>/k8s_deploy.yaml.")
+    gk.add_argument("--k8s-engine-cm-name", type=str, default="engine-configs",
+                    help="ConfigMap name to store engine YAML(s) (Method 2).")
+    gk.add_argument("--k8s-frontend-selector", type=str,
+                    default="dynamo.nvidia.com/componentType=frontend",
+                    help="Label selector to find frontend pod for port-forward (e.g. 'app=my-frontend').")
+    gk.add_argument("--k8s-context", type=str, default="",
+                    help="kubectl context to use (optional).")
+    gk.add_argument("--k8s-cr-name", type=str, default="",
+                    help="Override CR name in the deploy yaml; if empty will be parsed from the yaml.")
+    gk.add_argument("--k8s-frontend-name-regex", type=str, default="",
+                    help="Fallback regex to match frontend pod name; if empty, will be inferred as '^{CR_NAME}-.*-frontend-.*$' (case-insensitive).")
+    gk.add_argument("--k8s-delete-on-stop", action="store_true",
+                    help="Delete the deployed graph on stop.")
+    gk.add_argument("--k8s-pf-kind", choices=["pod", "svc"], default="pod",
+                    help="Resource kind to port-forward: pod or svc. Default: pod")
+    gk.add_argument("--k8s-pf-name", type=str, default="",
+                    help="Explicit resource name to port-forward; if empty, first Ready frontend pod is used.")
+    gk.add_argument("--k8s-wait-timeout-s", type=int, default=900,
+                    help="Max seconds to wait for pods to be Ready in k8s mode. Default: 900")
 
     parser.epilog = (parser.epilog or "") + (
         "\n\nEVAL NOTES:\n"
@@ -90,6 +121,19 @@ def main(args) -> int:
         runs=args.runs,
         artifact_root=args.artifact_root or "",
         cli_args=args,
+        # k8s
+        k8s_enabled=bool(getattr(args, "k8s", False)),
+        k8s_namespace=args.k8s_namespace,
+        k8s_deploy_file=args.k8s_deploy_file,
+        k8s_engine_cm_name=args.k8s_engine_cm_name,
+        k8s_frontend_selector=args.k8s_frontend_selector,
+        k8s_cr_name=args.k8s_cr_name,
+        k8s_frontend_name_regex=args.k8s_frontend_name_regex,
+        k8s_context=(args.k8s_context or ""),
+        k8s_delete_on_stop=bool(getattr(args, "k8s_delete_on_stop", False)),
+        k8s_pf_kind=args.k8s_pf_kind,
+        k8s_pf_name=args.k8s_pf_name or "",
+        k8s_wait_timeout_s=args.k8s_wait_timeout_s,
     )
 
     pipe = Pipeline(cfg)
@@ -104,3 +148,4 @@ def main(args) -> int:
             LOG.warning("Stop failed: %s", e)
 
     return rc
+

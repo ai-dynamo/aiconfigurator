@@ -7,6 +7,7 @@ import os
 import re
 import math
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,19 @@ class EvalConfig:
     runs: int
     artifact_root: str
     cli_args: Any
+    # k8s
+    k8s_enabled: bool
+    k8s_namespace: str
+    k8s_deploy_file: str
+    k8s_engine_cm_name: str
+    k8s_frontend_selector: str
+    k8s_cr_name: str
+    k8s_frontend_name_regex: str
+    k8s_context: str
+    k8s_delete_on_stop: bool
+    k8s_pf_kind: str
+    k8s_pf_name: str
+    k8s_wait_timeout_s: int
 
 class Pipeline:
     def __init__(self, cfg: EvalConfig):
@@ -77,10 +91,61 @@ class Pipeline:
         return result_dir
 
     def _copy_backend_configs(self, run_dir: Path, dest_root: Path) -> Dict[str, Path]:
-        """Copy backend_configs/{disagg,agg} into service dir (overwrite)."""
         src_root = run_dir / "backend_configs"
         if not src_root.exists():
             raise FileNotFoundError(f"{src_root} does not exist")
+
+        if self.cfg.k8s_enabled:
+            mode = self.cfg.mode
+            src_mode = src_root / mode
+            if not src_mode.exists():
+                raise FileNotFoundError(f"{src_mode} does not exist")
+            cm_dir = run_dir / "k8s_engine_cm"
+            if cm_dir.exists():
+                shutil.rmtree(cm_dir)
+            cm_dir.mkdir(parents=True, exist_ok=True)
+            needed = []
+            if mode == "agg":
+                needed = ["agg_config.yaml"]
+            else:
+                needed = ["prefill_config.yaml", "decode_config.yaml"]
+            copied = {}
+            for name in needed:
+                s = src_mode / name
+                if not s.exists():
+                    LOG.warning("Engine config missing: %s", s)
+                    continue
+                d = cm_dir / name
+                shutil.copy2(s, d)
+                copied[name] = d
+            if not copied:
+                raise FileNotFoundError(f"No engine YAML copied for mode={mode} under {src_mode}")
+
+            # kubectl create configmap ... --from-file=<cm_dir> -o yaml --dry-run=client | kubectl apply -f -
+            create_cmd = ["kubectl"]
+            if self.cfg.k8s_context:
+                create_cmd += ["--context", self.cfg.k8s_context]
+            create_cmd += [
+                "-n", self.cfg.k8s_namespace,
+                "create", "configmap", self.cfg.k8s_engine_cm_name,
+                "--from-file", str(cm_dir),
+                "-o", "yaml", "--dry-run=client",
+            ]
+            LOG.info("Creating/Updating ConfigMap via dry-run+apply: %s", " ".join(create_cmd))
+            dry = subprocess.run(create_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if dry.returncode != 0:
+                LOG.error("ConfigMap dry-run failed: %s", dry.stderr)
+                raise RuntimeError("kubectl create configmap dry-run failed")
+            apply_cmd = ["kubectl"]
+            if self.cfg.k8s_context:
+                apply_cmd += ["--context", self.cfg.k8s_context]
+            apply_cmd += ["apply", "-f", "-"]
+            app = subprocess.run(apply_cmd, input=dry.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if app.returncode != 0:
+                LOG.error("ConfigMap apply failed: %s", app.stderr)
+                raise RuntimeError("kubectl apply -f - failed")
+            LOG.info("ConfigMap '%s' updated with %d file(s).", self.cfg.k8s_engine_cm_name, len(copied))
+            return {"k8s_engine_cm_dir": cm_dir, **copied}
 
         copied: Dict[str, Path] = {}
         for mode in ("disagg", "agg"):
@@ -144,7 +209,6 @@ class Pipeline:
 
         return lo
 
-
     def _auto_concurrency_values(self, max_bs: int) -> List[int]:
         K = 6
         if max_bs <= 1:
@@ -196,17 +260,75 @@ class Pipeline:
 
         return out[:K]
 
-
     def _start_service(self, service_dir: Path, log_file: Path) -> ServiceManager:
-        start_rel = self.cfg.start_script.strip() or ("disagg/node_0_run.sh" if self.cfg.mode == "disagg" else "agg/node_0_run.sh")
-        sm = ServiceManager(
-            workdir=service_dir,
-            start_cmd=["bash", start_rel],
-            port=self.cfg.port,
-        )
-        sm.start(log_path=log_file, cold_wait_s=self.cfg.coldstart_wait_s)
-        sm.wait_healthy(timeout_s=self.cfg.health_timeout_s)
-        return sm
+        if self.cfg.k8s_enabled:
+            from aiconfigurator.eval.service import K8sServiceManager
+            deploy = self._find_k8s_deploy_yaml(self.last_config_dir or service_dir)
+            cr_name_yaml, ns_yaml = self._parse_cr_meta(deploy)
+            cr_name = self.cfg.k8s_cr_name or cr_name_yaml or ""
+            namespace = self.cfg.k8s_namespace
+            if ns_yaml and ns_yaml != namespace:
+                LOG.warning("Namespace mismatch: CLI=%s, YAML=%s. Using YAML namespace.", namespace, ns_yaml)
+                namespace = ns_yaml
+            fe_regex = self.cfg.k8s_frontend_name_regex
+            if not fe_regex and cr_name:
+                fe_regex = rf"^{re.escape(cr_name)}-.*-frontend-.*$"
+            if not fe_regex:
+                fe_regex = "frontend"
+            sm = K8sServiceManager(
+                namespace=namespace,
+                deploy_yaml=deploy,
+                port=self.cfg.port,
+                frontend_selector=self.cfg.k8s_frontend_selector,
+                frontend_name_regex=fe_regex,
+                cr_name=cr_name or "",
+                context=self.cfg.k8s_context,
+                pf_kind=self.cfg.k8s_pf_kind,
+                pf_name=self.cfg.k8s_pf_name,
+                delete_on_stop=self.cfg.k8s_delete_on_stop,
+                wait_timeout_s=self.cfg.k8s_wait_timeout_s,
+            )
+            sm.start(log_path=log_file, cold_wait_s=self.cfg.coldstart_wait_s)
+            sm.wait_healthy(timeout_s=self.cfg.health_timeout_s)
+            return sm
+        else:
+            start_rel = self.cfg.start_script.strip() or ("disagg/node_0_run.sh" if self.cfg.mode == "disagg" else "agg/node_0_run.sh")
+            sm = ServiceManager(
+                workdir=service_dir,
+                start_cmd=["bash", start_rel],
+                port=self.cfg.port,
+            )
+            sm.start(log_path=log_file, cold_wait_s=self.cfg.coldstart_wait_s)
+            sm.wait_healthy(timeout_s=self.cfg.health_timeout_s)
+            return sm
+
+    def _find_k8s_deploy_yaml(self, root: Path) -> Path:
+        # priority: CLI override > backend_configs/<mode>/k8s_deploy.yaml > service_dir/<mode>/k8s_deploy.yaml
+        if self.cfg.k8s_deploy_file:
+            p = Path(self.cfg.k8s_deploy_file)
+            if not p.exists():
+                raise FileNotFoundError(f"--k8s-deploy-file not found: {p}")
+            return p
+        cands = [
+            root / "backend_configs" / self.cfg.mode / "k8s_deploy.yaml",
+            Path(self.cfg.service_dir) / self.cfg.mode / "k8s_deploy.yaml",
+        ]
+        for p in cands:
+            if p.exists():
+                return p
+        raise FileNotFoundError(f"k8s_deploy.yaml not found in {cands}")
+
+    def _parse_cr_meta(self, deploy_yaml: Path) -> tuple[str | None, str | None]:
+        try:
+            with open(deploy_yaml) as f:
+                docs = list(yaml.safe_load_all(f))
+            for d in docs:
+                if isinstance(d, dict) and d.get("kind") == "DynamoGraphDeployment":
+                    meta = d.get("metadata", {}) or {}
+                    return meta.get("name"), meta.get("namespace")
+        except Exception as e:
+            LOG.warning("Failed to parse CR meta from %s: %s", deploy_yaml, e)
+        return None, None
 
     def _collect_gpu_once(self, where: Path) -> Dict[str, Any]:
         """Quick NVML snapshot before benchmark for worker sanity check."""
@@ -316,12 +438,23 @@ class Pipeline:
         model_path = str(getattr(args, "model_path", ""))
         served_model_name = str(getattr(args, "served_model_name", ""))
 
+        tokenizer_override = str(getattr(args, "tokenizer_path", "") or "")
+        tokenizer_arg = tokenizer_override or model_path or served_model_name or "unknown-tokenizer"
+        if tokenizer_override:
+            try:
+                from pathlib import Path as _P
+                looks_like_path = ("/" in tokenizer_override) or tokenizer_override.startswith(".")
+                if looks_like_path and not _P(tokenizer_override).exists():
+                    LOG.warning("Specified --tokenizer-path does not exist: %s", tokenizer_override)
+            except Exception:
+                pass
+
         cfg = {
             "name": "genai_perf_eval",
             "base_folder": str(art_dir),
             "result_folder": "bench",
             "model": served_model_name or "unknown-model",
-            "tokenizer": model_path or "unknown-tokenizer",
+            "tokenizer": tokenizer_arg,
             "url": url,
             "endpoint_type": "chat",
             "input_sequence_length": int(isl),
@@ -330,8 +463,6 @@ class Pipeline:
         }
         run_genai_perf(cfg)
         return art_dir / "bench"
-
-
 
     def _analyze_and_plot(
         self,
@@ -415,7 +546,33 @@ class Pipeline:
             LOG.info("Saved plot: %s", out_html)
 
     def _get_agg_gpu_count(self, workers_info: Dict[str, int]) -> int:
-        """Simple helper to get GPU count for agg mode."""
+        if self.cfg.k8s_enabled:
+            try:
+                base = (self.last_config_dir / "backend_configs" / "agg")
+                cfg_path = base / "agg_config.yaml"
+                if cfg_path.exists():
+                    with cfg_path.open() as f:
+                        y = yaml.safe_load(f) or {}
+                    tp = int(y.get("tensor_parallel_size", 1) or 1)
+                    pp = int(y.get("pipeline_parallel_size", 1) or 1)
+                    if tp * pp > 0:
+                        return tp * pp
+            except Exception as e:
+                LOG.warning("Failed to read TP/PP for agg from engine yaml: %s", e)
+            try:
+                deploy = self._find_k8s_deploy_yaml(Path(self.cfg.service_dir))
+                with open(deploy) as f:
+                    docs = list(yaml.safe_load_all(f))
+                for d in docs:
+                    services = (d or {}).get("spec", {}).get("services", {})
+                    aw = services.get("TRTLLMWorker", {})
+                    if aw:
+                        rep = int(aw.get("replicas", 0) or 0)
+                        gpu = int(str(((aw.get("resources", {}) or {}).get("limits", {}) or {}).get("gpu", "1")).strip('"') or 1)
+                        if rep * gpu > 0:
+                            return rep * gpu
+            except Exception as e:
+                LOG.warning("Failed to parse agg gpu from CR: %s", e)
         return workers_info.get("AGG_GPU_COUNT", 1)
 
     def _extract_workers_from_start_script(self, service_dir: Path) -> Dict[str, int]:
@@ -423,6 +580,49 @@ class Pipeline:
         For disagg, read disagg/node_0_run.sh and extract worker/GPU info.
         For agg, extract GPU count from agg_config.yaml.
         """
+        if self.cfg.k8s_enabled:
+            # k8s: try to infer from k8s_deploy.yaml; fallback to config YAMLs
+            try:
+                deploy = self._find_k8s_deploy_yaml(self.last_config_dir or service_dir)
+                with open(deploy) as f:
+                    docs = list(yaml.safe_load_all(f))
+                # Heuristic: look for services named *PrefillWorker / *DecodeWorker
+                vals = {
+                    "PREFILL_GPU": 0, "PREFILL_WORKERS": 0,
+                    "DECODE_GPU": 0,  "DECODE_WORKERS": 0,
+                    "AGG_WORKERS": 0, "AGG_GPU_COUNT": 0,
+                }
+                for d in docs:
+                    spec = (d or {}).get("spec", {})
+                    services = spec.get("services", {})
+                    # disagg workers
+                    pw = services.get("TRTLLMPrefillWorker", {})
+                    dw = services.get("TRTLLMDecodeWorker", {})
+                    aw = services.get("TRTLLMWorker", {})
+                    if pw:
+                        vals["PREFILL_WORKERS"] = int(pw.get("replicas", 0) or 0)
+                        vals["PREFILL_GPU"] = int(str(((pw.get("resources", {}) or {}).get("limits", {}) or {}).get("gpu", "0")).strip('"') or 0)
+                    if dw:
+                        vals["DECODE_WORKERS"] = int(dw.get("replicas", 0) or 0)
+                        vals["DECODE_GPU"] = int(str(((dw.get("resources", {}) or {}).get("limits", {}) or {}).get("gpu", "0")).strip('"') or 0)
+                    if aw:
+                        vals["AGG_WORKERS"] = int(aw.get("replicas", 0) or 0)
+                LOG.info("Parsed workers from k8s_deploy.yaml: %s", vals)
+                if vals["PREFILL_WORKERS"] or vals["DECODE_WORKERS"] or vals["AGG_WORKERS"]:
+                    return vals
+            except Exception as e:
+                LOG.warning("Failed to parse k8s deploy for workers: %s", e)
+            # fallback (agg only)
+            if self.cfg.mode != "disagg":
+                agg_gpu_count = self._extract_agg_gpu_count_from_config(Path(self.cfg.service_dir))
+                return {
+                    "PREFILL_GPU": -1, "PREFILL_WORKERS": 0,
+                    "DECODE_GPU": -1,  "DECODE_WORKERS": 0,
+                    "AGG_WORKERS": 1,  "AGG_GPU_COUNT": agg_gpu_count,
+                }
+            # last fallback
+            return {"PREFILL_GPU": 0, "PREFILL_WORKERS": 0, "DECODE_GPU": 0, "DECODE_WORKERS": 0}
+
         if self.cfg.mode == "disagg":
             start_rel = self.cfg.start_script.strip() or "disagg/node_0_run.sh"
             script = service_dir / start_rel
@@ -494,7 +694,7 @@ class Pipeline:
         # 2) copy configs to dynamo trtllm folder
         service_dir = Path(self.cfg.service_dir)
         _ = self._copy_backend_configs(self.last_config_dir, service_dir)
-        
+ 
         # Load optimal configurations from the saved results with TPOT filtering
         target_tpot = getattr(args, "tpot", None)
         optimal_configs = self._load_optimal_configs(self.last_config_dir, target_tpot)
@@ -504,7 +704,9 @@ class Pipeline:
             conc_list = list(self.cfg.bench_concurrency)
             LOG.info("Using provided benchmark concurrency: %s", conc_list)
         else:
-            mbs = self._read_max_batch_size(service_dir, self.cfg.mode)
+            # In k8s mode read from backend_configs; local mode read from service_dir
+            bs_base = (self.last_config_dir / "backend_configs") if self.cfg.k8s_enabled else service_dir
+            mbs = self._read_max_batch_size(bs_base, self.cfg.mode)
             if not mbs:
                 # safe fallback if YAML missing
                 conc_list = [1, 2, 4, 8, 16, 32]
@@ -512,7 +714,6 @@ class Pipeline:
             else:
                 conc_list = self._auto_concurrency_values(int(mbs))
                 LOG.info("Auto concurrency from max_batch_size=%s -> %s", mbs, conc_list)
-
 
         # prepare log path
         log_dir = Path(getattr(args, "save_dir")).resolve() / "log"
@@ -530,7 +731,7 @@ class Pipeline:
         write_json(self.art_root / "workers_extracted.json", workers_info)
 
         # GPU monitoring (conditional)
-        if self.cfg.gpu_monitor:
+        if self.cfg.gpu_monitor and not self.cfg.k8s_enabled:
             LOG.info("GPU monitor enabled")
             # lazy import to avoid NVML dependency when disabled
             from .gpu import GPUWatcher
@@ -540,7 +741,10 @@ class Pipeline:
             self._collect_gpu_once(self.art_root)
             self._gpu_watcher.start()
         else:
-            LOG.info("GPU monitor disabled: skipping NVML sampling and timeseries.")
+            if self.cfg.k8s_enabled and self.cfg.gpu_monitor:
+                LOG.warning("K8s mode: local NVML monitor is disabled (it only monitors local GPUs).")
+            else:
+                LOG.info("GPU monitor disabled: skipping NVML sampling and timeseries.")
             self._gpu_csv = None
 
         # benchmark tokens
@@ -553,9 +757,9 @@ class Pipeline:
         import time as _time
         _time.sleep(30)
 
-
+        # 4) benchmarking
         try:
-            base_url = f"http://0.0.0.0:{self.cfg.port}"
+            base_url = self.service.base_url()
             for i in range(self.cfg.runs):
                 tag = f"{run_name}_r{i+1}"
                 art_dir = self.art_root / tag
