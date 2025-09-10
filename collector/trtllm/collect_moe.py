@@ -17,6 +17,8 @@ import torch
 import random
 from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 
+aic_debug = int(os.getenv("aic_moe_debug", "0"))
+
 def balanced_logits(num_tokens, num_experts, topk):
     h_selected_experts = -torch.ones([num_tokens, topk])
     stride = math.ceil(num_experts/topk)
@@ -87,8 +89,7 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
             num_tokens_per_expert_reshaped[max_ep_idx].clone(), num_tokens_per_expert_reshaped[0].clone()
         num_tokens_per_expert = num_tokens_per_expert_reshaped.view(-1)
 
-    pet_debug = int(os.getenv("PET_DEBUG", "0"))
-    if pet_debug == 1:
+    if aic_debug == 2:
         print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
 
     _, num_tokens_per_expert_sorted_index = torch.sort(num_tokens_per_expert, descending=True)
@@ -247,20 +248,32 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
             False,  # In both low latency and attention dp scenarios, create_moe needs not to do allreduce inside op.
             model_config=model_config)
 
-    hidden_states_max_tokens = torch.randn([num_tokens_lists[-1], hidden_size]).bfloat16().to(torch.device(device))
-    logits_max_tokens = torch.randn([num_tokens_lists[-1], num_experts]).bfloat16().to(torch.device(device))
-
     ffn1_weights = Parameter(torch.randn(moe.w3_w1_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(dtype=moe.w3_w1_weight.dtype), requires_grad=False)
     ffn2_weights = Parameter(torch.randn(moe.w2_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(dtype=moe.w2_weight.dtype), requires_grad=False)
 
     moe.w3_w1_weight = ffn1_weights
     moe.w2_weight = ffn2_weights
 
-    torch.cuda.synchronize()
-    AutoTuner.get().clear_cache()
-    with torch.inference_mode(), autotune():
-        moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
-    torch.cuda.synchronize()
+    max_index = -1
+    while True:
+        try:
+            hidden_states_max_tokens = torch.randn([num_tokens_lists[max_index], hidden_size]).bfloat16().to(torch.device(device))
+            logits_max_tokens = torch.randn([num_tokens_lists[max_index], num_experts]).to(router_logits_dtype).to(torch.device(device))
+            torch.cuda.synchronize()
+            AutoTuner.get().clear_cache()
+            with torch.inference_mode(), autotune():
+                moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
+            torch.cuda.synchronize()
+            if aic_debug == 1:
+                print("tune success for tokens size {}".format(num_tokens_lists[max_index]))
+            break
+        except Exception as e:
+            if aic_debug == 1:
+               print("tune failed for tokens size {}, fallback to tokens size {}".format(num_tokens_lists[max_index], num_tokens_lists[max_index-1]))
+            max_index -= 1
+            if max_index == -len(num_tokens_lists):
+                raise ValueError("tune failed for all tokens sizes")
+            continue
 
     for num_tokens in num_tokens_lists:
         hidden_states = torch.randn([num_tokens, hidden_size]).bfloat16().to(torch.device(device))

@@ -105,10 +105,18 @@ def collect_trtllm(num_processes : int):
     try:
         import trtllm.collect_mla
         test_cases = trtllm.collect_mla.get_context_mla_test_cases()
-        parallel_run(test_cases, trtllm.collect_mla.run_mla, num_processes)
+        if version.startswith('1.1'):
+            import trtllm.collect_mla_1_1rc2
+            parallel_run(test_cases, trtllm.collect_mla_1_1rc2.run_mla, num_processes)
+        else:
+            parallel_run(test_cases, trtllm.collect_mla.run_mla, num_processes)
         logger.info(f"collected mla test cases for TensorRT LLM {version}")
+        
         test_cases = trtllm.collect_mla.get_generation_mla_test_cases()
-        parallel_run(test_cases, trtllm.collect_mla.run_mla, num_processes)
+        if version.startswith('1.1'):
+            parallel_run(test_cases, trtllm.collect_mla_1_1rc2.run_mla, num_processes)
+        else:
+            parallel_run(test_cases, trtllm.collect_mla.run_mla, num_processes)
         logger.info(f"collected mla test cases for TensorRT LLM {version}")        
     except:
         logger.warning("cannot collect mla test cases, skipping...")
@@ -116,7 +124,7 @@ def collect_trtllm(num_processes : int):
     try:
         if version.startswith('0.20.0'):
             import trtllm.collect_moe_pre_0_20 as collect_moe
-        elif version.startswith('0.21.0') or version.startswith('1.0.0'):
+        elif version.startswith('0.21.0') or version.startswith('1.0.0') or version.startswith('1.1.0'):
             import trtllm.collect_moe as collect_moe
         else:
             raise ValueError(f"cannot collect moe test cases for TensorRT LLM {version}, skipping...")
