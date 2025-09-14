@@ -9,6 +9,7 @@ from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models import get_model_family, check_is_moe
 from aiconfigurator.cli.helpers import DynamoConfig, add_dynamo_cli, build_dynamo_config, _dump_backend_file
 from aiconfigurator.cli.backends import get_config_generator
+from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
 
 import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any
@@ -257,7 +258,7 @@ class AIConfigurator:
                 for parallel_config in agg_parallel_config_list:
                     tp, pp, dp, moe_tp, moe_ep = parallel_config
                     logger.info(f"Enumerated Agg parallel config: tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
-                agg_df = pareto_analysis.ifb_pareto(
+                agg_df = pareto_analysis.agg_pareto(
                     model_name=aiconfigurator_config.model_name,
                     runtime_config=config.RuntimeConfig(
                         isl=aiconfigurator_config.isl,
@@ -546,70 +547,7 @@ class AIConfigurator:
         config_generator = get_config_generator(backend)
 
         return config_generator(aiconfigurator_result, aiconfigurator_config, dynamo_config, version)
-
-
-    def _plot_pareto_frontier(self, 
-                              title: str, 
-                              best_config_df: pd.DataFrame,
-                              disagg_pareto_df: pd.DataFrame, 
-                              agg_pareto_df: pd.DataFrame) -> str:
-        """Plot Pareto frontier for Disagg and Agg"""
-        plotext.plot_size(80, 30)
-        plotext.theme("clear")
-        if not disagg_pareto_df.empty:
-            plotext.plot(
-                disagg_pareto_df['tokens/s/user'],
-                disagg_pareto_df['tokens/s/gpu'],
-                label='Disagg',
-                color=(144, 238, 144), # light green
-                marker='d'
-            )
-        if not agg_pareto_df.empty:
-            plotext.plot(
-                agg_pareto_df['tokens/s/user'],
-                agg_pareto_df['tokens/s/gpu'],
-                label='Agg',
-                color= (200, 200, 200), # gray
-                marker='a'
-            )
-        
-        if not best_config_df.empty:
-            plotext.plot(
-                best_config_df['tokens/s/user'],
-                best_config_df['tokens/s/gpu'],
-                label='Best',
-                color=(255, 215, 0), # gold
-                marker='X'
-            )
-
-        plotext.title(f"{title}: tokens/s/gpu vs tokens/s/user")
-        plotext.xlabel("tokens/s/user")
-        plotext.ylabel("tokens/s/gpu")
-        plotext.grid(False)
-
-        y_min = 0.0
-        y_max = 0.0
-        x_min = 0.0
-        x_max = 0.0
-        if not disagg_pareto_df.empty:
-            y_max = max(disagg_pareto_df['tokens/s/gpu'].max(), y_max)
-            x_max = max(disagg_pareto_df['tokens/s/user'].max(), x_max)
-        if not agg_pareto_df.empty:
-            y_max = max(agg_pareto_df['tokens/s/gpu'].max(), y_max)
-            x_max = max(agg_pareto_df['tokens/s/user'].max(), x_max)
-        y_max = y_max * 1.2
-        y_max = ((y_max+49) // 50) * 50
-        x_max = x_max * 1.1
-        x_max = ((x_max+19) // 20) * 20
-        x_max = min(x_max, 300)
-        if y_max > 0.0 and x_max > 0.0:
-            plotext.ylim(y_min, y_max)
-            plotext.xlim(x_min, x_max)
-
-        buf = plotext.build()
-        plotext.clear_data()
-
-        return buf
+    
     
     def _plot_worker_setup_table(self, disagg_pareto: pd.DataFrame, agg_pareto: pd.DataFrame, total_gpus: int, tpot_target: float, top: int, is_moe: bool) -> str:
         """Plot worker setup table"""
@@ -733,7 +671,7 @@ class AIConfigurator:
 
         # ============================= pareto frontier
         summary_box.append("  Pareto Frontier:")
-        pareto_plot_buf = self._plot_pareto_frontier(f"{aiconfigurator_config.model_name} Pareto Frontier", 
+        pareto_plot_buf = draw_pareto_to_string(f"{aiconfigurator_config.model_name} Pareto Frontier", 
                                                      aiconfigurator_result.disagg_best_config if aiconfigurator_result.chosen_system_type == "disagg" else aiconfigurator_result.agg_best_config,
                                                      aiconfigurator_result.disagg_pareto, aiconfigurator_result.agg_pareto)
         summary_box.append(pareto_plot_buf)

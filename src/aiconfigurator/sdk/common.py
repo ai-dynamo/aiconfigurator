@@ -93,16 +93,16 @@ ColumnsStatic = ['model', 'isl', 'osl',
                  'backend', 'version', 'system']
 
 """
-Columns for IFB inference summary dataframe
+Columns for Agg inference summary dataframe
 """
-ColumnsIFB = ['model', 'isl', 'osl', 
+ColumnsAgg = ['model', 'isl', 'osl', 
               'concurrency', 'request_rate', 'bs', 'global_bs',
               'ttft', 'tpot', 'seq/s', 'seq/s/gpu', 'tokens/s', 'tokens/s/gpu', 'tokens/s/user', 
               'num_total_gpus',
               'tp', 'pp', 'dp', 'moe_tp', 'moe_ep', 'parallel',
               'gemm', 'kvcache', 'fmha', 'moe', 'comm',
               'memory', 
-              'balance_score','num_ctx_reqs','num_gen_reqs','num_tokens','ctx_tokens','gen_tokens', # ifb specific
+              'balance_score','num_ctx_reqs','num_gen_reqs','num_tokens','ctx_tokens','gen_tokens', # agg specific
               'backend', 'version', 'system']             
 
 """

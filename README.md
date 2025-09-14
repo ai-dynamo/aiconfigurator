@@ -262,7 +262,7 @@ To estimate performance, we take the following steps:
   - Attention DP (for DEEPSEEK and MoE)
 - Scheduling:
   - Static
-  - IFB (continuous batching)
+  - Aggregated serving (continuous batching)
   - Disaggregated serving
   - MTP (for DEEPSEEK)
 

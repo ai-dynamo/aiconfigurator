@@ -24,6 +24,91 @@ def get_system_config_path():
     return pkg_resources.files('aiconfigurator') / 'systems'
 
 
+def get_latest_database_version(system : str,
+                                backend : str, 
+                                ) -> Optional[str]:
+    """
+    Get the latest database version for a given system and backend
+    """
+    import re
+    
+    database_dict = get_all_databases()
+    try:
+        database_versions = list(database_dict[system][backend].keys())
+    except KeyError:
+        logger.error(f"database not found for {system=}, {backend=}")
+        return None
+    
+    def parse_version(version_str):
+        """Parse version string into comparable tuple"""
+        # Handle different version formats
+        version_str = version_str.lower()
+        
+        # Extract numeric version pattern (e.g., "1.2.3" from "v1.2.3rc4" or "1.2.3_suffix")
+        version_match = re.search(r'(\d+)\.(\d+)\.(\d+)', version_str)
+        if version_match:
+            major, minor, patch = map(int, version_match.groups())
+            version_parts = [major, minor, patch]
+            
+            # Handle release candidates (lower priority than stable releases)
+            if 'rc' in version_str:
+                rc_match = re.search(r'rc(\d+)', version_str)
+                if rc_match:
+                    rc_num = int(rc_match.group(1))
+                    version_parts.append(0)  # Stable release indicator
+                    version_parts.append(rc_num)  # RC number
+                else:
+                    version_parts.append(0)  # Stable release indicator
+                    version_parts.append(0)   # No RC number
+            else:
+                version_parts.append(1)  # Stable release (higher priority than RC)
+                version_parts.append(0)  # No RC number
+                
+            return tuple(version_parts)
+        
+        # Try to extract version from other patterns (e.g., "v0.20_fix0719")
+        version_match = re.search(r'v?(\d+)\.(\d+)', version_str)
+        if version_match:
+            major, minor = map(int, version_match.groups())
+            version_parts = [major, minor, 0, 1, 0]  # Assume stable release
+            return tuple(version_parts)
+        
+        # For completely non-standard versions, try to extract any numbers
+        numbers = re.findall(r'\d+', version_str)
+        if numbers:
+            # Use first few numbers found, pad with zeros
+            version_parts = [int(x) for x in numbers[:3]]
+            while len(version_parts) < 3:
+                version_parts.append(0)
+            version_parts.extend([0, 0])  # Add RC indicators
+            return tuple(version_parts)
+        
+        # If no numbers found, return a very low priority tuple
+        return (0, 0, 0, -1, 0)
+    
+    # Convert version strings to comparable tuples
+    versions_ids = []
+    for version in database_versions:
+        try:
+            version_parts = parse_version(version)
+            versions_ids.append((version_parts, version))
+            logger.debug(f"Parsed version {version} as {version_parts}")
+        except Exception as e:
+            logger.warning(f"Failed to parse version {version}: {e}")
+            continue
+    
+    if not versions_ids:
+        logger.error(f"no valid versions parsed for {system=}, {backend=}")
+        return None
+    
+    # Find the latest version by comparing version tuples
+    # Sort by version parts, latest version will be last
+    latest_version = max(versions_ids, key=lambda x: x[0])
+    logger.debug(f"Latest version for {system}/{backend}: {latest_version[1]} (parsed as {latest_version[0]})")
+    return latest_version[1]
+    
+
+
 def get_database(system : str,
                  backend : str, 
                  version : str, 

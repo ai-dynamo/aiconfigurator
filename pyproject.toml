@@ -57,7 +57,8 @@ dependencies = [
     "uvicorn>=0.34.2",
     "genai-perf",
     "bokeh",
-    "nvidia-ml-py"
+    "nvidia-ml-py",
+    "munch>=4.0.0"
 ]
 
 [project.optional-dependencies]
