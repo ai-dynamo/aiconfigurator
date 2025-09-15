@@ -86,6 +86,9 @@ This defines a new model similar to 'LLAMA' with:
 - Vocabulary size = 152064
 - Context size = 32768  
 
+Here 'LLAMA' is of the model families defined as **ModelFamily** in [`common.py`](../src/aiconfigurator/sdk/common.py)
+
+
 ### Situation 2: Variant to Supported Model but Requires Additional Data
 
 This typically refers to a MoE model, as the MoE operation of a new model usually has different `num_experts` and `topk` values, etc. This difference is captured by different data points in aiconfigurator.
@@ -96,14 +99,14 @@ As mentioned above, you need to follow several steps to support this model:
 
 2. Update the inherited database such as `src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt` with the `moe_perf.txt` file you get in step 1.
 
-3. Define the model similar to **Situation 1**, such as QWEN3_235B:
+3. Define the model similar to **Situation 1**, such as QWEN3_235B, it's a new model of model family **'MOE'**:
    ```python
    'QWEN3_235B': ['MOE', 94, 64, 4, 128, 4096, 12288, 151936, 40960, 8, 128, 1536, None]
    ```
    
    Please follow the comment lines in `common.py` to ensure the correct key values.
 
-Models with different MLA operations also follow a similar process. For example, if it's a variant to DEEPSEEK and has different definition of MLA, you need to collect new MLA data points.
+Models with different MLA operations also follow a similar process. For example, if it's a variant to model familiy 'DEEPSEEK' and has different definition of MLA, you need to collect new MLA data points.
 
 ### Situation 3: Model Needs New Operation Support
 
@@ -116,6 +119,8 @@ Steps required:
 3. **Define the data collection process** in collector by referring to existing operations' collection code, such as `collect_gemm.py`
 4. **Collect data for conv** and add the data file to systems in `src/aiconfigurator/systems/`
 5. **Add data loading code** in `perf_database.py` to load your data, which is leveraged by the method `query_conv`
+6. **Add new model definition** in `models.py` to build your model with new operation. A new model class is mapping to a new model family.  
+update your model in ModelFamily dict defined in [`common.py`](../src/aiconfigurator/sdk/common.py)
 
 ## Final Steps
 
