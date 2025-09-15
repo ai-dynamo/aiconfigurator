@@ -124,3 +124,26 @@ Rebuild & reinstall aiconfigurator to add this model's support.
 ---
 
 > **Need Help?** If you still have difficulty adding the model you want, please create an issue in github.
+
+## A Workflow For Reference
+```mermaid
+flowchart TD
+    A[Does the model belong to an existing model_family?]
+    A --> |YES| B([Simple dense, moe variants like <i><b>QWEN3_32B</b></i> can directly use the existing <i><b>LLAMA</b></i> or <i><b>MOE</b></i> model_family])
+    B --> C[Add the model's config in the <i><b>SupprotedModels</b></i> of <i><b>sdk/common.py</b></i> using an existing model_family]
+    A --> |NO| D([Each layer in <i><b>Nemotron</b></i> can have a different <i><b>inter_size</b></i>, so we defined a new class for this model])
+    D --> E[Does the model need new operations?]
+    E --> |YES| F([for instance, new model might have covolution, which isn't defined in sdk/operations.py])
+    F --> G[Define your operations in <b><i>sdk/operations.py</b></i>]
+    G --> H[Define the model as a new model class in <i><b>sdk/models.py</b></i> using OPs defined in <i><b>sdk/operations.py</b></i>]
+    E --> |NO|H
+    H --> i[Add the model's config in the <i><b>SupportedModels</b></i> of <i><b>sdk/common.py</b></i> using the newly defined model class as the model_family]
+    i --> j[Do you need to collect performance data for the new model?]
+    C --> j
+    j --> |YES|K([Some common cases in which you will need to collect new data])
+    K --> L[/• You haved defined new operations<br/> • <i><b>MoE</b></i> with different <i><b>num_experts</b></i> or <i><b>topk</b></i> from existing ones<br/>• New <i><b>attention</b></i> variant, such as <b><i>attention</b></i> with <b><i>head_size</b></i> other than 64 or 128/]
+    L --> M[Add new test cases to the relevant collector files under aiconfigurator/collector/]
+    M --> N[Collect data using <i><b>collect.py</b></i> and generate <i><b>XX_XX_perf.txt</b></i> data files]
+    N --> Z
+    j --> |NO|Z[<i><b>Good news, you are now all set</b></i>]
+```
