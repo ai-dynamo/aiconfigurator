@@ -225,19 +225,21 @@ def load_context_attention_data(context_attention_file):
     if not os.path.exists(context_attention_file):
         logger.warning(f"Context attention data file {context_attention_file} not found.")
         return None
-    context_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))
+    context_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict()))))))
     with open(context_attention_file, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
 
     for row in rows:
-        quant_mode, kv_cache_dtype, b, s, n, kv_n, latency = \
-            row['attn_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['num_heads'], row['num_key_value_heads'], row['latency']
+        quant_mode, kv_cache_dtype, b, s, n, kv_n, head_size, window_size, latency = \
+            row['attn_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['num_heads'], row['num_key_value_heads'], row['head_dim'], row['window_size'], row['latency']
         b=int(b)
         s=int(s)
         n=int(n)
         kv_n=int(kv_n)
+        head_size=int(head_size)
+        window_size=int(window_size)
         latency=float(latency)
         
         # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads
@@ -247,10 +249,10 @@ def load_context_attention_data(context_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = context_attention_data[quant_mode][kv_cache_dtype][kv_n][n][s][b]
-            logger.debug('value conflict in context attention data: {} {} {} {} {} {}'.format(quant_mode, kv_cache_dtype, kv_n, n, s, b))
+            latency = context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
+            logger.debug('value conflict in context attention data: {} {} {} {} {} {} {}'.format(quant_mode, kv_cache_dtype, head_size, window_size kv_n, n, s, b))
         except KeyError:
-            context_attention_data[quant_mode][kv_cache_dtype][kv_n][n][s][b] = latency
+            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = latency
 
     return context_attention_data
 
@@ -262,19 +264,21 @@ def load_generation_attention_data(generation_attention_file):
     if not os.path.exists(generation_attention_file):
         logger.warning(f"Generation attention data file {generation_attention_file} not found.")
         return None
-    generation_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict()))))
+    generation_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))
     with open(generation_attention_file, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
 
     for row in rows:
-        quant_mode, kv_cache_dtype, b, s, n, kv_n, step, latency = \
-            row['attn_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['num_heads'], row['num_key_value_heads'], row['step'], row['latency']
+        quant_mode, kv_cache_dtype, b, s, n, kv_n, head_size, window_size, step, latency = \
+            row['attn_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['num_heads'], row['num_key_value_heads'], row['head_dim'], row['window_size'], row['step'], row['latency']
         b=int(b)
         s=int(s)
         n=int(n)
         kv_n=int(kv_n)
+        head_size=int(head_size)
+        window_size=int(widnow_size)
         step = int(step)
         latency=float(latency)
 
@@ -285,10 +289,10 @@ def load_generation_attention_data(generation_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = generation_attention_data[kv_cache_dtype][kv_n][n][b][s]
-            logger.debug('value conflict in generation attention data: {} {} {} {} {}'.format(kv_cache_dtype, kv_n, n, b, s))
+            latency = generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
+            logger.debug('value conflict in generation attention data: {} {} {} {} {} {}'.format(kv_cache_dtype, kv_n, head_size, window_size, n, b, s))
         except KeyError:
-            generation_attention_data[kv_cache_dtype][kv_n][n][b][s] = latency
+            generation_attention_data[kv_cache_dtype][kv_n][head_zie][window_size][n][b][s] = latency
         
     return generation_attention_data
 
@@ -454,40 +458,44 @@ class PerfDatabase(object):
         for quant_mode in self._context_attention_data.keys():
             for kv_cache_dtype in self._context_attention_data[quant_mode].keys():
                 for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype]:
-                    data_dict=self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads]
-                    min_x = min(data_dict.keys())
-                    target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
-                    # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
-                    target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
-                        [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
-                    target_z_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048] # b
+                    for head_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads]:
+                        for window_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][head_size]:
+                            data_dict=self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][head_size][window_size]
+                            min_x = min(data_dict.keys())
+                            target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
+                            # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
+                            target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
+                                [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
+                            target_z_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048] # b
 
-                    filtered_x_list = []
-                    for i in target_x_list:
-                        if i >= min_x:
-                            filtered_x_list.append(i)
+                            filtered_x_list = []
+                            for i in target_x_list:
+                                if i >= min_x:
+                                    filtered_x_list.append(i)
 
-                    self._extrapolate_data_grid(data_dict=data_dict, #nsb
-                                                target_x_list=filtered_x_list,
-                                                target_y_list=target_y_list,
-                                                target_z_list=target_z_list, sqrt_y_value=True)
+                            self._extrapolate_data_grid(data_dict=data_dict, #nsb
+                                                        target_x_list=filtered_x_list,
+                                                        target_y_list=target_y_list,
+                                                        target_z_list=target_z_list, sqrt_y_value=True)
 
         for kv_cache_dtype in self._generation_attention_data.keys():
             for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
-                target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
-                target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
-                target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
-                data_dict = self._generation_attention_data[kv_cache_dtype][num_kv_heads]
-                min_x = min(data_dict.keys())
-                filtered_x_list = []
-                for i in target_x_list:
-                    if i >= min_x:
-                        filtered_x_list.append(i)
+                for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
+                    for window_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size]:
+                        target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
+                        target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
+                        target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
+                        data_dict = self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size][window_size]
+                        min_x = min(data_dict.keys())
+                        filtered_x_list = []
+                        for i in target_x_list:
+                            if i >= min_x:
+                                filtered_x_list.append(i)
 
-                self._extrapolate_data_grid(data_dict=data_dict, #nbs
-                                            target_x_list=filtered_x_list,
-                                            target_y_list=target_y_list,
-                                            target_z_list=target_z_list)
+                        self._extrapolate_data_grid(data_dict=data_dict, #nbs
+                                                    target_x_list=filtered_x_list,
+                                                    target_y_list=target_y_list,
+                                                    target_z_list=target_z_list)
                 
         for quant_mode, data_dict in self._gemm_data.items():
             target_x_list = [1,2,4,8,16,32,48,64,80,96,128,160,192,224,256,320,384,448,512,640,768,896,1024,2048,4096,8192,16384,32768,131072,524288,1048576,2097152*8] # num_tokens
@@ -838,7 +846,7 @@ class PerfDatabase(object):
             else:
                 kv_len = s - 1
             # only consider fp16 mmha
-            ops = 2 * b * n * h * 2 * (kv_len) # 2 for fma, 2 for q*k^t+*v
+            ops = 2 * b * n * h * 2 * (kv_len)yujvnm   # 2 for fma, 2 for q*k^t+*v
             # kvcache load bytes will depend on kvcache quant. while input q and output might be in fp16.
             mem_bytes = b * (n*h*2 + 2*n_kv*(kv_len)*h*kvcache_quant_mode.value.memory + n*h*2)
             
