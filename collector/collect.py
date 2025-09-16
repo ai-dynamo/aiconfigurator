@@ -14,23 +14,20 @@ logger = logging.getLogger(__name__)
 
 def worker(queue, device_id : int, func, progress_value, lock):
     device = torch.device(f'cuda:{device_id}')
-    status = True
     while True:
         task = queue.get()
         if task is None:
             break
 
-        with lock:
-            progress_value.value += 1
         try:
             result = func(*task, device)
         except Exception as e:
             print(f'Error: {e}', task, device)
             traceback.print_exc()
-            status = False
         
-        if not status:
-            break
+        # Update progress count regardless of success or failure
+        with lock:
+            progress_value.value += 1
 
 
 def parallel_run(tasks, func, num_processes):
@@ -60,7 +57,9 @@ def parallel_run(tasks, func, num_processes):
             for i, p in enumerate(processes):
                 if not p.is_alive():
                     print(f"Process {i} died with exit code {p.exitcode}, restarting...")
+                    p.join()  # Clean up dead process
                     processes[i] = start_process(i)
+                    queue.put(None)  # Add termination signal for restarted process
 
             progress_bar.n = progress_value.value
             progress_bar.refresh()
@@ -83,7 +82,20 @@ def collect_trtllm(num_processes : int):
     except:
         logger.error("TensorRT LLM is not installed. Please install it from https://github.com/NVIDIA/TensorRT-LLM")
         return
+    try:
+        if version.startswith('0.20.0'):
+            import trtllm.collect_moe_pre_0_20 as collect_moe
+        elif version.startswith('0.21.0') or version.startswith('1.0.0') or version.startswith('1.1.0'):
+            import trtllm.collect_moe as collect_moe
+        else:
+            raise ValueError(f"cannot collect moe test cases for TensorRT LLM {version}, skipping...")
+        test_cases = collect_moe.get_moe_test_cases()
+        parallel_run(test_cases, collect_moe.run_moe_torch, num_processes)
+        logger.info(f"collected moe test cases for TensorRT LLM {version}")
+    except:
+        logger.warning("cannot collect moe test cases, skipping...")
 
+    return
     # keep this to collect pre-hopper kernels for now.
     try:
         import trtllm.collect_gemm_trt
