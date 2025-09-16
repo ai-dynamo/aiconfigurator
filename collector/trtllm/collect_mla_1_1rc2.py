@@ -130,93 +130,6 @@ def _run_attn_for_backend(backend_name, num_heads, num_kv_heads,
     AttentionCls = get_attention_backend(backend_name)
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
-    ctx_compressed_kv = torch.cat([
-        torch.empty(
-            [ctx_len, kv_lora_rank],
-            dtype=dtype,
-            device=device,
-        ).uniform_(-1, 1) for ctx_len in context_sequence_lengths
-    ])
-    ctx_k_pe = torch.cat([
-        torch.empty(
-            [ctx_len, qk_rope_head_dim],
-            dtype=dtype,
-            device=device,
-        ).uniform_(-1, 1) for ctx_len in context_sequence_lengths
-    ])
-    ctx_q = torch.cat([
-        torch.empty(
-            [ctx_len, num_heads * qk_head_dim],
-            dtype=dtype,
-            device=device,
-        ).uniform_(-1, 1) for ctx_len in context_sequence_lengths
-    ])
-    ctx_kv = torch.cat([
-        torch.empty(
-            [ctx_len, num_kv_heads * (qk_nope_head_dim + v_head_dim)],
-            dtype=dtype,
-            device=device,
-        ).uniform_(-1, 1) for ctx_len in context_sequence_lengths
-    ])
-    # ctx_v.stride(0) == num_kv_heads * (qk_nope_head_dim + v_head_dim)
-    ctx_k_nope, ctx_v = ctx_kv.split(
-        [num_kv_heads * qk_nope_head_dim, num_kv_heads * v_head_dim],
-        dim=-1)
-    ctx_k_nope = ctx_k_nope.view(-1, num_kv_heads, qk_nope_head_dim)
-    ctx_k = torch.cat([
-        ctx_k_nope,
-        ctx_k_pe.view(-1, 1, qk_rope_head_dim).expand(-1, num_kv_heads, -1)
-    ],
-                        dim=-1)
-    ctx_k = ctx_k.view(-1, num_kv_heads * qk_head_dim)
-
-    gen_compressed_kv = torch.cat([
-            torch.empty(
-                [generation_seq_len_q, kv_lora_rank],
-                dtype=dtype,
-                device=device,
-            ).uniform_(-1, 1) for _ in context_sequence_lengths
-        ])
-
-    gen_k_pe = torch.cat([
-            torch.empty(
-                [generation_seq_len_q, qk_rope_head_dim],
-                dtype=dtype,
-                device=device,
-            ).uniform_(-1, 1) for _ in context_sequence_lengths
-        ])
-    
-    gen_fused_q = torch.cat([
-            torch.empty(
-                [
-                    generation_seq_len_q, num_heads *
-                    (kv_lora_rank + qk_rope_head_dim)
-                ],
-                dtype=dtype,
-                device=device,
-            ).uniform_(-1, 1) for _ in context_sequence_lengths
-        ])
-
-    gen_q_pe = torch.cat([
-            torch.empty(
-                [generation_seq_len_q, num_heads, qk_rope_head_dim],
-                dtype=dtype,
-                device=device,
-            ).uniform_(-1, 1) for _ in context_sequence_lengths
-        ])
-
-    inputs = {
-        "ctx_compressed_kv": ctx_compressed_kv,
-        "ctx_k_pe": ctx_k_pe,
-        "ctx_q": ctx_q,
-        "ctx_k": ctx_k,
-        "ctx_v": ctx_v,
-        "gen_compressed_kv": gen_compressed_kv,
-        "gen_k_pe": gen_k_pe,
-        "gen_fused_q": gen_fused_q,
-        "gen_q_pe": gen_q_pe,
-    }
-
     # Setup attention module and metadata
     pos_embd_params = PositionalEmbeddingParams(
         type=PositionEmbeddingType.yarn,
@@ -292,7 +205,7 @@ def _run_attn_for_backend(backend_name, num_heads, num_kv_heads,
         mapping=mapping,
         dtype=kv_cache_dtype,
     )
-    request_list = []
+
     for req_id, ctx_len in enumerate(context_sequence_lengths):
         req = LlmRequest(
             request_id=req_id,
@@ -305,7 +218,7 @@ def _run_attn_for_backend(backend_name, num_heads, num_kv_heads,
         req.paged_kv_block_ids = []
         beam_width = 1
         kv_cache_manager.impl.add_sequence(req_id, ctx_len, beam_width, req)
-        request_list.append(req)
+
     attn_metadata = AttentionCls.Metadata(
         seq_lens=torch.tensor(context_sequence_lengths, dtype=torch.int),
         request_ids=list(range(len(context_sequence_lengths))),
@@ -348,25 +261,80 @@ def _run_attn_for_backend(backend_name, num_heads, num_kv_heads,
         attn_metadata.prepare()
 
     if is_context_phase:
-        q = inputs["ctx_q"]
-        k = inputs["ctx_k"]
-        v = inputs["ctx_v"]
-        compressed_kv = inputs["ctx_compressed_kv"]
-        k_pe = inputs["ctx_k_pe"]
+        ctx_compressed_kv = torch.randn(
+                [ctx_len * len(context_sequence_lengths), kv_lora_rank],
+                dtype=dtype,
+                device=device,
+            )
+
+        ctx_k_pe = torch.randn(
+                [ctx_len * len(context_sequence_lengths), qk_rope_head_dim],
+                dtype=dtype,
+                device=device,
+            )
+
+        ctx_q = torch.randn(
+                [ctx_len * len(context_sequence_lengths), num_heads * qk_head_dim],
+                dtype=dtype,
+                device=device,
+            )
+
+        ctx_kv = torch.randn(
+                [ctx_len * len(context_sequence_lengths), num_kv_heads * (qk_nope_head_dim + v_head_dim)],
+                dtype=dtype,
+                device=device,
+            )
+        # ctx_v.stride(0) == num_kv_heads * (qk_nope_head_dim + v_head_dim)
+        ctx_k_nope, ctx_v = ctx_kv.split([num_kv_heads * qk_nope_head_dim, num_kv_heads * v_head_dim], dim=-1)
+        ctx_k_nope = ctx_k_nope.view(-1, num_kv_heads, qk_nope_head_dim)
+        ctx_k = torch.cat([
+            ctx_k_nope,
+            ctx_k_pe.view(-1, 1, qk_rope_head_dim).expand(-1, num_kv_heads, -1)], dim=-1)
+        ctx_k = ctx_k.view(-1, num_kv_heads * qk_head_dim)
+
+        q = ctx_q
+        k = ctx_k
+        v = ctx_v
+        compressed_kv = ctx_compressed_kv
+        k_pe = ctx_k_pe
+
         latent_cache = torch.cat([compressed_kv, k_pe], dim=-1)
         attn_mla.forward(
-            q.clone(),
-            k.clone(),
+            q,
+            k,
             v,
             attn_metadata,
             attention_input_type=AttentionInputType.context_only,
             latent_cache=latent_cache,
         )
     else:
-        fused_q = inputs["gen_fused_q"]
-        q_pe = inputs["gen_q_pe"]
-        compressed_kv = inputs["gen_compressed_kv"]
-        k_pe = inputs["gen_k_pe"]
+        compressed_kv = torch.randn(
+                    [generation_seq_len_q * len(context_sequence_lengths), kv_lora_rank],
+                    dtype=dtype,
+                    device=device,
+                )
+    
+        k_pe = torch.randn(
+                    [generation_seq_len_q * len(context_sequence_lengths), qk_rope_head_dim],
+                    dtype=dtype,
+                    device=device,
+                )
+        
+        fused_q = torch.randn(
+                    [
+                        generation_seq_len_q * len(context_sequence_lengths), num_heads *
+                        (kv_lora_rank + qk_rope_head_dim)
+                    ],
+                    dtype=dtype,
+                    device=device,
+                )
+    
+        q_pe = torch.randn(
+                    [generation_seq_len_q * len(context_sequence_lengths), num_heads, qk_rope_head_dim],
+                    dtype=dtype,
+                    device=device,
+                )
+
         latent_cache = torch.cat([compressed_kv, k_pe], dim=-1)
         attn_mla.forward(
             fused_q,
@@ -382,8 +350,8 @@ def _run_attn_for_backend(backend_name, num_heads, num_kv_heads,
     with torch.cuda.graph(g):
         if is_context_phase:
             attn_mla.forward(
-                q.clone(),
-                k.clone(),
+                q,
+                k,
                 v,
                 attn_metadata,
                 attention_input_type=AttentionInputType.context_only,
