@@ -36,7 +36,10 @@ keywords = [
 
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = [
+    "LICENSE",
+    "ATTRIBUTIONS.md"
+]
 
 requires-python = ">=3.9"
 
