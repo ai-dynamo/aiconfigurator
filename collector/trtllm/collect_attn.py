@@ -222,6 +222,7 @@ def run_attention_torch(batch_size,
             op_name=op_name, 
             kernel_source='torch_flow', 
             perf_filename=perf_filename)
+    kv_cache_manager.shutdown()
 
 
 def get_context_attention_test_cases():
