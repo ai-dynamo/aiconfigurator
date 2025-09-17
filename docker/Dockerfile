@@ -14,7 +14,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 FROM base AS build
 COPY src/ /workspace/src/
-COPY LICENSE pyproject.toml README.md /workspace/
+COPY LICENSE ATTRIBUTIONS.md pyproject.toml README.md /workspace/
 RUN uv build --wheel --out-dir /workspace/dist
 
 FROM base AS runtime
