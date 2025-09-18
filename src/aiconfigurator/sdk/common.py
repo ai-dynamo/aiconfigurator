@@ -178,6 +178,7 @@ class MoEQuantMode(Enum):
     fp8_block = QuantMapping(1, 2, 'fp8_block') # specific for trtllm torch ds fp8
     w4afp8 = QuantMapping(0.5, 2, 'w4afp8') # specific for trtllm torch ds w4a8
     nvfp4 = QuantMapping(0.5, 4, 'nvfp4') # nvfp4 on blackwell
+    w4a16_mxfp4 = QuantMapping(0.5, 1, 'w4a16_mxfp4')
 
 class FMHAQuantMode(Enum):
     """
