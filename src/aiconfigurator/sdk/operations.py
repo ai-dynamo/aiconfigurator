@@ -311,8 +311,8 @@ class ContextAttention(Operation):
         isl = kwargs.get('s')
         return database.query_context_attention(batch_size, isl, self._n, 
                                                self._n_kv, self._kvcache_quant_mode, 
-                                               self._fmha_quant_mode, self._sliding_window,
-                                               self._head_size)*self._scale_factor
+                                               self._fmha_quant_mode, sliding_window=self._sliding_window,
+                                               head_size=self._head_size)*self._scale_factor
     
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -343,8 +343,8 @@ class GenerationAttention(Operation):
         batch_size = kwargs.get('batch_size')
         s = kwargs.get('s')
         return database.query_generation_attention(batch_size, s, self._n, self._n_kv, 
-                                                  self._kv_cache_dtype, self._sliding_window,
-                                                  self._head_size)*self._scale_factor
+                                                  self._kv_cache_dtype, sliding_window=self._sliding_window,
+                                                  head_size=self._head_size)*self._scale_factor
  
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

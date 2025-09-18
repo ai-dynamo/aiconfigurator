@@ -56,7 +56,7 @@ def get_database(system : str,
         else:
             logger.error(f"system yaml {os.path.join(systems_dir, system+'.yaml')} not found")
             database = None
-
+    print(f"{database}*****************************")
     return database
 
 def get_all_databases(systems_dir : str = get_system_config_path()) -> Dict[str, Dict[str, Dict[str, PerfDatabase]]]:
@@ -225,7 +225,7 @@ def load_context_attention_data(context_attention_file):
     if not os.path.exists(context_attention_file):
         logger.warning(f"Context attention data file {context_attention_file} not found.")
         return None
-    context_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict()))))))
+    context_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))))
     with open(context_attention_file, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
@@ -250,7 +250,7 @@ def load_context_attention_data(context_attention_file):
 
         try:
             latency = context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
-            logger.debug('value conflict in context attention data: {} {} {} {} {} {} {}'.format(quant_mode, kv_cache_dtype, head_size, window_size kv_n, n, s, b))
+            logger.debug('value conflict in context attention data: {} {} {} {} {} {} {}'.format(quant_mode, kv_cache_dtype, head_size, window_size, kv_n, n, s, b))
         except KeyError:
             context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = latency
 
@@ -264,7 +264,7 @@ def load_generation_attention_data(generation_attention_file):
     if not os.path.exists(generation_attention_file):
         logger.warning(f"Generation attention data file {generation_attention_file} not found.")
         return None
-    generation_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))
+    generation_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict()))))))
     with open(generation_attention_file, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
@@ -278,7 +278,7 @@ def load_generation_attention_data(generation_attention_file):
         n=int(n)
         kv_n=int(kv_n)
         head_size=int(head_size)
-        window_size=int(widnow_size)
+        window_size=int(window_size)
         step = int(step)
         latency=float(latency)
 
@@ -292,7 +292,7 @@ def load_generation_attention_data(generation_attention_file):
             latency = generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
             logger.debug('value conflict in generation attention data: {} {} {} {} {} {}'.format(kv_cache_dtype, kv_n, head_size, window_size, n, b, s))
         except KeyError:
-            generation_attention_data[kv_cache_dtype][kv_n][head_zie][window_size][n][b][s] = latency
+            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = latency
         
     return generation_attention_data
 
@@ -472,7 +472,6 @@ class PerfDatabase(object):
                             for i in target_x_list:
                                 if i >= min_x:
                                     filtered_x_list.append(i)
-
                             self._extrapolate_data_grid(data_dict=data_dict, #nsb
                                                         target_x_list=filtered_x_list,
                                                         target_y_list=target_y_list,
@@ -602,7 +601,7 @@ class PerfDatabase(object):
                             data_dict[x][y] = {z:value}
                         else:
                             data_dict[x][y][z] = value
-
+        
         for x in target_x_list:
             if x not in data_dict.keys():
                 x_left, x_right = self._nearest_1d_point_helper(x, list(data_dict.keys()), False)
@@ -815,7 +814,7 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode, fmha_quant_mode)
         else:
-            if head_size != 128:
+            if head_size not in [64,128]:
                 return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode, fmha_quant_mode)[0]
             if n_kv == n:
                 attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][0]
@@ -846,7 +845,7 @@ class PerfDatabase(object):
             else:
                 kv_len = s - 1
             # only consider fp16 mmha
-            ops = 2 * b * n * h * 2 * (kv_len)yujvnm   # 2 for fma, 2 for q*k^t+*v
+            ops = 2 * b * n * h * 2 * (kv_len)   # 2 for fma, 2 for q*k^t+*v
             # kvcache load bytes will depend on kvcache quant. while input q and output might be in fp16.
             mem_bytes = b * (n*h*2 + 2*n_kv*(kv_len)*h*kvcache_quant_mode.value.memory + n*h*2)
             
@@ -863,7 +862,7 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode)
         else:
-            if head_size != 128:
+            if head_size not in [64,128]:
                 return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode)[0]
             if n_kv == n:
                 attention_dict = self._generation_attention_data[kvcache_quant_mode][0]
@@ -894,7 +893,6 @@ class PerfDatabase(object):
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
-
 
         if sol_mode is None:
             sol_mode = self._default_sol_mode
@@ -1203,17 +1201,19 @@ class PerfDatabase(object):
         # correct generation attention
         for quant_mode in self._generation_attention_data.keys():
             for n_kv in self._generation_attention_data[quant_mode].keys():
-                for n in self._generation_attention_data[quant_mode][n_kv].keys():
-                    for b in self._generation_attention_data[quant_mode][n_kv][n].keys():
-                        for s in self._generation_attention_data[quant_mode][n_kv][n][b].keys():
-                            if n_kv == 0:
-                                n_kv_local = n
-                            else:
-                                n_kv_local = n_kv
-                            sol = self.query_generation_attention(b, s, n, n_kv_local, quant_mode, sol_mode=common.SOLMode.SOL)
-                            if sol > self._generation_attention_data[quant_mode][n_kv][n][b][s]:
-                                logger.debug('generation attention quant {} n{} n_kv{} b{} s{}: sol {} > perf_db {}'.format(quant_mode, n, n_kv_local, b, s, sol, self._generation_attention_data[quant_mode][n_kv][n][b][s]))
-                                self._generation_attention_data[quant_mode][n_kv][n][b][s] = sol
+                for head_size in self._generation_attention_data[quant_mode][n_kv].keys():
+                    for sliding_window in self._generation_attention_data[quant_mode][n_kv][head_size].keys():
+                        for n in self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window].keys():
+                            for b in self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window][n].keys():
+                                for s in self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window][n][b].keys():
+                                    if n_kv == 0:
+                                        n_kv_local = n
+                                    else:
+                                        n_kv_local = n_kv
+                                    sol = self.query_generation_attention(b, s, n, n_kv_local, quant_mode, sol_mode=common.SOLMode.SOL, sliding_window=sliding_window, head_size=head_size)
+                                    if sol > self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window][n][b][s]:
+                                        logger.debug('generation attention quant {} n{} n_kv{} b{} s{}: sol {} > perf_db {}'.format(quant_mode, n, n_kv_local, b, s, sliding_window, sol, self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window][n][b][s]))
+                                        self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window][n][b][s] = sol
                 
     
 if __name__ == '__main__':
