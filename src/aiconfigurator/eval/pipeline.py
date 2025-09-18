@@ -18,8 +18,9 @@ import pandas as pd
 
 from aiconfigurator.eval.utils import run_stream, find_newest_subdir, mkdir_p, write_json, parse_disagg_start_script
 from aiconfigurator.eval.service import ServiceManager
+from aiconfigurator.eval.benchmarks import get as get_bench
+
 from aiconfigurator.eval.gpu import GPUWatcher
-from aiconfigurator.eval.benchmarks.genai_perf_runner import run as run_genai_perf, parse as parse_genai_perf
 from aiconfigurator.eval.plots.pareto import ParetoPlot
 from aiconfigurator.eval.plots.timeseries import plot_gpu_timeseries
 
@@ -40,7 +41,11 @@ class EvalConfig:
     runs: int
     artifact_root: str
     cli_args: Any
+    post_health_delay_s: int
+    bench_runner: str
+    bench_backend: Optional[str]
     # k8s
+    k8s_image_pull_token: str
     k8s_enabled: bool
     k8s_namespace: str
     k8s_deploy_file: str
@@ -48,11 +53,14 @@ class EvalConfig:
     k8s_frontend_selector: str
     k8s_cr_name: str
     k8s_frontend_name_regex: str
+    k8s_wait_workers_ready: bool
     k8s_context: str
     k8s_delete_on_stop: bool
     k8s_pf_kind: str
     k8s_pf_name: str
     k8s_wait_timeout_s: int
+    k8s_bench_in_pod: bool
+
 
 class Pipeline:
     def __init__(self, cfg: EvalConfig):
@@ -260,7 +268,7 @@ class Pipeline:
 
         return out[:K]
 
-    def _start_service(self, service_dir: Path, log_file: Path) -> ServiceManager:
+    def _start_service(self, service_dir: Path, log_file: Path) -> "ServiceManager":
         if self.cfg.k8s_enabled:
             from aiconfigurator.eval.service import K8sServiceManager
             deploy = self._find_k8s_deploy_yaml(self.last_config_dir or service_dir)
@@ -270,11 +278,9 @@ class Pipeline:
             if ns_yaml and ns_yaml != namespace:
                 LOG.warning("Namespace mismatch: CLI=%s, YAML=%s. Using YAML namespace.", namespace, ns_yaml)
                 namespace = ns_yaml
-            fe_regex = self.cfg.k8s_frontend_name_regex
-            if not fe_regex and cr_name:
-                fe_regex = rf"^{re.escape(cr_name)}-.*-frontend-.*$"
-            if not fe_regex:
-                fe_regex = "frontend"
+            import re as _re
+            fe_regex = self.cfg.k8s_frontend_name_regex or (rf"^{_re.escape(cr_name)}-.*-frontend-.*$" if cr_name else "frontend")
+            expected_model_id = str(getattr(self.cfg.cli_args, "served_model_name", "") or "")
             sm = K8sServiceManager(
                 namespace=namespace,
                 deploy_yaml=deploy,
@@ -287,11 +293,15 @@ class Pipeline:
                 pf_name=self.cfg.k8s_pf_name,
                 delete_on_stop=self.cfg.k8s_delete_on_stop,
                 wait_timeout_s=self.cfg.k8s_wait_timeout_s,
+                wait_workers_ready=self.cfg.k8s_wait_workers_ready,
+                expected_model_id=expected_model_id,
+                image_pull_token=self.cfg.k8s_image_pull_token,
             )
             sm.start(log_path=log_file, cold_wait_s=self.cfg.coldstart_wait_s)
             sm.wait_healthy(timeout_s=self.cfg.health_timeout_s)
             return sm
         else:
+            from aiconfigurator.eval.service import ServiceManager
             start_rel = self.cfg.start_script.strip() or ("disagg/node_0_run.sh" if self.cfg.mode == "disagg" else "agg/node_0_run.sh")
             sm = ServiceManager(
                 workdir=service_dir,
@@ -303,7 +313,7 @@ class Pipeline:
             return sm
 
     def _find_k8s_deploy_yaml(self, root: Path) -> Path:
-        # priority: CLI override > backend_configs/<mode>/k8s_deploy.yaml > service_dir/<mode>/k8s_deploy.yaml
+        # Priority: CLI override > backend_configs/<mode>/k8s_deploy.yaml > service_dir/<mode>/k8s_deploy.yaml
         if self.cfg.k8s_deploy_file:
             p = Path(self.cfg.k8s_deploy_file)
             if not p.exists():
@@ -318,7 +328,7 @@ class Pipeline:
                 return p
         raise FileNotFoundError(f"k8s_deploy.yaml not found in {cands}")
 
-    def _parse_cr_meta(self, deploy_yaml: Path) -> tuple[str | None, str | None]:
+    def _parse_cr_meta(self, deploy_yaml: Path) -> tuple[Optional[str], Optional[str]]:
         try:
             with open(deploy_yaml) as f:
                 docs = list(yaml.safe_load_all(f))
@@ -341,11 +351,11 @@ class Pipeline:
     def _load_optimal_configs(self, config_dir: Path, target_tpot: Optional[float] = None) -> Dict[str, pd.DataFrame]:
         """Load optimal configuration data from saved aiconfigurator results with TPOT filtering."""
         optimal_configs = {}
-        
+
         # Try to load from CSV files first (more complete data)
         agg_pareto_path = config_dir / "agg_pareto.csv"
         disagg_pareto_path = config_dir / "disagg_pareto.csv"
-        
+
         if agg_pareto_path.exists():
             try:
                 agg_pareto = pd.read_csv(agg_pareto_path)
@@ -354,12 +364,12 @@ class Pipeline:
                     if not best_agg.empty:
                         optimal_configs['agg'] = best_agg
                         LOG.info(f"Loaded optimal agg config: {best_agg['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu, "
-                                f"TPOT: {best_agg.get('tpot', [None]).iloc[0]} ms")
+                                 f"TPOT: {best_agg.get('tpot', [None]).iloc[0]} ms")
                     else:
                         LOG.warning("No agg config found that meets TPOT constraint")
             except Exception as e:
                 LOG.warning(f"Failed to load agg pareto data: {e}")
-        
+
         if disagg_pareto_path.exists():
             try:
                 disagg_pareto = pd.read_csv(disagg_pareto_path)
@@ -368,38 +378,38 @@ class Pipeline:
                     if not best_disagg.empty:
                         optimal_configs['disagg'] = best_disagg
                         LOG.info(f"Loaded optimal disagg config: {best_disagg['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu, "
-                                f"TPOT: {best_disagg.get('tpot', [None]).iloc[0]} ms")
+                                 f"TPOT: {best_disagg.get('tpot', [None]).iloc[0]} ms")
                     else:
                         LOG.warning("No disagg config found that meets TPOT constraint")
             except Exception as e:
                 LOG.warning(f"Failed to load disagg pareto data: {e}")
-        
+
         return optimal_configs
 
     def _get_best_config_under_tpot_constraint(self, pareto_df: pd.DataFrame, target_tpot: Optional[float]) -> pd.DataFrame:
         """Get the best configuration that meets TPOT constraint, similar to CLI logic."""
         if pareto_df.empty:
             return pd.DataFrame()
-        
+
         # If no TPOT constraint, return the best overall configuration
         if target_tpot is None:
             best_config = pareto_df.loc[pareto_df['tokens/s/gpu'].idxmax()].to_frame().T
             LOG.info("No TPOT constraint specified, using best overall configuration")
             return best_config
-        
+
         # Filter configurations that meet TPOT constraint
         if 'tpot' not in pareto_df.columns:
             LOG.warning("TPOT column not found in pareto data, using best overall configuration")
             return pareto_df.loc[pareto_df['tokens/s/gpu'].idxmax()].to_frame().T
-        
+
         # Find configurations that meet the TPOT constraint
         candidate_configs = pareto_df[pareto_df['tpot'] <= target_tpot].copy()
-        
+
         if not candidate_configs.empty:
             # Among valid candidates, pick the one with highest tokens/s/gpu
             best_config = candidate_configs.loc[candidate_configs['tokens/s/gpu'].idxmax()].to_frame().T
             LOG.info(f"Found {len(candidate_configs)} configs meeting TPOT <= {target_tpot}ms, "
-                    f"selected best with {best_config['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu")
+                     f"selected best with {best_config['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu")
             return best_config
         else:
             LOG.warning(f"No config found with TPOT <= {target_tpot}ms, using best overall configuration")
@@ -408,61 +418,115 @@ class Pipeline:
     def _convert_optimal_config_to_plot_format(self, config_df: pd.DataFrame, config_type: str) -> pd.DataFrame:
         """Convert optimal configuration DataFrame to format expected by ParetoPlot."""
         try:
-            # Create a DataFrame with the required columns for plotting
             plot_df = pd.DataFrame()
-            
-            # Map the columns from the optimal config to the expected plot format
+
             if 'tokens/s/user' in config_df.columns:
                 plot_df['output_token_throughput_per_user_avg'] = config_df['tokens/s/user']
-            
+
             if 'tokens/s/gpu' in config_df.columns:
                 plot_df['output_token_throughput_avg'] = config_df['tokens/s/gpu']
-            
-            # Add concurrency information if available
+
             if 'concurrency' in config_df.columns:
                 plot_df['load_label'] = config_df['concurrency'].astype(str)
             elif 'bs' in config_df.columns:
                 plot_df['load_label'] = config_df['bs'].astype(str)
             else:
                 plot_df['load_label'] = f"{config_type}_optimal"
-            
+
             LOG.debug(f"Converted optimal {config_type} config to plot format: {plot_df.to_dict()}")
             return plot_df
-            
+
         except Exception as e:
             LOG.warning(f"Failed to convert optimal {config_type} config to plot format: {e}")
             return pd.DataFrame()
 
-    def _run_benchmark(self, art_dir: Path, url: str, isl: int, osl: int, concurrency: List[int]) -> Path:
+    def _run_benchmark(self, art_dir: Path, *, url: str, isl: int, osl: int, concurrency: List[int]) -> Path:
+        """
+        Dispatch benchmark execution based on cfg.bench_runner:
+        - "genai-perf": use the default implementation
+        - "bench-serving": call bench_serving_runner locally, or delegate to
+            service.run_benchmark_in_pod when running inside a k8s Pod
+        """
+        runner = (self.cfg.bench_runner or "genai-perf").lower()
+
+        # ---------- Resolve model / tokenizer from CLI args (consistent precedence) ----------
         args = self.cfg.cli_args
-        model_path = str(getattr(args, "model_path", ""))
-        served_model_name = str(getattr(args, "served_model_name", ""))
+        model_path = str(getattr(args, "model_path", "") or "")
+        served_model_name = str(getattr(args, "served_model_name", "") or "")
+        model_cli = str(getattr(args, "model", "") or "")
 
-        tokenizer_override = str(getattr(args, "tokenizer_path", "") or "")
-        tokenizer_arg = tokenizer_override or model_path or served_model_name or "unknown-tokenizer"
-        if tokenizer_override:
-            try:
-                from pathlib import Path as _P
-                looks_like_path = ("/" in tokenizer_override) or tokenizer_override.startswith(".")
-                if looks_like_path and not _P(tokenizer_override).exists():
-                    LOG.warning("Specified --tokenizer-path does not exist: %s", tokenizer_override)
-            except Exception:
-                pass
+        # Model identifier precedence:
+        #   --model > served_model_name > basename(model_path) > model identifier
+        model = served_model_name or (Path(model_path).name if model_path else "") or model_cli
 
+        # Tokenizer precedence:
+        #   --tokenizer-path > --model_path > model identifier
+        tok_override = str(getattr(args, "tokenizer_path", "") or "")
+        tokenizer = tok_override or model_path or model
+
+        # Warn if tokenizer looks like a host-local path that does not exist
+        try:
+            looks_like_path = tokenizer and ("/" in tokenizer or tokenizer.startswith("."))
+            if looks_like_path and not Path(tokenizer).exists():
+                LOG.warning("Specified tokenizer looks like a local path but does not exist: %s", tokenizer)
+        except Exception:
+            pass
+
+        bench_dir = art_dir / "bench"
+        bench_dir.mkdir(parents=True, exist_ok=True)
+
+        # K8s in-pod execution: delegate to Service and copy results back
+        if self.cfg.k8s_enabled and self.cfg.k8s_bench_in_pod:
+            LOG.info("Running benchmark in k8s Pod: runner=%s backend=%s", runner, self.cfg.bench_backend)
+            return self.service.run_benchmark_in_pod(
+                art_dir=art_dir,
+                model=model,
+                tokenizer=tokenizer,
+                isl=int(isl),
+                osl=int(osl),
+                conc_list=list(map(int, concurrency or [])),
+                runner=runner,
+                bench_backend=self.cfg.bench_backend,
+            )
+
+        # Local execution (including k8s non in-pod): call the selected runner directly
+        if runner == "bench-serving":
+            run_fn = get_bench("bench_serving")["run"]
+            cfg = {
+                "base_folder": str(art_dir),
+                "result_folder": "bench",
+                "name": "bench",
+                "url": url,
+                "model": model,
+                "tokenizer": tokenizer,
+                "input_sequence_length": int(isl),
+                "output_sequence_length": int(osl),
+                "concurrency": list(map(int, concurrency or [])),
+                "backend": (self.cfg.bench_backend or "sglang-oai-chat"),
+                "dataset_name": "random",
+                "seed": int(getattr(self.cfg.cli_args, "seed", 42)),
+                "warmup_requests": 0,
+            }
+            LOG.info("Running local bench_serving: %s", cfg)
+            run_fn(cfg)  # Output is written into bench_dir
+            return bench_dir
+
+        # Default: genai-perf
+        run_fn = get_bench("genai_perf")["run"]
         cfg = {
-            "name": "genai_perf_eval",
             "base_folder": str(art_dir),
             "result_folder": "bench",
-            "model": served_model_name or "unknown-model",
-            "tokenizer": tokenizer_arg,
+            "name": "bench",
             "url": url,
-            "endpoint_type": "chat",
+            "model": model,
+            "tokenizer": tokenizer,
             "input_sequence_length": int(isl),
             "output_sequence_length": int(osl),
-            "concurrency": list(concurrency),
+            "concurrency": list(map(int, concurrency or [])),
         }
-        run_genai_perf(cfg)
-        return art_dir / "bench"
+        LOG.info("Running local genai-perf: %s", cfg)
+        run_fn(cfg)
+        return bench_dir
 
     def _analyze_and_plot(
         self,
@@ -474,11 +538,26 @@ class Pipeline:
         gpu_csv: Optional[Path],
         optimal_configs: Optional[Dict[str, pd.DataFrame]] = None,
     ) -> None:
-        """Parse genai-perf JSON and create plots."""
-        df = parse_genai_perf(bench_dir)
+        """Parse benchmark outputs (genai-perf or bench-serving) and create plots."""
+        # 1) Parser selection: honor cfg.bench_runner; on failure, fall back automatically
+        runner = (self.cfg.bench_runner or "genai-perf").lower()
+        parse_fn = None
+        try:
+            if runner == "bench-serving":
+                parse_fn = get_bench("bench_serving")["parse"]
+            else:
+                parse_fn = get_bench("genai_perf")["parse"]
+            df = parse_fn(bench_dir)
+        except FileNotFoundError as e:
+            LOG.warning("Primary parser (%s) failed: %s. Falling back to alternative parser...", runner, e)
+            alt = "genai_perf" if runner == "bench-serving" else "bench_serving"
+            df = get_bench(alt)["parse"](bench_dir)
+            LOG.info("Fallback parser '%s' succeeded.", alt)
+
+        # 2) Export rollup CSV
         out_csv = art_dir / "bench_summary.csv"
         df.to_csv(out_csv, index=False)
-        LOG.info("Saved summary: %s", out_csv)
+        LOG.info("Saved summary CSV to %s", out_csv)
 
         # Extract GPU count based on mode
         if mode == "disagg":
@@ -492,7 +571,7 @@ class Pipeline:
             # For agg mode, extract GPU count from config
             total_gpus = self._get_agg_gpu_count(workers_info)
             legend = f"agg_{total_gpus}gpu"
-        
+
         # Validate GPU count
         if total_gpus <= 0:
             LOG.warning("Total GPUs computed as 0; skip per-GPU normalization.")
@@ -518,17 +597,16 @@ class Pipeline:
             expand_x=True,
         )
         p.add_series("bench", df)
-        
+
         # Add optimal configuration points if available
         if optimal_configs:
             for config_type, config_df in optimal_configs.items():
                 if not config_df.empty:
-                    # Convert the optimal config data to match the expected format
                     optimal_point_df = self._convert_optimal_config_to_plot_format(config_df, config_type)
                     if not optimal_point_df.empty:
                         p.add_optimal_point(config_type.capitalize(), optimal_point_df)
                         LOG.info(f"Added optimal {config_type} point to plot")
-        
+
         p.render(
             ax,
             title="Throughput(per gpu)/Throughput(per user)",
@@ -581,7 +659,7 @@ class Pipeline:
         For agg, extract GPU count from agg_config.yaml.
         """
         if self.cfg.k8s_enabled:
-            # k8s: try to infer from k8s_deploy.yaml; fallback to config YAMLs
+            # In k8s mode, try to infer from k8s_deploy.yaml; fallback to config YAMLs
             try:
                 deploy = self._find_k8s_deploy_yaml(self.last_config_dir or service_dir)
                 with open(deploy) as f:
@@ -612,7 +690,7 @@ class Pipeline:
                     return vals
             except Exception as e:
                 LOG.warning("Failed to parse k8s deploy for workers: %s", e)
-            # fallback (agg only)
+            # Fallback (agg only)
             if self.cfg.mode != "disagg":
                 agg_gpu_count = self._extract_agg_gpu_count_from_config(Path(self.cfg.service_dir))
                 return {
@@ -620,7 +698,7 @@ class Pipeline:
                     "DECODE_GPU": -1,  "DECODE_WORKERS": 0,
                     "AGG_WORKERS": 1,  "AGG_GPU_COUNT": agg_gpu_count,
                 }
-            # last fallback
+            # Last fallback
             return {"PREFILL_GPU": 0, "PREFILL_WORKERS": 0, "DECODE_GPU": 0, "DECODE_WORKERS": 0}
 
         if self.cfg.mode == "disagg":
@@ -648,18 +726,18 @@ class Pipeline:
             if not config_path.exists():
                 LOG.warning(f"Agg config not found: {config_path}")
                 return 1
-            
+
             with config_path.open() as f:
                 config = yaml.safe_load(f) or {}
-            
+
             # For TRT-LLM, GPU count is TP * PP (DP is handled through TP)
             tp = config.get("tensor_parallel_size", 1)
             pp = config.get("pipeline_parallel_size", 1)
             gpu_count = tp * pp
-            
+
             LOG.info(f"Extracted agg GPU count (TRT-LLM): TP={tp} * PP={pp} = {gpu_count}")
             return gpu_count
-            
+
         except Exception as e:
             LOG.warning(f"Failed to extract agg GPU count: {e}")
             return 1
@@ -694,12 +772,12 @@ class Pipeline:
         # 2) copy configs to dynamo trtllm folder
         service_dir = Path(self.cfg.service_dir)
         _ = self._copy_backend_configs(self.last_config_dir, service_dir)
- 
+
         # Load optimal configurations from the saved results with TPOT filtering
         target_tpot = getattr(args, "tpot", None)
         optimal_configs = self._load_optimal_configs(self.last_config_dir, target_tpot)
 
-        # determine cc
+        # Determine concurrency
         if self.cfg.bench_concurrency and len(self.cfg.bench_concurrency) > 0:
             conc_list = list(self.cfg.bench_concurrency)
             LOG.info("Using provided benchmark concurrency: %s", conc_list)
@@ -708,14 +786,14 @@ class Pipeline:
             bs_base = (self.last_config_dir / "backend_configs") if self.cfg.k8s_enabled else service_dir
             mbs = self._read_max_batch_size(bs_base, self.cfg.mode)
             if not mbs:
-                # safe fallback if YAML missing
+                # Safe fallback if YAML missing
                 conc_list = [1, 2, 4, 8, 16, 32]
                 LOG.warning("Auto concurrency: max_batch_size not found -> fallback %s", conc_list)
             else:
                 conc_list = self._auto_concurrency_values(int(mbs))
                 LOG.info("Auto concurrency from max_batch_size=%s -> %s", mbs, conc_list)
 
-        # prepare log path
+        # Prepare log path
         log_dir = Path(getattr(args, "save_dir")).resolve() / "log"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / f"{run_name}_{self.cfg.mode}_p{self.cfg.port}.log"
@@ -723,7 +801,7 @@ class Pipeline:
         # 3) start + health
         self.service = self._start_service(service_dir, log_file)
 
-        # artifacts root
+        # Artifacts root
         self.art_root = self._ensure_art_root(save_dir, run_name)
 
         # Worker info from script (disagg) or default (agg)
@@ -733,11 +811,9 @@ class Pipeline:
         # GPU monitoring (conditional)
         if self.cfg.gpu_monitor and not self.cfg.k8s_enabled:
             LOG.info("GPU monitor enabled")
-            # lazy import to avoid NVML dependency when disabled
             from .gpu import GPUWatcher
             self._gpu_csv = self.art_root / "gpu_stats.csv"
             self._gpu_watcher = GPUWatcher(interval_s=self.cfg.nvml_interval_s, out_csv=self._gpu_csv)
-            # optional one-shot snapshot before benchmark
             self._collect_gpu_once(self.art_root)
             self._gpu_watcher.start()
         else:
@@ -747,15 +823,15 @@ class Pipeline:
                 LOG.info("GPU monitor disabled: skipping NVML sampling and timeseries.")
             self._gpu_csv = None
 
-        # benchmark tokens
+        # Benchmark tokens
         isl = int(getattr(args, "isl", 0) or 0) or 1024
         osl = int(getattr(args, "osl", 0) or 0) or 128
         LOG.info("Benchmark tokens: isl=%d osl=%d", isl, osl)
 
-        # wait 30s after health OK, before running benchmarks
-        LOG.info("Health OK. Waiting 30 seconds before starting benchmark...")
+        # Extra wait after health OK, before running benchmarks
+        LOG.info("Health OK. Waiting %ds before starting benchmark...", self.cfg.post_health_delay_s)
         import time as _time
-        _time.sleep(30)
+        _time.sleep(max(0, int(self.cfg.post_health_delay_s)))
 
         # 4) benchmarking
         try:

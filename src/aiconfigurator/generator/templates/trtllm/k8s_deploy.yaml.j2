@@ -9,6 +9,7 @@
 
 {%- set k8s_namespace = dynamo_config.k8s_namespace | default('ets-dynamo') -%}
 {%- set k8s_image = dynamo_config.k8s_image | default('nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.4.1') -%}
+{%- set k8s_image_pull_secret = dynamo_config.k8s_image_pull_secret | default('') -%}
 {%- set working_dir = '/workspace/components/backends/trtllm' -%}
 
 {%- set frontend_replicas = frontend_replicas | default(1) -%}
@@ -54,8 +55,13 @@ spec:
             persistentVolumeClaim:
               claimName: {{ k8s_model_cache_pvc }}
         {% endif %}
+        {% if k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s_image_pull_secret }}
+        {% endif %}        
         mainContainer:
           image: {{ k8s_image }}
+          imagePullPolicy: IfNotPresent
           {% if k8s_use_model_cache %}
           volumeMounts:
             - name: model-cache
@@ -78,7 +84,6 @@ spec:
         limits:
           gpu: "{{ agg_gpu }}"
       extraPodSpec:
-        {% if k8s_use_model_cache or k8s_use_engine_cm %}
         volumes:
           {% if k8s_use_model_cache %}
           - name: model-cache
@@ -90,11 +95,17 @@ spec:
             configMap:
               name: {{ k8s_engine_cm_name }}
           {% endif %}
-        {% endif %}
+          - name: tmp
+            emptyDir:
+              medium: Memory
+              sizeLimit: 10Gi
+        {% if k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s_image_pull_secret }}
+        {% endif %}    
         mainContainer:
           image: {{ k8s_image }}
           workingDir: {{ working_dir }}
-          {% if k8s_use_model_cache or k8s_use_engine_cm %}
           volumeMounts:
             {% if k8s_use_model_cache %}
             - name: model-cache
@@ -105,18 +116,45 @@ spec:
               mountPath: {{ k8s_engine_cm_mount }}
               readOnly: true
             {% endif %}
-          {% endif %}
-          command: ["python3","-m","dynamo.trtllm"]
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "8"
+              memory: "64Gi"
+              ephemeral-storage: "50Gi"
+            limits:
+              cpu: "16"
+              memory: "96Gi"
+              ephemeral-storage: "80Gi"
+          command: ["/bin/bash","-c"]
           args:
-            - --model-path
-            - "{{ model_path }}"
-            - --served-model-name
-            - "{{ served_model_name }}"
-            - --extra-engine-args
-            - "{{ agg_engine_args }}"
-            {% if is_kv %}
-            - --publish-events-and-metrics
-            {% endif %}
+            - |
+              set -euo pipefail
+              export NIXL_REF="0.4.1"
+              export NIXL_SRC_DIR="/opt/nixl"
+              export NIXL_PREFIX="/opt/nvidia/nvda_nixl"
+              export ARCH_ALT="x86_64"
+              export NIXL_LIB_DIR="$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu"
+              export NIXL_PLUGIN_DIR="$NIXL_LIB_DIR/plugins"
+              export LD_LIBRARY_PATH="$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:${LD_LIBRARY_PATH:-}"
+
+              pip install --break-system-packages /workspace/wheels/nixl/*.whl
+
+              export UCX_LOG_LEVEL=debug
+
+              cd "{{ working_dir }}"
+              args=(
+                --model-path "{{ model_path }}"
+                --served-model-name "{{ served_model_name }}"
+                --extra-engine-args "{{ agg_engine_args }}"
+                {% if is_kv %}
+                --publish-events-and-metrics
+                {% endif %}
+              )
+              exec python3 -m dynamo.trtllm "${args[@]}"
+
+
 
     {% else %}
     # ================== DISAGG ==================
@@ -129,7 +167,6 @@ spec:
         limits:
           gpu: "{{ prefill_gpu }}"
       extraPodSpec:
-        {% if k8s_use_model_cache or k8s_use_engine_cm %}
         volumes:
           {% if k8s_use_model_cache %}
           - name: model-cache
@@ -141,11 +178,18 @@ spec:
             configMap:
               name: {{ k8s_engine_cm_name }}
           {% endif %}
-        {% endif %}
+          - name: tmp
+            emptyDir:
+              medium: Memory
+              sizeLimit: 10Gi
+        {% if k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s_image_pull_secret }}
+        {% endif %}    
         mainContainer:
           image: {{ k8s_image }}
+          imagePullPolicy: IfNotPresent
           workingDir: {{ working_dir }}
-          {% if k8s_use_model_cache or k8s_use_engine_cm %}
           volumeMounts:
             {% if k8s_use_model_cache %}
             - name: model-cache
@@ -156,22 +200,48 @@ spec:
               mountPath: {{ k8s_engine_cm_mount }}
               readOnly: true
             {% endif %}
-          {% endif %}
-          command: ["python3","-m","dynamo.trtllm"]
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "8"
+              memory: "64Gi"
+              ephemeral-storage: "50Gi"
+            limits:
+              cpu: "16"
+              memory: "96Gi"
+              ephemeral-storage: "80Gi"
+          command: ["/bin/bash","-c"]
           args:
-            - --model-path
-            - "{{ model_path }}"
-            - --served-model-name
-            - "{{ served_model_name }}"
-            - --extra-engine-args
-            - "{{ prefill_engine_args }}"
-            - --disaggregation-mode
-            - prefill
-            - --disaggregation-strategy
-            - "{{ disaggregation_strategy }}"
-            {% if is_kv and disaggregation_strategy == 'prefill_first' %}
-            - --publish-events-and-metrics
-            {% endif %}
+            - |
+              set -euo pipefail
+              export NIXL_REF="0.4.1"
+              export NIXL_SRC_DIR="/opt/nixl"
+              export NIXL_PREFIX="/opt/nvidia/nvda_nixl"
+              export ARCH_ALT="x86_64"
+              export NIXL_LIB_DIR="$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu"
+              export NIXL_PLUGIN_DIR="$NIXL_LIB_DIR/plugins"
+              export LD_LIBRARY_PATH="$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:${LD_LIBRARY_PATH:-}"
+
+              pip install --break-system-packages /workspace/wheels/nixl/*.whl
+
+              export UCX_LOG_LEVEL=debug
+
+              cd "{{ working_dir }}"
+              args=( 
+                --model-path "{{ model_path }}"
+                --served-model-name "{{ served_model_name }}"
+                --extra-engine-args "{{ prefill_engine_args }}"
+                --disaggregation-mode prefill
+                --disaggregation-strategy "{{ disaggregation_strategy }}"
+                {% if is_kv and disaggregation_strategy == 'prefill_first' %}
+                --publish-events-and-metrics
+                {% endif %}
+              )
+              exec python3 -m dynamo.trtllm "${args[@]}"
+
+
+
 
     TRTLLMDecodeWorker:
       dynamoNamespace: {{ name }}
@@ -182,7 +252,6 @@ spec:
         limits:
           gpu: "{{ decode_gpu }}"
       extraPodSpec:
-        {% if k8s_use_model_cache or k8s_use_engine_cm %}
         volumes:
           {% if k8s_use_model_cache %}
           - name: model-cache
@@ -194,11 +263,18 @@ spec:
             configMap:
               name: {{ k8s_engine_cm_name }}
           {% endif %}
-        {% endif %}
+          - name: tmp
+            emptyDir:
+              medium: Memory
+              sizeLimit: 10Gi
+        {% if k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s_image_pull_secret }}
+        {% endif %}    
         mainContainer:
           image: {{ k8s_image }}
+          imagePullPolicy: IfNotPresent
           workingDir: {{ working_dir }}
-          {% if k8s_use_model_cache or k8s_use_engine_cm %}
           volumeMounts:
             {% if k8s_use_model_cache %}
             - name: model-cache
@@ -209,20 +285,43 @@ spec:
               mountPath: {{ k8s_engine_cm_mount }}
               readOnly: true
             {% endif %}
-          {% endif %}
-          command: ["python3","-m","dynamo.trtllm"]
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "8"
+              memory: "64Gi"
+              ephemeral-storage: "50Gi"
+            limits:
+              cpu: "16"
+              memory: "96Gi"
+              ephemeral-storage: "80Gi"
+          command: ["/bin/bash","-c"]
           args:
-            - --model-path
-            - "{{ model_path }}"
-            - --served-model-name
-            - "{{ served_model_name }}"
-            - --extra-engine-args
-            - "{{ decode_engine_args }}"
-            - --disaggregation-mode
-            - decode
-            - --disaggregation-strategy
-            - "{{ disaggregation_strategy }}"
-            {% if is_kv and disaggregation_strategy == 'decode_first' %}
-            - --publish-events-and-metrics
-            {% endif %}
+            - |
+              set -euo pipefail
+              export NIXL_REF="0.4.1"
+              export NIXL_SRC_DIR="/opt/nixl"
+              export NIXL_PREFIX="/opt/nvidia/nvda_nixl"
+              export ARCH_ALT="x86_64"
+              export NIXL_LIB_DIR="$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu"
+              export NIXL_PLUGIN_DIR="$NIXL_LIB_DIR/plugins"
+              export LD_LIBRARY_PATH="$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:${LD_LIBRARY_PATH:-}"
+
+              pip install --break-system-packages /workspace/wheels/nixl/*.whl
+
+              export UCX_LOG_LEVEL=debug
+
+              cd "{{ working_dir }}"
+              args=(
+                --model-path "{{ model_path }}"
+                --served-model-name "{{ served_model_name }}"
+                --extra-engine-args "{{ decode_engine_args }}"
+                --disaggregation-mode decode
+                --disaggregation-strategy "{{ disaggregation_strategy }}"
+                {% if is_kv and disaggregation_strategy == 'decode_first' %}
+                --publish-events-and-metrics
+                {% endif %}
+              )
+              exec python3 -m dynamo.trtllm "${args[@]}"
     {% endif %}

@@ -101,12 +101,12 @@ class ParetoPlot:
             all_x_vals = pd.concat([all_x_vals, x_vals])
 
             # Plot with distinctive markers (star shape, larger size, different color)
-            ax.scatter(x_vals, y_vals, label=f"{label} (Optimal)", 
+            ax.scatter(x_vals, y_vals, label=f"{label} (from aiconfigurator)", 
                       marker='*', s=150, c='red', edgecolors='black', linewidth=1, zorder=10)
             
             # Add labels for optimal points
             for xv, yv in zip(x_vals, y_vals):
-                ax.annotate(f"Optimal\n{label}", (xv, yv), textcoords="offset points",
+                ax.annotate(f"Aiconfigurator\n{label}", (xv, yv), textcoords="offset points",
                            xytext=(5, 5), fontsize=8, ha="left", va="bottom", 
                            bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7))
 

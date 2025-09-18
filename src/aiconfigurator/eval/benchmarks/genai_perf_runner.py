@@ -81,7 +81,7 @@ def parse(path: Path) -> pd.DataFrame:
 @register("genai_perf", parse=parse)
 def run(cfg: Cfg, *, bin_path: str = "genai-perf") -> None:
     """
-    Execute genai-perf – text-only, concurrency only.
+    Execute genai-perf - text-only, concurrency only.
     """
     art_dir = Path(cfg["base_folder"]) / cfg.get("result_folder", cfg["name"])
     art_dir.mkdir(parents=True, exist_ok=True)
@@ -116,6 +116,7 @@ def run(cfg: Cfg, *, bin_path: str = "genai-perf") -> None:
             "--extra-inputs", f"max_tokens:{osl}",
             "--extra-inputs", f"min_tokens:{osl}",
             "--extra-inputs", "ignore_eos:true",
+            "--extra-inputs", "{\"nvext\":{\"ignore_eos\":true}}",
             "--concurrency", str(v),
             "--request-count", str(v * 10),
             "--warmup-request-count", str(v * 2),

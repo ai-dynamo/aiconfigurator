@@ -51,11 +51,18 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--tokenizer-path", dest="tokenizer_path", type=str, default="",
                    help=("Override tokenizer path used by genai-perf. "
                          "Recommended in k8s mode where the served model is remote but the tokenizer is local."))
- 
+    g.add_argument("--post-health-delay-s", type=int, default=30,
+                   help="Extra seconds to wait after service is healthy before benchmark (default: 30).")
+
     # --- Kubernetes args ---
     gk = parser.add_argument_group("Kubernetes")
+    gk.add_argument("--k8s-bench-in-pod", action="store_true",
+                help="Run genai-perf inside a temporary benchmark Pod (1 GPU, high CPU/memory) and copy results back.")
     gk.add_argument("--k8s", action="store_true",
                     help="Enable Kubernetes deployment mode.")
+    gk.add_argument("--k8s-image-pull-token", type=str, default="",
+                help=("Single token for pulling private images. "
+                      "Format: 'USERNAME:PASSWORD' or '<TOKEN>' (then username defaults to 'oauth2accesstoken')."))
     gk.add_argument("--k8s-namespace", type=str, default="ets-dynamo",
                     help="Kubernetes namespace. Default: ets-dynamo")
     gk.add_argument("--k8s-deploy-file", type=str, default="",
@@ -65,27 +72,44 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     gk.add_argument("--k8s-frontend-selector", type=str,
                     default="dynamo.nvidia.com/componentType=frontend",
                     help="Label selector to find frontend pod for port-forward (e.g. 'app=my-frontend').")
-    gk.add_argument("--k8s-context", type=str, default="",
-                    help="kubectl context to use (optional).")
+    gk.add_argument("--k8s-frontend-name-regex", type=str, default="",
+                    help="Fallback regex to match frontend pod name; if empty, inferred as '^{CR}-.*-frontend-.*$'.")
     gk.add_argument("--k8s-cr-name", type=str, default="",
                     help="Override CR name in the deploy yaml; if empty will be parsed from the yaml.")
-    gk.add_argument("--k8s-frontend-name-regex", type=str, default="",
-                    help="Fallback regex to match frontend pod name; if empty, will be inferred as '^{CR_NAME}-.*-frontend-.*$' (case-insensitive).")
+    gk.add_argument("--k8s-context", type=str, default="",
+                    help="kubectl context to use (optional).")
     gk.add_argument("--k8s-delete-on-stop", action="store_true",
                     help="Delete the deployed graph on stop.")
     gk.add_argument("--k8s-pf-kind", choices=["pod", "svc"], default="pod",
                     help="Resource kind to port-forward: pod or svc. Default: pod")
     gk.add_argument("--k8s-pf-name", type=str, default="",
-                    help="Explicit resource name to port-forward; if empty, first Ready frontend pod is used.")
+                    help="Explicit resource name to port-forward; if empty, first Ready frontend pod/service is used.")
     gk.add_argument("--k8s-wait-timeout-s", type=int, default=900,
-                    help="Max seconds to wait for pods to be Ready in k8s mode. Default: 900")
+                    help="Max seconds to wait for resources Ready in k8s mode. Default: 900")
+    gk.add_argument("--no-k8s-wait-workers-ready", action="store_false", dest="k8s_wait_workers_ready", default=True,
+                    help="Do not wait for worker pods to become Ready per CR (default: wait).")
+
+    gk.add_argument(
+        "--bench-runner",
+        choices=["genai-perf", "bench-serving"],
+        default="genai-perf",
+        help="Benchmark runner in pod. Default: genai-perf",
+    )
+    gk.add_argument(
+        "--bench-backend",
+        default="dynamo-oai-chat",
+        help="bench_serving backend (e.g., sglang-oai or sglang-oai-chat). Optional.",
+    )
+
+
 
     parser.epilog = (parser.epilog or "") + (
-        "\n\nEVAL NOTES:\n"
         "\n\nEVAL NOTES:\n"
         "  • `eval` reuses all `cli` args for config generation.\n"
         "  • Health URLs are derived from --port as http://0.0.0.0:<port>/health and /v1/models.\n"
         "  • Use --gpu-monitor to enable NVML sampling and timeseries HTML; otherwise no monitoring is performed.\n"
+        "  • In k8s mode, set --tokenizer-path to a LOCAL tokenizer path for genai-perf.\n"
+        "  • In k8s mode, we wait worker Pods Ready by default; pass --no-k8s-wait-workers-ready to disable.\n"
     )
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
 
@@ -121,19 +145,24 @@ def main(args) -> int:
         runs=args.runs,
         artifact_root=args.artifact_root or "",
         cli_args=args,
-        # k8s
+        post_health_delay_s=args.post_health_delay_s,
+        bench_runner=args.bench_runner,
+        bench_backend=args.bench_backend,
         k8s_enabled=bool(getattr(args, "k8s", False)),
+        k8s_image_pull_token=args.k8s_image_pull_token,
         k8s_namespace=args.k8s_namespace,
         k8s_deploy_file=args.k8s_deploy_file,
         k8s_engine_cm_name=args.k8s_engine_cm_name,
         k8s_frontend_selector=args.k8s_frontend_selector,
         k8s_cr_name=args.k8s_cr_name,
         k8s_frontend_name_regex=args.k8s_frontend_name_regex,
+        k8s_wait_workers_ready=bool(getattr(args, "k8s_wait_workers_ready", True)),
         k8s_context=(args.k8s_context or ""),
         k8s_delete_on_stop=bool(getattr(args, "k8s_delete_on_stop", False)),
         k8s_pf_kind=args.k8s_pf_kind,
         k8s_pf_name=args.k8s_pf_name or "",
         k8s_wait_timeout_s=args.k8s_wait_timeout_s,
+        k8s_bench_in_pod=bool(getattr(args, "k8s_bench_in_pod", False)),
     )
 
     pipe = Pipeline(cfg)
@@ -148,4 +177,3 @@ def main(args) -> int:
             LOG.warning("Stop failed: %s", e)
 
     return rc
-
