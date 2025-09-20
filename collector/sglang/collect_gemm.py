@@ -49,7 +49,7 @@ import pkg_resources
 def get_gemm_test_cases():
     x_list = [1,2,4,8,16,32,48,64,80,96,128,160,192,256,384,512,768,1024,2048,4096,8192]
     nk_list = [64,128,256,512,768,1024,1536,2048,2560,3072,3584,4096,5120,6144,7168,8192,10240,12288]
-    nk_list_ext = [16384, 18432,24576,32768,36864,65536] # for coverage and interp purpose
+    nk_list_ext = [16384,65536] # for coverage and interp purpose
     gemm_list = ['int8_wo', 'int4_wo', 'fp8_block', 'float16', 'fp8']
 
     test_cases=[]
@@ -58,7 +58,7 @@ def get_gemm_test_cases():
         for x in sorted(x_list, reverse=True):
             for n in sorted(nk_list+nk_list_ext, reverse=True):
                 for k in sorted(nk_list+nk_list_ext, reverse=True):
-                    if n in nk_list_ext and k in nk_list_ext:
+                    if n * k == 65536*65536:
                         continue
                     if gemm_type == 'nvfp4' or gemm_type == 'fp8_block':
                         if n < 128 or k < 128:
