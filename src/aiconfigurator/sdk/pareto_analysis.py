@@ -18,46 +18,11 @@ from aiconfigurator.sdk import common
 import logging
 import traceback
 from munch import Munch, DefaultMunch
+import logging
+import traceback
+from scipy.interpolate import interp1d
 logger = logging.getLogger(__name__)
 
-
-def get_pareto_front(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:
-    """
-    Get Pareto front from raw data points.
-    """
-    df = df.sort_values(by=x_col)
-    def is_pareto(costs: np.ndarray) -> np.ndarray:
-        is_better = np.ones(costs.shape[0], dtype=bool)
-        for i, c in enumerate(costs):
-            if is_better[i]:
-                # Keep any point with a lower cost
-                is_better[is_better] = np.any(costs[is_better]>c, axis=1)  # Remove dominated points
-                is_better[i] = True  # And keep self
-        return is_better
-
-    # Convert DataFrame columns to numpy array
-    costs = df[[x_col, y_col]].values
-    is_pareto_front = is_pareto(costs)
-
-    # Plot Pareto front
-    pareto_front = df[is_pareto_front]
-    return pareto_front
-
-def draw_pareto(df: pd.DataFrame, x_col: str, y_col: str, ax: plt.Axes, color: str, label: str) -> None:
-    """
-    Draw Pareto front to plot.
-    """
-    df = df.sort_values(by=x_col)
-
-    # Plot Pareto front
-    pareto_front = get_pareto_front(df, x_col, y_col)
-    ax.plot(pareto_front[x_col], pareto_front[y_col], color=color, label=label)
-    ax.scatter(pareto_front[x_col], pareto_front[y_col], color=color)
-    
-    # Add labels and title
-    ax.set_xlabel(x_col)
-    ax.set_ylabel(y_col)
-    ax.legend()
 
 def enumerate_parallel_config(num_gpu_list: list[int], 
                               tp_list: list[int], 
@@ -271,70 +236,6 @@ def disagg_pareto(model_name: str,
                                                                     num_gpu_list=num_gpu_list)
 
     return summary.get_summary_df()
-
-
-def draw_pareto_to_string(title: str,
-                          best_config_df: Optional[pd.DataFrame],
-                          disagg_pareto_df: Optional[pd.DataFrame],
-                          agg_pareto_df: Optional[pd.DataFrame]) -> str:
-    """
-    Draw Pareto front to string.
-    """
-    plotext.plot_size(80, 30)
-    plotext.theme("clear")
-    if disagg_pareto_df is not None and not disagg_pareto_df.empty:
-        plotext.plot(
-            disagg_pareto_df['tokens/s/user'],
-            disagg_pareto_df['tokens/s/gpu'],
-            label='Disagg',
-            color=(144, 238, 144),  # light green
-            marker='d'
-        )
-    if agg_pareto_df is not None and not agg_pareto_df.empty:
-        plotext.plot(
-            agg_pareto_df['tokens/s/user'],
-            agg_pareto_df['tokens/s/gpu'],
-            label='Agg',
-            color=(200, 200, 200),  # gray
-            marker='a'
-        )
-
-    if best_config_df is not None and not best_config_df.empty:
-        plotext.plot(
-            best_config_df['tokens/s/user'],
-            best_config_df['tokens/s/gpu'],
-            label='Best',
-            color=(255, 215, 0),  # gold
-            marker='X'
-        )
-
-    plotext.title(f"{title}: tokens/s/gpu vs tokens/s/user")
-    plotext.xlabel("tokens/s/user")
-    plotext.ylabel("tokens/s/gpu")
-    plotext.grid(False)
-
-    y_min = 0.0
-    y_max = 0.0
-    x_min = 0.0
-    x_max = 0.0
-    if disagg_pareto_df is not None and not disagg_pareto_df.empty:
-        y_max = max(disagg_pareto_df['tokens/s/gpu'].max(), y_max)
-        x_max = max(disagg_pareto_df['tokens/s/user'].max(), x_max)
-    if agg_pareto_df is not None and not agg_pareto_df.empty:
-        y_max = max(agg_pareto_df['tokens/s/gpu'].max(), y_max)
-        x_max = max(agg_pareto_df['tokens/s/user'].max(), x_max)
-    y_max = y_max * 1.2
-    y_max = ((y_max + 49) // 50) * 50
-    x_max = x_max * 1.1
-    x_max = ((x_max + 19) // 20) * 20
-    x_max = min(x_max, 300)
-    if y_max > 0.0 and x_max > 0.0:
-        plotext.ylim(y_min, y_max)
-        plotext.xlim(x_min, x_max)
-
-    buf = plotext.build()
-    plotext.clear_data()
-    return buf
 
 
 class TaskConfig:
@@ -776,6 +677,189 @@ class TaskRunner:
         
         return df
 
+
+def get_pareto_front(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:
+    """
+    Get Pareto front from raw data points.
+    """
+    df = df.sort_values(by=x_col)
+    def is_pareto(costs: np.ndarray) -> np.ndarray:
+        is_better = np.ones(costs.shape[0], dtype=bool)
+        for i, c in enumerate(costs):
+            if is_better[i]:
+                # Keep any point with a lower cost
+                is_better[is_better] = np.any(costs[is_better]>c, axis=1)  # Remove dominated points
+                is_better[i] = True  # And keep self
+        return is_better
+
+    # Convert DataFrame columns to numpy array
+    costs = df[[x_col, y_col]].values
+    is_pareto_front = is_pareto(costs)
+
+    # Plot Pareto front
+    pareto_front = df[is_pareto_front]
+    return pareto_front
+
+def draw_pareto(df: pd.DataFrame, x_col: str, y_col: str, ax: plt.Axes, color: str, label: str) -> None:
+    """
+    Draw Pareto front to plot.
+    """
+    df = df.sort_values(by=x_col)
+
+    # Plot Pareto front
+    pareto_front = get_pareto_front(df, x_col, y_col)
+    ax.plot(pareto_front[x_col], pareto_front[y_col], color=color, label=label)
+    ax.scatter(pareto_front[x_col], pareto_front[y_col], color=color)
+    
+    # Add labels and title
+    ax.set_xlabel(x_col)
+    ax.set_ylabel(y_col)
+    ax.legend()
+
+def draw_pareto_to_string(title: str,
+                            best_config_df: Optional[pd.DataFrame],
+                            disagg_pareto_df: Optional[pd.DataFrame],
+                            agg_pareto_df: Optional[pd.DataFrame]) -> str:
+    """
+    Draw Pareto front to string.
+    """
+    plotext.plot_size(80, 30)
+    plotext.theme("clear")
+    if disagg_pareto_df is not None and not disagg_pareto_df.empty:
+        plotext.plot(
+            disagg_pareto_df['tokens/s/user'],
+            disagg_pareto_df['tokens/s/gpu'],
+            label='Disagg',
+            color=(144, 238, 144),  # light green
+            marker='d'
+        )
+    if agg_pareto_df is not None and not agg_pareto_df.empty:
+        plotext.plot(
+            agg_pareto_df['tokens/s/user'],
+            agg_pareto_df['tokens/s/gpu'],
+            label='Agg',
+            color=(200, 200, 200),  # gray
+            marker='a'
+        )
+
+    if best_config_df is not None and not best_config_df.empty:
+        plotext.plot(
+            best_config_df['tokens/s/user'],
+            best_config_df['tokens/s/gpu'],
+            label='Best',
+            color=(255, 215, 0),  # gold
+            marker='X'
+        )
+
+    plotext.title(f"{title}: tokens/s/gpu vs tokens/s/user")
+    plotext.xlabel("tokens/s/user")
+    plotext.ylabel("tokens/s/gpu")
+    plotext.grid(False)
+
+    y_min = 0.0
+    y_max = 0.0
+    x_min = 0.0
+    x_max = 0.0
+    if disagg_pareto_df is not None and not disagg_pareto_df.empty:
+        y_max = max(disagg_pareto_df['tokens/s/gpu'].max(), y_max)
+        x_max = max(disagg_pareto_df['tokens/s/user'].max(), x_max)
+    if agg_pareto_df is not None and not agg_pareto_df.empty:
+        y_max = max(agg_pareto_df['tokens/s/gpu'].max(), y_max)
+        x_max = max(agg_pareto_df['tokens/s/user'].max(), x_max)
+    y_max = y_max * 1.2
+    y_max = ((y_max + 49) // 50) * 50
+    x_max = x_max * 1.1
+    x_max = ((x_max + 19) // 20) * 20
+    x_max = min(x_max, 300)
+    if y_max > 0.0 and x_max > 0.0:
+        plotext.ylim(y_min, y_max)
+        plotext.xlim(x_min, x_max)
+
+    buf = plotext.build()
+    plotext.clear_data()
+    return buf
+
+def interpolate_throughput_at_tpot(df: Optional[pd.DataFrame], target_tpot: float) -> float:
+    """
+    Interpolates the throughput at a given TPOT. This is more for reference by reading the pareto frontier.
+    Args:
+        df: The DataFrame containing the throughput data.
+        target_tpot: The target TPOT in ms.
+    Returns:
+        The interpolated throughput at the target TPOT.
+    """
+    if df is None or df.empty:
+        return 0.0
+    
+    target_tps_user = 1000.0/target_tpot
+    
+    # Filter out points where tpot is not available or invalid
+    df_filtered = df.dropna(subset=['tokens/s/user', 'tokens/s/gpu'])
+    if df_filtered.empty or len(df_filtered) < 2:
+        # Not enough points to interpolate, try to find closest or return 0
+        if not df_filtered.empty:
+                # Fallback: find the point with tpot closest to target_tps_user
+            closest_idx = (df_filtered['tokens/s/user'] - target_tps_user).abs().idxmin()
+            return df_filtered.loc[closest_idx, 'tokens/s/gpu']
+        return 0.0
+
+    # Sort by tokens/s/user for interpolation
+    df_sorted = df_filtered.sort_values(by='tokens/s/user')
+    
+    # Create interpolation functions
+    # If target_tpot is outside the range, interp1d will extrapolate or error depending on fill_value
+    # Using fill_value="extrapolate" can be risky.
+    # It's often better to clamp to the nearest value if outside the range.
+    min_tps_user, max_tps_user = df_sorted['tokens/s/user'].min(), df_sorted['tokens/s/user'].max()
+
+    if target_tps_user < min_tps_user:
+        return df_sorted.iloc[0]['tokens/s/gpu'] # Closest value at smallest tokens/s/user
+    if target_tps_user > max_tps_user:
+        return 0.0 # cannot meet the target tps_user
+        
+    interp_func = interp1d(df_sorted['tokens/s/user'], df_sorted['tokens/s/gpu'], kind='linear', fill_value="extrapolate")
+    
+    interpolated_throughput = float(interp_func(target_tps_user))
+    return max(0.0, interpolated_throughput) # Ensure non-negative throughput
+
+def get_best_config_under_tpot_constraint(
+    total_gpus: int,
+    pareto_df: pd.DataFrame, 
+    target_tpot: float
+) -> pd.DataFrame:
+    """
+    Finds the best actual config from a Pareto frontier DataFrame
+    that meets the target_tpot constraint (tpot <= target_tpot)
+    and maximizes 'tokens/s/gpu'.
+    Args:
+        pareto_df: The Pareto frontier DataFrame.
+        target_tpot: The target TPOT in ms.
+    Returns:
+        A DataFrame containing the best config that meets the target_tpot constraint.
+    """
+    if pareto_df is None or pareto_df.empty:
+        return pd.DataFrame()
+
+    # Ensure 'tpot' and 'tokens/s/gpu' columns exist
+    if 'tpot' not in pareto_df.columns or 'tokens/s/gpu' not in pareto_df.columns:
+        logger.warning("Pareto DataFrame for _get_best_config_under_tpot_constraint is missing 'tpot' or 'tokens/s/gpu' columns.")
+        return pd.DataFrame()
+
+    candidate_configs = pareto_df[pareto_df['tpot'] <= target_tpot].copy()
+    
+    if not candidate_configs.empty:
+        # compute achieved cluster-scale tokens/s/gpu
+        candidate_configs['tokens/s/gpu_cluster'] = candidate_configs['tokens/s/gpu'] * \
+            (total_gpus // candidate_configs['num_total_gpus']) * candidate_configs['num_total_gpus'] / total_gpus
+        candidate_configs = candidate_configs.sort_values(by='tokens/s/gpu_cluster', ascending=False)
+        logger.debug(f"actual replica-level throughputs: {candidate_configs['tokens/s/gpu'].iloc[0]:.2f} vs. actual cluster-level throughputs: {candidate_configs['tokens/s/gpu_cluster'].iloc[0]:.2f}")        
+        return candidate_configs.head(1)
+    else:
+        # No config meets tpot <= target_tpot.
+        # Optionally, one could return the one closest to target_tpot if no strict candidates exist.
+        # For now, return empty if no config meets the criteria.
+        logger.info(f"No config found on Pareto front with TPOT <= {target_tpot}ms.")
+        return pd.DataFrame()
 
 if __name__ == '__main__':
 

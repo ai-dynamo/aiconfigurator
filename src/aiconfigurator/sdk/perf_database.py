@@ -24,6 +24,40 @@ def get_system_config_path():
     return pkg_resources.files('aiconfigurator') / 'systems'
 
 
+def get_supported_databases(systems_dir: str = get_system_config_path()) -> Dict[str, Dict[str, List[str]]]:
+    """
+    Get all supported databases for all systems, backends and versions without loading them.
+    """
+    supported_dict = defaultdict(lambda: defaultdict(list))
+    if not os.path.isdir(systems_dir):
+        logger.warning(f"Systems directory not found: {systems_dir}")
+        return supported_dict
+
+    system_yamls = [f for f in os.listdir(systems_dir) if f.endswith('.yaml') and os.path.isfile(os.path.join(systems_dir, f))]
+    for system_yaml in system_yamls:
+        system = system_yaml.split('.')[0]
+        try:
+            with open(os.path.join(systems_dir, system_yaml), 'r') as f:
+                system_spec = yaml.safe_load(f)
+            
+            data_dir = os.path.join(systems_dir, system_spec.get('data_dir', ''))
+            if not os.path.isdir(data_dir):
+                continue
+                
+            for backend in common.BackendName:
+                backend_path = os.path.join(data_dir, backend.value)
+                if not os.path.isdir(backend_path):
+                    continue
+                
+                versions = sorted([v for v in os.listdir(backend_path) if not v.startswith('.') and os.path.isdir(os.path.join(backend_path, v))])
+                if versions:
+                    supported_dict[system][backend.value] = versions
+        except Exception as e:
+            logger.warning(f"Could not process system config {system_yaml}: {e}")
+            
+    return supported_dict
+
+
 def get_latest_database_version(system : str,
                                 backend : str, 
                                 ) -> Optional[str]:
@@ -32,9 +66,9 @@ def get_latest_database_version(system : str,
     """
     import re
     
-    database_dict = get_all_databases()
+    supported_databases = get_supported_databases()
     try:
-        database_versions = list(database_dict[system][backend].keys())
+        database_versions = supported_databases[system][backend]
     except KeyError:
         logger.error(f"database not found for {system=}, {backend=}")
         return None
@@ -101,13 +135,14 @@ def get_latest_database_version(system : str,
         logger.error(f"no valid versions parsed for {system=}, {backend=}")
         return None
     
-    # Find the latest version by comparing version tuples
-    # Sort by version parts, latest version will be last
+    # Find the latest version by comparing version tuples.
+    # The tuple format (major, minor, patch, is_stable, rc_num) ensures
+    # correct sorting across stable and RC releases.
     latest_version = max(versions_ids, key=lambda x: x[0])
+    
     logger.debug(f"Latest version for {system}/{backend}: {latest_version[1]} (parsed as {latest_version[0]})")
     return latest_version[1]
     
-
 
 def get_database(system : str,
                  backend : str, 
