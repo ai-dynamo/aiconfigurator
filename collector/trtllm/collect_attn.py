@@ -236,13 +236,14 @@ def get_context_attention_test_cases():
     has_fp8 = getSMVersion() > 86
     test_cases = []
     b_list = [1,2,4,8,16,32,64,128,256]
-    s_list = [16,32,64,128,256,512,1024,1536,2048,3072,4096,6144,8192,10240,12288,16384,262144]
+    # s_list = [16,32,64,128,256,512,1024,1536,2048,3072,4096,6144,8192,10240,12288,16384,262144]
+    s_list = [16,32,64,128,256,512,1024,1536,2048]
     n_list = [4,8,12,16,24,32,40,48,64,96]
     # n_list = [4]
-    n_kv_list = [0,1,2,4,8]
-    # n_kv_list = [8]
-    head_dim = [64,128]
-    # head_dim = [64]
+    # n_kv_list = [0,1,2,4,8]
+    n_kv_list = [8]
+    # head_dim = [64,128]
+    head_dim = [64]
 
     for h in head_dim:
         for n in sorted(n_list, reverse=True):
@@ -296,8 +297,8 @@ def get_generation_attention_test_cases():
     # full n {4, 5, 7, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96}
     n_list = [4,8,12,16,24,32,40,48,64]
     # n_list = [64]
-    # n_list_xqa = [4,8,16,32,64,96,128]
-    n_list_xqa = [4,8,16,32,64]
+    n_list_xqa = [4,8,16,32,64,96,128]
+    # n_list_xqa = [4,8,16,32,64]
     n_kv_list = [1,2,4,8]
     # n_kv_list = [8]
     # head_dim = [64,128]

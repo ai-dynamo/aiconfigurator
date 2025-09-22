@@ -67,7 +67,6 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         # Get test cases
         test_cases = get_test_cases_func()
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
-        
         # Run collection
         errors = parallel_run(test_cases, run_func, num_processes, full_name)
         
@@ -240,96 +239,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     
     # Wait for processes
     for p in processes:
-<<<<<<< HEAD
-        p.join()
-
-def collect_trtllm(num_processes : int):
-    """
-    Collect performance data for TensorRT LLM.
-    """
-
-
-    os.environ['TLLM_LOG_LEVEL']= 'ERROR'
-    os.environ['TRTLLM_DG_ENABLED'] = "1" # enable deepgemm by default
-    try:
-        import tensorrt_llm
-        version = tensorrt_llm.__version__
-    except:
-        logger.error("TensorRT LLM is not installed. Please install it from https://github.com/NVIDIA/TensorRT-LLM")
-        return
-
-    # keep this to collect pre-hopper kernels for now.
-    try:
-        import trtllm.collect_gemm_trt
-        test_cases = trtllm.collect_gemm_trt.get_gemm_test_cases()
-        parallel_run(test_cases, trtllm.collect_gemm_trt.run_gemm, num_processes)
-        logger.info(f"collected gemm_trt test cases for TensorRT LLM {version}")
-    except:
-        logger.warning("cannot collect gemm_trt test cases, skipping...")
-
-    # only float16, fp8 and fp8_block
-    try:
-        import trtllm.collect_gemm
-        test_cases = trtllm.collect_gemm.get_gemm_test_cases()
-        parallel_run(test_cases, trtllm.collect_gemm.run_gemm, num_processes)
-        logger.info(f"collected gemm test cases for TensorRT LLM {version}")
-    except:
-        logger.warning("cannot collect gemm test cases, skipping...")
-
-    try:
-        import trtllm.collect_mla
-        test_cases = trtllm.collect_mla.get_context_mla_test_cases()
-        if version.startswith('1.1'):
-            import trtllm.collect_mla_1_1rc2
-            parallel_run(test_cases, trtllm.collect_mla_1_1rc2.run_mla, num_processes)
-        else:
-            parallel_run(test_cases, trtllm.collect_mla.run_mla, num_processes)
-        logger.info(f"collected mla test cases for TensorRT LLM {version}")
-        
-        test_cases = trtllm.collect_mla.get_generation_mla_test_cases()
-        if version.startswith('1.1'):
-            parallel_run(test_cases, trtllm.collect_mla_1_1rc2.run_mla, num_processes)
-        else:
-            parallel_run(test_cases, trtllm.collect_mla.run_mla, num_processes)
-        logger.info(f"collected mla test cases for TensorRT LLM {version}")        
-    except:
-        logger.warning("cannot collect mla test cases, skipping...")
-
-    try:
-        if version.startswith('0.20.0'):
-            import trtllm.collect_moe_pre_0_20 as collect_moe
-        elif version.startswith('0.21.0') or version.startswith('1.0.0') or version.startswith('1.1.0'):
-            import trtllm.collect_moe as collect_moe
-        else:
-            raise ValueError(f"cannot collect moe test cases for TensorRT LLM {version}, skipping...")
-        test_cases = collect_moe.get_moe_test_cases()
-        parallel_run(test_cases, collect_moe.run_moe_torch, num_processes)
-        logger.info(f"collected moe test cases for TensorRT LLM {version}")
-    except:
-        logger.warning("cannot collect moe test cases, skipping...")
-
-    try:
-        import trtllm.collect_mla_bmm
-        test_cases = trtllm.collect_mla_bmm.get_mla_gen_pre_test_cases()
-        parallel_run(test_cases, trtllm.collect_mla_bmm.run_mla_gen_pre, num_processes)
-        logger.info(f"collected mla_bmm test cases for TensorRT LLM {version}")
-        test_cases = trtllm.collect_mla_bmm.get_mla_gen_post_test_cases()
-        parallel_run(test_cases, trtllm.collect_mla_bmm.run_mla_gen_post, num_processes)
-        logger.info(f"collected mla_bmm test cases for TensorRT LLM {version}")        
-    except:
-        logger.warning("cannot collect mla_bmm test cases, skipping...")
-
-    try:
-        import trtllm.collect_attn
-        test_cases = trtllm.collect_attn.get_context_attention_test_cases()
-        parallel_run(test_cases, trtllm.collect_attn.run_attention_torch, num_processes)
-        logger.info(f"collected attention test cases for TensorRT LLM {version}")
-        test_cases = trtllm.collect_attn.get_generation_attention_test_cases()
-        parallel_run(test_cases, trtllm.collect_attn.run_attention_torch, num_processes)
-        logger.info(f"collected attention test cases for TensorRT LLM {version}")        
-    except:
-        logger.warning("cannot collect attention test cases, skipping...")
-=======
         p.join(timeout=10)
         if p.is_alive():
             logger.warning(f"Process {p.pid} did not terminate, forcing...")
@@ -337,15 +246,15 @@ def collect_trtllm(num_processes : int):
     
     # Log summary
     if errors:
+        log_dir = os.environ.get('COLLECTOR_LOG_DIR', '')
         logger.error(f"{module_name}: Completed with {len(errors)} errors")
-        error_file = f'errors_{module_name}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
+        error_file = f'{log_dir}/errors_{module_name}.json'
         save_error_report(errors, error_file)
         logger.error(f"Error details saved to {error_file}")
     else:
         logger.info(f"{module_name}: Completed successfully with no errors")
     
     return errors
->>>>>>> 9eb2bfc (update data collections)
 
 def collect_sglang():
     pass
@@ -397,6 +306,7 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
             with contextlib.redirect_stdout(_null), contextlib.redirect_stderr(_null):
                 import tensorrt_llm
         version = tensorrt_llm.__version__
+        # version = '1.1.0'
         logger.info(f"TensorRT LLM version: {version}")
     except:
         logger.error("TensorRT LLM is not installed")
@@ -426,14 +336,18 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
             'type': 'mla_context',
             'module': 'trtllm.collect_mla',
             'get_func': 'get_context_mla_test_cases',
-            'run_func': 'run_mla'
+            'run_func': 'run_mla',
+            'version_handler': lambda v: 'trtllm.collect_mla_1_1rc2' if v.startswith('1.1')
+                                        else 'trtllm.collect_mla'
         },
         {
             'name': 'trtllm',
             'type': 'mla_generation',
             'module': 'trtllm.collect_mla',
             'get_func': 'get_generation_mla_test_cases',
-            'run_func': 'run_mla'
+            'run_func': 'run_mla',
+            'version_handler': lambda v: 'trtllm.collect_mla_1_1rc2' if v.startswith('1.1')
+                                        else 'trtllm.collect_mla'
         },
         
         # Attention collections - separate entries for context and generation
@@ -494,9 +408,13 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
             else:
                 module_name = collection['module']
             
-            module = __import__(module_name, fromlist=[collection['get_func'], collection['run_func']])
-            get_func = getattr(module, collection['get_func'])
-            run_func = getattr(module, collection['run_func'])
+            get_module = __import__(module_name if collection['module'] else collection['module'], 
+                                    fromlist=[collection['get_func']])
+            # print(get_module)
+            run_module = __import__(module_name, fromlist=[collection['run_func']])
+            
+            get_func = getattr(get_module, collection['get_func'])
+            run_func = getattr(run_module, collection['run_func'])
             
             errors = collect_module_safe(
                 collection['name'],
