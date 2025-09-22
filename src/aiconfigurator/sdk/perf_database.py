@@ -481,6 +481,7 @@ class PerfDatabase(object):
             for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
                 for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
                     for window_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size]:
+                        print(f"kv_type:{kv_cache_dtype}, num_kv_heads:{num_kv_heads}, head_size:{head_size}, window_size:{window_size}******************")
                         target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
                         target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
                         target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
@@ -820,7 +821,8 @@ class PerfDatabase(object):
                 attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][0]
             else:
                 attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv]
-
+            print(f"fmha_quant_mode:{fmha_quant_mode}, kvcache_quant_mode:{kvcache_quant_mode}, n_kv:{n_kv}**************************************")
+            print(f"attention_dict:{attention_dict}********************************")
             latency = self._interp_3d(n, s, b, attention_dict, 'cubic')
             return latency
     

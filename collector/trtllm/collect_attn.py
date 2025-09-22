@@ -238,9 +238,11 @@ def get_context_attention_test_cases():
     b_list = [1,2,4,8,16,32,64,128,256]
     s_list = [16,32,64,128,256,512,1024,1536,2048,3072,4096,6144,8192,10240,12288,16384,262144]
     n_list = [4,8,12,16,24,32,40,48,64,96]
-    # n_kv_list = [0,1,2,4,8]
-    n_kv_list = [8]
+    # n_list = [4]
+    n_kv_list = [0,1,2,4,8]
+    # n_kv_list = [8]
     head_dim = [64,128]
+    # head_dim = [64]
 
     for h in head_dim:
         for n in sorted(n_list, reverse=True):
@@ -295,52 +297,53 @@ def get_generation_attention_test_cases():
     n_list = [4,8,12,16,24,32,40,48,64]
     # n_list = [64]
     # n_list_xqa = [4,8,16,32,64,96,128]
-    n_list_xqa = [64]
-    # n_kv_list = [1,2,4,8]
-    n_kv_list = [8]
-    head_dim = [64,128]
+    n_list_xqa = [4,8,16,32,64]
+    n_kv_list = [1,2,4,8]
+    # n_kv_list = [8]
+    # head_dim = [64,128]
+    head_dim = [64]
 
-    # MHA
-    max_bsn = 8192*1024 #2*1024*1024*1024/128/2 INT32MAX/128/2
-    max_bsn_largeb = max_bsn//2
-    for n in sorted(n_list, reverse=True):
-        b_s_dict = {}
-        s_b_dict = {}        
-        for s in s_list:
-            max_b = max_bsn // s // n # b*s*n*byte <= max_bsn
-            for b in b_list:
-                if b > max_b:
-                    break
-                if s not in s_b_dict.keys():
-                    s_b_dict[s] = {b}
-                else:
-                    s_b_dict[s].add(b)
-        for s, b_set in s_b_dict.items():
-            if len(b_set) < 4:
-                continue
-            for b in b_set:
-                if b not in b_s_dict.keys():
-                    b_s_dict[b] = {s-1}
-                b_s_dict[b].add(s-1)
-        for h in head_dim:
-            for b, s_list_limited in b_s_dict.items():
-                target_s_list = sorted(s_list_limited)
-                if b >= 256:
-                    target_s_list = target_s_list[:-1]
-                #print(f'collecting MHA heads: {n} batchsize: {b}  steps: {s_list_limited}')
-                # fp8 kv cache, fp8 context fmha, is_context_phase
-                for s in target_s_list:
-                    if getSMVersion() >= 100: 
-                        # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
-                        if n >= 32 and n % 32 != 0:
-                            continue
+    # # MHA
+    # max_bsn = 8192*1024 #2*1024*1024*1024/128/2 INT32MAX/128/2
+    # max_bsn_largeb = max_bsn//2
+    # for n in sorted(n_list, reverse=True):
+    #     b_s_dict = {}
+    #     s_b_dict = {}        
+    #     for s in s_list:
+    #         max_b = max_bsn // s // n # b*s*n*byte <= max_bsn
+    #         for b in b_list:
+    #             if b > max_b:
+    #                 break
+    #             if s not in s_b_dict.keys():
+    #                 s_b_dict[s] = {b}
+    #             else:
+    #                 s_b_dict[s].add(b)
+    #     for s, b_set in s_b_dict.items():
+    #         if len(b_set) < 4:
+    #             continue
+    #         for b in b_set:
+    #             if b not in b_s_dict.keys():
+    #                 b_s_dict[b] = {s-1}
+    #             b_s_dict[b].add(s-1)
+    #     for h in head_dim:
+    #         for b, s_list_limited in b_s_dict.items():
+    #             target_s_list = sorted(s_list_limited)
+    #             if b >= 256:
+    #                 target_s_list = target_s_list[:-1]
+    #             #print(f'collecting MHA heads: {n} batchsize: {b}  steps: {s_list_limited}')
+    #             # fp8 kv cache, fp8 context fmha, is_context_phase
+    #             for s in target_s_list:
+    #                 if getSMVersion() >= 100: 
+    #                     # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
+    #                     if n >= 32 and n % 32 != 0:
+    #                         continue
 
-                    test_cases.append([b, s, n, n, h, 0, False, False, False, 'generation_attention_perf.txt'])
+    #                 test_cases.append([b, s, n, n, h, 0, False, False, False, 'generation_attention_perf.txt'])
 
-                    if has_fp8:
-                        test_cases.append([b, s, n, n, h, 0, True, False, False, 'generation_attention_perf.txt'])
-                        # currently, fp8 is not for generation compute
-                        #test_cases.append([b, s, n, n, 128, True, True, False, 'generation_attention_perf.txt'])
+    #                 if has_fp8:
+    #                     test_cases.append([b, s, n, n, h, 0, True, False, False, 'generation_attention_perf.txt'])
+    #                     # currently, fp8 is not for generation compute
+    #                     #test_cases.append([b, s, n, n, 128, True, True, False, 'generation_attention_perf.txt'])
 
     # XQA
     max_bsn = 8192*1024*2 #2*1024*1024*1024/128/2
