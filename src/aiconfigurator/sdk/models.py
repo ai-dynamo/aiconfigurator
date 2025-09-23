@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-def get_model(model_name: str, model_config: config.ModelConfig) -> BaseModel:
+def get_model(model_name: str, backend: common.BackendName, model_config: config.ModelConfig) -> BaseModel:
     """
     Get model.
     """
@@ -22,6 +22,14 @@ def get_model(model_name: str, model_config: config.ModelConfig) -> BaseModel:
 
     if model_config.overwrite_num_layers > 0:
         l = model_config.overwrite_num_layers
+
+    if backend == 'sglang':
+        if model_family == 'DEEPSEEK':
+            model = DeepSeekModel_SGLang(topk, num_experts, moe_inter_size, \
+                         model_name, model_family, l, n, n_kv, d, \
+                    hidden, inter, vocab, context, \
+                    model_config)
+        return model
 
     if model_family == 'GPT':
         model = GPTModel(model_name, model_family, l, n, n_kv, d, \
@@ -448,6 +456,130 @@ class DeepSeekModel(BaseModel):
 
         # TODO
         # a lot of quantization ops
+
+
+class DeepSeekModel_SGLang(BaseModel):
+    """
+    DeepSeek V3/R1 uses this model impl.
+    """
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+        super().__init__(*args)
+
+        # make sure the paralel width is same
+        # assert(self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size), \
+        #     f"tp_size * attention_dp_size should be equal to moe_tp_size * moe_ep_size"
+        
+        assert(num_experts >= self.config.moe_ep_size), f"ep size cannot be larger than num_experts {num_experts}"
+        # assert(self.config.tp_size * self.config.attention_dp_size <= 256), f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} should not be larger than 256"
+
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_inter_size = moe_inter_size
+
+        self._mtp_scale_factor = 1./(1+calc_expectation(self._nextn, self._nextn_accept_rates))*(self._nextn+self._num_layers)/self._num_layers
+
+        gemm_quant_mode = self.config.gemm_quant_mode
+        moe_quant_mode = self.config.moe_quant_mode
+
+        mla_bmm_quant_mode = common.GEMMQuantMode.fp8 if gemm_quant_mode != common.GEMMQuantMode.float16 else common.GEMMQuantMode.float16
+
+        h = self._hidden_size # 7168
+        tp_size = self.config.tp_size
+        moe_tp_size = self.config.moe_tp_size
+        moe_ep_size = self.config.moe_ep_size
+        attention_dp_size = self.config.attention_dp_size
+        pp_size = self.config.pp_size
+        num_kv_heads_per_GPU = self._num_kv_heads_per_GPU
+
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        fmha_quant_mode = self.config.fmha_quant_mode
+        workload_distribution = self.config.workload_distribution
+        sms = self.config.sms
+        prefill_node_num = self.config.prefill_node_num
+        decode_node_num = self.config.decode_node_num
+        prefill_attention_dp_size = prefill_moe_ep_size = prefill_node_num * 8
+        decode_attention_dp_size = decode_moe_ep_size = decode_node_num * 8
+
+        self.context_ops.extend([ops.ContextMLASglang(f'context_attention', self._num_layers, tp_size, kvcache_quant_mode, fmha_quant_mode)])
+
+        # shared moe
+        self.context_ops.extend([
+                                ops.MLP(f'context_shared_expert', self._num_layers, h, self._moe_inter_size, moe_quant_mode)
+                                ])
+
+        # # dispatch tokens to experts, pre-dispatch
+        self.context_ops.extend([
+                                ops.MoEDispatch(
+                                    f'context_moe_pre_dispatch',
+                                    self._num_layers,
+                                    h,
+                                    self._topk,
+                                    self._num_experts,
+                                    moe_tp_size,
+                                    prefill_moe_ep_size,
+                                    prefill_attention_dp_size,
+                                    True,
+                                    sms=sms,
+                                    node_num=prefill_node_num,
+                                )
+                                ])
+        
+        # moe part
+        self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, prefill_moe_ep_size, moe_quant_mode, workload_distribution, prefill_moe_ep_size, is_context=True)
+                                ])
+
+        # self.context_ops.extend([ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+        # #####generation part, only generation part is scaled by mtp_scale_factor
+        self.generation_ops.extend([ops.GenerationMLASglang(f'generation_attention', self._num_layers*self._mtp_scale_factor, tp_size, kvcache_quant_mode, fmha_quant_mode)])
+
+        # shared moe
+        self.generation_ops.extend([
+                                ops.MLP(f'generation_shared_expert', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, moe_quant_mode)
+                                ])
+        # dispatch tokens to experts, pre-dispatch
+        # self.generation_ops.extend([
+        #                         ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, True)
+        #                         ])
+   
+        # moe part
+        self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, decode_moe_ep_size, moe_quant_mode, workload_distribution, decode_moe_ep_size, is_context=False),
+                                ])
+
+        
+        # dispatch tokens to experts, post-dispatch
+        self.generation_ops.extend([
+                                ops.MoEDispatch(
+                                    f'context_moe_post_dispatch',
+                                    self._num_layers,
+                                    h,
+                                    self._topk,
+                                    self._num_experts,
+                                    moe_tp_size,
+                                    decode_moe_ep_size,
+                                    decode_attention_dp_size,
+                                    True,
+                                    sms=sms,
+                                    node_num=decode_node_num,
+                                )
+                                ])
+
+        # dispatch tokens to experts, post-dispatch
+        # self.generation_ops.extend([
+        #                         ops.MoEDispatch(f'generation_moe_post_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, False)
+        #                         ])
+
+        # self.generation_ops.extend([ops.GEMM(f'generation_logits_gemm', 1*self._mtp_scale_factor, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+
+        # when tp_size=0, the comm part will be 0
+        # self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
+        # self.context_ops.append(ops.AllReduce('context_ar_2', self._num_layers, h, tp_size))
+        # self.generation_ops.append(ops.AllReduce('generation_ar_1', self._num_layers*self._mtp_scale_factor, h, tp_size))
+        # self.generation_ops.append(ops.AllReduce('generation_ar_2', self._num_layers*self._mtp_scale_factor, h, tp_size))
+
+
+        # TODO
+        # a lot of quantization ops
+
 
 class NemotronNas(BaseModel):
     """

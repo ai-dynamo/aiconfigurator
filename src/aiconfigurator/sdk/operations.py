@@ -117,7 +117,8 @@ class MoE(Operation):
                  moe_ep_size: int, 
                  quant_mode: common.MoEQuantMode, 
                  workload_distribution: str, 
-                 attention_dp_size: int) -> None:
+                 attention_dp_size: int,
+                 is_context: bool = True) -> None:
         super().__init__(name, scale_factor)
         self._hidden_size = hidden_size
         self._inter_size = inter_size
@@ -128,6 +129,7 @@ class MoE(Operation):
         self._moe_ep_size = moe_ep_size
         self._attention_dp_size = attention_dp_size
         self._workload_distribution = workload_distribution
+        self._is_context = is_context
         self._weights = self._hidden_size*self._inter_size*self._num_experts*quant_mode.value.memory*3 // self._moe_ep_size // self._moe_tp_size # 3 for ffn1,gate,ffn2; 2 for float16
     def query(self, database:PerfDatabase, **kwargs):
         # attention dp size will scale up the total input tokens. 
@@ -142,7 +144,8 @@ class MoE(Operation):
                                  moe_tp_size=self._moe_tp_size,
                                  moe_ep_size=self._moe_ep_size, 
                                  quant_mode=quant_mode, 
-                                 workload_distribution=self._workload_distribution)*self._scale_factor
+                                 workload_distribution=self._workload_distribution,
+                                 is_context=self._is_context)*self._scale_factor*3
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -162,7 +165,8 @@ class MoEDispatch(Operation):
                  moe_ep_size: int, 
                  attention_dp_size: int,
                  pre_dispatch: bool,
-                 enable_fp4_all2all: bool = True) -> None:
+                 enable_fp4_all2all: bool = True,
+                 **kwargs) -> None:
         super().__init__(name, scale_factor)
         self._hidden_size = hidden_size
         self._topk = topk
@@ -175,12 +179,15 @@ class MoEDispatch(Operation):
         self._pre_dispatch = pre_dispatch
         self.num_gpus = self._moe_ep_size*self._moe_tp_size
         self._attention_tp_size = moe_tp_size*moe_ep_size // self._attention_dp_size
+        self._sms = kwargs.get('sms', 12)
+        self._node_num = kwargs.get('node_num', 1)
         
         
     def query(self, database:PerfDatabase, **kwargs):
         num_tokens = kwargs.get('x')
         volume = num_tokens * self._hidden_size
         _sm_version = database.system_spec['gpu']['sm_version']
+        is_context = kwargs.get('is_context', True)
 
         if database.backend == common.BackendName.trtllm.value:
             assert (self._attention_tp_size == 1 or self._attention_dp_size ==1), "trtllm does not support TP>1 and DP>1 for attn simultaneously"
@@ -241,7 +248,10 @@ class MoEDispatch(Operation):
         elif database.backend == common.BackendName.vllm.value:
             raise NotImplementedError("Need to implement MoE dispatch for vllm")
         else: #sglang
-            raise NotImplementedError("Need to implement MoE dispatch for sglang")
+            if is_context:
+                comm_latency = database.query_deepep_normal(node_num=self._node_num, num_tokens=num_tokens, num_experts=self._num_experts, topk=self._topk, hidden_size=self._hidden_size, sms=self._sms)
+            else:
+                comm_latency = database.query_deepep_ll(node_num=self._node_num, num_tokens=num_tokens, num_experts=self._num_experts, topk=self._topk, hidden_size=self._hidden_size)
         
         return comm_latency * self._scale_factor
 
@@ -433,7 +443,7 @@ class Embedding(Operation):
   
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
-    
+
 class ElementWise(Operation):
     """
     Element-wise operation.
@@ -459,5 +469,81 @@ class ElementWise(Operation):
         
         return database.query_mem_op(read_bytes + write_bytes) * self._scale_factor
 
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+class MLP(Operation):
+    """
+    MLP operation for DeepSeek model's shared expert.
+    This handles the gate, ffn1, and ffn2 operations in a single class.
+    """
+    def __init__(self, name: str, scale_factor: float, hidden_size: int, intermediate_size: int, quant_mode: common.GEMMQuantMode) -> None:
+        super().__init__(name, scale_factor)
+        self._hidden_size = hidden_size
+        self._intermediate_size = intermediate_size
+        self._quant_mode = quant_mode
+        self._weights = (3 * self._hidden_size * self._intermediate_size) * quant_mode.value.memory
+
+    def query(self, database:PerfDatabase, **kwargs):
+        x = kwargs.get('x')  # num_tokens
+        overwrite_quant_mode = kwargs.get('quant_mode', None)
+        quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
+        is_context = kwargs.get('is_context', True)  # Default to context mode
+        
+        return database.query_mlp(x, self._hidden_size, self._intermediate_size, quant_mode, is_context) * self._scale_factor
+     
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor    
+class GenerationMLASglang(Operation):
+    """
+    Generation MLA operation for SGLang backend.
+    This handles the MLA operations in generation/decoding mode.
+    """
+    def __init__(self, 
+                 name: str, 
+                 scale_factor: float, 
+                 tp_size: int, 
+                 kvcache_quant_mode: common.KVCacheQuantMode, 
+                 fmha_quant_mode: common.FMHAQuantMode) -> None:
+        super().__init__(name, scale_factor)
+        self._tp_size = tp_size
+        self._weights = 0.0
+        self._kvcache_quant_mode = kvcache_quant_mode
+        self._fmha_quant_mode = fmha_quant_mode
+
+    def query(self, database:PerfDatabase, **kwargs):
+        batch_size = kwargs.get('batch_size')
+        s = kwargs.get('s')
+                
+        return database.query_generation_mla_sglang(batch_size, s, self._tp_size, self._kvcache_quant_mode, self._fmha_quant_mode) * self._scale_factor
+        
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
+class ContextMLASglang(Operation):
+    """
+    Context MLA operation for SGLang backend.
+    This handles the MLA operations in context/prefill mode.
+    """
+    def __init__(self, 
+                 name: str, 
+                 scale_factor: float, 
+                 tp_size: int, 
+                 kvcache_quant_mode: common.KVCacheQuantMode, 
+                 fmha_quant_mode: common.FMHAQuantMode) -> None:
+        super().__init__(name, scale_factor)
+        self._tp_size = tp_size
+        self._weights = 0.0
+        self._kvcache_quant_mode = kvcache_quant_mode
+        self._fmha_quant_mode = fmha_quant_mode
+
+    def query(self, database:PerfDatabase, **kwargs):
+        batch_size = kwargs.get('batch_size')
+        isl = kwargs.get('s')
+
+        return database.query_context_mla_sglang(batch_size, isl, self._tp_size, self._kvcache_quant_mode, self._fmha_quant_mode) * self._scale_factor
+      
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
