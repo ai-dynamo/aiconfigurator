@@ -21,6 +21,7 @@ def run_attention_torch(batch_size,
                         num_heads,
                         num_key_value_heads, # keep same as num_heads for MHA
                         head_dim,
+                        attention_window_size,
                         use_fp8_kv_cache,
                         use_fp8_context_fmha,
                         is_context_phase,                        
@@ -151,7 +152,8 @@ def run_attention_torch(batch_size,
         num_tokens = input_len * batch_size
     else:
         num_tokens = batch_size
-
+    
+    sinks = torch.randn(num_heads, dtype=torch.float32) if head_dim == 64 else None
     q = torch.randn([num_tokens, num_heads*128]).bfloat16().to(torch.device(device))
     kv = torch.randn([num_tokens, 2*num_key_value_heads*128]).bfloat16().to(torch.device(device))
     input_qkv = torch.concat([q, kv], dim=-1)
@@ -160,6 +162,8 @@ def run_attention_torch(batch_size,
         None,
         None,
         attn_metadata,
+        attention_window_size=attention_window_size if attention_window_size>0 else None,
+        attention_sinks=sinks,
         out_scale=out_scale
     )
     out_dtype = None if not use_fp8_context_fmha else torch.float8_e4m3fn
@@ -172,6 +176,8 @@ def run_attention_torch(batch_size,
             None,
             None,
             attn_metadata,
+            attention_window_size=attention_window_size if attention_window_size>0 else None,
+            attention_sinks=sinks,
             out_scale=out_scale
         )
     # warmup
@@ -209,7 +215,8 @@ def run_attention_torch(batch_size,
                     'isl': isl,
                     'num_heads': num_heads,
                     'num_key_value_heads': num_key_value_heads,
-                    'head_dim': 128,
+                    'head_dim': head_dim,
+                    'window_size': attention_window_size,
                     'beam_width': 1,
                     'attn_dtype': dtype_str,
                     'kv_cache_dtype': kv_cache_dtype_str,                     
@@ -232,35 +239,44 @@ def get_context_attention_test_cases():
     s_list = [16,32,64,128,256,512,1024,1536,2048,3072,4096,6144,8192,10240,12288,16384,262144]
     n_list = [4,8,12,16,24,32,40,48,64,96]
     n_kv_list = [0,1,2,4,8]
-    for n in sorted(n_list, reverse=True):
-        for s in sorted(s_list, reverse=True):
-            for b in sorted(b_list, reverse=True):
-                for n_kv in n_kv_list:
-                    if n_kv != 0:
-                        if n_kv >= n or n%n_kv != 0:
-                            continue
-                    num_kv_heads = n_kv if n_kv !=0 else n
+    head_dim = [64,128]
 
-                    if num_kv_heads == n:
-                        if b*s > 65536 or b >128:
-                            continue
-                    else:
-                        if b*s > 131072:
-                            continue
-                    if b*s*num_kv_heads*128*2 >= 2147483647:
-                        continue
-                    if getSMVersion() >= 100:
-                        # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
-                        if n >= 32 and n % 32 != 0:
-                            continue
+    for h in head_dim:
+        for n in sorted(n_list, reverse=True):
+            for s in sorted(s_list, reverse=True):
+                for b in sorted(b_list, reverse=True):
+                    for n_kv in n_kv_list:
+                        if n_kv != 0:
+                            if n_kv >= n or n%n_kv != 0:
+                                continue
+                        num_kv_heads = n_kv if n_kv !=0 else n
 
-                    #print(f'collecting heads: {n} kv_heads: {num_kv_heads} seq: {s} batchsize: {b}')
-                    # use fp8 kv cache, fp8 context fmha, is_context_phase. in torch flow, int8 kvcache is not supported yet.
-                    # fp16 kv cache, fp16 context fmha, is_context_phase
-                    test_cases.append([b, s, n, num_kv_heads, 128, False, False, True, 'context_attention_perf.txt'])
-                    if has_fp8:
-                        test_cases.append([b, s, n, num_kv_heads, 128, True, False, True, 'context_attention_perf.txt'])
-                        test_cases.append([b, s, n, num_kv_heads, 128, True, True, True, 'context_attention_perf.txt'])
+                        if num_kv_heads == n:
+                            if b*s > 65536 or b >128:
+                                continue
+                        else:
+                            if b*s > 131072:
+                                continue
+                        if b*s*num_kv_heads*128*2 >= 2147483647:
+                            continue
+                        if getSMVersion() >= 100:
+                            # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
+                            if n >= 32 and n % 32 != 0:
+                                continue
+
+                        #print(f'collecting heads: {n} kv_heads: {num_kv_heads} seq: {s} batchsize: {b}')
+                        # use fp8 kv cache, fp8 context fmha, is_context_phase. in torch flow, int8 kvcache is not supported yet.
+                        # fp16 kv cache, fp16 context fmha, is_context_phase
+                        if head_dim == 64:
+                            test_cases.append([b, s, n, num_kv_heads, h, 128, False, False, True, 'context_attention_perf.txt'])
+                            if has_fp8:
+                                test_cases.append([b, s, n, num_kv_heads, h, 128, True, False, True, 'context_attention_perf.txt'])
+                                test_cases.append([b, s, n, num_kv_heads, h, 128, True, True, True, 'context_attention_perf.txt'])
+                        else:
+                            test_cases.append([b, s, n, num_kv_heads, h, 0, False, False, True, 'context_attention_perf.txt'])
+                            if has_fp8:
+                                test_cases.append([b, s, n, num_kv_heads, h, 0, True, False, True, 'context_attention_perf.txt'])
+                                test_cases.append([b, s, n, num_kv_heads, h, 0, True, True, True, 'context_attention_perf.txt'])
 
     return test_cases
 
@@ -274,10 +290,10 @@ def get_generation_attention_test_cases():
     b_list_xqa = [1,2,4,8,16,32,64,128,256,512,1024,2048]
     # the i-th token to record. 1 for context phase. mapping to osl definition
     s_list = [2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072]
-    # full n {4, 5, 7, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96}
     n_list = [4,8,12,16,24,32,40,48,64]
     n_list_xqa = [4,8,16,32,64,96,128]
     n_kv_list = [1,2,4,8]
+    head_dim = [64,128]
 
     # MHA
     max_bsn = 8192*1024 #2*1024*1024*1024/128/2 INT32MAX/128/2
@@ -301,24 +317,25 @@ def get_generation_attention_test_cases():
                 if b not in b_s_dict.keys():
                     b_s_dict[b] = {s-1}
                 b_s_dict[b].add(s-1)
+        for h in head_dim:
+            for b, s_list_limited in b_s_dict.items():
+                target_s_list = sorted(s_list_limited)
+                if b >= 256:
+                    target_s_list = target_s_list[:-1]
+                #print(f'collecting MHA heads: {n} batchsize: {b}  steps: {s_list_limited}')
+                # fp8 kv cache, fp8 context fmha, is_context_phase
+                for s in target_s_list:
+                    if getSMVersion() >= 100: 
+                        # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
+                        if n >= 32 and n % 32 != 0:
+                            continue
 
-        for b, s_list_limited in b_s_dict.items():
-            target_s_list = sorted(s_list_limited)
-            if b >= 256:
-                target_s_list = target_s_list[:-1]
-            #print(f'collecting MHA heads: {n} batchsize: {b}  steps: {s_list_limited}')
-            # fp8 kv cache, fp8 context fmha, is_context_phase
-            for s in target_s_list:
-                if getSMVersion() >= 100: 
-                     # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
-                     if n >= 32 and n % 32 != 0:
-                        continue
-                test_cases.append([b, s, n, n, 128, False, False, False, 'generation_attention_perf.txt'])
+                    test_cases.append([b, s, n, n, h, 0, False, False, False, 'generation_attention_perf.txt'])
 
-                if has_fp8:
-                    test_cases.append([b, s, n, n, 128, True, False, False, 'generation_attention_perf.txt'])
-                    # currently, fp8 is not for generation compute
-                    #test_cases.append([b, s, n, n, 128, True, True, False, 'generation_attention_perf.txt'])
+                    if has_fp8:
+                        test_cases.append([b, s, n, n, h, 0, True, False, False, 'generation_attention_perf.txt'])
+                        # currently, fp8 is not for generation compute
+                        #test_cases.append([b, s, n, n, 128, True, True, False, 'generation_attention_perf.txt'])
 
     # XQA
     max_bsn = 8192*1024*2 #2*1024*1024*1024/128/2
@@ -341,27 +358,31 @@ def get_generation_attention_test_cases():
                 if b not in b_s_dict.keys():
                     b_s_dict[b] = {s-1}
                 b_s_dict[b].add(s-1)
-
-        for b, s_list_limited in b_s_dict.items():
-            target_s_list = sorted(s_list_limited)
-            if b >= 256:
-                target_s_list = target_s_list[:-1]
-            for n_kv in n_kv_list:
-                if n_kv >= n:
-                    continue
-                
-                # fp8 kv cache, fp8 context fmha, is_context_phase
-                for s in target_s_list:
-                    if getSMVersion() >= 100: 
-                        # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
-                        if n >= 32 and n % 32 != 0:
-                            continue
-                    test_cases.append([b, s, n, n_kv, 128, False, False, False, 'generation_attention_perf.txt'])
-
-                    if has_fp8:
-                        test_cases.append([b, s, n, n_kv, 128, True, False, False, 'generation_attention_perf.txt'])
-                        # currently, fp8 is not for generation compute
-                        #test_cases.append([b, s, n, n_kv, 128, True, True, False, 'generation_attention_perf.txt'])
+        for h in head_dim:
+            for b, s_list_limited in b_s_dict.items():
+                target_s_list = sorted(s_list_limited)
+                if b >= 256:
+                    target_s_list = target_s_list[:-1]
+                for n_kv in n_kv_list:
+                    if n_kv >= n:
+                        continue
+                    
+                    # fp8 kv cache, fp8 context fmha, is_context_phase
+                    for s in target_s_list:
+                        if getSMVersion() >= 100: 
+                            # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
+                            if n >= 32 and n % 32 != 0:
+                                continue
+                        if head_dim == 64:
+                            test_cases.append([b, s, n, n_kv, h, 128, False, False, False, 'generation_attention_perf.txt'])
+                            if has_fp8:
+                                test_cases.append([b, s, n, n_kv, h, 128, True, False, False, 'generation_attention_perf.txt'])
+                                # currently, fp8 is not for generation compute
+                                #test_cases.append([b, s, n, n_kv, 128, True, True, False, 'generation_attention_perf.txt'])
+                        else:
+                            test_cases.append([b, s, n, n_kv, h, 0, False, False, False, 'generation_attention_perf.txt'])
+                            if has_fp8:
+                                test_cases.append([b, s, n, n_kv, h, 0, True, False, False, 'generation_attention_perf.txt'])
     return test_cases
 
 if __name__ == '__main__':

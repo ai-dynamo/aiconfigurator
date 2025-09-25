@@ -124,13 +124,16 @@ def get_moe_test_cases():
                   [4096,1536,8,128, 'QWEN3_235B'], # qwen3-moe, 235b-a22b
                   [6144,2560,8,160, 'QWEN3_480B'], # qwen3-moe, 480b-a35b
                   [7168,2048,8,384, 'KIMI_K2'], # kimi k2
+                  [2880,2880,4,128,'GPT_OSS_120B'],
+                  [2880,2880,4,32,'GPT_OSS_20B']
                   ]
+    
     moe_list=['float16']
 
     if getSMVersion() > 86:
         moe_list += ['fp8']
         if getSMVersion() < 100:
-           moe_list += ['w4afp8', 'fp8_block'] # though trtllm gen kernel source supports fp8_block, it only provides min-latency data. not practical
+           moe_list += ['w4afp8', 'fp8_block', 'w4a16_mxfp4'] # though trtllm gen kernel source supports fp8_block, it only provides min-latency data. not practical
     
     if getSMVersion() >= 100:
         moe_list += ['nvfp4']
@@ -142,6 +145,12 @@ def get_moe_test_cases():
         for moe_type in moe_list:
             for model_config in model_config_list:
                 hs,inter_s,topk, num_experts, model_name = model_config
+                if model_name in ['GPT_OSS_20B','GPT_OSS_120B']:
+                    if moe_type != 'w4a16_mxfp4':
+                        continue
+                else:
+                    if moe_type == 'w4a16_mxfp4':
+                        continue
                 for tp in tp_list:
                     for ep in ep_list:
                         if tp*ep != num_gpu:
@@ -178,6 +187,7 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
 
     # moe type support float16, fp8_qdq, fp8_block, w4a8, nvfp4(not implemented yet)
     dtype = torch.bfloat16
+    quant_group_size = 128
     quant_algo = None
     if moe_type == 'fp8_block':
         quant_algo = QuantAlgo.FP8_BLOCK_SCALES
@@ -190,8 +200,10 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
         dtype = torch.float8_e4m3fn
     elif moe_type == 'nvfp4':
         quant_algo = QuantAlgo.NVFP4
+    elif moe_type == 'w4a16_mxfp4':
+        quant_algo == QuantAlgo.W4A16_MXFP4
+        quant_group_size = 32
     
-    quant_group_size = 128
     if moe_type == 'nvfp4':
         quant_group_size = 16
 
@@ -214,7 +226,24 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
     model_config.mapping = mapping
     model_config.quant_config = quant_config
     model_config.moe_max_num_tokens = num_tokens_lists[-1] # to avoid multi-chunk auxi stream in cuda-graph mode.
-    model_config.moe_backend = 'cutlass' if not min_latency_mode else 'trtllm'
+    swiglu_alpha = None
+    swiglu_beta = None 
+    swiglu_limit = None
+
+    if model_name in ['GPT_OSS_120B', 'GPT_OSS_20B']:
+        # use triton backend for best performance on Hopper
+        model_config.moe_backend = 'triton'
+        swiglu_alpha = torch.tensor(
+            [1.702] * (num_experts // moe_ep_size),
+            dtype=torch.float32).cuda()
+        swiglu_beta = torch.tensor(
+            [1.0] * (num_experts // moe_ep_size),
+            dtype=torch.float32).cuda()
+        swiglu_limit = torch.tensor(
+            [7.0] * (num_experts // moe_ep_size),
+            dtype=torch.float32).cuda()
+    else:
+        model_config.moe_backend = 'cutlass' if not min_latency_mode else 'trtllm'
 
     router_logits_dtype = torch.bfloat16
     # current min_latency mode only support experts <= 256. Thus K2 will not have min_latency mode.
@@ -246,7 +275,10 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
             dtype=dtype,
             reduce_results=
             False,  # In both low latency and attention dp scenarios, create_moe needs not to do allreduce inside op.
-            model_config=model_config)
+            model_config=model_config,
+            swiglu_alpha=swiglu_alpha,
+            swiglu_beta=swiglu_beta,
+            swiglu_limit=swiglu_limit)
 
     ffn1_weights = Parameter(torch.randn(moe.w3_w1_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(dtype=moe.w3_w1_weight.dtype), requires_grad=False)
     ffn2_weights = Parameter(torch.randn(moe.w2_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(dtype=moe.w2_weight.dtype), requires_grad=False)
