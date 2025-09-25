@@ -34,66 +34,9 @@ import torch.distributed as dist
 from torch.profiler import profile, ProfilerActivity, record_function
 
 # Constants
-DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/root/fac/deepseek-v3")
+DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/home/scratch.aichenf_wwfo/scripts/deepseek-v3")
 CUDA_LAUNCH_BLOCKING=1
 TORCH_USE_CUDA_DSA=1
-
-tp_size=1
-num_head = 128/tp_size
-
-def calculate_mla_attention_flops(
-    b : int, 
-    s=None, 
-    l=None,
-    is_decode=0,
-    hidden_size = 7168,
-    q_lora_rank = 1536,
-    kv_lora_rank = 512,
-    qk_rope_head_dim = 64,
-    qk_nope_head_dim = 128, 
-    v_head_dim = 128,
-    num_head = num_head,
-):
-
-    
-    if is_decode == 1:
-        if l is None:
-            raise ValueError("在decode模式(is_decode=1)下，参数l不能为None")
-
-
-        term1 = 2 * hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim ) * b
-        term2 = 2 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b
-        term3 = 2 * num_head  * qk_nope_head_dim * kv_lora_rank * b
-        term4 = 2 * b * l * num_head * (qk_rope_head_dim + kv_lora_rank)
-        term5 = 2 * b * num_head * kv_lora_rank * v_head_dim
-        term6 = 2 * num_head * v_head_dim * hidden_size * b
-        
-        flops = term1 + term2 + term3 + term4 + term5 + term6
-        
-        return flops
-        
-    else:
-        if s is None:
-            raise ValueError("在prefill模式(is_decode=0)下，参数s不能为None")
-        
-        term1 = 2 * hidden_size * (q_lora_rank + kv_lora_rank  +qk_rope_head_dim) * b*s
-        term2 = 2 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b*s
-        term3 = 2 * kv_lora_rank * num_head * (qk_nope_head_dim + v_head_dim) * b*s
-
-        term4 = 2 * num_head * (qk_nope_head_dim*2 + qk_rope_head_dim) * b * s**2
-        term5 = 2 * num_head * v_head_dim * hidden_size * b * s
-
-        flops = term1 + term2 + term3 + term4 + term5
-        
-        return flops
-
-
-def calculate_decode(b, l):
-    return calculate_mla_attention_flops(b, l=l, is_decode=1)
-
-
-def calculate_prefill(b, s):
-    return calculate_mla_attention_flops(b, s=s, is_decode=0)
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +71,6 @@ class BenchResult:
     max_time_ms: float
     std_time_ms: float
     num_iterations: int = 10
-    flops: Optional[float] = None  # Total FLOPs
-    tflops_per_sec: Optional[float] = None  # Achieved TFLOPS/s
 
 
 def get_attention_backend_info(model_runner: ModelRunner) -> str:
@@ -193,16 +134,16 @@ def getSMVersion():
 def get_context_attention_test_cases():
     """Get test cases for context attention - only b and s dimensions"""
     test_cases = []
-    b_list = [1,2,3,4,5,6,7, 8]
-    s_list = [2048]
-    b_list = [1]
-    s_list = [128]
+    b_list = [1,2,3,4,5,6,8,16,32,64,128,256,512,1024]
+    s_list = [ 16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072]
+    # b_list = [1]
+    # s_list = [128]
 
     for b in sorted(b_list):
         for s in sorted(s_list):
             # Simple memory limit check
-            # if b * s > 131072*2:
-            #     continue
+            if b * s > 1024*2048 * 8:
+                continue
             
             # Add test cases with only b and s
             test_cases.append([b, s])
@@ -215,17 +156,14 @@ def get_generation_attention_test_cases():
     test_cases = []
 
     # Generation parameters - only b and s dimensions
-    b_list = [128]
-    s_list = [1024]
-
-    # b_list = [8]
-    # s_list = [4096]
+    b_list = [1,2,3,4,5,6,8,16,32,64,128,256,512,1024]
+    s_list = [16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072]
 
     # Simple b and s combination test cases
     for b in sorted(b_list):
         for s in sorted(s_list):
             # Simple memory limit check
-            if b * s > 8192 * 1024 * 4:
+            if b * s > 8192 * 1024 * 8:
                 continue
             
             test_cases.append([b, s])
@@ -260,7 +198,7 @@ def load_model_runner(config: BenchConfig, tp_rank: int = 0) -> Tuple[ModelRunne
         load_format=load_format,
         tp_size=1,
         trust_remote_code=True,
-        mem_fraction_static=0.7,
+        mem_fraction_static=0.5,
         disable_radix_cache=True,
     )
     
@@ -287,7 +225,7 @@ def load_model_runner(config: BenchConfig, tp_rank: int = 0) -> Tuple[ModelRunne
     # Create model runner
     model_runner = ModelRunner(
         model_config=model_config,
-        mem_fraction_static=0.7,
+        mem_fraction_static=0.5,
         gpu_id=tp_rank,
         tp_rank=tp_rank,
         tp_size=server_args.tp_size,
@@ -338,19 +276,11 @@ def benchmark_attention_module(
     print("\nMLA Architecture Parameters:")
     for k, v in mla_params.items():
         print(f"  {k}: {v}")
-    
-    # Test Prefill Phase
-    print("\n" + "="*50)
-    print("PREFILL PHASE BENCHMARKING")
-    print("Using direct execution (no CUDA graph) for prefill testing...")
-    print("="*50)
+
     
     for batch_size in config.batch_sizes:
         for seq_length in config.seq_lengths:
             print(f"\nPrefill: batch_size={batch_size}, seq_length={seq_length}")
-            
-            # Calculate FLOPs for this configuration
-            flops = calculate_prefill(batch_size, seq_length)
             
             try:
                 # Create requests for prefill
@@ -377,6 +307,7 @@ def benchmark_attention_module(
                     model_config=model_runner.model_config,
                     enable_overlap=False,
                     spec_algorithm=SpeculativeAlgorithm.NONE,
+                    enable_custom_logit_processor=False  # 新增参数
                 )
                 batch.prepare_for_extend()
                 model_worker_batch = batch.get_model_worker_batch()
@@ -403,68 +334,37 @@ def benchmark_attention_module(
                 current_backend = get_attention_backend_info(model_runner)
                 print(f"  Using direct execution for prefill phase with backend: {current_backend}")
                 
-                if use_cuda_graph:
-                    # CUDA Graph capture for prefill
-                    g = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(g):
-                        with torch.no_grad():
-                            _ = attention_module(
-                                positions=positions,
-                                hidden_states=hidden_states,
-                                forward_batch=forward_batch,
-                                zero_allocator=zero_allocator
-                            )
-                    
-                    # Warmup with CUDA graph
-                    for _ in range(config.num_warmup):
-                        g.replay()
-                    
-                    # Timing with CUDA graph
+                for _ in range(config.num_warmup):
+                    with torch.no_grad():
+                        _ = attention_module(
+                            positions=positions,
+                            hidden_states=hidden_states,
+                            forward_batch=forward_batch,
+                            zero_allocator=zero_allocator
+                        )
+                
+                # Timing with direct execution
+                cuda_times = []
+                for _ in range(config.num_iterations):
                     start_event = torch.cuda.Event(enable_timing=True)
                     end_event = torch.cuda.Event(enable_timing=True)
                     start_event.record()
-                    for _ in range(config.num_iterations):
-                        g.replay()
+                    with torch.no_grad():
+                        _ = attention_module(
+                            positions=positions,
+                            hidden_states=hidden_states,
+                            forward_batch=forward_batch,
+                            zero_allocator=zero_allocator
+                        )
                     end_event.record()
                     torch.cuda.synchronize()
-                    
-                    # Calculate timing
-                    avg_cuda_time = start_event.elapsed_time(end_event) / config.num_iterations
-                    cuda_times = [avg_cuda_time] * config.num_iterations  # For compatibility with existing code
-                else:
-                    # Direct execution without CUDA graph
-                    # Warmup
-                    for _ in range(config.num_warmup):
-                        with torch.no_grad():
-                            _ = attention_module(
-                                positions=positions,
-                                hidden_states=hidden_states,
-                                forward_batch=forward_batch,
-                                zero_allocator=zero_allocator
-                            )
-                    
-                    # Timing with direct execution
-                    cuda_times = []
-                    for _ in range(config.num_iterations):
-                        start_event = torch.cuda.Event(enable_timing=True)
-                        end_event = torch.cuda.Event(enable_timing=True)
-                        start_event.record()
-                        with torch.no_grad():
-                            _ = attention_module(
-                                positions=positions,
-                                hidden_states=hidden_states,
-                                forward_batch=forward_batch,
-                                zero_allocator=zero_allocator
-                            )
-                        end_event.record()
-                        torch.cuda.synchronize()
-                        cuda_times.append(start_event.elapsed_time(end_event))
-                    
-                    avg_cuda_time = np.mean(cuda_times)
+                    cuda_times.append(start_event.elapsed_time(end_event))
+                
+                avg_cuda_time = np.mean(cuda_times)
                 
                 # Profiler for detailed performance analysis (optional)
                 if config.enable_profiler:
-                    profiler_output_dir = "/root/fac/llm-pet/profiler_output"
+                    profiler_output_dir = "/root/fac/aiconfigurator/profiler_output"
                     try:
                         os.makedirs(profiler_output_dir, exist_ok=True)
                         profiler_trace_path = os.path.join(
@@ -506,7 +406,6 @@ def benchmark_attention_module(
                 
                 # Calculate performance metrics using CUDA Events timing
                 avg_time_ms = np.mean(cuda_times)
-                tflops_per_sec = (flops / 1e12) / (avg_time_ms / 1000)  # TFLOPS/s
                 
                 # Record results
                 result = BenchResult(
@@ -517,15 +416,12 @@ def benchmark_attention_module(
                     min_time_ms=np.min(cuda_times),
                     max_time_ms=np.max(cuda_times),
                     std_time_ms=np.std(cuda_times),
-                    num_iterations=config.num_iterations,
-                    flops=flops,
-                    tflops_per_sec=tflops_per_sec
+                    num_iterations=config.num_iterations
                 )
                 results.append(result)
                 
                 print(f"  Prefill attention time: {result.avg_time_ms:.3f} ms "
                         f"(min: {result.min_time_ms:.3f}, max: {result.max_time_ms:.3f}, std: {result.std_time_ms:.3f})")
-                print(f"  FLOPs: {flops/1e9:.2f} GFLOPs, Performance: {tflops_per_sec:.2f} TFLOPS/s")
                 
                 # Clean up
                 model_runner.req_to_token_pool.clear()
@@ -538,28 +434,15 @@ def benchmark_attention_module(
                 print(f"  Skipping this configuration...")
                 continue
     
-    # Test Decode Phase
-    print("\n" + "="*50)
-    print("DECODE PHASE BENCHMARKING")
-    print("="*50)
-    
-    # For decode phase, always use CUDA graph for optimal performance
-    print("Using CUDA graph for decode testing...")
-    
-    # Decode phase will use CUDA graph capture and replay
-    
-    # Use the same attention module
+   
+    # Decode phase will use CUDA graph capture and replay 
     attention_module_decode = attention_module
     
     for batch_size in config.decode_batch_sizes:
         for kv_length in config.decode_kv_lengths:
             print(f"\nDecode: batch_size={batch_size}, kv_cache_length={kv_length}")
-            # Calculate FLOPs for decode
-            flops = calculate_decode(batch_size, kv_length)
             
             try:
-                    # First run a full forward pass to initialize KV cache properly
-                    # Create requests with the KV cache length
                 reqs = []
                 for i in range(batch_size):
                     req = Req(
@@ -585,6 +468,7 @@ def benchmark_attention_module(
                     model_config=model_runner.model_config,
                     enable_overlap=False,
                     spec_algorithm=SpeculativeAlgorithm.NONE,
+                    enable_custom_logit_processor=False  # 新增参数
                 )
 
                 batch.prepare_for_extend()
@@ -638,7 +522,7 @@ def benchmark_attention_module(
                 
                 # Profiler for detailed performance analysis (optional)
                 if config.enable_profiler:
-                    profiler_output_dir = "/root/fac/llm-pet/profiler_output"
+                    profiler_output_dir = "/root/fac/aiconfigurator/profiler_output"
                     try:
                         os.makedirs(profiler_output_dir, exist_ok=True)
                         profiler_trace_path = os.path.join(
@@ -670,7 +554,6 @@ def benchmark_attention_module(
                 torch.cuda.empty_cache()
                 # Calculate performance metrics using CUDA graph timing
                 avg_time_ms = avg_cuda_time
-                tflops_per_sec = (flops / 1e12) / (avg_time_ms / 1000)  # TFLOPS/s
                 
                 # Record results
                 result = BenchResult(
@@ -681,15 +564,12 @@ def benchmark_attention_module(
                     min_time_ms=avg_cuda_time,  # Single value from CUDA graph
                     max_time_ms=avg_cuda_time,  # Single value from CUDA graph
                     std_time_ms=0.0,           # No variation in CUDA graph timing
-                    num_iterations=config.num_iterations,
-                    flops=flops,
-                    tflops_per_sec=tflops_per_sec
+                    num_iterations=config.num_iterations
                 )
                 results.append(result)
                 
                 print(f"  Decode attention time: {result.avg_time_ms:.3f} ms "
                         f"(min: {result.min_time_ms:.3f}, max: {result.max_time_ms:.3f}, std: {result.std_time_ms:.3f})")
-                print(f"  FLOPs: {flops/1e9:.2f} GFLOPs, Performance: {tflops_per_sec:.2f} TFLOPS/s")
                 
                 # Clean up
                 model_runner.req_to_token_pool.clear()
@@ -706,96 +586,106 @@ def benchmark_attention_module(
     return results
 
 
-def save_results(results: List[BenchResult], output_path: str, attention_backend: str = "auto"):
-    """Save results to JSON file in TRTLLM format"""
+def get_gpu_device_name():
+    """Get the actual GPU device name"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(0)
+            # Map common device names to standardized names
+            if "H20" in device_name:
+                return "NVIDIA H20"
+            elif "A100" in device_name:
+                return "NVIDIA A100"
+            elif "V100" in device_name:
+                return "NVIDIA V100"
+            elif "RTX" in device_name:
+                return f"NVIDIA {device_name}"
+            else:
+                return f"NVIDIA {device_name}"
+        else:
+            return "NVIDIA H20"  # Default fallback
+    except:
+        return "NVIDIA H20"  # Default fallback
+
+
+def save_results(results: List[BenchResult], output_path: str, attention_backend: str = "auto", model_runner=None):
+    """Save results to separate CSV files for prefill and decode phases"""
+    
+    # Get device info
+    device_name = get_gpu_device_name()
+    attention_module = model_runner.model.model.layers[0].self_attn
+    actual_num_heads = attention_module.num_heads
+    
+    tp_size = 128 // actual_num_heads if actual_num_heads > 0 else 1
+    mla_dtype = "fp8" 
+    kv_cache_dtype = "fp8"  
+    num_heads = 128
+    
+    print(f"  Calculated tp_size: {tp_size}")
+    print(f"  Output num_heads: {num_heads}")
     
     # Group results by phase
     prefill_results = [r for r in results if r.phase == "prefill"]
     decode_results = [r for r in results if r.phase == "decode"]
     
-    # Format for TRTLLM
-    output_data = {
-        "model": "deepseek_v3",
-        "module": "attention",
-        "attention_backend": attention_backend,
-        "results": {
-            "prefill": {},
-            "decode": {}
-        }
-    }
+    # Determine kernel_source based on attention backend
+    kernel_source = attention_backend if attention_backend != "auto" else "flashinfer"
     
-    # Process prefill results
-    for result in prefill_results:
-        key = f"batch{result.batch_size}_seq{result.seq_length}"
-        result_dict = {
-            "avg_ms": result.avg_time_ms,
-            "min_ms": result.min_time_ms,
-            "max_ms": result.max_time_ms,
-            "std_ms": result.std_time_ms
-        }
+    context_output_path = os.path.join(output_path, "context_mla_perf.txt")
+    generation_output_path = os.path.join(output_path, "generation_mla_perf.txt")
+    
+    # Save prefill results to context_mla_perf.txt
+    if prefill_results:
+        file_exists = os.path.exists(context_output_path)
         
-        # Add FLOP metrics if available
-        if result.flops is not None:
-            result_dict.update({
-                "flops": result.flops,
-                "gflops": result.flops / 1e9,
-                "tflops_per_sec": result.tflops_per_sec
-            })
+        with open(context_output_path, 'a' if file_exists else 'w') as f:
+            # Write header only if file doesn't exist
+            if not file_exists:
+                f.write("framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,tp_size,step,latency\n")
+            
+            for result in prefill_results:
+                op_name = "mla_context"
+                isl = result.seq_length
+                step = 0
+                f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{mla_dtype},{kv_cache_dtype},{num_heads},{result.batch_size},{isl},{tp_size},{step},{result.avg_time_ms}\n")
         
-        output_data["results"]["prefill"][key] = result_dict
+        if file_exists:
+            print(f"\nPrefill results appended to {context_output_path}")
+        else:
+            print(f"\nPrefill results saved to {context_output_path}")
     
-    # Process decode results  
-    for result in decode_results:
-        key = f"batch{result.batch_size}_seq{result.seq_length}"
-        result_dict = {
-            "avg_ms": result.avg_time_ms,
-            "min_ms": result.min_time_ms,
-            "max_ms": result.max_time_ms,
-            "std_ms": result.std_time_ms
-        }
+    # Save decode results to generation_mla_perf.txt
+    if decode_results:
+        file_exists = os.path.exists(generation_output_path)
         
-        # Add FLOP metrics if available
-        if result.flops is not None:
-            result_dict.update({
-                "flops": result.flops,
-                "gflops": result.flops / 1e9,
-                "tflops_per_sec": result.tflops_per_sec
-            })
+        with open(generation_output_path, 'a' if file_exists else 'w') as f:
+            if not file_exists:
+                f.write("framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,tp_size,step,latency\n")
+
+            for result in decode_results:
+                op_name = "mla_generation" 
+                isl = result.seq_length
+                step = 0
+                f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{mla_dtype},{kv_cache_dtype},{num_heads},{result.batch_size},{isl},{tp_size},{step},{result.avg_time_ms}\n")
         
-        output_data["results"]["decode"][key] = result_dict
+        if file_exists:
+            print(f"\nDecode results appended to {generation_output_path}")
+        else:
+            print(f"\nDecode results saved to {generation_output_path}")
     
-    # Save to file
-    with open(output_path, 'w') as f:
-        json.dump(output_data, f, indent=2)
-    
-    print(f"\nResults saved to {output_path}")
-    
-    # Print summary statistics
-    print("\n" + "="*50)
-    print("PERFORMANCE SUMMARY")
-    print("="*50)
     
     if prefill_results:
         print("\nPrefill Performance:")
         for result in prefill_results:
-            if result.flops is not None and result.tflops_per_sec is not None:
-                print(f"  Batch {result.batch_size}, Seq {result.seq_length}: "
-                      f"{result.tflops_per_sec:.2f} TFLOPS/s "
-                      f"({result.flops/1e9:.2f} GFLOPs in {result.avg_time_ms:.3f} ms)")
-            else:
-                print(f"  Batch {result.batch_size}, Seq {result.seq_length}: "
-                      f"{result.avg_time_ms:.3f} ms (FLOPs not calculated)")
+            print(f"  Batch {result.batch_size}, Seq {result.seq_length}: "
+                  f"{result.avg_time_ms:.3f} ms")
     
     if decode_results:
         print("\nDecode Performance:")
         for result in decode_results:
-            if result.flops is not None and result.tflops_per_sec is not None:
-                print(f"  Batch {result.batch_size}, KV Cache {result.seq_length}: "
-                      f"{result.tflops_per_sec:.2f} TFLOPS/s "
-                      f"({result.flops/1e9:.2f} GFLOPs in {result.avg_time_ms:.3f} ms)")
-            else:
-                print(f"  Batch {result.batch_size}, KV Cache {result.seq_length}: "
-                      f"{result.avg_time_ms:.3f} ms (FLOPs not calculated)")
+            print(f"  Batch {result.batch_size}, KV Cache {result.seq_length}: "
+                  f"{result.avg_time_ms:.3f} ms")
 
 
 def main():
@@ -809,13 +699,13 @@ def main():
                         help="Number of warmup iterations")
     parser.add_argument("--num-iterations", type=int, default=10,
                         help="Number of benchmark iterations")
-    parser.add_argument("--output", type=str, default="/root/fac/llm-pet/attention_benchmark_results.json",
+    parser.add_argument("--output", type=str, default="/home/scratch.aichenf_wwfo/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/",
                         help="Output file for results")
     parser.add_argument("--model-path", type=str, default=DEEPSEEK_MODEL_PATH,
                         help="Model path or HuggingFace model ID")
     parser.add_argument("--dtype", type=str, default="auto",
                         help="Model dtype (auto, float16, bfloat16)")
-    parser.add_argument("--attention-backend", type=str, default="flashinfer",
+    parser.add_argument("--attention-backend", type=str, default="fa3",
                         choices=["auto", "fa3", "flashinfer", "aiter", "triton", "torch_native", "flashmla", "cutlass_mla", "intel_amx"],
                         help="Attention backend to use")
     parser.add_argument("--quick-test", action="store_true",
@@ -838,11 +728,8 @@ def main():
     if not validate_attention_backend(args.attention_backend, args.model_path):
         print("Continuing with the specified attention backend...")
     
-    # Generate output filename with attention backend info
-    if args.attention_backend != "auto":
-        output_filename = f"/root/fac/llm-pet/attention_benchmark_results_bf8b_tp1tt_{args.attention_backend}.json"
-    else:
-        output_filename = args.output
+    # Note: Results will be saved to context_mla_perf.txt and generation_mla_perf.txt
+    # The output argument is kept for compatibility but not used for the actual output files
     
     print(f"Loading model from {args.model_path}...")
     print(f"Using attention backend: {args.attention_backend}")
@@ -897,7 +784,7 @@ def main():
                     model_path=args.model_path,
                     dtype=args.dtype,
                     attention_backend=args.attention_backend,
-                    enable_profiler=True
+                    enable_profiler=False
                 )
                 
                 # Benchmark the attention module
@@ -917,10 +804,9 @@ def main():
         
         for test_case in test_cases:
             try:
-                # Create config for this test case
                 config = BenchConfig(
-                    batch_sizes=[],  # No prefill for generation tests
-                    seq_lengths=[],  # No prefill for generation tests
+                    batch_sizes=[],  
+                    seq_lengths=[], 
                     decode_batch_sizes=[test_case[0]],
                     decode_kv_lengths=[test_case[1]],
                     test_layer=args.test_layer,
@@ -929,10 +815,9 @@ def main():
                     model_path=args.model_path,
                     dtype=args.dtype,
                     attention_backend=args.attention_backend,
-                    enable_profiler=True
+                    enable_profiler=False
                 )
-                
-                # Benchmark the attention module
+
                 results = benchmark_attention_module(model_runner, config)
                 all_results.extend(results)
                 
@@ -941,7 +826,7 @@ def main():
                 continue
             
             # Save all results
-        save_results(all_results, output_filename, args.attention_backend)
+        save_results(all_results, args.output, args.attention_backend, model_runner)
     
     finally:
         # Cleanup
@@ -954,4 +839,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
