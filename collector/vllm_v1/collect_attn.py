@@ -193,7 +193,9 @@ def run_attention_torch(batch_size,
         q = torch.randn([num_tokens, num_heads, head_dim], dtype=dtype, device=device)
         k = torch.randn([num_tokens, num_key_value_heads, head_dim], dtype=dtype, device=device)
         v = torch.randn([num_tokens, num_key_value_heads, head_dim], dtype=dtype, device=device)
-        num_blocks = batch_size  
+        
+        num_blocks_per_seq = (input_len + block_size - 1) // block_size
+        num_blocks = batch_size * num_blocks_per_seq
         # Initialize KV cache - note FlashInfer shape requirements
         if use_fp8_kv_cache:
             kv_cache_dtype = torch.float8_e4m3fn  # or torch.float8_e5m2
@@ -277,7 +279,7 @@ def run_attention_torch(batch_size,
             g.replay()
         end_event.record()
         torch.cuda.synchronize()
-        latency = start_event.elapsed_time(end_event)/(test_ite*test_ite)
+        latency = start_event.elapsed_time(end_event)/test_ite
         
         isl = 1
         step = input_len
