@@ -407,11 +407,9 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
                     continue
             else:
                 module_name = collection['module']
-            print(module_name)
-            # if collection['module'] else collection['module']
+
             get_module = __import__(module_name, 
                                     fromlist=[collection['get_func']])
-            # print(get_module)
             run_module = __import__(module_name, fromlist=[collection['run_func']])
             
             get_func = getattr(get_module, collection['get_func'])
@@ -495,9 +493,10 @@ def main():
                         default=None)
     args = parser.parse_args()
     ops = args.ops
+    
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
-        logger = setup_logging(scope=args.ops, debug=args.debug)
+        logger = setup_logging(scope=args.ops if ops else ['all'], debug=args.debug)
     elif args.debug:
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
