@@ -847,6 +847,7 @@ def run_moe_benchmark(
         model_config=model_runner.model_config,
         enable_overlap=False,
         spec_algorithm=SpeculativeAlgorithm.NONE,
+        enable_custom_logit_processor=False,  
     )
     batch.prepare_for_extend()
     _maybe_prepare_mlp_sync_batch(batch, model_runner)
