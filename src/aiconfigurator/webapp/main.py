@@ -94,7 +94,7 @@ def main(args):
             EventHandler.setup_disagg_pd_ratio_events(disagg_pd_ratio_components)
         EventHandler.setup_pareto_comparison_events(pareto_comparison_components, pareto_results_state)
 
-        demo.launch(server_name=args.server_name, server_port=args.server_port)
+        demo.launch(server_name=args.server_name, server_port=args.server_port, share=True)
 
 
 if __name__ == "__main__":

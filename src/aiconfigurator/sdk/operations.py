@@ -181,6 +181,7 @@ class MoEDispatch(Operation):
         num_tokens = kwargs.get('x')
         volume = num_tokens * self._hidden_size
         _sm_version = database.system_spec['gpu']['sm_version']
+        _num_gpus_per_node = database.system_spec['node']['num_gpus_per_node']
 
         if database.backend == common.BackendName.trtllm.value:
             assert (self._attention_tp_size == 1 or self._attention_dp_size ==1), "trtllm does not support TP>1 and DP>1 for attn simultaneously"
@@ -188,7 +189,10 @@ class MoEDispatch(Operation):
                 if self._pre_dispatch:
                     if self._attention_tp_size > 1: #tp>1, use allreduce
                         # to do: custom allreduce
-                        comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                        if _num_gpus_per_node == 72 and self.num_gpus > 4: # to do: nvl72, node per gpu 
+                            comm_latency = database.query_nccl(common.CommQuantMode.half, self.num_gpus, 'all_reduce', volume)
+                        else:
+                            comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
                     elif self._attention_dp_size > 1:
                         if self._enable_fp4_all2all:
                             # Calculate all2all communication volume for nvfp4 all2all operation
@@ -211,7 +215,10 @@ class MoEDispatch(Operation):
                 else:
                     if self._attention_tp_size > 1: #tp>1, use allreduce
                         # to do: custom allreduce
-                        comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                        if _num_gpus_per_node == 72 and self.num_gpus > 4: # to do: nvl72, node per gpu 
+                            comm_latency = database.query_nccl(common.CommQuantMode.half, self.num_gpus, 'all_reduce', volume)
+                        else:
+                            comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
                     elif self._attention_dp_size > 1:
                         if self._enable_fp4_all2all:
                             # to do: nvfp4 all2all
@@ -342,10 +349,10 @@ class ContextMLA(Operation):
     def __init__(self, 
                  name: str, 
                  scale_factor: float, 
-                 tp_size: int, 
+                 num_heads: int, 
                  kvcache_quant_mode: common.KVCacheQuantMode, fmha_quant_mode: common.FMHAQuantMode) -> None:
         super().__init__(name, scale_factor)
-        self._tp_size = tp_size
+        self._num_heads = num_heads
         self._weights = 0. #2*(1536*24576/tp_size + 128/tp_size*512*128+128/tp_size*512*128) # up q, up k, up v  float16 # 104MB / tpsize per layer
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
@@ -353,7 +360,7 @@ class ContextMLA(Operation):
     def query(self, database:PerfDatabase, **kwargs):
         batch_size = kwargs.get('batch_size')
         isl = kwargs.get('s')
-        return database.query_context_mla(batch_size, isl, self._tp_size, self._kvcache_quant_mode, self._fmha_quant_mode)*self._scale_factor
+        return database.query_context_mla(batch_size, isl, self._num_heads, self._kvcache_quant_mode, self._fmha_quant_mode)*self._scale_factor
     
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -365,10 +372,10 @@ class GenerationMLA(Operation):
     def __init__(self, 
                  name: str, 
                  scale_factor: float, 
-                 tp_size: int, 
+                 num_heads: int, 
                  kv_cache_dtype: common.KVCacheQuantMode) -> None:
         super().__init__(name, scale_factor)
-        self._tp_size = tp_size
+        self._num_heads = num_heads
         self._weights = 0. # 2*(1536*24576/tp_size + 128/tp_size*512*128+128/tp_size*512*128) # up q, up k, v up  float16
         self._kv_cache_dtype = kv_cache_dtype
 
@@ -377,7 +384,7 @@ class GenerationMLA(Operation):
         assert(beam_width == 1), "only support beam_width=1"
         batch_size = kwargs.get('batch_size')
         s = kwargs.get('s')
-        return database.query_generation_mla(batch_size, s, self._tp_size, self._kv_cache_dtype)*self._scale_factor
+        return database.query_generation_mla(batch_size, s, self._num_heads, self._kv_cache_dtype)*self._scale_factor
  
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

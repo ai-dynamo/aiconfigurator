@@ -308,21 +308,27 @@ def load_context_mla_data(context_mla_file):
         rows = list(reader)
 
     for row in rows:
-        quant_mode, kv_cache_dtype, b, s, tp_size, latency = \
-            row['mla_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['tp_size'], row['latency']
+        quant_mode, kv_cache_dtype, b, s, latency, = \
+            row['mla_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['latency']
+
+        if 'num_heads' not in row:
+            tp_size = int(row['tp_size'])
+            num_heads = 128 // tp_size
+        else:
+            num_heads = int(row['num_heads'])
+
         b=int(b)
         s=int(s)
-        tp_size=int(tp_size)
         latency=float(latency)
 
         quant_mode = common.FMHAQuantMode[quant_mode]
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
         
         try:
-            latency = context_mla_data[quant_mode][kv_cache_dtype][tp_size][s][b]
-            logger.debug('value conflict in context mla data: {} {} {} {} {} {}'.format(quant_mode, kv_cache_dtype, tp_size, s, b, latency))
+            latency = context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b]
+            logger.debug('value conflict in context mla data: {} {} {} {} {} {}'.format(quant_mode, kv_cache_dtype, num_heads, s, b, latency))
         except KeyError:
-            context_mla_data[quant_mode][kv_cache_dtype][tp_size][s][b] = latency
+            context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = latency
         
     return context_mla_data
 
@@ -340,12 +346,18 @@ def load_generation_mla_data(generation_mla_file):
         rows = list(reader)
 
     for row in rows:
-        quant_mode, kv_cache_dtype, b, s, tp_size, step, latency = \
-            row['mla_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['tp_size'], row['step'], row['latency']
+        quant_mode, kv_cache_dtype, b, s, step, latency = \
+            row['mla_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['step'], row['latency']
+
+        if 'num_heads' not in row:
+            tp_size = int(row['tp_size'])
+            num_heads = 128 // tp_size
+        else:
+            num_heads = int(row['num_heads'])
+        
         b=int(b)
         s=int(s)
         step=int(step)
-        tp_size=int(tp_size)
         latency=float(latency)
 
         s = s + step
@@ -353,10 +365,10 @@ def load_generation_mla_data(generation_mla_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = generation_mla_data[kv_cache_dtype][tp_size][b][s]
-            logger.debug('value conflict in generation mla data: {} {} {} {} {} '.format(kv_cache_dtype, tp_size, b, s, latency))      
+            latency = generation_mla_data[kv_cache_dtype][num_heads][b][s]
+            logger.debug('value conflict in generation mla data: {} {} {} {} {} '.format(kv_cache_dtype, num_heads, b, s, latency))      
         except KeyError:
-            generation_mla_data[kv_cache_dtype][tp_size][b][s] = latency
+            generation_mla_data[kv_cache_dtype][num_heads][b][s] = latency
     
     return generation_mla_data
 
@@ -501,9 +513,9 @@ class PerfDatabase(object):
         # mla
         for quant_mode in self._context_mla_data.keys():
             for kv_cache_dtype in self._context_mla_data[quant_mode].keys():
-                tp_list =  list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
+                num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
                 data_dict=self._context_mla_data[quant_mode][kv_cache_dtype]
-                target_x_list=tp_list # to reuse x dim
+                target_x_list=num_heads_list # to reuse x dim
                 # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
                 target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
                     [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
@@ -853,19 +865,19 @@ class PerfDatabase(object):
     def query_context_mla(self, 
                           b : int, 
                           s : int, 
-                          tp_size : int, 
+                          num_heads : int, 
                           kvcache_quant_mode : common.KVCacheQuantMode, 
                           fmha_quant_mode : common.FMHAQuantMode, 
                           sol_mode : Optional[common.SOLMode] = None) -> float:
         """
         Query the context mla data
         """
-        def get_sol(b : int, s : int, tp_size : int, kvcache_quant_mode : common.KVCacheQuantMode, fmha_quant_mode : common.FMHAQuantMode) -> Tuple[float, float, float]:
+        def get_sol(b : int, s : int, num_heads : int, kvcache_quant_mode : common.KVCacheQuantMode, fmha_quant_mode : common.FMHAQuantMode) -> Tuple[float, float, float]:
             """
             Get the sol time, sol math and sol mem
             """
-            ops = b * 128 / tp_size * 2 / 2 *(s * s * 192 + s * s * 128) # 2 for fma, 2 for causality. 128/tp_size for local heads
-            mem_bytes = b * 128 / tp_size * 2 * (2*s*192 + 2*s*128) # 2 for fp16, TODO
+            ops = b * num_heads * 2 / 2 *(s * s * 192 + s * s * 128) # 2 for fma, 2 for causality. num_heads, for local heads
+            mem_bytes = b * num_heads * 2 * (2*s*192 + 2*s*128) # 2 for fp16, TODO
             sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
             sol_time = max(sol_math, sol_mem)
@@ -875,32 +887,31 @@ class PerfDatabase(object):
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            return get_sol(b, s, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
+            return get_sol(b, s, num_heads, kvcache_quant_mode, fmha_quant_mode)
         else:
             mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
-            latency = self._interp_3d(tp_size, s, b, mla_dict, 'cubic')
+            latency = self._interp_3d(num_heads, s, b, mla_dict, 'cubic')
             return latency
     
     def query_generation_mla(self, 
                              b : int, 
                              s : int, 
-                             tp_size : int, 
+                             num_heads : int, 
                              kvcache_quant_mode : common.KVCacheQuantMode, 
                              sol_mode : Optional[common.SOLMode] = None) -> float:
         """
         Query the generation mla data
         """
-        def get_sol(b : int, s : int, tp_size : int, kvcache_quant_mode : common.KVCacheQuantMode) -> Tuple[float, float, float]:
+        def get_sol(b : int, s : int, num_heads : int, kvcache_quant_mode : common.KVCacheQuantMode) -> Tuple[float, float, float]:
             """
             Get the sol time, sol math and sol mem
             """
-            n = 128//tp_size
             # only consider fp16 mmha
-            ops = 2 * b * n * 1088 * s # 2 for fma
+            ops = 2 * b * num_heads * 1088 * s # 2 for fma
             # kvcache load bytes will depend on kvcache quant. while input q and output might be in fp16.
-            mem_bytes = b * (n * 1088 * 2 + (s-1)*1088 * kvcache_quant_mode.value.memory)
+            mem_bytes = b * (num_heads * 1088 * 2 + (s-1)*1088 * kvcache_quant_mode.value.memory)
             
             sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000 # only fp16
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
@@ -910,12 +921,12 @@ class PerfDatabase(object):
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(b, s, tp_size, kvcache_quant_mode)[0]
+            return get_sol(b, s, num_heads, kvcache_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(b, s, tp_size, kvcache_quant_mode)
+            return get_sol(b, s, num_heads, kvcache_quant_mode)
         else:
             mla_dict = self._generation_mla_data[kvcache_quant_mode]
-            latency =  self._interp_3d(tp_size, b, s, mla_dict, 'bilinear')
+            latency =  self._interp_3d(num_heads, b, s, mla_dict, 'bilinear')
             return latency
         
     # to simplify, we no longer support allreduce_strategy

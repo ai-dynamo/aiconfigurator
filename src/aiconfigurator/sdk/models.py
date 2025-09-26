@@ -363,7 +363,7 @@ class DeepSeekModel(BaseModel):
                                 ops.GEMM(f'context_downscale_gemm', self._num_layers, 2112, h, gemm_quant_mode), # on every gpu, fused_a
                                 ops.GEMM(f'context_q_b_proj_gemm', self._num_layers, 24576//tp_size, 1536, gemm_quant_mode),
                                 ops.GEMM(f'context_kv_b_proj_gemm', self._num_layers, 32768//tp_size, 512, gemm_quant_mode), # ifb ctx attn part
-                                ops.ContextMLA(f'context_attention', self._num_layers, tp_size, kvcache_quant_mode, fmha_quant_mode), # ifb ctx attn part
+                                ops.ContextMLA(f'context_attention', self._num_layers, 128//tp_size, kvcache_quant_mode, fmha_quant_mode), # ifb ctx attn part
                                 ops.GEMM(f'context_proj_gemm', self._num_layers, h, 128*128//tp_size, gemm_quant_mode), # ifb ctx attn part
                                 ops.ElementWise(f'context_add_norm_2', self._num_layers, 2*h, 2*h, 0.8)])
 
@@ -401,7 +401,7 @@ class DeepSeekModel(BaseModel):
                                 ops.GEMM(f'generation_downscale_gemm', self._num_layers*self._mtp_scale_factor, 2112, h, gemm_quant_mode), # on every gpu
                                 ops.GEMM(f'generation_q_b_proj_gemm', self._num_layers*self._mtp_scale_factor, 24576//tp_size, 1536, gemm_quant_mode),
                                 ops.MLABmm(f'generation_bmm_pre', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=True), # ifb gen attn part
-                                ops.GenerationMLA(f'generation_attention', self._num_layers*self._mtp_scale_factor, tp_size, kvcache_quant_mode), # ifb gen attn part
+                                ops.GenerationMLA(f'generation_attention', self._num_layers*self._mtp_scale_factor, 128//tp_size, kvcache_quant_mode), # ifb gen attn part
                                 ops.MLABmm(f'generation_bmm_post', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=False), # ifb gen attn part
                                 ops.GEMM(f'generation_proj_gemm', self._num_layers*self._mtp_scale_factor, h, h//tp_size, gemm_quant_mode),
                                 ops.ElementWise(f'generation_add_norm_2', self._num_layers*self._mtp_scale_factor, 2*h, 2*h, 0.8)])

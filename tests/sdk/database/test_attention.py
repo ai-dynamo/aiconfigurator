@@ -150,18 +150,18 @@ class TestContextMLA:
     
     def test_query_context_mla_sol_mode(self, comprehensive_perf_db):
         """Test SOL mode calculation for context MLA."""
-        b, s, tp_size = 2, 64, 4
+        b, s, num_heads = 2, 64, 32
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
         
         result = comprehensive_perf_db.query_context_mla(
-            b, s, tp_size, kv_cache_quant_mode, fmha_quant_mode,
+            b, s, num_heads, kv_cache_quant_mode, fmha_quant_mode,
             sol_mode=common.SOLMode.SOL
         )
         
         # Calculate expected SOL result
-        ops = b * 128 / tp_size * 2 / 2 * (s * s * 192 + s * s * 128)
-        mem_bytes = b * 128 / tp_size * 2 * (2*s*192 + 2*s*128)
+        ops = b * num_heads * 2 / 2 * (s * s * 192 + s * s * 128)
+        mem_bytes = b * num_heads * 2 * (2*s*192 + 2*s*128)
         sol_math = ops / comprehensive_perf_db.system_spec['gpu']['float16_tc_flops'] * 1000 / fmha_quant_mode.value.compute
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec['gpu']['mem_bw'] * 1000
         expected = max(sol_math, sol_mem)
@@ -170,17 +170,17 @@ class TestContextMLA:
     
     def test_query_context_mla_non_sol_mode(self, comprehensive_perf_db):
         """Test non-SOL mode with interpolation."""
-        b, s, tp_size = 4, 32, 2
+        b, s, num_heads = 4, 32, 32
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
         
         result = comprehensive_perf_db.query_context_mla(
-            b, s, tp_size, kv_cache_quant_mode, fmha_quant_mode,
+            b, s, num_heads, kv_cache_quant_mode, fmha_quant_mode,
             sol_mode=common.SOLMode.NON_SOL
         )
         
         # Should use data from context_mla_data
-        expected = comprehensive_perf_db._context_mla_data[fmha_quant_mode][kv_cache_quant_mode][tp_size][s][b]
+        expected = comprehensive_perf_db._context_mla_data[fmha_quant_mode][kv_cache_quant_mode][num_heads][s][b]
         assert math.isclose(result, expected, rel_tol=1e-6)
     
     def test_query_context_mla_different_tp_sizes(self, comprehensive_perf_db):
@@ -190,9 +190,9 @@ class TestContextMLA:
         fmha_quant_mode = common.FMHAQuantMode.float16
         
         results = []
-        for tp_size in [1, 2, 4, 8]:
+        for num_heads in [16, 32, 64, 128]:
             result = comprehensive_perf_db.query_context_mla(
-                b, s, tp_size, kv_cache_quant_mode, fmha_quant_mode,
+                b, s, num_heads, kv_cache_quant_mode, fmha_quant_mode,
                 sol_mode=common.SOLMode.NON_SOL
             )
             results.append(result)
@@ -206,16 +206,16 @@ class TestGenerationMLA:
     
     def test_query_generation_mla_sol_mode(self, comprehensive_perf_db):
         """Test SOL mode calculation for generation MLA."""
-        b, s, tp_size = 4, 128, 2
+        b, s, num_heads = 4, 128, 32
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         
         result = comprehensive_perf_db.query_generation_mla(
-            b, s, tp_size, kv_cache_quant_mode,
+            b, s, num_heads, kv_cache_quant_mode,
             sol_mode=common.SOLMode.SOL
         )
         
         # Calculate expected SOL result
-        n = 128 // tp_size
+        n = num_heads
         ops = 2 * b * n * 1088 * s  # 2 for fma
         mem_bytes = b * (n * 1088 * 2 + (s-1)*1088 * kv_cache_quant_mode.value.memory)
         sol_math = ops / comprehensive_perf_db.system_spec['gpu']['float16_tc_flops'] * 1000
@@ -226,22 +226,22 @@ class TestGenerationMLA:
     
     def test_query_generation_mla_non_sol_mode(self, comprehensive_perf_db):
         """Test non-SOL mode with interpolation."""
-        b, s, tp_size = 2, 64, 4
+        b, s, num_heads = 2, 64, 32
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         
         result = comprehensive_perf_db.query_generation_mla(
-            b, s, tp_size, kv_cache_quant_mode,
+            b, s, num_heads, kv_cache_quant_mode,
             sol_mode=common.SOLMode.NON_SOL
         )
         
         # Should use data from generation_mla_data
-        expected = comprehensive_perf_db._generation_mla_data[kv_cache_quant_mode][tp_size][b][s]
+        expected = comprehensive_perf_db._generation_mla_data[kv_cache_quant_mode][num_heads][b][s]
         assert math.isclose(result, expected, rel_tol=1e-6)
     
     def test_query_generation_mla_sol_full_mode(self, comprehensive_perf_db):
         """Test SOL_FULL mode returns complete tuple."""
         result = comprehensive_perf_db.query_generation_mla(
-            1, 32, 2, common.KVCacheQuantMode.float16,
+            1, 32, 32, common.KVCacheQuantMode.float16,
             sol_mode=common.SOLMode.SOL_FULL
         )
         
