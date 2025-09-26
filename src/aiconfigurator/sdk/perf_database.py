@@ -56,7 +56,7 @@ def get_database(system : str,
         else:
             logger.error(f"system yaml {os.path.join(systems_dir, system+'.yaml')} not found")
             database = None
-
+    print(f"{database}*****************************")
     return database
 
 def get_all_databases(systems_dir : str = get_system_config_path()) -> Dict[str, Dict[str, Dict[str, PerfDatabase]]]:
@@ -225,19 +225,21 @@ def load_context_attention_data(context_attention_file):
     if not os.path.exists(context_attention_file):
         logger.warning(f"Context attention data file {context_attention_file} not found.")
         return None
-    context_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))
+    context_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))))
     with open(context_attention_file, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
 
     for row in rows:
-        quant_mode, kv_cache_dtype, b, s, n, kv_n, latency = \
-            row['attn_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['num_heads'], row['num_key_value_heads'], row['latency']
+        quant_mode, kv_cache_dtype, b, s, n, kv_n, head_size, window_size, latency = \
+            row['attn_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['num_heads'], row['num_key_value_heads'], row['head_dim'], row['window_size'], row['latency']
         b=int(b)
         s=int(s)
         n=int(n)
         kv_n=int(kv_n)
+        head_size=int(head_size)
+        window_size=int(window_size)
         latency=float(latency)
         
         # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads
@@ -247,10 +249,10 @@ def load_context_attention_data(context_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = context_attention_data[quant_mode][kv_cache_dtype][kv_n][n][s][b]
-            logger.debug('value conflict in context attention data: {} {} {} {} {} {}'.format(quant_mode, kv_cache_dtype, kv_n, n, s, b))
+            latency = context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
+            logger.debug('value conflict in context attention data: {} {} {} {} {} {} {}'.format(quant_mode, kv_cache_dtype, head_size, window_size, kv_n, n, s, b))
         except KeyError:
-            context_attention_data[quant_mode][kv_cache_dtype][kv_n][n][s][b] = latency
+            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = latency
 
     return context_attention_data
 
@@ -262,19 +264,21 @@ def load_generation_attention_data(generation_attention_file):
     if not os.path.exists(generation_attention_file):
         logger.warning(f"Generation attention data file {generation_attention_file} not found.")
         return None
-    generation_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict()))))
+    generation_attention_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict()))))))
     with open(generation_attention_file, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames
         rows = list(reader)
 
     for row in rows:
-        quant_mode, kv_cache_dtype, b, s, n, kv_n, step, latency = \
-            row['attn_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['num_heads'], row['num_key_value_heads'], row['step'], row['latency']
+        quant_mode, kv_cache_dtype, b, s, n, kv_n, head_size, window_size, step, latency = \
+            row['attn_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['num_heads'], row['num_key_value_heads'], row['head_dim'], row['window_size'], row['step'], row['latency']
         b=int(b)
         s=int(s)
         n=int(n)
         kv_n=int(kv_n)
+        head_size=int(head_size)
+        window_size=int(window_size)
         step = int(step)
         latency=float(latency)
 
@@ -285,10 +289,10 @@ def load_generation_attention_data(generation_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = generation_attention_data[kv_cache_dtype][kv_n][n][b][s]
-            logger.debug('value conflict in generation attention data: {} {} {} {} {}'.format(kv_cache_dtype, kv_n, n, b, s))
+            latency = generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
+            logger.debug('value conflict in generation attention data: {} {} {} {} {} {}'.format(kv_cache_dtype, kv_n, head_size, window_size, n, b, s))
         except KeyError:
-            generation_attention_data[kv_cache_dtype][kv_n][n][b][s] = latency
+            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = latency
         
     return generation_attention_data
 
@@ -454,40 +458,44 @@ class PerfDatabase(object):
         for quant_mode in self._context_attention_data.keys():
             for kv_cache_dtype in self._context_attention_data[quant_mode].keys():
                 for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype]:
-                    data_dict=self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads]
-                    min_x = min(data_dict.keys())
-                    target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
-                    # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
-                    target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
-                        [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
-                    target_z_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048] # b
+                    for head_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads]:
+                        for window_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][head_size]:
+                            data_dict=self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][head_size][window_size]
+                            min_x = min(data_dict.keys())
+                            target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
+                            # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
+                            target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
+                                [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
+                            target_z_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048] # b
 
-                    filtered_x_list = []
-                    for i in target_x_list:
-                        if i >= min_x:
-                            filtered_x_list.append(i)
-
-                    self._extrapolate_data_grid(data_dict=data_dict, #nsb
-                                                target_x_list=filtered_x_list,
-                                                target_y_list=target_y_list,
-                                                target_z_list=target_z_list, sqrt_y_value=True)
+                            filtered_x_list = []
+                            for i in target_x_list:
+                                if i >= min_x:
+                                    filtered_x_list.append(i)
+                            self._extrapolate_data_grid(data_dict=data_dict, #nsb
+                                                        target_x_list=filtered_x_list,
+                                                        target_y_list=target_y_list,
+                                                        target_z_list=target_z_list, sqrt_y_value=True)
 
         for kv_cache_dtype in self._generation_attention_data.keys():
             for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
-                target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
-                target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
-                target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
-                data_dict = self._generation_attention_data[kv_cache_dtype][num_kv_heads]
-                min_x = min(data_dict.keys())
-                filtered_x_list = []
-                for i in target_x_list:
-                    if i >= min_x:
-                        filtered_x_list.append(i)
+                for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
+                    for window_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size]:
+                        print(f"kv_type:{kv_cache_dtype}, num_kv_heads:{num_kv_heads}, head_size:{head_size}, window_size:{window_size}******************")
+                        target_x_list=[4, 5, 6, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96, 128] # n
+                        target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
+                        target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
+                        data_dict = self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size][window_size]
+                        min_x = min(data_dict.keys())
+                        filtered_x_list = []
+                        for i in target_x_list:
+                            if i >= min_x:
+                                filtered_x_list.append(i)
 
-                self._extrapolate_data_grid(data_dict=data_dict, #nbs
-                                            target_x_list=filtered_x_list,
-                                            target_y_list=target_y_list,
-                                            target_z_list=target_z_list)
+                        self._extrapolate_data_grid(data_dict=data_dict, #nbs
+                                                    target_x_list=filtered_x_list,
+                                                    target_y_list=target_y_list,
+                                                    target_z_list=target_z_list)
                 
         for quant_mode, data_dict in self._gemm_data.items():
             target_x_list = [1,2,4,8,16,32,48,64,80,96,128,160,192,224,256,320,384,448,512,640,768,896,1024,2048,4096,8192,16384,32768,131072,524288,1048576,2097152*8] # num_tokens
@@ -594,7 +602,7 @@ class PerfDatabase(object):
                             data_dict[x][y] = {z:value}
                         else:
                             data_dict[x][y][z] = value
-
+        
         for x in target_x_list:
             if x not in data_dict.keys():
                 x_left, x_right = self._nearest_1d_point_helper(x, list(data_dict.keys()), False)
@@ -778,16 +786,22 @@ class PerfDatabase(object):
                                 n_kv : int, 
                                 kvcache_quant_mode : common.KVCacheQuantMode, 
                                 fmha_quant_mode : common.FMHAQuantMode, 
-                                sol_mode : Optional[common.SOLMode] = None) -> float:
+                                sol_mode : Optional[common.SOLMode] = None,
+                                sliding_window : int = 0,
+                                head_size : int = 128) -> float:
         """
         Query the context attention data
         """
-        def get_sol(b : int, s : int, n : int, n_kv : int, kvcache_quant_mode : common.KVCacheQuantMode, fmha_quant_mode : common.FMHAQuantMode) -> Tuple[float, float, float]:
+        def get_sol(b : int, s : int, n : int, n_kv : int, h : int, w : int,
+                    kvcache_quant_mode : common.KVCacheQuantMode, fmha_quant_mode : common.FMHAQuantMode,) -> Tuple[float, float, float]:
             """
             Get the sol time, sol math and sol mem
             """
-            ops = 2 * b * s * s * n * 128 * 2 / 2 # 2 for fma, 2 for q*k^t+*v, 2 for causality.
-            mem_bytes = 2 * b * (n*s*128 + 2*n_kv*s*128 + n*s*128) # 2 for fp16 TODO
+            if w > 0 and s > w:
+                ops = 4 * b * n * (s-w) * w * d + 4 * b * n * w * w * d / 2
+            else:
+                ops = 2 * b * s * s * n * h * 2 / 2 # 2 for fma, 2 for q*k^t+*v, /2 for causality.
+            mem_bytes = 2 * b * (n*s*h + 2*n_kv*s*h + n*s*h) # 2 for fp16 TODO
             sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
             sol_time = max(sol_math, sol_mem)
@@ -797,15 +811,18 @@ class PerfDatabase(object):
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(b, s, n, n_kv, kvcache_quant_mode, fmha_quant_mode)[0]
+            return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode, fmha_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(b, s, n, n_kv, kvcache_quant_mode, fmha_quant_mode)
+            return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode, fmha_quant_mode)
         else:
+            if head_size not in [64,128]:
+                return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode, fmha_quant_mode)[0]
             if n_kv == n:
                 attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][0]
             else:
                 attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv]
-
+            print(f"fmha_quant_mode:{fmha_quant_mode}, kvcache_quant_mode:{kvcache_quant_mode}, n_kv:{n_kv}**************************************")
+            print(f"attention_dict:{attention_dict}********************************")
             latency = self._interp_3d(n, s, b, attention_dict, 'cubic')
             return latency
     
@@ -815,18 +832,24 @@ class PerfDatabase(object):
                                    n : int, 
                                    n_kv : int, 
                                    kvcache_quant_mode : common.KVCacheQuantMode, 
-                                   sol_mode : Optional[common.SOLMode] = None) -> float:
+                                   sol_mode : Optional[common.SOLMode] = None,
+                                   sliding_window : int = 0,
+                                   head_size : int = 128 ) -> float:
         """
         Query the generation attention data
         """
-        def get_sol(b : int, s : int, n : int, n_kv : int, kvcache_quant_mode : common.KVCacheQuantMode) -> Tuple[float, float, float]:
+        def get_sol(b : int, s : int, n : int, n_kv : int, h : int, w : int, kvcache_quant_mode : common.KVCacheQuantMode) -> Tuple[float, float, float]:
             """
             Get the sol time, sol math and sol mem
             """
+            if w > 0:
+                kv_len = min(s - 1, w)
+            else:
+                kv_len = s - 1
             # only consider fp16 mmha
-            ops = 2 * b * n * 128 * 2 * s # 2 for fma, 2 for q*k^t+*v
+            ops = 2 * b * n * h * 2 * (kv_len)   # 2 for fma, 2 for q*k^t+*v
             # kvcache load bytes will depend on kvcache quant. while input q and output might be in fp16.
-            mem_bytes = b * (n*128*2 + 2*n_kv*(s-1)*128*kvcache_quant_mode.value.memory + n*128*2)
+            mem_bytes = b * (n*h*2 + 2*n_kv*(kv_len)*h*kvcache_quant_mode.value.memory + n*h*2)
             
             sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
@@ -837,10 +860,12 @@ class PerfDatabase(object):
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(b, s, n, n_kv, kvcache_quant_mode)[0]
+            return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(b, s, n, n_kv, kvcache_quant_mode)
+            return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode)
         else:
+            if head_size not in [64,128]:
+                return get_sol(b, s, n, n_kv, head_size, sliding_window, kvcache_quant_mode)[0]
             if n_kv == n:
                 attention_dict = self._generation_attention_data[kvcache_quant_mode][0]
             else:
@@ -870,7 +895,6 @@ class PerfDatabase(object):
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
-
 
         if sol_mode is None:
             sol_mode = self._default_sol_mode
@@ -1077,7 +1101,9 @@ class PerfDatabase(object):
                     moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
                 else:
                     moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-
+            
+            if not moe_dict:
+                 return get_sol(num_tokens, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, quant_mode, workload_distribution)[0]
             num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
             lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
             return lat
@@ -1177,17 +1203,19 @@ class PerfDatabase(object):
         # correct generation attention
         for quant_mode in self._generation_attention_data.keys():
             for n_kv in self._generation_attention_data[quant_mode].keys():
-                for n in self._generation_attention_data[quant_mode][n_kv].keys():
-                    for b in self._generation_attention_data[quant_mode][n_kv][n].keys():
-                        for s in self._generation_attention_data[quant_mode][n_kv][n][b].keys():
-                            if n_kv == 0:
-                                n_kv_local = n
-                            else:
-                                n_kv_local = n_kv
-                            sol = self.query_generation_attention(b, s, n, n_kv_local, quant_mode, sol_mode=common.SOLMode.SOL)
-                            if sol > self._generation_attention_data[quant_mode][n_kv][n][b][s]:
-                                logger.debug('generation attention quant {} n{} n_kv{} b{} s{}: sol {} > perf_db {}'.format(quant_mode, n, n_kv_local, b, s, sol, self._generation_attention_data[quant_mode][n_kv][n][b][s]))
-                                self._generation_attention_data[quant_mode][n_kv][n][b][s] = sol
+                for head_size in self._generation_attention_data[quant_mode][n_kv].keys():
+                    for sliding_window in self._generation_attention_data[quant_mode][n_kv][head_size].keys():
+                        for n in self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window].keys():
+                            for b in self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window][n].keys():
+                                for s in self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window][n][b].keys():
+                                    if n_kv == 0:
+                                        n_kv_local = n
+                                    else:
+                                        n_kv_local = n_kv
+                                    sol = self.query_generation_attention(b, s, n, n_kv_local, quant_mode, sol_mode=common.SOLMode.SOL, sliding_window=sliding_window, head_size=head_size)
+                                    if sol > self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window][n][b][s]:
+                                        logger.debug('generation attention quant {} n{} n_kv{} b{} s{}: sol {} > perf_db {}'.format(quant_mode, n, n_kv_local, b, s, sliding_window, sol, self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window][n][b][s]))
+                                        self._generation_attention_data[quant_mode][n_kv][head_size][sliding_window][n][b][s] = sol
                 
     
 if __name__ == '__main__':

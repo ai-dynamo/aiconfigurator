@@ -983,7 +983,7 @@ def configure_parser(parser):
     parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs, no less than 2 as disagg deployment requires at least 2 gpus")
     # optional args, dedault according to templates
     parser.add_argument("--backend", choices=[backend.value for backend in common.BackendName], type=str, default=common.BackendName.trtllm.value, help="Backend name, suport trtllm for now")
-    parser.add_argument("--version", type=str, default='0.20.0', help="Version, 0.20.0,1.0.0rc3 for trtllm")
+    parser.add_argument("--version", type=str, default='1.0.0rc5', help="Version, 0.20.0,1.0.0rc3 for trtllm")
     parser.add_argument("--isl", type=int, help="Input sequence length")
     parser.add_argument("--osl", type=int, help="Output sequence length")
     parser.add_argument("--ttft", type=float, help="Time to first token (ms)")

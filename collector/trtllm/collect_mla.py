@@ -134,7 +134,6 @@ def run_mla(input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_
         mapping=mapping,
         dtype=kv_cache_dtype)
 
-
     input_seq_lens = [input_len for _ in range(batch_size)]
     total_seq_lens = [input_len + output_len for _ in range(batch_size)]
     request_ids = [i for i in range(batch_size)]
