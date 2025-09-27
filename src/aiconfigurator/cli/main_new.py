@@ -116,8 +116,7 @@ def _build_yaml_config(exp_config: dict, config_section: dict) -> Optional[dict]
         "mode": exp_config.get("mode", "patch"),
         "config": config_section,
     }
-    if "profiles" in exp_config:
-        yaml_config["profiles"] = exp_config["profiles"]
+
     return yaml_config
 
 
@@ -193,6 +192,7 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
             "system_name": system_name,
             "backend_name": backend_name,
             "total_gpus": total_gpus,
+            "profiles": exp_config.get("profiles", []),
         }
 
         if backend_version is not None:
