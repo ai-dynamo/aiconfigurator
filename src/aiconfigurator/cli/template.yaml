@@ -1,0 +1,141 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# define your experiments here, the order will determine the execution order.
+exps:
+  - exp1
+  - exp2
+  - exp3
+  - exp4
+  #- exp5
+
+# exp1, agg, full config
+exp1:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "DEEPSEEK_V3"
+  profiles: [] # some inherit presets for easier patch
+  config:
+    nextn: 1 # mtp 1
+    nextn_accept_rates: [0.85,0,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
+    runtime_config:
+      isl: 4000 # input sequence length
+      osl: 1000 # output sequence length
+      ttft: 1000.0  # Target TTFT in ms
+      tpot: 40.0   # Target TPOT in ms
+    worker_config:
+      system_name: "h200_sxm"
+      backend_name: "trtllm"
+      backend_version: "0.20.0"
+      gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
+      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
+      kvcache_quant_mode: "float16" # fp8, int8, float16
+      fmha_quant_mode: "float16" # fp8, float16
+      comm_quant_mode: "half" # half
+      num_gpu_per_worker: [4, 8]
+      tp_list: [1, 2, 4, 8]
+      pp_list: [1]
+      dp_list: [1, 2, 4, 8]
+      moe_tp_list: [1]
+      moe_ep_list: [1, 2, 4, 8]
+
+# simplified mode, as we're doing patch to default things.
+exp2:
+  mode: "patch"
+  serving_mode: "agg" # required
+  model_name: "DEEPSEEK_V3" # required
+  profiles: ["fp8_default"] # patch gemm/moe quant mode to fp8
+  config:
+    runtime_config:
+      isl: 4000 # input sequence length
+      osl: 1000 # output sequence length
+      ttft: 1000.0  # Target TTFT in ms
+      tpot: 40.0   # Target TPOT in ms
+    worker_config:
+      system_name: "h200_sxm" #required
+      moe_quant_mode: "w4afp8" # patch moe quant mode to w4afp8, config part is the last one to overwrite previous settings
+
+# exp3, disagg, full config
+exp3:
+  mode: "patch"
+  serving_mode: "disagg"
+  model_name: "DEEPSEEK_V3"
+  profiles: []
+  config:
+    nextn: 1 # mtp 1
+    nextn_accept_rates: [0.85,0,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
+    runtime_config:
+      isl: 4000 # input sequence length
+      osl: 1000 # output sequence length
+      ttft: 1000.0  # Target TTFT in ms
+      tpot: 40.0   # Target TPOT in ms
+    # each prefill worker config
+    prefill_worker_config:
+      system_name: "h200_sxm"
+      backend_name: "trtllm"
+      backend_version: "0.20.0"  
+      gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
+      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
+      kvcache_quant_mode: "float16" # fp8, int8, float16
+      fmha_quant_mode: "float16" # fp8, float16
+      comm_quant_mode: "half" # half
+      num_gpu_per_worker: [4, 8]
+      tp_list: [1, 2, 4, 8]
+      pp_list: [1]
+      dp_list: [1] # we didn't enable attn dp here. You can enable it if you want.
+      moe_tp_list: [1]
+      moe_ep_list: [1, 2, 4, 8]
+    # each decode worker config
+    decode_worker_config:
+      system_name: "h200_sxm"
+      backend_name: "trtllm"
+      backend_version: "0.20.0"  
+      gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
+      moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
+      kvcache_quant_mode: "float16" # fp8, int8, float16
+      fmha_quant_mode: "float16" # fp8, float16
+      comm_quant_mode: "half" # half
+      num_gpu_per_worker: [4, 8]
+      tp_list: [1, 2, 4, 8]
+      pp_list: [1]
+      dp_list: [1, 2, 4, 8]
+      moe_tp_list: [1]
+      moe_ep_list: [1, 2, 4, 8]
+    # the whole replica config, a replica is the minimum unit of disagg deployment. It contains xPyD workers.
+    # x is the number of prefill workers, y is the number of decode workers
+    # then we scale replicas to meet your total gpus requirement.
+    replica_config:
+      num_gpu_per_replica: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128] # It means the searched replica will have total gpus in this list, this list will be capped by max_gpu_per_replica
+      max_gpu_per_replica: 128 # max gpus per replica, if specified as 0, it means no limit. Too many gpus per replica will make the prefill/decoder worker pair complicated. no need to be too large.
+      max_prefill_worker: 32 # It means in every replica, you will have up to 32 prefill workers, x_max = 32
+      max_decode_worker: 32 # It means in every replica, you will have up to 32 decode workers, y_max = 32
+    advanced_tuning_config:
+      # advanced tuning config
+      prefill_correction_scale: 0.9 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * prefill_correction_scale
+      decode_correction_scale: 0.92 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * decode_correction_scale
+      prefill_max_batch_size: 1
+      decode_max_batch_size: 512
+
+# exp4, disagg, simplified config
+exp4:
+  mode: "patch"
+  serving_mode: "disagg"
+  model_name: "DEEPSEEK_V3"
+  enable_wide_ep: true # enable wide ep for prefill/decode
+  profiles: ["fp8_default"] # patch gemm/moe quant mode to fp8 per tensor quant
+  config:
+    nextn: 2 # mtp 1
+    nextn_accept_rates: [0.85,0.3,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
+    runtime_config:
+      isl: 4000 # input sequence length
+      osl: 1000 # output sequence length
+      ttft: 1000.0  # Target TTFT in ms
+      tpot: 40.0   # Target TPOT in ms
+    prefill_worker_config:
+      system_name: "h200_sxm"
+      backend_name: "trtllm"
+    decode_worker_config:
+      system_name: "h200_sxm"
+      backend_name: "trtllm"
+    replica_config:
+      max_gpu_per_replica: 64 # max gpus per replica, if specified as 0, it means no limit. Too many gpus per replica will make the prefill/decoder worker pair complicated. no need to be too large.

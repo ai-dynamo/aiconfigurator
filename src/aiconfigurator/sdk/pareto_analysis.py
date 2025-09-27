@@ -6,18 +6,16 @@ import pandas as pd
 import numpy as np
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import get_database, PerfDatabase, get_latest_database_version
-from aiconfigurator.sdk.common import ColumnsAgg, BackendName
+from aiconfigurator.sdk.common import ColumnsAgg
 from aiconfigurator.sdk.backends.factory import get_backend
-from aiconfigurator.sdk.models import check_is_moe
 import matplotlib.pyplot as plt
 import plotext
 import copy
-from typing import Optional, Any, Union
+from typing import Optional
 from aiconfigurator.sdk import config
 from aiconfigurator.sdk import common
 import logging
 import traceback
-from munch import Munch, DefaultMunch
 import logging
 import traceback
 from scipy.interpolate import interp1d
@@ -31,7 +29,7 @@ def enumerate_parallel_config(num_gpu_list: list[int],
                               moe_tp_list: list[int]=[1], 
                               moe_ep_list: list[int]=[1], 
                               is_moe: bool=False,
-                              backend: BackendName=BackendName.trtllm) -> list[list[int]]:
+                              backend: common.BackendName=common.BackendName.trtllm) -> list[list[int]]:
     """
     Enumerate parallel configurations based on parallel list. This is a helper function for agg_pareto and disagg_pareto to define search space.
 
@@ -56,10 +54,10 @@ def enumerate_parallel_config(num_gpu_list: list[int],
                         for moe_ep in moe_ep_list:
                             if dp*tp*pp in num_gpu_list and dp*tp == moe_tp*moe_ep: # check num gpu and width
                                 # backend specific filters
-                                if backend == BackendName.trtllm: # trtllm as trtllm don't supports attn tp > 1
+                                if backend == common.BackendName.trtllm: # trtllm as trtllm don't supports attn tp > 1
                                     if dp > 1 and tp > 1:
                                         continue
-                                elif backend == BackendName.sglang: # sglang doesn't support moe tp and moe ep > 1 at the same time for now
+                                elif backend == common.BackendName.sglang: # sglang doesn't support moe tp and moe ep > 1 at the same time for now
                                     if moe_tp > 1 and moe_ep > 1:
                                         continue
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
@@ -204,6 +202,7 @@ def disagg_pareto(model_name: str,
 
     prefill_max_num_tokens = kwargs.get('prefill_max_num_tokens', 16384)
     decode_max_num_tokens = kwargs.get('decode_max_num_tokens', 512)
+    logger.debug(f"prefill_max_num_tokens: {prefill_max_num_tokens}, decode_max_num_tokens: {decode_max_num_tokens}")
 
     # num gpu constraint for the whole system
     num_gpu_list = kwargs.get('num_gpu_list', None)
@@ -236,446 +235,6 @@ def disagg_pareto(model_name: str,
                                                                     num_gpu_list=num_gpu_list)
 
     return summary.get_summary_df()
-
-
-class TaskConfig:
-
-    def _populate_agg_config(self):
-        self.config.worker_config = Munch()
-        self.config.worker_config.system_name = self.system_name
-        self.config.worker_config.backend_name = self.backend_name
-        if self.backend_version is None:
-            self.config.worker_config.backend_version = get_latest_database_version(self.config.worker_config.system_name, self.config.worker_config.backend_name)
-        else:
-            self.config.worker_config.backend_version = self.backend_version
-
-        is_moe = check_is_moe(self.config.model_name)
-        should_enable_pp = False # TODO, add logic to verify if pp is needed on pcie-based system. However pp it not well aligned yet.
-
-        self.config.is_moe = is_moe
-        # default parallel config
-        self.config.worker_config.num_gpu_per_worker = [1, 2, 4, 8]
-        self.config.worker_config.tp_list = [1, 2, 4, 8]
-        self.config.worker_config.pp_list = [1, 2, 4, 8] if should_enable_pp else [1]
-        self.config.worker_config.dp_list = [1, 2, 4, 8] if is_moe else [1]
-        self.config.worker_config.moe_tp_list = [1]
-        self.config.worker_config.moe_ep_list = [1, 2, 4, 8] if is_moe else [1]
-
-        if not is_moe:
-            if self.config.worker_config.system_name == 'gb200_sxm':
-                self.config.worker_config.num_gpu_per_worker = [1, 2, 4, 8, 16]
-                self.config.worker_config.tp_list = [1, 2, 4, 8, 16]
-                self.config.worker_config.pp_list = [1]
-        else:
-            if self.enable_wide_ep:
-                self.config.worker_config.num_gpu_per_worker = [1, 2, 4, 8, 16, 32]
-                self.config.worker_config.tp_list = [1, 2, 4, 8]
-                self.config.worker_config.pp_list = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
-                self.config.worker_config.dp_list = [1, 2, 4, 8, 16, 32]
-                self.config.worker_config.moe_tp_list = [1]
-                self.config.worker_config.moe_ep_list = [1, 2, 4, 8, 16, 32]
-                
-        # quantization config
-        self.config.worker_config.gemm_quant_mode = "fp8_block"
-        self.config.worker_config.moe_quant_mode = "fp8_block"
-        self.config.worker_config.kvcache_quant_mode = "fp8"
-        self.config.worker_config.fmha_quant_mode = "float16" if self.config.model_name in ['DEEPSEEK_V3', 'KIMI_K2'] else "fp8"
-        self.config.worker_config.comm_quant_mode = "half"
-
-        database = get_database(system=self.config.worker_config.system_name, backend=self.config.worker_config.backend_name, version=self.config.worker_config.backend_version)
-        if database.system_spec['gpu']['sm_version'] >= 100:
-            self.config.worker_config.gemm_quant_mode = "nvfp4"
-            self.config.worker_config.moe_quant_mode = "nvfp4"
-        elif database.system_spec['gpu']['sm_version'] < 89:
-            self.config.worker_config.gemm_quant_mode = "float16"
-            self.config.worker_config.moe_quant_mode = "float16"
-            self.config.worker_config.kvcache_quant_mode = "float16"
-
-        if self.use_specific_quant_mode is not None:
-            # fp8_tensor, float16.
-            if self.use_specific_quant_mode != 'w4afp8': # w4afp8 is only for moe
-                self.config.worker_config.gemm_quant_mode = self.use_specific_quant_mode
-            self.config.worker_config.moe_quant_mode = self.use_specific_quant_mode
-        
-        logger.info(f"Task {self.task_name}: Runtime config: {self.config.runtime_config}")
-        logger.info(f"Task {self.task_name}: Worker config: {self.config.worker_config}")
-
-    def _populate_disagg_config(self):
-        self.config.prefill_worker_config = Munch()
-        self.config.decode_worker_config = Munch()
-        self.config.replica_config = Munch()
-        self.config.advanced_tuning_config = Munch()
-
-        self.config.prefill_worker_config.system_name = self.system_name
-        self.config.prefill_worker_config.backend_name = self.backend_name
-        self.config.decode_worker_config.system_name = self.decode_system_name if self.decode_system_name is not None else self.system_name
-        self.config.decode_worker_config.backend_name = self.backend_name
-        if self.backend_version is None:
-            self.config.prefill_worker_config.backend_version = get_latest_database_version(self.config.prefill_worker_config.system_name, self.config.prefill_worker_config.backend_name)
-            self.config.decode_worker_config.backend_version = get_latest_database_version(self.config.decode_worker_config.system_name, self.config.decode_worker_config.backend_name)
-        else:
-            self.config.prefill_worker_config.backend_version = self.backend_version
-            self.config.decode_worker_config.backend_version = self.backend_version
-
-        is_moe = check_is_moe(self.config.model_name)
-        should_enable_pp = False # TODO, add logic to verify if pp is needed on pcie-based system. However pp it not well aligned yet.
-
-        self.config.is_moe = is_moe
-    
-        # default parallel config
-        self.config.prefill_worker_config.num_gpu_per_worker = [1, 2, 4, 8]
-        self.config.prefill_worker_config.tp_list = [1, 2, 4, 8]
-        self.config.prefill_worker_config.pp_list = [1, 2, 4, 8] if should_enable_pp else [1]
-        self.config.prefill_worker_config.dp_list = [1] # we disable prefill attn dp for empirical reason
-        self.config.prefill_worker_config.moe_tp_list = [1]
-        self.config.prefill_worker_config.moe_ep_list = [1, 2, 4, 8] if is_moe else [1]
-        self.config.decode_worker_config.num_gpu_per_worker = [1, 2, 4, 8]
-        self.config.decode_worker_config.tp_list = [1, 2, 4, 8]
-        self.config.decode_worker_config.pp_list = [1, 2, 4, 8] if should_enable_pp else [1]
-        self.config.decode_worker_config.dp_list = [1, 2, 4, 8] if is_moe else [1]
-        self.config.decode_worker_config.moe_tp_list = [1]
-        self.config.decode_worker_config.moe_ep_list = [1, 2, 4, 8] if is_moe else [1]
-
-        if not is_moe:
-            if self.config.prefill_worker_config.system_name == 'gb200_sxm':
-                self.config.prefill_worker_config.num_gpu_per_worker = [1, 2, 4, 8, 16]
-                self.config.prefill_worker_config.tp_list = [1, 2, 4, 8, 16]
-                self.config.prefill_worker_config.pp_list = [1]
-            if self.config.decode_worker_config.system_name == 'gb200_sxm':
-                self.config.decode_worker_config.num_gpu_per_worker = [1, 2, 4, 8, 16]
-                self.config.decode_worker_config.tp_list = [1, 2, 4, 8, 16]
-                self.config.decode_worker_config.pp_list = [1]
-        else:
-            if self.enable_wide_ep:
-                self.config.prefill_worker_config.num_gpu_per_worker = [1, 2, 4, 8, 16]
-                self.config.prefill_worker_config.tp_list = [1, 2, 4, 8]
-                self.config.prefill_worker_config.pp_list = [1, 2, 4, 8, 16] if should_enable_pp else [1]
-                self.config.prefill_worker_config.dp_list = [1, 2, 4]
-                self.config.prefill_worker_config.moe_tp_list = [1]
-                self.config.prefill_worker_config.moe_ep_list = [1, 2, 4, 8, 16]
-                
-                self.config.decode_worker_config.num_gpu_per_worker = [1, 2, 4, 8, 16, 32, 64]
-                self.config.decode_worker_config.tp_list = [1, 2, 4, 8]
-                self.config.decode_worker_config.pp_list = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
-                self.config.decode_worker_config.dp_list = [1, 2, 4, 8, 16, 32, 64]
-                self.config.decode_worker_config.moe_tp_list = [1]
-                self.config.decode_worker_config.moe_ep_list = [1, 2, 4, 8, 16, 32, 64]
-        
-        # quantization config
-        self.config.prefill_worker_config.gemm_quant_mode = "fp8_block"
-        self.config.prefill_worker_config.moe_quant_mode = "fp8_block"
-        self.config.prefill_worker_config.kvcache_quant_mode = "fp8"
-        self.config.prefill_worker_config.fmha_quant_mode = "float16" if self.config.model_name in ['DEEPSEEK_V3', 'KIMI_K2'] else "fp8"
-        self.config.prefill_worker_config.comm_quant_mode = "half"
-        
-        database = get_database(system=self.config.prefill_worker_config.system_name, backend=self.config.prefill_worker_config.backend_name, version=self.config.prefill_worker_config.backend_version)
-        if database.system_spec['gpu']['sm_version'] >= 100:
-            self.config.prefill_worker_config.gemm_quant_mode = "nvfp4"
-            self.config.prefill_worker_config.moe_quant_mode = "nvfp4"
-        elif database.system_spec['gpu']['sm_version'] < 89:
-            self.config.prefill_worker_config.gemm_quant_mode = "float16"
-            self.config.prefill_worker_config.moe_quant_mode = "float16"
-            self.config.prefill_worker_config.kvcache_quant_mode = "float16"
-        
-        if self.use_specific_quant_mode is not None:
-            # fp8_tensor, float16.
-            if self.use_specific_quant_mode != 'w4afp8': # w4afp8 is only for moe
-                self.config.prefill_worker_config.gemm_quant_mode = self.use_specific_quant_mode
-            self.config.prefill_worker_config.moe_quant_mode = self.use_specific_quant_mode
-
-        self.config.decode_worker_config.gemm_quant_mode = "fp8_block"
-        self.config.decode_worker_config.moe_quant_mode = "fp8_block"
-        self.config.decode_worker_config.kvcache_quant_mode = "fp8"
-        self.config.decode_worker_config.fmha_quant_mode = "float16"
-        self.config.decode_worker_config.comm_quant_mode = "half"
-        
-        database = get_database(system=self.config.decode_worker_config.system_name, backend=self.config.decode_worker_config.backend_name, version=self.config.decode_worker_config.backend_version)
-        if database.system_spec['gpu']['sm_version'] >= 100:
-            self.config.decode_worker_config.gemm_quant_mode = "nvfp4"
-            self.config.decode_worker_config.moe_quant_mode = "nvfp4"
-        elif database.system_spec['gpu']['sm_version'] < 89:
-            self.config.decode_worker_config.gemm_quant_mode = "float16"
-            self.config.decode_worker_config.moe_quant_mode = "float16"
-            self.config.decode_worker_config.kvcache_quant_mode = "float16"
-        
-        if self.use_specific_quant_mode is not None:
-            # fp8_tensor, float16.
-            if self.use_specific_quant_mode != 'w4afp8': # w4afp8 is only for moe
-                self.config.decode_worker_config.gemm_quant_mode = self.use_specific_quant_mode
-            self.config.decode_worker_config.moe_quant_mode = self.use_specific_quant_mode
-        
-        # replica config
-        self.config.replica_config.num_gpu_per_replica = [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128]
-        self.config.replica_config.max_gpu_per_replica = 128
-        self.config.replica_config.max_prefill_worker = 32
-        self.config.replica_config.max_decode_worker = 32
-        if self.enable_wide_ep:
-            self.config.replica_config.num_gpu_per_replica = None
-            self.config.replica_config.max_gpu_per_replica = 512
-            self.config.replica_config.max_prefill_worker = 32
-            self.config.replica_config.max_decode_worker = 32
-        
-        # advanced tuning config
-        self.config.advanced_tuning_config.prefill_correction_scale = 0.9
-        self.config.advanced_tuning_config.decode_correction_scale = 0.92
-        self.config.advanced_tuning_config.prefill_max_batch_size = 1
-        self.config.advanced_tuning_config.decode_max_batch_size = 512
-
-        logger.info(f"Task {self.task_name}: Runtime config: {self.config.runtime_config}")
-        logger.info(f"Task {self.task_name}: Prefill worker config: {self.config.prefill_worker_config}")
-        logger.info(f"Task {self.task_name}: Decode worker config: {self.config.decode_worker_config}")
-        logger.info(f"Task {self.task_name}: Replica config: {self.config.replica_config}")
-        logger.info(f"Task {self.task_name}: Advanced tuning config: {self.config.advanced_tuning_config}")
-
-    def _overwrite_from_yaml_config(self, yaml_config: Union[dict, DefaultMunch]):
-        # Convert to dict for easier manipulation, then convert back to Munch at the end
-        target_dict = self.config.toDict()
-        source_dict = copy.deepcopy(yaml_config)
-        
-        def _recursive_update(target, source, path=""):
-            """Recursively update target dict with source dict values"""
-            for key, value in source.items():
-                current_path = f"{path}.{key}" if path else key
-                
-                # Check if key exists in target
-                if key not in target:
-                    logger.warning(f"Key '{current_path}' does not exist in self.config, adding it anyway")
-                
-                # If both are dicts, recurse
-                if isinstance(value, dict) and key in target and isinstance(target[key], dict):
-                    _recursive_update(target[key], value, current_path)
-                else:
-                    # Direct assignment
-                    target[key] = value
-        
-        _recursive_update(target_dict, source_dict)
-        
-        # Convert back to DefaultMunch
-        self.config = DefaultMunch.fromDict(target_dict, DefaultMunch)
-    
-    def _convert_worker_config_to_enum(self, worker_config: Union[dict, DefaultMunch]):
-        worker_config.gemm_quant_mode = common.GEMMQuantMode[worker_config.gemm_quant_mode]
-        worker_config.moe_quant_mode = common.MoEQuantMode[worker_config.moe_quant_mode]
-        worker_config.kvcache_quant_mode = common.KVCacheQuantMode[worker_config.kvcache_quant_mode]
-        worker_config.fmha_quant_mode = common.FMHAQuantMode[worker_config.fmha_quant_mode]
-        worker_config.comm_quant_mode = common.CommQuantMode[worker_config.comm_quant_mode]
-
-    def __init__(self, 
-                 serving_mode: str,
-                 model_name: str,
-                 system_name: str = 'h200_sxm',
-                 decode_system_name: Optional[str] = None,
-                 backend_name: str = 'trtllm',
-                 backend_version: Optional[str] = None,
-                 use_specific_quant_mode: Optional[str] = None, # fp8, fp8_block, float16, w4afp8, nvfp4
-                 isl: int = 4000,
-                 osl: int = 1000,
-                 ttft: float = 1000,
-                 tpot: float = 50,
-                 enable_wide_ep: bool = False,
-                 yaml_config: Optional[dict] = None):
-
-        # non-config part
-        self.task_name = f"{serving_mode}_{model_name}_{system_name}_{decode_system_name}_{backend_name}_{backend_version}_{isl}_{osl}_{ttft}_{tpot}"        
-        self.system_name = system_name
-        self.decode_system_name = decode_system_name
-        self.backend_name = backend_name
-        self.backend_version = backend_version
-        self.use_specific_quant_mode = use_specific_quant_mode        
-        self.enable_wide_ep = enable_wide_ep
-
-        # common config part - use recursive DefaultMunch to ensure independent objects
-        self.config = Munch()
-        self.config.serving_mode = serving_mode
-        self.config.model_name = model_name
-        self.config.task_name = self.task_name
-        self.config.nextn = 0 if model_name not in ['DEEPSEEK_V3', 'KIMI_K2'] else 1
-        self.config.nextn_accept_rates = [0.85,0,0,0,0]
-        self.config.runtime_config = Munch()
-        self.config.runtime_config.isl = isl
-        self.config.runtime_config.osl = osl
-        self.config.runtime_config.ttft = ttft
-        self.config.runtime_config.tpot = tpot
-
-        if serving_mode == 'agg':
-            self._populate_agg_config()
-        elif serving_mode == 'disagg':
-            self._populate_disagg_config()
-        else:
-            raise ValueError(f"Invalid serving mode: {serving_mode}")
-        
-        if yaml_config is not None:
-            self._overwrite_from_yaml_config(yaml_config=yaml_config)
-
-        if serving_mode == 'agg':
-            self._convert_worker_config_to_enum(self.config.worker_config)
-        elif serving_mode == 'disagg':
-            self._convert_worker_config_to_enum(self.config.prefill_worker_config)
-            self._convert_worker_config_to_enum(self.config.decode_worker_config)
-
-class TaskRunner:
-    def run_agg(self, task_config: DefaultMunch) -> Optional[pd.DataFrame]:
-        logger.info(f"Task {task_config.task_name}: Setting up runtime config")
-        runtime_config = config.RuntimeConfig(isl=task_config.runtime_config.isl,
-                                              osl=task_config.runtime_config.osl, 
-                                              ttft=task_config.runtime_config.ttft, 
-                                              tpot=list(range(1,20,1))+list(range(20,300,5)))
-        logger.info(f"Task {task_config.task_name}: Setting up database")
-        try:
-            database = copy.deepcopy(get_database(system=task_config.worker_config.system_name, 
-                                                backend=task_config.worker_config.backend_name, 
-                                                version=task_config.worker_config.backend_version))
-        except Exception as e:
-            logger.error(f"Error getting database for {task_config.worker_config.system_name} {task_config.worker_config.backend_name} {task_config.worker_config.backend_version}: {e}")
-            return None
-        logger.info(f"Task {task_config.task_name}: Setting up model config")
-        model_config = config.ModelConfig(gemm_quant_mode=task_config.worker_config.gemm_quant_mode,
-                                          kvcache_quant_mode=task_config.worker_config.kvcache_quant_mode,
-                                          fmha_quant_mode=task_config.worker_config.fmha_quant_mode,
-                                          moe_quant_mode=task_config.worker_config.moe_quant_mode,
-                                          comm_quant_mode=task_config.worker_config.comm_quant_mode,
-                                          nextn=task_config.nextn,
-                                          nextn_accept_rates=task_config.nextn_accept_rates)
-        logger.info(f"Task {task_config.task_name}: Enumerating parallel config")
-        try:
-            parallel_config_list = enumerate_parallel_config(
-                num_gpu_list=task_config.worker_config.num_gpu_per_worker,
-                tp_list=task_config.worker_config.tp_list,
-                pp_list=task_config.worker_config.pp_list,
-                dp_list=task_config.worker_config.dp_list,
-                moe_tp_list=task_config.worker_config.moe_tp_list,
-                moe_ep_list=task_config.worker_config.moe_ep_list,
-                is_moe=check_is_moe(task_config.model_name),
-                backend=common.BackendName(task_config.worker_config.backend_name)
-            )
-        except Exception as e:
-            logger.error(f"Error enumerating parallel config for {task_config.worker_config.system_name} {task_config.worker_config.backend_name} {task_config.worker_config.backend_version}: {e}")
-            return None
-        logger.info(f"Task {task_config.task_name}: Running agg pareto")
-        return agg_pareto(model_name=task_config.model_name,
-               runtime_config=runtime_config, 
-               database=database,
-               backend_name=task_config.worker_config.backend_name,
-               model_config=model_config,
-               parallel_config_list=parallel_config_list)
-
-    def run_disagg(self, task_config: DefaultMunch) -> Optional[pd.DataFrame]:
-        logger.info(f"Task {task_config.task_name}: Setting up runtime config")
-        runtime_config = config.RuntimeConfig(isl=task_config.runtime_config.isl,
-                                              osl=task_config.runtime_config.osl, 
-                                              ttft=task_config.runtime_config.ttft, 
-                                              tpot=list(range(1,20,1))+list(range(20,300,5)))
-
-        # prefill                                              
-        logger.info(f"Task {task_config.task_name}: Setting up prefill database")
-        try:
-            prefill_database = copy.deepcopy(get_database(system=task_config.prefill_worker_config.system_name, 
-                                                        backend=task_config.prefill_worker_config.backend_name, 
-                                                        version=task_config.prefill_worker_config.backend_version))
-        except Exception as e:
-            logger.error(f"Error getting prefill database for {task_config.prefill_worker_config.system_name} {task_config.prefill_worker_config.backend_name} {task_config.prefill_worker_config.backend_version}: {e}")
-            return None
-        logger.info(f"Task {task_config.task_name}: Setting up prefill model config")
-        prefill_model_config = config.ModelConfig(gemm_quant_mode=task_config.prefill_worker_config.gemm_quant_mode,
-                                                  kvcache_quant_mode=task_config.prefill_worker_config.kvcache_quant_mode,
-                                                  fmha_quant_mode=task_config.prefill_worker_config.fmha_quant_mode,
-                                                  moe_quant_mode=task_config.prefill_worker_config.moe_quant_mode,
-                                                  comm_quant_mode=task_config.prefill_worker_config.comm_quant_mode,
-                                                  nextn=task_config.nextn,
-                                                  nextn_accept_rates=task_config.nextn_accept_rates)
-
-        logger.info(f"Task {task_config.task_name}: Enumerating prefill parallel config")
-        try:
-            prefill_parallel_config_list = enumerate_parallel_config(
-                num_gpu_list=task_config.prefill_worker_config.num_gpu_per_worker,
-                tp_list=task_config.prefill_worker_config.tp_list,
-                pp_list=task_config.prefill_worker_config.pp_list,
-                dp_list=task_config.prefill_worker_config.dp_list,
-                moe_tp_list=task_config.prefill_worker_config.moe_tp_list,
-                moe_ep_list=task_config.prefill_worker_config.moe_ep_list,
-                is_moe=check_is_moe(task_config.model_name),
-                backend=common.BackendName(task_config.prefill_worker_config.backend_name)
-            )
-        except Exception as e:
-            logger.error(f"Error enumerating prefill parallel config for {task_config.prefill_worker_config.system_name} {task_config.prefill_worker_config.backend_name} {task_config.prefill_worker_config.backend_version}: {e}")
-            return None
-
-        # decode
-        logger.info(f"Task {task_config.task_name}: Setting up decode database")
-        try:
-            decode_database = copy.deepcopy(get_database(system=task_config.decode_worker_config.system_name, 
-                                                        backend=task_config.decode_worker_config.backend_name, 
-                                                        version=task_config.decode_worker_config.backend_version))
-        except Exception as e:
-            logger.error(f"Error getting decode database for {task_config.decode_worker_config.system_name} {task_config.decode_worker_config.backend_name} {task_config.decode_worker_config.backend_version}: {e}")
-            return None
-        logger.info(f"Task {task_config.task_name}: Setting up decode model config")
-        decode_model_config = config.ModelConfig(gemm_quant_mode=task_config.decode_worker_config.gemm_quant_mode,
-                                                  kvcache_quant_mode=task_config.decode_worker_config.kvcache_quant_mode,
-                                                  fmha_quant_mode=task_config.decode_worker_config.fmha_quant_mode,
-                                                  moe_quant_mode=task_config.decode_worker_config.moe_quant_mode,
-                                                  comm_quant_mode=task_config.decode_worker_config.comm_quant_mode,
-                                                  nextn=task_config.nextn,
-                                                  nextn_accept_rates=task_config.nextn_accept_rates)
-        
-        logger.info(f"Task {task_config.task_name}: Enumerating decode parallel config")
-        try:
-            decode_parallel_config_list = enumerate_parallel_config(
-                num_gpu_list=task_config.decode_worker_config.num_gpu_per_worker,
-                tp_list=task_config.decode_worker_config.tp_list,
-                pp_list=task_config.decode_worker_config.pp_list,
-                dp_list=task_config.decode_worker_config.dp_list,
-                moe_tp_list=task_config.decode_worker_config.moe_tp_list,
-                moe_ep_list=task_config.decode_worker_config.moe_ep_list,
-                is_moe=check_is_moe(task_config.model_name),
-                backend=common.BackendName(task_config.decode_worker_config.backend_name)
-            )
-        except Exception as e:
-            logger.error(f"Error enumerating decode parallel config for {task_config.decode_worker_config.system_name} {task_config.decode_worker_config.backend_name} {task_config.decode_worker_config.backend_version}: {e}")
-            return None
-        
-        logger.info(f"Task {task_config.task_name}: Running disagg pareto")
-        return disagg_pareto(
-                            model_name=task_config.model_name,
-                            runtime_config=runtime_config,
-                            prefill_database=prefill_database,
-                            prefill_backend_name=task_config.prefill_worker_config.backend_name,
-                            prefill_model_config=prefill_model_config,
-                            prefill_parallel_config_list=prefill_parallel_config_list,
-                            decode_database=decode_database,
-                            decode_backend_name=task_config.decode_worker_config.backend_name,
-                            decode_model_config=decode_model_config,
-                            decode_parallel_config_list=decode_parallel_config_list,
-                            num_gpu_list=task_config.replica_config.num_gpu_per_replica,
-                            max_num_gpu=task_config.replica_config.max_gpu_per_replica,
-                            prefill_max_num_worker=task_config.replica_config.max_prefill_worker,
-                            decode_max_num_worker=task_config.replica_config.max_decode_worker,
-                            prefill_max_batch_size=task_config.advanced_tuning_config.prefill_max_batch_size,
-                            decode_max_batch_size=task_config.advanced_tuning_config.decode_max_batch_size,
-                            prefill_correction_scale=task_config.advanced_tuning_config.prefill_correction_scale,                    
-                            decode_correction_scale=task_config.advanced_tuning_config.decode_correction_scale
-                            )
-
-    def run(self, task_config: TaskConfig) -> Optional[pd.DataFrame]:
-        task_name = task_config.task_name
-        serving_mode = task_config.config.serving_mode
-        # run
-        logger.info(f"Starting Pareto Analysis for {task_name} in {serving_mode} mode...")
-        try:
-            if serving_mode == 'agg':
-                df = self.run_agg(task_config.config)
-            elif serving_mode == 'disagg':
-                df = self.run_disagg(task_config.config)
-            else:
-                raise ValueError(f"Invalid serving mode: {serving_mode}")
-        except Exception as e:
-            logger.error(f"Error running pareto analysis for {task_name} in {serving_mode} mode: {e}")
-            df = None
-
-        if df is None:
-            logger.warning(f"No result found for {task_name} in {serving_mode} mode.")
-        
-        return df
 
 
 def get_pareto_front(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:
@@ -865,32 +424,9 @@ if __name__ == '__main__':
 
     logging.basicConfig(level=logging.INFO)
     
-    model_name = 'DEEPSEEK_V3'
+    model_name = 'QWEN3_32B'#'DEEPSEEK_V3'
     isl = 4000
     osl = 1000
     ttft = 1000
-    tpot = 50
-
-    agg_task_config = TaskConfig(serving_mode='agg', 
-                                 model_name=model_name, 
-                                 system_name='h200_sxm',
-                                 isl=isl,
-                                 osl=osl,
-                                 ttft=ttft,
-                                 tpot=tpot,
-                                 use_specific_quant_mode='w4afp8')
-    disagg_task_config = TaskConfig(serving_mode='disagg', 
-                                    model_name=model_name, 
-                                    system_name='h200_sxm', 
-                                    decode_system_name='h100_sxm', 
-                                    isl=isl,
-                                    osl=osl,
-                                    ttft=ttft,
-                                    tpot=tpot,
-                                    use_specific_quant_mode='w4afp8')
-    task_runner = TaskRunner()
-    agg_df = task_runner.run(agg_task_config)
-    disagg_df = task_runner.run(disagg_task_config)
-    print(agg_df)
-    print(disagg_df)
+    tpot = 40
 
