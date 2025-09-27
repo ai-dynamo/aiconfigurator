@@ -671,9 +671,30 @@ class AIConfigurator:
 
         # ============================= pareto frontier
         summary_box.append("  Pareto Frontier:")
-        pareto_plot_buf = draw_pareto_to_string(f"{aiconfigurator_config.model_name} Pareto Frontier", 
-                                                     aiconfigurator_result.disagg_best_config if aiconfigurator_result.chosen_system_type == "disagg" else aiconfigurator_result.agg_best_config,
-                                                     aiconfigurator_result.disagg_pareto, aiconfigurator_result.agg_pareto)
+        try:
+            pareto_plot_buf = draw_pareto_to_string(
+                f"{aiconfigurator_config.model_name} Pareto Frontier",
+                [
+                    {"df": aiconfigurator_result.disagg_pareto, "label": "Disagg"},
+                    {"df": aiconfigurator_result.agg_pareto, "label": "Agg"},
+                ],
+                highlight={
+                    "df": aiconfigurator_result.disagg_best_config if aiconfigurator_result.chosen_system_type == "disagg" else aiconfigurator_result.agg_best_config,
+                    "label": "Best",
+                },
+            )
+        except TypeError:
+            highlight_df = (
+                aiconfigurator_result.disagg_best_config
+                if aiconfigurator_result.chosen_system_type == "disagg"
+                else aiconfigurator_result.agg_best_config
+            )
+            pareto_plot_buf = draw_pareto_to_string(
+                f"{aiconfigurator_config.model_name} Pareto Frontier",
+                highlight_df,
+                aiconfigurator_result.disagg_pareto,
+                aiconfigurator_result.agg_pareto,
+            )
         summary_box.append(pareto_plot_buf)
         summary_box.append("  " + "-" * 76)
 

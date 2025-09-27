@@ -275,64 +275,85 @@ def draw_pareto(df: pd.DataFrame, x_col: str, y_col: str, ax: plt.Axes, color: s
     ax.set_ylabel(y_col)
     ax.legend()
 
-def draw_pareto_to_string(title: str,
-                            best_config_df: Optional[pd.DataFrame],
-                            disagg_pareto_df: Optional[pd.DataFrame],
-                            agg_pareto_df: Optional[pd.DataFrame]) -> str:
+def draw_pareto_to_string(
+    title: str,
+    series: list[dict],
+    *,
+    highlight: Optional[dict] = None,
+) -> str:
+    """Render one or more Pareto series as ASCII plot text.
+
+    Args:
+        title: Plot title prefix.
+        series: List of dictionaries describing the series to plot. Expected keys:
+            - "df": pandas DataFrame containing the Pareto frontier.
+            - "label": Series label (default: "series-{index}").
+            - "color": plotext color (RGB tuple or name).
+            - "marker": plotext marker (default: "dot").
+        highlight: Optional dictionary describing a highlighted point set. Accepts
+            keys "df", "label", "color", "marker" similar to ``series``.
     """
-    Draw Pareto front to string.
-    """
+
     plotext.plot_size(80, 30)
     plotext.theme("clear")
-    if disagg_pareto_df is not None and not disagg_pareto_df.empty:
-        plotext.plot(
-            disagg_pareto_df['tokens/s/user'],
-            disagg_pareto_df['tokens/s/gpu'],
-            label='Disagg',
-            color=(144, 238, 144),  # light green
-            marker='d'
-        )
-    if agg_pareto_df is not None and not agg_pareto_df.empty:
-        plotext.plot(
-            agg_pareto_df['tokens/s/user'],
-            agg_pareto_df['tokens/s/gpu'],
-            label='Agg',
-            color=(200, 200, 200),  # gray
-            marker='a'
-        )
 
-    if best_config_df is not None and not best_config_df.empty:
+    palette = [
+        (144, 238, 144),  # light green
+        (200, 200, 200),  # gray
+        (135, 206, 235),  # sky blue
+        (255, 182, 193),  # light pink
+        (255, 160, 122),  # light salmon
+        (221, 160, 221),  # plum
+    ]
+    markers = ["dot", "fdot", "hdot", "ldot", "sdot", "x"]
+
+    y_max = 0.0
+    x_max = 0.0
+
+    for idx, entry in enumerate(series):
+        df = entry.get("df")
+        if df is None or df.empty:
+            continue
+        color = entry.get("color") or palette[idx % len(palette)]
+        marker = entry.get("marker") or markers[idx % len(markers)]
+        label = entry.get("label") or f"series-{idx+1}"
         plotext.plot(
-            best_config_df['tokens/s/user'],
-            best_config_df['tokens/s/gpu'],
-            label='Best',
-            color=(255, 215, 0),  # gold
-            marker='X'
+            df['tokens/s/user'],
+            df['tokens/s/gpu'],
+            label=label,
+            color=color,
+            marker=marker,
         )
+        y_max = max(df['tokens/s/gpu'].max(), y_max)
+        x_max = max(df['tokens/s/user'].max(), x_max)
+
+    if highlight is not None:
+        highlight_df = highlight.get("df")
+        if highlight_df is not None and not highlight_df.empty:
+            color = highlight.get("color") or (255, 215, 0)  # gold
+            marker = highlight.get("marker") or "x"
+            label = highlight.get("label") or "Best"
+            plotext.plot(
+                highlight_df['tokens/s/user'],
+                highlight_df['tokens/s/gpu'],
+                label=label,
+                color=color,
+                marker=marker,
+            )
+            y_max = max(highlight_df['tokens/s/gpu'].max(), y_max)
+            x_max = max(highlight_df['tokens/s/user'].max(), x_max)
 
     plotext.title(f"{title}: tokens/s/gpu vs tokens/s/user")
     plotext.xlabel("tokens/s/user")
     plotext.ylabel("tokens/s/gpu")
     plotext.grid(False)
 
-    y_min = 0.0
-    y_max = 0.0
-    x_min = 0.0
-    x_max = 0.0
-    if disagg_pareto_df is not None and not disagg_pareto_df.empty:
-        y_max = max(disagg_pareto_df['tokens/s/gpu'].max(), y_max)
-        x_max = max(disagg_pareto_df['tokens/s/user'].max(), x_max)
-    if agg_pareto_df is not None and not agg_pareto_df.empty:
-        y_max = max(agg_pareto_df['tokens/s/gpu'].max(), y_max)
-        x_max = max(agg_pareto_df['tokens/s/user'].max(), x_max)
-    y_max = y_max * 1.2
-    y_max = ((y_max + 49) // 50) * 50
-    x_max = x_max * 1.1
-    x_max = ((x_max + 19) // 20) * 20
-    x_max = min(x_max, 300)
     if y_max > 0.0 and x_max > 0.0:
-        plotext.ylim(y_min, y_max)
-        plotext.xlim(x_min, x_max)
+        y_max = ((y_max * 1.2) + 49) // 50 * 50
+        x_max = ((x_max * 1.1) + 19) // 20 * 20
+        x_max = min(x_max, 300)
+        plotext.ylim(0.0, y_max)
+        plotext.xlim(0.0, x_max)
 
     buf = plotext.build()
     plotext.clear_data()

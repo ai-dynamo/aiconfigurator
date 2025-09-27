@@ -42,15 +42,17 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
     parser.add_argument("--ttft", type=float, default=1000.0, help="Time to first token in ms.")
     parser.add_argument("--tpot", type=float, default=20.0, help="Time per output token in ms.")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
+    parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")        
 
 
 def _add_experiments_mode_arguments(parser):
     parser.add_argument("--yaml_path", type=str, required=True, help="Path to a YAML file containing experiment definitions.")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
+    parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")        
 
 
 def configure_parser(parser):
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
-    parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
     default_parser = subparsers.add_parser("default", help="Run the default agg vs disagg comparison.")
@@ -58,7 +60,6 @@ def configure_parser(parser):
 
     experiments_parser = subparsers.add_parser("exp", help="Run one or more experiments defined in a YAML file.")
     _add_experiments_mode_arguments(experiments_parser)
-    
 
 
 def _build_default_task_configs(args) -> Dict[str, TaskConfig]:
@@ -80,7 +81,7 @@ def _build_default_task_configs(args) -> Dict[str, TaskConfig]:
     disagg_kwargs["decode_system_name"] = decode_system
     disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
 
-    return {"agg": agg_task, "disagg": disagg_task}
+    return {"disagg": disagg_task, "agg": agg_task}
 
 
 _EXPERIMENT_RESERVED_KEYS = {
@@ -373,11 +374,8 @@ def log_final_summary(
 
     summary_box.append("  " + "-" * 76)
     summary_box.append("  Input Configuration & SLA Target:")
-    # Find the first experiment to get model and is_moe
-    first_exp_name = list(task_configs.keys())[0]
-    first_task_config = task_configs[first_exp_name].config
-    summary_box.append(f"    Model: {first_task_config.model_name} (is_moe: {first_task_config.is_moe})")
-    summary_box.append(f"    Total GPUs: {task_configs[first_exp_name].total_gpus}")
+    summary_box.append(f"    Model: {task_configs[chosen_exp].config.model_name} (is_moe: {task_configs[chosen_exp].config.is_moe})")
+    summary_box.append(f"    Total GPUs: {task_configs[chosen_exp].total_gpus}")
     if mode == "default":
         agg_value = best_throughputs.get("agg", 0.0)
         disagg_value = best_throughputs.get("disagg", 0.0)
@@ -408,17 +406,24 @@ def log_final_summary(
     summary_box.append("  " + "-" * 76)
 
     # ============================= pareto frontier
-    if len(pareto_fronts) < 3:  # Only show command line plot for small number of experiments
+    if len(pareto_fronts) <= 10:  # avoid overly crowded plots
         summary_box.append("  Pareto Frontier:")
-        
-        # Prepare data for plotting - use first two experiments or all if less than 2
-        exp_names = list(pareto_fronts.keys())
-        pareto1 = pareto_fronts[exp_names[0]] if len(exp_names) > 0 else pd.DataFrame()
-        pareto2 = pareto_fronts[exp_names[1]] if len(exp_names) > 1 else pd.DataFrame()
-        
-        pareto_plot_buf = draw_pareto_to_string(f"{first_task_config.model_name} Pareto Frontier", 
-                                                        best_config_df,
-                                                        pareto1, pareto2)
+        series_payload = [
+            {"df": df, "label": name}
+            for name, df in pareto_fronts.items()
+            if df is not None and not df.empty
+        ]
+        highlight_series = None
+        if not best_config_df.empty:
+            highlight_series = {
+                "df": best_config_df,
+                "label": f"{chosen_exp} best",
+            }
+            pareto_plot_buf = draw_pareto_to_string(
+                f"{task_configs[chosen_exp].config.model_name} Pareto Frontier",
+                series_payload,
+                highlight=highlight_series,
+            )
         summary_box.append(pareto_plot_buf)
     summary_box.append("  " + "-" * 76)
 
