@@ -419,14 +419,3 @@ def get_best_config_under_tpot_constraint(
         # For now, return empty if no config meets the criteria.
         logger.info(f"No config found on Pareto front with TPOT <= {target_tpot}ms.")
         return pd.DataFrame()
-
-if __name__ == '__main__':
-
-    logging.basicConfig(level=logging.INFO)
-    
-    model_name = 'QWEN3_32B'#'DEEPSEEK_V3'
-    isl = 4000
-    osl = 1000
-    ttft = 1000
-    tpot = 40
-

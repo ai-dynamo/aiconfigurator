@@ -584,13 +584,31 @@ class TaskConfig:
         self.system_name = system_name
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
-        self.backend_version = backend_version
         self.use_specific_quant_mode = use_specific_quant_mode
         self.enable_wide_ep = enable_wide_ep
         self.total_gpus = total_gpus
 
+        if serving_mode == "agg":
+            effective_backend_version = self.config.worker_config.backend_version
+            self.backend_version = effective_backend_version
+        elif serving_mode == "disagg":
+            prefill_backend_version = self.config.prefill_worker_config.backend_version
+            decode_backend_version = self.config.decode_worker_config.backend_version
+            self.prefill_backend_version = prefill_backend_version
+            self.decode_backend_version = decode_backend_version
+            if prefill_backend_version == decode_backend_version:
+                effective_backend_version = prefill_backend_version
+            else:
+                effective_backend_version = f"{prefill_backend_version}-{decode_backend_version}"
+            self.backend_version = effective_backend_version
+        else:
+            effective_backend_version = backend_version
+            self.backend_version = backend_version
+
         self.task_name = (
-            f"{serving_mode}_{model_name}_{system_name}_{decode_system_name}_{backend_name}_{backend_version}_{isl}_{osl}_{ttft}_{tpot}"
+            f"{serving_mode}_{model_name}_{system_name}_{decode_system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{ttft}_{tpot}"
+        ) if serving_mode == "disagg" else (
+            f"{serving_mode}_{model_name}_{system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{ttft}_{tpot}"
         )
         self.config.task_name = self.task_name
 
@@ -625,6 +643,8 @@ class TaskConfig:
             "task_name": self.task_name,
             "serving_mode": self.config.serving_mode,
             "applied_layers": self.config.applied_layers,
+            "nextn": self.config.nextn,
+            "nextn_accept_rates": self.config.nextn_accept_rates,
             "runtime_config": _convert(self.config.runtime_config),
         }
 

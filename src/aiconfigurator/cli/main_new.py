@@ -228,7 +228,7 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
     return task_configs
 
 
-def _execute_task_configs(task_configs: Dict[str, TaskConfig], save_dir: Optional[str]) -> None:
+def _execute_task_configs(task_configs: Dict[str, TaskConfig], save_dir: Optional[str], mode: str) -> None:
     results: Dict[str, pd.DataFrame] = {}
     start_time = time.time()
     runner = TaskRunner()
@@ -251,11 +251,10 @@ def _execute_task_configs(task_configs: Dict[str, TaskConfig], save_dir: Optiona
         logger.error("No successful experiment runs to compare.")
         raise SystemExit(1)
 
-    pareto_fronts = {name: get_pareto_front(df, 'tokens/s/user', 'tokens/s/gpu') for name, df in results.items()}
 
     best_configs: Dict[str, pd.DataFrame] = {}
     best_throughputs: Dict[str, float] = {}
-    for name, pareto_df in pareto_fronts.items():
+    for name, pareto_df in results.items():
         tpot_target = task_configs[name].config.runtime_config.tpot
         per_total = getattr(task_configs[name], "total_gpus", None) or 0
         best_config_df = get_best_config_under_tpot_constraint(per_total, pareto_df, tpot_target)
@@ -267,10 +266,10 @@ def _execute_task_configs(task_configs: Dict[str, TaskConfig], save_dir: Optiona
 
     chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
 
-    log_final_summary(chosen_exp, best_throughputs, best_configs, pareto_fronts, task_configs)
+    log_final_summary(chosen_exp, best_throughputs, best_configs, results, task_configs, mode)
 
     if save_dir:
-        save_results(chosen_exp, best_configs, pareto_fronts, task_configs, save_dir)
+        save_results(chosen_exp, best_configs, results, task_configs, save_dir)
 
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
@@ -289,7 +288,7 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
-    _execute_task_configs(task_configs, args.save_dir)
+    _execute_task_configs(task_configs, args.save_dir, args.mode)
 
 def _plot_worker_setup_table(exp_name: str, pareto_df: pd.DataFrame, total_gpus: int, tpot_target: float, top: int, is_moe: bool) -> str:
     """Plot worker setup table for a single experiment."""
@@ -356,7 +355,14 @@ def _plot_worker_setup_table(exp_name: str, pareto_df: pd.DataFrame, total_gpus:
     buf.append(table.get_string())
     return "\n".join(buf)
     
-def log_final_summary(chosen_exp: str, best_throughputs: Dict[str, float], best_configs: Dict[str, pd.DataFrame], pareto_fronts: Dict[str, pd.DataFrame], task_configs: Dict[str, TaskConfig]):
+def log_final_summary(
+        chosen_exp: str, 
+        best_throughputs: Dict[str, float], 
+        best_configs: Dict[str, pd.DataFrame], 
+        pareto_fronts: Dict[str, pd.DataFrame], 
+        task_configs: Dict[str, TaskConfig],
+        mode: str,
+):
     """Log final summary of configuration results"""
     
     # Consolidate and format results into a summary box for clear presentation
@@ -372,7 +378,19 @@ def log_final_summary(chosen_exp: str, best_throughputs: Dict[str, float], best_
     first_task_config = task_configs[first_exp_name].config
     summary_box.append(f"    Model: {first_task_config.model_name} (is_moe: {first_task_config.is_moe})")
     summary_box.append(f"    Total GPUs: {task_configs[first_exp_name].total_gpus}")
-    summary_box.append(f"    Best Experiment Chosen: \033[1m{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu\033[0m")
+    if mode == "default":
+        agg_value = best_throughputs.get("agg", 0.0)
+        disagg_value = best_throughputs.get("disagg", 0.0)
+        if agg_value > 0 and disagg_value > 0:
+            benefit_ratio = disagg_value / agg_value
+        elif agg_value == 0 and disagg_value > 0:
+            benefit_ratio = float("inf")
+        elif agg_value > 0 and disagg_value == 0:
+            benefit_ratio = 0.0
+        summary_box.append(f"    Best Experiment Chosen: \033[1m{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu ({benefit_ratio:.2f}x better)\033[0m")        
+    else:
+        summary_box.append(f"    Best Experiment Chosen: \033[1m{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu\033[0m")
+        
     summary_box.append("  " + "-" * 76)
 
 
@@ -384,9 +402,9 @@ def log_final_summary(chosen_exp: str, best_throughputs: Dict[str, float], best_
     summary_box.append(f"    - Best Throughput: {best_throughput:.2f} tokens/s/gpu")
     if not best_config_df.empty:
         best_conf_details = best_config_df.iloc[0]
-        summary_box.append(f"      - User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
-        summary_box.append(f"      - TTFT: {best_conf_details['ttft']:.2f}ms")
-        summary_box.append(f"      - TPOT: {best_conf_details['tpot']:.2f}ms")
+        summary_box.append(f"    - User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
+        summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
+        summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
     summary_box.append("  " + "-" * 76)
 
     # ============================= pareto frontier
