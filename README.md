@@ -279,7 +279,10 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 |--------|-------------------|--------|
 | h100_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
 | h200_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
-| b200_sxm | TRTLLM(NA) | 🚧 |
+| b200_sxm | TRTLLM(1.0.0rc6) | ✅ |
+| gb200_sxm | TRTLLM(1.0.0rc6) | ✅ |
+
+> **Note**: b200 and gb200 are under dev. Results are to be aligned. For preview now. 
 
 ### How To Add A New Model
 Adding a new model needs to modify the source code and perhaps to collect new data for the model. Please refer to [add_a_new_model](docs/add_a_new_model.md)
