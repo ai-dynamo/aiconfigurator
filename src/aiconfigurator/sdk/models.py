@@ -258,15 +258,38 @@ class MOEModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
+        workload_distribution = f"{self.config.workload_distribution}_{self._power_law_alpha}"
 
+        if self.model_name in ['GPT_OSS_120B','GPT_OSS_20B']:
+            attn_scale_factor = 2
+            sliding_window = 128
+            self.context_ops.append(ops.ContextAttention(f'context_attention', 
+                                                         self._num_layers/attn_scale_factor, 
+                                                         self._num_heads//tp_size, 
+                                                         num_kv_heads_per_GPU, 
+                                                         kvcache_quant_mode, 
+                                                         fmha_quant_mode,
+                                                         sliding_window,
+                                                         self._head_size))
+            self.generation_ops.append(ops.GenerationAttention(f'generation_attention', 
+                                                               self._num_layers/attn_scale_factor, 
+                                                               self._num_heads//tp_size, 
+                                                               num_kv_heads_per_GPU, 
+                                                               kvcache_quant_mode,
+                                                               sliding_window,
+                                                               self._head_size))
+        else:
+            attn_scale_factor = 1
+            
         self.context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
                                 ops.GEMM(f'context_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode),
-                                ops.ContextAttention(f'context_attention', self._num_layers, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode),
+                                ops.ContextAttention(f'context_attention', self._num_layers/attn_scale_factor, 
+                                                     self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, 
+                                                     fmha_quant_mode, head_size=self._head_size),
                                 ops.GEMM(f'context_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
                                 ops.ElementWise(f'context_add_norm_2', self._num_layers, 2*h, 2*h, 0.8)])
-
+        
         #router, only take it into account when num_experts >= 128
         if self._num_experts >= 128:
             self.context_ops.extend([
@@ -284,7 +307,9 @@ class MOEModel(BaseModel):
         self.generation_ops.extend([ops.Embedding(f'generation_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'generation_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
                                 ops.GEMM(f'generation_qkv_gemm', self._num_layers, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode),
-                                ops.GenerationAttention(f'generation_attention', self._num_layers, self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode),
+                                ops.GenerationAttention(f'generation_attention', self._num_layers/attn_scale_factor, 
+                                                        self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, 
+                                                        head_size=self._head_size),
                                 ops.GEMM(f'generation_proj_gemm', self._num_layers, h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
                                 ops.ElementWise(f'generation_add_norm_2', self._num_layers, 2*h, 2*h, 0.8)])
 
@@ -617,7 +642,7 @@ class NemotronNas(BaseModel):
                                                 ops.AllReduce('generation_ar_2', count, h, tp_size)])
             self._generation_ops.append(ops.P2P('generation_p2p', pp_scale_factor, h, pp_size))
             self._generation_ops.append(ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16))
-    
+
     
     def _ffn_mult_to_intermediate_size(self, ffn_mult: float) -> int:
         """
