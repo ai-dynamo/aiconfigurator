@@ -48,11 +48,15 @@ def get_database(system : str,
             system_spec = yaml.load(open(os.path.join(systems_dir, system+'.yaml')), Loader=yaml.SafeLoader)
             data_path = os.path.join(systems_dir, system_spec['data_dir'], backend, version)
             if os.path.exists(data_path):
-                database = PerfDatabase(system, backend, version, systems_dir)
-                databases_cache[system][backend][version] = database
+                try:
+                    database = PerfDatabase(system, backend, version, systems_dir)
+                    databases_cache[system][backend][version] = database
+                except Exception as e:
+                    logger.error(f"failed to load {system=}, {backend=}, {version=}: {e}")
+                    database = None
             else:
-                database = None
                 logger.error(f"data path {data_path} not found")
+                database = None
         else:
             logger.error(f"system yaml {os.path.join(systems_dir, system+'.yaml')} not found")
             database = None
