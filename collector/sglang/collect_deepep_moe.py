@@ -1,31 +1,5 @@
-#!/usr/bin/env python3
-"""
-Benchmark DeepEP MoE layers with dummy weights.
-
-This script loads the first 4 layers of DeepSeek model with dummy weights
-and benchmarks the DeepEP MoE layers for different batch sizes and sequence lengths.
-
-Usage:
-    # Basic test with dummy weights
-    python collect_deepep_moe.py --model-path deepseek-ai/deepseek-coder-7b-instruct --load-format dummy
-
-    # Test specific batch sizes and sequence lengths
-    python collect_deepep_moe.py --model-path deepseek-ai/deepseek-coder-7b-instruct --load-format dummy --batch-size 1 4 8 --input-len 128 512 1024
-
-    # Test with profiling
-    python collect_deepep_moe.py --model-path deepseek-ai/deepseek-coder-7b-instruct --load-format dummy --profile
-
-Debugging CUDA errors:
-    # Set environment variables for debugging
-    export CUDA_LAUNCH_BLOCKING=1
-    export TORCH_USE_CUDA_DSA=1
-    python collect_deepep_moe.py --model-path deepseek-ai/deepseek-coder-7b-instruct --load-format dummy
-
-Multi-GPU timing:
-    # The script now properly handles multi-GPU timing with distributed barriers
-    # to ensure accurate latency measurements across all GPUs
-    # All ranks participate in the computation, but only rank 0 reports results
-"""
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 import argparse
 import copy

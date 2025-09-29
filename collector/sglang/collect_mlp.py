@@ -14,29 +14,16 @@
 # limitations under the License.
 
 import os
-import sys
 import torch
-import torch.nn as nn
 import time
 import math
-import json
-import argparse
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
-import concurrent.futures
+from typing import List
 import fcntl
-
-# Add sglang to path
-sys.path.insert(0, "/sgl-workspace/sglang/python")
-
-# Add project root to path to import helper module
-sys.path.insert(0, "/root/fac/llm-pet")
 
 from sglang.srt.models.deepseek_v2 import DeepseekV2MLP
 from sglang.srt.distributed.parallel_state import destroy_model_parallel
-from sglang.srt.layers.quantization import (
-    Fp8Config
-)
+from sglang.srt.layers.quantization import Fp8Config
 from sglang.srt.distributed import (
     initialize_model_parallel,
     init_distributed_environment,
@@ -44,7 +31,25 @@ from sglang.srt.distributed import (
 
 
 # Default model path
-DEEPSEEK_MODEL_PATH = "/root/fac/deepseek-v3"
+DEEPSEEK_MODEL_PATH = "/home/scratch.aichenf_wwfo/scripts/deepseek-v3"
+
+@dataclass
+class BenchConfig:
+    # MLP parameters
+    quant_types: List[str] = field(default_factory=lambda: ['fp8'])
+    num_tokens: List[int] = field(default_factory=lambda: [])
+    
+    # Model parameters
+    hidden_size: int = 7168
+    intermediate_size: int = 2048
+    
+    # Common parameters
+    num_warmup: int = 3
+    num_iterations: int = 10
+    model_path: str = DEEPSEEK_MODEL_PATH
+    dtype: str = "auto"
+    device: str = "cuda:0"
+    enable_profiler: bool = False
 
 @dataclass
 class MLPBenchResult:
@@ -61,39 +66,91 @@ class MLPBenchResult:
     device: str
     kernel_source: str
 
-def get_gpu_device_name():
-    """Get the actual GPU device name"""
-    try:
-        import torch
-        if torch.cuda.is_available():
-            device_name = torch.cuda.get_device_name(0)
-            # Map common device names to standardized names
-            if "H20" in device_name:
-                return "NVIDIA H20-3e"
-            elif "A100" in device_name:
-                return "NVIDIA A100"
-            elif "V100" in device_name:
-                return "NVIDIA V100"
-            elif "RTX" in device_name:
-                return f"NVIDIA {device_name}"
-            else:
-                return f"NVIDIA {device_name}"
-        else:
-            return "NVIDIA H20-3e"  # Default fallback
-    except:
-        return "NVIDIA H20-3e"  # Default fallback
+
+def get_mlp_test_cases():
+    """Get test cases for MLP benchmarking"""
+    test_cases = []
+
+    num_tokens = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+    quant_types = ['fp8']
+    # DeepSeek V2/V3 model parameters
+    hidden_size = 7168
+    intermediate_size = 2048  
+    
+    for quant_type in quant_types:
+        for num_token in num_tokens:
+            test_cases.append({
+                'quant_type': quant_type,
+                'num_token': num_token,
+                'hidden_size': hidden_size,
+                'intermediate_size': intermediate_size
+            })
+    
+    return test_cases
 
 
-def log_perf(item_list: list[dict], 
+def output_results(results: List[MLPBenchResult], output_path: str):
+    """Save results to separate files for prefill and decode phases"""
+    # Group results by kernel source (prefill vs decode)
+    prefill_results = [r for r in results if r.kernel_source == 'deepseek_v2']
+    decode_results = [r for r in results if r.kernel_source == 'deepseek_v2_cuda_graph']
+    
+    # Save prefill results
+    if prefill_results:
+        prefill_filename = os.path.join(output_path, "prefill_mlp_perf.txt")
+        prefill_items = []
+        for result in prefill_results:
+            prefill_items.append({
+                'quant_type': result.quant_type,
+                'num_token': result.num_token,
+                'hidden_size': result.hidden_size,
+                'intermediate_size': result.intermediate_size,
+                'avg_ms': result.avg_time_ms
+            })
+        
+        save_results_to_file(
+            item_list=prefill_items,
+            framework='SGLang',
+            version='1.0.0',
+            device_name='NVIDIA H20-3e',
+            op_name='mlp',
+            kernel_source='deepseek_v2',
+            perf_filename=prefill_filename
+        )
+        print(f"Prefill results saved to: {prefill_filename}")
+    
+    # Save decode results
+    if decode_results:
+        decode_filename = os.path.join(output_path, "generation_mlp_perf.txt")
+        decode_items = []
+        for result in decode_results:
+            decode_items.append({
+                'quant_type': result.quant_type,
+                'num_token': result.num_token,
+                'hidden_size': result.hidden_size,
+                'intermediate_size': result.intermediate_size,
+                'avg_ms': result.avg_time_ms
+            })
+        
+        save_results_to_file(
+            item_list=decode_items,
+            framework='SGLang',
+            version='1.0.0',
+            device_name='NVIDIA H20-3e',
+            op_name='mlp',
+            kernel_source='deepseek_v2_cuda_graph',
+            perf_filename=decode_filename
+        )
+        print(f"Decode results saved to: {decode_filename}")
+
+
+def save_results_to_file(item_list: list[dict], 
              framework: str, 
              version: str, 
              device_name: str, 
              op_name: str,
              kernel_source: str,
              perf_filename: str):
-    
-    # Use standardized device name
-    device_name = get_gpu_device_name()
     
     # Fixed header matching the reference format
     header = 'framework,version,device,op_name,kernel_source,quant_type,num_token,hidden_size,intermediate_size,avg_ms'
@@ -116,56 +173,6 @@ def log_perf(item_list: list[dict],
             line = f'{framework},{version},{device_name},{op_name},{kernel_source},{quant_type},{num_token},{hidden_size},{intermediate_size},{avg_ms}'
             f.write(line + '\n')
 
-def export_profiler_data(profiler, quant_type: str, num_token: int, hidden_size: int, intermediate_size: int):
-    """Export profiler data in multiple formats"""
-    # Create output directory
-    os.makedirs("profiler_outputs", exist_ok=True)
-    
-    # Generate filename prefix
-    filename_prefix = f"mlp_profile_{quant_type}_tokens{num_token}_hidden{hidden_size}_intermediate{intermediate_size}"
-    
-    # Export as JSON (Chrome trace format)
-    json_path = f"profiler_outputs/{filename_prefix}.json"
-    try:
-        profiler.export_chrome_trace(json_path)
-        print(f"Profiler data exported to {json_path}")
-    except RuntimeError as e:
-        if "Trace is already saved" in str(e):
-            print(f"Profiler trace already saved to TensorBoard logs")
-        else:
-            print(f"Warning: Could not export Chrome trace: {e}")
-    
-    # Export detailed statistics
-    stats_path = f"profiler_outputs/{filename_prefix}_stats.txt"
-    try:
-        with open(stats_path, 'w') as f:
-            f.write(f"MLP Profiler Statistics\n")
-            f.write(f"Quantization Type: {quant_type}\n")
-            f.write(f"Number of Tokens: {num_token}\n")
-            f.write(f"Hidden Size: {hidden_size}\n")
-            f.write(f"Intermediate Size: {intermediate_size}\n")
-            f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            
-            # Write profiler table
-            f.write("Profiler Table (sorted by CUDA time):\n")
-            f.write(str(profiler.key_averages().table(sort_by="cuda_time_total", row_limit=50)))
-            f.write("\n\n")
-            
-            # Write memory statistics
-            f.write("Memory Statistics:\n")
-            f.write(str(profiler.key_averages().table(sort_by="cuda_memory_usage", row_limit=50)))
-            f.write("\n\n")
-            
-            # Write CPU time statistics
-            f.write("CPU Time Statistics:\n")
-            f.write(str(profiler.key_averages().table(sort_by="cpu_time_total", row_limit=50)))
-        
-        print(f"Profiler statistics exported to {stats_path}")
-    except Exception as e:
-        print(f"Warning: Could not export profiler statistics: {e}")
-
-# Removed save_results_to_json function - only using txt output format
-
 def cleanup_distributed():
     """Clean up distributed environment if it exists"""
     try:
@@ -182,47 +189,8 @@ def cleanup_distributed():
     except Exception as e:
         print(f"Warning: Could not clean up torch.distributed: {e}")
 
-def get_mlp_test_cases():
-    """Get test cases for MLP benchmarking"""
-    # Test different batch sizes and sequence lengths
-    num_tokens = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
-    
-    # Test different quantization types
-    quant_types = ['fp8']  # Start with float16 for basic testing
-    
-    # DeepSeek V2/V3 model parameters
-    hidden_size = 7168
-    intermediate_size = 2048  # 4x expansion ratio
-    
-    test_cases = []
-    for quant_type in quant_types:
-        for num_token in num_tokens:
-                # Skip some combinations to reduce test time
-                test_cases.append({
-                    'quant_type': quant_type,
-                    'num_token': num_token,
-                    'hidden_size': hidden_size,
-                    'intermediate_size': intermediate_size
-                })
-    
-    return test_cases
-
-def run_mlp_benchmark(
-    quant_type: str,
-    num_token: int,
-    hidden_size: int,
-    intermediate_size: int,
-    device: str = 'cuda:0',
-    num_warmup: int = 3,
-    num_iterations: int = 10,
-    enable_profile: bool = False
-):
-    """Run MLP benchmark with given parameters"""
-    torch.cuda.set_device(device)
-    
-    # Clean up any existing distributed environment
-    cleanup_distributed()
-    
+def initialize_distributed():
+    """Initialize distributed environment for MLP benchmarking"""
     # Initialize distributed environment for single GPU
     dist_init_method = f"tcp://127.0.0.1:29500"
     init_distributed_environment(
@@ -233,386 +201,300 @@ def run_mlp_benchmark(
         distributed_init_method=dist_init_method,
         timeout=10,
     )
-    
-    # Initialize model parallel groups (single GPU = no parallelism)
+
     initialize_model_parallel(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=1,
         expert_model_parallel_size=1,
         duplicate_tp_group=False,
         backend="nccl",
-    )
-    
-    # Create quantization config
-    quant_config = Fp8Config(is_checkpoint_fp8_serialized=True,
-        activation_scheme="dynamic",
-        ignored_layers=None,
-        weight_block_size=[128, 128])
-    # quant_config = None
+    )  
 
-    # Create MLP module
-    mlp = DeepseekV2MLP(
-        hidden_size=hidden_size,
-        intermediate_size=2048,
-        hidden_act="silu",
-        quant_config=quant_config,
-        reduce_results=True,
-        prefix="",
-        tp_rank=0,  # Set tp_rank for single GPU
-        tp_size=1,  # Set tp_size for single GPU
-    ).to(device)
+def run_mlp_torch(
+    cases: List,
+    backend_config: BenchConfig
+) -> List[MLPBenchResult]:
+    """Run prefill benchmark for MLP module"""
     
-    # Create input tensor
-    input_tensor = torch.randn(
-        (num_token, hidden_size), 
-        dtype=torch.bfloat16, 
-        device=device
-    )
+    results = []
+    torch.cuda.set_device(backend_config.device)
     
-    # Warmup runs
-    with torch.no_grad():
-        for _ in range(num_warmup):
-            _ = mlp(input_tensor)
+    for test_case in cases:
+        quant_type = test_case['quant_type']
+        num_token = test_case['num_token']
+        hidden_size = test_case['hidden_size']
+        intermediate_size = test_case['intermediate_size']
+        
+        print(f"\nPrefill: quant_type={quant_type}, num_token={num_token}")
+        
+        try:
+            # Create quantization config
+            quant_config = Fp8Config(is_checkpoint_fp8_serialized=True,
+                activation_scheme="dynamic",
+                ignored_layers=None,
+                weight_block_size=[128, 128])
+
+            # Create MLP module
+            mlp = DeepseekV2MLP(
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act="silu",
+                quant_config=quant_config,
+                reduce_results=True,
+                prefix="",
+                tp_rank=0, 
+                tp_size=1, 
+            ).to(backend_config.device)
+
+            input_tensor = torch.randn(
+                (num_token, hidden_size), 
+                dtype=torch.bfloat16, 
+                device=backend_config.device
+            )
+            
+            # Warmup runs
+            with torch.no_grad():
+                for _ in range(backend_config.num_warmup):
+                    _ = mlp(input_tensor)
+            
+            torch.cuda.synchronize()
+            
+            # Benchmark runs
+            times = []
+            
+            with torch.no_grad():
+                for i in range(backend_config.num_iterations):
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    
+                    start_event.record()
+                    output = mlp(input_tensor)
+                    end_event.record()
+                    
+                    torch.cuda.synchronize()
+                    elapsed_time = start_event.elapsed_time(end_event)
+                    times.append(elapsed_time)
+            
+            # Calculate statistics
+            avg_time = sum(times) / len(times)
+            min_time = min(times)
+            max_time = max(times)
+            std_time = math.sqrt(sum((t - avg_time) ** 2 for t in times) / len(times))
+            
+            print(f"  Prefill MLP time: {avg_time:.3f} ms "
+                    f"(min: {min_time:.3f}, max: {max_time:.3f}, std: {std_time:.3f})")
+            
+            # Record results
+            result = MLPBenchResult(
+                quant_type=quant_type,
+                num_token=num_token,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                avg_time_ms=avg_time,
+                min_time_ms=min_time,
+                max_time_ms=max_time,
+                std_time_ms=std_time,
+                num_iterations=backend_config.num_iterations,
+                device=torch.cuda.get_device_name(backend_config.device),
+                kernel_source='deepseek_v2'
+            )
+            results.append(result)
+            
+            # Clean up
+            del mlp, input_tensor
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            print(f"  Prefill test failed: {str(e)}")
+            print(f"  Skipping this configuration...")
+            continue
     
-    torch.cuda.synchronize()
+    return results
+
+def run_mlp_cuda_graph(
+    cases: List,
+    backend_config: BenchConfig
+) -> List[MLPBenchResult]:
+    """Run decode benchmark for MLP module using CUDA graph"""
     
-    # Benchmark runs
-    times = []
-    profiler = None
+    results = []
+    torch.cuda.set_device(backend_config.device)
     
-    if enable_profile:
-        # Create profiler for detailed analysis
-        profiler = torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler_logs'),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True
-        )
-        profiler.start()
-    
-    with torch.no_grad():
-        for i in range(num_iterations):
+    # Process all test cases
+    for test_case in cases:
+        quant_type = test_case['quant_type']
+        num_token = test_case['num_token']
+        hidden_size = test_case['hidden_size']
+        intermediate_size = test_case['intermediate_size']
+        
+        print(f"\nDecode: quant_type={quant_type}, num_token={num_token}")
+        
+        try:
+            # Create quantization config
+            quant_config = Fp8Config(is_checkpoint_fp8_serialized=True,
+                activation_scheme="dynamic",
+                ignored_layers=None,
+                weight_block_size=[128, 128])
+
+            # Create MLP module
+            mlp = DeepseekV2MLP(
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act="silu",
+                quant_config=quant_config,
+                reduce_results=True,
+                prefix=f"mlp",
+                tp_rank=0,
+                tp_size=1,
+            ).to(backend_config.device)
+
+            input_tensor = torch.randn(
+                (num_token, hidden_size), 
+                dtype=torch.bfloat16, 
+                device=backend_config.device
+            )
+
+            torch.cuda.synchronize()
+            
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                _ = mlp(input_tensor)
+            
+            for _ in range(backend_config.num_warmup):
+                g.replay()
+            
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             
             start_event.record()
-            output = mlp(input_tensor)
+            for i in range(backend_config.num_iterations):
+                g.replay()
             end_event.record()
             
             torch.cuda.synchronize()
-            elapsed_time = start_event.elapsed_time(end_event)
-            times.append(elapsed_time)
+            total_time = start_event.elapsed_time(end_event)
+            avg_time = total_time / backend_config.num_iterations 
+
+            print(f"  Decode MLP time: {avg_time:.3f} ms")
             
-            if enable_profile and profiler:
-                profiler.step()
-    
-    if enable_profile and profiler:
-        profiler.stop()
-        # Export profiler data
-        export_profiler_data(profiler, quant_type, num_token, hidden_size, intermediate_size)
-    
-    # Calculate statistics
-    avg_time = sum(times) / len(times)
-    min_time = min(times)
-    max_time = max(times)
-    std_time = math.sqrt(sum((t - avg_time) ** 2 for t in times) / len(times))
-    
-    # No FLOPs calculations needed for the output format
-    
-    print(f"MLP Benchmark - {quant_type}: "
-          f"num_token={num_token}, "
-          f"avg_time={avg_time:.2f}ms")
-    
-    # Return MLPBenchResult object
-    return MLPBenchResult(
-        quant_type=quant_type,
-        num_token=num_token,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        avg_time_ms=avg_time,
-        min_time_ms=min_time,
-        max_time_ms=max_time,
-        std_time_ms=std_time,
-        num_iterations=num_iterations,
-        device=torch.cuda.get_device_name(device),
-        kernel_source='deepseek_v2'
-    )
+            result = MLPBenchResult(
+                quant_type=quant_type,
+                num_token=num_token,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                avg_time_ms=avg_time,
+                min_time_ms=avg_time,
+                max_time_ms=avg_time,
+                std_time_ms=0.0,
+                num_iterations=backend_config.num_iterations,
+                device=torch.cuda.get_device_name(backend_config.device),
+                kernel_source='deepseek_v2_cuda_graph'
+            )
+            results.append(result)
+            
+            del mlp, input_tensor
+            torch.cuda.empty_cache()
 
-def run_mlp_benchmark_cuda_graph(
-    quant_type: str,
-    num_token: int,
-    hidden_size: int,
-    intermediate_size: int,
-    device: str = 'cuda:0',
-    num_warmup: int = 3,
-    num_iterations: int = 10,
-    enable_profile: bool = False
-):
-    """Run MLP benchmark using CUDA graph for more accurate timing"""
-    torch.cuda.set_device(device)
+        except Exception as e:
+            print(f"  Decode test failed: {str(e)}")
+            print(f"  Skipping this configuration...")
+            continue
     
-    # Clean up any existing distributed environment
-    cleanup_distributed()
-    
-    # Create quantization config
-    quant_config = Fp8Config(is_checkpoint_fp8_serialized=True,
-        activation_scheme="dynamic",
-        ignored_layers=None,
-        weight_block_size=[128, 128])
-    
-    # quant_config = None
-    dist_init_method = f"tcp://127.0.0.1:29500"
-    # Initialize model
-    init_distributed_environment(
-        backend="nccl",
-        world_size=1,
-        rank=0,
-        local_rank=0,
-        distributed_init_method=dist_init_method,
-        timeout=10,
-    )
-    initialize_model_parallel(
-        tensor_model_parallel_size=1,
-        pipeline_model_parallel_size=1,
-        expert_model_parallel_size=1,
-        backend="nccl",
-        duplicate_tp_group=False,
-    )
-    
-    # Create multiple MLP modules to avoid L2 cache effects
-    
-    mlp = DeepseekV2MLP(
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        hidden_act="silu",
-        quant_config=quant_config,
-        reduce_results=True,
-        prefix=f"mlp",
-        tp_rank=0,
-        tp_size=1,
-    ).to(device)
-    
-    
-    # Create input tensor
-    input_tensor = torch.randn(
-        (num_token, hidden_size), 
-        dtype=torch.bfloat16, 
-        device=device
-    )
-    
-    # Warmup
-    with torch.no_grad():
-        for _ in range(num_warmup):
-          
-            _ = mlp(input_tensor)
-    
-    torch.cuda.synchronize()
-    
-    # Create CUDA graph
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
-   
-        _ = mlp(input_tensor)
-    
-    # Warmup with graph
-    for _ in range(num_warmup):
-        g.replay()
-    
-    # Setup profiler if enabled
-    profiler = None
-    if enable_profile:
-        profiler = torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler_logs'),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True
-        )
-        profiler.start()
-    
-    # Benchmark with graph
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    
-    start_event.record()
-    for i in range(num_iterations):
-        g.replay()
-        if enable_profile and profiler:
-            profiler.step()
-    end_event.record()
-    
-    torch.cuda.synchronize()
-    total_time = start_event.elapsed_time(end_event)
-    avg_time = total_time / num_iterations
-    
-    if enable_profile and profiler:
-        profiler.stop()
-        # Export profiler data
-        export_profiler_data(profiler, quant_type, num_token, hidden_size, intermediate_size) 
+    return results
 
-    
-    print(f"MLP Benchmark (CUDA Graph) - {quant_type}: "
-          f"num_token={num_token}, "
-          f"avg_time={avg_time:.2f}ms")
-    
-    # Return MLPBenchResult object
-    return MLPBenchResult(
-        quant_type=quant_type,
-        num_token=num_token,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        avg_time_ms=avg_time,
-        min_time_ms=avg_time,  # CUDA graph gives consistent timing
-        max_time_ms=avg_time,
-        std_time_ms=0.0,
-        num_iterations=num_iterations,
-        device=torch.cuda.get_device_name(device),
-        kernel_source='deepseek_v2_cuda_graph'
-    )
-
-def parse_args():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='SGLang MLP Benchmark with Profiling Support')
-    parser.add_argument('--enable-profile', action='store_true', 
-                       help='Enable PyTorch profiler to export detailed performance analysis')
-    parser.add_argument('--cuda-graph-only', action='store_true',
-                       help='Run only CUDA graph benchmarks (skip regular benchmarks)')
-    parser.add_argument('--regular-only', action='store_true',
-                       help='Run only regular benchmarks (skip CUDA graph benchmarks)')
-    parser.add_argument('--num-iterations', type=int, default=10,
-                       help='Number of benchmark iterations (default: 10)')
-    parser.add_argument('--num-warmup', type=int, default=3,
-                       help='Number of warmup iterations (default: 3)')
-    parser.add_argument('--device', type=str, default='cuda:0',
-                       help='CUDA device to use (default: cuda:0)')
-    parser.add_argument('--output', type=str, default="/home/scratch.aichenf_wwfo/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/",
-                       help='Output directory for results ')
-    
-    return parser.parse_args()
 
 def main():
     """Main function to run MLP benchmarks"""
-    args = parse_args()
-    
-    print("Starting SGLang MLP Benchmark")
-    print(f"Device: {torch.cuda.get_device_name()}")
-    print(f"Profiling enabled: {args.enable_profile}")
-    print(f"Number of iterations: {args.num_iterations}")
-    print(f"Number of warmup: {args.num_warmup}")
+    # Fixed configuration values
+    output_path = "/home/scratch.aichenf_wwfo/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
+    model_path = DEEPSEEK_MODEL_PATH
     
     # Clean up any existing distributed environment at the start
     cleanup_distributed()
     
-    # Create output directory
-    os.makedirs(args.output, exist_ok=True)
-    print(f"Output directory: {args.output}")
+    print(f"Starting SGLang MLP Benchmark")
+    print(f"Model path: {model_path}")
+    print(f"Device: {torch.cuda.get_device_name()}")
     
-    # Get test cases
+    # Create base config
+    base_config = BenchConfig(
+        quant_types=['fp8'],
+        num_tokens=[],  # Not used anymore
+        hidden_size=7168,
+        intermediate_size=2048,
+        num_warmup=3,
+        num_iterations=10,
+        model_path=model_path,
+        dtype="auto",
+        device="cuda:0",
+        enable_profiler=False
+    )
+    
+    # Run MLP benchmarks
+    all_results = []
+    
+    # Get all test cases
     test_cases = get_mlp_test_cases()
-    print(f"Total test cases: {len(test_cases)}")
+    print(f"Running {len(test_cases)} test cases...")
     
-    # Run CUDA graph benchmarks (generation)
-    generation_results = []
-    if not args.regular_only:
-        print("\n=== Running CUDA Graph Benchmarks (Generation) ===")
-        for test_case in test_cases:
-            # Use CUDA graph version for more accurate timing
-            result = run_mlp_benchmark_cuda_graph(
-                **test_case,
-                device=args.device,
-                num_warmup=args.num_warmup,
-                num_iterations=args.num_iterations,
-                enable_profile=args.enable_profile
-            )
-            generation_results.append(result)
+    # Group test cases by quant_type to minimize model reloading
+    grouped_cases = {}
+    for test_case in test_cases:
+        quant_type = test_case['quant_type']
+        if quant_type not in grouped_cases:
+            grouped_cases[quant_type] = []
+        grouped_cases[quant_type].append(test_case)
     
-    # Run regular benchmarks (prefill)
-    prefill_results = []
-    if not args.cuda_graph_only:
-        print("\n=== Running Regular Benchmarks (Prefill) ===")
-        for test_case in test_cases:
-            result = run_mlp_benchmark(
-                **test_case,
-                device=args.device,
-                num_warmup=args.num_warmup,
-                num_iterations=args.num_iterations,
-                enable_profile=args.enable_profile
-            )
-            prefill_results.append(result)
+    # Process each group
+    for quant_type, cases in grouped_cases.items():
+        print(f"\n{'='*60}")
+        print(f"TESTING: Quant Type={quant_type}")
+        print(f"Test cases: {len(cases)}")
+        print(f"{'='*60}")
+        cleanup_distributed()
     
-    # Write results to files after all tests are completed
-    if generation_results:
-        generation_filename = os.path.join(args.output, "generation_mlp_perf.txt")
-        # Convert results to the format expected by log_perf
-        generation_items = []
-        for result in generation_results:
-            generation_items.append({
-                'quant_type': result.quant_type,
-                'num_token': result.num_token,
-                'hidden_size': result.hidden_size,
-                'intermediate_size': result.intermediate_size,
-                'avg_ms': result.avg_time_ms
-            })
-        
-        log_perf(
-            item_list=generation_items,
-            framework='SGLang',
-            version='1.0.0',
-            device_name=get_gpu_device_name(),
-            op_name='mlp',
-            kernel_source='deepseek_v2_cuda_graph',
-            perf_filename=generation_filename
+        # Create config for this quant type
+        backend_config = BenchConfig(
+            quant_types=[quant_type],
+            num_tokens=base_config.num_tokens,
+            hidden_size=base_config.hidden_size,
+            intermediate_size=base_config.intermediate_size,
+            num_warmup=base_config.num_warmup,
+            num_iterations=base_config.num_iterations,
+            model_path=base_config.model_path,
+            dtype=base_config.dtype,
+            device=base_config.device,
+            enable_profiler=base_config.enable_profiler
         )
-        print(f"Generation results saved to: {generation_filename}")
-    
-    if prefill_results:
-        prefill_filename = os.path.join(args.output, "prefill_mlp_perf.txt")
-        # Convert results to the format expected by log_perf
-        prefill_items = []
-        for result in prefill_results:
-            prefill_items.append({
-                'quant_type': result.quant_type,
-                'num_token': result.num_token,
-                'hidden_size': result.hidden_size,
-                'intermediate_size': result.intermediate_size,
-                'avg_ms': result.avg_time_ms
-            })
         
-        log_perf(
-            item_list=prefill_items,
-            framework='SGLang',
-            version='1.0.0',
-            device_name=get_gpu_device_name(),
-            op_name='mlp',
-            kernel_source='deepseek_v2',
-            perf_filename=prefill_filename
-        )
-        print(f"Prefill results saved to: {prefill_filename}")
+        torch.cuda.empty_cache()
+
+        # Initialize distributed environment
+        initialize_distributed()
+        
+        # Run prefill benchmarks
+        print("\n=== Running Prefill Benchmarks ===")
+        prefill_results = run_mlp_torch(cases, backend_config)
+        all_results.extend(prefill_results)
+        
+        # Run decode benchmarks
+        print("\n=== Running Decode Benchmarks (CUDA Graph) ===")
+        decode_results = run_mlp_cuda_graph(cases, backend_config)
+        all_results.extend(decode_results)
+
+        # Clean up for this quant type
+        cleanup_distributed()
+        torch.cuda.empty_cache()
     
-    if args.enable_profile:
-        print(f"\nProfiler data exported to:")
-        print(f"  - Chrome trace files: profiler_outputs/*.json")
-        print(f"  - Statistics files: profiler_outputs/*_stats.txt")
-        print(f"  - TensorBoard logs: profiler_logs/")
-        print(f"\nTo view profiler data:")
-        print(f"  1. Chrome trace: Open profiler_outputs/*.json in Chrome (chrome://tracing)")
-        print(f"  2. TensorBoard: tensorboard --logdir=profiler_logs")
+    # Save all results
+    output_results(all_results, output_path)
     
     print("\n" + "="*50)
     print("MLP BENCHMARK COMPLETED")
     print("="*50)
     print(f"Output files saved to:")
-    print(f"  - Prefill results: {os.path.join(args.output, 'prefill_mlp_perf.txt')}")
-    print(f"  - Generation results: {os.path.join(args.output, 'generation_mlp_perf.txt')}")
+    print(f"  - Prefill results: {os.path.join(output_path, 'prefill_mlp_perf.txt')}")
+    print(f"  - Generation results: {os.path.join(output_path, 'generation_mlp_perf.txt')}")
     print("="*50)
 
 if __name__ == "__main__":
