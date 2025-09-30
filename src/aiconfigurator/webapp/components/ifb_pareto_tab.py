@@ -30,8 +30,8 @@ def create_ifb_pareto_tab(app_config):
         runtime_config_components['tpot'].visible = False
         
         estimate_btn = gr.Button('Estimate IFB Pareto', visible=True)
-        with gr.Row():
-            result_name = gr.Textbox(value="", label="Result name")
+        with gr.Row(equal_height=True):
+            result_name = gr.Textbox(value="", label="Result name", lines=2, max_lines=2)
             save_btn = gr.Button("Save for comparison", interactive=False)
 
         pareto_html = gr.HTML(value='')

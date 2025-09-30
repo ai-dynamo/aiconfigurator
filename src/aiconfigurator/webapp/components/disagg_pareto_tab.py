@@ -65,8 +65,8 @@ def create_disagg_pareto_tab(app_config):
                 decode_max_batch_size = gr.Number(value=512, label="Decode max batch size", interactive=True)
         
         estimate_btn = gr.Button("Estimate Disaggregation Pareto")
-        with gr.Row():
-            result_name = gr.Textbox(value="", label="Result name")
+        with gr.Row(equal_height=True):
+            result_name = gr.Textbox(value="", label="Result name", lines=2, max_lines=2)
             save_btn = gr.Button("Save for comparison", interactive=False)
 
         pareto_html = gr.HTML(value='')
@@ -74,8 +74,7 @@ def create_disagg_pareto_tab(app_config):
             label="Disaggregation pareto datapoints",
             headers=['index']+ColumnsDisagg,
             interactive=False,
-            visible=True,
-            height=300
+            visible=True
         )
         debugging_box = gr.Textbox(label="Debugging", lines=5)
 
