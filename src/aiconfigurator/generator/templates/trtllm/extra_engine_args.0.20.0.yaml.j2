@@ -15,7 +15,7 @@ max_num_tokens: {{ max_num_tokens }}
 max_seq_len: {{ max_seq_len }}
 
 kv_cache_config:
-  enable_block_reuse: {{ dynamo_config.enable_block_reuse | default(true) }}
+  enable_block_reuse: {{ dynamo_config.enable_block_reuse | default(false) }}
   free_gpu_memory_fraction: {{ dynamo_config.free_gpu_memory_fraction | default(0.80) }}  # dynamo_config.free_gpu_memory_fraction Fraction for KV‑cache
 
 {% if is_speculative is defined %}  # speculative decoding

@@ -29,7 +29,7 @@ def get_context_mla_test_cases():
                     for tp_size in [1,2,4,8,16,32,64]:
                         if b*s > 32768:
                             continue
-                        # (input_len, batch_size, output_len, kv_cache_dtype, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
+                        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
                         test_cases.append([s,b,1,dtype,n,tp_size,tp_size,64,10,6,True,"context_mla_perf.txt"])
     return test_cases
 
@@ -44,7 +44,7 @@ def get_generation_mla_test_cases():
                     for tp_size in [1,2,4,8,16,32,64]:
                         if b*s > 1024*4096*2*2:
                             continue
-                        # (input_len, batch_size, output_len, kv_cache_dtype, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
+                        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
                         test_cases.append([s-1,b,1,dtype,n,tp_size,tp_size,64,10,6,False,"generation_mla_perf.txt"])
     return test_cases
 

@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+"""
+inputs:
 
-def generate_backend_config(*_args, **_kwargs):
-    raise NotImplementedError("SGLang backend generator not implemented yet")
+This module provides the input schema and parser for the aiconfigurator generator.
+"""

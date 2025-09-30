@@ -42,7 +42,7 @@ requires-python = ">=3.9"
 
 dependencies = [
     "fastapi>=0.115.12",
-    "gradio==4.44.1",
+    "gradio==5.47.1",
     "jinja2>=3.1.0",
     "matplotlib>=3.9.4",
     "numpy==1.26.4",

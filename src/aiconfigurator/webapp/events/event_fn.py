@@ -6,7 +6,7 @@ from aiconfigurator.sdk.inference_session import InferenceSession
 import pandas as pd
 from aiconfigurator.sdk import config
 import gradio as gr
-from aiconfigurator.sdk.perf_database import get_all_databases
+from aiconfigurator.sdk.perf_database import get_all_databases, get_database
 from aiconfigurator.sdk import common, models
 import numpy as np
 import plotly.graph_objects as go
@@ -127,8 +127,8 @@ class EventFn:
         
         with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer), LogCapture() as (logger, log_buffer):
             try:        
-                database_dict = get_all_databases()
-                database = database_dict[system_name][backend_name][version]
+                database = copy.deepcopy(get_database(system_name, backend_name, version))
+                assert database is not None
                 database.set_default_sol_mode(common.SOLMode(int(sol_mode)))
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(',')]
                 model_config = config.ModelConfig(tp_size=tp_size,
@@ -188,8 +188,8 @@ class EventFn:
         stderr_buffer = StringIO()
         with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer), LogCapture() as (logger, log_buffer):
             try:        
-                database_dict = get_all_databases()
-                database = database_dict[system_name][backend_name][version]
+                database = get_database(system_name, backend_name, version)
+                assert database is not None
                 database.set_default_sol_mode(common.SOLMode(int(sol_mode)))
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(',')]
                 model_config = config.ModelConfig(tp_size=tp_size,
@@ -261,8 +261,8 @@ class EventFn:
         stderr_buffer = StringIO()
         with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer), LogCapture() as (logger, log_buffer):
             try:        
-                database_dict = get_all_databases()
-                database = database_dict[system_name][backend_name][version]
+                database = copy.deepcopy(get_database(system_name, backend_name, version))
+                assert database is not None
                 database.set_default_sol_mode(common.SOLMode(int(sol_mode)))
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(',')]
                 model_config = config.ModelConfig(gemm_quant_mode=common.GEMMQuantMode[gemm_quant_mode],
@@ -341,12 +341,10 @@ class EventFn:
         stderr_buffer = StringIO()
         with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer), LogCapture() as (logger, log_buffer):
             try:        
-                database_dict = get_all_databases()
-                prefill_database = database_dict[prefill_system_name][prefill_backend_name][prefill_version]
-                decode_database = database_dict[decode_system_name][decode_backend_name][decode_version]
-                # to avoid conflict.
-                if prefill_sol_mode != decode_sol_mode:
-                    decode_database = copy.deepcopy(decode_database)
+                prefill_database = copy.deepcopy(get_database(prefill_system_name, prefill_backend_name, prefill_version))
+                decode_database = copy.deepcopy(get_database(decode_system_name, decode_backend_name, decode_version))
+                assert prefill_database is not None
+                assert decode_database is not None
                 prefill_database.set_default_sol_mode(common.SOLMode(int(prefill_sol_mode)))
                 decode_database.set_default_sol_mode(common.SOLMode(int(decode_sol_mode)))
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(',')]
@@ -537,8 +535,6 @@ class EventFn:
         stderr_buffer = StringIO()
         with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer), LogCapture() as (logger, log_buffer):
             try:
-                database_dict = get_all_databases()
-                
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(',')]
                 prefill_model_config = config.ModelConfig(tp_size=prefill_tp_size,
                                                             pp_size=prefill_pp_size,
@@ -571,7 +567,8 @@ class EventFn:
         
                 # prefill
                 prefill_model = get_model(model_name, prefill_model_config)
-                prefill_database = database_dict[prefill_system_name][prefill_backend_name][prefill_version]
+                prefill_database = copy.deepcopy(get_database(prefill_system_name, prefill_backend_name, prefill_version))
+                assert prefill_database is not None
                 prefill_database.set_default_sol_mode(common.SOLMode(int(prefill_sol_mode)))
                 prefill_backend = get_backend(prefill_backend_name)
                 prefill_session = InferenceSession(prefill_model, prefill_database, prefill_backend)
@@ -588,7 +585,8 @@ class EventFn:
 
                 # decode
                 decode_model = get_model(model_name, decode_model_config)
-                decode_database = database_dict[decode_system_name][decode_backend_name][decode_version]
+                decode_database = copy.deepcopy(get_database(decode_system_name, decode_backend_name, decode_version))
+                assert decode_database is not None
                 decode_database.set_default_sol_mode(common.SOLMode(int(decode_sol_mode)))
                 decode_backend = get_backend(decode_backend_name)
                 decode_session = InferenceSession(decode_model, decode_database, decode_backend)

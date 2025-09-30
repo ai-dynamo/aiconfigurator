@@ -49,15 +49,13 @@ def create_disagg_pd_ratio_tab(app_config):
                 label="Prefill datapoints",
                 headers=['index']+ColumnsStatic,
                 interactive=False,
-                visible=True,
-                height=300,
+                visible=True
             )
             decode_result_df = gr.Dataframe(
                 label="Decode datapoints",
                 headers=['index']+ColumnsStatic,
                 interactive=False,
-                visible=True,
-                height=300,
+                visible=True
             )
         debugging_box = gr.Textbox(label="Debugging", lines=5)
 

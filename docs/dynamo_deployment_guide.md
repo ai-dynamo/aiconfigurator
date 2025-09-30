@@ -117,14 +117,14 @@ pip3 install "."
 ```
 
 ### 1.2 Build the Dynamo Container
-In this example, we're using Dynamo 0.4.0, please switch to release/0.4.0 first.
+In this example, we're using Dynamo 0.5.0, please switch to release/0.5.0 first.
 ```bash
 # other version of trtllm can be used as well
 # currently dynamo is at version 0.4.0, indicated in the tag
 ./container/build.sh \
-  --framework tensorrtllm \
-  --tensorrtllm-pip-wheel tensorrt-llm==1.0.0rc4 \
-  --tag dynamo:0.4.0-trtllm-1.0.0rc4
+  --framework TRTLLM \
+  --tensorrtllm-pip-wheel tensorrt-llm==1.0.0rc6 \
+  --tag dynamo:0.4.0-trtllm-1.0.0rc6
 ```
 
 > Please refer to [Dynamo Getting Started](https://docs.nvidia.com/dynamo/latest/get_started.html) for detailed dynamo installation
