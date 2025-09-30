@@ -7,7 +7,7 @@ moe_tensor_parallel_size: {{ moe_tp }}
 moe_config:
     backend: {{ dynamo_config.moe_backend | default('CUTLASS') }} # dynamo_config.moe_backend MOE backend to use (CUTLASS, CUTEDSL, WIDEEP, TRTLLM, VANILLA)
     {% if dynamo_config.moe_load_balancer is defined %}  # Configuration for MoE load balancing
-    load_balancer: {{ dynamo_config.moe_load_balancer }} # dynamo_config.moe_load_balancer MOE load balancer
+    load_balancer: {{ dynamo_config.moe_load_balancer }} # dynamo_config.moe_load_balancer moe load balancer
     {% endif %}
 {% endif %}
 
@@ -21,7 +21,7 @@ max_num_tokens: {{ max_num_tokens }}
 max_seq_len: {{ max_seq_len }}
 
 kv_cache_config:
-  enable_block_reuse: {{ dynamo_config.enable_block_reuse | default(true) }} # dynamo_config.enable_block_reuse Controls if KV cache can be reused for different requests
+  enable_block_reuse: {{ dynamo_config.enable_block_reuse | default(false) }} # dynamo_config.enable_block_reuse Controls if KV cache can be reused for different requests
   free_gpu_memory_fraction: {{ dynamo_config.free_gpu_memory_fraction | default(0.80) }}  # dynamo_config.free_gpu_memory_fraction The maximum number of tokens that should be stored in the KV cache.
   dtype: {{ kv_cache_dtype | default('auto') }}
 
@@ -37,14 +37,8 @@ cuda_graph_config:
 disable_overlap_scheduler: {{ disable_overlap_scheduler | default(true) }}
 print_iter_log: {{ dynamo_config.print_iter_log | default(false) }}  # dynamo_config.print_iter_log Print iteration logs
 
-{% if is_speculative is defined %}
-{% set dt = decoding_type %}
+{% if is_speculative is defined %}  # speculative decoding
 speculative_config:
-  decoding_type: {{ dt }}
-  {% if dt == 'MTP' %}
+  decoding_type: {{ decoding_type }}
   num_nextn_predict_layers: {{ num_nextn_predict_layers }}
-  {% endif %}
-  {% if dt == 'Eagle' and eagle_speculative_model_dir is defined %}
-  speculative_model_dir: {{ eagle_speculative_model_dir }}
-  {% endif %}
 {% endif %}

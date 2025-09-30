@@ -7,8 +7,10 @@ from aiconfigurator.sdk import config
 from aiconfigurator.sdk.perf_database import get_database
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models import get_model_family, check_is_moe
-from aiconfigurator.cli.helpers import DynamoConfig, add_dynamo_cli, build_dynamo_config, _dump_backend_file
-from aiconfigurator.cli.backends import get_config_generator
+# from aiconfigurator.cli.helpers import DynamoConfig, add_dynamo_cli, build_dynamo_config, _dump_backend_file
+# from aiconfigurator.cli.backends import get_config_generator
+from aiconfigurator.generator.cli_args import add_config_generation_cli, build_dynamo_config
+from aiconfigurator.generator.api import generate_backend_config
 
 import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any
@@ -506,49 +508,6 @@ class AIConfigurator:
              
         return has_disagg_benefit, benefit_ratio, chosen_system_type
     
-    def generate_backend_config(self,
-                               aiconfigurator_result: AIConfiguratorResult,
-                               aiconfigurator_config: AIConfiguratorConfig,
-                               dynamo_config: DynamoConfig, generated_config_version: str) -> Dict[str, Dict[str, dict]]:
-        """
-        Generate backend-specific config based on the chosen system type (Agg or Disagg).
-        Args:
-            aiconfigurator_result: The result of the aiconfigurator.
-            aiconfigurator_config: The config of the aiconfigurator.
-        Returns:
-            A dictionary containing the backend-specific configs. 'mode': {file_name: backend_config_yaml}
-        """
-        
-        def _derive_backend(aiconfigurator_config: AIConfiguratorConfig) -> common.BackendName:
-            """Derive the backend from the aiconfigurator config"""
-            if aiconfigurator_config.agg_worker_config:
-                return aiconfigurator_config.agg_worker_config.backend_name
-            elif aiconfigurator_config.disagg_prefill_worker_config:
-                return aiconfigurator_config.disagg_prefill_worker_config.backend_name
-            else:
-                raise ValueError("No backend found in the aiconfigurator config")
-
-        def _derive_version(aiconfigurator_config: AIConfiguratorConfig) -> str:
-            if aiconfigurator_config.agg_worker_config:
-                return aiconfigurator_config.agg_worker_config.version
-            elif aiconfigurator_config.disagg_prefill_worker_config:
-                return aiconfigurator_config.disagg_prefill_worker_config.version
-            else:
-                raise ValueError("No version found in the aiconfigurator config")
-
-
-        backend = _derive_backend(aiconfigurator_config)
-        if generated_config_version:
-            version = generated_config_version
-        else:
-            version = _derive_version(aiconfigurator_config)
-
-        logger.info(f"Generating configs for deploying dynamo + {backend} with version {version}")
-        config_generator = get_config_generator(backend)
-
-        return config_generator(aiconfigurator_result, aiconfigurator_config, dynamo_config, version)
-
-
     def _plot_pareto_frontier(self, 
                               title: str, 
                               best_config_df: pd.DataFrame,
@@ -780,7 +739,7 @@ class AIConfigurator:
         summary_box.append("*" * 80)
         logger.info("\n" + "\n".join(summary_box))
     
-    def save_aiconfigurator_result(self, aiconfigurator_result: AIConfiguratorResult, aiconfigurator_config: AIConfiguratorConfig, backend_configs: dict, dir_path: str) -> None:
+    def save_aiconfigurator_result(self, aiconfigurator_result: AIConfiguratorResult, aiconfigurator_config: AIConfiguratorConfig, dir_path: str) -> None:
         """
         Save the aiconfigurator result to a dir_path.
         Args:
@@ -830,22 +789,11 @@ class AIConfigurator:
             if not aiconfigurator_result.disagg_pareto.empty:
                 aiconfigurator_result.disagg_pareto.to_csv(str(disagg_csv_file), index=False)
             
-            # Use safe_mkdir for backend configs directory with automatic sanitization
-            backend_configs_path = safe_result_dir / 'backend_configs'
-            logger.debug(f"Saving backend configs to {backend_configs_path}")
-            backend_configs_dir = safe_mkdir(str(backend_configs_path))
-            
-            for mode, mode_backend_configs in backend_configs.items():
-                mode_path = backend_configs_dir / mode
-                logger.debug(f"Saving {mode} backend configs to {mode_path}")
-                mode_dir = safe_mkdir(str(mode_path))
-                
-                for file_name, mode_backend_config in mode_backend_configs.items():
-                    out_path = mode_dir / file_name
-                    _dump_backend_file(str(out_path), mode_backend_config)
-
         except Exception as e:
             logger.error(f"Failed to save aiconfigurator result to {dir_path}/{result_dir_name}: {e}")
+
+        return safe_result_dir
+
 
 def load_config_from_yaml(model_name: str,
                             system_name: str,
@@ -992,7 +940,7 @@ def configure_parser(parser):
     parser.add_argument("--save_dir", type=str, default=None, help="Path to the directory to save the aiconfigurator result. Default is None, which means not saving the aiconfigurator result.")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
 
-    chosen_backend = add_dynamo_cli(parser, common.BackendName.trtllm.value)
+    chosen_backend = add_config_generation_cli(parser, default_backend=common.BackendName.trtllm.value)
 
     parser.epilog = (
         "\nNOTE:\n"
@@ -1038,9 +986,16 @@ def main(args):
         aiconfigurator.log_final_summary(aiconfigurator_result, aiconfigurator_config)
 
         if args.save_dir is not None:
-            backend_configs = aiconfigurator.generate_backend_config(aiconfigurator_result, aiconfigurator_config, dynamo_config, args.generated_config_version)
-            aiconfigurator.save_aiconfigurator_result(aiconfigurator_result, aiconfigurator_config, backend_configs, args.save_dir)
-    
+            save_dir = aiconfigurator.save_aiconfigurator_result(aiconfigurator_result, aiconfigurator_config, args.save_dir)
+            generate_backend_config.from_runtime(
+                cfg=aiconfigurator_config,
+                res=aiconfigurator_result,
+                overrides=dynamo_config,
+                version=args.generated_config_version or args.version,
+                backend=args.backend,
+                save_dir=os.path.join(save_dir, "backend_configs")
+            )
+
     except Exception as e:
         logger.error(f"Configuration failed: {e}")
         logger.exception("Full traceback")

@@ -21,12 +21,13 @@ max_num_tokens: {{ max_num_tokens }}
 max_seq_len: {{ max_seq_len }}
 
 kv_cache_config:
-  enable_block_reuse: {{ dynamo_config.enable_block_reuse | default(true) }} # dynamo_config.enable_block_reuse Controls if KV cache can be reused for different requests
+  enable_block_reuse: {{ dynamo_config.enable_block_reuse | default(false) }} # dynamo_config.enable_block_reuse Controls if KV cache can be reused for different requests
   free_gpu_memory_fraction: {{ dynamo_config.free_gpu_memory_fraction | default(0.80) }}  # dynamo_config.free_gpu_memory_fraction The maximum number of tokens that should be stored in the KV cache.
   dtype: {{ kv_cache_dtype | default('auto') }}
 
 cache_transceiver_config:
   backend: {{ (dynamo_config.cache_transceiver_backend | default('DEFAULT')) | upper }} # dynamo_config.cache_transceiver_backend The communication backend type to use for the cache transceiver (DEFAULT, UCX, NIXL, MPI)
+  max_tokens_in_buffer: {{dynamo_config.max_tokens_in_buffer | default(1024)}} # dynamo_config.max_tokens_in_buffer The max number of tokens the transfer buffer can fit
 
 cuda_graph_config:
   enable_padding: {{ dynamo_config.cuda_graph_padding_enabled | default(true) }} # dynamo_config.cuda_graph_padding_enabled Pad CUDA graph
