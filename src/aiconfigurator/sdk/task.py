@@ -13,8 +13,8 @@ from collections.abc import Mapping
 import yaml
 import pandas as pd
 from munch import DefaultMunch, Munch
-from pprint import pprint
 import json
+from typing import Dict, Any
 
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import check_is_moe
@@ -581,12 +581,17 @@ class TaskConfig:
         self.config, applied_layers = TaskConfigFactory.create(ctx)
         self.config.applied_layers = applied_layers
 
+        self.serving_mode = serving_mode
+        self.model_name = model_name
         self.system_name = system_name
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
         self.use_specific_quant_mode = use_specific_quant_mode
         self.enable_wide_ep = enable_wide_ep
         self.total_gpus = total_gpus
+        self.yaml_mode = yaml_mode
+        self.yaml_patch = yaml_patch
+        self.profiles = list(effective_profiles)
 
         if serving_mode == "agg":
             effective_backend_version = self.config.worker_config.backend_version
@@ -639,28 +644,58 @@ class TaskConfig:
                 return getattr(obj, "name")
             return obj
 
-        printable = {
-            "task_name": self.task_name,
-            "serving_mode": self.config.serving_mode,
-            "applied_layers": self.config.applied_layers,
-            "nextn": self.config.nextn,
-            "nextn_accept_rates": self.config.nextn_accept_rates,
-            "runtime_config": _convert(self.config.runtime_config),
+        printable: Dict[str, Any] = {
+            "mode": self.yaml_mode,
+            "serving_mode": self.serving_mode,
+            "model_name": self.model_name,
+            "total_gpus": self.total_gpus,
+            "system_name": self.system_name,
         }
 
-        if self.config.serving_mode == "agg" and hasattr(self.config, "worker_config"):
-            printable["worker_config"] = _convert(self.config.worker_config)
-        elif self.config.serving_mode == "disagg":
-            printable.update(
-                {
-                    "prefill_worker_config": _convert(self.config.prefill_worker_config),
-                    "decode_worker_config": _convert(self.config.decode_worker_config),
-                    "replica_config": _convert(self.config.replica_config),
-                    "advanced_tuning_config": _convert(self.config.advanced_tuning_config),
-                }
-            )
+        if self.config.serving_mode == "disagg":
+            printable["decode_system_name"] = self.decode_system_name
 
-        return json.dumps(printable, indent=2, sort_keys=True)
+        printable["backend_name"] = self.backend_name
+        printable["backend_version"] = self.backend_version
+
+        runtime_dict = _convert(self.config.runtime_config)
+        printable.update({k: runtime_dict.get(k) for k in ("isl", "osl", "ttft", "tpot") if runtime_dict.get(k) is not None})
+
+        base_config = _convert(getattr(self.config, "yaml_patch", getattr(self, "yaml_patch", {})))
+        printable["profiles"] = self.profiles
+
+        def _ensure_dict(target: Dict[str, Any], key: str) -> Dict[str, Any]:
+            value = target.setdefault(key, {})
+            if not isinstance(value, dict):
+                raise ValueError(f"Expected dict for config['{key}'], got {type(value)}")
+            return value
+
+        config_section: Dict[str, Any] = dict(base_config) if isinstance(base_config, dict) else {}
+
+        if getattr(self.config, "nextn", None) is not None:
+            config_section.setdefault("nextn", self.config.nextn)
+        if getattr(self.config, "nextn_accept_rates", None) is not None:
+            config_section.setdefault("nextn_accept_rates", self.config.nextn_accept_rates)
+
+        if self.config.serving_mode == "agg" and hasattr(self.config, "worker_config"):
+            wc = _convert(self.config.worker_config)
+            _ensure_dict(config_section, "worker_config").update(wc)
+        elif self.config.serving_mode == "disagg":
+            for key in ("prefill_worker_config", "decode_worker_config", "replica_config", "advanced_tuning_config"):
+                value = getattr(self.config, key, None)
+                if value is not None:
+                    cfg = _convert(value)
+                    if isinstance(cfg, dict):
+                        _ensure_dict(config_section, key).update(cfg)
+                    else:
+                        config_section[key] = cfg
+
+        if config_section:
+            printable["config"] = config_section
+        
+        final_dict = {self.task_name: printable}
+
+        return json.dumps(final_dict, indent=2)
 
     def _convert_worker_config_to_enum(self, worker_config: Union[dict, DefaultMunch]) -> None:
         """Convert string quant mode values to enums, skip if already converted."""

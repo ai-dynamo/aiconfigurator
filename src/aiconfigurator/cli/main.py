@@ -1,22 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
-from aiconfigurator.sdk import pareto_analysis, common
-from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string, get_pareto_front, interpolate_throughput_at_tpot, get_best_config_under_tpot_constraint
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-import pandas as pd
-from typing import Dict, List, Tuple, Optional, Any, Union
-from dataclasses import dataclass, field
-import yaml
 import argparse
-import time
+import copy
+import json
+import logging
 import os
 import random
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import matplotlib.pyplot as plt
+import pandas as pd
+import yaml
 from prettytable import PrettyTable
+
 from aiconfigurator import __version__
-import copy
+from aiconfigurator.generator.api import generate_backend_config
+from aiconfigurator.generator.cli_args import add_config_generation_cli, build_dynamo_config
+from aiconfigurator.sdk import common, pareto_analysis
+from aiconfigurator.sdk.pareto_analysis import (
+    draw_pareto_to_string,
+    get_best_config_under_tpot_constraint,
+    get_pareto_front,
+    interpolate_throughput_at_tpot,
+)
+from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.sdk.utils import safe_mkdir
 
 
 logger = logging.getLogger(__name__)
@@ -34,12 +45,14 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--tpot", type=float, default=20.0, help="Time per output token in ms.")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")        
+    add_config_generation_cli(parser, default_backend=common.BackendName.trtllm.value)
 
 
 def _add_experiments_mode_arguments(parser):
     parser.add_argument("--yaml_path", type=str, required=True, help="Path to a YAML file containing experiment definitions.")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")        
+    add_config_generation_cli(parser, default_backend=common.BackendName.trtllm.value)
 
 
 def configure_parser(parser):
@@ -219,7 +232,11 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
     return task_configs
 
 
-def _execute_task_configs(task_configs: Dict[str, TaskConfig], save_dir: Optional[str], mode: str) -> None:
+def _execute_task_configs(
+    task_configs: Dict[str, TaskConfig],
+    save_dir: Optional[str],
+    mode: str,
+) -> Tuple[str, Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, float], Optional[str]]:
     results: Dict[str, pd.DataFrame] = {}
     start_time = time.time()
     runner = TaskRunner()
@@ -259,11 +276,14 @@ def _execute_task_configs(task_configs: Dict[str, TaskConfig], save_dir: Optiona
 
     log_final_summary(chosen_exp, best_throughputs, best_configs, results, task_configs, mode)
 
+    result_dir_path = None
     if save_dir:
-        save_results(chosen_exp, best_configs, results, task_configs, save_dir)
+        result_dir_path = save_results(chosen_exp, best_configs, results, task_configs, save_dir)
 
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
+
+    return chosen_exp, best_configs, results, best_throughputs, result_dir_path
 
 
 def main(args):
@@ -279,7 +299,38 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
-    _execute_task_configs(task_configs, args.save_dir, args.mode)
+    chosen_exp, best_configs, pareto_results, best_throughputs, result_dir = _execute_task_configs(
+        task_configs,
+        args.save_dir,
+        args.mode,
+    )
+    return
+
+    dynamo_config = build_dynamo_config(args)
+    generated_version = getattr(args, "generated_config_version", None)
+
+    if result_dir:
+        generator_save_dir = os.path.join(result_dir, "backend_configs")
+    else:
+        generator_save_dir = None
+
+    for exp_name, best_cfg_df in best_configs.items():
+        target_task = task_configs.get(exp_name)
+        if target_task is None:
+            target_task = task_configs.get("agg" if exp_name == "agg" else "disagg")
+
+        try:
+            generate_backend_config.from_runtime(
+                cfg=target_task.config,
+                res=pareto_results.get(exp_name, pd.DataFrame()),
+                overrides=dynamo_config,
+                version=generated_version,
+                backend=target_task.backend_name,
+                save_dir=os.path.join(generator_save_dir, exp_name) if generator_save_dir else None,
+            )
+            logger.info("Generated backend artifacts for %s", exp_name)
+        except Exception as exc:
+            logger.error("Backend config generation failed for %s: %s", exp_name, exc)
 
 def _plot_worker_setup_table(exp_name: str, pareto_df: pd.DataFrame, total_gpus: int, tpot_target: float, top: int, is_moe: bool) -> str:
     """Plot worker setup table for a single experiment."""
@@ -444,23 +495,53 @@ def save_results(chosen_exp: str, best_configs: Dict[str, pd.DataFrame], pareto_
     result_dir_path = os.path.join(save_dir, f'{result_prefix}_{random.randint(0,1000000)}')
     
     logger.info(f'Saving results to {result_dir_path}')
-    os.makedirs(result_dir_path, exist_ok=True)
+    try:
+        safe_result_dir = safe_mkdir(result_dir_path, exist_ok=True)
 
-    for exp_name, pareto_df in pareto_fronts.items():
-        pareto_df.to_csv(os.path.join(result_dir_path, f'{exp_name}_pareto.csv'), index=False)
-        best_configs[exp_name].to_csv(os.path.join(result_dir_path, f'{exp_name}_best_config.csv'), index=False)
+        # Save overall pareto plots in the root directory
+        fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+        plt.title(f"{first_task_config.model_name} tokens/s/gpu vs tokens/s/user")
+        colors = ['blue', 'red', 'green', 'purple', 'orange', 'brown']
+        for i, (exp_name, pareto_df) in enumerate(pareto_fronts.items()):
+            if not pareto_df.empty:
+                pareto_analysis.draw_pareto(
+                    pareto_df, 'tokens/s/user', 'tokens/s/gpu', ax, colors[i % len(colors)], exp_name
+                )
+        plt.savefig(os.path.join(safe_result_dir, 'pareto_frontier.png'))
+        plt.close()
 
-    # Save plot with all pareto fronts
-    fig, ax = plt.subplots(1,1, figsize=(8,5))
-    plt.title(f"{first_task_config.model_name} tokens/s/gpu vs tokens/s/user")
-    
-    colors = ['blue', 'red', 'green', 'purple', 'orange', 'brown']
-    for i, (exp_name, pareto_df) in enumerate(pareto_fronts.items()):
-        if not pareto_df.empty:
-            pareto_analysis.draw_pareto(pareto_df, 'tokens/s/user', 'tokens/s/gpu', ax, colors[i % len(colors)], exp_name)
-        
-    plt.savefig(os.path.join(result_dir_path, 'pareto_frontier.png'))
-    plt.close()
+        # Save each experiment's results in its own subdirectory
+        for exp_name, pareto_df in pareto_fronts.items():
+            exp_dir = os.path.join(safe_result_dir, exp_name)
+            safe_mkdir(exp_dir, exist_ok=True)
+
+            # 1. Save best config dataframe
+            best_config_df = best_configs.get(exp_name)
+            if best_config_df is not None:
+                best_config_df.to_csv(os.path.join(exp_dir, 'best_config.csv'), index=False)
+
+            # 2. Save all pareto dataframe
+            if pareto_df is not None:
+                pareto_df.to_csv(os.path.join(exp_dir, 'pareto.csv'), index=False)
+
+            # 3. Save the config for this experiment
+            exp_task_config = task_configs[exp_name]
+
+            with open(os.path.join(exp_dir, 'config.yaml'), 'w') as f:
+                yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
+
+        # Also save all pareto csvs in the root directory for convenience
+        '''
+        for exp_name, pareto_df in pareto_fronts.items():
+            if pareto_df is not None:
+                pareto_df.to_csv(os.path.join(safe_result_dir, f'{exp_name}_pareto.csv'), index=False)
+        for exp_name, best_config_df in best_configs.items():
+            if best_config_df is not None:
+                best_config_df.to_csv(os.path.join(safe_result_dir, f'{exp_name}_best_config.csv'), index=False)
+        '''
+    except Exception as exc:
+        logger.error("Failed to save results: %s", exc)
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for Disaggregated Serving Deployment")

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# define your experiments here, the order will determine the execution order.
+# define your experiments here, the order will determine the execution order. If not defined, every exp will be executed.
 exps:
   - exp_agg_full
   - exp_agg_simplified
