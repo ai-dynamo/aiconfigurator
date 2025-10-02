@@ -743,9 +743,11 @@ class PerfDatabase(object):
         y0,y1 = y
         if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:
             y1 = y0
-        model = np.polyfit(x, [y0,y1], 1)
-        
-        return self._validate(np.polyval(model, value))
+
+        if y0 == y1:
+            return y0
+
+        return y0 + (y1 - y0) / (x1 - x0) * (value - x0)
 
     def set_default_sol_mode(self, mode:common.SOLMode) -> None:
         """

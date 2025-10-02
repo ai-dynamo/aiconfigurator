@@ -233,6 +233,7 @@ class TRTLLMBackend(BaseBackend):
         ctx_tokens_list.sort()
         
         results_df = pd.DataFrame(columns=common.ColumnsIFB)
+        df_list = []
         capped_b = []
         for b in b_list:
             for ctx_tokens in ctx_tokens_list:
@@ -256,10 +257,10 @@ class TRTLLMBackend(BaseBackend):
                 if summary.check_oom():
                     break # larger ctx tokens will cause oom
                 if summary.get_summary_df().loc[0,'tpot'] <= tpot and summary.get_summary_df().loc[0,'ttft'] <= ttft:
-                    if len(results_df) == 0:
-                        results_df = summary.get_summary_df()
-                    else:
-                        results_df = pd.concat([results_df, summary.get_summary_df()], axis=0, ignore_index=True)
+                    df_list.append(summary.get_summary_df())
+
+        if df_list:
+            results_df = pd.concat(df_list, axis=0, ignore_index=True)
 
         sorted_results_df = results_df.sort_values(by='seq/s', ascending=False).round(3)
         if top_k > 0:
