@@ -403,10 +403,11 @@ def interpolate_throughput_at_tpot(df: Optional[pd.DataFrame], target_tpot: floa
     interpolated_throughput = float(interp_func(target_tps_user))
     return max(0.0, interpolated_throughput) # Ensure non-negative throughput
 
-def get_best_config_under_tpot_constraint(
+def get_best_configs_under_tpot_constraint(
     total_gpus: int,
     pareto_df: pd.DataFrame, 
-    target_tpot: float
+    target_tpot: float,
+    top_n: int = 1
 ) -> pd.DataFrame:
     """
     Finds the best actual config from a Pareto frontier DataFrame
@@ -423,18 +424,22 @@ def get_best_config_under_tpot_constraint(
 
     # Ensure 'tpot' and 'tokens/s/gpu' columns exist
     if 'tpot' not in pareto_df.columns or 'tokens/s/gpu' not in pareto_df.columns:
-        logger.warning("Pareto DataFrame for _get_best_config_under_tpot_constraint is missing 'tpot' or 'tokens/s/gpu' columns.")
+        logger.warning("Pareto DataFrame for _get_best_configs_under_tpot_constraint is missing 'tpot' or 'tokens/s/gpu' columns.")
         return pd.DataFrame()
 
     candidate_configs = pareto_df[pareto_df['tpot'] <= target_tpot].copy()
+
+    if top_n < 1:
+        logger.error(f"top_n is less than 1")
+        return pd.DataFrame()
     
     if not candidate_configs.empty:
         # compute achieved cluster-scale tokens/s/gpu
         candidate_configs['tokens/s/gpu_cluster'] = candidate_configs['tokens/s/gpu'] * \
             (total_gpus // candidate_configs['num_total_gpus']) * candidate_configs['num_total_gpus'] / total_gpus
-        candidate_configs = candidate_configs.sort_values(by='tokens/s/gpu_cluster', ascending=False)
+        candidate_configs = candidate_configs.sort_values(by='tokens/s/gpu_cluster', ascending=False).head(top_n).reset_index(drop=True)
         logger.debug(f"actual replica-level throughputs: {candidate_configs['tokens/s/gpu'].iloc[0]:.2f} vs. actual cluster-level throughputs: {candidate_configs['tokens/s/gpu_cluster'].iloc[0]:.2f}")        
-        return candidate_configs.head(1)
+        return candidate_configs
     else:
         # No config meets tpot <= target_tpot.
         # Optionally, one could return the one closest to target_tpot if no strict candidates exist.

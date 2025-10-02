@@ -19,18 +19,24 @@ from prettytable import PrettyTable
 from aiconfigurator import __version__
 from aiconfigurator.generator.api import generate_backend_config
 from aiconfigurator.generator.cli_args import add_config_generation_cli, build_dynamo_config
-from aiconfigurator.sdk import common, pareto_analysis
+from aiconfigurator.sdk import common, pareto_analysis, task
 from aiconfigurator.sdk.pareto_analysis import (
     draw_pareto_to_string,
-    get_best_config_under_tpot_constraint,
-    get_pareto_front,
-    interpolate_throughput_at_tpot,
+    get_best_configs_under_tpot_constraint,
 )
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.sdk.task import TaskConfig, TaskRunner, task_config_to_generator_config
 from aiconfigurator.sdk.utils import safe_mkdir
 
 
 logger = logging.getLogger(__name__)
+
+
+def _build_common_cli_parser() -> argparse.ArgumentParser:
+    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")
+    common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
+    add_config_generation_cli(common_parser, default_backend=common.BackendName.trtllm.value)
+    return common_parser
 
 
 def _add_default_mode_arguments(parser):
@@ -43,25 +49,20 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
     parser.add_argument("--ttft", type=float, default=1000.0, help="Time to first token in ms.")
     parser.add_argument("--tpot", type=float, default=20.0, help="Time per output token in ms.")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
-    parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")        
-    add_config_generation_cli(parser, default_backend=common.BackendName.trtllm.value)
 
 
 def _add_experiments_mode_arguments(parser):
     parser.add_argument("--yaml_path", type=str, required=True, help="Path to a YAML file containing experiment definitions.")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
-    parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")        
-    add_config_generation_cli(parser, default_backend=common.BackendName.trtllm.value)
 
 
 def configure_parser(parser):
+    common_cli_parser = _build_common_cli_parser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
-    default_parser = subparsers.add_parser("default", help="Run the default agg vs disagg comparison.")
+    default_parser = subparsers.add_parser("default", parents=[common_cli_parser], help="Run the default agg vs disagg comparison.")
     _add_default_mode_arguments(default_parser)
 
-    experiments_parser = subparsers.add_parser("exp", help="Run one or more experiments defined in a YAML file.")
+    experiments_parser = subparsers.add_parser("exp", parents=[common_cli_parser], help="Run one or more experiments defined in a YAML file.")
     _add_experiments_mode_arguments(experiments_parser)
 
 
@@ -145,7 +146,7 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
     task_configs: Dict[str, TaskConfig] = {}
 
     for exp_name in experiment_names:
-        exp_config = experiment_data.get(exp_name)
+        exp_config = experiment_data[exp_name]
         if not isinstance(exp_config, dict):
             logger.warning("Skipping experiment '%s': configuration is not a mapping.", exp_name)
             continue
@@ -156,18 +157,18 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
         else:
             config_section = copy.deepcopy(config_section)
 
-        serving_mode = exp_config.get("serving_mode")
-        model_name = exp_config.get("model_name")
+        serving_mode = exp_config["serving_mode"]
+        model_name = exp_config["model_name"]
         if serving_mode not in {"agg", "disagg"} or not model_name:
             logger.warning("Skipping experiment '%s': missing serving_mode or model_name.", exp_name)
             continue
 
         # system
         if serving_mode == "agg":
-            inferred_system = exp_config.get("system_name")
+            inferred_system = exp_config["system_name"]
             inferred_decode_system = None
         else:
-            inferred_system = exp_config.get("system_name")
+            inferred_system = exp_config["system_name"]
             inferred_decode_system = exp_config.get("decode_system_name") or inferred_system
         system_name = inferred_system
         if not system_name:
@@ -234,9 +235,9 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
 
 def _execute_task_configs(
     task_configs: Dict[str, TaskConfig],
-    save_dir: Optional[str],
     mode: str,
-) -> Tuple[str, Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, float], Optional[str]]:
+) -> Tuple[str, Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, float]]:
+    """Execute the task configs and return the chosen experiment, best configs, results, and best throughputs."""
     results: Dict[str, pd.DataFrame] = {}
     start_time = time.time()
     runner = TaskRunner()
@@ -259,13 +260,12 @@ def _execute_task_configs(
         logger.error("No successful experiment runs to compare.")
         raise SystemExit(1)
 
-
     best_configs: Dict[str, pd.DataFrame] = {}
     best_throughputs: Dict[str, float] = {}
     for name, pareto_df in results.items():
         tpot_target = task_configs[name].config.runtime_config.tpot
-        per_total = getattr(task_configs[name], "total_gpus", None) or 0
-        best_config_df = get_best_config_under_tpot_constraint(per_total, pareto_df, tpot_target)
+        total_gpus = getattr(task_configs[name], "total_gpus", None) or 0
+        best_config_df = get_best_configs_under_tpot_constraint(total_gpus, pareto_df, tpot_target, top_n=3)
         best_configs[name] = best_config_df
         if not best_config_df.empty:
             best_throughputs[name] = best_config_df['tokens/s/gpu_cluster'].values[0]
@@ -276,14 +276,10 @@ def _execute_task_configs(
 
     log_final_summary(chosen_exp, best_throughputs, best_configs, results, task_configs, mode)
 
-    result_dir_path = None
-    if save_dir:
-        result_dir_path = save_results(chosen_exp, best_configs, results, task_configs, save_dir)
-
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
 
-    return chosen_exp, best_configs, results, best_throughputs, result_dir_path
+    return chosen_exp, best_configs, results, best_throughputs
 
 
 def main(args):
@@ -299,38 +295,21 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
-    chosen_exp, best_configs, pareto_results, best_throughputs, result_dir = _execute_task_configs(
+    chosen_exp, best_configs, results, best_throughputs = _execute_task_configs(
         task_configs,
-        args.save_dir,
         args.mode,
     )
-    return
 
-    dynamo_config = build_dynamo_config(args)
-    generated_version = getattr(args, "generated_config_version", None)
+    if args.save_dir:
+        save_results(
+            args=args,
+            best_configs=best_configs, 
+            pareto_fronts=results, 
+            task_configs=task_configs, 
+            save_dir=args.save_dir,
+            generated_backend_version=args.generated_config_version,
+        )
 
-    if result_dir:
-        generator_save_dir = os.path.join(result_dir, "backend_configs")
-    else:
-        generator_save_dir = None
-
-    for exp_name, best_cfg_df in best_configs.items():
-        target_task = task_configs.get(exp_name)
-        if target_task is None:
-            target_task = task_configs.get("agg" if exp_name == "agg" else "disagg")
-
-        try:
-            generate_backend_config.from_runtime(
-                cfg=target_task.config,
-                res=pareto_results.get(exp_name, pd.DataFrame()),
-                overrides=dynamo_config,
-                version=generated_version,
-                backend=target_task.backend_name,
-                save_dir=os.path.join(generator_save_dir, exp_name) if generator_save_dir else None,
-            )
-            logger.info("Generated backend artifacts for %s", exp_name)
-        except Exception as exc:
-            logger.error("Backend config generation failed for %s: %s", exp_name, exc)
 
 def _plot_worker_setup_table(exp_name: str, pareto_df: pd.DataFrame, total_gpus: int, tpot_target: float, top: int, is_moe: bool) -> str:
     """Plot worker setup table for a single experiment."""
@@ -457,7 +436,7 @@ def log_final_summary(
         highlight_series = None
         if not best_config_df.empty:
             highlight_series = {
-                "df": best_config_df,
+                "df": best_config_df.head(1),
                 "label": f"{chosen_exp} best",
             }
             pareto_plot_buf = draw_pareto_to_string(
@@ -478,14 +457,21 @@ def log_final_summary(
     # Plot worker setup tables for all experiments
     for exp_name, pareto_df in pareto_fronts.items():
         exp_task_config = task_configs[exp_name].config
-        per_total = getattr(task_configs[exp_name], "total_gpus", None) or 0
-        table_buf = _plot_worker_setup_table(exp_name, pareto_df, per_total, exp_task_config.runtime_config.tpot, 5, exp_task_config.is_moe)
+        total_gpus = getattr(task_configs[exp_name], "total_gpus", None) or 0
+        table_buf = _plot_worker_setup_table(exp_name, pareto_df, total_gpus, exp_task_config.runtime_config.tpot, 5, exp_task_config.is_moe)
         summary_box.append(table_buf)
 
     summary_box.append("*" * 80)
     logger.info("\n" + "\n".join(summary_box))
 
-def save_results(chosen_exp: str, best_configs: Dict[str, pd.DataFrame], pareto_fronts: Dict[str, pd.DataFrame], task_configs: Dict[str, TaskConfig], save_dir: str):
+def save_results(
+    args,
+    best_configs: Dict[str, pd.DataFrame], 
+    pareto_fronts: Dict[str, pd.DataFrame], 
+    task_configs: Dict[str, TaskConfig], 
+    save_dir: str,
+    generated_backend_version: Optional[str] = None,
+):
     """Save the results to a directory."""
     
     first_exp_name = list(task_configs.keys())[0]
@@ -516,9 +502,9 @@ def save_results(chosen_exp: str, best_configs: Dict[str, pd.DataFrame], pareto_
             safe_mkdir(exp_dir, exist_ok=True)
 
             # 1. Save best config dataframe
-            best_config_df = best_configs.get(exp_name)
+            best_config_df = best_configs[exp_name] # top n configs
             if best_config_df is not None:
-                best_config_df.to_csv(os.path.join(exp_dir, 'best_config.csv'), index=False)
+                best_config_df.to_csv(os.path.join(exp_dir, 'best_config_topn.csv'), index=False)
 
             # 2. Save all pareto dataframe
             if pareto_df is not None:
@@ -527,18 +513,26 @@ def save_results(chosen_exp: str, best_configs: Dict[str, pd.DataFrame], pareto_
             # 3. Save the config for this experiment
             exp_task_config = task_configs[exp_name]
 
-            with open(os.path.join(exp_dir, 'config.yaml'), 'w') as f:
+            with open(os.path.join(exp_dir, 'config.yaml'), 'w') as f: # for future aic repro
                 yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
+            
+            # 4. Save the generated config for this experiment, sub-directory for each best config
+            for i, (idx, result_df) in enumerate(best_config_df.iterrows()):
+                cfg = task_config_to_generator_config(task_config=exp_task_config, result_df=result_df)
 
-        # Also save all pareto csvs in the root directory for convenience
-        '''
-        for exp_name, pareto_df in pareto_fronts.items():
-            if pareto_df is not None:
-                pareto_df.to_csv(os.path.join(safe_result_dir, f'{exp_name}_pareto.csv'), index=False)
-        for exp_name, best_config_df in best_configs.items():
-            if best_config_df is not None:
-                best_config_df.to_csv(os.path.join(safe_result_dir, f'{exp_name}_best_config.csv'), index=False)
-        '''
+                top_config_dir = os.path.join(exp_dir, f'top{i+1}')
+                safe_mkdir(top_config_dir, exist_ok=True)
+                with open(os.path.join(top_config_dir, 'generator_config.yaml'), 'w') as f:
+                    yaml.safe_dump(cfg, f, sort_keys=False)
+                
+                artifacts = generate_backend_config.from_runtime(
+                    cfg=cfg,
+                    backend=exp_task_config.backend_name,
+                    version=generated_backend_version or exp_task_config.backend_version,
+                    overrides=build_dynamo_config(args),                    
+                    save_dir=top_config_dir,
+                )
+
     except Exception as exc:
         logger.error("Failed to save results: %s", exc)
         raise SystemExit(1)
