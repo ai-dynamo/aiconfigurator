@@ -121,6 +121,10 @@ class TRTLLMGenerator(BaseGenerator):
         if agg_spec:
             agg_cfg = self._build_worker_config(agg_spec, ctx, role="agg")
 
+            # perf considerations
+            agg_cfg["cuda_graph_batch_sizes"] = [i for i in range(1, agg_cfg["bs"] + 1)]
+            agg_cfg["disable_overlap_scheduler"] = False
+
             # max_num_tokens heuristic
             if ctx.runtime.nextn and ctx.runtime.nextn >= 1 and get_model_family(ctx.model_name) == "DEEPSEEK":
                 agg_cfg["max_num_tokens"] = agg_cfg["bs"] * (1 + ctx.runtime.nextn) + ctx.runtime.isl + 1500

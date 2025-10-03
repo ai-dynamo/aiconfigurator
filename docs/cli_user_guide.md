@@ -78,26 +78,26 @@ Pareto frontier shows the trade-off betwen generation speed `tokens/s/user` and 
                gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; tp * pp for dense models (underlined numbers are the actual values in math)
 
 disagg Top Configurations: (Sorted by tokens/s/gpu)
-+------+--------------+---------------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
-| Rank | tokens/s/gpu | tokens/s/user | concurrency | total_gpus(used) | replicas |  gpus/replica  | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
-+------+--------------+---------------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
-|  1   |    913.82    |     123.92    |      64     |   32 (32=4x8)    |    4     |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   64  |
-|  2   |    873.07    |     126.28    |      60     |   32 (32=4x8)    |    4     |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   60  |
-|  3   |    852.77    |     133.94    |     240     |   32 (32=1x32)   |    1     | 32 (=12x1+5x4) |     12     |    1 (=1x1)    |    tp1pp1   |   1   |     5      |    4 (=4x1)    |    tp4pp1   |   48  |
-|  4   |    568.51    |     148.82    |      72     |   32 (32=2x16)   |    2     | 16 (=4x1+3x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    4 (=4x1)    |    tp4pp1   |   24  |
-|  5   |    434.77    |     145.12    |     104     |   32 (24=1x24)   |    1     | 24 (=4x2+4x4)  |     4      |    2 (=2x1)    |    tp2pp1   |   1   |     4      |    4 (=4x1)    |    tp4pp1   |   26  |
-+------+--------------+---------------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
++------+--------------+---------------+--------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | concurrency | total_gpus(used) | replicas |  gpus/replica  | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
++------+--------------+---------------+--------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+|  1   |    913.82    |     123.92    | 202.65 |  256(=64x4) |   32 (32=4x8)    |    4     |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   64  |
+|  2   |    873.07    |     126.28    | 202.65 |  240(=60x4) |   32 (32=4x8)    |    4     |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   60  |
+|  3   |    852.77    |     133.94    | 202.65 | 240(=240x1) |   32 (32=1x32)   |    1     | 32 (=12x1+5x4) |     12     |    1 (=1x1)    |    tp1pp1   |   1   |     5      |    4 (=4x1)    |    tp4pp1   |   48  |
+|  4   |    568.51    |     148.82    | 202.65 |  144(=72x2) |   32 (32=2x16)   |    2     | 16 (=4x1+3x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    4 (=4x1)    |    tp4pp1   |   24  |
+|  5   |    434.77    |     145.12    | 123.20 | 104(=104x1) |   32 (24=1x24)   |    1     | 24 (=4x2+4x4)  |     4      |    2 (=2x1)    |    tp2pp1   |   1   |     4      |    4 (=4x1)    |    tp4pp1   |   26  |
++------+--------------+---------------+--------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
 
 agg Top Configurations: (Sorted by tokens/s/gpu)
-+------+--------------+---------------+-------------+------------------+----------+--------------+-------------+----------+----+
-| Rank | tokens/s/gpu | tokens/s/user | concurrency | total_gpus(used) | replicas | gpus/replica | gpus/worker | parallel | bs |
-+------+--------------+---------------+-------------+------------------+----------+--------------+-------------+----------+----+
-|  1   |    638.28    |     100.97    |      28     |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 28 |
-|  2   |    612.50    |     101.49    |      14     |   32 (32=16x2)   |    16    |      2       |   2 (=2x1)  |  tp2pp1  | 14 |
-|  3   |    594.71    |     108.14    |      24     |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 24 |
-|  4   |    592.60    |     111.22    |      24     |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 24 |
-|  5   |    544.17    |     119.83    |      20     |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 20 |
-+------+--------------+---------------+-------------+------------------+----------+--------------+-------------+----------+----+
++------+--------------+---------------+--------+-------------+------------------+----------+--------------+-------------+----------+----+
+| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | concurrency | total_gpus(used) | replicas | gpus/replica | gpus/worker | parallel | bs |
++------+--------------+---------------+--------+-------------+------------------+----------+--------------+-------------+----------+----+
+|  1   |    638.28    |     100.97    | 187.72 |  224(=28x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 28 |
+|  2   |    612.50    |     101.49    | 274.98 | 224(=14x16) |   32 (32=16x2)   |    16    |      2       |   2 (=2x1)  |  tp2pp1  | 14 |
+|  3   |    594.71    |     108.14    | 149.46 |  192(=24x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 24 |
+|  4   |    592.60    |     111.22    | 199.08 |  192(=24x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 24 |
+|  5   |    544.17    |     119.83    | 149.25 |  160(=20x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 20 |
++------+--------------+---------------+--------+-------------+------------------+----------+--------------+-------------+----------+----+
 ```
 
 If you want to reproduce the result we esimated, you need to follow the suggestions here. Take the disagg top1 result as an example.  
@@ -105,7 +105,7 @@ We're expecting to achieve 913.82 tokens/s/gpu and 123.92 tokens/s/user with thi
 We have 1 definition `replica`, it means the number of copies of your xPyD disagg system. Say, here, we have 4 replicas, each replica contains 8 GPUs.  
 Each replica has a system of 4 prefill workers and 1 decode workers. Each prefill worker is using tp1pp1 which is 1 GPU per worker; while each decoder worker is using tp4pp1 which is 4 GPU per workers. These workers compose a 4P1D replica with 8 GPUs. As you want to deploy on 32 GPUs, then you will have 4 replicas.  
 `bs` is required to be set in framework as it limits the largest batch_size of the worker which is crucial to control the TPOT of the deployment.  
-`concurrency` here is per-replica value. If you deploy all replicas, you need to specify the concurrency = `concurrency * replicas` to benchmark your deployment.
+`concurrency` = `concurrency * replicas` Use it to benchmark your deployment on total GPUs. If you only want to benchmark 1 replica, divide it by `replicas`
 
 As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save_dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. Here's a stucture of the output folder,
 ```text

@@ -46,7 +46,7 @@ def _plot_worker_setup_table(exp_name: str, pareto_df: pd.DataFrame, total_gpus:
     is_disagg = '(p)tp' in top_configs.columns
 
     if is_disagg:
-        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "concurrency", "total_gpus(used)", "replicas", "gpus/replica", 
+        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "TTFT", "concurrency", "total_gpus(used)", "replicas", "gpus/replica", 
                              "(p)workers", "(p)gpus/worker", "(p)parallel", "(p)bs",
                              "(d)workers", "(d)gpus/worker", "(d)parallel", "(d)bs"]
         for i, row in enumerate(top_configs.to_dict('records')):
@@ -61,14 +61,15 @@ def _plot_worker_setup_table(exp_name: str, pareto_df: pd.DataFrame, total_gpus:
                 p_gpus_worker = f'{row["(p)pp"]*row["(p)tp"]} (=\033[4m{row["(p)tp"]}\033[0mx\033[4m{row["(p)pp"]}\033[0m)'
                 d_gpus_worker = f'{row["(d)pp"]*row["(d)tp"]} (=\033[4m{row["(d)tp"]}\033[0mx\033[4m{row["(d)pp"]}\033[0m)'
             table.add_row([
-                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", row['concurrency'],
+                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", f"{row['ttft']:.2f}",
+                f"{row['concurrency']*row['replicas']}(={row['concurrency']}x{row['replicas']})",
                 f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})", row['replicas'],
                 f"{row['num_total_gpus']} (={row['(p)workers']}x{row['(p)pp']*row['(p)tp']*row['(p)dp']}+{row['(d)workers']}x{row['(d)pp']*row['(d)tp']*row['(d)dp']})",
                 row['(p)workers'], p_gpus_worker, p_parallel, row['(p)bs'],
                 row['(d)workers'], d_gpus_worker, d_parallel, row['(d)bs'],
             ])
     else: # agg
-        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "concurrency", "total_gpus(used)", 
+        table.field_names = ["Rank", f"\033[1mtokens/s/gpu\033[0m", "tokens/s/user", "TTFT", "concurrency", "total_gpus(used)", 
                              "replicas", "gpus/replica", "gpus/worker", "parallel", "bs"]
         for i, row in enumerate(top_configs.to_dict('records')):
             if is_moe:
@@ -78,8 +79,8 @@ def _plot_worker_setup_table(exp_name: str, pareto_df: pd.DataFrame, total_gpus:
                 parallel = f'tp\033[4m{row["tp"]}\033[0mpp\033[4m{row["pp"]}\033[0m'
                 gpus_worker = f'{row["pp"]*row["tp"]} (=\033[4m{row["tp"]}\033[0mx\033[4m{row["pp"]}\033[0m)'
             table.add_row([
-                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}",
-                row['concurrency'], f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
+                i + 1, f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m", f"{row['tokens/s/user']:.2f}", f"{row['ttft']:.2f}",
+                f"{row['concurrency']*row['replicas']}(={row['concurrency']}x{row['replicas']})", f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                 row['replicas'], row['num_total_gpus'],
                 gpus_worker, parallel, row['bs']
             ])
