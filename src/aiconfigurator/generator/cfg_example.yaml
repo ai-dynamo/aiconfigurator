@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 model_name: "QWEN3_32B"
 system_name: "h200_sxm"
 decode_system_name: "h200_sxm" # this is only used for disagg, we can delete if it's agg.
