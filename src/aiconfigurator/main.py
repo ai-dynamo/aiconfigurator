@@ -42,15 +42,15 @@ def main(argv: list[str] | None = None) -> None:
     subparsers = parser.add_subparsers(dest='command', help='Command to run', required=True)
     
     # CLI subcommand
-    cli_parser = subparsers.add_parser('cli', help='Run CLI interface')
+    cli_parser = subparsers.add_parser('cli', help='Run CLI interface', add_help=False)
     cli_parser.set_defaults(handler=_run_cli)
     
     # Webapp subcommand  
-    webapp_parser = subparsers.add_parser('webapp', help='Run Web interface')
+    webapp_parser = subparsers.add_parser('webapp', help='Run Web interface', add_help=False)
     webapp_parser.set_defaults(handler=_run_webapp)
 
     # Eval subcommand  
-    eval_parser = subparsers.add_parser('eval', help='Generate config -> Launch Service -> Benchmarking -> Analysis')
+    eval_parser = subparsers.add_parser('eval', help='Generate config -> Launch Service -> Benchmarking -> Analysis', add_help=False)
     eval_parser.set_defaults(handler=_run_eval)
 
     args, extras = parser.parse_known_args(argv)

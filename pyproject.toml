@@ -86,7 +86,7 @@ aiconfigurator = "aiconfigurator.main:main"
 
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
-"aiconfigurator.generator" = ["templates/**/*.j2"]
+"aiconfigurator.generator" = ["*.yaml", "templates/**/*.j2"]
 "aiconfigurator" = ["systems/*.yaml", "systems/**/*.txt"]
 
 [tool.setuptools.packages.find]
