@@ -113,6 +113,12 @@ class TRTLLMBackend(BaseBackend):
             genonly_step_latency = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
 
             ttft = mix_step_latency * np.ceil(isl/ctx_tokens)
+            # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency (batch size here) to mitigate the impact of first round latency
+            # assume we need to increase x of requests when concurrency gets larger. thus capped to 4 to make it reasonable.
+            correction_factor = min(2+(steps_to_finish_ctx-3)/2/10, 4)
+            ttft *= correction_factor
+            logger.debug(f'ttft correction factor: {2+(steps_to_finish_ctx-3)/2/10} capped to {correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}')
+
             tpot = (mix_step_latency * num_mix_steps_for_tpot_calc + genonly_step_latency * num_genonly_steps) / (num_mix_steps_for_tpot_calc + num_genonly_steps)
             output_throughput = 1000 / (num_mix_steps*mix_step_latency + num_genonly_steps*genonly_step_latency) * b * (osl-1)
             logger.debug(f'ctx_tokens: {ctx_tokens}, b: {b}, osl: {osl}, isl: {isl}, num_mix_steps: {num_mix_steps}, num_genonly_steps: {num_genonly_steps}, num_mix_ctx_tokens: {num_mix_ctx_tokens}, num_mix_gen_tokens: {num_mix_gen_tokens}, num_genonly_tokens: {num_genonly_tokens}')
