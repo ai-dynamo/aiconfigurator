@@ -356,7 +356,11 @@ def draw_pareto_to_string(
         plotext.ylim(0.0, y_max)
         plotext.xlim(0.0, x_max)
 
-    buf = plotext.build()
+    try:
+        buf = plotext.build()
+    except Exception as e:
+        logger.error(f"failed to build plotext: {e}")
+        buf = ""
     plotext.clear_data()
     return buf
 
