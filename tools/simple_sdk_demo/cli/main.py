@@ -29,7 +29,7 @@ def parse(args):
     parser.add_argument("--mode",
                         type=str,
                         default='static',
-                        choices=['static', 'static_ctx', 'static_gen', 'ifb', 'disagg'],
+                        choices=['static', 'static_ctx', 'static_gen', 'agg', 'disagg'],
                         help='inference mode')
     parser.add_argument("--backend",
                         type=str,
@@ -111,7 +111,7 @@ def parse(args):
     parser.add_argument("--ctx_stride",
                         type=int,
                         default=64,
-                        help="IFB: ctx_stride, mimicking num_tokens_per_block param in TRT-LLM, defaulted as 64")
+                        help="Agg: ctx_stride, mimicking num_tokens_per_block param in TRT-LLM, defaulted as 64")
     args = parser.parse_args(args=args)
 
     return args
@@ -129,8 +129,8 @@ def main(args):
     backend = get_backend(args.backend)
     session = InferenceSession(model, database, backend)
 
-    if args.mode == 'ifb':
-        summary = session.find_best_ifb_result_under_constraints(runtime_config=runtime_config, top_k=0, max_batch_size=512, ctx_stride=args.ctx_stride)
+    if args.mode == 'agg':
+        summary = session.find_best_agg_result_under_constraints(runtime_config=runtime_config, top_k=0, max_batch_size=512, ctx_stride=args.ctx_stride)
         print(summary.get_summary_df())
         summary.get_summary_df().to_csv('result.csv')
     elif args.mode == 'disagg':

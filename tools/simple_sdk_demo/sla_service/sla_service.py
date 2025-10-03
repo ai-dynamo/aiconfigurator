@@ -61,7 +61,7 @@ def post_sla(
 
         # dense model
         is_moe = check_is_moe(model_name)
-        ifb_parallel_config_list = enumerate_parallel_config(num_gpu_list=[1,2,4,8],
+        agg_parallel_config_list = enumerate_parallel_config(num_gpu_list=[1,2,4,8],
                                                             tp_list=[1,2,4,8],
                                                             pp_list=[1],
                                                             moe_tp_list=[1,2,4,8],
@@ -74,8 +74,8 @@ def post_sla(
         max_num_tokens = 8192 # default as NIM
         min_cc = max_num_tokens//isl+1
         cc_list = [cc for cc in concurrency_list_default if cc >= min_cc]
-        results_df = pd.DataFrame(columns=common.ColumnsIFB)
-        for parallel_config in ifb_parallel_config_list:
+        results_df = pd.DataFrame(columns=common.ColumnsAgg)
+        for parallel_config in agg_parallel_config_list:
             tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
             overwritten_model_config = copy.deepcopy(model_config)
             overwritten_model_config.pp_size = pp_size
@@ -88,7 +88,7 @@ def post_sla(
 
             for cc in cc_list:
                 runtime_config.batch_size = cc
-                summary = sess.run_ifb(runtime_config=runtime_config, ctx_tokens=max_num_tokens)
+                summary = sess.run_agg(runtime_config=runtime_config, ctx_tokens=max_num_tokens)
                 result_df = summary.get_summary_df()
                 if summary.check_oom():
                     logger.info(f"OOM for cc: {cc}")

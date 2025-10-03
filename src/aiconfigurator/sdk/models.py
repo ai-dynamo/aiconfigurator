@@ -336,7 +336,7 @@ class DeepSeekModel(BaseModel):
          # used to scale the tpot to reflect mtp effect: 
          # 1. mtp will reduce the overall time by expected_tokens_per_step 
          # 2. mtp module introduces nextn new transformer layers+linear layers (we ignore the linear layers for now)
-         # 3. special correction in ifb step due to we leveraging ctx phase for gen tokens non-attn part
+         # 3. special correction in agg step due to we leveraging ctx phase for gen tokens non-attn part
          # meanwhile, needs to scale the actual bs of generation by nextn, this is covered in inferencesession
         self._mtp_scale_factor = 1./(1+calc_expectation(self._nextn, self._nextn_accept_rates))*(self._nextn+self._num_layers)/self._num_layers
         self._power_law_alpha = 1.01
@@ -362,9 +362,9 @@ class DeepSeekModel(BaseModel):
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
                                 ops.GEMM(f'context_downscale_gemm', self._num_layers, 2112, h, gemm_quant_mode), # on every gpu, fused_a
                                 ops.GEMM(f'context_q_b_proj_gemm', self._num_layers, 24576//tp_size, 1536, gemm_quant_mode),
-                                ops.GEMM(f'context_kv_b_proj_gemm', self._num_layers, 32768//tp_size, 512, gemm_quant_mode), # ifb ctx attn part
-                                ops.ContextMLA(f'context_attention', self._num_layers, 128//tp_size, kvcache_quant_mode, fmha_quant_mode), # ifb ctx attn part
-                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, 128*128//tp_size, gemm_quant_mode), # ifb ctx attn part
+                                ops.GEMM(f'context_kv_b_proj_gemm', self._num_layers, 32768//tp_size, 512, gemm_quant_mode), # agg ctx attn part
+                                ops.ContextMLA(f'context_attention', self._num_layers, 128//tp_size, kvcache_quant_mode, fmha_quant_mode), # agg ctx attn part
+                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, 128*128//tp_size, gemm_quant_mode), # agg ctx attn part
                                 ops.ElementWise(f'context_add_norm_2', self._num_layers, 2*h, 2*h, 0.8)])
 
         # shared moe
@@ -400,9 +400,9 @@ class DeepSeekModel(BaseModel):
                                 ops.ElementWise(f'generation_add_norm_1', self._num_layers*self._mtp_scale_factor, 2*h, 2*h, 0.8),
                                 ops.GEMM(f'generation_downscale_gemm', self._num_layers*self._mtp_scale_factor, 2112, h, gemm_quant_mode), # on every gpu
                                 ops.GEMM(f'generation_q_b_proj_gemm', self._num_layers*self._mtp_scale_factor, 24576//tp_size, 1536, gemm_quant_mode),
-                                ops.MLABmm(f'generation_bmm_pre', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=True), # ifb gen attn part
-                                ops.GenerationMLA(f'generation_attention', self._num_layers*self._mtp_scale_factor, 128//tp_size, kvcache_quant_mode), # ifb gen attn part
-                                ops.MLABmm(f'generation_bmm_post', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=False), # ifb gen attn part
+                                ops.MLABmm(f'generation_bmm_pre', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=True), # agg gen attn part
+                                ops.GenerationMLA(f'generation_attention', self._num_layers*self._mtp_scale_factor, 128//tp_size, kvcache_quant_mode), # agg gen attn part
+                                ops.MLABmm(f'generation_bmm_post', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=False), # agg gen attn part
                                 ops.GEMM(f'generation_proj_gemm', self._num_layers*self._mtp_scale_factor, h, h//tp_size, gemm_quant_mode),
                                 ops.ElementWise(f'generation_add_norm_2', self._num_layers*self._mtp_scale_factor, 2*h, 2*h, 0.8)])
 

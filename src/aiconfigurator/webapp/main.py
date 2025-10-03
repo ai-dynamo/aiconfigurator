@@ -3,8 +3,8 @@
 
 import gradio as gr
 from aiconfigurator.webapp.components.static_tab import create_static_tab
-from aiconfigurator.webapp.components.ifb_tab import create_ifb_tab
-from aiconfigurator.webapp.components.ifb_pareto_tab import create_ifb_pareto_tab
+from aiconfigurator.webapp.components.agg_tab import create_agg_tab
+from aiconfigurator.webapp.components.agg_pareto_tab import create_agg_pareto_tab
 from aiconfigurator.webapp.components.disagg_pareto_tab import create_disagg_pareto_tab
 from aiconfigurator.webapp.components.pareto_comparison_tab import create_pareto_comparison_tab
 from aiconfigurator.webapp.components.disagg_pd_ratio_tab import create_disagg_pd_ratio_tab
@@ -23,7 +23,7 @@ def configure_parser(parser):
     """
     parser.add_argument("--server_name", type=str, default="0.0.0.0", help="Server name")
     parser.add_argument("--server_port", type=int, default=7860, help="Server port")
-    parser.add_argument("--enable_ifb", action="store_true", help="Enable IFB tab")
+    parser.add_argument("--enable_agg", action="store_true", help="Enable Agg tab")
     parser.add_argument("--enable_disagg_pd_ratio", action="store_true", help="Enable Disagg PD Ratio tab")
     parser.add_argument("--debug", help="Debug mode", action="store_true")
     parser.add_argument("--experimental", help="enable experimental features", action="store_true")
@@ -33,7 +33,7 @@ def main(args):
     Main function for the WebApp.
     """
     app_config = {
-        'enable_ifb': args.enable_ifb,
+        'enable_agg': args.enable_agg,
         'enable_disagg_pd_ratio': args.enable_disagg_pd_ratio,
         'experimental': args.experimental,
         'debug': args.debug,
@@ -74,9 +74,9 @@ def main(args):
         with gr.Tabs() as tabs:
             readme_components = create_readme_tab(app_config)            
             static_components = create_static_tab(app_config)
-            if app_config['enable_ifb']:
-                ifb_components = create_ifb_tab(app_config)
-            ifb_pareto_components = create_ifb_pareto_tab(app_config)
+            if app_config['enable_agg']:
+                agg_components = create_agg_tab(app_config)
+            agg_pareto_components = create_agg_pareto_tab(app_config)
             disagg_pareto_components = create_disagg_pareto_tab(app_config)
             if app_config['enable_disagg_pd_ratio']:
                 disagg_pd_ratio_components = create_disagg_pd_ratio_tab(app_config)
@@ -84,11 +84,11 @@ def main(args):
         
         # setup events
         EventHandler.setup_static_events(static_components)
-        if app_config['enable_ifb']:
-            EventHandler.setup_ifb_events(ifb_components)
-        EventHandler.setup_ifb_pareto_events(ifb_pareto_components)
+        if app_config['enable_agg']:
+            EventHandler.setup_agg_events(agg_components)
+        EventHandler.setup_agg_pareto_events(agg_pareto_components)
         EventHandler.setup_disagg_pareto_events(disagg_pareto_components)
-        EventHandler.setup_save_events(ifb_pareto_components['result_name'], ifb_pareto_components['save_btn'], ifb_pareto_components['result_df'], pareto_comparison_components['candidates_dropdown'], pareto_results_state)
+        EventHandler.setup_save_events(agg_pareto_components['result_name'], agg_pareto_components['save_btn'], agg_pareto_components['result_df'], pareto_comparison_components['candidates_dropdown'], pareto_results_state)
         EventHandler.setup_save_events(disagg_pareto_components['result_name'], disagg_pareto_components['save_btn'], disagg_pareto_components['result_df'], pareto_comparison_components['candidates_dropdown'], pareto_results_state)
         if app_config['enable_disagg_pd_ratio']:
             EventHandler.setup_disagg_pd_ratio_events(disagg_pd_ratio_components)

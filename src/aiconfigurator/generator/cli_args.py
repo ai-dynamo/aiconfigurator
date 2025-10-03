@@ -95,8 +95,7 @@ def add_config_generation_cli(parser: argparse.ArgumentParser, default_backend: 
         "--generated_config_version",
         type=str,
         default=None,
-        help="Force the target engine version for generated configs. "
-             "(default: fallback to --version)",
+        help="Target engine version for generated configs. If none is given, will skip the generation",
     )
 
     for v, m in sorted(meta.items()):

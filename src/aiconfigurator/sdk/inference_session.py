@@ -26,10 +26,10 @@ class InferenceSession(object):
     
     Methods:
         run_static (static, static_ctx, static_gen): to support static batching and disagg, returns details of a static run
-        run_ifb (static, static_ctx, static_gen): run ifb inference, returns summary of the perf result with given ifb config and runtime config (concurrency)
-        find_best_ifb_result_under_constraints (static, static_ctx, static_gen):
-            find the best ifb result under constraints, returns summary 
-            which contains all the possible ifb config and perf that matchs SLA.
+        run_agg (static, static_ctx, static_gen): run agg inference, returns summary of the perf result with given agg config and runtime config (concurrency)
+        find_best_agg_result_under_constraints (static, static_ctx, static_gen):
+            find the best agg result under constraints, returns summary 
+            which contains all the possible agg config and perf that matchs SLA.
     """
     def __init__(self, model:models.BaseModel, 
                  database:perf_database.PerfDatabase, 
@@ -56,32 +56,32 @@ class InferenceSession(object):
         """
         return self._backend.run_static(self._model, self._database, runtime_config, mode, stride)
 
-    def run_ifb(self, runtime_config:config.RuntimeConfig, **kwargs) -> InferenceSummary:
+    def run_agg(self, runtime_config:config.RuntimeConfig, **kwargs) -> InferenceSummary:
         """
-        Run ifb inference
+        Run agg inference
 
         Args:
             runtime_config (RuntimeConfig): the runtime config
-            **kwargs: other arguments to run ifb, depends on the backend specific design
+            **kwargs: other arguments to run agg, depends on the backend specific design
 
         Returns:
             InferenceSummary: the summary of the inference result
         """
-        return self._backend.run_ifb(self._model, self._database, runtime_config, **kwargs)
+        return self._backend.run_agg(self._model, self._database, runtime_config, **kwargs)
     
     # Optimization
-    def find_best_ifb_result_under_constraints(self, runtime_config:config.RuntimeConfig, **kwargs) -> InferenceSummary:
+    def find_best_agg_result_under_constraints(self, runtime_config:config.RuntimeConfig, **kwargs) -> InferenceSummary:
         """
-        Find the best ifb result under constraints
+        Find the best agg result under constraints
 
         Args:
             runtime_config (RuntimeConfig): the runtime config
-            **kwargs: other arguments to find the best ifb result under constraints, depends on the backend specific design
+            **kwargs: other arguments to find the best agg result under constraints, depends on the backend specific design
 
         Returns:
-            InferenceSummary: the summary of the inference result, contains all the possible ifb config and perf that matchs SLA.
+            InferenceSummary: the summary of the inference result, contains all the possible agg config and perf that matchs SLA.
         """
-        return self._backend.find_best_ifb_result_under_constraints(self._model, self._database, runtime_config, **kwargs)
+        return self._backend.find_best_agg_result_under_constraints(self._model, self._database, runtime_config, **kwargs)
 
     
 class DisaggInferenceSession(object):

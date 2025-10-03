@@ -20,33 +20,18 @@ from unittest.mock import MagicMock, patch
 import tempfile
 import shutil
 
-from aiconfigurator.cli.main import main as cli_main, load_config_from_yaml, AIConfigurator
+from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.perf_database import get_latest_database_version, get_supported_databases
+
+
+_LATEST_VERSIONS_CACHE = {}
 
 
 def get_all_backends():
     """Get all backends to test."""
     # In the future, this could come from common.BackendName
     return ['trtllm']
-
-
-def get_all_versions(backend):
-    """Get all versions for a given backend."""
-    if backend == 'trtllm':
-        return ['0.20.0', '1.0.0rc3']
-    # Example for a future backend
-    # if backend == 'vllm':
-    #     return ['v0.5.1']
-    return []
-
-
-def get_all_backend_version_combinations():
-    """Generate all (backend, version) combinations to test."""
-    combinations = []
-    for backend in get_all_backends():
-        for version in get_all_versions(backend):
-            combinations.append(pytest.param(backend, version, id=f"{backend}-{version}"))
-    return combinations
 
 
 @pytest.fixture(scope="session")
@@ -207,10 +192,11 @@ Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
     backend_versions = summary_report['test_configuration']['versions_tested']
     if backend_versions:
-        report_content += chr(10).join([
-            f"- **{backend}**: {', '.join(versions)}" 
-            for backend, versions in backend_versions.items()
-        ])
+        for system, backends in backend_versions.items():
+            if backends:
+                report_content += f"- **{system}**:\n"
+                for backend, version in backends.items():
+                    report_content += f"  - {backend}: {version} (latest)\n"
     else:
         report_content += "N/A"
 
@@ -266,6 +252,15 @@ def session_summary_report(request, test_results_dir, error_log):
     
     # Collect configuration details from the TestE2ESweep class
     test_class = TestE2ESweep()
+
+    versions_tested = {}
+    systems_to_check = test_class.get_all_systems()
+    for system in systems_to_check:
+        versions_tested[system] = {}
+        for backend in get_all_backends():
+            version = get_latest_database_version(system=system, backend=backend)
+            if version:
+                versions_tested[system][backend] = version
     
     summary_report = {
         "test_execution_summary": error_log["test_summary"],
@@ -275,10 +270,7 @@ def session_summary_report(request, test_results_dir, error_log):
             "gpu_configs_tested": test_class.get_all_gpu_configs(),
             "isl_osl_combinations": test_class.get_all_isl_osl_combinations(),
             "ttft_tpot_combinations": test_class.get_all_ttft_tpot_combinations(),
-            "versions_tested": {
-                backend: get_all_versions(backend)
-                for backend in get_all_backends()
-            }
+            "versions_tested": versions_tested
         },
         "error_analysis": _analyze_errors(error_log["errors"]),
         "recommendations": _generate_recommendations(error_log)
@@ -313,7 +305,7 @@ class TestE2ESweep:
 
     def get_all_systems(self):
         """Get all supported systems."""
-        return ['h100_sxm', 'h200_sxm']
+        return ['h100_sxm', 'h200_sxm', 'b200_sxm', 'gb200_sxm']
 
     def get_all_gpu_configs(self):
         """Get all GPU configurations to test."""
@@ -331,19 +323,23 @@ class TestE2ESweep:
         pytest.param(model, id=f"model_{model}")
         for model in common.SupportedModels.keys()
     ])
-    @pytest.mark.parametrize("system", ['h100_sxm', 'h200_sxm'])
+    @pytest.mark.parametrize("system", ['h100_sxm', 'h200_sxm', 'b200_sxm', 'gb200_sxm'])
     @pytest.mark.parametrize("total_gpus", [8, 512])
     @pytest.mark.parametrize("isl,osl", [(4000, 1000), (1000, 2), (32, 1000)])
     @pytest.mark.parametrize("ttft,tpot", [(5000, 10), (5000, 100)])
-    @pytest.mark.parametrize("backend,version", get_all_backend_version_combinations())
+    @pytest.mark.parametrize("backend", get_all_backends())
     def test_e2e_configuration_sweep(self, model_name, system, total_gpus, isl, osl, 
-                                   ttft, tpot, backend, version, test_results_dir, error_log):
+                                   ttft, tpot, backend, test_results_dir, error_log):
         """
         Test end-to-end configuration for each combination of parameters.
         
         This test executes the full aiconfigurator pipeline and captures any errors
         that occur during execution, logging them for analysis.
         """
+        version = get_latest_database_version(system=system, backend=backend)
+        if not version:
+            pytest.skip(f"No latest version found for {system=}, {backend=}")
+
         error_log["test_summary"]["total_combinations"] += 1
         
         # Create unique test case identifier
@@ -377,32 +373,30 @@ class TestE2ESweep:
         try:
             # Create temporary directory for this test case
             with tempfile.TemporaryDirectory() as temp_dir:
-                # Execute the aiconfigurator
-                aiconfigurator = AIConfigurator()
-                aiconfigurator_config = load_config_from_yaml(
-                    model_name=model_name,
-                    system_name=system,
-                    backend_name='trtllm',
-                    version=version,
-                    total_gpus=total_gpus,
-                    isl=isl,
-                    osl=osl,
-                    ttft=float(ttft),
-                    tpot=float(tpot)
-                )
+                # Mock CLI arguments
+                args = MagicMock()
+                args.mode = "default"
+                args.model = model_name
+                args.system = system
+                args.decode_system = None
+                args.total_gpus = total_gpus
+                args.isl = isl
+                args.osl = osl
+                args.ttft = float(ttft)
+                args.tpot = float(tpot)
+                args.backend = backend
+                args.backend_version = version
+                args.save_dir = temp_dir
+                args.debug = False
+                args.generated_config_version = None
+                args.config_output_dir = None
+                args.deploy_output_dir = None
+
+                # Execute the aiconfigurator via the main CLI entrypoint
+                cli_main(args)
                 
-                # Run the configuration (this is the main validation)
-                aiconfigurator_result = aiconfigurator.run(aiconfigurator_config)
-                
-                # Extract result summary for analysis (optional)
-                test_case["result_summary"] = {
-                    "chosen_system_type": aiconfigurator_result.chosen_system_type,
-                    "has_disagg_benefit": aiconfigurator_result.has_disagg_benefit,
-                    "benefit_ratio": aiconfigurator_result.benefit_ratio,
-                    "agg_best_throughput": aiconfigurator_result.agg_actual_best_throughput,
-                    "disagg_best_throughput": aiconfigurator_result.disagg_actual_best_throughput
-                }
-                
+                # For the purpose of this test, we assume success if no exception is raised.
+                # A more thorough check could inspect the contents of `temp_dir`.
                 test_case["status"] = "success"
                 error_log["test_summary"]["successful"] += 1
                 
@@ -444,7 +438,7 @@ class TestE2ESweep:
         
         # If error occurred, fail the test with detailed information
         if error_occurred:
-            pytest.fail(f"Configuration failed for {test_case_id}: {error_details['error_message']}")
+            pytest.fail(f"Configuration failed for {test_case_id}:\n{error_details['traceback']}")
 
     # The summary report generation is now handled by the session_summary_report fixture.
     # The test_generate_sweep_summary_report method has been removed. 

@@ -176,7 +176,7 @@ class EventFn:
                     gr.update(value=stdout_text+stderr_text))
 
     @staticmethod
-    def run_estimation_ifb(model_name, system_name, backend_name, version, sol_mode, 
+    def run_estimation_agg(model_name, system_name, backend_name, version, sol_mode, 
                            isl, osl, ttft, tpot, 
                            tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, 
                            gemm_quant_mode, kvcache_quant_mode, fmha_quant_mode, 
@@ -229,7 +229,7 @@ class EventFn:
                 backend = get_backend(backend_name)
                 model = get_model(model_name, model_config)
                 session = InferenceSession(model, database, backend)
-                summary = session.find_best_ifb_result_under_constraints(runtime_config=runtime_config, 
+                summary = session.find_best_agg_result_under_constraints(runtime_config=runtime_config, 
                                                                             top_k = 10,
                                                                             max_batch_size = 512,
                                                                             ctx_stride = 512)
@@ -239,7 +239,7 @@ class EventFn:
                     logger.error(f"No result for {model_name} with {tp_size} GPUs under this restriction ttft {ttft}ms, tpot {tpot} ms and memory size. Try to set a larger ttft/tpot limit and use more GPUs.")
 
             except Exception as e:
-                results_df = pd.DataFrame(columns=common.ColumnsIFB)
+                results_df = pd.DataFrame(columns=common.ColumnsAgg)
                 traceback_log = traceback.format_exc()
                 is_error = True
         stdout_text = stdout_buffer.getvalue() + log_buffer.getvalue()
@@ -249,7 +249,7 @@ class EventFn:
 
 
     @staticmethod
-    def run_estimation_ifb_pareto(model_name, system_name, backend_name, version, sol_mode, 
+    def run_estimation_agg_pareto(model_name, system_name, backend_name, version, sol_mode, 
                                   isl, osl, ttft,
                                   num_gpus, tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, 
                                   gemm_quant_mode, kvcache_quant_mode, fmha_quant_mode, 
@@ -293,7 +293,7 @@ class EventFn:
                 if len(parallel_config_list) == 0:
                     logger.error(f"No valid parallel config found for {model_name} with {tp_size} GPUs. Please double check your parallel configs.")
 
-                results_df = pareto_analysis.ifb_pareto(model_name=model_name, 
+                results_df = pareto_analysis.agg_pareto(model_name=model_name, 
                                         runtime_config=runtime_config,
                                         database=database, 
                                         backend_name=backend_name,
@@ -304,10 +304,10 @@ class EventFn:
                 results_df = results_df.reset_index(drop=True).reset_index()
                 if results_df.size == 0:
                     logger.error(f"No result for {model_name} with {tp_size} GPUs under this restriction ttft {ttft}ms and memory size. Try to set a larger ttft limit and use more GPUs.")
-                title = f'{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_ttft{runtime_config.ttft}_{system_name}_{backend_name}_{version}_{model_config.gemm_quant_mode}_{model_config.kvcache_quant_mode}_{model_config.fmha_quant_mode}_{model_config.moe_quant_mode}_{model_config.comm_quant_mode}_IFB_Pareto'
+                title = f'{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_ttft{runtime_config.ttft}_{system_name}_{backend_name}_{version}_{model_config.gemm_quant_mode}_{model_config.kvcache_quant_mode}_{model_config.fmha_quant_mode}_{model_config.moe_quant_mode}_{model_config.comm_quant_mode}_Agg_Pareto'
                 pareto_html = create_scatter_plot(results_df, 'tokens/s/user', 'tokens/s/gpu', title)
             except Exception as e:
-                results_df = pd.DataFrame(columns=common.ColumnsIFB)
+                results_df = pd.DataFrame(columns=common.ColumnsAgg)
                 traceback_log = traceback.format_exc()
                 is_error = True
         stdout_text = stdout_buffer.getvalue() + log_buffer.getvalue()

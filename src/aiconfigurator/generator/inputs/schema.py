@@ -41,29 +41,17 @@ class RuntimeView:
     nextn_accept_rates: Optional[List[float]] = None
 
 @dataclass
-class ParallelSpecBase:
-    """Common spec shared by Agg and Disagg roles."""
+class ModeConfig:
+    """Config payload for a specific serving mode.""" 
+    workers: int    
+    bs: int   
     tp: int
     pp: int
-    dp: int
-    bs: int
-    moe_tp: Optional[int] = None
-    moe_ep: Optional[int] = None
-
-@dataclass
-class BestAggConfig(ParallelSpecBase):
-    """Best Agg config using the common spec base."""
-
-@dataclass
-class RoleParallelSpec(ParallelSpecBase):
-    """Spec for a Disagg role with worker count."""
-    workers: int = 1
-
-@dataclass
-class BestDisaggConfig:
-    """Best Disagg config with prefill and decode specs."""
-    prefill: RoleParallelSpec
-    decode: RoleParallelSpec
+    dp: Optional[int] = 1
+    moe_tp: Optional[int] = 1
+    moe_ep: Optional[int] = 1
+    memory: Optional[int] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class GeneratorContext:
@@ -75,5 +63,4 @@ class GeneratorContext:
     version: str
     runtime: RuntimeView
     overrides: DynamoConfig
-    best_agg: Optional[BestAggConfig] = None
-    best_disagg: Optional[BestDisaggConfig] = None
+    modes: Dict[str, ModeConfig] = field(default_factory=dict)

@@ -18,14 +18,14 @@ class SGLANGBackend(BaseBackend):
     def __init__(self):
         super().__init__()
 
-    def run_ifb(self, 
+    def run_agg(self, 
                 model: BaseModel, 
                 database: PerfDatabase, 
                 runtime_config: RuntimeConfig, 
                 **kwargs) -> InferenceSummary:
         pass
 
-    def find_best_ifb_result_under_constraints(self, 
+    def find_best_agg_result_under_constraints(self, 
                                                model: BaseModel, 
                                                database: PerfDatabase, 
                                                runtime_config: RuntimeConfig, 
