@@ -189,6 +189,7 @@ class TRTLLMBackend(BaseBackend):
             top_k: the number of best results to return
             max_batch_size: the maximum batch size to test
             ctx_stride: the stride of ctx tokens to test, it will impact the time to run the test.
+            enable_chunked_prefill: whether to enable chunked prefill, it will impact the time to run the test while have little impact on the result. Default off
 
         Returns:
             A summary of the best IFB result under constraints.
@@ -201,6 +202,7 @@ class TRTLLMBackend(BaseBackend):
         top_k = kwargs.get('top_k', 1)
         max_batch_size = kwargs.get('max_batch_size', 512)
         ctx_stride = kwargs.get('ctx_stride', 512)
+        enable_chunked_prefill = kwargs.get('enable_chunked_prefill', False)
 
         MAX_NORMAL_CTX_TOKENS = 8192
         MAX_CTX_TOKENS_MULTIPLE_OF_ISL = 2
@@ -210,7 +212,12 @@ class TRTLLMBackend(BaseBackend):
         ctx_stride_large = max(1024, ctx_stride, max_ctx_tokens//MAX_CTX_TOKENS_SEARCH_STEPS) # if ctx tokens is already larger than 2048, we need to increase ctx_stride for faster sweeping
         # when b is larger than 1024, the result is not good as the data collection is not enough to cover this.
         b_list_default = list(range(1,16,1))+list(range(16,32,4))+list(range(32,64,8))+list(range(64,256,16))+list(range(256,512,32))+list(range(512,1024,256))+[1024]
-    
+
+        if not enable_chunked_prefill:
+            logger.debug(f'enable_chunked_prefill is off, override ctx_stride: from {ctx_stride} to {isl}, ctx_stride_large: from {ctx_stride_large} to {np.ceil(ctx_stride_large/isl) * isl}')            
+            ctx_stride = isl
+            ctx_stride_large = np.ceil(ctx_stride_large/isl) * isl
+            
         # sweep for batch_size and ctx_tokens
         # ctx_tokens will have a step of ctx_stride. When it's larger than 8192, we will increase the step to ctx_stride_large.
         # outer_loop is over batch_size dimention, from 1 to max_batch_size
