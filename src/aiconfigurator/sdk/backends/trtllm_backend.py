@@ -113,6 +113,12 @@ class TRTLLMBackend(BaseBackend):
             genonly_step_latency = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
 
             ttft = mix_step_latency * np.ceil(isl/ctx_tokens)
+            # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency (batch size here) to mitigate the impact of first round latency
+            # assume we need to increase x of requests when concurrency gets larger. thus capped to 4 to make it reasonable.
+            correction_factor = min(2+(steps_to_finish_ctx-3)/2/10, 4)
+            ttft *= correction_factor
+            logger.debug(f'ttft correction factor: {2+(steps_to_finish_ctx-3)/2/10} capped to {correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}')
+
             tpot = (mix_step_latency * num_mix_steps_for_tpot_calc + genonly_step_latency * num_genonly_steps) / (num_mix_steps_for_tpot_calc + num_genonly_steps)
             output_throughput = 1000 / (num_mix_steps*mix_step_latency + num_genonly_steps*genonly_step_latency) * b * (osl-1)
             logger.debug(f'ctx_tokens: {ctx_tokens}, b: {b}, osl: {osl}, isl: {isl}, num_mix_steps: {num_mix_steps}, num_genonly_steps: {num_genonly_steps}, num_mix_ctx_tokens: {num_mix_ctx_tokens}, num_mix_gen_tokens: {num_mix_gen_tokens}, num_genonly_tokens: {num_genonly_tokens}')
@@ -189,6 +195,7 @@ class TRTLLMBackend(BaseBackend):
             top_k: the number of best results to return
             max_batch_size: the maximum batch size to test
             ctx_stride: the stride of ctx tokens to test, it will impact the time to run the test.
+            enable_chunked_prefill: whether to enable chunked prefill, it will impact the time to run the test while have little impact on the result. Default off
 
         Returns:
             A summary of the best IFB result under constraints.
@@ -201,6 +208,7 @@ class TRTLLMBackend(BaseBackend):
         top_k = kwargs.get('top_k', 1)
         max_batch_size = kwargs.get('max_batch_size', 512)
         ctx_stride = kwargs.get('ctx_stride', 512)
+        enable_chunked_prefill = kwargs.get('enable_chunked_prefill', False)
 
         MAX_NORMAL_CTX_TOKENS = 8192
         MAX_CTX_TOKENS_MULTIPLE_OF_ISL = 2
@@ -210,7 +218,12 @@ class TRTLLMBackend(BaseBackend):
         ctx_stride_large = max(1024, ctx_stride, max_ctx_tokens//MAX_CTX_TOKENS_SEARCH_STEPS) # if ctx tokens is already larger than 2048, we need to increase ctx_stride for faster sweeping
         # when b is larger than 1024, the result is not good as the data collection is not enough to cover this.
         b_list_default = list(range(1,16,1))+list(range(16,32,4))+list(range(32,64,8))+list(range(64,256,16))+list(range(256,512,32))+list(range(512,1024,256))+[1024]
-    
+
+        if not enable_chunked_prefill:
+            logger.debug(f'enable_chunked_prefill is off, override ctx_stride: from {ctx_stride} to {isl}, ctx_stride_large: from {ctx_stride_large} to {np.ceil(ctx_stride_large/isl) * isl}')            
+            ctx_stride = isl
+            ctx_stride_large = np.ceil(ctx_stride_large/isl) * isl
+            
         # sweep for batch_size and ctx_tokens
         # ctx_tokens will have a step of ctx_stride. When it's larger than 8192, we will increase the step to ctx_stride_large.
         # outer_loop is over batch_size dimention, from 1 to max_batch_size
