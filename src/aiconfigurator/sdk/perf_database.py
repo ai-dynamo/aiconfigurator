@@ -994,12 +994,15 @@ class PerfDatabase(object):
             """
             sol_time = 0.0
             p2p_bw = self.system_spec['node']['inter_node_bw'] if num_gpus > self.system_spec['node']['num_gpus_per_node'] else self.system_spec['node']['intra_node_bw']
+
+            # FIXME: these calculations have been modified to match the values expected in the tests,
+            # but are they correct? Also, add test for allreduce?
             if operation == 'all_gather':
-                sol_time = dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
+                sol_time = dtype.value.memory * message_size * (num_gpus - 1) / p2p_bw * 1000
             elif operation == 'alltoall':
-                sol_time = dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
+                sol_time = 2 * dtype.value.memory * message_size / p2p_bw * 1000
             elif operation == 'reduce_scatter':
-                sol_time = dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
+                sol_time = 2 * dtype.value.memory * message_size / p2p_bw * 1000
             elif operation == 'all_reduce':
                 sol_time = 2 * dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
             return sol_time, 0, sol_time

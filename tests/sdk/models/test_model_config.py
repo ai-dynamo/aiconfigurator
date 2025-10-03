@@ -37,7 +37,7 @@ class TestSupportedModels:
             # First element should be model family string
             model_family = config[0]
             assert isinstance(model_family, str)
-            assert model_family in ['QWEN', 'LLAMA', 'MOE', 'DEEPSEEK', 'GPT']
+            assert model_family in common.ModelFamily
 
     @pytest.mark.parametrize("model_name,is_moe_expected", [
         ("QWEN3_32B", False),

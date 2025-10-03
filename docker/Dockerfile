@@ -30,4 +30,5 @@ RUN WHL=$(ls -d /wheelhouse/*) && \
     uv pip install "$WHL[dev-test]" && \
     rm -rf /wheelhouse
 
+COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/

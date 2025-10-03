@@ -100,20 +100,20 @@ def patch_all_loaders_and_yaml(request, monkeypatch):
             lambda path: dummy_custom_allreduce_data
         )
 
-        # 4) Patch load_nccl_data to return an empty dict (we only inspect SOL‐mode for query_nccl here)
+        # 4) load_moe_data needs to return 2 dicts
         monkeypatch.setattr(
-            'aiconfigurator.sdk.perf_database.load_nccl_data',
-            lambda path: {}
+            'aiconfigurator.sdk.perf_database.load_moe_data',
+            lambda path: ({}, {})
         )
 
         # 5) For completeness, patch every other loader to return an empty dict
         for loader_name in [
             'load_context_attention_data',
             'load_generation_attention_data',
-            'load_moe_data',
             'load_context_mla_data',
             'load_generation_mla_data',
             'load_mla_bmm_data',
+            'load_nccl_data',
         ]:
             monkeypatch.setattr(
                 f'aiconfigurator.sdk.perf_database.{loader_name}',
@@ -197,18 +197,18 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
     dummy_context_mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))))
     for quant_mode in [common.FMHAQuantMode.float16]:
         for kv_cache_dtype in [common.KVCacheQuantMode.float16]:
-            for tp_size in [1, 2, 4, 8]:
+            for num_heads in [16, 32, 64, 128]:
                 for s in [16, 32, 64, 128]:
                     for b in [1, 2, 4, 8]:
-                        dummy_context_mla_data[quant_mode][kv_cache_dtype][tp_size][s][b] = 0.01 * s * b / tp_size
+                        dummy_context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = 0.0001 * s * b * num_heads
     
     # Generation MLA data
     dummy_generation_mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
     for kv_cache_dtype in [common.KVCacheQuantMode.float16]:
-        for tp_size in [1, 2, 4, 8]:
+        for num_heads in [16, 32, 64, 128]:
             for b in [1, 2, 4, 8]:
                 for s in [1, 16, 32, 64, 128]:
-                    dummy_generation_mla_data[kv_cache_dtype][tp_size][b][s] = 0.001 * b * s / tp_size
+                    dummy_generation_mla_data[kv_cache_dtype][num_heads][b][s] = 0.00001 * b * s * num_heads
     
     # MLA BMM data
     dummy_mla_bmm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
@@ -220,11 +220,11 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
     
     # Custom allreduce data
     dummy_custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-    for dtype_str in ['half']:  # Use string keys
+    for dtype in [common.CommQuantMode.half]:
         for tp_size in [1, 2, 4, 8]:
             for strategy in ['AUTO']:
                 for msg_size in [512, 1024, 2048, 4096, 8192]:
-                    dummy_custom_allreduce_data[dtype_str][str(tp_size)][strategy][str(msg_size)] = 0.001 * msg_size * tp_size
+                    dummy_custom_allreduce_data[dtype][tp_size][strategy][msg_size] = 0.001 * msg_size * tp_size
     
     # NCCL data
     dummy_nccl_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
@@ -239,7 +239,7 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
     monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_context_attention_data', lambda path: dummy_context_attention_data)
     monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_generation_attention_data', lambda path: dummy_generation_attention_data)
     monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_custom_allreduce_data', lambda path: dummy_custom_allreduce_data)
-    monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_moe_data', lambda path: dummy_moe_data)
+    monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_moe_data', lambda path: (dummy_moe_data, dummy_moe_data))
     monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_context_mla_data', lambda path: dummy_context_mla_data)
     monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_generation_mla_data', lambda path: dummy_generation_mla_data)
     monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_mla_bmm_data', lambda path: dummy_mla_bmm_data)

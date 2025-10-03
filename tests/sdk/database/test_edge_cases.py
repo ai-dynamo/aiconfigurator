@@ -45,9 +45,14 @@ class TestNcclEdgeCases:
             common.CommQuantMode.half, 16, 'all_gather', 1024,
             sol_mode=common.SOLMode.NON_SOL
         )
-        
-        # Should apply sqrt scaling: baseline * sqrt(16/8)
-        expected = baseline * math.sqrt(16/8)
+
+        node_info = comprehensive_perf_db.system_spec['node']
+        intra_node_slowdown = node_info['intra_node_bw'] / node_info['inter_node_bw']
+        baseline_transfers_per_gpu = (8 - 1) / 8
+        result_transfers_per_gpu = (16 - 1) / 16
+        correction_factor = intra_node_slowdown * result_transfers_per_gpu / baseline_transfers_per_gpu
+
+        expected = baseline * correction_factor
         assert math.isclose(result, expected, rel_tol=1e-6)
     
     def test_query_nccl_edge_message_sizes(self, comprehensive_perf_db):
@@ -102,7 +107,9 @@ class TestAllreduceEdgeCases:
         )
         
         # Should apply scaling: lat * (tp_size-1)/tp_size * 8/7
-        expected_scaling = (16-1)/16 * 8/7
+        node_info = comprehensive_perf_db.system_spec['node']
+        intra_node_slowdown = node_info['intra_node_bw'] / node_info['inter_node_bw']
+        expected_scaling = (16-1)/16 * intra_node_slowdown
         baseline_unscaled = baseline / ((8-1)/8)  # Remove 8 GPU scaling
         expected = baseline_unscaled * expected_scaling
         assert math.isclose(result, expected, rel_tol=1e-6)
@@ -184,7 +191,11 @@ class TestInitializationEdgeCases:
                     return defaultdict(float)
                 return defaultdict(lambda: create_nested_defaultdict(depth - 1))
             
-            monkeypatch.setattr(f'aiconfigurator.sdk.perf_database.{loader}', lambda path, d=depth: create_nested_defaultdict(d))
+            if loader == "load_moe_data":
+                loader_func = lambda path, d=depth: (create_nested_defaultdict(d), create_nested_defaultdict(d))
+            else:
+                loader_func = lambda path, d=depth: create_nested_defaultdict(d)
+            monkeypatch.setattr(f'aiconfigurator.sdk.perf_database.{loader}', loader_func)
         
         # Initialize database - should trigger extrapolation
         db = PerfDatabase('test', 'backend', 'v1', str(tmp_path))

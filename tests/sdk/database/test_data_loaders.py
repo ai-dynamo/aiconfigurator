@@ -120,10 +120,9 @@ def test_load_custom_allreduce_data_basic(tmp_path):
     # 1) Prepare a minimal CSV file
     csv_file = tmp_path / "custom_ar.csv"
     lines = [
-        # dtype is ignored; tp_size=4, message_size=1024, strategy="strat1", latency=0.123
-        "ignored_string,4,1024,strat1,dummy_layer,0.123\n",
-        # dtype ignored again; tp_size=8, message_size=2048, strategy="strat2", latency=0.456
-        "whatever,8,2048,strat2,another_layer,0.456\n"
+        "framework,version,device,op_name,kernel_source,allreduce_dtype,num_gpus,message_size,latency\n",
+        "TRTLLM,1.0.0rc6,NVIDIA B200,all_reduce,TRTLLM,float16,2,128,0.0038\n",
+        "TRTLLM,1.0.0rc6,NVIDIA B200,all_reduce,TRTLLM,float16,2,8192,0.0045\n"
     ]
     csv_file.write_text("".join(lines))
 
@@ -134,17 +133,12 @@ def test_load_custom_allreduce_data_basic(tmp_path):
     key_dtype = CommQuantMode.half  # loader always forces dtype→CommQuantMode.half
     assert key_dtype in data
 
-    # First entry: tp_size=4 → strategy="strat1" → message_size=1024 → latency=0.123
-    assert 4 in data[key_dtype]
-    assert "strat1" in data[key_dtype][4]
-    assert 1024 in data[key_dtype][4]["strat1"]
-    assert data[key_dtype][4]["strat1"][1024] == pytest.approx(0.123)
-
-    # Second entry: tp_size=8 → strategy="strat2" → message_size=2048 → latency=0.456
-    assert 8 in data[key_dtype]
-    assert "strat2" in data[key_dtype][8]
-    assert 2048 in data[key_dtype][8]["strat2"]
-    assert data[key_dtype][8]["strat2"][2048] == pytest.approx(0.456)
+    # Expected format:
+    # data[dtype][tp_size][allreduce_strategy][message_size]
+    assert 2 in data[key_dtype]
+    assert "AUTO" in data[key_dtype][2]
+    assert data[key_dtype][2]["AUTO"][128] == pytest.approx(0.0038)
+    assert data[key_dtype][2]["AUTO"][8192] == pytest.approx(0.0045)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,6 +165,7 @@ def test_load_nccl_data_basic(tmp_path):
     """
     csv_file = tmp_path / "nccl.csv"
     lines = [
+        "nccl_dtype,num_gpus,message_size,kernel_source,op_name,latency\n",
         # half, 2 GPUs, 512 bytes, library=NCCL, operation="allgather", latency=1.0
         "half,2,512,NCCL,allgather,1.0\n",
         # int8, 4 GPUs, 1024 bytes, library=NCCL, operation="allreduce", latency=2.5
@@ -224,8 +219,8 @@ def test_load_gemm_data_basic(tmp_path):
     """
     csv_file = tmp_path / "gemm.csv"
     lines = [
-        # backend_name,version,hardware,op_name,quant_mode,m,n,k,layer_name,latency
-        "trt,1.0,hwX,opX,float16,128,256,512,layerA,0.789\n"
+        "framework,version,device,op_name,gemm_dtype,m,n,k,latency\n",
+        "trt,1.0,hwX,opX,float16,128,256,512,0.789\n"
     ]
     csv_file.write_text("".join(lines))
 
@@ -263,13 +258,13 @@ def test_load_moe_data_basic(tmp_path):
       moe_data[quant_mode_enum][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens] = latency
     """
     csv_file = tmp_path / "moe.csv"
-    # Build one CSV line with exactly 15 comma‐separated fields:
-    # backend_name,version,hardware,op_name,quant_mode,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,workload_distribution,layer_name,latency
+    headers = "framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency\n"
     line = ",".join([
         "trt",              # backend_name
         "1.0",              # version
         "hwX",              # hardware
         "opX",              # op_name
+        "moe_torch_flow",   # kernel_source
         "float16",          # quant_mode
         "1",                # num_tokens
         "16",               # hidden_size
@@ -279,12 +274,11 @@ def test_load_moe_data_basic(tmp_path):
         "2",                # moe_tp_size
         "2",                # moe_ep_size
         "uniform",          # workload_distribution
-        "layer_dummy",      # layer_name (ignored as a key)
         "1.23"              # latency
     ]) + "\n"
-    csv_file.write_text(line)
+    csv_file.write_text(headers + line)
 
-    data = load_moe_data(str(csv_file))
+    data, _ = load_moe_data(str(csv_file))
 
     qm = MoEQuantMode.float16
     assert qm in data
@@ -328,6 +322,7 @@ def test_load_context_attention_data_basic(tmp_path):
     So we expect data[FMHAQuantMode.float16][KVCacheQuantMode.float16][0][4][2][1] == 0.321.
     """
     csv_file = tmp_path / "ctx_attn.csv"
+    headers = "framework,version,device,op_name,batch_size,isl,num_heads,num_key_value_heads,head_dim,beam_width,attn_dtype,kv_cache_dtype,step,latency\n"
     fields = [
         "trt",      # backend_name
         "1.0",      # version
@@ -344,7 +339,7 @@ def test_load_context_attention_data_basic(tmp_path):
         "1",        # step
         "0.321"     # latency
     ]
-    csv_file.write_text(",".join(fields) + "\n")
+    csv_file.write_text(headers + ",".join(fields) + "\n")
 
     data = load_context_attention_data(str(csv_file))
 
@@ -388,6 +383,7 @@ def test_load_generation_attention_data_basic(tmp_path):
     So we expect data[KVCacheQuantMode.float16][0][4][1][3] == 0.987.
     """
     csv_file = tmp_path / "gen_attn.csv"
+    headers = "framework,version,device,op_name,batch_size,isl,num_heads,num_key_value_heads,head_dim,beam_width,attn_dtype,kv_cache_dtype,step,latency\n"
     fields = [
         "trt",      # backend_name
         "1.0",      # version
@@ -404,7 +400,7 @@ def test_load_generation_attention_data_basic(tmp_path):
         "1",        # step
         "0.987"     # latency
     ]
-    csv_file.write_text(",".join(fields) + "\n")
+    csv_file.write_text(headers + ",".join(fields) + "\n")
 
     data = load_generation_attention_data(str(csv_file))
 
@@ -443,6 +439,7 @@ def test_load_context_mla_data_basic(tmp_path):
         context_mla_data[quant_mode_enum][kv_cache_dtype_enum][tp_size][s][b] = latency
     """
     csv_file = tmp_path / "ctx_mla.csv"
+    headers = "framework,version,device,op_name,mla_dtype,kv_cache_dtype,batch_size,isl,tp_size,step,latency\n"
     fields = [
         "trt",        # backend_name (ignored)
         "1.0",        # version (ignored)
@@ -456,19 +453,21 @@ def test_load_context_mla_data_basic(tmp_path):
         "1",          # step (ignored downstream)
         "1.111"       # latency
     ]
-    csv_file.write_text(",".join(fields) + "\n")
+    csv_file.write_text(headers + ",".join(fields) + "\n")
 
     data = load_context_mla_data(str(csv_file))
 
     qm = FMHAQuantMode.float16
     kcd = KVCacheQuantMode.float16
 
+    num_heads = 128 // 4 # tp_size == 4 -> num_heads == 128 // 4 == 32
+
     assert qm in data
     assert kcd in data[qm]
-    assert 4 in data[qm][kcd]        # tp_size == 4
-    assert 2 in data[qm][kcd][4]     # s == 2
-    assert 1 in data[qm][kcd][4][2]  # b == 1
-    assert data[qm][kcd][4][2][1] == pytest.approx(1.111)
+    assert num_heads in data[qm][kcd]
+    assert 2 in data[qm][kcd][num_heads]     # s == 2
+    assert 1 in data[qm][kcd][num_heads][2]  # b == 1
+    assert data[qm][kcd][num_heads][2][1] == pytest.approx(1.111)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -496,6 +495,7 @@ def test_load_generation_mla_data_basic(tmp_path):
       generation_mla_data[kv_cache_dtype_enum][tp_size][b][new_s] = latency
     """
     csv_file = tmp_path / "gen_mla.csv"
+    headers = "framework,version,device,op_name,mla_dtype,kv_cache_dtype,batch_size,isl,tp_size,step,latency\n"
     fields = [
         "trt",        # backend_name (ignored)
         "1.0",        # version (ignored)
@@ -509,17 +509,18 @@ def test_load_generation_mla_data_basic(tmp_path):
         "1",          # step → new_s=3
         "2.222"       # latency
     ]
-    csv_file.write_text(",".join(fields) + "\n")
+    csv_file.write_text(headers + ",".join(fields) + "\n")
 
     data = load_generation_mla_data(str(csv_file))
 
     kcd = KVCacheQuantMode.float16
+    num_heads = 128 // 4 # tp_size == 4 -> num_heads == 128 // 4 == 32
 
     assert kcd in data
-    assert 4 in data[kcd]            # tp_size == 4
-    assert 1 in data[kcd][4]         # b == 1
-    assert 3 in data[kcd][4][1]      # s = original 2 + step 1 = 3
-    assert data[kcd][4][1][3] == pytest.approx(2.222)
+    assert num_heads in data[kcd]
+    assert 1 in data[kcd][num_heads]         # b == 1
+    assert 3 in data[kcd][num_heads][1]      # s = original 2 + step 1 = 3
+    assert data[kcd][num_heads][1][3] == pytest.approx(2.222)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -545,6 +546,7 @@ def test_load_mla_bmm_data_basic(tmp_path):
       mla_bmm_data[quant_enum][op_name][num_heads][num_tokens] = latency
     """
     csv_file = tmp_path / "mla_bmm.csv"
+    headers = "framework,version,device,op_name,bmm_dtype,num_tokens,num_heads,latency\n"
     fields = [
         "trt",        # backend_name (ignored)
         "1.0",        # version (ignored)
@@ -555,7 +557,7 @@ def test_load_mla_bmm_data_basic(tmp_path):
         "2",          # num_heads
         "3.333"       # latency
     ]
-    csv_file.write_text(",".join(fields) + "\n")
+    csv_file.write_text(headers + ",".join(fields) + "\n")
 
     data = load_mla_bmm_data(str(csv_file))
 

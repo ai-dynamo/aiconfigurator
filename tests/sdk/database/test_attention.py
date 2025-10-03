@@ -99,7 +99,7 @@ class TestGenerationAttention:
         )
         
         # Calculate expected SOL result
-        ops = 2 * b * n * 128 * 2  # 2 for fma, 2 for q*k^t+*v
+        ops = 2 * b * n * 128 * 2 * s  # 2 for fma, 2 for q*k^t+*v
         mem_bytes = b * (n*128*2 + 2*n_kv*(s-1)*128*kv_cache_quant_mode.value.memory + n*128*2)
         sol_math = ops / comprehensive_perf_db.system_spec['gpu']['float16_tc_flops'] * 1000
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec['gpu']['mem_bw'] * 1000
