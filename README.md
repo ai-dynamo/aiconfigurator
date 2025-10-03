@@ -151,7 +151,7 @@ agg Top Configurations: (Sorted by tokens/s/gpu)
 INFO 2025-10-03 14:49:15,439 main.py:293] All experiments completed in 30.82 seconds
 ```
 
-These results indicate that deploying Qwen3-32B on h200_sxm in FP8 can achieve **1.70x** higher tokens/s/gpu for disaggregated versus aggregated deployment under the SLA targets TTFT ≤ 300 ms and TPOT ≤ 10 ms, with ISL:OSL of 4000:500.
+These results indicate that deploying Qwen3-32B on h200_sxm in FP8 can achieve **1.70x** higher tokens/s/gpu for disaggregated versus aggregated deployment **under the SLA targets TTFT ≤ 300 ms and TPOT ≤ 10 ms**, with ISL:OSL of 4000:500.
 Try different ISL:OSL values and SLA limits to fit your use case, for example:
 
 ```bash
@@ -177,7 +177,9 @@ For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).
 
 ### Generate Configurations for Dynamo and Reproduce the results
 
-In the `aiconfigurator` CLI, if you specify `--save_dir`, the tool generates configuration files for deploying with Dynamo.
+Please refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details about deployment and reproduction especially about the benchmark methodology.
+
+To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save_dir`, the tool generates configuration files for deploying with Dynamo.
 This feature bridges the gap between configuration and Dynamo deployment.
 The folder structure looks like this:
 
@@ -208,8 +210,6 @@ results/QWEN3_32B_isl4000_osl1000_ttft1000_tpot20_904495
 │   ...
 └── pareto_frontier.png
 ```
-
-Refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details about deployment and reproduction.
 
 ### All-in-one automation
 
