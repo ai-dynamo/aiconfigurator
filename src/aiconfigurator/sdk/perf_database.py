@@ -1114,6 +1114,7 @@ class PerfDatabase(object):
             """
             sol_time = 0.0
             p2p_bw = self.system_spec['node']['inter_node_bw'] if num_gpus > self.system_spec['node']['num_gpus_per_node'] else self.system_spec['node']['intra_node_bw']
+
             if operation == 'all_gather':
                 sol_time = dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
             elif operation == 'alltoall':
