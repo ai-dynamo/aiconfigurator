@@ -20,6 +20,23 @@ sudo nvidia-smi -pm 1
 sudo nvidia-smi -lgc xxx,yyy
 ```
 xxx, yyy frequency can be queried by nvidia-smi -q -i 0, refer to the Max Clocks part, xxx is SM frequency, yyy is Memory frequency.
+A script to set frequency:
+```
+#!/bin/bash
+
+# Run nvidia-smi query and extract SM and Memory frequencies from Max Clocks
+sm_freq=$(nvidia-smi -q -i 0 | grep -A 4 "Max Clocks" | grep "SM " | grep -o "[0-9]\+ MHz" | grep -o "[0-9]\+")
+mem_freq=$(nvidia-smi -q -i 0 | grep -A 4 "Max Clocks" | grep "Memory " | grep -o "[0-9]\+ MHz" | grep -o "[0-9]\+")
+
+# Check if frequencies were successfully extracted
+if [ -z "$sm_freq" ] || [ -z "$mem_freq" ]; then
+    echo "Error: Could not extract SM or Memory frequency from Max Clocks."
+    exit 1
+fi
+
+# Generate the command
+echo "sudo nvidia-smi -lgc $sm_freq,$mem_freq"
+```
 Prepare a clean env with the target framework and nccl lib installed.
 
 # Collect comm data
