@@ -17,7 +17,7 @@ Next, please enable persistent-mode and lock frequency of the node. Make sure th
 sudo nvidia-smi -pm 1
 ```
 ```bash
-sudo nvidia-smi -lgc xxx,yyy
+sudo nvidia-smi -ac yyy,xxx
 ```
 xxx, yyy frequency can be queried by nvidia-smi -q -i 0, refer to the Max Clocks part, xxx is SM frequency, yyy is Memory frequency.
 A script to set frequency:
@@ -35,7 +35,7 @@ if [ -z "$sm_freq" ] || [ -z "$mem_freq" ]; then
 fi
 
 # Generate the command
-echo "sudo nvidia-smi -lgc $sm_freq,$mem_freq"
+echo "sudo nvidia-smi -ac $mem_freq,$sm_freq"
 ```
 Prepare a clean env with the target framework and nccl lib installed.
 
