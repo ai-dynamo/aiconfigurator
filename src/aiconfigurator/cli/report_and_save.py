@@ -233,6 +233,7 @@ def save_results(
             
             # 4. Save the generated config for this experiment, sub-directory for each best config
             if best_config_df is not None:
+                dynamo_overrides = build_dynamo_config(args)
                 for i, (idx, result_df) in enumerate(best_config_df.iterrows()):
                     cfg = task_config_to_generator_config(task_config=exp_task_config, result_df=result_df)
 
@@ -245,7 +246,7 @@ def save_results(
                         cfg=cfg,
                         backend=exp_task_config.backend_name,
                         version=generated_backend_version or exp_task_config.backend_version,
-                        overrides=build_dynamo_config(args),                    
+                        overrides=dynamo_overrides,                    
                         save_dir=top_config_dir,
                     )
 

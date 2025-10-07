@@ -6,8 +6,19 @@ Artifact saving utilities.
 import os, yaml
 from typing import Dict, Any
 
+
+class _LiteralDumper(yaml.SafeDumper):
+    pass
+
+def _represent_multiline_str(dumper: yaml.SafeDumper, data: str):
+    if "\n" in data:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+_LiteralDumper.add_representer(str, _represent_multiline_str)
+
 def _render_shell_text(val: Any) -> str:
-    """Return shell script text without comments except shebang."""
+    """Return shell script that can be used for launch the service."""
     if isinstance(val, (list, tuple)):
         text = "\n".join(str(x) for x in val)
     else:
@@ -22,7 +33,7 @@ def _render_shell_text(val: Any) -> str:
     return "\n".join(lines)
 
 def save_artifacts(by_mode: Dict[str, Dict[str, Any]], root_dir: str) -> None:
-    """Persist artifacts to filesystem as '{root_dir}/{mode}/{filename}'."""
+    """Persist artifacts to filesystem."""
     os.makedirs(root_dir, exist_ok=True)
     for mode, files in by_mode.items():
         mode_dir = os.path.join(root_dir, mode)
@@ -33,4 +44,11 @@ def save_artifacts(by_mode: Dict[str, Dict[str, Any]], root_dir: str) -> None:
                 if fname.endswith(".sh"):
                     f.write(_render_shell_text(content))
                 else:
-                    yaml.safe_dump(content, f, sort_keys=False, allow_unicode=True)
+                    yaml.dump(
+                        content, f,
+                        Dumper=_LiteralDumper,
+                        sort_keys=False,
+                        allow_unicode=True,
+                        width=4096,
+                        default_flow_style=False,
+                    )
