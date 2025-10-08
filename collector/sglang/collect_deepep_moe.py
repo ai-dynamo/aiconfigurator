@@ -529,13 +529,11 @@ def benchmark_moe_layer_decode(
         )
         hidden_states_fp8_tensor = hidden_states.to(torch.float8_e4m3fn)
 
-        dispatch_output_list = [DeepEPLLOutput(
-            hidden_states_fp8=(hidden_states_fp8_tensor, scale_tensor),
-            topk_idx=torch.empty(0, device=device, dtype=torch.int32), 
-            topk_weights=torch.empty(0, device=device, dtype=torch.float32),  
-            masked_m=masked_m,
-            expected_m=int(max(masked_m))
-        ) for masked_m in masked_m_list]
+        # Create dispatch_output_list with independent tensor copies for each entry
+        # Each dispatch_output needs its own copy because moe_impl will dispose/delete the tensors
+        topk_idx_empty = torch.empty(0, device=device, dtype=torch.int32)
+        topk_weights_empty = torch.empty(0, device=device, dtype=torch.float32)
+        
 
         # Debug information (only for rank 0)
         # if tp_rank == 0:
@@ -560,12 +558,42 @@ def benchmark_moe_layer_decode(
         torch.cuda.empty_cache()
         
         # Warmup iterations to capture CUDA Graph
+        # Need to recreate dispatch_output_list for each iteration because moe_impl disposes tensors
         for _ in range(bench_args.num_warmup):
+            dispatch_output_list = []
+            for masked_m in masked_m_list:
+                hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
+                scale_tensor_copy = scale_tensor.clone()
+                
+                output = DeepEPLLOutput(
+                    hidden_states_fp8=(hidden_states_fp8_tensor_copy, scale_tensor_copy),
+                    topk_idx=topk_idx_empty,
+                    topk_weights=topk_weights_empty,
+                    masked_m=masked_m,
+                    expected_m=int(max(masked_m))
+                )
+                dispatch_output_list.append(output)
+            
             for dispatch_output in dispatch_output_list:
                 _ = moe_layer.experts.moe_impl(dispatch_output)
         
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
+        
+        # Create fresh dispatch_output_list for CUDA Graph capture
+        dispatch_output_list = []
+        for masked_m in masked_m_list:
+            hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
+            scale_tensor_copy = scale_tensor.clone()
+            
+            output = DeepEPLLOutput(
+                hidden_states_fp8=(hidden_states_fp8_tensor_copy, scale_tensor_copy),
+                topk_idx=topk_idx_empty,
+                topk_weights=topk_weights_empty,
+                masked_m=masked_m,
+                expected_m=int(max(masked_m))
+            )
+            dispatch_output_list.append(output)
         
         graph = torch.cuda.CUDAGraph()
         
@@ -598,7 +626,7 @@ def benchmark_moe_layer_decode(
         end_event.record()
         latency_ms = start_event.elapsed_time(end_event)
 
-        gemm_latencies.append(latency_ms/bench_args.num_iterations/len(dispatch_output_list))
+        gemm_latencies.append(latency_ms/bench_args.num_iterations/len(masked_m_list))
        
         profiler.stop() 
         
