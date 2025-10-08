@@ -54,9 +54,9 @@ class EventHandler:
         EventHandler.setup_model_name_events(components['model_name_components'], components['model_quant_components'], components['model_parallel_components'], components['model_misc_config_components'])
 
     @staticmethod
-    def setup_ifb_events(components):
+    def setup_agg_events(components):
         components['estimate_btn'].click(
-            fn=EventFn.run_estimation_ifb,
+            fn=EventFn.run_estimation_agg,
             inputs=[
                 components['model_name_components']['model_name'],
                 components['model_system_components']['system'],
@@ -93,9 +93,9 @@ class EventHandler:
 
 
     @staticmethod
-    def setup_ifb_pareto_events(components):
+    def setup_agg_pareto_events(components):
         components['estimate_btn'].click(
-            fn=EventFn.run_estimation_ifb_pareto,
+            fn=EventFn.run_estimation_agg_pareto,
             inputs=[
                 components['model_name_components']['model_name'],
                 components['model_system_components']['system'],

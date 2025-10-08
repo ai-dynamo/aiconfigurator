@@ -28,11 +28,11 @@ Supported models
     model name: model_family,l,n,n_kv,d,hidden_size,inter_size,vocab,context,topk,num_experts,moe_inter_size,extra_params
 """
 SupportedModels = {
-                'GPT_7B':['GPT',32,32,32,128,32*128,32*128*4,50527,2048, 0, 0, 0, None],
-                'GPT_13B':['GPT',40,40,40,128,40*128,40*128*4,50527,2048, 0, 0, 0, None],
-                'GPT_30B':['GPT',48,56,56,128,56*128,56*128*4,50527,2048, 0, 0, 0, None],
-                'GPT_66B':['GPT',64,72,72,128,72*128,72*128*4,50527,2048, 0, 0, 0, None],
-                'GPT_175B':['GPT',96,96,96,128,96*128,96*128*4,50527,2048, 0, 0, 0, None],
+                #'GPT_7B':['GPT',32,32,32,128,32*128,32*128*4,50527,2048, 0, 0, 0, None],
+                #'GPT_13B':['GPT',40,40,40,128,40*128,40*128*4,50527,2048, 0, 0, 0, None],
+                #'GPT_30B':['GPT',48,56,56,128,56*128,56*128*4,50527,2048, 0, 0, 0, None],
+                #'GPT_66B':['GPT',64,72,72,128,72*128,72*128*4,50527,2048, 0, 0, 0, None],
+                #'GPT_175B':['GPT',96,96,96,128,96*128,96*128*4,50527,2048, 0, 0, 0, None],
                 'LLAMA2_7B':['LLAMA',32,32,32,128,32*128,11008,32000,2048, 0, 0, 0, None],
                 'LLAMA2_13B':['LLAMA',40,40,40,128,40*128,13824,32000,4096, 0, 0, 0, None],
                 'LLAMA2_70B':['LLAMA',80,64,8,128,64*128,28672,32000,4096, 0, 0, 0, None],
@@ -46,7 +46,7 @@ SupportedModels = {
                 #'MOE_Deepseek_16B_Base':['MOE', 28,16,16,128,2816,102400,4096,6,64,1408, None],
                 #'MOE_Deepseek_V2':['MOE', 60,128,128,40,3072,102400,163840,6,160,1536, None],#using MLA, not standard attention
                 'DEEPSEEK_V3':['DEEPSEEK', 61,128,128,56,128*56,18432,129280,4096,8,256,2048, None],#using MLA, not standard attention, 3 of 61 are dense layers using intersize 18432, others using 2048
-                'KIMI_K2':['DEEPSEEK', 61,128,128,56,128*56,18432,163840,131072, 8, 384, 2048, None],                
+                #'KIMI_K2':['DEEPSEEK', 61,128,128,56,128*56,18432,163840,131072, 8, 384, 2048, None], FIXME: not enabled due to e2e failure
                 #'MOE_Qwen1.5_A2.7B':['MOE', 24,16,16,128,5632,151936,32768,4,60,1408, None],
                 #'MOE_Qwen2_57B_A14B':['MOE', 28,28,4,128,20480,151936,32768,8,64,2560, None]
                 'QWEN2.5_1.5B':['LLAMA', 28,12,2,128,12*128,8960,151936,131072, 0, 0, 0, None],
@@ -96,16 +96,16 @@ ColumnsStatic = ['model', 'isl', 'osl',
                  'backend', 'version', 'system']
 
 """
-Columns for IFB inference summary dataframe
+Columns for Agg inference summary dataframe
 """
-ColumnsIFB = ['model', 'isl', 'osl', 
+ColumnsAgg = ['model', 'isl', 'osl', 
               'concurrency', 'request_rate', 'bs', 'global_bs',
               'ttft', 'tpot', 'seq/s', 'seq/s/gpu', 'tokens/s', 'tokens/s/gpu', 'tokens/s/user', 
               'num_total_gpus',
               'tp', 'pp', 'dp', 'moe_tp', 'moe_ep', 'parallel',
               'gemm', 'kvcache', 'fmha', 'moe', 'comm',
               'memory', 
-              'balance_score','num_ctx_reqs','num_gen_reqs','num_tokens','ctx_tokens','gen_tokens', # ifb specific
+              'balance_score','num_ctx_reqs','num_gen_reqs','num_tokens','ctx_tokens','gen_tokens', # agg specific
               'backend', 'version', 'system']             
 
 """

@@ -100,14 +100,13 @@ def check_test_infrastructure():
         return False, f"❌ Error checking tests: {e}", 0
 
 
-def run_pytest_command(cmd, description, capture_output=False):
+def run_pytest_command(cmd, description):
     """
-    Run a pytest command with proper formatting and error handling.
+    Run a pytest command, streaming its output in real-time and capturing it for summary.
     
     Args:
         cmd (list): Command to execute
         description (str): Description of what this command does
-        capture_output (bool): Whether to capture output instead of showing it
     
     Returns:
         tuple: (success: bool, result: subprocess.CompletedProcess)
@@ -123,21 +122,31 @@ def run_pytest_command(cmd, description, capture_output=False):
     print(f"📋 {description}")
     print(f"💻 Command: {' '.join(cmd)}")
     print(f"{'='*60}")
+
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     
-    result = subprocess.run(cmd, capture_output=capture_output, text=True)
+    output_lines = []
+    for line in iter(process.stdout.readline, ''):
+        sys.stdout.write(line)
+        output_lines.append(line)
     
-    if result.returncode == 0:
+    return_code = process.wait()
+
+    if return_code == 0:
         print("✅ Success!")
-        if capture_output and result.stdout:
-            print("Output:")
-            print(result.stdout)
     else:
         print("❌ Failed!")
-        if capture_output and result.stderr:
-            print("Error:")
-            print(result.stderr)
+        # The full output has already been streamed. 
+        # A summary could be printed here if needed, but the user will see the error in the stream.
     
-    return result.returncode == 0, result
+    # Create a CompletedProcess-like object for compatibility.
+    result = subprocess.CompletedProcess(
+        cmd, return_code, 
+        stdout="".join(output_lines), 
+        stderr=None  # stderr is redirected to stdout
+    )
+    
+    return return_code == 0, result
 
 
 def generate_test_filter(models=None, systems=None, gpu_configs=None, 

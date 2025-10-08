@@ -19,15 +19,15 @@ class TRTLLMBackend(BaseBackend):
     """
     def __init__(self,):
         super().__init__()
-        self._ifb_cache = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+        self._agg_cache = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
 
-    def run_ifb(self, 
+    def run_agg(self, 
                 model: BaseModel, 
                 database: PerfDatabase, 
                 runtime_config: RuntimeConfig, 
                 **kwargs) -> InferenceSummary:
         """
-        Run the IFB inference.
+        Run the agg inference.
         """
         isl = runtime_config.isl
         osl = runtime_config.osl
@@ -37,7 +37,7 @@ class TRTLLMBackend(BaseBackend):
         balance_score = isl * b / ctx_tokens / osl
 
         try:
-            summary = self._ifb_cache[isl][osl][b][ctx_tokens]
+            summary = self._agg_cache[isl][osl][b][ctx_tokens]
         except KeyError:
             # we would like to calculate num_mix_steps and num_genonly_steps based on isl, osl, b, ctx_tokens
             # within osl steps, need to finish all the ctx tokens
@@ -155,7 +155,7 @@ class TRTLLMBackend(BaseBackend):
             comm = model.config.comm_quant_mode.name
             mem = memory['total']
             
-            result = pd.DataFrame(columns=common.ColumnsIFB, 
+            result = pd.DataFrame(columns=common.ColumnsAgg, 
                                   data=[[model.model_name, isl, osl, \
                                          concurrency, request_rate, b, b*model.config.attention_dp_size, \
                                          ttft, tpot, seq_s, seq_s_gpu, tokens_s, tokens_s_gpu, tokens_s_user, \
@@ -170,17 +170,17 @@ class TRTLLMBackend(BaseBackend):
             summary.set_summary_df(result)
         
             # caching
-            self._ifb_cache[isl][osl][b][ctx_tokens] = summary
+            self._agg_cache[isl][osl][b][ctx_tokens] = summary
 
         return summary
 
-    def find_best_ifb_result_under_constraints(self, 
+    def find_best_agg_result_under_constraints(self, 
                                                model: BaseModel, 
                                                database: PerfDatabase, 
                                                runtime_config: RuntimeConfig, 
                                                **kwargs) -> InferenceSummary:
         """
-        Find the best IFB result under constraints.
+        Find the best agg result under constraints.
 
         Args:
             model: the model to be tested
@@ -191,7 +191,7 @@ class TRTLLMBackend(BaseBackend):
             ctx_stride: the stride of ctx tokens to test, it will impact the time to run the test.
 
         Returns:
-            A summary of the best IFB result under constraints.
+            A summary of the best agg result under constraints.
         """
         isl = runtime_config.isl
         osl = runtime_config.osl
@@ -232,7 +232,7 @@ class TRTLLMBackend(BaseBackend):
                 ctx_tokens_list.append(ctx_tokens)
         ctx_tokens_list.sort()
         
-        results_df = pd.DataFrame(columns=common.ColumnsIFB)
+        results_df = pd.DataFrame(columns=common.ColumnsAgg)
         df_list = []
         capped_b = []
         for b in b_list:
@@ -252,7 +252,7 @@ class TRTLLMBackend(BaseBackend):
                     else:
                         capped_b.append(gen_tokens)
 
-                summary = self.run_ifb(model=model, database=database, runtime_config=RuntimeConfig(batch_size=b, isl=isl, osl=osl), ctx_tokens=ctx_tokens)
+                summary = self.run_agg(model=model, database=database, runtime_config=RuntimeConfig(batch_size=b, isl=isl, osl=osl), ctx_tokens=ctx_tokens)
 
                 if summary.check_oom():
                     break # larger ctx tokens will cause oom

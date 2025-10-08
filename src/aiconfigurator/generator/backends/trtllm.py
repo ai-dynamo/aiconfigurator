@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from .base import BaseGenerator, register
-from ..inputs.schema import GeneratorContext, ParallelSpecBase, RoleParallelSpec
+from ..inputs.schema import GeneratorContext, ModeConfig
 from ..types import ArtifactBundle
 from ..utils.node_allocation import allocate_disagg_nodes
 from aiconfigurator.sdk.models import get_model_family
@@ -38,7 +38,7 @@ class TRTLLMGenerator(BaseGenerator):
         if kv_mode.lower() == "fp8":
             cfg["kv_cache_dtype"] = "fp8"
 
-    def _apply_moe_attention_dp_mapping(self, cfg: Dict[str, Any], spec: ParallelSpecBase, is_moe: bool) -> None:
+    def _apply_moe_attention_dp_mapping(self, cfg: Dict[str, Any], spec: ModeConfig, is_moe: bool) -> None:
         """
         - If is_moe:
             - mark is_moe
@@ -76,7 +76,7 @@ class TRTLLMGenerator(BaseGenerator):
         tpl = self.env.get_template(tpl_name)
         return yaml.safe_load(tpl.render(**ctx))
 
-    def _build_worker_config(self, spec: ParallelSpecBase, ctx: GeneratorContext, role: str) -> Dict[str, Any]:
+    def _build_worker_config(self, spec: ModeConfig, ctx: GeneratorContext, role: str) -> Dict[str, Any]:
         """
         Build a per-role engine args dict based on the original implementation,
         with common parts factored into helpers and reading from GeneratorContext.
@@ -87,11 +87,12 @@ class TRTLLMGenerator(BaseGenerator):
             pp=int(spec.pp),
             dp=int(spec.dp),
             bs=int(spec.bs),
+            **spec.extra,
         )
         cfg["gpu"] = cfg["tp"] * cfg["pp"] * cfg["dp"]
 
         # workers only for disagg roles
-        if isinstance(spec, RoleParallelSpec) and role in ("prefill", "decode"):
+        if spec.workers is not None and role in ("prefill", "decode"):
             cfg["workers"] = int(spec.workers)
 
         # MoE / attention-dp mapping
@@ -116,9 +117,13 @@ class TRTLLMGenerator(BaseGenerator):
 
         out: Dict[str, Dict[str, Any]] = {}
 
-        # --- AGG ---
-        if ctx.best_agg:
-            agg_cfg = self._build_worker_config(ctx.best_agg, ctx, role="agg")
+        agg_spec = ctx.modes.get("agg")
+        if agg_spec:
+            agg_cfg = self._build_worker_config(agg_spec, ctx, role="agg")
+
+            # perf considerations
+            agg_cfg["cuda_graph_batch_sizes"] = [i for i in range(1, agg_cfg["bs"] + 1)]
+            agg_cfg["disable_overlap_scheduler"] = False
 
             # max_num_tokens heuristic
             if ctx.runtime.nextn and ctx.runtime.nextn >= 1 and get_model_family(ctx.model_name) == "DEEPSEEK":
@@ -138,6 +143,7 @@ class TRTLLMGenerator(BaseGenerator):
             )
 
             k8s_agg = {
+                "model_name": ctx.model_name,
                 "mode": "agg",
                 "agg_workers": int(global_args.get("agg_workers", 1)),
                 "agg_gpu": int(agg_cfg["gpu"]),
@@ -153,10 +159,9 @@ class TRTLLMGenerator(BaseGenerator):
                 "k8s_deploy.yaml": k8s_yaml_agg
             }
 
-        # --- DISAGG ---
-        if ctx.best_disagg:
-            pre_spec = ctx.best_disagg.prefill
-            dec_spec = ctx.best_disagg.decode
+        pre_spec = ctx.modes.get("disagg_prefill")
+        dec_spec = ctx.modes.get("disagg_decode")
+        if pre_spec and dec_spec:
 
             pre_cfg = self._build_worker_config(pre_spec, ctx, role="prefill")
             dec_cfg = self._build_worker_config(dec_spec, ctx, role="decode")
@@ -202,6 +207,7 @@ class TRTLLMGenerator(BaseGenerator):
                 node_files[f"node_{idx}_run.sh"] = script
 
             k8s_disagg = {
+                "model_name": ctx.model_name,
                 "mode": "disagg",
                 "prefill_workers": int(pre_cfg.get("workers", 1)),
                 "decode_workers": int(dec_cfg.get("workers", 1)),

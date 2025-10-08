@@ -3,6 +3,7 @@
 
 from argparse import ArgumentParser
 import os
+import subprocess
 import torch
 from helper import log_perf
 
@@ -31,8 +32,9 @@ def NCCL_benchmark(dtype: str,
     
     while size < max_size:
         inner_loop = 100 if size <= 16777216 else 60
-        cmd = NCCL_test_bin + ' -b ' + str(size) + ' -e ' + str(size) + ' -t ' + str(num_gpus) + ' -d ' + dtype + ' -w 40 -a 1 -n ' + str(inner_loop) + ' -c 0'
-        print_lines = os.popen(cmd).read().split('\n')
+        cmd_args = [NCCL_test_bin, '-b', str(size), '-e', str(size), '-t', str(num_gpus), '-d', dtype, '-w', '40', '-a', '1', '-n', str(inner_loop), '-c', '0']
+        result = subprocess.run(cmd_args, capture_output=True, text=True)
+        print_lines = result.stdout.split('\n')
         for index_line in range(len(print_lines)):
             if 'time' in print_lines[index_line]:
                 break
@@ -74,7 +76,7 @@ if __name__ == "__main__":
         "-r",
         default="512,536870913,2",  # 512B to 512MB
         help="min_size,max_size,multiplicative_ratio")
-    parser.add_argument("--num_gpus", "-n", default=8)
+    parser.add_argument("--num_gpus", "-n", default=8, type=int)
     args = parser.parse_args()
 
     NCCL_benchmark(args.dtype, args.NCCL_op, args.range, args.num_gpus)
