@@ -85,8 +85,8 @@ class AIConfiguratorConfig:
     disagg_decode_worker_config: Optional[WorkerConfig] = None
 
     # advanced tuning config section
-    prefill_correction_scale: float = 1.0 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * prefill_correction_scale
-    decode_correction_scale: float = 1.0 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * decode_correction_scale
+    prefill_latency_correction_scale: float = 1.0
+    decode_latency_correction_scale: float = 1.0
     prefill_max_batch_size: int = 1
     decode_max_batch_size: int = 512
 
@@ -365,10 +365,10 @@ class AIConfigurator:
                     max_num_gpu=aiconfigurator_config.disagg_replica_config.max_gpu_per_replica,
                     prefill_max_num_worker=aiconfigurator_config.disagg_replica_config.max_prefill_worker,
                     decode_max_num_worker=aiconfigurator_config.disagg_replica_config.max_decode_worker,
-                    prefill_max_batch_size=aiconfigurator_config.prefill_max_batch_size,
-                    decode_max_batch_size=aiconfigurator_config.decode_max_batch_size,
-                    prefill_correction_scale=aiconfigurator_config.prefill_correction_scale,                    
-                    decode_correction_scale=aiconfigurator_config.decode_correction_scale,
+                    prefill_max_num_tokens=aiconfigurator_config.prefill_max_batch_size * aiconfigurator_config.isl,
+                    decode_max_num_tokens=aiconfigurator_config.decode_max_batch_size,
+                    prefill_latency_correction_scale=aiconfigurator_config.prefill_latency_correction_scale,                    
+                    decode_latency_correction_scale=aiconfigurator_config.decode_latency_correction_scale,
                 )                
             logger.info("Disagg Pareto Analysis completed.")
         else:
@@ -448,6 +448,48 @@ class AIConfigurator:
             candidate_configs['tokens/s/gpu_cluster'] = candidate_configs['tokens/s/gpu'] * \
                 (total_gpus // candidate_configs['num_total_gpus']) * candidate_configs['num_total_gpus'] / total_gpus
             candidate_configs = candidate_configs.sort_values(by='tokens/s/gpu_cluster', ascending=False)
+            logger.debug(f"actual replica-level throughputs: {candidate_configs['tokens/s/gpu'].iloc[0]:.2f} vs. actual cluster-level throughputs: {candidate_configs['tokens/s/gpu_cluster'].iloc[0]:.2f}")        
+            return candidate_configs.head(1)
+        else:
+            # No config meets tpot <= target_tpot.
+            # Optionally, one could return the one closest to target_tpot if no strict candidates exist.
+            # For now, return empty if no config meets the criteria.
+            logger.info(f"No config found on Pareto front with TPOT <= {target_tpot}ms.")
+            return pd.DataFrame()
+
+    def _get_top_config(self, 
+                        total_gpus: int,
+                        pareto_df: pd.DataFrame, 
+                        target_tpot: float,
+                        group_key: str) -> pd.DataFrame:
+        """
+        Finds the best actual config from a Pareto frontier DataFrame
+        that meets the target_tpot constraint (tpot <= target_tpot)
+        and maximizes 'tokens/s/gpu'.
+        Args:
+            pareto_df: The Pareto points DataFrame. (not only the frontier)
+            target_tpot: The target TPOT in ms.
+        Returns:
+            A DataFrame containing the best config that meets the target_tpot constraint.
+        """
+        if pareto_df is None or pareto_df.empty:
+            return pd.DataFrame()
+
+        # Ensure 'tpot' and 'tokens/s/gpu' columns exist
+        if 'tpot' not in pareto_df.columns or 'tokens/s/gpu' not in pareto_df.columns:
+            logger.warning("Pareto DataFrame for _get_best_config_under_tpot_constraint is missing 'tpot' or 'tokens/s/gpu' columns.")
+            return pd.DataFrame()
+
+        candidate_configs = pareto_df[pareto_df['tpot'] <= target_tpot].copy()
+        
+        if not candidate_configs.empty:
+            # compute achieved cluster-scale tokens/s/gpu
+            candidate_configs['tokens/s/gpu_cluster'] = candidate_configs['tokens/s/gpu'] * \
+                (total_gpus // candidate_configs['num_total_gpus']) * candidate_configs['num_total_gpus'] / total_gpus
+
+            # we need to find the best 1 out of each group and return the final results, sorted by tokens/s/gpu_cluster
+            
+            #candidate_configs = candidate_configs.sort_values(by='tokens/s/gpu_cluster', ascending=False)
             logger.debug(f"actual replica-level throughputs: {candidate_configs['tokens/s/gpu'].iloc[0]:.2f} vs. actual cluster-level throughputs: {candidate_configs['tokens/s/gpu_cluster'].iloc[0]:.2f}")        
             return candidate_configs.head(1)
         else:
@@ -875,8 +917,8 @@ def load_config_from_yaml(model_name: str,
         disagg_replica_config=_get_replica_config(config_data.get('disagg_config', None), 'replica_config'),
         disagg_prefill_worker_config=_get_worker_config(config_data.get('disagg_config', None), 'prefill_worker_config'),
         disagg_decode_worker_config=_get_worker_config(config_data.get('disagg_config', None), 'decode_worker_config'),
-        prefill_correction_scale=config_data.get('prefill_correction_scale', 1.0),
-        decode_correction_scale=config_data.get('decode_correction_scale', 1.0),
+        prefill_latency_correction_scale=config_data.get('prefill_latency_correction_scale', 1.0),
+        decode_latency_correction_scale=config_data.get('decode_latency_correction_scale', 1.0),
         prefill_max_batch_size=config_data.get('prefill_max_batch_size', 1),
         decode_max_batch_size=config_data.get('decode_max_batch_size', 512)
     )

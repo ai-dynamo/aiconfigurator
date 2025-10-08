@@ -10,6 +10,8 @@ from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models import BaseModel
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.config import RuntimeConfig
+import logging
+logger = logging.getLogger(__name__)
 
 class BaseBackend(ABC):
     """
@@ -30,9 +32,19 @@ class BaseBackend(ABC):
                    database: PerfDatabase, 
                    runtime_config: RuntimeConfig, 
                    mode: str, 
-                   stride: int = 32) -> InferenceSummary:
+                   stride: int = 32,
+                   latency_correction_scale: float = 1.0) -> InferenceSummary:
         """
         Run the static inference.
+
+        Args:
+            model (BaseModel): the model to run inference
+            database (PerfDatabase): the database to run inference
+            runtime_config (RuntimeConfig): the runtime config
+            mode (str): the mode to run inference, static, static_ctx, static_gen
+            stride (int): the stride is used to accelerate the estimation, for a give osl, will only computes the i, i+stride, i+2*stride, ...
+                step, default is 32.
+            latency_correction_scale (float): the correction scale to adjust the latency, default is 1.0. corrected latency = latency * latency_correction_scale
         """
         def _run_context(batch_size: int, isl: int) -> dict[str, float]:
             context_latency_dict = defaultdict(float)
@@ -88,6 +100,13 @@ class BaseBackend(ABC):
             context_latency_dict = _run_context(batch_size, isl)
             generation_latency_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl)
+
+        if latency_correction_scale != 1.0:
+            logger.debug(f'latency_correction_scale: {latency_correction_scale} is applied to the latency')
+            for op, op_latency in context_latency_dict.items():
+                context_latency_dict[op] *= latency_correction_scale
+            for op, op_latency in generation_latency_dict.items():
+                generation_latency_dict[op] *= latency_correction_scale
 
         context_latency, generation_latency = 0.0, 0.0
         for op, op_latency in context_latency_dict.items():

@@ -170,12 +170,12 @@ def disagg_pareto(model_name: str,
                   prefill_backend_name: str, 
                   prefill_model_config: config.ModelConfig, 
                   prefill_parallel_config_list: list[list[int]], 
-                  prefill_correction_scale: float,
+                  prefill_latency_correction_scale: float,
                   decode_database: PerfDatabase, 
                   decode_backend_name: str, 
                   decode_model_config: config.ModelConfig, 
                   decode_parallel_config_list: list[list[int]], 
-                  decode_correction_scale: float,
+                  decode_latency_correction_scale: float,
                   **kwargs) -> pd.DataFrame:
     """
     Find Pareto front for Disaggregated Inference.
@@ -188,12 +188,12 @@ def disagg_pareto(model_name: str,
         prefill_backend_name: prefill backend name
         prefill_model_config: prefill model config
         prefill_parallel_config_list: prefill parallel config list
-        prefill_correction_scale: prefill correction scale
+        prefill_latency_correction_scale: prefill latency correction scale
         decode_database: decode database
         decode_backend_name: decode backend name
         decode_model_config: decode model config
         decode_parallel_config_list: decode parallel config list
-        decode_correction_scale: decode correction scale
+        decode_latency_correction_scale: decode latency correction scale
         **kwargs: other arguments
         prefill_max_num_tokens: max number of tokens for prefill worker, in kwargs
         decode_max_num_tokens: max number of tokens for decode worker, in kwargs
@@ -230,7 +230,7 @@ def disagg_pareto(model_name: str,
     decode_backend = get_backend(decode_backend_name)
 
     disagg_sess = DisaggInferenceSession(prefill_database, prefill_backend, decode_database, decode_backend)
-    disagg_sess.set_correction_scales(prefill_correction_scale, decode_correction_scale)
+    disagg_sess.set_latency_correction_scales(prefill_latency_correction_scale, decode_latency_correction_scale)
 
     prefill_max_num_tokens = kwargs.get('prefill_max_num_tokens', 16384)
     decode_max_num_tokens = kwargs.get('decode_max_num_tokens', 512)
@@ -322,10 +322,10 @@ if __name__ == '__main__':
     disagg_df_h200 = disagg_pareto(model_name=model_name, runtime_config=runtime_config,
                                    prefill_database=h200_database, prefill_backend_name=backend_name, prefill_model_config=model_config, 
                                    prefill_parallel_config_list=prefill_parallel_config_list, prefill_num_worker_list=max_worker_list,
-                                   prefill_correction_scale=1.0,
+                                   prefill_latency_correction_scale=1.0,
                                    decode_database=h200_database, decode_backend_name=backend_name, decode_model_config=model_config, 
                                    decode_parallel_config_list=decode_parallel_config_list, decode_num_worker_list=max_worker_list,
-                                   decode_correction_scale=1.0)
+                                   decode_latency_correction_scale=1.0)
                                   
 
     compare_results({'DISAGG_h200':disagg_df_h200, 'IFB_h200':ifb_df_h200},

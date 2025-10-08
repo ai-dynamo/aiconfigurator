@@ -163,7 +163,7 @@ class EventHandler:
                 components['prefill_model_quant_components']['fmha_quant_mode'],                
                 components['prefill_model_quant_components']['moe_quant_mode'],
                 components['prefill_model_quant_components']['comm_quant_mode'],
-                components['prefill_correction_scale'],
+                components['prefill_latency_correction_scale'],
                 components['decode_model_system_components']['system'], # decode        
                 components['decode_model_system_components']['backend'],
                 components['decode_model_system_components']['version'],
@@ -180,7 +180,7 @@ class EventHandler:
                 components['decode_model_quant_components']['fmha_quant_mode'],                
                 components['decode_model_quant_components']['moe_quant_mode'],
                 components['decode_model_quant_components']['comm_quant_mode'],
-                components['decode_correction_scale'],
+                components['decode_latency_correction_scale'],
                 components['num_gpu_list'],
                 components['max_num_gpu'],
                 components['prefill_max_num_worker'],
