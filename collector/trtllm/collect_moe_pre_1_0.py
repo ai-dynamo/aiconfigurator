@@ -174,6 +174,7 @@ def get_moe_test_cases():
     return test_cases
 
 def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, min_latency_mode, model_name, perf_filename, distributed = "power_law", power_law_alpha = 0., device='cuda:0'):
+    device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
@@ -249,8 +250,8 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
             False,  # In both low latency and attention dp scenarios, create_moe needs not to do allreduce inside op.
             model_config=model_config)
 
-    ffn1_weights = Parameter(torch.randn(moe.w3_w1_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(dtype=moe.w3_w1_weight.dtype), requires_grad=False)
-    ffn2_weights = Parameter(torch.randn(moe.w2_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(dtype=moe.w2_weight.dtype), requires_grad=False)
+    ffn1_weights = Parameter(torch.randn(moe.w3_w1_weight.shape, dtype=torch.bfloat16, device=device).to(dtype=moe.w3_w1_weight.dtype), requires_grad=False)
+    ffn2_weights = Parameter(torch.randn(moe.w2_weight.shape, dtype=torch.bfloat16, device=device).to(dtype=moe.w2_weight.dtype), requires_grad=False)
 
     moe.w3_w1_weight = ffn1_weights
     moe.w2_weight = ffn2_weights
@@ -258,8 +259,8 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
     max_index = -1
     while True:
         try:
-            hidden_states_max_tokens = torch.randn([num_tokens_lists[max_index], hidden_size]).bfloat16().to(torch.device(device))
-            logits_max_tokens = torch.randn([num_tokens_lists[max_index], num_experts]).to(router_logits_dtype).to(torch.device(device))
+            hidden_states_max_tokens = torch.randn([num_tokens_lists[max_index], hidden_size],device=device).bfloat16()
+            logits_max_tokens = torch.randn([num_tokens_lists[max_index], num_experts],device=device).to(router_logits_dtype)
             torch.cuda.synchronize()
             AutoTuner.get().clear_cache()
             with torch.inference_mode(), autotune():
@@ -277,13 +278,13 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
             continue
 
     for num_tokens in num_tokens_lists:
-        hidden_states = torch.randn([num_tokens, hidden_size]).bfloat16().to(torch.device(device))
+        hidden_states = torch.randn([num_tokens, hidden_size], device=device).bfloat16()
 
         num_iter = 5 if distributed == "power_law" else 1
         if distributed == "power_law":
-            actual_logits_list = [power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype).to(torch.device(device)) for _ in range(num_iter)]
+            actual_logits_list = [power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype) for _ in range(num_iter)]
         elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype).to(torch.device(device))
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype)
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 
