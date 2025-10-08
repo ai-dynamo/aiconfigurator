@@ -412,11 +412,12 @@ aiconfigurator cli default \
   --total_gpus 8 \
   --generated_config_version 1.0.0rc6 \
   --prefill_free_gpu_memory_fraction 0.8 \
+  --cache_transceiver_backend default \
   --free_gpu_memory_fraction 0.7 \
   --decode_free_gpu_memory_fraction 0.5 \
   --k8s_engine_mode inline \
   --k8s_model_cache pvc:model-cache \
-  --k8s_namespace ets-dynamo \
+  --k8s_namespace dynamo-custom-ns \
 ```
 
 This produces `disagg/k8s_deploy.yaml` (and for Agg, `agg/k8s_deploy.yaml`) under  `--save_dir`. 
@@ -441,13 +442,13 @@ If you prefer a separate ConfigMap:
 
 ```bash
 # Disagg
-kubectl -n ets-dynamo create configmap engine-configs \
+kubectl -n dynamo-custom-ns create configmap engine-configs \
   --from-file=prefill_config.yaml=disagg/prefill_config.yaml \
   --from-file=decode_config.yaml=disagg/decode_config.yaml \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # Agg
-kubectl -n ets-dynamo create configmap engine-configs \
+kubectl -n dynamo-custom-ns create configmap engine-configs \
   --from-file=agg_config.yaml=agg/agg_config.yaml \
   --dry-run=client -o yaml | kubectl apply -f -
 
