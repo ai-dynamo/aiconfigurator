@@ -55,69 +55,70 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 ### CLI
 
 ```bash
-aiconfigurator cli --model QWEN3_32B --total_gpus 32 --system h200_sxm
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm
+aiconfigurator cli exp --yaml_path exp.yaml
 ```
-
-- With **three basic arguments**, it prints the estimated best deployment and the deployment details.
+- We have two modes, `default` and `exp`.
+- Use `default`, followed with **three basic arguments**, it prints the estimated best deployment and the deployment details.
+- Use `exp`, pass in exp.yaml by `--yaml_path` to customize your experiments and even a heterogenous one.
 - Use `--save_dir DIR` to generate framework configuration files for Dynamo.
 - Use `-h` for more options and customization.
 
+Refer to [CLI User Guide](docs/cli_user_guide.md)
+
+An example here, 
+```bash
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --isl 4000 --osl 500 --ttft 300 --tpot 10
+```
+
 ```text
 ********************************************************************************
-*                      Dynamo AIConfigurator Final Results                     *
+*                     Dynamo aiconfigurator Final Results                      *
 ********************************************************************************
   ----------------------------------------------------------------------------
   Input Configuration & SLA Target:
     Model: QWEN3_32B (is_moe: False)
-    Total GPUs: 512
-    I/O Length (tokens): Input=4000, Output=500
-    SLA Target: TTFT <= 300.0ms, TPOT <= 10.0ms
+    Total GPUs: 32
+    Best Experiment Chosen: disagg at 812.92 tokens/s/gpu (1.70x better)
   ----------------------------------------------------------------------------
-  Overall best system chosen: disagg at 812.48 tokens/s/gpu (2.39x better)
-    - Agg Actual Best: 340.48 tokens/s/gpu  100.83 tokens/s/user | TTFT: 188.91ms TPOT: 9.92ms
-    - Disagg Actual Best: 812.48 tokens/s/gpu  109.12 tokens/s/user | TTFT: 276.94ms TPOT: 9.16ms
+  Overall Best Configuration:
+    - Best Throughput: 812.92 tokens/s/gpu
+    - User Throughput: 120.23 tokens/s/user
+    - TTFT: 276.76ms
+    - TPOT: 8.32ms
   ----------------------------------------------------------------------------
   Pareto Frontier:
-               QWEN3_32B Pareto Frontier: tokens/s/gpu vs tokens/s/user
+               QWEN3_32B Pareto Frontier: tokens/s/gpu vs tokens/s/user         
       ┌────────────────────────────────────────────────────────────────────────┐
-1600.0┤ dd Disagg                                                              │
-      │ aa Agg                                                                 │
-      │ XX Best                                                                │
+1600.0┤ •• disagg                                                              │
+      │ ff agg                                                                 │
+      │ xx disagg best                                                         │
       │                                                                        │
-1333.3┤    a                                                                   │
-      │     a                                                                  │
-      │      aaaa    d                                                         │
-      │          a    ddddddddd                                                │
-1066.7┤           a           dd                                               │
-      │            aa           dddddddd                                       │
-      │              aaa                dd                                     │
-      │                 a                 d                                    │
- 800.0┤                 a                  dddddddXdd                          │
-      │                  aaaa                        d                         │
-      │                      aaa                      d                        │
-      │                         aa                     d                       │
- 533.3┤                           aaaaaa                dd                     │
-      │                                 aa                dd                   │
-      │                                   aa                dd                 │
-      │                                     aaaaaa            ddd              │
- 266.7┤                                          aaaaa           d             │
-      │                                              aaaaaaa                   │
-      │                                                     aaaaaaa            │
+1333.3┤   f                                                                    │
+      │   ff                                                                   │
+      │     ff    •                                                            │
+      │       f   ••••••••                                                     │
+1066.7┤        f         ••                                                    │
+      │         fff       ••••••••                                             │
+      │            f              ••                                           │
+      │            f                ••••                                       │
+ 800.0┤            fffff                •••x                                   │
+      │                 fff                 ••                                 │
+      │                   fff                •                                 │
+      │                     fffff             ••                               │
+ 533.3┤                         ffff            ••                             │
+      │                             ffff          ••                           │
+      │                                 fffffff     •••••                      │
+      │                                        ffffff    ••                    │
+ 266.7┤                                              fffff •••••••••           │
+      │                                                   ffffffffff           │
+      │                                                             f          │
       │                                                                        │
    0.0┤                                                                        │
       └┬─────────────────┬─────────────────┬────────────────┬─────────────────┬┘
-       0                45                90               135              180
-tokens/s/gpu                         tokens/s/user
+       0                60                120              180              240 
+tokens/s/gpu                         tokens/s/user                              
 
-  ----------------------------------------------------------------------------
-  Worker Setup:
-    Model: QWEN3_32B (is_moe: False)
-    Disagg Prefill: h200_sxm (trtllm)
-    Disagg Decode:  h200_sxm (trtllm)
-    Prefill Quantization: GEMM: fp8_block, KVCache: fp8, FMHA: fp8
-    Decode Quantization: GEMM: fp8_block, KVCache: fp8, FMHA: fp8
-    Agg: h200_sxm (trtllm)
-    Quantization: GEMM: fp8_block, KVCache: fp8, FMHA: fp8
   ----------------------------------------------------------------------------
   Deployment Details:
     (p) stands for prefill, (d) stands for decode, bs stands for batch size, a replica stands for the smallest scalable unit xPyD of the disagg system
@@ -125,72 +126,90 @@ tokens/s/gpu                         tokens/s/user
                gpus/replica = (p)gpus/worker * (p)workers + (d)gpus/worker * (d)workers; for Agg, gpus/replica = gpus/worker
                gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; tp * pp for dense models (underlined numbers are the actual values in math)
 
-Disagg Top Configurations: (Sorted by tokens/s/gpu)
-+------+--------------+---------------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
-| Rank | tokens/s/gpu | tokens/s/user | concurrency | total_gpus(used) | replicas |  gpus/replica  | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
-+------+--------------+---------------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
-|  1   |    812.48    |     109.12    |      60     |  512 (512=64x8)  |    64    |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   60  |
-|  2   |    802.97    |     100.56    |     204     | 512 (500=20x25)  |    20    | 25 (=13x1+3x4) |     13     |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    4 (=4x1)    |    tp4pp1   |   68  |
-|  3   |    802.09    |     106.73    |     192     | 512 (500=20x25)  |    20    | 25 (=13x1+3x4) |     13     |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    4 (=4x1)    |    tp4pp1   |   64  |
-|  4   |    767.19    |     114.22    |     156     | 512 (506=22x23)  |    22    | 23 (=11x1+3x4) |     11     |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    4 (=4x1)    |    tp4pp1   |   52  |
-|  5   |    761.70    |     111.61    |     224     | 512 (496=16x31)  |    16    | 31 (=15x1+4x4) |     15     |    1 (=1x1)    |    tp1pp1   |   1   |     4      |    4 (=4x1)    |    tp4pp1   |   56  |
-+------+--------------+---------------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
-Agg Top Configurations: (Sorted by tokens/s/gpu)
-+------+--------------+---------------+-------------+------------------+----------+--------------+-------------+----------+----+
-| Rank | tokens/s/gpu | tokens/s/user | concurrency | total_gpus(used) | replicas | gpus/replica | gpus/worker | parallel | bs |
-+------+--------------+---------------+-------------+------------------+----------+--------------+-------------+----------+----+
-|  1   |    340.48    |     100.83    |      15     | 512 (512=128x4)  |   128    |      4       |   4 (=4x1)  |  tp4pp1  | 15 |
-|  2   |    326.78    |     104.48    |      14     | 512 (512=128x4)  |   128    |      4       |   4 (=4x1)  |  tp4pp1  | 14 |
-|  3   |    307.50    |     105.57    |      13     | 512 (512=128x4)  |   128    |      4       |   4 (=4x1)  |  tp4pp1  | 13 |
-|  4   |    296.61    |     107.15    |      24     |  512 (512=64x8)  |    64    |      8       |   8 (=8x1)  |  tp8pp1  | 24 |
-|  5   |    265.44    |     115.81    |      20     |  512 (512=64x8)  |    64    |      8       |   8 (=8x1)  |  tp8pp1  | 20 |
-+------+--------------+---------------+-------------+------------------+----------+--------------+-------------+----------+----+
+disagg Top Configurations: (Sorted by tokens/s/gpu)
++------+--------------+---------------+--------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | concurrency | total_gpus(used) | replicas |  gpus/replica  | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
++------+--------------+---------------+--------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+|  1   |    812.92    |     120.23    | 276.76 |  240(=60x4) |   32 (32=4x8)    |    4     |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   60  |
+|  2   |    750.55    |     125.26    | 276.76 |  208(=52x4) |   32 (32=4x8)    |    4     |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   52  |
+|  3   |    651.19    |     128.44    | 276.76 |  176(=44x4) |   32 (32=4x8)    |    4     |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   44  |
+|  4   |    593.79    |     122.69    | 276.76 | 168(=168x1) |   32 (24=1x24)   |    1     | 24 (=12x1+3x4) |     12     |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    4 (=4x1)    |    tp4pp1   |   56  |
+|  5   |    530.57    |     127.90    | 276.76 | 144(=144x1) |   32 (24=1x24)   |    1     | 24 (=12x1+3x4) |     12     |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    4 (=4x1)    |    tp4pp1   |   48  |
++------+--------------+---------------+--------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+
+agg Top Configurations: (Sorted by tokens/s/gpu)
++------+--------------+---------------+--------+-------------+------------------+----------+--------------+-------------+----------+----+
+| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | concurrency | total_gpus(used) | replicas | gpus/replica | gpus/worker | parallel | bs |
++------+--------------+---------------+--------+-------------+------------------+----------+--------------+-------------+----------+----+
+|  1   |    478.57    |     107.58    | 197.85 |  160(=20x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 20 |
+|  2   |    429.39    |     122.54    | 197.57 |  128(=16x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 16 |
+|  3   |    398.29    |     131.04    | 197.41 |  112(=14x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 14 |
+|  4   |    377.31    |     133.32    | 190.10 |  104(=13x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 13 |
+|  5   |    339.51    |     143.14    | 189.94 |  88(=11x8)  |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 11 |
++------+--------------+---------------+--------+-------------+------------------+----------+--------------+-------------+----------+----+
 ********************************************************************************
-INFO 2025-07-28 17:23:10,701 main.py:1035] Configuration completed in 48.18 seconds
+INFO 2025-10-03 14:49:15,439 main.py:293] All experiments completed in 30.82 seconds
 ```
 
-These results indicate that deploying Qwen3-32B on `h200_sxm` in FP8 can achieve **2.39x** higher tokens/s/gpu for disaggregated versus aggregated deployment under the SLA targets TTFT ≤ 300 ms and TPOT ≤ 10 ms, with ISL:OSL of 4000:500.
+These results indicate that deploying Qwen3-32B on h200_sxm in FP8 can achieve **1.70x** higher tokens/s/gpu for disaggregated versus aggregated deployment **under the SLA targets TTFT ≤ 300 ms and TPOT ≤ 10 ms**, with ISL:OSL of 4000:500.
 Try different ISL:OSL values and SLA limits to fit your use case, for example:
 
 ```bash
-aiconfigurator cli --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200
 ```
 
 You will get different results.
 
 ### Customized Configuration for aiconfigurator
 
-To customize further (including the search space and per-component quantization) parameters are defined in a YAML file.
-Built-in YAML files are under `src/aiconfigurator/cli/templates/trtllm/xxx_default.yaml` (in the future, `trtllm` can be replaced by other backend names).
-Refer to the YAML file and modify as needed. Pass your customized YAML file with `--yaml_path`:
+The `default` mode will create two experiments, one is `agg` and another one is `disagg` and then compare the results.  
+To further customize (including the search space and per-component quantization), parameters are defined in a YAML file.
+Built-in YAML files are under `src/aiconfigurator/cli/example.yaml` and `src/aiconfigurator/cli/exps/*.yaml`
+Refer to the YAML file and modify as needed. Pass your customized YAML file to `exp` mode:
 
 ```bash
-aiconfigurator cli --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200 --yaml_path customized_config.yaml
+aiconfigurator cli exp --yaml_path customized_config.yaml
 ```
 
-For guidance on tuning these parameters, refer to [Advanced Tuning](docs/advanced_tuning.md).
+We can use `exp` mode to compare multiple results, including disagg vs. agg, homegenous vs. heterogenous, and more than 2 experiments. 
+We've crafted several examples in `src/aiconfigurator/cli/exps/*.yaml`  
+For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).
 
-### Generate Configurations for Dynamo
+### Generate Configurations for Dynamo and Reproduce the results
 
-In the `aiconfigurator` CLI, if you specify `--save_dir`, the tool generates configuration files for deploying with Dynamo.
+Please refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details about deployment and reproduction especially about the benchmark methodology.
+
+To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save_dir`, the tool generates configuration files for deploying with Dynamo.
 This feature bridges the gap between configuration and Dynamo deployment.
 The folder structure looks like this:
 
 ```text
-backend_configs/
-├── agg/
-│   ├── agg_config.yaml
-│   └── node_0_run.sh
-└── disagg/
-│   ├── decode_config.yaml
-│   ├── prefill_config.yaml
-│   ├── node_0_run.sh
-│   ├── node_1_run.sh
-│   └── ...
-└──
+results/QWEN3_32B_isl4000_osl1000_ttft1000_tpot20_904495
+├── agg
+│   ├── best_config_topn.csv
+│   ├── config.yaml
+│   ├── pareto.csv
+│   ├── top1
+│   │   ├── agg
+│   │   │   ├── agg_config.yaml
+│   │   │   ├── k8s_deploy.yaml
+│   │   │   └── node_0_run.sh 
+│   │   └── generator_config.yaml
+│   ...
+├── disagg
+│   ├── best_config_topn.csv
+│   ├── config.yaml
+│   ├── pareto.csv
+│   ├── top1
+│   │   ├── disagg
+│   │   │   ├── decode_config.yaml
+│   │   │   ├── k8s_deploy.yaml
+│   │   │   ├── node_0_run.sh
+│   │   │   └── prefill_config.yaml
+│   │   └── generator_config.yaml
+│   ...
+└── pareto_frontier.png
 ```
-
-Refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details.
 
 ### All-in-one automation
 
@@ -262,7 +281,7 @@ To estimate performance, we take the following steps:
   - Attention DP (for DEEPSEEK and MoE)
 - Scheduling:
   - Static
-  - IFB (continuous batching)
+  - Aggregated serving (continuous batching)
   - Disaggregated serving
   - MTP (for DEEPSEEK)
 

@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# define your experiments here, the order will determine the execution order.
+exps:
+  - exp_h200_h200
+  - exp_b200_h200
+
+exp_h200_h200:
+  mode: "patch"
+  serving_mode: "disagg" # required
+  model_name: "QWEN3_32B" # required
+  total_gpus: 16 # required
+  system_name: "h200_sxm" # required, for prefill
+  decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
+  backend_name: "trtllm"
+  profiles: []
+  isl: 4000 # input sequence length
+  osl: 500 # output sequence length
+  ttft: 300.0  # Target TTFT in ms
+  tpot: 50.0   # Target TPOT in ms
+
+exp_b200_h200:
+  mode: "patch"
+  serving_mode: "disagg" # required
+  model_name: "QWEN3_32B" # required
+  total_gpus: 16 # required
+  system_name: "b200_sxm" # required, for prefill
+  decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
+  backend_name: "trtllm"
+  profiles: []
+  isl: 4000 # input sequence length
+  osl: 500 # output sequence length
+  ttft: 300.0  # Target TTFT in ms
+  tpot: 50.0   # Target TPOT in ms

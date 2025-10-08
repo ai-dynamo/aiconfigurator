@@ -117,11 +117,11 @@ pipeline {
 The testing framework systematically validates:
 
 - **15+ Models**: QWEN, LLAMA, DEEPSEEK, MOE variants
-- **2 Systems**: h100_sxm, h200_sxm
+- **2 Systems**: h100_sxm, h200_sxm, b200_sxm, gb200_sxm
 - **2 GPU Configs**: 8 GPUs, 512 GPUs
 - **3 Workload Patterns**: (4000,1000), (1000,2), (32,1000) ISL/OSL
 - **2 Performance Targets**: 10ms, 100ms TPOT
-- **1 Framework Version**: 0.20.0 (extensible)
+- **1 Framework Version**: latest (extensible)
 
 ## 🚀 Getting Started
 

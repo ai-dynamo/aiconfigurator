@@ -17,7 +17,7 @@ def create_readme_tab(app_config):
                     4. Click on Download button to download the result dataframe.
                     In Debugging box, it prints the error message if any.
                 #### Use cases
-                    1. Working with ifb/disagg tab, facilitating the performance analysis. You can,
+                    1. Working with agg/disagg tab, facilitating the performance analysis. You can,
                         1.1 estimate memory consumption to check OOM and memory breakdown
                         1.2 check TTFT and TPOT via static batching by setting inference mode to static_ctx or static_gen.
                         1.3 get step breakdown, similar to nsys profiling, you will understand the dominant operation.
@@ -50,7 +50,7 @@ def create_readme_tab(app_config):
                 ### Pareto Comparison tab
                     This tab is used to do comparison between different pareto estimation results.
                 #### Use cases
-                    1. comparing ifb vs. disagg, to understand whether disagg might help in your case and find the best deployment strategy of your target SLA. Disagg is not always better. You need to specify your SLA.
+                    1. comparing agg vs. disagg, to understand whether disagg might help in your case and find the best deployment strategy of your target SLA. Disagg is not always better. You need to specify your SLA.
                 '''
             )
 
@@ -140,7 +140,7 @@ def create_readme_tab(app_config):
                 #### parallel config error
                     Fix as the error message says.
                 ### hang
-                    A typicall run of ifb pareto estimation takes 1~2 minutes with ~5 enumerated configs. Linear to how many parallel options you have.
+                    A typicall run of agg pareto estimation takes 1~2 minutes with ~5 enumerated configs. Linear to how many parallel options you have.
                     A typical run of disagg pareto estimation takes ~30 seconds with ~5 enumerated configs. Linear to how many parallel options you have.
                     A run longer than 10 minutes is abnormal. Try to refresh the page. Set smaller search space by selecting fewer parallel options.
                 ### Others
