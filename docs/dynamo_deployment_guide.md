@@ -397,6 +397,8 @@ For deploying Dynamo on Kubernetes, please refer to this [dynamo/deploy](https:/
 
 ### 5.1 Generate Configuration for K8S
 
+This produces `disagg/k8s_deploy.yaml` (and for Agg, `agg/k8s_deploy.yaml`) under  `--save_dir`. 
+
 ```bash
 # Example (Disagg)
 aiconfigurator cli default \
@@ -415,12 +417,14 @@ aiconfigurator cli default \
   --cache_transceiver_backend default \
   --free_gpu_memory_fraction 0.7 \
   --decode_free_gpu_memory_fraction 0.5 \
+  --k8s_image nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0 \
   --k8s_engine_mode inline \
   --k8s_model_cache pvc:model-cache \
   --k8s_namespace dynamo-custom-ns \
 ```
 
-This produces `disagg/k8s_deploy.yaml` (and for Agg, `agg/k8s_deploy.yaml`) under  `--save_dir`. 
+Since different versions of TensorRT-LLM often have variations in configuration, please specify `--generated_config_version` to match the version used when generating configs. For the specific TensorRT-LLM version corresponding to a official dynamo image, you can refer to, for example, this [pyproject](https://github.com/ai-dynamo/dynamo/blob/v0.5.0/pyproject.toml#L51), or check directly inside the container by running: `python -c import tensorrt_llm; print(tensorrt_llm.__version__)`. In this case, since the image is nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0, you should set `--generated_config_version 1.0.0rc6`.
+
 
 ### Apply (inline mode – default)
 
