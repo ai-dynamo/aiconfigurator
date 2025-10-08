@@ -27,6 +27,8 @@ def run_attention_torch(batch_size,
                         is_context_phase,                        
                         perf_filename,
                         device='cuda:0'):
+    device=torch.device(device)
+    torch.set_default_device(device)
     torch.cuda.set_device(device)
 
     # if XQA JIT is enabled, the context phase will also trigger XQA prepare which causes the error with specifc q/kv head and seq setting.
@@ -118,7 +120,7 @@ def run_attention_torch(batch_size,
                                 kv_cache_manager=kv_cache_manager, 
                                 mapping=mapping, 
                                 enable_flash_mla=False,
-                                seq_lens=torch.tensor(input_seq_lens, dtype=torch.int32), 
+                                seq_lens=torch.tensor(input_seq_lens, dtype=torch.int32, device="cpu"),
                                 num_contexts=batch_size,
                                 position_ids=None, 
                                 kv_cache_params=KVCacheParams(use_cache=True, num_cached_tokens_per_seq=num_cached_tokens_per_seq, block_ids_per_seq=None, host_max_attention_window_sizes=None, host_sink_token_length=None), 
@@ -135,7 +137,7 @@ def run_attention_torch(batch_size,
                                                 kv_cache_manager=kv_cache_manager, 
                                                 mapping=mapping,
                                                 enable_flash_mla=False,
-                                                seq_lens=torch.tensor(gen_seq_lens, dtype=torch.int32), 
+                                                seq_lens=torch.tensor(gen_seq_lens, dtype=torch.int32, device="cpu"),
                                                 position_ids=None, 
                                                 num_contexts=0, 
                                                 kv_cache_params=KVCacheParams(use_cache=True, num_cached_tokens_per_seq=input_seq_lens, block_ids_per_seq=None, host_max_attention_window_sizes=None, host_sink_token_length=None), 

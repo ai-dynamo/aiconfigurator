@@ -40,7 +40,10 @@ def get_gemm_test_cases():
 
 
 def run_gemm(gemm_type, m, n, k, perf_filename, device='cuda:0'):
+    device = torch.device(device)
     torch.cuda.set_device(device)
+    torch.set_default_device(device)
+
     dtype = torch.bfloat16
     x = torch.randn((m, k), dtype=dtype).to(torch.device(device))
 
