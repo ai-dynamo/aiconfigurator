@@ -509,10 +509,10 @@ def benchmark_moe_layer_decode(
         
         masked_m = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
 
-        # support two distributed mode: power_law and balanced
+        # support two distributed mode: power_law and uniform
         if distributed == "power_law":
             masked_m_list = [power_law_logits_v3(num_token * num_rank, num_experts, top_k, ep_size, power_law_alpha).to(masked_m.dtype).to(torch.device(device)) for _ in range(5)]
-        elif distributed == "balanced":
+        elif distributed == "uniform":
             # expert size is 256
             base_tokens_per_expert = int(num_token * top_k) * num_rank // 256
             if base_tokens_per_expert == 0:
@@ -522,7 +522,7 @@ def benchmark_moe_layer_decode(
             masked_m_list = [masked_m]
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")        
-
+        
         scale_tensor = torch.ones(
             num_local_experts, num_max_dispatch_tokens_per_rank * num_rank, scale_hidden_size, 
             device=hidden_states.device, dtype=torch.float32
@@ -661,7 +661,7 @@ def benchmark_moe_layer_decode(
     return results
 
 
-def write_results_to_file(all_results, bench_args, server_args, model_config, rank_print, tp_rank):
+def write_results_to_file(all_results, bench_args, server_args, model_config, rank_print, tp_rank, distributed, power_law_alpha):
     """Write benchmark results to separate prefill and decode files"""
     if tp_rank != 0:
         return
@@ -671,8 +671,8 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
         decode_results = [r for r in all_results if "decode" in r.phase]
         
         output_path = "/lustre/raplab/client/xutingz/workspace/gitsrc/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
-        context_output_path = os.path.join(output_path, "context_moe_perf_power_law.txt")
-        generation_output_path = os.path.join(output_path, "generation_moe_perf_power_law.txt")
+        context_output_path = os.path.join(output_path, "context_moe_perf.txt")
+        generation_output_path = os.path.join(output_path, "generation_moe_perf.txt")
         
         os.makedirs(output_path, exist_ok=True)
         
@@ -697,10 +697,9 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
                     moe_tp_size = 1
                     moe_ep_size = server_args.ep_size if num_experts==256 else int(server_args.ep_size*256//num_experts)
                     num_tokens = result.num_token * moe_ep_size
-                    distribution = "uniform"
                     num_experts = 256
 
-                    f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{distribution},{result.avg_latency_ms}\n")
+                    f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{"uniform"},{result.avg_latency_ms}\n")
             
             if file_exists:
                 rank_print(f"\nPrefill results appended to {context_output_path}")
@@ -727,10 +726,9 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
                     moe_tp_size = 1
                     moe_ep_size = server_args.ep_size if num_experts==256 else int(server_args.ep_size*256//num_experts)
                     num_tokens = result.num_token * moe_ep_size
-                    distribution = "uniform"
                     num_experts = 256
                     
-                    f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{distribution},{result.avg_latency_ms}\n")
+                    f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{"power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed},{result.avg_latency_ms}\n")
             
             if file_exists:
                 rank_print(f"\nDecode results appended to {generation_output_path}")
@@ -747,6 +745,8 @@ def run_moe_benchmark(
     port_args,
     bench_args: MoEBenchArgs,
     tp_rank: int,
+    distributed = "power_law", 
+    power_law_alpha = 0.8,
 ):
     """Run the complete MoE benchmark"""
     
@@ -849,6 +849,8 @@ def run_moe_benchmark(
             actual_num_experts,
             ep_size,
             num_rank,
+            distributed, 
+            power_law_alpha,
         )
         all_results.extend(results)
         
@@ -866,7 +868,7 @@ def run_moe_benchmark(
         return
     
     # Write results to separate prefill and decode files
-    write_results_to_file(all_results, bench_args, server_args, model_config, rank_print, tp_rank)
+    write_results_to_file(all_results, bench_args, server_args, model_config, rank_print, tp_rank, distributed, power_law_alpha)
     torch.cuda.empty_cache()
     
     rank_print(f"\n{'='*60}")
@@ -890,6 +892,8 @@ def main(server_args, bench_args: MoEBenchArgs):
                 port_args,
                 bench_args,
                 tp_rank,
+                "power_law", 
+                0.8,
             ),
         )
         proc.start()
