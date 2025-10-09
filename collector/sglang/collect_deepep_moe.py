@@ -613,7 +613,7 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
         prefill_results = [r for r in all_results if "prefill" in r.phase]
         decode_results = [r for r in all_results if "decode" in r.phase]
         
-        output_path = "/lustre/raplab/client/xutingz/workspace/gitsrc/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
+        output_path = "path/to/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
         context_output_path = os.path.join(output_path, "context_moe_perf.txt")
         generation_output_path = os.path.join(output_path, "generation_moe_perf.txt")
         
@@ -845,7 +845,7 @@ def main(server_args, bench_args: MoEBenchArgs):
             if proc.is_alive():
                 proc.kill()
 
-DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/lustre/raplab/client/xutingz/workspace/model/DeepSeek-V3/")
+DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "path/to/DeepSeek-V3/")
 
 if __name__ == "__main__":
     # Fixed configuration values
