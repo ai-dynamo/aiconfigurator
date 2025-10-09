@@ -140,9 +140,6 @@ class MoEBenchResult:
     num_token: int
     phase: str  # "prefill" or "decode"
     avg_latency_ms: float
-    min_latency_ms: float
-    max_latency_ms: float
-    std_latency_ms: float
     num_iterations: int
     num_experts: int
     cuda_graph_used: bool = False
@@ -388,17 +385,12 @@ def benchmark_moe_layer_prefill(
         profiler.stop()
         torch.cuda.empty_cache()
 
-        # Calculate statistics
+        # Calculate statistics (keep only average)
         avg_latency_ms = np.mean(gemm_latencies)
-        min_latency_ms = np.min(gemm_latencies)
-        max_latency_ms = np.max(gemm_latencies)
-        std_latency_ms = np.std(gemm_latencies)
         
         if tp_rank == 0:
             rank_print(f"DeepEP MoE GEMM Results (Prefill):")
-            rank_print(f"  Average latency: {avg_latency_ms:.3f}ms ± {std_latency_ms:.3f}ms")
-            rank_print(f"  Min latency: {min_latency_ms:.3f}ms")
-            rank_print(f"  Max latency: {max_latency_ms:.3f}ms")
+            rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
             
         prefill_result = MoEBenchResult(
             run_name=bench_args.run_name,
@@ -406,9 +398,6 @@ def benchmark_moe_layer_prefill(
             num_token=num_token,
             phase="prefill_gemm_test",
             avg_latency_ms=avg_latency_ms,
-            min_latency_ms=min_latency_ms,
-            max_latency_ms=max_latency_ms,
-            std_latency_ms=std_latency_ms,
             num_iterations=bench_args.num_iterations,
             num_experts=num_experts,
             cuda_graph_used=False
@@ -443,10 +432,7 @@ def benchmark_moe_layer_decode(
     top_k = moe_layer.topk.top_k  # 
     num_local_experts  = int(num_experts//ep_size)
     
-    for num_token in decode_test_cases:
-
-        num_local_experts  = int(num_experts/ep_size)
-    
+    for num_token in decode_test_cases:    
         num_max_dispatch_tokens_per_rank = 128
 
         if num_token > num_max_dispatch_tokens_per_rank:
@@ -475,7 +461,7 @@ def benchmark_moe_layer_decode(
 
         # support two distributed mode: power_law and uniform
         if distributed == "power_law":
-            masked_m_list = [power_law_logits_v4(num_token * num_rank, num_experts, top_k, ep_size, power_law_alpha).to(masked_m.dtype).to(torch.device(device)) for _ in range(5)]
+            masked_m_list = [power_law_logits_v4(num_token * num_rank, num_local_experts * num_rank, top_k, num_rank, power_law_alpha).to(masked_m.dtype).to(torch.device(device)) for _ in range(5)]
         elif distributed == "uniform":
             # expert size is 256
             base_tokens_per_expert = int(num_token * top_k) * num_rank // 256
@@ -535,7 +521,7 @@ def benchmark_moe_layer_decode(
                     topk_idx=topk_idx_empty,
                     topk_weights=topk_weights_empty,
                     masked_m=masked_m,
-                    expected_m=int(max(masked_m))
+                    expected_m=int(torch.ceil(masked_m.float().mean()).item())
                 )
                 dispatch_output_list.append(output)
             
@@ -556,7 +542,7 @@ def benchmark_moe_layer_decode(
                 topk_idx=topk_idx_empty,
                 topk_weights=topk_weights_empty,
                 masked_m=masked_m,
-                expected_m=int(max(masked_m))
+                expected_m=int(torch.ceil(masked_m.float().mean()).item())
             )
             dispatch_output_list.append(output)
         
@@ -596,15 +582,10 @@ def benchmark_moe_layer_decode(
         profiler.stop() 
         
         avg_latency_ms = np.mean(gemm_latencies)
-        min_latency_ms = np.min(gemm_latencies)
-        max_latency_ms = np.max(gemm_latencies)
-        std_latency_ms = np.std(gemm_latencies)
      
         if tp_rank == 0:
             rank_print(f"DeepEP MoE GEMM Results (Decode) - CUDA Graph Enabled:")
-            rank_print(f"  Average latency: {avg_latency_ms:.3f}ms ± {std_latency_ms:.3f}ms")
-            rank_print(f"  Min latency: {min_latency_ms:.3f}ms")
-            rank_print(f"  Max latency: {max_latency_ms:.3f}ms")
+            rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
             
         decode_result = MoEBenchResult(
             run_name=bench_args.run_name,
@@ -612,9 +593,6 @@ def benchmark_moe_layer_decode(
             num_token=num_token,
             phase="decode_gemm_test",
             avg_latency_ms=avg_latency_ms,
-            min_latency_ms=min_latency_ms,
-            max_latency_ms=max_latency_ms,
-            std_latency_ms=std_latency_ms,
             num_iterations=bench_args.num_iterations,
             num_experts=num_experts,
             cuda_graph_used=True
