@@ -219,11 +219,11 @@ def load_moe_data(moe_file):
 
 def load_sglang_mlp_data(mlp_file):
     """
-    Load the SGLang MLP data from prefill_mlp_pref.txt and generation_mlp_pref.txt
+    Load the SGLang MLP data from context_mlp_perf.txt and generation_mlp_perf.txt
     """
-    # For SGLang, we need to load both prefill (context) and generation MLP data
+    # For SGLang, we need to load both context and generation MLP data
     data_dir = os.path.dirname(mlp_file)
-    prefill_mlp_file = os.path.join(data_dir, 'prefill_mlp_perf.txt')
+    prefill_mlp_file = os.path.join(data_dir, 'context_mlp_perf.txt')
     generation_mlp_file = os.path.join(data_dir, 'generation_mlp_perf.txt')
     
     context_mlp_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))
@@ -1767,6 +1767,7 @@ class PerfDatabase(object):
             
             try:
                 # Navigate the nested dictionary structure
+                print(node_num, hidden_size, topk, num_experts)
                 data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts]
                 lat = self._interp_2d_linear(sms, num_tokens, data)
                 return lat / 1000.0  # Convert from microseconds to milliseconds

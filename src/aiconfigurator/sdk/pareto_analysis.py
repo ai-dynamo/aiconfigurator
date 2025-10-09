@@ -140,7 +140,7 @@ def ifb_pareto(model_name: str,
             overwritten_model_config.moe_tp_size = moe_tp_size
             overwritten_model_config.moe_ep_size = moe_ep_size
             overwritten_model_config.attention_dp_size = dp_size
-            model = get_model(model_name=model_name, model_config=overwritten_model_config)
+            model = get_model(model_name=model_name, backend=backend_name, model_config=overwritten_model_config)
             backend = get_backend(backend_name)
             sess = InferenceSession(model=model, database=database, backend=backend)
             for tpot in tpot_list:
@@ -254,6 +254,7 @@ def disagg_pareto(model_name: str,
     decode_num_worker_list = get_working_list(decode_num_worker_list, decode_max_num_worker)
 
     summary = disagg_sess.find_best_disagg_result_under_constraints(model_name=model_name,
+                                                                    backend_name=decode_backend_name,   
                                                                     runtime_config=runtime_config,
                                                                     prefill_model_config=prefill_model_config,
                                                                     prefill_parallel_config_list=prefill_parallel_config_list,
@@ -294,8 +295,8 @@ def compare_results(label_results_dict: dict[str, pd.DataFrame], title: str, wri
 
 
 if __name__ == '__main__':
-    version = '0.20.0'
-    backend_name = 'trtllm'
+    version = '0.5.0'
+    backend_name = 'sglang'
     model_name = 'DEEPSEEK_V3'
     max_worker_list = list(range(1,33,1))
     model_config = config.ModelConfig(gemm_quant_mode=common.GEMMQuantMode.fp8_ootb,

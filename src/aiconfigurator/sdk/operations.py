@@ -180,7 +180,6 @@ class MoEDispatch(Operation):
         self.num_gpus = self._moe_ep_size*self._moe_tp_size
         self._attention_tp_size = moe_tp_size*moe_ep_size // self._attention_dp_size
         self._sms = kwargs.get('sms', 12)
-        self._node_num = kwargs.get('node_num', 1)
         
         
     def query(self, database:PerfDatabase, **kwargs):
@@ -248,10 +247,11 @@ class MoEDispatch(Operation):
         elif database.backend == common.BackendName.vllm.value:
             raise NotImplementedError("Need to implement MoE dispatch for vllm")
         else: #sglang
+            # TODO：For SGLang, use deepepmoe backend
             if is_context:
-                comm_latency = database.query_deepep_normal(node_num=self._node_num, num_tokens=num_tokens, num_experts=self._num_experts, topk=self._topk, hidden_size=self._hidden_size, sms=self._sms)
+                comm_latency = database.query_deepep_normal(node_num=self.num_gpus, num_tokens=num_tokens, num_experts=self._num_experts, topk=self._topk, hidden_size=self._hidden_size, sms=self._sms)
             else:
-                comm_latency = database.query_deepep_ll(node_num=self._node_num, num_tokens=num_tokens, num_experts=self._num_experts, topk=self._topk, hidden_size=self._hidden_size)
+                comm_latency = database.query_deepep_ll(node_num=self.num_gpus, num_tokens=num_tokens, num_experts=self._num_experts, topk=self._topk, hidden_size=self._hidden_size)
         
         return comm_latency * self._scale_factor
 
