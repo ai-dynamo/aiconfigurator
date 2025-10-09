@@ -63,7 +63,7 @@ def get_moe_decode_test_cases():
     test_cases = []
     
     # Decode parameters - batch_size and kv_len dimensions
-    batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]  # More reasonable batch sizes
+    batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]  # More reasonable batch sizes
     # batch_sizes = [1/8, 1/4, 1/2]  # More reasonable batch sizes
     
     test_cases = batch_sizes
@@ -76,7 +76,6 @@ def sample_power_law(size, alpha, xmin, xmax):
     return inv_cdf
 
 # NOTE: power_law_logits_v3 was copied from aiconfigurator/collector/trtllm/collect_moe.py and modified
-# TODO: restrict the max token per expert to be num_local_token * num_rank 
 def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
     if num_tokens*topk > num_experts:
         num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens*0.8)
@@ -490,6 +489,11 @@ def benchmark_moe_layer_decode(
         num_local_experts  = int(num_experts/ep_size)
     
         num_max_dispatch_tokens_per_rank = 128
+
+        if num_token > num_max_dispatch_tokens_per_rank:
+            print(f"num_token {num_token} > num_max_dispatch_tokens_per_rank {num_max_dispatch_tokens_per_rank}, skipping")
+            continue
+
         hidden_size = model_runner.model.config.hidden_size
         
         if hidden_size % 128 != 0:
@@ -522,8 +526,7 @@ def benchmark_moe_layer_decode(
                 masked_m[:] = base_tokens_per_expert
             masked_m_list = [masked_m]
         else:
-            raise ValueError(f"Unsupported distributed mode: {distributed}")        
-        
+            raise ValueError(f"Unsupported distributed mode: {distributed}")   
         scale_tensor = torch.ones(
             num_local_experts, num_max_dispatch_tokens_per_rank * num_rank, scale_hidden_size, 
             device=hidden_states.device, dtype=torch.float32
@@ -893,7 +896,7 @@ def main(server_args, bench_args: MoEBenchArgs):
                 port_args,
                 bench_args,
                 tp_rank,
-                "uniform", 
+                "power_law", 
                 0.8,
             ),
         )
