@@ -463,7 +463,7 @@ def load_sglang_moe_data(moe_file):
     # Log summary of loaded data
     context_count = sum(len(quant_data) for quant_data in moe_default_data.values())
     generation_count = sum(len(quant_data) for quant_data in moe_low_latency_data.values())
-    logger.info(f"Loaded {context_count} context MoE entries and {generation_count} generation MoE entries")
+    logger.info(f"Loaded {context_count} context MoE and {generation_count} generation MoE ")
     
     return moe_default_data, moe_low_latency_data
 
@@ -781,11 +781,15 @@ class PerfDatabase(object):
             self._generation_attention_data = {}
             self._custom_allreduce_data = {}
             self._moe_data, self._generation_moe_data = load_sglang_moe_data(os.path.join(data_dir, common.PerfDataFilename.context_moe.value))
+            logging.info(f"moe data loaded")
             self._context_mla_data = load_context_mla_data(os.path.join(data_dir, common.PerfDataFilename.context_mla.value))
             self._generation_mla_data = load_generation_mla_data(os.path.join(data_dir, common.PerfDataFilename.generation_mla.value))
+            logging.info(f"mla data loaded")
             self._context_mlp_data, self._generation_mlp_data = load_sglang_mlp_data(os.path.join(data_dir, common.PerfDataFilename.mlp.value))
+            logging.info(f"mlp data loaded")
             self._deepep_normal_data = load_deepep_normal_data(os.path.join(data_dir, common.PerfDataFilename.deepep_normal.value))
             self._deepep_ll_data = load_deepep_ll_data(os.path.join(data_dir, common.PerfDataFilename.deepep_ll.value))
+            logging.info(f"deepep data loaded")
             self._nccl_data = {}
             self._mla_bmm_data = {}
         else:
@@ -1405,8 +1409,10 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
         else:
+            # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
+            num_heads = 128 // tp_size
             mla_dict = self._generation_mla_data[kvcache_quant_mode]
-            latency =  self._interp_3d(tp_size, b, s, mla_dict, 'bilinear')
+            latency =  self._interp_3d(num_heads, b, s, mla_dict, 'bilinear')
             return latency
     
     def query_context_mla_sglang(self, 
@@ -1491,8 +1497,10 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
         else:
+            # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
+            num_heads = 128 // tp_size
             mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
-            latency = self._interp_3d(tp_size, s, b, mla_dict, 'cubic')
+            latency = self._interp_3d(num_heads, s, b, mla_dict, 'cubic')
             return latency
         
     # to simplify, we no longer support allreduce_strategy
@@ -1905,7 +1913,6 @@ class PerfDatabase(object):
             
             try:
                 # Navigate the nested dictionary structure
-                print(node_num, hidden_size, topk, num_experts)
                 data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts]
                 lat = self._interp_2d_linear(sms, num_tokens, data)
                 return lat / 1000.0  # Convert from microseconds to milliseconds

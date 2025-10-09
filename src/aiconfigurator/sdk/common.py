@@ -192,6 +192,7 @@ class FMHAQuantMode(Enum):
     """
     float16 = QuantMapping(0, 1, 'float16')
     fp8 = QuantMapping(0, 2, 'fp8')
+    fp8_block = QuantMapping(1, 2, 'fp8_block')
 
 class KVCacheQuantMode(Enum):
     """

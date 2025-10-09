@@ -3,10 +3,10 @@
 
 # define your experiments here, the order will determine the execution order. If not defined, every exp will be executed.
 exps:
-  - exp_agg_full
-  - exp_agg_simplified
+  # - exp_agg_full
+  # - exp_agg_simplified
   - exp_disagg_full
-  - exp_disagg_simplified
+  # - exp_disagg_simplified
 
 # exp_agg_full, agg, full config, please refer to this as a template.
 exp_agg_full:
@@ -58,10 +58,10 @@ exp_disagg_full:
   total_gpus: 32 # required
   system_name: "h200_sxm" # required
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
-  backend_name: "trtllm" # optional, default to trtllm
-  backend_version: "0.20.0" # optional, default to the latest version in the database
-  isl: 4000 # input sequence length, optional, default to 4000
-  osl: 1000 # output sequence length, optional, default to 1000
+  backend_name: "sglang" # optional, default to trtllm
+  backend_version: "0.5.0" # optional, default to the latest version in the database
+  isl: 1024 # input sequence length, optional, default to 4000
+  osl: 100 # output sequence length, optional, default to 1000
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
   tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
   enable_wide_ep: false # enable wide ep for prefill/decode, optional, default to false
@@ -73,24 +73,24 @@ exp_disagg_full:
     prefill_worker_config:
       gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
       moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
-      kvcache_quant_mode: "float16" # fp8, int8, float16
-      fmha_quant_mode: "float16" # fp8, float16
+      kvcache_quant_mode: "fp8" # fp8, int8, float16
+      fmha_quant_mode: "fp8_block" # fp8, float16
       comm_quant_mode: "half" # half
       num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
-      tp_list: [1, 2, 4, 8]
+      tp_list: [1]
       pp_list: [1]
-      dp_list: [1] # we didn't enable attn dp here. You can enable it if you want.
+      dp_list: [1, 2, 4, 8] # we didn't enable attn dp here. You can enable it if you want.
       moe_tp_list: [1]
       moe_ep_list: [1, 2, 4, 8]
     # each decode worker config
     decode_worker_config:
       gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
       moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
-      kvcache_quant_mode: "float16" # fp8, int8, float16
-      fmha_quant_mode: "float16" # fp8, float16
+      kvcache_quant_mode: "fp8" # fp8, int8, float16
+      fmha_quant_mode: "fp8_block" # fp8, float16
       comm_quant_mode: "half" # half
-      num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
-      tp_list: [1, 2, 4, 8]
+      num_gpu_per_worker: [8] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
+      tp_list: [1]
       pp_list: [1]
       dp_list: [1, 2, 4, 8]
       moe_tp_list: [1]
@@ -108,7 +108,7 @@ exp_disagg_full:
       prefill_correction_scale: 0.9 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * prefill_correction_scale
       decode_correction_scale: 0.92 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * decode_correction_scale
       prefill_max_batch_size: 1
-      decode_max_batch_size: 512
+      decode_max_batch_size: 128
 
 # exp_disagg_simplified, disagg, simplified config
 exp_disagg_simplified:
@@ -116,7 +116,7 @@ exp_disagg_simplified:
   serving_mode: "disagg"
   model_name: "DEEPSEEK_V3"
   total_gpus: 512
-  system_name: "gb200_sxm"
+  system_name: "h200_sxm"
   enable_wide_ep: true # enable wide ep for prefill/decode, default to false, optional
   config: # patch below default values
     nextn: 2 # mtp 1

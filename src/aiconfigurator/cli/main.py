@@ -260,6 +260,7 @@ def _execute_task_configs(
             logger.info("Starting experiment: %s", exp_name)
             logger.info("Task config: %s", task_config.pretty())
             result_df = runner.run(task_config)
+            print(f"result_df: {result_df}")
             if result_df is not None and not result_df.empty:
                 results[exp_name] = result_df
                 logger.info("Experiment %s completed with %d results.", exp_name, len(result_df))

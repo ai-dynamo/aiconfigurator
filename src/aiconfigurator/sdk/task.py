@@ -977,6 +977,7 @@ class TaskRunner:
             prefill_correction_scale=task_config.advanced_tuning_config.prefill_correction_scale,
             decode_correction_scale=task_config.advanced_tuning_config.decode_correction_scale,
         )
+        # print(f"result_df: {result_df}")
         return pa.get_pareto_front(result_df, 'tokens/s/user', 'tokens/s/gpu').reset_index(drop=True).reset_index()
 
     def run(self, task_config: TaskConfig) -> Optional[pd.DataFrame]:

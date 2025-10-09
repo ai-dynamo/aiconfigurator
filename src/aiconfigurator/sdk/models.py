@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-def get_model(model_name: str, backend: common.BackendName, model_config: config.ModelConfig) -> BaseModel:
+def get_model(model_name: str, backend_name: common.BackendName, model_config: config.ModelConfig) -> BaseModel:
     """
     Get model.
     """
@@ -23,7 +23,7 @@ def get_model(model_name: str, backend: common.BackendName, model_config: config
     if model_config.overwrite_num_layers > 0:
         l = model_config.overwrite_num_layers
 
-    if backend == 'sglang':
+    if backend_name == 'sglang':
         if model_family == 'DEEPSEEK':
             model = DisaggDeepSeekModel(topk, num_experts, moe_inter_size, \
                          model_name, model_family, l, n, n_kv, d, \

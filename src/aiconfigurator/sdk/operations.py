@@ -145,7 +145,7 @@ class MoE(Operation):
                                  moe_ep_size=self._moe_ep_size, 
                                  quant_mode=quant_mode, 
                                  workload_distribution=self._workload_distribution,
-                                 is_context=self._is_context)*self._scale_factor*3
+                                 is_context=self._is_context)*self._scale_factor
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -186,7 +186,7 @@ class MoEDispatch(Operation):
         num_tokens = kwargs.get('x')
         volume = num_tokens * self._hidden_size
         _sm_version = database.system_spec['gpu']['sm_version']
-        _num_gpus_per_node = database.system_spec['gpu']['num_gpus_per_node']
+        _num_gpus_per_node = database.system_spec['node']['num_gpus_per_node']
         is_context = kwargs.get('is_context', True)
 
         if database.backend == common.BackendName.trtllm.value:
