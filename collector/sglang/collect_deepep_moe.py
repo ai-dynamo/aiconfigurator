@@ -184,35 +184,10 @@ def load_model_with_dummy_weights(server_args, port_args, tp_rank):
     
     rank_print(f"Model loaded successfully.")
     
-
-    
     if server_args.tp_size > 1:
         dist.barrier()
     
     return model_runner
-
-
-def prepare_synthetic_inputs(batch_size, input_len):
-    """Prepare synthetic inputs for benchmarking"""
-    reqs = []
-    for i in range(batch_size):
-        req = Req(
-            rid=str(i),
-            origin_input_text="",
-            origin_input_ids=list(torch.randint(0, 10000, (input_len,)).tolist()),
-            sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
-        )
-        req.prefix_indices = []
-        req.fill_ids = req.origin_input_ids
-        req.extend_input_len = len(req.fill_ids)
-        req.logprob_start_len = 0
-        req.cached_tokens = 0  
-        req.already_computed = 0  
-        reqs.append(req)
-
-    return reqs
-
-
 
 def benchmark_moe_layer_prefill(
     model_runner,
@@ -511,7 +486,6 @@ def benchmark_moe_layer_decode(
             masked_m_list = [masked_m]
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")   
-        print(f"num_token: {num_token}, num_rank: {num_rank}, num_experts: {num_experts}, ep_size: {ep_size}, top_k: {top_k}, masked_m_list: {masked_m_list}")
         max_masked_m = int(torch.stack([mm.max() for mm in masked_m_list]).max().item())
         assert max_masked_m <= hidden_states.shape[1], f"max(masked_m_list) {max_masked_m} > hidden_states.shape[1] {hidden_states.shape[1]}"
         scale_tensor = torch.ones(
@@ -776,7 +750,6 @@ def run_moe_benchmark(
         
         # Load model with the specific expert number
         model_runner = load_model_with_dummy_weights(server_args, port_args, tp_rank)
-        reqs = prepare_synthetic_inputs(128, 16)  # Fixed output_len=16
         
         # Get the MoE layer for this expert number
         moe_layer = model_runner.model.model.layers[bench_args.test_layer].mlp
@@ -836,7 +809,7 @@ def run_moe_benchmark(
         model_config = model_runner.model_config
         
         # Clean up model_runner
-        del model_runner, moe_layer, reqs
+        del model_runner, moe_layer
         torch.cuda.empty_cache()
 
     except Exception as e:
