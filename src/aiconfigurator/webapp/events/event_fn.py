@@ -6,7 +6,7 @@ from aiconfigurator.sdk.inference_session import InferenceSession
 import pandas as pd
 from aiconfigurator.sdk import config
 import gradio as gr
-from aiconfigurator.sdk.perf_database import get_all_databases
+from aiconfigurator.sdk.perf_database import get_all_databases, get_database
 from aiconfigurator.sdk import common, models
 import numpy as np
 import plotly.graph_objects as go
@@ -127,8 +127,8 @@ class EventFn:
         
         with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer), LogCapture() as (logger, log_buffer):
             try:        
-                database_dict = get_all_databases()
-                database = database_dict[system_name][backend_name][version]
+                database = copy.deepcopy(get_database(system_name, backend_name, version))
+                assert database is not None
                 database.set_default_sol_mode(common.SOLMode(int(sol_mode)))
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(',')]
                 model_config = config.ModelConfig(tp_size=tp_size,
@@ -176,7 +176,7 @@ class EventFn:
                     gr.update(value=stdout_text+stderr_text))
 
     @staticmethod
-    def run_estimation_ifb(model_name, system_name, backend_name, version, sol_mode, 
+    def run_estimation_agg(model_name, system_name, backend_name, version, sol_mode, 
                            isl, osl, ttft, tpot, 
                            tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, 
                            gemm_quant_mode, kvcache_quant_mode, fmha_quant_mode, 
@@ -188,8 +188,8 @@ class EventFn:
         stderr_buffer = StringIO()
         with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer), LogCapture() as (logger, log_buffer):
             try:        
-                database_dict = get_all_databases()
-                database = database_dict[system_name][backend_name][version]
+                database = get_database(system_name, backend_name, version)
+                assert database is not None
                 database.set_default_sol_mode(common.SOLMode(int(sol_mode)))
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(',')]
                 model_config = config.ModelConfig(tp_size=tp_size,
@@ -229,7 +229,7 @@ class EventFn:
                 backend = get_backend(backend_name)
                 model = get_model(model_name, model_config)
                 session = InferenceSession(model, database, backend)
-                summary = session.find_best_ifb_result_under_constraints(runtime_config=runtime_config, 
+                summary = session.find_best_agg_result_under_constraints(runtime_config=runtime_config, 
                                                                             top_k = 10,
                                                                             max_batch_size = 512,
                                                                             ctx_stride = 512)
@@ -239,7 +239,7 @@ class EventFn:
                     logger.error(f"No result for {model_name} with {tp_size} GPUs under this restriction ttft {ttft}ms, tpot {tpot} ms and memory size. Try to set a larger ttft/tpot limit and use more GPUs.")
 
             except Exception as e:
-                results_df = pd.DataFrame(columns=common.ColumnsIFB)
+                results_df = pd.DataFrame(columns=common.ColumnsAgg)
                 traceback_log = traceback.format_exc()
                 is_error = True
         stdout_text = stdout_buffer.getvalue() + log_buffer.getvalue()
@@ -249,7 +249,7 @@ class EventFn:
 
 
     @staticmethod
-    def run_estimation_ifb_pareto(model_name, system_name, backend_name, version, sol_mode, 
+    def run_estimation_agg_pareto(model_name, system_name, backend_name, version, sol_mode, 
                                   isl, osl, ttft,
                                   num_gpus, tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, 
                                   gemm_quant_mode, kvcache_quant_mode, fmha_quant_mode, 
@@ -261,8 +261,8 @@ class EventFn:
         stderr_buffer = StringIO()
         with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer), LogCapture() as (logger, log_buffer):
             try:        
-                database_dict = get_all_databases()
-                database = database_dict[system_name][backend_name][version]
+                database = copy.deepcopy(get_database(system_name, backend_name, version))
+                assert database is not None
                 database.set_default_sol_mode(common.SOLMode(int(sol_mode)))
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(',')]
                 model_config = config.ModelConfig(gemm_quant_mode=common.GEMMQuantMode[gemm_quant_mode],
@@ -293,7 +293,7 @@ class EventFn:
                 if len(parallel_config_list) == 0:
                     logger.error(f"No valid parallel config found for {model_name} with {tp_size} GPUs. Please double check your parallel configs.")
 
-                results_df = pareto_analysis.ifb_pareto(model_name=model_name, 
+                results_df = pareto_analysis.agg_pareto(model_name=model_name, 
                                         runtime_config=runtime_config,
                                         database=database, 
                                         backend_name=backend_name,
@@ -304,10 +304,10 @@ class EventFn:
                 results_df = results_df.reset_index(drop=True).reset_index()
                 if results_df.size == 0:
                     logger.error(f"No result for {model_name} with {tp_size} GPUs under this restriction ttft {ttft}ms and memory size. Try to set a larger ttft limit and use more GPUs.")
-                title = f'{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_ttft{runtime_config.ttft}_{system_name}_{backend_name}_{version}_{model_config.gemm_quant_mode}_{model_config.kvcache_quant_mode}_{model_config.fmha_quant_mode}_{model_config.moe_quant_mode}_{model_config.comm_quant_mode}_IFB_Pareto'
+                title = f'{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_ttft{runtime_config.ttft}_{system_name}_{backend_name}_{version}_{model_config.gemm_quant_mode}_{model_config.kvcache_quant_mode}_{model_config.fmha_quant_mode}_{model_config.moe_quant_mode}_{model_config.comm_quant_mode}_Agg_Pareto'
                 pareto_html = create_scatter_plot(results_df, 'tokens/s/user', 'tokens/s/gpu', title)
             except Exception as e:
-                results_df = pd.DataFrame(columns=common.ColumnsIFB)
+                results_df = pd.DataFrame(columns=common.ColumnsAgg)
                 traceback_log = traceback.format_exc()
                 is_error = True
         stdout_text = stdout_buffer.getvalue() + log_buffer.getvalue()
@@ -341,12 +341,10 @@ class EventFn:
         stderr_buffer = StringIO()
         with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer), LogCapture() as (logger, log_buffer):
             try:        
-                database_dict = get_all_databases()
-                prefill_database = database_dict[prefill_system_name][prefill_backend_name][prefill_version]
-                decode_database = database_dict[decode_system_name][decode_backend_name][decode_version]
-                # to avoid conflict.
-                if prefill_sol_mode != decode_sol_mode:
-                    decode_database = copy.deepcopy(decode_database)
+                prefill_database = copy.deepcopy(get_database(prefill_system_name, prefill_backend_name, prefill_version))
+                decode_database = copy.deepcopy(get_database(decode_system_name, decode_backend_name, decode_version))
+                assert prefill_database is not None
+                assert decode_database is not None
                 prefill_database.set_default_sol_mode(common.SOLMode(int(prefill_sol_mode)))
                 decode_database.set_default_sol_mode(common.SOLMode(int(decode_sol_mode)))
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(',')]
@@ -537,8 +535,6 @@ class EventFn:
         stderr_buffer = StringIO()
         with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer), LogCapture() as (logger, log_buffer):
             try:
-                database_dict = get_all_databases()
-                
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(',')]
                 prefill_model_config = config.ModelConfig(tp_size=prefill_tp_size,
                                                             pp_size=prefill_pp_size,
@@ -571,7 +567,8 @@ class EventFn:
         
                 # prefill
                 prefill_model = get_model(model_name, prefill_model_config)
-                prefill_database = database_dict[prefill_system_name][prefill_backend_name][prefill_version]
+                prefill_database = copy.deepcopy(get_database(prefill_system_name, prefill_backend_name, prefill_version))
+                assert prefill_database is not None
                 prefill_database.set_default_sol_mode(common.SOLMode(int(prefill_sol_mode)))
                 prefill_backend = get_backend(prefill_backend_name)
                 prefill_session = InferenceSession(prefill_model, prefill_database, prefill_backend)
@@ -588,7 +585,8 @@ class EventFn:
 
                 # decode
                 decode_model = get_model(model_name, decode_model_config)
-                decode_database = database_dict[decode_system_name][decode_backend_name][decode_version]
+                decode_database = copy.deepcopy(get_database(decode_system_name, decode_backend_name, decode_version))
+                assert decode_database is not None
                 decode_database.set_default_sol_mode(common.SOLMode(int(decode_sol_mode)))
                 decode_backend = get_backend(decode_backend_name)
                 decode_session = InferenceSession(decode_model, decode_database, decode_backend)

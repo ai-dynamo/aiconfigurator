@@ -1,0 +1,264 @@
+{%- set name_prefix = name_prefix | default('trtllm') -%}
+{%- set mode = mode | default('disagg') -%}
+
+# router_mode from dynamo_config
+{%- set router_mode = dynamo_config.router_mode | default('') -%}
+{%- set is_kv = router_mode == 'kv' -%}
+
+{%- set name = name | default(name_prefix ~ '-' ~ ('agg' if mode == 'agg' else 'disagg') ~ ('-router' if is_kv else '')) -%}
+
+{%- set k8s_namespace = dynamo_config.k8s_namespace | default('ets-dynamo') -%}
+{%- set k8s_image = dynamo_config.k8s_image | default('nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.4.1') -%}
+{%- set k8s_image_pull_secret = dynamo_config.k8s_image_pull_secret | default('') -%}
+{%- set working_dir = '/workspace/components/backends/trtllm' -%}
+
+{%- set frontend_replicas = frontend_replicas | default(1) -%}
+
+{%- set model_path = dynamo_config.model_path | default(model_name) -%}
+{%- set served_model_name = dynamo_config.served_model_name | default(model_name) -%}
+{%- set disaggregation_strategy = dynamo_config.disaggregation_strategy | default('prefill_first') -%}
+
+{%- set k8s_use_model_cache = dynamo_config.k8s_use_model_cache | default(true) -%}
+{%- set k8s_model_cache_pvc = dynamo_config.k8s_model_cache_pvc | default('model-cache') -%}
+{%- set k8s_model_cache_mount = dynamo_config.k8s_model_cache_mount | default('/workspace/model_cache') -%}
+{%- set k8s_use_engine_cm = dynamo_config.k8s_use_engine_cm | default(true) -%}
+{%- set k8s_engine_cm_name = dynamo_config.k8s_engine_cm_name | default('engine-configs') -%}
+{%- set k8s_engine_cm_mount = dynamo_config.k8s_engine_cm_mount | default('/workspace/engine_configs') -%}
+
+{%- set prefill_workers = prefill_workers | default(1) -%}
+{%- set decode_workers = decode_workers | default(1) -%}
+{%- set prefill_gpu = prefill_gpu | default('1') -%}
+{%- set decode_gpu = decode_gpu | default('1') -%}
+{%- set agg_workers = agg_workers | default(1) -%}
+{%- set agg_gpu = agg_gpu | default('1') -%}
+
+{%- set prefill_engine_args = prefill_engine_args | default('/workspace/engine_configs/prefill_config.yaml') -%}
+{%- set decode_engine_args = decode_engine_args | default('/workspace/engine_configs/decode_config.yaml') -%}
+{%- set agg_engine_args = agg_engine_args | default('/workspace/engine_configs/agg_config.yaml') -%}
+
+{{ '\n' }}
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ name }}
+  namespace: {{ k8s_namespace }}
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: {{ name }}
+      componentType: frontend
+      replicas: {{ frontend_replicas }}
+      extraPodSpec:
+        {% if k8s_use_model_cache %}
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: {{ k8s_model_cache_pvc }}
+        {% endif %}
+        {% if k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s_image_pull_secret }}
+        {% endif %}        
+        mainContainer:
+          image: {{ k8s_image }}
+          imagePullPolicy: IfNotPresent
+          {% if k8s_use_model_cache %}
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ k8s_model_cache_mount }}
+          {% endif %}
+      {% if is_kv %}
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
+      {% endif %}
+
+    {% if mode == 'agg' %}
+    # ===================== AGG =====================
+    TRTLLMWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: {{ name }}
+      componentType: worker
+      replicas: {{ agg_workers }}
+      resources:
+        limits:
+          gpu: "{{ agg_gpu }}"
+      extraPodSpec:
+        volumes:
+          {% if k8s_use_model_cache %}
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: {{ k8s_model_cache_pvc }}
+          {% endif %}
+          {% if k8s_use_engine_cm %}
+          - name: engine-configs
+            configMap:
+              name: {{ k8s_engine_cm_name }}
+          {% endif %}
+          - name: tmp
+            emptyDir:
+              medium: Memory
+              sizeLimit: 10Gi
+        {% if k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s_image_pull_secret }}
+        {% endif %}    
+        mainContainer:
+          image: {{ k8s_image }}
+          workingDir: {{ working_dir }}
+          volumeMounts:
+            {% if k8s_use_model_cache %}
+            - name: model-cache
+              mountPath: {{ k8s_model_cache_mount }}
+            {% endif %}
+            {% if k8s_use_engine_cm %}
+            - name: engine-configs
+              mountPath: {{ k8s_engine_cm_mount }}
+              readOnly: true
+            {% endif %}
+            - name: tmp
+              mountPath: /tmp
+          command: ["/bin/bash","-c"]
+          args:
+            - |
+              set -euo pipefail
+              cd "{{ working_dir }}"
+              args=(
+                --model-path "{{ model_path }}"
+                --served-model-name "{{ served_model_name }}"
+                --extra-engine-args "{{ agg_engine_args }}"
+                {% if is_kv %}
+                --publish-events-and-metrics
+                {% endif %}
+              )
+              exec python3 -m dynamo.trtllm "${args[@]}"
+
+
+
+    {% else %}
+    # ================== DISAGG ==================
+    TRTLLMPrefillWorker:
+      dynamoNamespace: {{ name }}
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: {{ prefill_workers }}
+      resources:
+        limits:
+          gpu: "{{ prefill_gpu }}"
+      extraPodSpec:
+        volumes:
+          {% if k8s_use_model_cache %}
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: {{ k8s_model_cache_pvc }}
+          {% endif %}
+          {% if k8s_use_engine_cm %}
+          - name: engine-configs
+            configMap:
+              name: {{ k8s_engine_cm_name }}
+          {% endif %}
+          - name: tmp
+            emptyDir:
+              medium: Memory
+              sizeLimit: 10Gi
+        {% if k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s_image_pull_secret }}
+        {% endif %}    
+        mainContainer:
+          image: {{ k8s_image }}
+          imagePullPolicy: IfNotPresent
+          workingDir: {{ working_dir }}
+          volumeMounts:
+            {% if k8s_use_model_cache %}
+            - name: model-cache
+              mountPath: {{ k8s_model_cache_mount }}
+            {% endif %}
+            {% if k8s_use_engine_cm %}
+            - name: engine-configs
+              mountPath: {{ k8s_engine_cm_mount }}
+              readOnly: true
+            {% endif %}
+            - name: tmp
+              mountPath: /tmp
+          command: ["/bin/bash","-c"]
+          args:
+            - |
+              set -euo pipefail
+              cd "{{ working_dir }}"
+              args=( 
+                --model-path "{{ model_path }}"
+                --served-model-name "{{ served_model_name }}"
+                --extra-engine-args "{{ prefill_engine_args }}"
+                --disaggregation-mode prefill
+                --disaggregation-strategy "{{ disaggregation_strategy }}"
+                {% if is_kv and disaggregation_strategy == 'prefill_first' %}
+                --publish-events-and-metrics
+                {% endif %}
+              )
+              exec python3 -m dynamo.trtllm "${args[@]}"
+
+
+
+
+    TRTLLMDecodeWorker:
+      dynamoNamespace: {{ name }}
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: {{ decode_workers }}
+      resources:
+        limits:
+          gpu: "{{ decode_gpu }}"
+      extraPodSpec:
+        volumes:
+          {% if k8s_use_model_cache %}
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: {{ k8s_model_cache_pvc }}
+          {% endif %}
+          {% if k8s_use_engine_cm %}
+          - name: engine-configs
+            configMap:
+              name: {{ k8s_engine_cm_name }}
+          {% endif %}
+          - name: tmp
+            emptyDir:
+              medium: Memory
+              sizeLimit: 10Gi
+        {% if k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s_image_pull_secret }}
+        {% endif %}    
+        mainContainer:
+          image: {{ k8s_image }}
+          imagePullPolicy: IfNotPresent
+          workingDir: {{ working_dir }}
+          volumeMounts:
+            {% if k8s_use_model_cache %}
+            - name: model-cache
+              mountPath: {{ k8s_model_cache_mount }}
+            {% endif %}
+            {% if k8s_use_engine_cm %}
+            - name: engine-configs
+              mountPath: {{ k8s_engine_cm_mount }}
+              readOnly: true
+            {% endif %}
+            - name: tmp
+              mountPath: /tmp
+          command: ["/bin/bash","-c"]
+          args:
+            - |
+              set -euo pipefail            
+              cd "{{ working_dir }}"
+              args=(
+                --model-path "{{ model_path }}"
+                --served-model-name "{{ served_model_name }}"
+                --extra-engine-args "{{ decode_engine_args }}"
+                --disaggregation-mode decode
+                --disaggregation-strategy "{{ disaggregation_strategy }}"
+                {% if is_kv and disaggregation_strategy == 'decode_first' %}
+                --publish-events-and-metrics
+                {% endif %}
+              )
+              exec python3 -m dynamo.trtllm "${args[@]}"
+    {% endif %}

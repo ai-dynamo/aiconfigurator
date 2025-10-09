@@ -21,8 +21,8 @@ class BaseBackend(ABC):
 
     Methods:
         run_static: this is common for all backends. It's implemented in this class. If there might be some backend-specific logic, it should be implemented in the subclass.
-        run_ifb: this is backend-specific. It should be implemented in the subclass.
-        find_best_ifb_result_under_constraints: this is backend-specific. It should be implemented in the subclass.
+        run_agg: this is backend-specific. It should be implemented in the subclass.
+        find_best_agg_result_under_constraints: this is backend-specific. It should be implemented in the subclass.
         _get_memory_usage: this is backend-specific. It should be implemented in the subclass.
     """
     def run_static(self, 
@@ -143,24 +143,24 @@ class BaseBackend(ABC):
         return summary
 
     @abstractmethod
-    def run_ifb(self, 
+    def run_agg(self, 
                 model: BaseModel, 
                 database: PerfDatabase, 
                 runtime_config: RuntimeConfig, 
                 **kwargs) -> InferenceSummary:
         """
-        Run the IFB inference.
+        Run the agg inference.
         """
         pass
 
     @abstractmethod
-    def find_best_ifb_result_under_constraints(self, 
+    def find_best_agg_result_under_constraints(self, 
                                                model: BaseModel, 
                                                database: PerfDatabase, 
                                                runtime_config: RuntimeConfig, 
                                                **kwargs) -> InferenceSummary:
         """
-        Find the best IFB result under constraints.
+        Find the best agg result under constraints.
         """
         pass
 

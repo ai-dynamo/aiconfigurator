@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-import tensorrt_llm
 import os
+
+import tensorrt_llm
+import torch
 from cuda import cuda
 from helper import getSMVersion, log_perf
+
 
 def get_mla_gen_pre_test_cases():
     test_cases = []
@@ -13,7 +15,7 @@ def get_mla_gen_pre_test_cases():
     gen_num_tokens = [1,2,4,8,16,32,48,64,80,96,128,160,192,256,320,384,512,768,1024,1536,2048,3072,4096,6144,8192]
     num_heads = [128,64,32,16,8,4,2,1]
     dtype_list = ['float16']
-    if getSMVersion() < 100 and getSMVersion() > 86:
+    if 86 < getSMVersion() < 100:
         dtype_list += ['fp8']
     for num_tokens in gen_num_tokens:
         for num_head in num_heads:
@@ -26,7 +28,7 @@ def get_mla_gen_post_test_cases():
     ctx_num_tokens = [1,2,4,8,16,32,48,64,80,96,128,160,192,256,320,384,512,768,1024,1536,2048,3072,4096,6144,8192,12288,16384,20480]
     num_heads = [128,64,32,16,8,4,2,1]
     dtype_list = ['float16']
-    if getSMVersion() < 100:
+    if 86 < getSMVersion() < 100:
         dtype_list += ['fp8']
     for num_tokens in ctx_num_tokens:
         for num_head in num_heads:

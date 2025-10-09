@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-def get_model(model_name: str, backend: common.BackendName, model_config: config.ModelConfig) -> BaseModel:
+def get_model(model_name: str, backend_name: common.BackendName, model_config: config.ModelConfig) -> BaseModel:
     """
     Get model.
     """
@@ -23,9 +23,9 @@ def get_model(model_name: str, backend: common.BackendName, model_config: config
     if model_config.overwrite_num_layers > 0:
         l = model_config.overwrite_num_layers
 
-    if backend == 'sglang':
+    if backend_name == 'sglang':
         if model_family == 'DEEPSEEK':
-            model = DeepSeekModel_SGLang(topk, num_experts, moe_inter_size, \
+            model = DisaggDeepSeekModel(topk, num_experts, moe_inter_size, \
                          model_name, model_family, l, n, n_kv, d, \
                     hidden, inter, vocab, context, \
                     model_config)
@@ -344,7 +344,7 @@ class DeepSeekModel(BaseModel):
          # used to scale the tpot to reflect mtp effect: 
          # 1. mtp will reduce the overall time by expected_tokens_per_step 
          # 2. mtp module introduces nextn new transformer layers+linear layers (we ignore the linear layers for now)
-         # 3. special correction in ifb step due to we leveraging ctx phase for gen tokens non-attn part
+         # 3. special correction in agg step due to we leveraging ctx phase for gen tokens non-attn part
          # meanwhile, needs to scale the actual bs of generation by nextn, this is covered in inferencesession
         self._mtp_scale_factor = 1./(1+calc_expectation(self._nextn, self._nextn_accept_rates))*(self._nextn+self._num_layers)/self._num_layers
         self._power_law_alpha = 1.01
@@ -370,9 +370,9 @@ class DeepSeekModel(BaseModel):
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8),
                                 ops.GEMM(f'context_downscale_gemm', self._num_layers, 2112, h, gemm_quant_mode), # on every gpu, fused_a
                                 ops.GEMM(f'context_q_b_proj_gemm', self._num_layers, 24576//tp_size, 1536, gemm_quant_mode),
-                                ops.GEMM(f'context_kv_b_proj_gemm', self._num_layers, 32768//tp_size, 512, gemm_quant_mode), # ifb ctx attn part
-                                ops.ContextMLA(f'context_attention', self._num_layers, tp_size, kvcache_quant_mode, fmha_quant_mode), # ifb ctx attn part
-                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, 128*128//tp_size, gemm_quant_mode), # ifb ctx attn part
+                                ops.GEMM(f'context_kv_b_proj_gemm', self._num_layers, 32768//tp_size, 512, gemm_quant_mode), # agg ctx attn part
+                                ops.ContextMLA(f'context_attention', self._num_layers, 128//tp_size, kvcache_quant_mode, fmha_quant_mode), # agg ctx attn part
+                                ops.GEMM(f'context_proj_gemm', self._num_layers, h, 128*128//tp_size, gemm_quant_mode), # agg ctx attn part
                                 ops.ElementWise(f'context_add_norm_2', self._num_layers, 2*h, 2*h, 0.8)])
 
         # shared moe
@@ -408,9 +408,9 @@ class DeepSeekModel(BaseModel):
                                 ops.ElementWise(f'generation_add_norm_1', self._num_layers*self._mtp_scale_factor, 2*h, 2*h, 0.8),
                                 ops.GEMM(f'generation_downscale_gemm', self._num_layers*self._mtp_scale_factor, 2112, h, gemm_quant_mode), # on every gpu
                                 ops.GEMM(f'generation_q_b_proj_gemm', self._num_layers*self._mtp_scale_factor, 24576//tp_size, 1536, gemm_quant_mode),
-                                ops.MLABmm(f'generation_bmm_pre', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=True), # ifb gen attn part
-                                ops.GenerationMLA(f'generation_attention', self._num_layers*self._mtp_scale_factor, tp_size, kvcache_quant_mode), # ifb gen attn part
-                                ops.MLABmm(f'generation_bmm_post', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=False), # ifb gen attn part
+                                ops.MLABmm(f'generation_bmm_pre', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=True), # agg gen attn part
+                                ops.GenerationMLA(f'generation_attention', self._num_layers*self._mtp_scale_factor, 128//tp_size, kvcache_quant_mode), # agg gen attn part
+                                ops.MLABmm(f'generation_bmm_post', self._num_layers*self._mtp_scale_factor, self._num_heads//tp_size, mla_bmm_quant_mode, if_pre=False), # agg gen attn part
                                 ops.GEMM(f'generation_proj_gemm', self._num_layers*self._mtp_scale_factor, h, h//tp_size, gemm_quant_mode),
                                 ops.ElementWise(f'generation_add_norm_2', self._num_layers*self._mtp_scale_factor, 2*h, 2*h, 0.8)])
 
@@ -458,19 +458,14 @@ class DeepSeekModel(BaseModel):
         # a lot of quantization ops
 
 
-class DeepSeekModel_SGLang(BaseModel):
+class DisaggDeepSeekModel(BaseModel):
     """
     DeepSeek V3/R1 uses this model impl.
     """
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 
-        # make sure the paralel width is same
-        # assert(self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size), \
-        #     f"tp_size * attention_dp_size should be equal to moe_tp_size * moe_ep_size"
-        
         assert(num_experts >= self.config.moe_ep_size), f"ep size cannot be larger than num_experts {num_experts}"
-        # assert(self.config.tp_size * self.config.attention_dp_size <= 256), f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} should not be larger than 256"
 
         self._topk = topk
         self._num_experts = num_experts
@@ -500,6 +495,7 @@ class DeepSeekModel_SGLang(BaseModel):
         prefill_attention_dp_size = prefill_moe_ep_size = prefill_node_num * 8
         decode_attention_dp_size = decode_moe_ep_size = decode_node_num * 8
 
+        # attention
         self.context_ops.extend([ops.ContextMLASglang(f'context_attention', self._num_layers, tp_size, kvcache_quant_mode, fmha_quant_mode)])
 
         # shared moe
@@ -507,7 +503,7 @@ class DeepSeekModel_SGLang(BaseModel):
                                 ops.MLP(f'context_shared_expert', self._num_layers, h, self._moe_inter_size, moe_quant_mode)
                                 ])
 
-        # # dispatch tokens to experts, pre-dispatch
+        # dispatch tokens to experts
         self.context_ops.extend([
                                 ops.MoEDispatch(
                                     f'context_moe_pre_dispatch',
@@ -524,29 +520,18 @@ class DeepSeekModel_SGLang(BaseModel):
                                 )
                                 ])
         
-        # moe part
+        # moe 
         self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, prefill_moe_ep_size, moe_quant_mode, workload_distribution, prefill_moe_ep_size, is_context=True)
                                 ])
-
-        # self.context_ops.extend([ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
-        # #####generation part, only generation part is scaled by mtp_scale_factor
+        # attention
         self.generation_ops.extend([ops.GenerationMLASglang(f'generation_attention', self._num_layers*self._mtp_scale_factor, tp_size, kvcache_quant_mode, fmha_quant_mode)])
 
         # shared moe
         self.generation_ops.extend([
                                 ops.MLP(f'generation_shared_expert', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, moe_quant_mode)
                                 ])
-        # dispatch tokens to experts, pre-dispatch
-        # self.generation_ops.extend([
-        #                         ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, True)
-        #                         ])
-   
-        # moe part
-        self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, decode_moe_ep_size, moe_quant_mode, workload_distribution, decode_moe_ep_size, is_context=False),
-                                ])
-
         
-        # dispatch tokens to experts, post-dispatch
+        # dispatch tokens to experts
         self.generation_ops.extend([
                                 ops.MoEDispatch(
                                     f'context_moe_post_dispatch',
@@ -562,20 +547,10 @@ class DeepSeekModel_SGLang(BaseModel):
                                     node_num=decode_node_num,
                                 )
                                 ])
-
-        # dispatch tokens to experts, post-dispatch
-        # self.generation_ops.extend([
-        #                         ops.MoEDispatch(f'generation_moe_post_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts, moe_tp_size, moe_ep_size, attention_dp_size, False)
-        #                         ])
-
-        # self.generation_ops.extend([ops.GEMM(f'generation_logits_gemm', 1*self._mtp_scale_factor, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
-
-        # when tp_size=0, the comm part will be 0
-        # self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
-        # self.context_ops.append(ops.AllReduce('context_ar_2', self._num_layers, h, tp_size))
-        # self.generation_ops.append(ops.AllReduce('generation_ar_1', self._num_layers*self._mtp_scale_factor, h, tp_size))
-        # self.generation_ops.append(ops.AllReduce('generation_ar_2', self._num_layers*self._mtp_scale_factor, h, tp_size))
-
+           
+        # moe part
+        self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, decode_moe_ep_size, moe_quant_mode, workload_distribution, decode_moe_ep_size, is_context=False),
+                                ])
 
         # TODO
         # a lot of quantization ops

@@ -26,10 +26,10 @@ class InferenceSession(object):
     
     Methods:
         run_static (static, static_ctx, static_gen): to support static batching and disagg, returns details of a static run
-        run_ifb (static, static_ctx, static_gen): run ifb inference, returns summary of the perf result with given ifb config and runtime config (concurrency)
-        find_best_ifb_result_under_constraints (static, static_ctx, static_gen):
-            find the best ifb result under constraints, returns summary 
-            which contains all the possible ifb config and perf that matchs SLA.
+        run_agg (static, static_ctx, static_gen): run agg inference, returns summary of the perf result with given agg config and runtime config (concurrency)
+        find_best_agg_result_under_constraints (static, static_ctx, static_gen):
+            find the best agg result under constraints, returns summary 
+            which contains all the possible agg config and perf that matchs SLA.
     """
     def __init__(self, model:models.BaseModel, 
                  database:perf_database.PerfDatabase, 
@@ -56,32 +56,32 @@ class InferenceSession(object):
         """
         return self._backend.run_static(self._model, self._database, runtime_config, mode, stride)
 
-    def run_ifb(self, runtime_config:config.RuntimeConfig, **kwargs) -> InferenceSummary:
+    def run_agg(self, runtime_config:config.RuntimeConfig, **kwargs) -> InferenceSummary:
         """
-        Run ifb inference
+        Run agg inference
 
         Args:
             runtime_config (RuntimeConfig): the runtime config
-            **kwargs: other arguments to run ifb, depends on the backend specific design
+            **kwargs: other arguments to run agg, depends on the backend specific design
 
         Returns:
             InferenceSummary: the summary of the inference result
         """
-        return self._backend.run_ifb(self._model, self._database, runtime_config, **kwargs)
+        return self._backend.run_agg(self._model, self._database, runtime_config, **kwargs)
     
     # Optimization
-    def find_best_ifb_result_under_constraints(self, runtime_config:config.RuntimeConfig, **kwargs) -> InferenceSummary:
+    def find_best_agg_result_under_constraints(self, runtime_config:config.RuntimeConfig, **kwargs) -> InferenceSummary:
         """
-        Find the best ifb result under constraints
+        Find the best agg result under constraints
 
         Args:
             runtime_config (RuntimeConfig): the runtime config
-            **kwargs: other arguments to find the best ifb result under constraints, depends on the backend specific design
+            **kwargs: other arguments to find the best agg result under constraints, depends on the backend specific design
 
         Returns:
-            InferenceSummary: the summary of the inference result, contains all the possible ifb config and perf that matchs SLA.
+            InferenceSummary: the summary of the inference result, contains all the possible agg config and perf that matchs SLA.
         """
-        return self._backend.find_best_ifb_result_under_constraints(self._model, self._database, runtime_config, **kwargs)
+        return self._backend.find_best_agg_result_under_constraints(self._model, self._database, runtime_config, **kwargs)
 
     def run_disagg(self, runtime_config:config.RuntimeConfig, mode:str, stride:int=32) -> InferenceSummary:
         """
@@ -119,7 +119,7 @@ class DisaggInferenceSession(object):
         run_disagg (model_name, runtime_config, prefill_model_config, prefill_batch_size, 
                     prefill_num_worker, decode_model_config, decode_batch_size, decode_num_worker)
             run disagg with given prefill/decode worker info
-        find_best_disagg_result_under_constraints (model_name, runtime_config, prefill_model_config, 
+        find_best_disagg_result_under_constraints (model_name, backend_name, runtime_config, prefill_model_config, 
                     prefill_parallel_config_list, prefill_max_num_tokens, prefill_num_worker_list, 
                     decode_model_config, decode_parallel_config_list, decode_max_num_tokens, 
                     decode_num_worker_list, num_gpu_list)
@@ -249,8 +249,8 @@ class DisaggInferenceSession(object):
         Returns:
             InferenceSummary: the summary of the inference result
         '''
-        prefill_model = models.get_model(model_name, prefill_model_config)
-        decode_model = models.get_model(model_name, decode_model_config)
+        prefill_model = models.get_model(model_name, self._prefill_backend, prefill_model_config)
+        decode_model = models.get_model(model_name, self._decode_backend, decode_model_config)
         prefill_sess = InferenceSession(model=prefill_model,
                                         database=self._prefill_database,
                                         backend=self._prefill_backend)
@@ -264,15 +264,19 @@ class DisaggInferenceSession(object):
         decode_runtime_config = copy.deepcopy(runtime_config)
         decode_runtime_config.batch_size = decode_batch_size
         decode_summary = decode_sess.run_static(mode='static_gen', runtime_config=decode_runtime_config)
+        print(f"prefill_summary: {prefill_summary.get_summary_df()}")
+        print(f"decode_summary: {decode_summary.get_summary_df()}")
         disagg_summary_df = self._get_disagg_summary_df(prefill_summary.get_summary_df(), prefill_num_worker, decode_summary.get_summary_df(), decode_num_worker)
 
         disagg_summary = InferenceSummary(runtime_config=runtime_config)
         disagg_summary.set_summary_df(disagg_summary_df)
+        print(f"disagg_summary_df: {disagg_summary_df}")
         return disagg_summary
     
     # optimization
     def find_best_disagg_result_under_constraints(self, 
                                                  model_name : str, 
+                                                 backend_name : str,
                                                  runtime_config : config.RuntimeConfig, 
                                                  prefill_model_config : config.ModelConfig, 
                                                  prefill_parallel_config_list : List[Tuple[int, int, int, int, int]], 
@@ -295,6 +299,7 @@ class DisaggInferenceSession(object):
 
         Args:
             model_name (str): the model name
+            backend_name (str): the backend name
             runtime_config (RuntimeConfig): the runtime config
             prefill_model_config (ModelConfig): the prefill model config
             prefill_parallel_config_list (List[Tuple[int, int, int, int, int]]): the prefill parallel config list
@@ -355,7 +360,7 @@ class DisaggInferenceSession(object):
                     overwritten_model_config.moe_tp_size = moe_tp_size
                     overwritten_model_config.moe_ep_size = moe_ep_size
                     overwritten_model_config.attention_dp_size = dp_size
-                    model = models.get_model(model_name=model_name, model_config=overwritten_model_config)
+                    model = models.get_model(model_name=model_name, backend_name=backend_name, model_config=overwritten_model_config)
                     if mode == 'static_ctx':
                         sess = InferenceSession(model=model, database=self._prefill_database, backend=self._prefill_backend)
                     else:
@@ -464,4 +469,5 @@ class DisaggInferenceSession(object):
         
         # set final disagg summary
         disagg_summary.set_summary_df(disagg_summary_df)
+        print(f"disagg_summary_df: {disagg_summary_df}")
         return disagg_summary

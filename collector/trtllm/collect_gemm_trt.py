@@ -75,7 +75,9 @@ class GEMMProfiler(trt.IProfiler):
         perf_filename=self._perf_filename)
 
 def run_gemm(gemm_type, use_plugin, m, n, k, device='cuda:0'):
+    device = torch.device(device)
     torch.cuda.set_device(device)
+    torch.set_default_device(device)
 
     #print("testing ", gemm_type, " ", m, " ", n,"  ", k)
 

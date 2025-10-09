@@ -3,7 +3,7 @@
 
 [project]
 name = "aiconfigurator"
-version = "0.2.0"
+version = "0.3.0"
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
@@ -42,22 +42,23 @@ requires-python = ">=3.9"
 
 dependencies = [
     "fastapi>=0.115.12",
-    "gradio==4.44.1",
+    "gradio==5.47.1",
     "jinja2>=3.1.0",
     "matplotlib>=3.9.4",
-    "numpy==1.26.4",
+    "numpy~=2.2.6",
     "orjson>=3.10.16",
     "pandas>=2.2.3",
     "plotext>=5.3.2",
     "plotly>=6.0.1",
     "prettytable>=3.16.0",
-    "pydantic==2.10.6",
+    "pydantic~=2.11.4",
     "pyyaml>=6.0",
     "scipy>=1.13.1",
     "uvicorn>=0.34.2",
     "genai-perf",
     "bokeh",
-    "nvidia-ml-py"
+    "nvidia-ml-py",
+    "munch>=4.0.0"
 ]
 
 [project.optional-dependencies]
@@ -84,7 +85,8 @@ build-backend = "setuptools.build_meta"
 aiconfigurator = "aiconfigurator.main:main"
 
 [tool.setuptools.package-data]
-"aiconfigurator.cli" = ["templates/**/*.yaml", "templates/**/**/*.j2"]
+"aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
+"aiconfigurator.generator" = ["*.yaml", "templates/**/*.j2"]
 "aiconfigurator" = ["systems/*.yaml", "systems/**/*.txt"]
 
 [tool.setuptools.packages.find]

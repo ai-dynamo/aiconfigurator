@@ -11,7 +11,7 @@ def create_pareto_comparison_tab(app_config):
                 label="introduction",
                 value=r'''
                     **Please read the readme tab before using this tab.**  
-                    This mode is used to compare the Pareto frontier of different runs from ifb or disaggregation.  
+                    This mode is used to compare the Pareto frontier of different runs from agg or disaggregation.  
                     Please select the results you want to compare, it allows multiple selections.  
                     The system will draw the Pareto frontier for each selected result.  
                 '''
