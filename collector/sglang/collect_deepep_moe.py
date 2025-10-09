@@ -76,6 +76,7 @@ def sample_power_law(size, alpha, xmin, xmax):
     return inv_cdf
 
 # NOTE: power_law_logits_v3 was copied from aiconfigurator/collector/trtllm/collect_moe.py and modified
+# TODO: restrict the max token per expert to be num_local_token * num_rank 
 def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
     if num_tokens*topk > num_experts:
         num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens*0.8)
@@ -892,7 +893,7 @@ def main(server_args, bench_args: MoEBenchArgs):
                 port_args,
                 bench_args,
                 tp_rank,
-                "power_law", 
+                "uniform", 
                 0.8,
             ),
         )
