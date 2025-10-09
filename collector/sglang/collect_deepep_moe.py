@@ -745,21 +745,21 @@ def run_moe_benchmark(
         prefill_test_cases = get_moe_prefill_test_cases(ep_size, num_rank)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 
-        # results = benchmark_moe_layer_prefill(
-        #     model_runner,
-        #     server_args,
-        #     port_args,
-        #     bench_args,
-        #     rank_print,
-        #     server_args.device,
-        #     tp_rank,
-        #     prefill_test_cases,
-        #     moe_layer,
-        #     actual_num_experts,
-        #     ep_size,
-        #     num_rank,
-        # )
-        # all_results.extend(results)
+        results = benchmark_moe_layer_prefill(
+            model_runner,
+            server_args,
+            port_args,
+            bench_args,
+            rank_print,
+            server_args.device,
+            tp_rank,
+            prefill_test_cases,
+            moe_layer,
+            actual_num_experts,
+            ep_size,
+            num_rank,
+        )
+        all_results.extend(results)
 
         # Calculate decode test cases
         decode_test_cases = get_moe_decode_test_cases()
