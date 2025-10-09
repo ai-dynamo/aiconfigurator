@@ -76,12 +76,13 @@ def sample_power_law(size, alpha, xmin, xmax):
     return inv_cdf
 
 # NOTE: power_law_logits_v3 was copied from aiconfigurator/collector/trtllm/collect_moe.py and modified
+# restrict max tokens per expert to be less than num_tokens
 def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
     if num_tokens*topk > num_experts:
         num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens*0.8)
     else:
         num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
-
+    print(f"num_tokens_per_expert: {num_tokens_per_expert}")
     target_sum = num_tokens * topk
     
     original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
@@ -527,6 +528,9 @@ def benchmark_moe_layer_decode(
             masked_m_list = [masked_m]
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")   
+        print(f"num_token: {num_token}, num_rank: {num_rank}, num_experts: {num_experts}, ep_size: {ep_size}, top_k: {top_k}, masked_m_list: {masked_m_list}")
+        max_masked_m = int(torch.stack([mm.max() for mm in masked_m_list]).max().item())
+        assert max_masked_m <= hidden_states.shape[1], f"max(masked_m_list) {max_masked_m} > hidden_states.shape[1] {hidden_states.shape[1]}"
         scale_tensor = torch.ones(
             num_local_experts, num_max_dispatch_tokens_per_rank * num_rank, scale_hidden_size, 
             device=hidden_states.device, dtype=torch.float32
@@ -820,21 +824,21 @@ def run_moe_benchmark(
         prefill_test_cases = get_moe_prefill_test_cases(ep_size, num_rank)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 
-        results = benchmark_moe_layer_prefill(
-            model_runner,
-            server_args,
-            port_args,
-            bench_args,
-            rank_print,
-            server_args.device,
-            tp_rank,
-            prefill_test_cases,
-            moe_layer,
-            actual_num_experts,
-            ep_size,
-            num_rank,
-        )
-        all_results.extend(results)
+        # results = benchmark_moe_layer_prefill(
+        #     model_runner,
+        #     server_args,
+        #     port_args,
+        #     bench_args,
+        #     rank_print,
+        #     server_args.device,
+        #     tp_rank,
+        #     prefill_test_cases,
+        #     moe_layer,
+        #     actual_num_experts,
+        #     ep_size,
+        #     num_rank,
+        # )
+        # all_results.extend(results)
 
         # Calculate decode test cases
         decode_test_cases = get_moe_decode_test_cases()
@@ -925,7 +929,6 @@ DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/lustre/raplab/clie
 if __name__ == "__main__":
     # Fixed configuration values
     model_path = DEEPSEEK_MODEL_PATH
-    output_path = "/lustre/raplab/client/xutingz/workspace/gitsrc/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
     
     # Create ServerArgs manually with fixed values
     server_args = ServerArgs(
@@ -952,7 +955,7 @@ if __name__ == "__main__":
         num_warmup=3,
         num_iterations=10,
         test_layer=3,
-        num_experts=128,
+        num_experts=16,
     )
 
     logging.basicConfig(
