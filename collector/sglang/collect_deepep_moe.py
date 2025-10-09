@@ -670,9 +670,9 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
         prefill_results = [r for r in all_results if "prefill" in r.phase]
         decode_results = [r for r in all_results if "decode" in r.phase]
         
-        output_path = "/home/scratch.aichenf_wwfo/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
-        context_output_path = os.path.join(output_path, "context_moe_perf.txt")
-        generation_output_path = os.path.join(output_path, "generation_moe_perf.txt")
+        output_path = "/lustre/raplab/client/xutingz/workspace/gitsrc/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
+        context_output_path = os.path.join(output_path, "context_moe_perf_power_law.txt")
+        generation_output_path = os.path.join(output_path, "generation_moe_perf_power_law.txt")
         
         os.makedirs(output_path, exist_ok=True)
         
@@ -816,21 +816,21 @@ def run_moe_benchmark(
         prefill_test_cases = get_moe_prefill_test_cases(ep_size, num_rank)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 
-        # results = benchmark_moe_layer_prefill(
-        #     model_runner,
-        #     server_args,
-        #     port_args,
-        #     bench_args,
-        #     rank_print,
-        #     server_args.device,
-        #     tp_rank,
-        #     prefill_test_cases,
-        #     moe_layer,
-        #     actual_num_experts,
-        #     ep_size,
-        #     num_rank,
-        # )
-        # all_results.extend(results)
+        results = benchmark_moe_layer_prefill(
+            model_runner,
+            server_args,
+            port_args,
+            bench_args,
+            rank_print,
+            server_args.device,
+            tp_rank,
+            prefill_test_cases,
+            moe_layer,
+            actual_num_experts,
+            ep_size,
+            num_rank,
+        )
+        all_results.extend(results)
 
         # Calculate decode test cases
         decode_test_cases = get_moe_decode_test_cases()
