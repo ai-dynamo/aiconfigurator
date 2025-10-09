@@ -75,51 +75,53 @@ def sample_power_law(size, alpha, xmin, xmax):
     inv_cdf = ((xmax**(1-alpha) - xmin**(1-alpha)) * u + xmin**(1-alpha))**(1/(1-alpha))
     return inv_cdf
 
-# NOTE: power_law_logits_v3 was copied from aiconfigurator/collector/trtllm/collect_moe.py and modified
+# NOTE: power_law_logits_v4 was copied from aiconfigurator/collector/trtllm/collect_moe.py and modified
 # restrict max tokens per expert to be less than num_tokens
-def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
-    if num_tokens*topk > num_experts:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens*0.8)
-    else:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
-    print(f"num_tokens_per_expert: {num_tokens_per_expert}")
-    target_sum = num_tokens * topk
-    
-    original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
-    
-    target_distribution = original_distribution * target_sum
-    
-    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
-    
-    current_sum = num_tokens_per_expert.sum().item()
-    delta = target_sum - current_sum
-    if delta != 0:
-        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-        
-        if delta > 0:
-            for i in range(delta):
-                expert_idx = sorted_indices[i % len(sorted_indices)]
-                num_tokens_per_expert[expert_idx] += 1
+def power_law_logits_v4(num_tokens, num_experts, topk, ep, alpha):
+    while True:
+        if num_tokens*topk > num_experts:
+            num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens*0.8)
         else:
-            for i in range(-delta):
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
-                if num_tokens_per_expert[expert_idx] > 0:
-                    num_tokens_per_expert[expert_idx] -= 1
-                else:
-                    num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -=1
-    
-    if len(num_tokens_per_expert) > 1:
-        sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
-        assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
+            num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
+        target_sum = num_tokens * topk
+        
+        original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
+        
+        target_distribution = original_distribution * target_sum
+        
+        num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
+        
+        current_sum = num_tokens_per_expert.sum().item()
+        delta = target_sum - current_sum
+        if delta != 0:
+            sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
+            
+            if delta > 0:
+                for i in range(delta):
+                    expert_idx = sorted_indices[i % len(sorted_indices)]
+                    num_tokens_per_expert[expert_idx] += 1
+            else:
+                for i in range(-delta):
+                    expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
+                    if num_tokens_per_expert[expert_idx] > 0:
+                        num_tokens_per_expert[expert_idx] -= 1
+                    else:
+                        num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -=1
+        
+        if len(num_tokens_per_expert) > 1:
+            sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
+            assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
 
-    with torch.no_grad():
-        conv1d = torch.nn.Conv1d(in_channels=1, out_channels=1, kernel_size=num_experts//ep, stride=num_experts//ep, padding=0, bias=False)
-        conv1d_weights = torch.tensor([1 for _ in range(num_experts//ep)])
-        conv1d.weight.copy_(conv1d_weights)
+        with torch.no_grad():
+            conv1d = torch.nn.Conv1d(in_channels=1, out_channels=1, kernel_size=num_experts//ep, stride=num_experts//ep, padding=0, bias=False)
+            conv1d_weights = torch.tensor([1 for _ in range(num_experts//ep)])
+            conv1d.weight.copy_(conv1d_weights)
 
-    res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
-    max_ep_idx = torch.argmax(res).item()
-    return num_tokens_per_expert.view(ep, num_experts // ep)[max_ep_idx].view(-1)
+        res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
+        max_ep_idx = torch.argmax(res).item()
+        num_tokens_per_expert_rank0 = num_tokens_per_expert.view(ep, num_experts // ep)[max_ep_idx].view(-1)
+        if max(num_tokens_per_expert_rank0) <= num_tokens:
+            return num_tokens_per_expert_rank0
 
 @dataclass
 class MoEBenchArgs:
@@ -210,25 +212,6 @@ def prepare_synthetic_inputs(batch_size, input_len):
 
     return reqs
 
-
-def _maybe_prepare_mlp_sync_batch(batch: ScheduleBatch, model_runner):
-    """Prepare MLP sync batch for DeepEP MoE"""
-    if require_mlp_sync(model_runner.server_args):
-        Scheduler.prepare_mlp_sync_batch_raw(
-            batch,
-            dp_size=model_runner.server_args.dp_size,
-            attn_tp_size=model_runner.server_args.tp_size,
-            tp_group=model_runner.tp_group,
-            get_idle_batch=None,
-            disable_cuda_graph=True,
-            spec_algorithm=SpeculativeAlgorithm.NONE,
-            speculative_num_draft_tokens=None,
-            require_mlp_tp_gather=require_mlp_tp_gather(model_runner.server_args),
-            disable_overlap_schedule=model_runner.server_args.disable_overlap_schedule,
-            enable_two_batch_overlap=False,
-            enable_deepep_moe=True,
-            deepep_mode=DeepEPMode.AUTO,
-        )
 
 
 def benchmark_moe_layer_prefill(
@@ -517,7 +500,7 @@ def benchmark_moe_layer_decode(
 
         # support two distributed mode: power_law and uniform
         if distributed == "power_law":
-            masked_m_list = [power_law_logits_v3(num_token * num_rank, num_experts, top_k, ep_size, power_law_alpha).to(masked_m.dtype).to(torch.device(device)) for _ in range(5)]
+            masked_m_list = [power_law_logits_v4(num_token * num_rank, num_experts, top_k, ep_size, power_law_alpha).to(masked_m.dtype).to(torch.device(device)) for _ in range(5)]
         elif distributed == "uniform":
             # expert size is 256
             base_tokens_per_expert = int(num_token * top_k) * num_rank // 256
@@ -795,19 +778,6 @@ def run_moe_benchmark(
         model_runner = load_model_with_dummy_weights(server_args, port_args, tp_rank)
         reqs = prepare_synthetic_inputs(128, 16)  # Fixed output_len=16
         
-        batch = ScheduleBatch.init_new(
-            reqs=reqs,
-            req_to_token_pool=model_runner.req_to_token_pool,
-            token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
-            tree_cache=None,
-            model_config=model_runner.model_config,
-            enable_overlap=False,
-            spec_algorithm=SpeculativeAlgorithm.NONE,
-            enable_custom_logit_processor=False,  
-        )
-        batch.prepare_for_extend()
-        _maybe_prepare_mlp_sync_batch(batch, model_runner)
-        
         # Get the MoE layer for this expert number
         moe_layer = model_runner.model.model.layers[bench_args.test_layer].mlp
         actual_num_experts = moe_layer.config.n_routed_experts  # Actual number of experts loaded
@@ -866,7 +836,7 @@ def run_moe_benchmark(
         model_config = model_runner.model_config
         
         # Clean up model_runner
-        del model_runner, moe_layer, batch, reqs
+        del model_runner, moe_layer, reqs
         torch.cuda.empty_cache()
 
     except Exception as e:
