@@ -29,7 +29,7 @@ def get_context_mla_test_cases():
                     for tp_size in [1,2,4,8,16,32,64]:
                         if b*s > 32768:
                             continue
-                        # (input_len, batch_size, output_len, kv_cache_dtype, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
+                        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
                         test_cases.append([s,b,1,dtype,n,tp_size,tp_size,64,10,6,True,"context_mla_perf.txt"])
     return test_cases
 
@@ -44,11 +44,12 @@ def get_generation_mla_test_cases():
                     for tp_size in [1,2,4,8,16,32,64]:
                         if b*s > 1024*4096*2*2:
                             continue
-                        # (input_len, batch_size, output_len, kv_cache_dtype, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
+                        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
                         test_cases.append([s-1,b,1,dtype,n,tp_size,tp_size,64,10,6,False,"generation_mla_perf.txt"])
     return test_cases
 
 def run_mla(input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size, tp_size, tokens_per_block, warming_up, test_ite, is_context_phase, perf_filename, device='cuda:0'):
+    device = torch.device(device)
     torch.cuda.set_device(device)
     backend_name = "TRTLLM"
     layer_idx = 0
@@ -182,8 +183,8 @@ def run_mla(input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_
     else:
         num_tokens = batch_size
 
-    compressed_kv = torch.randn([num_tokens, kv_lora_rank]).bfloat16().to(torch.device(device))
-    k_pe = torch.randn([num_tokens, qk_rope_head_dim]).bfloat16().to(torch.device(device))
+    compressed_kv = torch.randn([num_tokens, kv_lora_rank], dtype=torch.bfloat16, device=device)
+    k_pe = torch.randn([num_tokens, qk_rope_head_dim], dtype=torch.bfloat16, device=device)
 
     latent_cache = torch.cat([compressed_kv, k_pe], dim=-1)
 
@@ -192,14 +193,14 @@ def run_mla(input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_
         fused_q = torch.randn([
             num_tokens,
             num_heads * (qk_nope_head_dim + qk_rope_head_dim + qk_nope_head_dim + qk_rope_head_dim + v_head_dim) # 128 128 64
-        ]).cuda().bfloat16()
+        ], device=device, dtype=torch.bfloat16)
         q_pe = None
     else:
         fused_q = torch.randn([
             num_tokens,
             num_heads * (kv_lora_rank + qk_rope_head_dim)
-        ]).cuda().bfloat16()        
-        q_pe = torch.randn([num_tokens, num_heads, qk_rope_head_dim]).cuda().bfloat16()
+        ], device=device, dtype=torch.bfloat16)
+        q_pe = torch.randn([num_tokens, num_heads, qk_rope_head_dim], dtype=torch.bfloat16, device=device)
 
     # dry run
     if is_context_phase:

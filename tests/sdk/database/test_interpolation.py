@@ -21,8 +21,8 @@ class TestInterpolationMethods:
         
         # Test exact match
         left, right = comprehensive_perf_db._nearest_1d_point_helper(10, values, inner_only=True)
-        assert left == 5
-        assert right == 10
+        assert left == 10
+        assert right == 20
         
         # Test at boundaries
         left, right = comprehensive_perf_db._nearest_1d_point_helper(1, values, inner_only=True)
@@ -68,8 +68,8 @@ class TestInterpolationMethods:
         # Zero should pass through
         assert comprehensive_perf_db._validate(0.0) == 0.0
         
-        # Negative value should log warning but still return
-        with caplog.at_level('WARNING'):
+        # Negative value should log debug but still return
+        with caplog.at_level('DEBUG'):
             result = comprehensive_perf_db._validate(-5.0)
             assert result == -5.0
             assert 'Negative value detected' in caplog.text

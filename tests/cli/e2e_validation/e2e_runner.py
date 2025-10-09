@@ -82,11 +82,11 @@ class E2ETestRunner:
             },
             "system": {
                 "models": ["QWEN3_32B"],
-                "systems": ["h100_sxm", "h200_sxm"],
+                "systems": ["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm"],
                 "gpu_configs": [8],
                 "isl_osl_combinations": [(4000, 1000)],
                 "tpot_values": [10],
-                "maxfail": 2
+                "maxfail": 4
             },
             "comprehensive": {
                 "models": ["QWEN3_32B", "LLAMA3.1_8B"],
@@ -157,7 +157,7 @@ class E2ETestRunner:
             "python3", "-m", "pytest",
             "tests/cli/e2e_validation/test_e2e_sweep.py",
             "-v" if verbose else "-q",
-            "--tb=short",
+            "--tb=auto",
             f"--maxfail={maxfail}"
         ]
         
@@ -227,7 +227,7 @@ Examples:
     
     # Selective test filters
     parser.add_argument("--models", nargs="+", help="Models to test")
-    parser.add_argument("--systems", nargs="+", choices=["h100_sxm", "h200_sxm"], help="Systems to test")
+    parser.add_argument("--systems", nargs="+", choices=["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm"], help="Systems to test")
     parser.add_argument("--gpu-configs", nargs="+", type=int, choices=[8, 512], help="GPU configurations")
     parser.add_argument("--isl-osl", nargs="+", help="ISL,OSL combinations (format: 4000,1000)")
     parser.add_argument("--tpot", nargs="+", type=int, choices=[10, 100], help="TPOT values")
