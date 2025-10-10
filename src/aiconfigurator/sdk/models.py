@@ -518,6 +518,7 @@ class DisaggDeepSeekModel(BaseModel):
                                     True,
                                     sms=sms,
                                     node_num=prefill_node_num,
+                                    moe_backend=moe_backend,
                                 )
                                 ])
         
@@ -546,6 +547,7 @@ class DisaggDeepSeekModel(BaseModel):
                                     True,
                                     sms=sms,
                                     node_num=decode_node_num,
+                                    moe_backend=moe_backend,
                                 )
                                 ])
            
