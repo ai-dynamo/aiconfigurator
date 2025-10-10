@@ -1,74 +1,46 @@
-import argparse
-import copy
-import dataclasses
-import itertools
 import json
 import logging
 import multiprocessing
 import os
-import time
-from typing import Tuple, List, Optional
+from typing import List
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 import torch.distributed as dist
-from dataclasses import dataclass, field
 
 from sglang.srt.configs.model_config import ModelConfig
-from sglang.srt.distributed.parallel_state import destroy_distributed_environment
 from sglang.srt.entrypoints.engine import _set_envs_and_config
-
-from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
-from sglang.srt.managers.scheduler import Scheduler
-from sglang.srt.model_executor.cuda_graph_runner import rank0_log
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
-from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils import (
     configure_logger,
     get_bool_env_var,
-    kill_process_tree,
-    require_mlp_sync,
-    require_mlp_tp_gather,
     set_gpu_proc_affinity,
     suppress_other_loggers,
-    BumpAllocator,
 )
-from sglang.srt.layers.moe.utils import DeepEPMode
 from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPNormalOutput, DeepEPLLOutput
 
+DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 
-def get_moe_prefill_test_cases(ep_size, rank):
-    """Get test cases for MoE prefill phase - batch_size and input_len dimensions"""
+def get_moe_prefill_test_cases(rank):
+    """Get test cases for MoE prefill phase"""
     test_cases = []
-
-    num_tokens = [4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384] #4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]  
+    num_tokens = [4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384]
 
     for num_token in sorted(num_tokens):
-
-        # rank = 2 if num_expert == 256 else 2 * 256//num_expert
-        if num_token * 8  < 128:  # tokens per rank
+        if num_token * 8 < 128:
             continue
         if num_token * rank > 256*2048: 
             continue
-        
-        # Add test cases with batch_size and input_len
         test_cases.append(num_token)
     
     return test_cases
 
 def get_moe_decode_test_cases():
-    """Get test cases for MoE decode phase - batch_size and kv_len dimensions"""
-    test_cases = []
-    
-    # Decode parameters - batch_size and kv_len dimensions
-    batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]  # More reasonable batch sizes
-    # batch_sizes = [1/8, 1/4, 1/2]  # More reasonable batch sizes
-    
-    test_cases = batch_sizes
-    
-    return test_cases
+    """Get test cases for MoE decode phase"""
+    batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
+    return batch_sizes
 
 def sample_power_law(size, alpha, xmin, xmax):
     u = torch.rand(size)
@@ -149,15 +121,11 @@ def load_model_with_dummy_weights(server_args, port_args, tp_rank):
     suppress_other_loggers()
     rank_print = print if tp_rank == 0 else lambda *args, **kwargs: None
 
-    # Override model config to load only first 4 layers (we'll test the 4th layer)
-    # Note: n_routed_experts should already be set in server_args.json_model_override_args
     if server_args.load_format == "dummy":
-        # Parse existing override args to preserve n_routed_experts
         existing_override = {}
         if server_args.json_model_override_args:
             existing_override = json.loads(server_args.json_model_override_args)
         
-        # Only override num_hidden_layers, preserve other settings like n_routed_experts
         existing_override["num_hidden_layers"] = 4
         server_args.json_model_override_args = json.dumps(existing_override)
 
@@ -315,7 +283,6 @@ def benchmark_moe_layer_prefill(
             num_recv_tokens_per_expert=num_recv
         )
 
-
         # if tp_rank == 0:
         #     rank_print(f"Prefill setup:")
         #     rank_print(f"  topk_idx: {topk_idx_iter.shape}, device: {topk_idx_iter.device}, dtype: {topk_idx_iter.dtype}")
@@ -341,9 +308,8 @@ def benchmark_moe_layer_prefill(
                 topk_weights=topk_weights_iter.clone(),
                 num_recv_tokens_per_expert=num_recv
             )
-            # print("before moe_impl",topk_idx_iter)
             _ = moe_layer.experts.moe_impl(dispatch_output)
-            # print(t)
+
 
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
@@ -368,7 +334,6 @@ def benchmark_moe_layer_prefill(
                 topk_weights=topk_weights_iter.clone(),
                 num_recv_tokens_per_expert=num_recv
             )
-            # Prefill
             torch.get_device_module(device).synchronize()
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
@@ -385,7 +350,6 @@ def benchmark_moe_layer_prefill(
         profiler.stop()
         torch.cuda.empty_cache()
 
-        # Calculate statistics (keep only average)
         avg_latency_ms = np.mean(gemm_latencies)
         
         if tp_rank == 0:
@@ -426,11 +390,10 @@ def benchmark_moe_layer_decode(
 ) -> List[MoEBenchResult]:
     results = []
     
-    # Clear the pools
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
-    top_k = moe_layer.topk.top_k  # 
-    num_local_experts  = int(num_experts//ep_size)
+    top_k = moe_layer.topk.top_k
+    num_local_experts = int(num_experts//ep_size)
     
     for num_token in decode_test_cases:    
         num_max_dispatch_tokens_per_rank = 128
@@ -480,8 +443,6 @@ def benchmark_moe_layer_decode(
         )
         hidden_states_fp8_tensor = hidden_states.to(torch.float8_e4m3fn)
 
-        # Create dispatch_output_list with independent tensor copies for each entry
-        # Each dispatch_output needs its own copy because moe_impl will dispose/delete the tensors
         topk_idx_empty = torch.empty(0, device=device, dtype=torch.int32)
         topk_weights_empty = torch.empty(0, device=device, dtype=torch.float32)
         
@@ -503,13 +464,10 @@ def benchmark_moe_layer_decode(
         #     print(f"  Token distribution: {[f'Expert {i}: {masked_m[i]} tokens' for i in range(min(5, num_local_experts))]}")
         #     if num_local_experts > 5:
         #         print(f"  ... and {num_local_experts - 5} more experts")
-        #     print(f"  CUDA Graph will be used for benchmarking")
         
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
         
-        # Warmup iterations to capture CUDA Graph
-        # Need to recreate dispatch_output_list for each iteration because moe_impl disposes tensors
         for _ in range(bench_args.num_warmup):
             dispatch_output_list = []
             for masked_m in masked_m_list:
@@ -531,7 +489,6 @@ def benchmark_moe_layer_decode(
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
         
-        # Create fresh dispatch_output_list for CUDA Graph capture
         dispatch_output_list = []
         for masked_m in masked_m_list:
             hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
@@ -604,7 +561,7 @@ def benchmark_moe_layer_decode(
     return results
 
 
-def write_results_to_file(all_results, bench_args, server_args, model_config, rank_print, tp_rank, distributed, power_law_alpha):
+def write_results_to_file(all_results, server_args, rank_print, tp_rank, distributed, power_law_alpha, output_path):
     """Write benchmark results to separate prefill and decode files"""
     if tp_rank != 0:
         return
@@ -613,9 +570,10 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
         prefill_results = [r for r in all_results if "prefill" in r.phase]
         decode_results = [r for r in all_results if "decode" in r.phase]
         
-        output_path = "path/to/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
         context_output_path = os.path.join(output_path, "context_moe_perf.txt")
         generation_output_path = os.path.join(output_path, "generation_moe_perf.txt")
+        device = "cuda"
+        device_name = torch.cuda.get_device_name(device)
         
         os.makedirs(output_path, exist_ok=True)
         
@@ -623,39 +581,35 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
             file_exists = os.path.exists(context_output_path)
             
             with open(context_output_path, 'a' if file_exists else 'w') as f:
-                # Write header only if file doesn't exist
                 if not file_exists:
-                    f.write("framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency\n")
+                    f.write("framework,version,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency\n")
                 
                 for result in prefill_results:
-                    # Use configuration values directly
                     num_experts = result.num_experts
                     hidden_size = 7168
                     inter_size = 2048
-                    top_k = 8  # Default top_k value
+                    top_k = 8
                     op_name = "moe_context"
                     kernel_source = "deepepmoe"
-                    moe_dtype = "fp8"
-                    device_name = "NVIDIA H20-3e"  # Default device name
+                    moe_dtype = "fp8_block"
                     moe_tp_size = 1
                     moe_ep_size = server_args.ep_size if num_experts==256 else int(server_args.ep_size*256//num_experts)
                     num_tokens = result.num_token * moe_ep_size
                     num_experts = 256
-
-                    f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{"uniform"},{result.avg_latency_ms}\n")
+                    
+                    f.write(f"SGLang,0.5.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{"uniform"},{result.avg_latency_ms}\n")
             
             if file_exists:
                 rank_print(f"\nPrefill results appended to {context_output_path}")
             else:
                 rank_print(f"\nPrefill results saved to {context_output_path}")
         
-        # Write decode results to generation_moe_perf.txt
         if decode_results:
             file_exists = os.path.exists(generation_output_path)
             
             with open(generation_output_path, 'a' if file_exists else 'w') as f:
                 if not file_exists:
-                    f.write("framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency\n")
+                    f.write("framework,version,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency\n")
                 
                 for result in decode_results:
                     num_experts = result.num_experts
@@ -664,14 +618,13 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
                     top_k = 8  
                     op_name = "moe_generation"
                     kernel_source = "deepepmoe"
-                    moe_dtype = "fp8"
-                    device_name = "NVIDIA H20-3e"  
+                    moe_dtype = "fp8_block"
                     moe_tp_size = 1
                     moe_ep_size = server_args.ep_size if num_experts==256 else int(server_args.ep_size*256//num_experts)
                     num_tokens = result.num_token * moe_ep_size
                     num_experts = 256
-                    
-                    f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{"power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed},{result.avg_latency_ms}\n")
+
+                    f.write(f"SGLang,0.5.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{"power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed},{result.avg_latency_ms}\n")
             
             if file_exists:
                 rank_print(f"\nDecode results appended to {generation_output_path}")
@@ -690,28 +643,23 @@ def run_moe_benchmark(
     tp_rank: int,
     distributed = "power_law", 
     power_law_alpha = 0.8,
+    output_path = None,
 ):
     """Run the complete MoE benchmark"""
     
-    # Set CPU affinity
     if get_bool_env_var("SGLANG_SET_CPU_AFFINITY"):
         set_gpu_proc_affinity(server_args.tp_size, server_args.nnodes, tp_rank)
 
-    # Configure the logger
     configure_logger(server_args, prefix=f" TP{tp_rank}")
     rank_print = print if tp_rank == 0 else lambda *args, **kwargs: None
 
-    # Check if model has MoE layers and get the specified layer
-    moe_layer_id = bench_args.test_layer  # Use the test_layer from bench_args
-    
-    # Run benchmarks for all configurations
+    moe_layer_id = bench_args.test_layer
     all_results = []
     
     rank_print(f"\n{'='*60}")
     rank_print(f"Testing MoE Layer {moe_layer_id}")
     rank_print(f"{'='*60}")
 
-    # Get the expert number from bench_args
     num_expert = bench_args.num_experts
     
     try:
@@ -719,30 +667,25 @@ def run_moe_benchmark(
         rank_print(f"Testing with {num_expert} experts")
         rank_print(f"{'='*50}")
         
-        # Override model config to set the expert number
         original_json_override = server_args.json_model_override_args
         server_args.json_model_override_args = json.dumps({
             "num_hidden_layers": 4,
             "n_routed_experts": num_expert
         })
         
-        # Load model with the specific expert number
         model_runner = load_model_with_dummy_weights(server_args, port_args, tp_rank)
         
-        # Get the MoE layer for this expert number
         moe_layer = model_runner.model.model.layers[bench_args.test_layer].mlp
-        actual_num_experts = moe_layer.config.n_routed_experts  # Actual number of experts loaded
+        actual_num_experts = moe_layer.config.n_routed_experts
         
         rank_print(f"Loaded model with {actual_num_experts} experts")
         
-        # Restore original json_override
         server_args.json_model_override_args = original_json_override
 
-        # Calculate prefill test cases
         ep_size = server_args.ep_size
         num_local_experts = actual_num_experts // ep_size
         num_rank = ep_size if actual_num_experts == 256 else int(256//actual_num_experts * ep_size)
-        prefill_test_cases = get_moe_prefill_test_cases(ep_size, num_rank)
+        prefill_test_cases = get_moe_prefill_test_cases(num_rank)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 
         results = benchmark_moe_layer_prefill(
@@ -761,7 +704,6 @@ def run_moe_benchmark(
         )
         all_results.extend(results)
 
-        # Calculate decode test cases
         decode_test_cases = get_moe_decode_test_cases()
         rank_print(f"Testing {len(decode_test_cases)} decode configurations...")
 
@@ -783,10 +725,6 @@ def run_moe_benchmark(
         )
         all_results.extend(results)
         
-        # Save model_config before cleaning up model_runner
-        model_config = model_runner.model_config
-        
-        # Clean up model_runner
         del model_runner, moe_layer
         torch.cuda.empty_cache()
 
@@ -796,8 +734,7 @@ def run_moe_benchmark(
         rank_print(f"Traceback: {traceback.format_exc()}")
         return
     
-    # Write results to separate prefill and decode files
-    write_results_to_file(all_results, bench_args, server_args, model_config, rank_print, tp_rank, distributed, power_law_alpha)
+    write_results_to_file(all_results, server_args, rank_print, tp_rank, distributed, power_law_alpha, output_path)
     torch.cuda.empty_cache()
     
     rank_print(f"\n{'='*60}")
@@ -805,7 +742,7 @@ def run_moe_benchmark(
     rank_print(f"{'='*60}")
 
 
-def main(server_args, bench_args: MoEBenchArgs):
+def main(server_args, bench_args: MoEBenchArgs, output_path: str):
     """Main function"""
 
     _set_envs_and_config(server_args)
@@ -823,21 +760,19 @@ def main(server_args, bench_args: MoEBenchArgs):
                 tp_rank,
                 "power_law", 
                 0.8,
+                output_path,
             ),
         )
         proc.start()
         workers.append(proc)
 
-    # Wait for all processes to complete
     for proc in workers:
         proc.join()
         
-    # Check if any process failed
     for i, proc in enumerate(workers):
         if proc.exitcode != 0:
             print(f"Process {i} (tp_rank={i}) failed with exit code {proc.exitcode}")
             
-    # Clean up processes
     for proc in workers:
         if proc.is_alive():
             proc.terminate()
@@ -845,13 +780,11 @@ def main(server_args, bench_args: MoEBenchArgs):
             if proc.is_alive():
                 proc.kill()
 
-DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "path/to/DeepSeek-V3/")
 
 if __name__ == "__main__":
-    # Fixed configuration values
     model_path = DEEPSEEK_MODEL_PATH
+    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
     
-    # Create ServerArgs manually with fixed values
     server_args = ServerArgs(
         model_path=model_path,
         dtype="auto",
@@ -869,14 +802,14 @@ if __name__ == "__main__":
         cuda_graph_max_bs=4,
         disable_cuda_graph=True,
     )
-    
-    # Create BenchArgs with fixed values
+
+    # num_experts: 2, 4, 8, 16, 32, 64, 128, 256 to simulate ep256, ep128, ep64, ep32, ep16, ep8, ep4, ep2, when ep_size is 2
     bench_args = MoEBenchArgs(
         run_name="deepep_moe_test",
         num_warmup=3,
         num_iterations=10,
         test_layer=3,
-        num_experts=16,
+        num_experts=128,
     )
 
     logging.basicConfig(
@@ -884,7 +817,7 @@ if __name__ == "__main__":
         format="%(message)s",
     )
 
-    main(server_args, bench_args)
+    main(server_args, bench_args, output_path)
 
     print("\n" + "="*60)
     print("SCRIPT COMPLETED SUCCESSFULLY")

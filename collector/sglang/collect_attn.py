@@ -21,8 +21,6 @@ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from torch.profiler import profile, ProfilerActivity, record_function
 
-
-# Constants
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 logger = logging.getLogger(__name__)
 
@@ -465,6 +463,8 @@ def output_results(results: List[BenchResult], output_path: str):
     os.makedirs(output_path, exist_ok=True)
     context_output_path = os.path.join(output_path, "context_mla_perf.txt")
     generation_output_path = os.path.join(output_path, "generation_mla_perf.txt")
+    device = "cuda"
+    device_name=torch.cuda.get_device_name(device)
     
     if prefill_results:
         file_exists = os.path.exists(context_output_path)
@@ -482,7 +482,7 @@ def output_results(results: List[BenchResult], output_path: str):
                 kv_cache_dtype = "fp8"
                 tp_size = 1 
                 
-                f.write(f"SGLang,1.0.0,NVIDIA H20-3e,{op_name},{attention_backend},{mla_dtype},{kv_cache_dtype},{num_heads},{result.batch_size},{isl},{tp_size},{step},{result.avg_time_ms}\n")
+                f.write(f"SGLang,0.5.0,{device_name},{op_name},{attention_backend},{mla_dtype},{kv_cache_dtype},{num_heads},{result.batch_size},{isl},{tp_size},{step},{result.avg_time_ms}\n")
         
         if file_exists:
             print(f"\nPrefill results appended to {context_output_path}")
@@ -506,7 +506,7 @@ def output_results(results: List[BenchResult], output_path: str):
                 kv_cache_dtype = "fp8"
                 tp_size = 1  
                 
-                f.write(f"SGLang,1.0.0,NVIDIA H20-3e,{op_name},{attention_backend},{mla_dtype},{kv_cache_dtype},{num_heads},{result.batch_size},{isl},{tp_size},{step},{result.avg_time_ms}\n")
+                f.write(f"SGLang,1.0.0,{device_name},{op_name},{attention_backend},{mla_dtype},{kv_cache_dtype},{num_heads},{result.batch_size},{isl},{tp_size},{step},{result.avg_time_ms}\n")
         
         if file_exists:
             print(f"\nDecode results appended to {generation_output_path}")
