@@ -63,12 +63,65 @@ def get_moe_decode_test_cases():
     test_cases = []
     
     # Decode parameters - batch_size and kv_len dimensions
-    batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]  # More reasonable batch sizes
+    batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]  # More reasonable batch sizes
     # batch_sizes = [1/8, 1/4, 1/2]  # More reasonable batch sizes
     
     test_cases = batch_sizes
     
     return test_cases
+
+def sample_power_law(size, alpha, xmin, xmax):
+    u = torch.rand(size)
+    inv_cdf = ((xmax**(1-alpha) - xmin**(1-alpha)) * u + xmin**(1-alpha))**(1/(1-alpha))
+    return inv_cdf
+
+# NOTE: power_law_logits_v4 was copied from aiconfigurator/collector/trtllm/collect_moe.py and modified
+# restrict max tokens per expert to be less than num_tokens
+def power_law_logits_v4(num_tokens, num_experts, topk, ep, alpha):
+    while True:
+        if num_tokens*topk > num_experts:
+            num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens*0.8)
+        else:
+            num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
+        target_sum = num_tokens * topk
+        
+        original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
+        
+        target_distribution = original_distribution * target_sum
+        
+        num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
+        
+        current_sum = num_tokens_per_expert.sum().item()
+        delta = target_sum - current_sum
+        if delta != 0:
+            sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
+            
+            if delta > 0:
+                for i in range(delta):
+                    expert_idx = sorted_indices[i % len(sorted_indices)]
+                    num_tokens_per_expert[expert_idx] += 1
+            else:
+                for i in range(-delta):
+                    expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
+                    if num_tokens_per_expert[expert_idx] > 0:
+                        num_tokens_per_expert[expert_idx] -= 1
+                    else:
+                        num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -=1
+        
+        if len(num_tokens_per_expert) > 1:
+            sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
+            assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
+
+        with torch.no_grad():
+            conv1d = torch.nn.Conv1d(in_channels=1, out_channels=1, kernel_size=num_experts//ep, stride=num_experts//ep, padding=0, bias=False)
+            conv1d_weights = torch.tensor([1 for _ in range(num_experts//ep)])
+            conv1d.weight.copy_(conv1d_weights)
+
+        res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
+        max_ep_idx = torch.argmax(res).item()
+        num_tokens_per_expert_rank0 = num_tokens_per_expert.view(ep, num_experts // ep)[max_ep_idx].view(-1)
+        if max(num_tokens_per_expert_rank0) <= num_tokens:
+            return num_tokens_per_expert_rank0
 
 @dataclass
 class MoEBenchArgs:
@@ -87,9 +140,6 @@ class MoEBenchResult:
     num_token: int
     phase: str  # "prefill" or "decode"
     avg_latency_ms: float
-    min_latency_ms: float
-    max_latency_ms: float
-    std_latency_ms: float
     num_iterations: int
     num_experts: int
     cuda_graph_used: bool = False
@@ -131,54 +181,10 @@ def load_model_with_dummy_weights(server_args, port_args, tp_rank):
     
     rank_print(f"Model loaded successfully.")
     
-
-    
     if server_args.tp_size > 1:
         dist.barrier()
     
     return model_runner
-
-
-def prepare_synthetic_inputs(batch_size, input_len):
-    """Prepare synthetic inputs for benchmarking"""
-    reqs = []
-    for i in range(batch_size):
-        req = Req(
-            rid=str(i),
-            origin_input_text="",
-            origin_input_ids=list(torch.randint(0, 10000, (input_len,)).tolist()),
-            sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
-        )
-        req.prefix_indices = []
-        req.fill_ids = req.origin_input_ids
-        req.extend_input_len = len(req.fill_ids)
-        req.logprob_start_len = 0
-        req.cached_tokens = 0  
-        req.already_computed = 0  
-        reqs.append(req)
-
-    return reqs
-
-
-def _maybe_prepare_mlp_sync_batch(batch: ScheduleBatch, model_runner):
-    """Prepare MLP sync batch for DeepEP MoE"""
-    if require_mlp_sync(model_runner.server_args):
-        Scheduler.prepare_mlp_sync_batch_raw(
-            batch,
-            dp_size=model_runner.server_args.dp_size,
-            attn_tp_size=model_runner.server_args.tp_size,
-            tp_group=model_runner.tp_group,
-            get_idle_batch=None,
-            disable_cuda_graph=True,
-            spec_algorithm=SpeculativeAlgorithm.NONE,
-            speculative_num_draft_tokens=None,
-            require_mlp_tp_gather=require_mlp_tp_gather(model_runner.server_args),
-            disable_overlap_schedule=model_runner.server_args.disable_overlap_schedule,
-            enable_two_batch_overlap=False,
-            enable_deepep_moe=True,
-            deepep_mode=DeepEPMode.AUTO,
-        )
-
 
 def benchmark_moe_layer_prefill(
     model_runner,
@@ -379,17 +385,12 @@ def benchmark_moe_layer_prefill(
         profiler.stop()
         torch.cuda.empty_cache()
 
-        # Calculate statistics
+        # Calculate statistics (keep only average)
         avg_latency_ms = np.mean(gemm_latencies)
-        min_latency_ms = np.min(gemm_latencies)
-        max_latency_ms = np.max(gemm_latencies)
-        std_latency_ms = np.std(gemm_latencies)
         
         if tp_rank == 0:
             rank_print(f"DeepEP MoE GEMM Results (Prefill):")
-            rank_print(f"  Average latency: {avg_latency_ms:.3f}ms ± {std_latency_ms:.3f}ms")
-            rank_print(f"  Min latency: {min_latency_ms:.3f}ms")
-            rank_print(f"  Max latency: {max_latency_ms:.3f}ms")
+            rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
             
         prefill_result = MoEBenchResult(
             run_name=bench_args.run_name,
@@ -397,9 +398,6 @@ def benchmark_moe_layer_prefill(
             num_token=num_token,
             phase="prefill_gemm_test",
             avg_latency_ms=avg_latency_ms,
-            min_latency_ms=min_latency_ms,
-            max_latency_ms=max_latency_ms,
-            std_latency_ms=std_latency_ms,
             num_iterations=bench_args.num_iterations,
             num_experts=num_experts,
             cuda_graph_used=False
@@ -423,6 +421,8 @@ def benchmark_moe_layer_decode(
     num_experts: int,
     ep_size: int,
     num_rank: int,
+    distributed = "power_law", 
+    power_law_alpha = 0.8,
 ) -> List[MoEBenchResult]:
     results = []
     
@@ -432,11 +432,13 @@ def benchmark_moe_layer_decode(
     top_k = moe_layer.topk.top_k  # 
     num_local_experts  = int(num_experts//ep_size)
     
-    for num_token in decode_test_cases:
-
-        num_local_experts  = int(num_experts/ep_size)
-    
+    for num_token in decode_test_cases:    
         num_max_dispatch_tokens_per_rank = 128
+
+        if num_token > num_max_dispatch_tokens_per_rank:
+            print(f"num_token {num_token} > num_max_dispatch_tokens_per_rank {num_max_dispatch_tokens_per_rank}, skipping")
+            continue
+
         hidden_size = model_runner.model.config.hidden_size
         
         if hidden_size % 128 != 0:
@@ -456,15 +458,33 @@ def benchmark_moe_layer_decode(
         hidden_states_fp8_tensor = hidden_states.to(torch.float8_e4m3fn)
         
         masked_m = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
-        
-        # expert size is 256
-        base_tokens_per_expert = int(num_token * top_k) * num_rank // 256
-        if base_tokens_per_expert == 0:
-            masked_m[:int(num_token * top_k) * num_rank//ep_size] = 1
+
+        # support two distributed mode: power_law and uniform
+        if distributed == "power_law":
+            masked_m_list = [power_law_logits_v4(num_token * num_rank, num_local_experts * num_rank, top_k, num_rank, power_law_alpha).to(masked_m.dtype).to(torch.device(device)) for _ in range(5)]
+        elif distributed == "uniform":
+            # expert size is 256
+            base_tokens_per_expert = int(num_token * top_k) * num_rank // 256
+            if base_tokens_per_expert == 0:
+                masked_m[:int(num_token * top_k) * num_rank//ep_size] = 1
+            else:
+                masked_m[:] = base_tokens_per_expert
+            masked_m_list = [masked_m]
         else:
-            masked_m[:] = base_tokens_per_expert
+            raise ValueError(f"Unsupported distributed mode: {distributed}")   
+        max_masked_m = int(torch.stack([mm.max() for mm in masked_m_list]).max().item())
+        assert max_masked_m <= hidden_states.shape[1], f"max(masked_m_list) {max_masked_m} > hidden_states.shape[1] {hidden_states.shape[1]}"
+        scale_tensor = torch.ones(
+            num_local_experts, num_max_dispatch_tokens_per_rank * num_rank, scale_hidden_size, 
+            device=hidden_states.device, dtype=torch.float32
+        )
+        hidden_states_fp8_tensor = hidden_states.to(torch.float8_e4m3fn)
+
+        # Create dispatch_output_list with independent tensor copies for each entry
+        # Each dispatch_output needs its own copy because moe_impl will dispose/delete the tensors
+        topk_idx_empty = torch.empty(0, device=device, dtype=torch.int32)
+        topk_weights_empty = torch.empty(0, device=device, dtype=torch.float32)
         
-        expected_m = int(max(masked_m)) 
 
         # Debug information (only for rank 0)
         # if tp_rank == 0:
@@ -489,41 +509,48 @@ def benchmark_moe_layer_decode(
         torch.cuda.empty_cache()
         
         # Warmup iterations to capture CUDA Graph
+        # Need to recreate dispatch_output_list for each iteration because moe_impl disposes tensors
         for _ in range(bench_args.num_warmup):
-            scale_tensor = torch.ones(
-                num_local_experts, num_max_dispatch_tokens_per_rank * num_rank, scale_hidden_size, 
-                device=hidden_states.device, dtype=torch.float32
-            )
-            hidden_states_fp8_tensor = hidden_states.to(torch.float8_e4m3fn)
-            dispatch_output = DeepEPLLOutput(
-                hidden_states_fp8=(hidden_states_fp8_tensor, scale_tensor),
-                topk_idx=torch.empty(0, device=device, dtype=torch.int32), 
-                topk_weights=torch.empty(0, device=device, dtype=torch.float32),  
-                masked_m=masked_m,
-                expected_m=expected_m
-            )
-            _ = moe_layer.experts.moe_impl(dispatch_output)
+            dispatch_output_list = []
+            for masked_m in masked_m_list:
+                hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
+                scale_tensor_copy = scale_tensor.clone()
+                
+                output = DeepEPLLOutput(
+                    hidden_states_fp8=(hidden_states_fp8_tensor_copy, scale_tensor_copy),
+                    topk_idx=topk_idx_empty,
+                    topk_weights=topk_weights_empty,
+                    masked_m=masked_m,
+                    expected_m=int(torch.ceil(masked_m.float().mean()).item())
+                )
+                dispatch_output_list.append(output)
+            
+            for dispatch_output in dispatch_output_list:
+                _ = moe_layer.experts.moe_impl(dispatch_output)
         
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
         
-        graph = torch.cuda.CUDAGraph()
-
-        scale_tensor = torch.ones(
-                num_local_experts, num_max_dispatch_tokens_per_rank * num_rank, scale_hidden_size, 
-                device=hidden_states.device, dtype=torch.float32
+        # Create fresh dispatch_output_list for CUDA Graph capture
+        dispatch_output_list = []
+        for masked_m in masked_m_list:
+            hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
+            scale_tensor_copy = scale_tensor.clone()
+            
+            output = DeepEPLLOutput(
+                hidden_states_fp8=(hidden_states_fp8_tensor_copy, scale_tensor_copy),
+                topk_idx=topk_idx_empty,
+                topk_weights=topk_weights_empty,
+                masked_m=masked_m,
+                expected_m=int(torch.ceil(masked_m.float().mean()).item())
             )
-        hidden_states_fp8_tensor = hidden_states.to(torch.float8_e4m3fn)
-        dispatch_output = DeepEPLLOutput(
-            hidden_states_fp8=(hidden_states_fp8_tensor, scale_tensor),
-            topk_idx=torch.empty(0, device=device, dtype=torch.int32),  
-            topk_weights=torch.empty(0, device=device, dtype=torch.float32),  
-            masked_m=masked_m,
-            expected_m=expected_m
-        )
+            dispatch_output_list.append(output)
+        
+        graph = torch.cuda.CUDAGraph()
         
         with torch.cuda.graph(graph):
-            _ = moe_layer.experts.moe_impl(dispatch_output)
+            for dispatch_output in dispatch_output_list:
+                _ = moe_layer.experts.moe_impl(dispatch_output)
         
         graph.replay()
             
@@ -544,27 +571,21 @@ def benchmark_moe_layer_decode(
         start_event.record()
         torch.get_device_module(device).synchronize()
         for i in range(bench_args.num_iterations):
- 
             graph.replay()
 
         torch.get_device_module(device).synchronize()
         end_event.record()
         latency_ms = start_event.elapsed_time(end_event)
 
-        gemm_latencies.append(latency_ms/bench_args.num_iterations)
+        gemm_latencies.append(latency_ms/bench_args.num_iterations/len(masked_m_list))
        
         profiler.stop() 
         
         avg_latency_ms = np.mean(gemm_latencies)
-        min_latency_ms = np.min(gemm_latencies)
-        max_latency_ms = np.max(gemm_latencies)
-        std_latency_ms = np.std(gemm_latencies)
      
         if tp_rank == 0:
             rank_print(f"DeepEP MoE GEMM Results (Decode) - CUDA Graph Enabled:")
-            rank_print(f"  Average latency: {avg_latency_ms:.3f}ms ± {std_latency_ms:.3f}ms")
-            rank_print(f"  Min latency: {min_latency_ms:.3f}ms")
-            rank_print(f"  Max latency: {max_latency_ms:.3f}ms")
+            rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
             
         decode_result = MoEBenchResult(
             run_name=bench_args.run_name,
@@ -572,21 +593,18 @@ def benchmark_moe_layer_decode(
             num_token=num_token,
             phase="decode_gemm_test",
             avg_latency_ms=avg_latency_ms,
-            min_latency_ms=min_latency_ms,
-            max_latency_ms=max_latency_ms,
-            std_latency_ms=std_latency_ms,
             num_iterations=bench_args.num_iterations,
             num_experts=num_experts,
             cuda_graph_used=True
         )
         results.append(decode_result)
-        del hidden_states, hidden_states_fp8_tensor, scale_tensor, dispatch_output
+        del hidden_states, hidden_states_fp8_tensor, scale_tensor, dispatch_output_list
         torch.cuda.empty_cache()
 
     return results
 
 
-def write_results_to_file(all_results, bench_args, server_args, model_config, rank_print, tp_rank):
+def write_results_to_file(all_results, bench_args, server_args, model_config, rank_print, tp_rank, distributed, power_law_alpha):
     """Write benchmark results to separate prefill and decode files"""
     if tp_rank != 0:
         return
@@ -595,7 +613,7 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
         prefill_results = [r for r in all_results if "prefill" in r.phase]
         decode_results = [r for r in all_results if "decode" in r.phase]
         
-        output_path = "/home/scratch.aichenf_wwfo/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
+        output_path = "path/to/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
         context_output_path = os.path.join(output_path, "context_moe_perf.txt")
         generation_output_path = os.path.join(output_path, "generation_moe_perf.txt")
         
@@ -622,10 +640,9 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
                     moe_tp_size = 1
                     moe_ep_size = server_args.ep_size if num_experts==256 else int(server_args.ep_size*256//num_experts)
                     num_tokens = result.num_token * moe_ep_size
-                    distribution = "uniform"
                     num_experts = 256
 
-                    f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{distribution},{result.avg_latency_ms}\n")
+                    f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{"uniform"},{result.avg_latency_ms}\n")
             
             if file_exists:
                 rank_print(f"\nPrefill results appended to {context_output_path}")
@@ -652,10 +669,9 @@ def write_results_to_file(all_results, bench_args, server_args, model_config, ra
                     moe_tp_size = 1
                     moe_ep_size = server_args.ep_size if num_experts==256 else int(server_args.ep_size*256//num_experts)
                     num_tokens = result.num_token * moe_ep_size
-                    distribution = "uniform"
                     num_experts = 256
                     
-                    f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{distribution},{result.avg_latency_ms}\n")
+                    f.write(f"SGLang,1.0.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{"power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed},{result.avg_latency_ms}\n")
             
             if file_exists:
                 rank_print(f"\nDecode results appended to {generation_output_path}")
@@ -672,6 +688,8 @@ def run_moe_benchmark(
     port_args,
     bench_args: MoEBenchArgs,
     tp_rank: int,
+    distributed = "power_law", 
+    power_law_alpha = 0.8,
 ):
     """Run the complete MoE benchmark"""
     
@@ -710,20 +728,6 @@ def run_moe_benchmark(
         
         # Load model with the specific expert number
         model_runner = load_model_with_dummy_weights(server_args, port_args, tp_rank)
-        reqs = prepare_synthetic_inputs(128, 16)  # Fixed output_len=16
-        
-        batch = ScheduleBatch.init_new(
-            reqs=reqs,
-            req_to_token_pool=model_runner.req_to_token_pool,
-            token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
-            tree_cache=None,
-            model_config=model_runner.model_config,
-            enable_overlap=False,
-            spec_algorithm=SpeculativeAlgorithm.NONE,
-            enable_custom_logit_processor=False,  
-        )
-        batch.prepare_for_extend()
-        _maybe_prepare_mlp_sync_batch(batch, model_runner)
         
         # Get the MoE layer for this expert number
         moe_layer = model_runner.model.model.layers[bench_args.test_layer].mlp
@@ -774,6 +778,8 @@ def run_moe_benchmark(
             actual_num_experts,
             ep_size,
             num_rank,
+            distributed, 
+            power_law_alpha,
         )
         all_results.extend(results)
         
@@ -781,7 +787,7 @@ def run_moe_benchmark(
         model_config = model_runner.model_config
         
         # Clean up model_runner
-        del model_runner, moe_layer, batch, reqs
+        del model_runner, moe_layer
         torch.cuda.empty_cache()
 
     except Exception as e:
@@ -791,7 +797,7 @@ def run_moe_benchmark(
         return
     
     # Write results to separate prefill and decode files
-    write_results_to_file(all_results, bench_args, server_args, model_config, rank_print, tp_rank)
+    write_results_to_file(all_results, bench_args, server_args, model_config, rank_print, tp_rank, distributed, power_law_alpha)
     torch.cuda.empty_cache()
     
     rank_print(f"\n{'='*60}")
@@ -815,6 +821,8 @@ def main(server_args, bench_args: MoEBenchArgs):
                 port_args,
                 bench_args,
                 tp_rank,
+                "power_law", 
+                0.8,
             ),
         )
         proc.start()
@@ -837,12 +845,11 @@ def main(server_args, bench_args: MoEBenchArgs):
             if proc.is_alive():
                 proc.kill()
 
-DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/home/scratch.aichenf_wwfo/scripts/deepseek-v3")
+DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "path/to/DeepSeek-V3/")
 
 if __name__ == "__main__":
     # Fixed configuration values
     model_path = DEEPSEEK_MODEL_PATH
-    output_path = "/home/scratch.aichenf_wwfo/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
     
     # Create ServerArgs manually with fixed values
     server_args = ServerArgs(
@@ -869,7 +876,7 @@ if __name__ == "__main__":
         num_warmup=3,
         num_iterations=10,
         test_layer=3,
-        num_experts=128,
+        num_experts=16,
     )
 
     logging.basicConfig(
