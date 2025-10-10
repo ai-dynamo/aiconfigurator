@@ -37,7 +37,6 @@ class AllReduce(Operation):
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 
-
 class P2P(Operation):
     """
     P2P operation.
@@ -332,6 +331,7 @@ class ContextAttention(Operation):
     
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
+
 class GenerationAttention(Operation):
     """
     Generation attention operation.
@@ -505,9 +505,9 @@ class MLP(Operation):
         
         return database.query_mlp(x, self._hidden_size, self._intermediate_size, quant_mode, is_context) * self._scale_factor
      
-
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor    
+
 class GenerationMLASglang(Operation):
     """
     Generation MLA operation for SGLang backend.
@@ -533,7 +533,6 @@ class GenerationMLASglang(Operation):
         
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
-
 
 class ContextMLASglang(Operation):
     """
