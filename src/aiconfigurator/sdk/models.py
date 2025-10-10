@@ -489,6 +489,7 @@ class DisaggDeepSeekModel(BaseModel):
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
         workload_distribution = self.config.workload_distribution
+        moe_backend = self.config.moe_backend
         sms = self.config.sms
         prefill_node_num = self.config.prefill_node_num
         decode_node_num = self.config.decode_node_num
@@ -521,7 +522,7 @@ class DisaggDeepSeekModel(BaseModel):
                                 ])
         
         # moe 
-        self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, prefill_moe_ep_size, moe_quant_mode, workload_distribution, prefill_moe_ep_size, is_context=True)
+        self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, prefill_moe_ep_size, moe_quant_mode, workload_distribution, prefill_moe_ep_size, is_context=True, moe_backend=moe_backend)
                                 ])
         # attention
         self.generation_ops.extend([ops.GenerationMLASglang(f'generation_attention', self._num_layers*self._mtp_scale_factor, tp_size, kvcache_quant_mode, fmha_quant_mode)])
@@ -549,7 +550,7 @@ class DisaggDeepSeekModel(BaseModel):
                                 ])
            
         # moe part
-        self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, decode_moe_ep_size, moe_quant_mode, workload_distribution, decode_moe_ep_size, is_context=False),
+        self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, moe_tp_size, decode_moe_ep_size, moe_quant_mode, workload_distribution, decode_moe_ep_size, is_context=False, moe_backend=moe_backend),
                                 ])
 
         # TODO

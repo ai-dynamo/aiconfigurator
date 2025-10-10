@@ -192,7 +192,7 @@ class FMHAQuantMode(Enum):
     """
     float16 = QuantMapping(0, 1, 'float16')
     fp8 = QuantMapping(0, 2, 'fp8')
-    fp8_block = QuantMapping(1, 2, 'fp8_block')
+    fp8_block = QuantMapping(1, 2, 'fp8_block') # specific for sglang
 
 class KVCacheQuantMode(Enum):
     """

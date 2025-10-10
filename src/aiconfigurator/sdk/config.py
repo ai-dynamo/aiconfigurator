@@ -27,7 +27,7 @@ class ModelConfig:
     sms: int = 12
     prefill_node_num: int = 1
     decode_node_num: int = 1
-
+    moe_backend: str = 'deepep_moe'
 
 @dataclass
 class RuntimeConfig:

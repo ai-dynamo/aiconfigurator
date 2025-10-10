@@ -1611,6 +1611,7 @@ class PerfDatabase(object):
                   quant_mode : common.MoEQuantMode, 
                   workload_distribution : str, 
                   is_context : bool = True,
+                  moe_backend : Optional[str] = None,
                   sol_mode : Optional[common.SOLMode] = None) -> float:
         """
         Query the moe data
@@ -1669,16 +1670,19 @@ class PerfDatabase(object):
                 return lat
 
             elif self.backend == common.BackendName.sglang.value:
-                if is_context:
-                    moe_data = self._moe_data
-                else:
-                    moe_data = self._generation_moe_data
-                moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
-                lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
-                if is_context:
-                    return lat
-                else:
+                # Set default moe_backend if not specified
+                if moe_backend is None:
+                    moe_backend = "deepep_moe"
+                
+                if moe_backend == "deepep_moe":
+                    if is_context:
+                        moe_data = self._moe_data
+                    else:
+                        moe_data = self._generation_moe_data
+
+                    moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                    num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
+                    lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
                     return lat 
 
     def query_mla_bmm(self, 

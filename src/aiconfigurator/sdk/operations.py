@@ -118,7 +118,8 @@ class MoE(Operation):
                  quant_mode: common.MoEQuantMode, 
                  workload_distribution: str, 
                  attention_dp_size: int,
-                 is_context: bool = True) -> None:
+                 is_context: bool = True,
+                 **kwargs) -> None:
         super().__init__(name, scale_factor)
         self._hidden_size = hidden_size
         self._inter_size = inter_size
@@ -130,7 +131,9 @@ class MoE(Operation):
         self._attention_dp_size = attention_dp_size
         self._workload_distribution = workload_distribution
         self._is_context = is_context
+        self._moe_backend = kwargs.get('moe_backend', 'deepep_moe')
         self._weights = self._hidden_size*self._inter_size*self._num_experts*quant_mode.value.memory*3 // self._moe_ep_size // self._moe_tp_size # 3 for ffn1,gate,ffn2; 2 for float16
+    
     def query(self, database:PerfDatabase, **kwargs):
         # attention dp size will scale up the total input tokens. 
         x = kwargs.get('x') * self._attention_dp_size
@@ -145,7 +148,8 @@ class MoE(Operation):
                                  moe_ep_size=self._moe_ep_size, 
                                  quant_mode=quant_mode, 
                                  workload_distribution=self._workload_distribution,
-                                 is_context=self._is_context)*self._scale_factor
+                                 is_context=self._is_context,
+                                 moe_backend=self._moe_backend)*self._scale_factor
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
