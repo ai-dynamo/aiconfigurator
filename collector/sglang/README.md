@@ -1,19 +1,36 @@
 # SGLang Operator Performance Collection Tools
 
-This directory contains three scripts for collecting performance data of DeepSeek model operators for the SGLang framework.
+This directory contains scripts for collecting performance data of **Prefill-Decode (PD) disaggregated** DeepSeek model operators for the SGLang framework.
+
+## Purpose
+
+These scripts are designed to collect operator-level performance data for DeepSeek models in a PD-disaggregated serving architecture. They focus on the three largest modules in DeepSeek models:
+
+1. **Attention (MLA)**: Multi-head Latent Attention mechanism
+2. **MoE**: Mixture of Experts layers
+3. **Shared Expert (MLP)**: Shared Multi-Layer Perceptron layers
+
+The collected performance data can be used for performance modeling, scheduling optimization, and resource allocation in disaggregated serving systems.
 
 ## Overview
 
 - **collect_attn.py**: Collects performance data for DeepSeek Attention (MLA) operators
 - **collect_deepep_moe.py**: Collects performance data for DeepSeek MoE operators
-- **collect_mlp.py**: Collects performance data for MLP operators
+- **collect_mlp.py**: Collects performance data for Shared Expert (MLP) operators
 
 ## Requirements
 
-- Python 3.8+
-- PyTorch with CUDA support
-- SGLang framework
-- DeepSeek model weights (or use dummy weights)
+- SGLang framework: v0.5.0rc0 
+```bash
+docker run -itd --shm-size 32g --gpus all --ipc=host --network=host --name sglang lmsysorg/sglang:v0.5.0rc0-cu126
+```
+- DeepSeek model config (or use dummy weights)
+
+## General Configuration
+
+Modify output_path in each script to your desired location, e.g.:
+output_path = "aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
+
 
 ## 1. Attention Operator Collection (collect_attn.py)
 
@@ -25,20 +42,13 @@ This directory contains three scripts for collecting performance data of DeepSee
 
 ### Usage
 
-#### Basic Run
+#### Basic Run with dummy weight
 ```bash
-cd /home/scratch.aichenf_wwfo/aiconfigurator/collector/sglang
+export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
 python collect_attn.py
 ```
-
-#### Quick Test with Dummy Weights (Recommended)
-```bash
-# Use dummy weights, load only 2 layers, test layer 0
-SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 SGLANG_TEST_LAYER=0 python collect_attn.py
-```
-
 #### Environment Variables
-- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model (default: `/home/scratch.aichenf_wwfo/scripts/deepseek-v3`)
+- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model 
 - `SGLANG_LOAD_FORMAT`: Load format, set to `dummy` to skip weight loading
 - `SGLANG_TEST_NUM_LAYERS`: Load only specified number of layers (with dummy mode)
 - `SGLANG_TEST_LAYER`: Layer index to test (default: 0)
@@ -57,7 +67,7 @@ Results are saved to:
 
 Output format:
 ```
-framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,tp_size,step,latency
+framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,batch_size,isl,tp_size,step,latency
 ```
 
 ## 2. MoE Operator Collection (collect_deepep_moe.py)
@@ -72,10 +82,17 @@ framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_head
 
 #### Basic Run
 ```bash
+export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
 python collect_deepep_moe.py
 ```
 
+#### Environment Variables
+- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model
+
 #### Modify Configuration
+
+**Important**: DeepEP MoE collection requires **at least 2 GPUs** for distributed execution.
+
 Edit the configuration at the bottom of the script:
 ```python
 server_args = ServerArgs(
@@ -92,17 +109,29 @@ bench_args = MoEBenchArgs(
     num_warmup=3,
     num_iterations=10,
     test_layer=3,                # Test layer 3
-    num_experts=16,              # Number of experts: 16, 32, 64, 128, 256
+    num_experts=256,             # Number of experts to simulate different EP configurations
 )
 ```
 
-#### Environment Variables
-- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model
+**Simulating Different EP Configurations**:
+
+The `num_experts` parameter in `MoEBenchArgs` is used to simulate different expert parallel (EP) sizes. For example, when using 2 GPUs with `tp_size=2` and `ep_size=2`:
+
+- `num_experts=256` → simulates **EP 2** (256 experts / 2 = 128 experts per GPU)
+- `num_experts=128` → simulates **EP 4** (128 experts / 4 = 32 experts per GPU)
+- `num_experts=64` → simulates **EP 8** (64 experts / 8 = 8 experts per GPU)
+- `num_experts=32` → simulates **EP 16** (32 experts / 16 = 2 experts per GPU)
+- `num_experts=16` → simulates **EP 32**
+- `num_experts=8` → simulates **EP 64**
+- `num_experts=4` → simulates **EP 128**
+- `num_experts=2` → simulates **EP 256** (2 experts / 256 = minimal experts per GPU)
+
+The actual `moe_ep_size` is automatically calculated based on the relationship between `num_experts` and the base EP size (256).
 
 ### Test Parameters
 - Number of experts: Configurable (suggested: 16, 32, 64, 128, 256)
 - Number of tokens: 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384
-- Distribution mode: `power_law` (default) or `uniform`
+- Distribution mode: `power_law`  or `uniform`
 
 ### Output
 Results are saved to:
@@ -111,7 +140,7 @@ Results are saved to:
 
 Output format:
 ```
-framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency
+framework,version,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency
 ```
 
 ## 3. MLP Operator Collection (collect_mlp.py)
@@ -125,11 +154,12 @@ framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,
 
 #### Basic Run
 ```bash
+export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
 python collect_mlp.py
 ```
 
 #### Environment Variables
-- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model (default: `/home/scratch.aichenf_wwfo/scripts/deepseek-v3`)
+- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model (default: `/deepseek-v3`)
 
 ### Test Parameters
 The script automatically tests the following configurations:
@@ -140,85 +170,11 @@ The script automatically tests the following configurations:
 
 ### Output
 Results are saved to:
-- `prefill_mlp_perf.txt`: Prefill phase performance data
-- `generation_mlp_perf.txt`: Decode phase performance data
+- `context_mlp_perf.txt`: Context phase performance data
+- `generation_mlp_perf.txt`: Generation phase performance data
 
 Output format:
 ```
 framework,version,device,op_name,kernel_source,quant_type,num_token,hidden_size,intermediate_size,avg_ms
 ```
 
-## General Configuration
-
-### Modify Output Path
-Find the `output_path` variable in each script and modify it:
-
-**collect_attn.py (line 606):**
-```python
-output_path = "/home/scratch.aichenf_wwfo/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
-```
-
-**collect_deepep_moe.py (line 616):**
-```python
-output_path = "path/to/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
-```
-
-**collect_mlp.py (line 409):**
-```python
-output_path = "/home/scratch.aichenf_wwfo/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
-```
-
-### Adjust Test Parameters
-The `get_*_test_cases()` function in each script defines the test cases and can be modified as needed:
-- `get_attention_test_cases()` in collect_attn.py
-- `get_moe_prefill_test_cases()` / `get_moe_decode_test_cases()` in collect_deepep_moe.py
-- `get_mlp_test_cases()` in collect_mlp.py
-
-### Warmup and Iterations
-Adjust in the configuration section of each script:
-```python
-num_warmup = 3      # Number of warmup iterations
-num_iterations = 10 # Number of test iterations
-```
-
-## Recommended Workflow
-
-1. **Quick Verification**: Use dummy weights for fast testing
-   ```bash
-   SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 python collect_attn.py
-   python collect_mlp.py
-   python collect_deepep_moe.py
-   ```
-
-2. **Full Testing**: Use real weights for complete performance testing
-   ```bash
-   export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-   python collect_attn.py
-   python collect_mlp.py
-   python collect_deepep_moe.py
-   ```
-
-3. **Result Analysis**: Check the performance data files in the output directory
-
-## Notes
-
-1. **Memory Limits**: Some configuration combinations may exceed GPU memory; the scripts will automatically skip these configurations
-2. **Parallel Execution**: The MoE script supports multi-GPU parallelism via `tp_size` and `ep_size` configuration
-3. **CUDA Graph**: Decode phase uses CUDA Graph by default for more accurate performance data
-4. **Result Appending**: Output files support append mode; multiple runs will not overwrite previous results
-
-## Troubleshooting
-
-### Issue: CUDA Out of Memory
-- Solution: Reduce the test range for batch size or sequence length
-- Use dummy weights to reduce model memory usage
-
-### Issue: Distributed Initialization Failure
-- Solution: Scripts automatically clean up distributed environment; if issues persist, restart the Python process
-
-### Issue: Slow Model Loading
-- Solution: Use `SGLANG_LOAD_FORMAT=dummy` to skip weight loading
-
-## Contact
-
-For questions or suggestions, please contact the development team.
