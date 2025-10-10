@@ -83,20 +83,6 @@ class InferenceSession(object):
         """
         return self._backend.find_best_agg_result_under_constraints(self._model, self._database, runtime_config, **kwargs)
 
-    def run_disagg(self, runtime_config:config.RuntimeConfig, mode:str, stride:int=32) -> InferenceSummary:
-        """
-        Run disaggregated inference with different batch sizes for prefill and decode
-
-        Args:
-            runtime_config (RuntimeConfig): the runtime config with batch_size for prefill and decode_bs for decode
-            mode (str): the mode to run inference, 'disagg'
-            stride (int): the stride is used to accelerate the estimation
-
-        Returns:
-            InferenceSummary: the summary of the inference result
-        """
-        return self._backend.run_disagg(self._model, self._database, runtime_config, mode, stride)
-
     
 class DisaggInferenceSession(object):
     '''
@@ -264,13 +250,10 @@ class DisaggInferenceSession(object):
         decode_runtime_config = copy.deepcopy(runtime_config)
         decode_runtime_config.batch_size = decode_batch_size
         decode_summary = decode_sess.run_static(mode='static_gen', runtime_config=decode_runtime_config)
-        print(f"prefill_summary: {prefill_summary.get_summary_df()}")
-        print(f"decode_summary: {decode_summary.get_summary_df()}")
         disagg_summary_df = self._get_disagg_summary_df(prefill_summary.get_summary_df(), prefill_num_worker, decode_summary.get_summary_df(), decode_num_worker)
 
         disagg_summary = InferenceSummary(runtime_config=runtime_config)
         disagg_summary.set_summary_df(disagg_summary_df)
-        print(f"disagg_summary_df: {disagg_summary_df}")
         return disagg_summary
     
     # optimization
@@ -469,5 +452,4 @@ class DisaggInferenceSession(object):
         
         # set final disagg summary
         disagg_summary.set_summary_df(disagg_summary_df)
-        print(f"disagg_summary_df: {disagg_summary_df}")
         return disagg_summary
