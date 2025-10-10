@@ -758,7 +758,7 @@ def main(server_args, bench_args: MoEBenchArgs, output_path: str):
                 port_args,
                 bench_args,
                 tp_rank,
-                "power_law", 
+                "uniform", 
                 0.8,
                 output_path,
             ),
