@@ -139,12 +139,12 @@ def disagg_pareto(model_name: str,
                   prefill_backend_name: str, 
                   prefill_model_config: config.ModelConfig, 
                   prefill_parallel_config_list: list[list[int]], 
-                  prefill_correction_scale: float,
+                  prefill_latency_correction_scale: float,
                   decode_database: PerfDatabase, 
                   decode_backend_name: str, 
                   decode_model_config: config.ModelConfig, 
                   decode_parallel_config_list: list[list[int]], 
-                  decode_correction_scale: float,
+                  decode_latency_correction_scale: float,
                   **kwargs) -> pd.DataFrame:
     """
     Find Pareto front for Disaggregated Inference.
@@ -157,12 +157,12 @@ def disagg_pareto(model_name: str,
         prefill_backend_name: prefill backend name
         prefill_model_config: prefill model config
         prefill_parallel_config_list: prefill parallel config list
-        prefill_correction_scale: prefill correction scale
+        prefill_latency_correction_scale: prefill latency correction scale
         decode_database: decode database
         decode_backend_name: decode backend name
         decode_model_config: decode model config
         decode_parallel_config_list: decode parallel config list
-        decode_correction_scale: decode correction scale
+        decode_latency_correction_scale: decode latency correction scale
         **kwargs: other arguments
         prefill_max_num_tokens: max number of tokens for prefill worker, in kwargs
         decode_max_num_tokens: max number of tokens for decode worker, in kwargs
@@ -199,7 +199,7 @@ def disagg_pareto(model_name: str,
     decode_backend = get_backend(decode_backend_name)
 
     disagg_sess = DisaggInferenceSession(prefill_database, prefill_backend, decode_database, decode_backend)
-    disagg_sess.set_correction_scales(prefill_correction_scale, decode_correction_scale)
+    disagg_sess.set_latency_correction_scales(prefill_latency_correction_scale, decode_latency_correction_scale)
 
     prefill_max_num_tokens = kwargs.get('prefill_max_num_tokens', 16384)
     decode_max_num_tokens = kwargs.get('decode_max_num_tokens', 512)
@@ -411,14 +411,15 @@ def get_best_configs_under_tpot_constraint(
     total_gpus: int,
     pareto_df: pd.DataFrame, 
     target_tpot: float,
-    top_n: int = 1
+    top_n: int = 1,
+    group_by: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Finds the best actual config from a Pareto frontier DataFrame
+    Finds the best actual config from a Pareto DataFrame
     that meets the target_tpot constraint (tpot <= target_tpot)
     and maximizes 'tokens/s/gpu'.
     Args:
-        pareto_df: The Pareto frontier DataFrame.
+        pareto_df: The Pareto DataFrame.
         target_tpot: The target TPOT in ms.
     Returns:
         A DataFrame containing the best config that meets the target_tpot constraint.
@@ -441,6 +442,9 @@ def get_best_configs_under_tpot_constraint(
         # compute achieved cluster-scale tokens/s/gpu
         candidate_configs['tokens/s/gpu_cluster'] = candidate_configs['tokens/s/gpu'] * \
             (total_gpus // candidate_configs['num_total_gpus']) * candidate_configs['num_total_gpus'] / total_gpus
+        if group_by is not None:
+            top_indexes = candidate_configs.groupby(group_by)['tokens/s/gpu_cluster'].idxmax()
+            candidate_configs = candidate_configs.loc[top_indexes]
         candidate_configs = candidate_configs.sort_values(by='tokens/s/gpu_cluster', ascending=False).head(top_n).reset_index(drop=True)
         logger.debug(f"actual replica-level throughputs: {candidate_configs['tokens/s/gpu'].iloc[0]:.2f} vs. actual cluster-level throughputs: {candidate_configs['tokens/s/gpu_cluster'].iloc[0]:.2f}")        
         return candidate_configs

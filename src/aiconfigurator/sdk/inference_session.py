@@ -41,7 +41,7 @@ class InferenceSession(object):
         self._database = database
         self._backend = backend
 
-    def run_static(self, runtime_config:config.RuntimeConfig, mode:str, stride:int=32) -> InferenceSummary :
+    def run_static(self, runtime_config:config.RuntimeConfig, mode:str, stride:int=32, latency_correction_scale:float=1.0) -> InferenceSummary :
         """
         Run static inference
 
@@ -54,7 +54,7 @@ class InferenceSession(object):
         Returns:
             InferenceSummary: the summary of the inference result
         """
-        return self._backend.run_static(self._model, self._database, runtime_config, mode, stride)
+        return self._backend.run_static(self._model, self._database, runtime_config, mode, stride, latency_correction_scale)
 
     def run_agg(self, runtime_config:config.RuntimeConfig, **kwargs) -> InferenceSummary:
         """
@@ -110,7 +110,7 @@ class DisaggInferenceSession(object):
                     decode_model_config, decode_parallel_config_list, decode_max_num_tokens, 
                     decode_num_worker_list, num_gpu_list)
             find the best disagg result under constraints
-        set_correction_scales (prefill_correction_scale, decode_correction_scale):
+        set_latency_correction_scales (prefill_latency_correction_scale, decode_latency_correction_scale):
             set the correction scales for better alignment with real system
     '''
     def __init__(self, 
@@ -127,15 +127,21 @@ class DisaggInferenceSession(object):
         self._decode_backend = decode_backend
 
         # allow user to set correction scales for better alignment with real system
-        self._prefill_correction_scale = 1.0
-        self._decode_correction_scale = 1.0
+        # now the corection scales are used to correct the latency, not throughput, corrected latency = latency * correction_scale
+        self._prefill_latency_correction_scale = 1.0
+        self._decode_latency_correction_scale = 1.0
 
-    def set_correction_scales(self, prefill_correction_scale:float, decode_correction_scale:float):
+        # comes from pipeline bubble, especially when benchmarking with concurrency
+        self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR = 0.9
+        # comes from not saturating the batchsize slot of decode worker
+        self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR = 0.92
+
+    def set_latency_correction_scales(self, prefill_latency_correction_scale:float, decode_latency_correction_scale:float):
         """
         Set the correction scales for better alignment with real system
         """
-        self._prefill_correction_scale = prefill_correction_scale
-        self._decode_correction_scale = decode_correction_scale
+        self._prefill_latency_correction_scale = prefill_latency_correction_scale
+        self._decode_latency_correction_scale = decode_latency_correction_scale
 
     def _get_disagg_summary_df(self, prefill_summary_df:pd.DataFrame, 
                                prefill_num_worker:int, 
@@ -144,7 +150,8 @@ class DisaggInferenceSession(object):
         """
         Get the disagg summary df based on prefill and decode summary df
         """
-        seq_s = min(prefill_summary_df['seq/s']*prefill_num_worker*self._prefill_correction_scale, decode_summary_df['seq/s']*decode_num_worker*self._decode_correction_scale)
+        seq_s = min(prefill_summary_df['seq/s']*prefill_num_worker*self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR, 
+        decode_summary_df['seq/s']*decode_num_worker*self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR)
         prefill_gpus = prefill_summary_df['pp']*prefill_summary_df['tp']*prefill_summary_df['dp']
         decode_gpus = decode_summary_df['pp']*decode_summary_df['tp']*decode_summary_df['dp']
         seq_s_gpu = seq_s / (prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker)
@@ -295,36 +302,51 @@ class DisaggInferenceSession(object):
         Returns:
             Optional[InferenceSummary]: the summary of the inference result, contains all the possible disagg config and perf that matchs SLA.
         '''
-        def match_workers(prefill_throughput:float, 
-                          prefill_gpus:int, 
-                          decode_throughput:float, 
-                          decode_gpus:int, 
-                          prefill_num_worker_list:List[int], 
-                          decode_num_worker_list:List[int], 
-                          num_gpu_list:Optional[List[int]]) -> Tuple[int, int]:
+
+        def _match_workers(prefill_throughput:float, 
+                            prefill_gpus:int, 
+                            decode_throughput:float, 
+                            decode_gpus:int, 
+                            prefill_num_worker_list:List[int], 
+                            decode_num_worker_list:List[int], 
+                            num_gpu_list:Optional[List[int]],
+                            rate_matching_prefill_degradation_factor:float,
+                            rate_matching_decode_degradation_factor:float) -> Tuple[int, int]:
             """
             Match the prefill and decode workers, return the best prefill and decode num worker
             """
             prefill_opt_num_worker, decode_opt_num_worker = -1, -1
             throughput_per_gpu_max = 0
-            corrected_prefill_throughput = prefill_throughput * self._prefill_correction_scale
-            corrected_decode_throughput = decode_throughput * self._decode_correction_scale
-            for prefill_num_worker in prefill_num_worker_list:
-                for decode_num_worker in decode_num_worker_list:
+            for decode_num_worker in decode_num_worker_list:
+                for prefill_num_worker in prefill_num_worker_list:
                     num_gpu = prefill_gpus*prefill_num_worker + decode_gpus*decode_num_worker
                     if num_gpu_list is not None and num_gpu not in num_gpu_list:
                         continue
-                    throughput_per_gpu = min(corrected_prefill_throughput * prefill_num_worker, corrected_decode_throughput * decode_num_worker) / (prefill_gpus*prefill_num_worker + decode_gpus*decode_num_worker)
+
+                    prefill_throughput_corrected = prefill_throughput * prefill_num_worker * rate_matching_prefill_degradation_factor
+                    decode_throughput_corrected = decode_throughput * decode_num_worker * rate_matching_decode_degradation_factor
+
+                    # criteria 1, try to make prefill_throughput larger than decode_throughput
+                    #   other wise, decode bs cannot be achieved and decode throughput cannot be achieved as well.
+                    #if prefill_throughput < decode_throughput:
+                    #    continue
+
+                    # criteria 2, try to make the throughput per gpu larger
+                    throughput_per_gpu = min(prefill_throughput_corrected, decode_throughput_corrected) / num_gpu
+
                     if  throughput_per_gpu > throughput_per_gpu_max:
                         throughput_per_gpu_max = throughput_per_gpu
                         prefill_opt_num_worker, decode_opt_num_worker = prefill_num_worker, decode_num_worker
+
             return prefill_opt_num_worker, decode_opt_num_worker
-        
-        def get_summary_df(model_config:config.ModelConfig, 
+
+
+        def _get_summary_df(model_config:config.ModelConfig, 
                            parallel_config_list:List[Tuple[int, int, int, int, int]], 
                            b_list:List[int], 
                            runtime_config:config.RuntimeConfig, 
-                           mode:str) -> pd.DataFrame:
+                           mode:str,
+                           latency_correction_scale:float = 1.0) -> pd.DataFrame:
             """
             Get all worker candidates based on give search space
             """
@@ -350,7 +372,7 @@ class DisaggInferenceSession(object):
                     for b in b_list:
                         overwritten_runtime_config = copy.deepcopy(runtime_config)
                         overwritten_runtime_config.batch_size = b
-                        summary = sess.run_static(mode=mode, runtime_config=overwritten_runtime_config)
+                        summary = sess.run_static(mode=mode, runtime_config=overwritten_runtime_config, latency_correction_scale=latency_correction_scale)
                         if not summary.check_oom():
                             summary_df = pd.concat([summary_df, summary.get_summary_df()], axis=0, ignore_index=True)
                         else: # larger b will always OOM
@@ -359,8 +381,101 @@ class DisaggInferenceSession(object):
                     logger.error(f"Error getting candidate workers with parallel config: tp={tp_size}, pp={pp_size}, dp={dp_size}, moe_tp={moe_tp_size}, moe_ep={moe_ep_size} skip this combination: {traceback.format_exc()}")
                     continue
             return summary_df
+        
 
-        def find_best_result_under_constraints(ttft:float, 
+        def _find_best_result_under_constraints_with_diversity(ttft:float, 
+                                               tpot:float, 
+                                               prefill_summary_df:pd.DataFrame, 
+                                               decode_summary_df:pd.DataFrame, 
+                                               return_top_k:int, 
+                                               num_gpu_list:Optional[List[int]],
+                                               rate_matching_prefill_degradation_factor:float,
+                                               rate_matching_decode_degradation_factor:float) -> InferenceSummary: 
+            """
+            Find the best result under constraints with diversity
+            """
+
+            # 1. different from find_best_result_under_constraints, we need to find the best result with diversity for decode.
+            #   diversity means we should categorize the decode summary df into different categories based on parallelism
+            #   (we can use the parallel key in the df).
+            #   do the rate matching and sort the result by category - throughput.
+            # 2. for prefill, follow two rules: high throughput, if at same level, choose the one with small batchsize.
+            #   add one func for correct ttft (we have some fomula, just leave it blank for now)
+            # 3. prefill/decode correction are already applied to workers. 
+            #   Additioanl correction can be a degradation factor for the final result during the rate matching process.
+            # 4. rate matching. The prefill throughput should be 1.x larger than the decode throughput. 1.x is an empirical value.
+            #   Default is 1.1.
+
+            DECODE_FILTER_RATIO_MIN = 0.0
+            DECODE_FILTER_RATIO_MAX = 1.0
+            MAX_DECODE_WORKERS_PER_CATEGORY = 16
+            MAX_PREFILL_WORKERS = 32
+
+            # only ttft will be corrected here, other latency and throughput will not be corrected.
+            # concurrency / num_prefill_workers = local_concurrency(lc); N x concurrency requests
+            # formula = (lc * (lc+1) / 2 + lc * (N-1) )/lc/N
+            # if we use N=10, it's lc/20+0.95. assume lc can be 15-20, 1.8 is a reasonable correction factor.
+            # as we need to get the lc after rate matching, we cannot get the exact value now. 
+            # Let's make it simple to do pre-correction instead of post-correction.
+            correction_factor = 1.8  # let's make it simple for now.
+            prefill_candidates = prefill_summary_df.assign(
+                                            ttft=prefill_summary_df['ttft'] * correction_factor)
+
+            prefill_candidates = prefill_candidates[prefill_candidates['context_latency'] < ttft]
+            if len(prefill_candidates) == 0:
+                logger.debug(f"No prefill worker candidates found for ttft {ttft}ms.")
+                return None
+            prefill_candidates = prefill_candidates.sort_values(by=['seq/s/gpu', 'global_bs'], ascending=[False, True]).reset_index(drop=True).head(MAX_PREFILL_WORKERS)
+
+            decode_candidates = decode_summary_df[(decode_summary_df['tpot'] < tpot*DECODE_FILTER_RATIO_MAX) & (decode_summary_df['tpot'] > tpot * DECODE_FILTER_RATIO_MIN)].copy()
+            if len(decode_candidates) == 0:
+                logger.debug(f"No decode worker candidates found for tpot {tpot}ms.")
+                return None
+
+            disagg_summary_df_list: List[pd.DataFrame] = []
+            for parallel_value, parallel_group in decode_candidates.groupby('parallel'):
+                parallel_group_sorted = parallel_group.sort_values(by=['seq/s/gpu'], ascending=[False]).reset_index(drop=True).head(MAX_DECODE_WORKERS_PER_CATEGORY)
+                category_results: List[pd.DataFrame] = []
+                for _, decode_worker in parallel_group_sorted.iterrows():
+                    decode_throughput = float(decode_worker['seq/s'])
+                    decode_gpus = decode_worker['num_total_gpus']
+                    for _, prefill_worker in prefill_candidates.iterrows():
+                        prefill_throughput = float(prefill_worker['seq/s'])
+                        prefill_gpus = prefill_worker['num_total_gpus']
+                        prefill_num_worker, decode_num_worker = _match_workers(
+                            prefill_throughput=prefill_throughput,
+                            prefill_gpus=prefill_gpus,
+                            decode_throughput=decode_throughput,
+                            decode_gpus=decode_gpus,
+                            prefill_num_worker_list=prefill_num_worker_list,
+                            decode_num_worker_list=decode_num_worker_list,
+                            num_gpu_list=num_gpu_list,
+                            rate_matching_prefill_degradation_factor=rate_matching_prefill_degradation_factor,
+                            rate_matching_decode_degradation_factor=rate_matching_decode_degradation_factor
+                        )
+                        if prefill_num_worker == -1 or decode_num_worker == -1:
+                            continue
+
+                        disagg_df = self._get_disagg_summary_df(prefill_worker, prefill_num_worker, decode_worker, decode_num_worker)
+                        category_results.append(disagg_df)
+
+                if category_results:
+                    category_df = pd.concat(category_results, ignore_index=True)
+                    # only return the best one for each category
+                    category_df = category_df.sort_values(by=['tokens/s/gpu', 'num_total_gpus'], ascending=[False, True]).head(1).reset_index(drop=True)
+                    disagg_summary_df_list.append(category_df)
+                else:
+                    logger.debug(f"No matched result for decode parallel {parallel_value} under diversity constraints.")
+
+            if not disagg_summary_df_list:
+                logger.debug("No disagg summary found after applying diversity constraints.")
+                return None
+
+            disagg_summary_df = pd.concat(disagg_summary_df_list, ignore_index=True)
+            disagg_summary_df = disagg_summary_df.sort_values(by=['tokens/s/gpu'], ascending=[False]).head(return_top_k).reset_index(drop=True)
+            return disagg_summary_df
+
+        def _find_best_result_under_constraints(ttft:float, 
                                                tpot:float, 
                                                prefill_summary_df:pd.DataFrame, 
                                                decode_summary_df:pd.DataFrame, 
@@ -396,7 +511,7 @@ class DisaggInferenceSession(object):
                     decode_throughput = decode_worker['seq/s']
                     prefill_gpus = prefill_worker['pp']*prefill_worker['tp']*prefill_worker['dp']
                     decode_gpus = decode_worker['pp']*decode_worker['tp']*decode_worker['dp']
-                    prefill_num_worker, decode_num_worker = match_workers(prefill_throughput, prefill_gpus, decode_throughput, decode_gpus, prefill_num_worker_list, decode_num_worker_list, num_gpu_list)
+                    prefill_num_worker, decode_num_worker = _match_workers(prefill_throughput, prefill_gpus, decode_throughput, decode_gpus, prefill_num_worker_list, decode_num_worker_list, num_gpu_list)
                     if prefill_num_worker == -1 or decode_num_worker == -1:
                         continue
                     disagg_summary_df = pd.concat([disagg_summary_df, self._get_disagg_summary_df(prefill_worker, prefill_num_worker, decode_worker, decode_num_worker)], axis=0, ignore_index=True)
@@ -430,8 +545,22 @@ class DisaggInferenceSession(object):
         disagg_summary.set_summary_df(disagg_summary_df)
         
         # find prefill and decode workers
-        prefill_summary_df = get_summary_df(prefill_model_config, prefill_parallel_config_list, prefill_batch_size_range, runtime_config, 'static_ctx')
-        decode_summary_df = get_summary_df(decode_model_config, decode_parallel_config_list, decode_batch_size_range, runtime_config, 'static_gen')
+        prefill_summary_df = _get_summary_df(
+            prefill_model_config, 
+            prefill_parallel_config_list, 
+            prefill_batch_size_range, 
+            runtime_config, 
+            'static_ctx',
+            latency_correction_scale=self._prefill_latency_correction_scale,
+            )
+        decode_summary_df = _get_summary_df(
+            decode_model_config, 
+            decode_parallel_config_list, 
+            decode_batch_size_range, 
+            runtime_config, 
+            'static_gen',
+            latency_correction_scale=self._decode_latency_correction_scale
+            )
         if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:
             logger.debug(f"No prefill or decode workers found for {model_name} with given configs.")
             return disagg_summary
@@ -441,13 +570,22 @@ class DisaggInferenceSession(object):
         tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
         for tpot in tpot_list:
             logger.debug(f"Finding best result under constraints for tpot={tpot}ms...")
-            filtered_disagg_summary_df = find_best_result_under_constraints(ttft, tpot, prefill_summary_df, decode_summary_df, return_top_k=5, num_gpu_list=num_gpu_list)
+            filtered_disagg_summary_df = _find_best_result_under_constraints_with_diversity(
+                ttft=ttft, 
+                tpot=tpot, 
+                prefill_summary_df=prefill_summary_df, 
+                decode_summary_df=decode_summary_df, 
+                return_top_k=5, 
+                num_gpu_list=num_gpu_list, 
+                rate_matching_prefill_degradation_factor=self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR, 
+                rate_matching_decode_degradation_factor=self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR
+                )
             if filtered_disagg_summary_df is not None:
                 disagg_summary_df = pd.concat([disagg_summary_df, filtered_disagg_summary_df], axis=0, ignore_index=True)
         if len(disagg_summary_df) == 0:
             logger.debug(f"No disagg result found for {model_name} with given constraints.")
             return disagg_summary
-        
+
         # set final disagg summary
         disagg_summary.set_summary_df(disagg_summary_df)
         return disagg_summary

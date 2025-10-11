@@ -23,7 +23,7 @@ from aiconfigurator.sdk.pareto_analysis import (
 )
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 from aiconfigurator.sdk.utils import safe_mkdir
-from .report_and_save import log_final_summary, save_results
+from aiconfigurator.cli.report_and_save import log_final_summary, save_results
 
 
 logger = logging.getLogger(__name__)
@@ -251,18 +251,21 @@ def _execute_task_configs(
     mode: str,
 ) -> Tuple[str, Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, float]]:
     """Execute the task configs and return the chosen experiment, best configs, results, and best throughputs."""
-    results: Dict[str, pd.DataFrame] = {}
+    results: Dict[str, Dict[str, pd.DataFrame]] = {}
     start_time = time.time()
     runner = TaskRunner()
 
+    # TODO, can run in parallel
     for exp_name, task_config in task_configs.items():
         try:
             logger.info("Starting experiment: %s", exp_name)
             logger.info("Task config: %s", task_config.pretty())
-            result_df = runner.run(task_config)
-            if result_df is not None and not result_df.empty:
-                results[exp_name] = result_df
-                logger.info("Experiment %s completed with %d results.", exp_name, len(result_df))
+            task_result = runner.run(task_config)
+            pareto_df = task_result["pareto_df"]
+            pareto_frontier_df = task_result["pareto_frontier_df"]
+            if pareto_frontier_df is not None and not pareto_frontier_df.empty:
+                results[exp_name] = task_result
+                logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_frontier_df))
             else:
                 logger.warning("Experiment %s returned no results.", exp_name)
         except Exception as exc:
@@ -275,11 +278,22 @@ def _execute_task_configs(
 
     best_configs: Dict[str, pd.DataFrame] = {}
     best_throughputs: Dict[str, float] = {}
-    for name, pareto_df in results.items():
-        tpot_target = task_configs[name].config.runtime_config.tpot
+    pareto_fronts: Dict[str, Optional[pd.DataFrame]] = {}
+    for name, task_result in results.items():
+        pareto_df = task_result["pareto_df"]
+        pareto_frontier_df = task_result["pareto_frontier_df"]
+        target_tpot = task_configs[name].config.runtime_config.tpot
         total_gpus = getattr(task_configs[name], "total_gpus", None) or 0
-        best_config_df = get_best_configs_under_tpot_constraint(total_gpus, pareto_df, tpot_target, top_n=3)
+        group_by_key = "(d)parallel" if task_configs[name].serving_mode == "disagg" else "parallel"
+        best_config_df = get_best_configs_under_tpot_constraint( # based on all data points
+            total_gpus=total_gpus,
+            pareto_df=pareto_df,
+            target_tpot=target_tpot,
+            top_n=5,
+            group_by=group_by_key,
+        )
         best_configs[name] = best_config_df
+        pareto_fronts[name] = pareto_frontier_df
         if not best_config_df.empty:
             best_throughputs[name] = best_config_df['tokens/s/gpu_cluster'].values[0]
         else:
@@ -287,12 +301,19 @@ def _execute_task_configs(
 
     chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
 
-    log_final_summary(chosen_exp, best_throughputs, best_configs, results, task_configs, mode)
+    log_final_summary(
+        chosen_exp=chosen_exp, # for summary
+        best_throughputs=best_throughputs, # for summary
+        best_configs=best_configs, # for table
+        pareto_fronts=pareto_fronts, # for plotting
+        task_configs=task_configs, # for info in summary
+        mode=mode,
+    )
 
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
 
-    return chosen_exp, best_configs, results, best_throughputs
+    return chosen_exp, best_configs, pareto_fronts, best_throughputs
 
 
 def main(args):
@@ -308,7 +329,7 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
-    chosen_exp, best_configs, results, best_throughputs = _execute_task_configs(
+    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs(
         task_configs,
         args.mode,
     )
@@ -317,7 +338,7 @@ def main(args):
         save_results(
             args=args,
             best_configs=best_configs, 
-            pareto_fronts=results, 
+            pareto_fronts=pareto_fronts, 
             task_configs=task_configs, 
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,

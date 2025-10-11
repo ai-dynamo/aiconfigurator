@@ -100,8 +100,8 @@ exp_disagg_full:
       max_decode_worker: 32 # It means in every replica, you will have up to 32 decode workers, y_max = 32
     advanced_tuning_config:
       # advanced tuning config
-      prefill_correction_scale: 0.9 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * prefill_correction_scale
-      decode_correction_scale: 0.92 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * decode_correction_scale
+      prefill_latency_correction_scale: 1.1 # If you find the predicted prefill latency is too optimistic, you can set a scale factor to make it more realistic, prefill_latency_corrected = prefill_latency * prefill_latency_correction_scale
+      decode_latency_correction_scale: 1.08 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, decode_latency_corrected = decode_latency * decode_latency_correction_scale
       prefill_max_batch_size: 1
       decode_max_batch_size: 512
 ```
@@ -141,7 +141,7 @@ All the valid combinations will print a line of log for each like this: `Enumera
 We will then find a best one among these enumrations.
 ## advanced tuning config
 The final tuning config is for some correction and deployment purpose.  
-`prefill/decode_correction_scale` is to scale down the prefill/decode worker perf. If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * prefill_correction_scale. This can adjust the generated configs for better alignment with real deployment.  
+`prefill/decode_latency_correction_scale` is to scale down the prefill/decode worker perf. If you find the predicted prefill latency is too optimistic, you can set a scale factor to make it more realistic, latency_corrected = latency_predicted * latency_correction_scale. This can adjust the generated configs for better alignment with real deployment.  
 `prefill/decode_max_batch_size`, in practical, you don't have to make decode batch size too large, 512 is a very high value. It's for local rank rather than the global batch size.  
 And for prefill, for typical ISL larger than 1000, it's almost saturating the compute flops, doing batching will not give you too much perf gain but makes the TTFT x times.
 

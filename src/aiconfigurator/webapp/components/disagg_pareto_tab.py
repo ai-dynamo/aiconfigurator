@@ -29,13 +29,13 @@ def create_disagg_pareto_tab(app_config):
                 prefill_model_system_components = create_system_config(app_config)
                 prefill_model_quant_components = create_model_quant_config(app_config)
                 prefill_model_parallel_components = create_model_parallel_config(app_config, single_select=False, disagg=True)
-                prefill_correction_scale = gr.Number(value=1.0, label="Prefill correction scale", interactive=True)
+                prefill_latency_correction_scale = gr.Number(value=1.1, label="Prefill latency correction scale", interactive=True)
             with gr.Column(elem_classes="config-column"):
                 gr.Markdown("### Decode config")
                 decode_model_system_components = create_system_config(app_config)
                 decode_model_quant_components = create_model_quant_config(app_config)                
                 decode_model_parallel_components = create_model_parallel_config(app_config, single_select=False, disagg=True)
-                decode_correction_scale = gr.Number(value=1.0, label="Decode correction scale", interactive=True)
+                decode_latency_correction_scale = gr.Number(value=1.08, label="Decode latency correction scale", interactive=True)
         runtime_config_components['tpot'].visible = False
 
         # constraint section
@@ -88,11 +88,11 @@ def create_disagg_pareto_tab(app_config):
         'prefill_model_system_components': prefill_model_system_components,
         'prefill_model_quant_components': prefill_model_quant_components,
         'prefill_model_parallel_components': prefill_model_parallel_components,
-        'prefill_correction_scale': prefill_correction_scale,
+        'prefill_latency_correction_scale': prefill_latency_correction_scale,
         'decode_model_system_components': decode_model_system_components,
         'decode_model_quant_components': decode_model_quant_components,
         'decode_model_parallel_components': decode_model_parallel_components,
-        'decode_correction_scale': decode_correction_scale,
+        'decode_latency_correction_scale': decode_latency_correction_scale,
         'num_gpu_list': num_gpu_list,
         'max_num_gpu': max_num_gpu,
         'prefill_max_num_worker': prefill_max_num_worker,

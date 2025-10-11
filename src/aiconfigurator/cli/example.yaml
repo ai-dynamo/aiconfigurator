@@ -105,8 +105,8 @@ exp_disagg_full:
       max_decode_worker: 32 # It means in every replica, you will have up to 32 decode workers, y_max = 32
     advanced_tuning_config:
       # advanced tuning config
-      prefill_correction_scale: 0.9 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * prefill_correction_scale
-      decode_correction_scale: 0.92 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * decode_correction_scale
+      prefill_latency_correction_scale: 1.1 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, latency_corrected = latency_predicted * prefill_latency_correction_scale
+      decode_latency_correction_scale: 1.08 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, latency_corrected = latency_predicted * decode_latency_correction_scale
       prefill_max_batch_size: 1
       decode_max_batch_size: 512
 
