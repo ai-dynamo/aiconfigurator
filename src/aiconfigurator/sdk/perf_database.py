@@ -1797,12 +1797,13 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(num_tokens, num_experts, topk, hidden_size)
         else:
-            if node_num == 1:
-                print(hidden_size, topk, num_experts, sms, num_tokens)
-            data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts]
-            if node_num == 1:
-                print(data.keys())
-            lat = self._interp_2d_linear(sms, num_tokens, data)
+            if node_num == 1 and sms == 20: # only collect sm=20 for now
+                data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
+                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
+                lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+            else:
+                data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts]
+                lat = self._interp_2d_linear(sms, num_tokens, data)
             return lat / 1000.0 
         
 if __name__ == '__main__':
