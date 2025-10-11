@@ -20,7 +20,7 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
 
     assert num_experts % num_ranks == 0
     if local_rank == 0:
-        print(f'[config] num_tokens={num_tokens}, hidden={hidden}, num_topk={num_topk}', flush=True)
+        print(f'[config] num_tokens={num_tokens}, hidden={hidden}, num_topk={num_topk} ,num_experts={num_experts}', flush=True)
 
     # Random data
     x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * rank
@@ -191,7 +191,7 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
                 print(f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
                       f'{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us', flush=True)
         if local_rank == 0:
-            print(f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}, {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), t: {best_time * 1e6:.2f} us', flush=True)
+            print(f'[tuning] Best dispatch ({"FP8" if isinstance(current_x, tuple) else "BF16"}): SMs {best_results[0]}, NVL chunk {best_results[1]}, RDMA chunk 0, transmit: {best_time * 1e6:.2f} us, notify: 0.00 us, BW: 0.00 GB/s (RDMA), {nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL)', flush=True)
             print('', flush=True)
 
         # Gather the best config from rank 0 and the first test setting
@@ -225,7 +225,7 @@ def test_main(args: argparse.Namespace, num_sms: int, local_rank: int, num_ranks
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
 
     if local_rank == 0:
-        print(f'[tuning] Best combine: SMs {best_results[0]}, NVL chunk {best_results[1]}: {combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL), t: {best_time * 1e6:.2f} us', flush=True)
+        print(f'[tuning] Best combine: SMs {best_results[0]}, NVL chunk {best_results[1]}, RDMA chunk 0, transmit: {best_time * 1e6:.2f} us, notify: 0.00 us, BW: 0.00 GB/s (RDMA), {combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL)', flush=True)
         print('', flush=True)
 
 

@@ -66,7 +66,7 @@ export RANK=3
 
 Run the following command on a single node:
 ```bash
-python /new_workspace/test_intranode.py
+python /new_workspace/test_intranode.py |& tee deepep_node_1_mode_normal.log
 ```
 
 # Test inter-node normal mode
