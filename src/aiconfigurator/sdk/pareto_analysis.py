@@ -59,9 +59,10 @@ def enumerate_parallel_config(num_gpu_list: list[int],
                                     if dp > 1 and tp > 1:
                                         continue
                                 elif backend == common.BackendName.sglang: # sglang doesn't support moe tp and moe ep > 1 at the same time for now
-                                    if moe_tp > 1 and moe_ep > 1:
+                                    if moe_tp > 1:
                                         continue
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
+                                print(f"Enumerated parallel config: tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
             else:
                 if tp*pp in num_gpu_list:
                     parallel_config_list.append([tp, pp, 1, 1, 1])

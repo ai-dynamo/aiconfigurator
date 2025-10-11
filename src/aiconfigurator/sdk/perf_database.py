@@ -1797,8 +1797,11 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(num_tokens, num_experts, topk, hidden_size)
         else:
-            
+            if node_num == 1:
+                print(hidden_size, topk, num_experts, sms, num_tokens)
             data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts]
+            if node_num == 1:
+                print(data.keys())
             lat = self._interp_2d_linear(sms, num_tokens, data)
             return lat / 1000.0 
         

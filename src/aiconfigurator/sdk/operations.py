@@ -184,6 +184,8 @@ class MoEDispatch(Operation):
         self._attention_tp_size = moe_tp_size*moe_ep_size // self._attention_dp_size
         self._sms = kwargs.get('sms', 12)
         self._moe_backend = kwargs.get('moe_backend', 'deepep_moe')
+        self._node_num = kwargs.get('node_num', 1)
+        self._is_context = kwargs.get('is_context', True)
         
         
     def query(self, database:PerfDatabase, **kwargs):
@@ -191,7 +193,6 @@ class MoEDispatch(Operation):
         volume = num_tokens * self._hidden_size
         _sm_version = database.system_spec['gpu']['sm_version']
         _num_gpus_per_node = database.system_spec['node']['num_gpus_per_node']
-        is_context = kwargs.get('is_context', True)
 
         if database.backend == common.BackendName.trtllm.value:
             assert (self._attention_tp_size == 1 or self._attention_dp_size ==1), "trtllm does not support TP>1 and DP>1 for attn simultaneously"
@@ -259,10 +260,10 @@ class MoEDispatch(Operation):
             raise NotImplementedError("Need to implement MoE dispatch for vllm")
         else: #sglang
             if self._moe_backend == 'deepep_moe':
-                if is_context:
-                    comm_latency = database.query_deepep_normal(node_num=self.num_gpus, num_tokens=num_tokens, num_experts=self._num_experts, topk=self._topk, hidden_size=self._hidden_size, sms=self._sms)
+                if self._is_context:
+                    comm_latency = database.query_deepep_normal(node_num=self._node_num, num_tokens=num_tokens, num_experts=self._num_experts, topk=self._topk, hidden_size=self._hidden_size, sms=self._sms)
                 else:
-                    comm_latency = database.query_deepep_ll(node_num=self.num_gpus, num_tokens=num_tokens, num_experts=self._num_experts, topk=self._topk, hidden_size=self._hidden_size)
+                    comm_latency = database.query_deepep_ll(node_num=self._node_num, num_tokens=num_tokens, num_experts=self._num_experts, topk=self._topk, hidden_size=self._hidden_size)
             else:
                 raise NotImplementedError(f"MoE backend {self._moe_backend} not implemented")
         return comm_latency * self._scale_factor

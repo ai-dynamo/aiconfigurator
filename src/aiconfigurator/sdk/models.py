@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-def get_model(model_name: str, model_config: config.ModelConfig,  backend_name: common.BackendName='trtllm') -> BaseModel:
+def get_model(model_name: str, model_config: config.ModelConfig,  backend_name: str=common.BackendName.trtllm.value) -> BaseModel:
     """
     Get model.
     """
@@ -483,8 +483,8 @@ class DisaggDeepSeekModel(BaseModel):
         moe_backend = self.config.moe_backend
         sms = self.config.sms
         workload_distribution = "uniform"
-        
-        node_num = moe_ep_size//self.config.moe_ep_size
+        gpu_per_node = 8
+        node_num = moe_ep_size//gpu_per_node
 
         # context mla attention
         self.context_ops.extend([ops.ContextMLASglang(f'context_attention', self._num_layers, tp_size, kvcache_quant_mode, fmha_quant_mode)])
@@ -495,7 +495,7 @@ class DisaggDeepSeekModel(BaseModel):
         # dispatch tokens to experts
         self.context_ops.extend([ops.MoEDispatch(f'context_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts, 
                                                  moe_tp_size, moe_ep_size, attention_dp_size, True, 
-                                                 sms=sms, node_num=node_num, moe_backend=moe_backend)])
+                                                 sms=sms, node_num=node_num, moe_backend=moe_backend, is_context=True)])
         
         # moe computation
         self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, 
@@ -511,7 +511,7 @@ class DisaggDeepSeekModel(BaseModel):
         # dispatch tokens to experts
         self.generation_ops.extend([ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts, 
                                                     moe_tp_size, moe_ep_size, attention_dp_size, True, 
-                                                    sms=sms, node_num=node_num, moe_backend=moe_backend)])
+                                                    sms=sms, node_num=node_num, moe_backend=moe_backend, is_context=False)])
    
         # moe computation
         self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, 
