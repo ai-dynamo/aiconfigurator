@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+data_dir: data/a100_sxm # relative to systems_dir
+gpu:
+  mem_bw: 2039000000000 # 2.039TB/s
+  mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_capacity: 85899345920 # 80GiB
+  float16_tc_flops: 312000000000000 # 312TFLOPS
+  int8_tc_flops: 624000000000000 # 624TFLOPS
+  power: 400  # Watt
+  sm_version: 80
+
+node:
+  num_gpus_per_node: 8
+  inter_node_bw: 25000000000  # Byte/s per GPU, single direction, assume 1:1 CX6 per node
+  intra_node_bw: 600000000000  # Byte/s per gpu, single direction
+  pcie_bw: 32000000000  # Byte/s, single direction, pcie 4.0
+  p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
+
+misc:
+  nccl_mem: # some nonofficial correction based on observations, you should try to modify based on your own observations
+    1: 0
+    2: 358612992 # 342MB
+    4: 411041792 # 392MB
+    8: 411041792 # 392MB
+  other_mem: 3758096384 # increase from 551MB to 3.5GB for safer deployment, this will cover part of the inaccurate mem calc.
+  nccl_version: '2.27.3'
