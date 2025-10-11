@@ -9,7 +9,9 @@ Notes:
 
 # Build Docker
 
-```bash
+Note: The test files under `deep_collector/` are sourced from [DeepEP](https://github.com/deepseek-ai/DeepEP/tree/main/tests) with some modifications applied.
+
+```bashzai
 docker build -t deepep:latest -f docker/Dockerfile.deepep .
 docker run -it --network host --gpus all  -v aiconfigurator/collector/deep_collector:/new_workspace --privileged deepep:latest bash
 ```
