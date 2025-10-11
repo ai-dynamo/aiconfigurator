@@ -236,9 +236,8 @@ docker compose -f deploy/docker-compose.yml up -d
 ### 3.1 Generate Configuration with aiconfigurator
 
 ```bash
-aiconfigurator cli \
+aiconfigurator cli default \
   --system h200_sxm \
-  --version 1.0.0rc3 \
   --isl 5000 \
   --osl 1000 \
   --ttft 1000 \
@@ -246,7 +245,7 @@ aiconfigurator cli \
   --save_dir ./ \
   --model QWEN3_32B \
   --model_path /workspace/model_hub/qwen3-32b-fp8 \
-  --served_model_name Qwen3/Qwen3-32B-FP8 \
+  --served_model_name Qwen/Qwen3-32B-FP8 \
   --total_gpus 8 \
   --head_node_ip 0.0.0.0 \
   --generated_config_version 1.0.0rc4 \
@@ -315,7 +314,7 @@ curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -d '{
-    "model": "Qwen3/Qwen3-32B-FP8",
+    "model": "Qwen/Qwen3-32B-FP8",
     "messages": [
       { "role": "user", "content": "Introduce yourself" }
     ],
@@ -333,9 +332,8 @@ curl http://localhost:8000/v1/chat/completions \
 
 ```bash
 # For head_node_ip, ensure that the IP passed here corresponds to node 0, etcd and NATS.io have already been started on node 0 in Step 2
-aiconfigurator cli \
+aiconfigurator cli default \
   --system h200_sxm \
-  --version 1.0.0rc3 \
   --isl 5000 \
   --osl 1000 \
   --ttft 200 \
@@ -343,7 +341,7 @@ aiconfigurator cli \
   --save_dir ./ \
   --model QWEN3_32B \
   --model_path /workspace/model_hub/qwen3-32b-fp8 \
-  --served_model_name Qwen3/Qwen3-32B-FP8 \
+  --served_model_name Qwen/Qwen3-32B-FP8 \
   --total_gpus 16 \
   --head_node_ip NODE_0_IP \
   --generated_config_version 1.0.0rc4 \
@@ -379,12 +377,98 @@ curl http://NODE_0_IP:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Accept: text/event-stream" \
   -d '{
-    "model": "Qwen3/Qwen3-32B-FP8",
+    "model": "Qwen/Qwen3-32B-FP8",
     "messages": [
       { "role": "user", "content": "Introduce yourself" }
     ],
     "stream": true
   }'
 ```
+
+
+---
+
+## 5. Deploy on Kubernetes
+
+The generator can also emit a Kubernetes CR (`k8s_deploy.yaml`) for the K8S deployment.
+
+For deploying Dynamo on Kubernetes, please refer to this [dynamo/deploy](https://github.com/ai-dynamo/dynamo/tree/main/deploy)
+ and make sure to install the CRDs and platform first.
+
+### 5.1 Generate Configuration for K8S
+
+This produces `disagg/k8s_deploy.yaml` (and for Agg, `agg/k8s_deploy.yaml`) under  `--save_dir`. 
+
+```bash
+# Example (Disagg)
+aiconfigurator cli default \
+  --system h200_sxm \
+  --isl 5000 \
+  --osl 1000 \
+  --ttft 200 \
+  --tpot 8 \
+  --save_dir ./ \
+  --model QWEN3_32B \
+  --model_path Qwen/Qwen3-32B-FP8 \
+  --served_model_name Qwen/Qwen3-32B-FP8 \
+  --total_gpus 8 \
+  --generated_config_version 1.0.0rc6 \
+  --prefill_free_gpu_memory_fraction 0.8 \
+  --cache_transceiver_backend default \
+  --free_gpu_memory_fraction 0.7 \
+  --decode_free_gpu_memory_fraction 0.5 \
+  --k8s_image nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0 \
+  --k8s_engine_mode inline \
+  --k8s_model_cache pvc:model-cache \
+  --k8s_namespace dynamo-custom-ns \
+```
+
+Since different versions of TensorRT-LLM often have variations in configuration, please specify `--generated_config_version` to match the version used when generating configs. For the specific TensorRT-LLM version corresponding to a official dynamo image, you can refer to, for example, this [pyproject](https://github.com/ai-dynamo/dynamo/blob/v0.5.0/pyproject.toml#L51), or check directly inside the container by running: `python -c import tensorrt_llm; print(tensorrt_llm.__version__)`. In this case, since the image is nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0, you should set `--generated_config_version 1.0.0rc6`.
+
+
+### Apply (inline mode – default)
+
+`--k8s_engine_mode inline`
+
+Inline mode embeds the engine configs into the Pod startup script; **no ConfigMap is needed**:
+
+```bash
+kubectl apply -f disagg/k8s_deploy.yaml
+# or
+kubectl apply -f agg/k8s_deploy.yaml
+```
+
+### Apply (configmap mode – optional)
+
+`--k8s_engine_mode configmap`
+
+If you prefer a separate ConfigMap:
+
+```bash
+# Disagg
+kubectl -n dynamo-custom-ns create configmap engine-configs \
+  --from-file=prefill_config.yaml=disagg/prefill_config.yaml \
+  --from-file=decode_config.yaml=disagg/decode_config.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Agg
+kubectl -n dynamo-custom-ns create configmap engine-configs \
+  --from-file=agg_config.yaml=agg/agg_config.yaml \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Then apply the CR
+kubectl apply -f disagg/k8s_deploy.yaml   # or agg/k8s_deploy.yaml
+```
+
+### Additional arguments specific to Kubernetes
+
+All of the following are CLI flags (because they are referenced as `dynamo_config.*` inside the templates). Defaults shown in **bold**.
+
+* `--k8s_engine_mode={inline|configmap}` – engine config delivery. **inline** by default.
+* `--k8s_model_cache={disabled|pvc:<claimName>}` – model cache mount. Default **pvc:model-cache** (mounted at `/workspace/model_cache`). It only takes effect when you use a PVC to store the model; otherwise, if you directly specify something like `--model_path Qwen/Qwen3-32B-FP8`, the model will be downloaded from Hugging Face, and you don’t need to provide `--k8s_model_cache`.
+* `--k8s_namespace=<ns>` – target namespace. Default **dynamo**.
+* `--k8s_image=<image>` – runtime image. Default **nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0**.
+* `--k8s_image_pull_secret=<secret>` – optional pull secret name.
+
 
 ---

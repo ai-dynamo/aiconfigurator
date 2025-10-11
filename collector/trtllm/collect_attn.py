@@ -27,6 +27,8 @@ def run_attention_torch(batch_size,
                         is_context_phase,                        
                         perf_filename,
                         device='cuda:0'):
+    device=torch.device(device)
+    torch.set_default_device(device)
     torch.cuda.set_device(device)
 
     # if XQA JIT is enabled, the context phase will also trigger XQA prepare which causes the error with specifc q/kv head and seq setting.
@@ -118,7 +120,7 @@ def run_attention_torch(batch_size,
                                 kv_cache_manager=kv_cache_manager, 
                                 mapping=mapping, 
                                 enable_flash_mla=False,
-                                seq_lens=torch.tensor(input_seq_lens, dtype=torch.int32), 
+                                seq_lens=torch.tensor(input_seq_lens, dtype=torch.int32, device="cpu"),
                                 num_contexts=batch_size,
                                 position_ids=None, 
                                 kv_cache_params=KVCacheParams(use_cache=True, num_cached_tokens_per_seq=num_cached_tokens_per_seq, block_ids_per_seq=None, host_max_attention_window_sizes=None, host_sink_token_length=None), 
@@ -135,7 +137,7 @@ def run_attention_torch(batch_size,
                                                 kv_cache_manager=kv_cache_manager, 
                                                 mapping=mapping,
                                                 enable_flash_mla=False,
-                                                seq_lens=torch.tensor(gen_seq_lens, dtype=torch.int32), 
+                                                seq_lens=torch.tensor(gen_seq_lens, dtype=torch.int32, device="cpu"),
                                                 position_ids=None, 
                                                 num_contexts=0, 
                                                 kv_cache_params=KVCacheParams(use_cache=True, num_cached_tokens_per_seq=input_seq_lens, block_ids_per_seq=None, host_max_attention_window_sizes=None, host_sink_token_length=None), 
@@ -154,8 +156,8 @@ def run_attention_torch(batch_size,
         num_tokens = batch_size
     
     sinks = torch.randn(num_heads, dtype=torch.float32) if head_dim == 64 else None
-    q = torch.randn([num_tokens, num_heads*128]).bfloat16().to(torch.device(device))
-    kv = torch.randn([num_tokens, 2*num_key_value_heads*128]).bfloat16().to(torch.device(device))
+    q = torch.randn([num_tokens, num_heads*head_dim]).bfloat16().to(torch.device(device))
+    kv = torch.randn([num_tokens, 2*num_key_value_heads*head_dim]).bfloat16().to(torch.device(device))
     input_qkv = torch.concat([q, kv], dim=-1)
     attn.forward(
         input_qkv,
@@ -260,8 +262,11 @@ def get_context_attention_test_cases():
                         if b*s*num_kv_heads*128*2 >= 2147483647:
                             continue
                         if getSMVersion() >= 100:
+                            # though it's a precheck of gen kernels during the attention op init, this cannot be skipped for now
                             # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
-                            if n >= 32 and n % 32 != 0:
+                            mNumHeadsQPerKv = 1 if n_kv == 0 else n//n_kv
+                            maxNumHeadsQPerKvInCta = 32
+                            if mNumHeadsQPerKv >= maxNumHeadsQPerKvInCta and mNumHeadsQPerKv % maxNumHeadsQPerKvInCta != 0:
                                 continue
 
                         #print(f'collecting heads: {n} kv_heads: {num_kv_heads} seq: {s} batchsize: {b}')
@@ -325,11 +330,6 @@ def get_generation_attention_test_cases():
                 #print(f'collecting MHA heads: {n} batchsize: {b}  steps: {s_list_limited}')
                 # fp8 kv cache, fp8 context fmha, is_context_phase
                 for s in target_s_list:
-                    if getSMVersion() >= 100: 
-                        # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
-                        if n >= 32 and n % 32 != 0:
-                            continue
-
                     test_cases.append([b, s, n, n, h, 0, False, False, False, 'generation_attention_perf.txt'])
 
                     if has_fp8:
@@ -371,7 +371,9 @@ def get_generation_attention_test_cases():
                     for s in target_s_list:
                         if getSMVersion() >= 100: 
                             # TLLM_CHECK_WITH_INFO((params.mNumHeadsQPerKv < maxNumHeadsQPerKvInCta || params.mNumHeadsQPerKv % maxNumHeadsQPerKvInCta == 0),
-                            if n >= 32 and n % 32 != 0:
+                            mNumHeadsQPerKv = 1 if n_kv == 0 else n//n_kv
+                            maxNumHeadsQPerKvInCta = 32
+                            if mNumHeadsQPerKv >= maxNumHeadsQPerKvInCta and mNumHeadsQPerKv % maxNumHeadsQPerKvInCta != 0:
                                 continue
                         if head_dim == 64:
                             test_cases.append([b, s, n, n_kv, h, 128, False, False, False, 'generation_attention_perf.txt'])

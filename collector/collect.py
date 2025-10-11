@@ -44,6 +44,7 @@ import os, sys
 from contextlib import contextmanager
 import sys
 import time
+import signal
 import multiprocessing as mp
 from tqdm import tqdm
 import torch
@@ -161,6 +162,38 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
         logger.info(f"Started worker process {p.pid} on device {device_id}")
         return p
     
+    def create_process_exit_error(device_id, exit_code):
+        if exit_code in (None, 0):
+            return None
+
+        if exit_code < 0:
+            signum = -exit_code
+            try:
+                signame = signal.Signals(signum).name
+            except Exception:
+                signame = f"SIG{signum}"
+            reason = f"terminated by signal {signum} ({signame})"
+            error_type = 'WorkerSignalCrash'
+        else:
+            reason = f"exited with status {exit_code}"
+            error_type = 'WorkerAbnormalExit'
+
+        logger.error(
+            f"Process {device_id} ({module_name}) {reason}"
+        )
+
+        return {
+            'module': module_name,
+            'device_id': device_id,
+            'task_id': 'process_exit',
+            'task_params': None,
+            'error_type': error_type,
+            'error_message': reason,
+            'traceback': '',
+            'exit_code': exit_code,
+            'timestamp': datetime.now().isoformat()
+        }
+
     # Start processes
     for device_id in range(num_processes):
         processes.append(start_process(device_id))
@@ -220,6 +253,13 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
                         f"restarts: {process_stats[i]['restarts']}, "
                         f"errors: {len(process_stats[i]['errors'])})"
                     )
+
+                    crash_error = create_process_exit_error(i, exit_code)
+                    if crash_error:
+                        errors.append(crash_error)
+                        process_stats[i]['errors'].append('process_exit')
+                        pbar.set_postfix({'errors': len(errors)})
+                        last_error_count = len(errors)
                     
                     if process_stats[i]['restarts'] > 8192:
                         logger.error(f"Process {i} exceeded restart limit, not restarting")
@@ -390,7 +430,8 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
             'get_func': 'get_moe_test_cases',
             'run_func': 'run_moe_torch',
             'version_handler': lambda v: 'trtllm.collect_moe_pre_0_20' if v.startswith('0.20.0') 
-                                      else 'trtllm.collect_moe' if v.startswith(('0.21.0', '1.0.0', '1.1.0'))
+                                      else 'trtllm.collect_moe_pre_1_0' if v.startswith(('0.21.0', '1.0.0'))
+                                      else 'trtllm.collect_moe' if v.startswith(('1.1.0'))
                                       else None
         }
     ]

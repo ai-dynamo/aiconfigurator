@@ -3,6 +3,7 @@
 """
 TRT-LLM backend generator.
 """
+import yaml
 from pathlib import Path
 from typing import Dict, Any, Optional
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
@@ -132,6 +133,7 @@ class TRTLLMGenerator(BaseGenerator):
                 agg_cfg["max_num_tokens"] = agg_cfg["bs"] + ctx.runtime.isl + 1500
 
             agg_yaml = self._get_yaml_tpl(engine_tpl, {**agg_cfg, "dynamo_config": global_args})
+            agg_yaml_str = yaml.safe_dump(agg_yaml, sort_keys=False)
 
             script = run_tpl.render(
                 mode="agg",
@@ -149,6 +151,7 @@ class TRTLLMGenerator(BaseGenerator):
                 "agg_gpu": int(agg_cfg["gpu"]),
                 "agg_engine_args": "/workspace/engine_configs/agg_config.yaml",
                 "dynamo_config": global_args,
+                "agg_engine_args_inline": agg_yaml_str,
             }
 
             k8s_yaml_agg = self._get_yaml_tpl(k8s_tpl, k8s_agg)
@@ -185,6 +188,10 @@ class TRTLLMGenerator(BaseGenerator):
 
             pre_yaml = self._get_yaml_tpl(engine_tpl, {**pre_cfg, "dynamo_config": {**global_args, **worker_args["prefill"]}})
             dec_yaml = self._get_yaml_tpl(engine_tpl, {**dec_cfg, "dynamo_config": {**global_args, **worker_args["decode"]}})
+            pre_yaml_str = yaml.safe_dump(pre_yaml, sort_keys=False)
+            dec_yaml_str = yaml.safe_dump(dec_yaml, sort_keys=False)
+
+
 
             plan = allocate_disagg_nodes(pre_cfg.get("workers", 1), pre_cfg["gpu"], dec_cfg.get("workers", 1), dec_cfg["gpu"])
 
@@ -216,6 +223,8 @@ class TRTLLMGenerator(BaseGenerator):
                 "prefill_engine_args": "/workspace/engine_configs/prefill_config.yaml",
                 "decode_engine_args": "/workspace/engine_configs/decode_config.yaml",
                 "dynamo_config": global_args,
+                "prefill_engine_args_inline": pre_yaml_str,
+                "decode_engine_args_inline": dec_yaml_str,
             }
             k8s_yaml_disagg = self._get_yaml_tpl(k8s_tpl, k8s_disagg)
 

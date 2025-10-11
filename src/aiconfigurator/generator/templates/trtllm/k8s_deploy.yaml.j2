@@ -1,40 +1,48 @@
 {%- set name_prefix = name_prefix | default('trtllm') -%}
 {%- set mode = mode | default('disagg') -%}
 
-# router_mode from dynamo_config
+# Router and naming
 {%- set router_mode = dynamo_config.router_mode | default('') -%}
 {%- set is_kv = router_mode == 'kv' -%}
-
 {%- set name = name | default(name_prefix ~ '-' ~ ('agg' if mode == 'agg' else 'disagg') ~ ('-router' if is_kv else '')) -%}
 
-{%- set k8s_namespace = dynamo_config.k8s_namespace | default('ets-dynamo') -%}
-{%- set k8s_image = dynamo_config.k8s_image | default('nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.4.1') -%}
+# K8s essentials
+{%- set k8s_namespace = dynamo_config.k8s_namespace | default('dynamo') -%}
+{%- set k8s_image = dynamo_config.k8s_image | default('nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0') -%}
 {%- set k8s_image_pull_secret = dynamo_config.k8s_image_pull_secret | default('') -%}
 {%- set working_dir = '/workspace/components/backends/trtllm' -%}
 
-{%- set frontend_replicas = frontend_replicas | default(1) -%}
-
+# Model and strategy
 {%- set model_path = dynamo_config.model_path | default(model_name) -%}
 {%- set served_model_name = dynamo_config.served_model_name | default(model_name) -%}
 {%- set disaggregation_strategy = dynamo_config.disaggregation_strategy | default('prefill_first') -%}
 
-{%- set k8s_use_model_cache = dynamo_config.k8s_use_model_cache | default(true) -%}
-{%- set k8s_model_cache_pvc = dynamo_config.k8s_model_cache_pvc | default('model-cache') -%}
-{%- set k8s_model_cache_mount = dynamo_config.k8s_model_cache_mount | default('/workspace/model_cache') -%}
-{%- set k8s_use_engine_cm = dynamo_config.k8s_use_engine_cm | default(true) -%}
+# Engine delivery mode: 'configmap' or 'inline'
+{%- set k8s_engine_mode = dynamo_config.k8s_engine_mode | default('inline') -%} # dynamo_config.k8s_engine_mode configmap or inline
+{%- set use_engine_cm = (k8s_engine_mode == 'configmap') -%}
 {%- set k8s_engine_cm_name = dynamo_config.k8s_engine_cm_name | default('engine-configs') -%}
-{%- set k8s_engine_cm_mount = dynamo_config.k8s_engine_cm_mount | default('/workspace/engine_configs') -%}
+{%- set k8s_engine_cm_mount = '/workspace/engine_configs' -%}
 
+# Model cache: 'disabled' or 'pvc:<claimName>'
+{%- set _mc = dynamo_config.k8s_model_cache | default('pvc:model-cache') -%} # dynamo_config.k8s_model_cache disabled or pvc:<claimName>
+{%- set _mc_parts = _mc.split(':') -%}
+{%- set k8s_use_model_cache = (_mc != 'disabled') -%}
+{%- set k8s_model_cache_pvc = (_mc_parts[1] if _mc_parts[0] == 'pvc' else 'model-cache') -%}
+{%- set k8s_model_cache_mount = '/workspace/model_cache' -%}
+
+# Engine-args file locations inside container
+{%- set prefill_engine_args = '/workspace/engine_configs/prefill_config.yaml' -%}
+{%- set decode_engine_args = '/workspace/engine_configs/decode_config.yaml' -%}
+{%- set agg_engine_args = '/workspace/engine_configs/agg_config.yaml' -%}
+
+# Replica/GPU counts come from generator
+{%- set frontend_replicas = frontend_replicas | default(1) -%}
 {%- set prefill_workers = prefill_workers | default(1) -%}
 {%- set decode_workers = decode_workers | default(1) -%}
 {%- set prefill_gpu = prefill_gpu | default('1') -%}
 {%- set decode_gpu = decode_gpu | default('1') -%}
 {%- set agg_workers = agg_workers | default(1) -%}
 {%- set agg_gpu = agg_gpu | default('1') -%}
-
-{%- set prefill_engine_args = prefill_engine_args | default('/workspace/engine_configs/prefill_config.yaml') -%}
-{%- set decode_engine_args = decode_engine_args | default('/workspace/engine_configs/decode_config.yaml') -%}
-{%- set agg_engine_args = agg_engine_args | default('/workspace/engine_configs/agg_config.yaml') -%}
 
 {{ '\n' }}
 apiVersion: nvidia.com/v1alpha1
@@ -58,7 +66,7 @@ spec:
         {% if k8s_image_pull_secret %}
         imagePullSecrets:
           - name: {{ k8s_image_pull_secret }}
-        {% endif %}        
+        {% endif %}
         mainContainer:
           image: {{ k8s_image }}
           imagePullPolicy: IfNotPresent
@@ -90,10 +98,13 @@ spec:
             persistentVolumeClaim:
               claimName: {{ k8s_model_cache_pvc }}
           {% endif %}
-          {% if k8s_use_engine_cm %}
+          {% if use_engine_cm %}
           - name: engine-configs
             configMap:
               name: {{ k8s_engine_cm_name }}
+          {% else %}
+          - name: engine-configs
+            emptyDir: {}
           {% endif %}
           - name: tmp
             emptyDir:
@@ -102,20 +113,19 @@ spec:
         {% if k8s_image_pull_secret %}
         imagePullSecrets:
           - name: {{ k8s_image_pull_secret }}
-        {% endif %}    
+        {% endif %}
         mainContainer:
           image: {{ k8s_image }}
           workingDir: {{ working_dir }}
+          imagePullPolicy: IfNotPresent
           volumeMounts:
             {% if k8s_use_model_cache %}
             - name: model-cache
               mountPath: {{ k8s_model_cache_mount }}
             {% endif %}
-            {% if k8s_use_engine_cm %}
             - name: engine-configs
               mountPath: {{ k8s_engine_cm_mount }}
-              readOnly: true
-            {% endif %}
+              {% if use_engine_cm %}readOnly: true{% endif %}
             - name: tmp
               mountPath: /tmp
           command: ["/bin/bash","-c"]
@@ -123,6 +133,12 @@ spec:
             - |
               set -euo pipefail
               cd "{{ working_dir }}"
+              {% if not use_engine_cm %}
+              mkdir -p {{ k8s_engine_cm_mount }}
+              cat > {{ agg_engine_args }} <<'YAML'
+{{ (agg_engine_args_inline | trim | indent(14, true)) }}
+              YAML
+              {% endif %}
               args=(
                 --model-path "{{ model_path }}"
                 --served-model-name "{{ served_model_name }}"
@@ -132,8 +148,30 @@ spec:
                 {% endif %}
               )
               exec python3 -m dynamo.trtllm "${args[@]}"
-
-
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 40
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
 
     {% else %}
     # ================== DISAGG ==================
@@ -152,10 +190,13 @@ spec:
             persistentVolumeClaim:
               claimName: {{ k8s_model_cache_pvc }}
           {% endif %}
-          {% if k8s_use_engine_cm %}
+          {% if use_engine_cm %}
           - name: engine-configs
             configMap:
               name: {{ k8s_engine_cm_name }}
+          {% else %}
+          - name: engine-configs
+            emptyDir: {}
           {% endif %}
           - name: tmp
             emptyDir:
@@ -164,7 +205,7 @@ spec:
         {% if k8s_image_pull_secret %}
         imagePullSecrets:
           - name: {{ k8s_image_pull_secret }}
-        {% endif %}    
+        {% endif %}
         mainContainer:
           image: {{ k8s_image }}
           imagePullPolicy: IfNotPresent
@@ -174,11 +215,9 @@ spec:
             - name: model-cache
               mountPath: {{ k8s_model_cache_mount }}
             {% endif %}
-            {% if k8s_use_engine_cm %}
             - name: engine-configs
               mountPath: {{ k8s_engine_cm_mount }}
-              readOnly: true
-            {% endif %}
+              {% if use_engine_cm %}readOnly: true{% endif %}
             - name: tmp
               mountPath: /tmp
           command: ["/bin/bash","-c"]
@@ -186,7 +225,13 @@ spec:
             - |
               set -euo pipefail
               cd "{{ working_dir }}"
-              args=( 
+              {% if not use_engine_cm %}
+              mkdir -p {{ k8s_engine_cm_mount }}
+              cat > {{ prefill_engine_args }} <<'YAML'
+{{ (prefill_engine_args_inline | trim | indent(14, true)) }}
+              YAML
+              {% endif %}
+              args=(
                 --model-path "{{ model_path }}"
                 --served-model-name "{{ served_model_name }}"
                 --extra-engine-args "{{ prefill_engine_args }}"
@@ -197,9 +242,30 @@ spec:
                 {% endif %}
               )
               exec python3 -m dynamo.trtllm "${args[@]}"
-
-
-
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 40
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
 
     TRTLLMDecodeWorker:
       dynamoNamespace: {{ name }}
@@ -216,10 +282,13 @@ spec:
             persistentVolumeClaim:
               claimName: {{ k8s_model_cache_pvc }}
           {% endif %}
-          {% if k8s_use_engine_cm %}
+          {% if use_engine_cm %}
           - name: engine-configs
             configMap:
               name: {{ k8s_engine_cm_name }}
+          {% else %}
+          - name: engine-configs
+            emptyDir: {}
           {% endif %}
           - name: tmp
             emptyDir:
@@ -228,7 +297,7 @@ spec:
         {% if k8s_image_pull_secret %}
         imagePullSecrets:
           - name: {{ k8s_image_pull_secret }}
-        {% endif %}    
+        {% endif %}
         mainContainer:
           image: {{ k8s_image }}
           imagePullPolicy: IfNotPresent
@@ -238,18 +307,22 @@ spec:
             - name: model-cache
               mountPath: {{ k8s_model_cache_mount }}
             {% endif %}
-            {% if k8s_use_engine_cm %}
             - name: engine-configs
               mountPath: {{ k8s_engine_cm_mount }}
-              readOnly: true
-            {% endif %}
+              {% if use_engine_cm %}readOnly: true{% endif %}
             - name: tmp
               mountPath: /tmp
           command: ["/bin/bash","-c"]
           args:
             - |
-              set -euo pipefail            
+              set -euo pipefail
               cd "{{ working_dir }}"
+              {% if not use_engine_cm %}
+              mkdir -p {{ k8s_engine_cm_mount }}
+              cat > {{ decode_engine_args }} <<'YAML'
+{{ (decode_engine_args_inline | trim | indent(14, true)) }}
+              YAML
+              {% endif %}
               args=(
                 --model-path "{{ model_path }}"
                 --served-model-name "{{ served_model_name }}"
@@ -261,4 +334,28 @@ spec:
                 {% endif %}
               )
               exec python3 -m dynamo.trtllm "${args[@]}"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 40
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10
     {% endif %}
