@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import traceback
 from typing import Dict, Optional
 
 import matplotlib.pyplot as plt
@@ -250,4 +251,4 @@ def save_results(
                     )
 
     except Exception as exc:
-        logger.error("Failed to save results: %s", exc)
+        logger.error("Failed to save results: %s, %s", exc, traceback.format_exc())

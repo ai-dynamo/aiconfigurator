@@ -313,7 +313,7 @@ def _execute_task_configs(
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
 
-    return chosen_exp, best_configs, results, best_throughputs
+    return chosen_exp, best_configs, pareto_fronts, best_throughputs
 
 
 def main(args):
@@ -329,7 +329,7 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
-    chosen_exp, best_configs, results, best_throughputs = _execute_task_configs(
+    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs(
         task_configs,
         args.mode,
     )
@@ -338,7 +338,7 @@ def main(args):
         save_results(
             args=args,
             best_configs=best_configs, 
-            pareto_fronts=results, 
+            pareto_fronts=pareto_fronts, 
             task_configs=task_configs, 
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,
