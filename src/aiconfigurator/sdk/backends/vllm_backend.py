@@ -17,6 +17,7 @@ class VLLMBackend(BaseBackend):
     """
     def __init__(self,):
         super().__init__()
+        self.name = common.BackendName.vllm
 
     def run_agg(self, 
                 model: BaseModel, 

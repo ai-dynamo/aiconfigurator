@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-def get_model(model_name: str, model_config: config.ModelConfig) -> BaseModel:
+def get_model(model_name: str, model_config: config.ModelConfig,  backend_name: str=common.BackendName.trtllm.value) -> BaseModel:
     """
     Get model.
     """
@@ -37,8 +37,14 @@ def get_model(model_name: str, model_config: config.ModelConfig) -> BaseModel:
                     hidden, inter, vocab, context, \
                     model_config)
     elif model_family == 'DEEPSEEK':
-        model = DeepSeekModel(topk, num_experts, moe_inter_size, \
+        if backend_name == 'sglang':
+            model = DisaggDeepSeekModel(topk, num_experts, moe_inter_size, \
                          model_name, model_family, l, n, n_kv, d, \
+                    hidden, inter, vocab, context, \
+                    model_config)
+        else:
+            model = DeepSeekModel(topk, num_experts, moe_inter_size, \
+                        model_name, model_family, l, n, n_kv, d, \
                     hidden, inter, vocab, context, \
                     model_config)
     elif model_family == 'NEMOTRONNAS':
@@ -448,6 +454,70 @@ class DeepSeekModel(BaseModel):
 
         # TODO
         # a lot of quantization ops
+
+
+class DisaggDeepSeekModel(BaseModel):
+    """
+    DeepSeek V3/R1 disaggregated model for SGLang backend.
+    """
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+        super().__init__(*args)
+
+        assert(num_experts >= self.config.moe_ep_size), f"ep size cannot be larger than num_experts {num_experts}"
+
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_inter_size = moe_inter_size
+        self._mtp_scale_factor = 1./(1+calc_expectation(self._nextn, self._nextn_accept_rates))*(self._nextn+self._num_layers)/self._num_layers
+
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        moe_tp_size = self.config.moe_tp_size
+        moe_ep_size = self.config.moe_ep_size
+        attention_dp_size = self.config.attention_dp_size
+        pp_size = self.config.pp_size
+        
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        fmha_quant_mode = self.config.fmha_quant_mode
+        moe_quant_mode = self.config.moe_quant_mode
+        moe_backend = self.config.moe_backend
+        sms = self.config.sms
+        workload_distribution = "uniform"
+        gpu_per_node = 8
+        node_num = moe_ep_size//gpu_per_node
+
+        # context mla attention
+        self.context_ops.extend([ops.ContextMLASglang(f'context_attention', self._num_layers, tp_size, kvcache_quant_mode, fmha_quant_mode)])
+
+        # shared expert
+        self.context_ops.extend([ops.MLP(f'context_shared_expert', self._num_layers, h, self._moe_inter_size, moe_quant_mode)])
+        
+        # dispatch tokens to experts
+        self.context_ops.extend([ops.MoEDispatch(f'context_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts, 
+                                                 moe_tp_size, moe_ep_size, attention_dp_size, True, 
+                                                 sms=sms, node_num=node_num, moe_backend=moe_backend, is_context=True)])
+        
+        # moe computation
+        self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, 
+                                         moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, 
+                                         attention_dp_size, is_context=True, moe_backend=moe_backend)])
+
+        # generation mla attention
+        self.generation_ops.extend([ops.GenerationMLASglang(f'generation_attention', self._num_layers*self._mtp_scale_factor, tp_size, kvcache_quant_mode, fmha_quant_mode)])
+
+        # shared expert
+        self.generation_ops.extend([ops.MLP(f'generation_shared_expert', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, moe_quant_mode)])
+        
+        # dispatch tokens to experts
+        self.generation_ops.extend([ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts, 
+                                                    moe_tp_size, moe_ep_size, attention_dp_size, True, 
+                                                    sms=sms, node_num=node_num, moe_backend=moe_backend, is_context=False)])
+   
+        # moe computation
+        self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, 
+                                            moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, 
+                                            attention_dp_size, is_context=False, moe_backend=moe_backend)])
+
 
 class NemotronNas(BaseModel):
     """
