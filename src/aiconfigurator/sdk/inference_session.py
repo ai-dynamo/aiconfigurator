@@ -411,17 +411,23 @@ class DisaggInferenceSession(object):
             MAX_DECODE_WORKERS_PER_CATEGORY = 16
             MAX_PREFILL_WORKERS = 32
 
-            def _correct_ttft(target_ttft: float) -> float:
-                return target_ttft
+            # only ttft will be corrected here, other latency and throughput will not be corrected.
+            # concurrency / num_prefill_workers = local_concurrency(lc); N x concurrency requests
+            # formula = (lc * (lc+1) / 2 + lc * (N-1) )/lc/N
+            # if we use N=10, it's lc/20+0.95. assume lc can be 15-20, 1.8 is a reasonable correction factor.
+            # as we need to get the lc after rate matching, we cannot get the exact value now. 
+            # Let's make it simple to do pre-correction instead of post-correction.
+            correction_factor = 1.8  # let's make it simple for now.
+            prefill_candidates = prefill_summary_df.assign(
+                                            ttft=prefill_summary_df['ttft'] * correction_factor)
 
-            corrected_ttft = _correct_ttft(ttft)
-            prefill_candidates = prefill_summary_df[prefill_summary_df['context_latency'] < corrected_ttft]
+            prefill_candidates = prefill_candidates[prefill_candidates['context_latency'] < ttft]
             if len(prefill_candidates) == 0:
-                logger.debug(f"No prefill worker candidates found for corrected ttft {corrected_ttft}ms.")
+                logger.debug(f"No prefill worker candidates found for ttft {ttft}ms.")
                 return None
             prefill_candidates = prefill_candidates.sort_values(by=['seq/s/gpu', 'global_bs'], ascending=[False, True]).reset_index(drop=True).head(MAX_PREFILL_WORKERS)
 
-            decode_candidates = decode_summary_df[(decode_summary_df['tpot'] < tpot*DECODE_FILTER_RATIO_MAX) & (decode_summary_df['tpot'] > tpot * DECODE_FILTER_RATIO_MIN)]
+            decode_candidates = decode_summary_df[(decode_summary_df['tpot'] < tpot*DECODE_FILTER_RATIO_MAX) & (decode_summary_df['tpot'] > tpot * DECODE_FILTER_RATIO_MIN)].copy()
             if len(decode_candidates) == 0:
                 logger.debug(f"No decode worker candidates found for tpot {tpot}ms.")
                 return None
@@ -579,11 +585,6 @@ class DisaggInferenceSession(object):
         if len(disagg_summary_df) == 0:
             logger.debug(f"No disagg result found for {model_name} with given constraints.")
             return disagg_summary
-        
-        tp8_decode_candidates = disagg_summary_df[disagg_summary_df['(d)tp'] == 8]
-        if not tp8_decode_candidates.empty:
-            logger.info(f"final: tp8 decode workers tokens/s/gpu: {tp8_decode_candidates['tokens/s/gpu'].tolist()} tpot: {tp8_decode_candidates['tpot'].tolist()}")
-        
 
         # set final disagg summary
         disagg_summary.set_summary_df(disagg_summary_df)

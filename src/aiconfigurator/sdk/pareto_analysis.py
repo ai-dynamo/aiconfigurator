@@ -411,14 +411,15 @@ def get_best_configs_under_tpot_constraint(
     total_gpus: int,
     pareto_df: pd.DataFrame, 
     target_tpot: float,
-    top_n: int = 1
+    top_n: int = 1,
+    group_by: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Finds the best actual config from a Pareto frontier DataFrame
+    Finds the best actual config from a Pareto DataFrame
     that meets the target_tpot constraint (tpot <= target_tpot)
     and maximizes 'tokens/s/gpu'.
     Args:
-        pareto_df: The Pareto frontier DataFrame.
+        pareto_df: The Pareto DataFrame.
         target_tpot: The target TPOT in ms.
     Returns:
         A DataFrame containing the best config that meets the target_tpot constraint.
@@ -441,6 +442,9 @@ def get_best_configs_under_tpot_constraint(
         # compute achieved cluster-scale tokens/s/gpu
         candidate_configs['tokens/s/gpu_cluster'] = candidate_configs['tokens/s/gpu'] * \
             (total_gpus // candidate_configs['num_total_gpus']) * candidate_configs['num_total_gpus'] / total_gpus
+        if group_by is not None:
+            top_indexes = candidate_configs.groupby(group_by)['tokens/s/gpu_cluster'].idxmax()
+            candidate_configs = candidate_configs.loc[top_indexes]
         candidate_configs = candidate_configs.sort_values(by='tokens/s/gpu_cluster', ascending=False).head(top_n).reset_index(drop=True)
         logger.debug(f"actual replica-level throughputs: {candidate_configs['tokens/s/gpu'].iloc[0]:.2f} vs. actual cluster-level throughputs: {candidate_configs['tokens/s/gpu_cluster'].iloc[0]:.2f}")        
         return candidate_configs

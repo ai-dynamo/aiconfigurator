@@ -22,16 +22,16 @@ from aiconfigurator.sdk.utils import safe_mkdir
 logger = logging.getLogger(__name__)
 
 
-def _plot_worker_setup_table(exp_name: str, pareto_df: pd.DataFrame, total_gpus: int, tpot_target: float, top: int, is_moe: bool) -> str:
+def _plot_worker_setup_table(exp_name: str, config_df: pd.DataFrame, total_gpus: int, tpot_target: float, top: int, is_moe: bool) -> str:
     """Plot worker setup table for a single experiment."""
     buf = []
     
-    if pareto_df is None or pareto_df.empty:
+    if config_df is None or config_df.empty:
         return ""
 
-    pareto_df['tokens/s/gpu_cluster'] = pareto_df['tokens/s/gpu'] * (total_gpus // pareto_df['num_total_gpus']) \
-        * pareto_df['num_total_gpus'] / total_gpus if total_gpus > 0 else 0
-    top_configs = pareto_df[pareto_df['tpot'] <= tpot_target].sort_values(by='tokens/s/gpu_cluster', ascending=False).head(top).copy()
+    config_df['tokens/s/gpu_cluster'] = config_df['tokens/s/gpu'] * (total_gpus // config_df['num_total_gpus']) \
+        * config_df['num_total_gpus'] / total_gpus if total_gpus > 0 else 0
+    top_configs = config_df[config_df['tpot'] <= tpot_target].sort_values(by='tokens/s/gpu_cluster', ascending=False).head(top).copy()
     
     if top_configs.empty:
         return f"\nNo configurations for {exp_name} met the TPOT constraint."
@@ -170,10 +170,10 @@ def log_final_summary(
     summary_box.append(f"               gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; tp * pp for dense models (underlined \033[4mnumbers\033[0m are the actual values in math)")
     
     # Plot worker setup tables for all experiments
-    for exp_name, pareto_df in pareto_fronts.items():
+    for exp_name, config_df in best_configs.items():
         exp_task_config = task_configs[exp_name].config
         total_gpus = getattr(task_configs[exp_name], "total_gpus", None) or 0
-        table_buf = _plot_worker_setup_table(exp_name, pareto_df, total_gpus, exp_task_config.runtime_config.tpot, 5, exp_task_config.is_moe)
+        table_buf = _plot_worker_setup_table(exp_name, config_df, total_gpus, exp_task_config.runtime_config.tpot, 5, exp_task_config.is_moe)
         summary_box.append(table_buf)
 
     summary_box.append("*" * 80)

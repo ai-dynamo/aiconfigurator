@@ -79,8 +79,8 @@ def test_taskconfig_disagg_default():
     assert cfg.replica_config.max_gpu_per_replica == 128
     assert cfg.advanced_tuning_config.prefill_max_batch_size == 1
     assert cfg.advanced_tuning_config.decode_max_batch_size == 512
-    assert cfg.advanced_tuning_config.prefill_correction_scale == 0.9
-    assert cfg.advanced_tuning_config.decode_correction_scale == 0.92
+    assert cfg.advanced_tuning_config.prefill_latency_correction_scale == 1.1
+    assert cfg.advanced_tuning_config.decode_latency_correction_scale == 1.08
     assert "disagg-defaults" in cfg.applied_layers
 
 
@@ -255,10 +255,12 @@ def test_taskrunner_runs_agg_and_disagg():
 
     runner = TaskRunner()
 
-    agg_df = runner.run(agg_task)
-    disagg_df = runner.run(disagg_task)
+    agg_result = runner.run(agg_task)
+    disagg_result = runner.run(disagg_task)
 
-    assert isinstance(agg_df, pd.DataFrame)
-    assert isinstance(disagg_df, pd.DataFrame)
-    assert agg_df["tokens/s/user"].iloc[0] == pytest.approx(1.0)
-    assert disagg_df["tokens/s/user"].iloc[0] == pytest.approx(0.8)
+    assert isinstance(agg_result["pareto_frontier_df"], pd.DataFrame)
+    assert isinstance(disagg_result["pareto_frontier_df"], pd.DataFrame)
+    assert isinstance(agg_result["pareto_df"], pd.DataFrame)
+    assert isinstance(disagg_result["pareto_df"], pd.DataFrame)
+    assert agg_result["pareto_frontier_df"]["tokens/s/user"].iloc[0] == pytest.approx(1.0)
+    assert disagg_result["pareto_frontier_df"]["tokens/s/user"].iloc[0] == pytest.approx(0.8)

@@ -299,8 +299,8 @@ class TaskConfigFactory:
             replica_config["max_gpu_per_replica"] = 512
 
         advanced_tuning_config = {
-            "prefill_correction_scale": 0.9,
-            "decode_correction_scale": 0.92,
+            "prefill_latency_correction_scale": 1.1,
+            "decode_latency_correction_scale": 1.08,
             "prefill_max_batch_size": 1,
             "decode_max_batch_size": 512,
         }
@@ -771,7 +771,7 @@ class TaskConfig:
 
 
 class TaskRunner:
-    def run_agg(self, task_config: DefaultMunch) -> Optional[pd.DataFrame]:
+    def run_agg(self, task_config: DefaultMunch) -> dict[str, Optional[pd.DataFrame]]:
         logger.info("Task %s: Setting up runtime config", task_config.task_name)
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
@@ -839,9 +839,9 @@ class TaskRunner:
             model_config=model_config,
             parallel_config_list=parallel_config_list,
         )
-        return pa.get_pareto_front(result_df, 'tokens/s/user', 'tokens/s/gpu').reset_index(drop=True).reset_index()
+        return {"pareto_df": result_df, "pareto_frontier_df": pa.get_pareto_front(result_df, 'tokens/s/user', 'tokens/s/gpu').reset_index(drop=True).reset_index()}
 
-    def run_disagg(self, task_config: DefaultMunch) -> Optional[pd.DataFrame]:
+    def run_disagg(self, task_config: DefaultMunch) -> dict[str, Optional[pd.DataFrame]]:
         logger.info("Task %s: Setting up runtime config", task_config.task_name)
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
@@ -974,12 +974,12 @@ class TaskRunner:
             decode_max_num_worker=task_config.replica_config.max_decode_worker,
             prefill_max_num_tokens=task_config.advanced_tuning_config.prefill_max_batch_size*task_config.runtime_config.isl,
             decode_max_num_tokens=task_config.advanced_tuning_config.decode_max_batch_size,
-            prefill_correction_scale=task_config.advanced_tuning_config.prefill_correction_scale,
-            decode_correction_scale=task_config.advanced_tuning_config.decode_correction_scale,
+            prefill_latency_correction_scale=task_config.advanced_tuning_config.prefill_latency_correction_scale,
+            decode_latency_correction_scale=task_config.advanced_tuning_config.decode_latency_correction_scale,
         )
-        return pa.get_pareto_front(result_df, 'tokens/s/user', 'tokens/s/gpu').reset_index(drop=True).reset_index()
+        return {"pareto_df": result_df, "pareto_frontier_df": pa.get_pareto_front(result_df, 'tokens/s/user', 'tokens/s/gpu').reset_index(drop=True).reset_index()}
 
-    def run(self, task_config: TaskConfig) -> Optional[pd.DataFrame]:
+    def run(self, task_config: TaskConfig) -> dict[str, Optional[pd.DataFrame]]:
         serving_mode = task_config.config.serving_mode
         logger.info(
             "Starting Pareto Analysis for %s in %s mode...",
@@ -988,9 +988,9 @@ class TaskRunner:
         )
         try:
             if serving_mode == "agg":
-                df = self.run_agg(task_config.config)
+                result = self.run_agg(task_config.config)
             elif serving_mode == "disagg":
-                df = self.run_disagg(task_config.config)
+                result = self.run_disagg(task_config.config)
             else:
                 raise ValueError(f"Invalid serving mode: {serving_mode}")
         except Exception as e:
@@ -1000,12 +1000,12 @@ class TaskRunner:
                 serving_mode,
                 e,
             )
-            df = None
+            result = None
 
-        if df is None:
+        if result is None:
             logger.warning("No result found for %s in %s mode.", task_config.task_name, serving_mode)
 
-        return df
+        return result
 
 if __name__ == "__main__":
 
@@ -1022,7 +1022,7 @@ if __name__ == "__main__":
     task_runner = TaskRunner()
     print("\n=== TaskConfig (agg) ===")
     print(task_agg.pretty())
-    agg_df = task_runner.run(task_agg)
+    agg_df = task_runner.run(task_agg)["pareto_frontier_df"]
     agg_df.to_csv("agg_df.csv", index=False)
     print("\n=== agg pareto ===")
     print(agg_df)
@@ -1040,13 +1040,13 @@ if __name__ == "__main__":
         yaml_config={
             "mode": "patch",
             "config": {
-                "advanced_tuning_config": {"prefill_correction_scale": 0.85, "decode_correction_scale": 0.88},
+                "advanced_tuning_config": {"prefill_latency_correction_scale": 1.1, "decode_latency_correction_scale": 1.08},
             },
         },
     )
     print("\n=== TaskConfig (disagg) ===")
     print(task_disagg.pretty())
-    disagg_df = task_runner.run(task_disagg)
+    disagg_df = task_runner.run(task_disagg)["pareto_frontier_df"]
     disagg_df.to_csv("disagg_df.csv", index=False)
     print("\n=== disagg pareto ===")
     print(disagg_df)
