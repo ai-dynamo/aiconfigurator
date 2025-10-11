@@ -96,19 +96,11 @@ python collect_deepep_moe.py
 Edit the configuration at the bottom of the script:
 ```python
 server_args = ServerArgs(
-    model_path=model_path,
-    dtype="auto",
-    device="cuda",
-    load_format="dummy",        # Use dummy weights
     tp_size=2,                   # Tensor parallel size
     ep_size=2,                   # Expert parallel size
-    # ... other parameters
 )
 
 bench_args = MoEBenchArgs(
-    num_warmup=3,
-    num_iterations=10,
-    test_layer=3,                # Test layer 3
     num_experts=256,             # Number of experts to simulate different EP configurations
 )
 ```
@@ -124,7 +116,7 @@ The `num_experts` parameter in `MoEBenchArgs` is used to simulate different expe
 - `num_experts=16` → simulates **EP 32**
 - `num_experts=8` → simulates **EP 64**
 - `num_experts=4` → simulates **EP 128**
-- `num_experts=2` → simulates **EP 256** (2 experts / 256 = minimal experts per GPU)
+- `num_experts=2` → simulates **EP 256** (2 experts / 2 = 1 experts per GPU)
 
 The actual `moe_ep_size` is automatically calculated based on the relationship between `num_experts` and the base EP size (256).
 

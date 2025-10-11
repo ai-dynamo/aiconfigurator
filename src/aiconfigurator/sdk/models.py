@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-def get_model(model_name: str, backend_name: common.BackendName, model_config: config.ModelConfig) -> BaseModel:
+def get_model(model_name: str, model_config: config.ModelConfig,  backend_name: common.BackendName='trtllm') -> BaseModel:
     """
     Get model.
     """
@@ -22,14 +22,6 @@ def get_model(model_name: str, backend_name: common.BackendName, model_config: c
 
     if model_config.overwrite_num_layers > 0:
         l = model_config.overwrite_num_layers
-
-    if backend_name == 'sglang':
-        if model_family == 'DEEPSEEK':
-            model = DisaggDeepSeekModel(topk, num_experts, moe_inter_size, \
-                         model_name, model_family, l, n, n_kv, d, \
-                    hidden, inter, vocab, context, \
-                    model_config)
-        return model
 
     if model_family == 'GPT':
         model = GPTModel(model_name, model_family, l, n, n_kv, d, \
@@ -45,8 +37,14 @@ def get_model(model_name: str, backend_name: common.BackendName, model_config: c
                     hidden, inter, vocab, context, \
                     model_config)
     elif model_family == 'DEEPSEEK':
-        model = DeepSeekModel(topk, num_experts, moe_inter_size, \
+        if backend_name == 'sglang':
+            model = DisaggDeepSeekModel(topk, num_experts, moe_inter_size, \
                          model_name, model_family, l, n, n_kv, d, \
+                    hidden, inter, vocab, context, \
+                    model_config)
+        else:
+            model = DeepSeekModel(topk, num_experts, moe_inter_size, \
+                        model_name, model_family, l, n, n_kv, d, \
                     hidden, inter, vocab, context, \
                     model_config)
     elif model_family == 'NEMOTRONNAS':
@@ -482,14 +480,11 @@ class DisaggDeepSeekModel(BaseModel):
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
-        workload_distribution = self.config.workload_distribution
         moe_backend = self.config.moe_backend
         sms = self.config.sms
+        workload_distribution = "uniform"
         
-        prefill_node_num = self.config.prefill_node_num
-        decode_node_num = self.config.decode_node_num
-        prefill_attention_dp_size = prefill_moe_ep_size = prefill_node_num * 8
-        decode_attention_dp_size = decode_moe_ep_size = decode_node_num * 8
+        node_num = moe_ep_size//self.config.moe_ep_size
 
         # context mla attention
         self.context_ops.extend([ops.ContextMLASglang(f'context_attention', self._num_layers, tp_size, kvcache_quant_mode, fmha_quant_mode)])
@@ -499,13 +494,13 @@ class DisaggDeepSeekModel(BaseModel):
         
         # dispatch tokens to experts
         self.context_ops.extend([ops.MoEDispatch(f'context_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts, 
-                                                 moe_tp_size, prefill_moe_ep_size, prefill_attention_dp_size, True, 
-                                                 sms=sms, node_num=prefill_node_num, moe_backend=moe_backend)])
+                                                 moe_tp_size, moe_ep_size, attention_dp_size, True, 
+                                                 sms=sms, node_num=node_num, moe_backend=moe_backend)])
         
         # moe computation
         self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, 
-                                         moe_tp_size, prefill_moe_ep_size, moe_quant_mode, workload_distribution, 
-                                         prefill_moe_ep_size, is_context=True, moe_backend=moe_backend)])
+                                         moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, 
+                                         attention_dp_size, is_context=True, moe_backend=moe_backend)])
 
         # generation mla attention
         self.generation_ops.extend([ops.GenerationMLASglang(f'generation_attention', self._num_layers*self._mtp_scale_factor, tp_size, kvcache_quant_mode, fmha_quant_mode)])
@@ -515,13 +510,13 @@ class DisaggDeepSeekModel(BaseModel):
         
         # dispatch tokens to experts
         self.generation_ops.extend([ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers*self._mtp_scale_factor, h, self._topk, self._num_experts, 
-                                                    moe_tp_size, decode_moe_ep_size, decode_attention_dp_size, True, 
-                                                    sms=sms, node_num=decode_node_num, moe_backend=moe_backend)])
+                                                    moe_tp_size, moe_ep_size, attention_dp_size, True, 
+                                                    sms=sms, node_num=node_num, moe_backend=moe_backend)])
    
         # moe computation
         self.generation_ops.extend([ops.MoE(f'generation_moe', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, self._topk, self._num_experts, 
-                                            moe_tp_size, decode_moe_ep_size, moe_quant_mode, workload_distribution, 
-                                            decode_moe_ep_size, is_context=False, moe_backend=moe_backend)])
+                                            moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, 
+                                            attention_dp_size, is_context=False, moe_backend=moe_backend)])
 
 
 class NemotronNas(BaseModel):

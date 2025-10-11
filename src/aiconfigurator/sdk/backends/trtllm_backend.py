@@ -20,6 +20,7 @@ class TRTLLMBackend(BaseBackend):
     def __init__(self,):
         super().__init__()
         self._agg_cache = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+        self.name = common.BackendName.trtllm
 
     def run_agg(self, 
                 model: BaseModel, 

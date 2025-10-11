@@ -20,13 +20,11 @@ class ModelConfig:
     moe_tp_size: int = None
     moe_ep_size: int = None
     attention_dp_size: int = 1
-    workload_distribution: str = "uniform"
+    workload_distribution: str = "power_law"
     nextn: int = 0 # at most mtp5
     nextn_accept_rates: list = None
     overwrite_num_layers: int = 0
     sms: int = 12
-    prefill_node_num: int = 1
-    decode_node_num: int = 1
     moe_backend: str = 'deepep_moe'
 
 @dataclass
@@ -35,7 +33,6 @@ class RuntimeConfig:
     Runtime configuration.
     """
     batch_size: int = None
-    decode_bs: int = None
     beam_width: int = 1
     isl: int = None
     osl: int = None

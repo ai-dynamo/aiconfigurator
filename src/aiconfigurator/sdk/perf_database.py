@@ -346,8 +346,8 @@ def load_sglang_mlp_data(mlp_file):
     Load the SGLang MLP data from context_mlp_perf.txt and generation_mlp_perf.txt
     """
     data_dir = os.path.dirname(mlp_file)
-    prefill_mlp_file = os.path.join(data_dir, 'context_mlp_perf.txt')
-    generation_mlp_file = os.path.join(data_dir, 'generation_mlp_perf.txt')
+    prefill_mlp_file = os.path.join(data_dir, common.PerfDataFilename.context_mlp.value)
+    generation_mlp_file = os.path.join(data_dir, common.PerfDataFilename.generation_mlp.value)
     
     context_mlp_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))
     generation_mlp_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))
@@ -769,7 +769,7 @@ class PerfDatabase(object):
             self._moe_data, self._generation_moe_data = load_sglang_moe_data(os.path.join(data_dir, common.PerfDataFilename.context_moe.value))
             self._context_mla_data = load_context_mla_data(os.path.join(data_dir, common.PerfDataFilename.context_mla.value))
             self._generation_mla_data = load_generation_mla_data(os.path.join(data_dir, common.PerfDataFilename.generation_mla.value))
-            self._context_mlp_data, self._generation_mlp_data = load_sglang_mlp_data(os.path.join(data_dir, common.PerfDataFilename.mlp.value))
+            self._context_mlp_data, self._generation_mlp_data = load_sglang_mlp_data(os.path.join(data_dir, common.PerfDataFilename.context_mlp.value))
             self._deepep_normal_data = load_deepep_normal_data(os.path.join(data_dir, common.PerfDataFilename.deepep_normal.value))
             self._deepep_ll_data = load_deepep_ll_data(os.path.join(data_dir, common.PerfDataFilename.deepep_ll.value))
             self._nccl_data = {}

@@ -18,6 +18,7 @@ class SGLANGBackend(BaseBackend):
     """
     def __init__(self):
         super().__init__()
+        self.name = common.BackendName.sglang
 
     def run_agg(self, 
                 model: BaseModel, 

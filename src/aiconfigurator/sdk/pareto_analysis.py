@@ -109,7 +109,7 @@ def agg_pareto(model_name: str,
             overwritten_model_config.moe_tp_size = moe_tp_size
             overwritten_model_config.moe_ep_size = moe_ep_size
             overwritten_model_config.attention_dp_size = dp_size
-            model = get_model(model_name=model_name, backend=backend_name, model_config=overwritten_model_config)
+            model = get_model(model_name=model_name, model_config=overwritten_model_config, backend_name=backend_name)
             backend = get_backend(backend_name)
             sess = InferenceSession(model=model, database=database, backend=backend)
             for tpot in tpot_list:
@@ -224,7 +224,6 @@ def disagg_pareto(model_name: str,
     decode_num_worker_list = get_working_list(decode_num_worker_list, decode_max_num_worker)
 
     summary = disagg_sess.find_best_disagg_result_under_constraints(model_name=model_name,
-                                                                    backend_name=decode_backend_name,   
                                                                     runtime_config=runtime_config,
                                                                     prefill_model_config=prefill_model_config,
                                                                     prefill_parallel_config_list=prefill_parallel_config_list,
