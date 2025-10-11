@@ -62,7 +62,6 @@ def enumerate_parallel_config(num_gpu_list: list[int],
                                     if moe_tp > 1:
                                         continue
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
-                                print(f"Enumerated parallel config: tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
             else:
                 if tp*pp in num_gpu_list:
                     parallel_config_list.append([tp, pp, 1, 1, 1])
