@@ -634,7 +634,7 @@ def benchmark_moe_layer_decode(
 
 
 
-def run_moe_benchmark(
+def run_moe(
     server_args,
     port_args,
     bench_args: MoEBenchArgs,
@@ -751,7 +751,7 @@ def main(server_args, bench_args: MoEBenchArgs, output_path: str):
     workers = []
     for tp_rank in range(server_args.tp_size):
         proc = multiprocessing.Process(
-            target=run_moe_benchmark,
+            target=run_moe,
             args=(
                 server_args,
                 port_args,
