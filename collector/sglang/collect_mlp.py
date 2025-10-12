@@ -395,7 +395,6 @@ def main(output_path: str, base_config: BenchConfig):
         cleanup_distributed()
         torch.cuda.empty_cache()
     
-    # Results are saved via log_perf during benchmarking; no separate output step needed
     
     print("\n" + "="*50)
     print("MLP BENCHMARK COMPLETED")
