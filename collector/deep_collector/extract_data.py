@@ -32,7 +32,7 @@ def parse_log_file(log_path: str) -> List[Dict]:
         List of dicts containing test data
     """
     if not os.path.exists(log_path):
-        print(f"错误: 日志文件 {log_path} 不存在")
+        print(f"Error: Log file {log_path} does not exist")
         return []
     
     with open(log_path, 'r', encoding='utf-8') as f:
@@ -116,7 +116,7 @@ def parse_ll_log_file(log_path: str) -> List[Dict]:
     2) return_recv_hook=False bandwidth/avg_t lines
     """
     if not os.path.exists(log_path):
-        print(f"错误: 日志文件 {log_path} 不存在")
+        print(f"Error: Log file {log_path} does not exist")
         return []
 
     results: List[Dict] = []
@@ -265,7 +265,7 @@ def create_csv_report(all_data: List[Dict], output_path: str):
         output_path: CSV file path
     """
     if not all_data:
-        print("警告: 没有找到有效的测试数据")
+        print("Warning: No valid test data found")
         return
     
     # Priority columns
@@ -273,17 +273,17 @@ def create_csv_report(all_data: List[Dict], output_path: str):
         'num_tokens', 'hidden', 'num_topk', 'num_experts',
         'data_size_mb', 'total_time_us', 'total_throughput_gbps',
         
-        # Dispatch 指标
+        # Dispatch metrics
         'dispatch_sms', 'dispatch_nvl_chunk', 'dispatch_rdma_chunk',
         'dispatch_transmit_us', 'dispatch_notify_us',
         'dispatch_rdma_bandwidth_gbps', 'dispatch_nvl_bandwidth_gbps',
         
-        # Combine 指标
+        # Combine metrics
         'combine_sms', 'combine_nvl_chunk', 'combine_rdma_chunk',
         'combine_transmit_us', 'combine_notify_us',
         'combine_rdma_bandwidth_gbps', 'combine_nvl_bandwidth_gbps',
         
-        # 汇总指标
+        # Summary metrics
         'avg_rdma_bandwidth_gbps', 'avg_nvl_bandwidth_gbps',
         'total_transmit_time_us', 'total_notify_time_us',
     ]
@@ -320,7 +320,7 @@ def create_csv_report(all_data: List[Dict], output_path: str):
                     rounded_row[k] = v
             writer.writerow(rounded_row)
     
-    print(f"✅ CSV报告已生成: {output_path}")
+    print(f"CSV report generated: {output_path}")
 
 def _format_number(val):
     if isinstance(val, float):
@@ -350,7 +350,7 @@ def create_normal_txt(all_rows: List[Dict], output_path: str, node_num: int = NO
             rows.append(r)
 
     if not rows:
-        print("警告: normal 数据为空，未生成TXT")
+        print("Warning: normal data is empty, no TXT generated")
         return False
 
     rows_sorted = sorted(rows, key=lambda x: (x.get('hidden', 0), x.get('num_tokens', 0), x.get('dispatch_sms', 0)))
@@ -403,7 +403,7 @@ def create_ll_txt(all_rows: List[Dict], output_path: str, node_num: int = NODE_N
             rows.append(r)
 
     if not rows:
-        print("警告: ll 数据为空，未生成TXT")
+        print("Warning: ll data is empty, no TXT generated")
         return False
 
     rows_sorted = sorted(rows, key=lambda x: (x.get('hidden', 0), x.get('num_tokens', 0)))
@@ -442,7 +442,7 @@ def create_summary_report(all_data: List[Dict], output_dir: str):
     summary_path = os.path.join(output_dir, "internode_summary.txt")
     
     with open(summary_path, 'w', encoding='utf-8') as f:
-        f.write("DeepEP 16节点跨节点测试性能汇总\n")
+        f.write("DeepEP 16-node Cross-node Performance Summary\n")
         f.write("=" * 50 + "\n\n")
         
         # Basic information
@@ -497,19 +497,19 @@ def create_summary_report(all_data: List[Dict], output_dir: str):
                 f.write(f"  Overall throughput: {data['total_throughput_gbps']:.2f} GB/s\n")
             f.write("\n")
     
-    print(f"✅ 汇总报告已生成: {summary_path}")
+    print(f"Summary report generated: {summary_path}")
 
 def try_create_excel_report(all_data: List[Dict], output_path: str):
     """
-    尝试创建Excel报告（如果有openpyxl的话）
+    Try to create Excel report (if openpyxl is available)
     """
     try:
         from openpyxl import Workbook
     except ImportError:
-        print("❌ 未安装openpyxl，无法生成Excel。请安装后重试: pip install openpyxl")
+        print("Error: openpyxl not installed. Cannot generate Excel. Please install: pip install openpyxl")
         return False
 
-    # 组装列头（优先重要列）
+    # Assemble column headers (priority important columns)
     priority_columns = [
         'num_tokens', 'hidden', 'num_topk', 'num_experts',
         'data_size_mb', 'total_time_us', 'total_throughput_gbps',
@@ -534,7 +534,7 @@ def try_create_excel_report(all_data: List[Dict], output_path: str):
 
     wb = Workbook()
     ws = wb.active
-    ws.title = '原始数据'
+    ws.title = 'Raw Data'
     ws.append(sorted_columns)
 
     sorted_data = sorted(all_data, key=lambda x: x.get('num_tokens', 0))
@@ -550,29 +550,29 @@ def try_create_excel_report(all_data: List[Dict], output_path: str):
     output_dir = os.path.dirname(os.path.abspath(output_path)) or '.'
     os.makedirs(output_dir, exist_ok=True)
     wb.save(output_path)
-    print(f"✅ Excel报告已生成: {output_path}")
+    print(f"Excel report generated: {output_path}")
     return True
 
 def try_create_excel_report_multi_sheet(logfile_to_data: Dict[str, List[Dict]], output_path: str) -> bool:
     """
-    生成多sheet的Excel：每个日志文件对应一个sheet，sheet名为日志文件名。
-    优先使用pandas；若不可用，退回openpyxl。
+    Generate multi-sheet Excel: each log file corresponds to a sheet, sheet name is the log filename.
+    Prioritize pandas; fallback to openpyxl if unavailable.
     """
-    # 过滤空数据
+    # Filter empty data
     logfile_to_data = {k: v for k, v in logfile_to_data.items() if v}
     if not logfile_to_data:
-        print("警告: 没有找到有效的测试数据")
+        print("Warning: No valid test data found")
         return False
 
-    # 尝试pandas
+    # Try pandas
     try:
         from openpyxl import Workbook  # type: ignore
     except ImportError:
-        print("❌ 未安装openpyxl，无法生成Excel。请安装后重试: pip install openpyxl")
+        print("Error: openpyxl not installed. Cannot generate Excel. Please install: pip install openpyxl")
         return False
 
     wb = Workbook()
-    # 默认工作表将用于第一个sheet
+    # Default worksheet will be used for first sheet
     first = True
     used_names = set()
     for path, rows in logfile_to_data.items():
@@ -593,7 +593,7 @@ def try_create_excel_report_multi_sheet(logfile_to_data: Dict[str, List[Dict]], 
         else:
             ws = wb.create_sheet(title=name)
 
-        # 计算列集合，优先重要列
+        # Calculate column set, prioritize important columns
         priority_columns = [
             'num_tokens', 'hidden', 'num_topk', 'num_experts',
             'data_size_mb', 'total_time_us', 'total_throughput_gbps',
@@ -616,10 +616,10 @@ def try_create_excel_report_multi_sheet(logfile_to_data: Dict[str, List[Dict]], 
                 all_columns.remove(c)
         ordered.extend(sorted(all_columns))
 
-        # 表头
+        # Header
         ws.append(ordered)
 
-        # 按num_tokens排序写入
+        # Write sorted by num_tokens
         rows_sorted = sorted(rows, key=lambda x: x.get('num_tokens', 0))
         for r in rows_sorted:
             row_vals = []
@@ -633,70 +633,70 @@ def try_create_excel_report_multi_sheet(logfile_to_data: Dict[str, List[Dict]], 
     output_dir = os.path.dirname(os.path.abspath(output_path)) or '.'
     os.makedirs(output_dir, exist_ok=True)
     wb.save(output_path)
-    print(f"✅ Excel报告已生成: {output_path}")
+    print(f"Excel report generated: {output_path}")
     return True
 
 def main():
-    parser = argparse.ArgumentParser(description='从目录下所有.log生成TXT报告')
+    parser = argparse.ArgumentParser(description='Generate TXT reports from all .log files in directory')
     parser.add_argument('--log-dir', default='path/to/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/',
-                       help='包含.log文件的目录路径')
+                       help='Directory path containing .log files')
     parser.add_argument('--output-normal', default='./deepep_normal_perf.txt',
-                       help='normal 输出TXT文件路径 (默认: ./deepep_normal_perf.txt)')
+                       help='normal output TXT file path (default: ./deepep_normal_perf.txt)')
     parser.add_argument('--output-ll', default='./deepep_ll_perf.txt',
-                       help='ll 输出TXT文件路径 (默认: ./deepep_ll_perf.txt)')
+                       help='ll output TXT file path (default: ./deepep_ll_perf.txt)')
     args = parser.parse_args()
     
-    print("🔍 开始解析DeepEP 16节点跨节点测试日志...")
-    print(f"日志目录: {args.log_dir}")
-    print(f"normal TXT输出: {args.output_normal}")
-    print(f"ll TXT输出: {args.output_ll}")
+    print("Starting to parse DeepEP 16-node cross-node test logs...")
+    print(f"Log directory: {args.log_dir}")
+    print(f"normal TXT output: {args.output_normal}")
+    print(f"ll TXT output: {args.output_ll}")
     print("=" * 50)
     
-    # 收集日志文件
+    # Collect log files
     log_files = collect_log_files(args.log_dir)
     if not log_files:
-        print("❌ 没有找到任何 .log 日志文件")
+        print("Error: No .log files found")
         return
-    print(f"找到 {len(log_files)} 个日志文件，开始解析...")
+    print(f"Found {len(log_files)} log files, starting parsing...")
 
     logfile_to_data: Dict[str, List[Dict]] = {}
     for log_file in log_files:
-        print(f"正在解析: {os.path.basename(log_file)}...")
+        print(f"Parsing: {os.path.basename(log_file)}...")
         if log_file.endswith('ll.log'):
             data = parse_ll_log_file(log_file)
         else:
             data = parse_log_file(log_file)
         if data:
             node_num_val = _extract_node_num_from_filename(log_file)
-            # 将 node_num 注入每一行
+            # Inject node_num into each row
             for r in data:
                 r['node_num'] = node_num_val
             logfile_to_data[log_file] = data
 
     if not logfile_to_data:
-        print("❌ 没有提取到任何有效的测试数据")
+        print("Error: No valid test data extracted")
         return
 
-    # 准备汇总数据
+    # Prepare summary data
     all_data: List[Dict] = []
     for rows in logfile_to_data.values():
         all_data.extend(rows)
 
-    # normal TXT（来自 parse_log_file 输出）
+    # normal TXT (from parse_log_file output)
     normal_rows: List[Dict] = []
     for path, rows in logfile_to_data.items():
         if not path.endswith('ll.log'):
             normal_rows.extend(rows)
     normal_success = create_normal_txt(normal_rows, args.output_normal, NODE_NUM_DEFAULT)
     
-    # ll TXT（来自 parse_ll_log_file 输出的 return_recv_hook=False 行）
+    # ll TXT (from parse_ll_log_file output with return_recv_hook=False rows)
     ll_rows: List[Dict] = []
     for path, rows in logfile_to_data.items():
         if path.endswith('ll.log'):
             ll_rows.extend(rows)
     ll_success = create_ll_txt(ll_rows, args.output_ll, NODE_NUM_DEFAULT)
     
-    print(f"\n🎉 报告生成完成!")
+    print(f"\nReport generation complete!")
     if normal_success:
         print(f"  - normal: {args.output_normal}")
     if ll_success:
