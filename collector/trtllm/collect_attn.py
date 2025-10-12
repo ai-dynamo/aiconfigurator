@@ -237,7 +237,7 @@ def run_attention_torch(batch_size,
 def get_context_attention_test_cases():
     has_fp8 = getSMVersion() > 86
     test_cases = []
-    b_list = [1,2,4,8,16,32,64,128,256,512,1024,2048]
+    b_list = [1,2,4,8,16,32,64,128,256]
     s_list = [16,32,64,128,256,512,1024,1536,2048,3072,4096,6144,8192,10240,12288,16384,262144]
     n_list = [4,8,12,16,24,32,40,48,64,96]
     n_kv_list = [0,1,2,4,8]
