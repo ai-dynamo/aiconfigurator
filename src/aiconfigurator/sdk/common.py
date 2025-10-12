@@ -70,7 +70,9 @@ SupportedModels = {
                                                         BlockConfig(None, True, 3.28125, False, 1),
                                                         BlockConfig(None, True, 5.25, False, 1)
                                                     ]
-                                                    ]
+                                                    ],
+                'GPT_OSS_120B':['MOE',36,64,8,64,2880,2880,201088,131072,4,128,2880,None],
+                'GPT_OSS_20B':['MOE',24,64,8,64,2880,2880,201088,131072,4,32,2880,None]
               }
 
 """
@@ -186,6 +188,7 @@ class MoEQuantMode(Enum):
     fp8_block = QuantMapping(1, 2, 'fp8_block') # specific for trtllm torch ds fp8
     w4afp8 = QuantMapping(0.5, 2, 'w4afp8') # specific for trtllm torch ds w4a8
     nvfp4 = QuantMapping(0.5, 4, 'nvfp4') # nvfp4 on blackwell
+    w4a16_mxfp4 = QuantMapping(0.5, 1, 'w4a16_mxfp4') #native data format for gpt oss
 
 class FMHAQuantMode(Enum):
     """

@@ -242,6 +242,10 @@ def run_moe_torch(moe_type, num_tokens_lists, hidden_size, inter_size, topk, num
         swiglu_limit = torch.tensor(
             [7.0] * (num_experts // moe_ep_size),
             dtype=torch.float32).cuda()
+        if 86 < getSMVersion() <100:
+            model_config.moe_backend = 'triton'
+        else:
+            model_config.moe_backend = 'cutlass' if not min_latency_mode else 'trtllm'
     else:
         model_config.moe_backend = 'cutlass' if not min_latency_mode else 'trtllm'
 

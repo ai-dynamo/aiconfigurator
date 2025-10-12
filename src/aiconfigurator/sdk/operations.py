@@ -317,18 +317,25 @@ class ContextAttention(Operation):
                  n: int, 
                  n_kv: int, 
                  kvcache_quant_mode: common.KVCacheQuantMode, 
-                 fmha_quant_mode: common.FMHAQuantMode) -> None:
+                 fmha_quant_mode: common.FMHAQuantMode,
+                 window_size: int = 0,
+                 head_size: int = 128) -> None:
         super().__init__(name, scale_factor)
         self._n = n
         self._weights = 0.0
         self._n_kv = n_kv
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
+        self._window_size = window_size
+        self._head_size = head_size
 
     def query(self, database:PerfDatabase, **kwargs):
         batch_size = kwargs.get('batch_size')
         isl = kwargs.get('s')
-        return database.query_context_attention(batch_size, isl, self._n, self._n_kv, self._kvcache_quant_mode, self._fmha_quant_mode)*self._scale_factor
+        return database.query_context_attention(batch_size, isl, self._n, self._n_kv, 
+                                                self._kvcache_quant_mode, self._fmha_quant_mode,
+                                                window_size=self._window_size,
+                                                head_size=self._head_size)*self._scale_factor
     
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -342,19 +349,26 @@ class GenerationAttention(Operation):
                  scale_factor: float, 
                  n: int, 
                  n_kv: int, 
-                 kv_cache_dtype: common.KVCacheQuantMode) -> None:
+                 kv_cache_dtype: common.KVCacheQuantMode,
+                 window_size: int = 0,
+                 head_size: int = 128) -> None:
         super().__init__(name, scale_factor)
         self._n = n
         self._weights = 0.0
         self._n_kv = n_kv
         self._kv_cache_dtype = kv_cache_dtype
+        self._window_size = window_size
+        self._head_size = head_size 
 
     def query(self, database:PerfDatabase, **kwargs):
         beam_width = kwargs.get('beam_width')
         assert(beam_width == 1), "only support beam_width=1"
         batch_size = kwargs.get('batch_size')
         s = kwargs.get('s')
-        return database.query_generation_attention(batch_size, s, self._n, self._n_kv, self._kv_cache_dtype)*self._scale_factor
+        return database.query_generation_attention(batch_size, s, self._n, self._n_kv, 
+                                                   self._kv_cache_dtype,
+                                                   window_size=self._window_size,
+                                                   head_size=self._head_size)*self._scale_factor
  
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
