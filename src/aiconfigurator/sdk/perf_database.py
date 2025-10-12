@@ -856,7 +856,7 @@ class PerfDatabase(object):
             data_dict=self._generation_mla_data[kv_cache_dtype]
             target_x_list=tp_list # n
             target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
-            target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384]#,32768,65536,131072,262144,2097152*8] # s
+            target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
 
             self._extrapolate_data_grid(data_dict=data_dict, #tpsize, bs
                                         target_x_list=target_x_list,
@@ -1011,7 +1011,7 @@ class PerfDatabase(object):
         Validate the value
         """
         if value < 0.:
-            logger.warning(f'Negative value detected {value}, pass')
+            logger.debug(f'Negative value detected {value}, pass')
         return value
     
     def _interp_3d_linear(self, x:int, y:int, z:int, data:dict) -> float:
