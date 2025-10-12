@@ -28,8 +28,10 @@ docker run -itd --shm-size 32g --gpus all --ipc=host --network=host --name sglan
 
 ## General Configuration
 
-Modify output_path in each script to your desired location, e.g.:
-output_path = "aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
+All scripts save results to the same output directory. Modify `output_path` in each script to your desired location:
+```python
+output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
+```
 
 
 ## 1. Attention Operator Collection (collect_attn.py)
@@ -67,7 +69,7 @@ Results are saved to:
 
 Output format:
 ```
-framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,batch_size,isl,tp_size,step,latency
+framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,tp_size,step,latency
 ```
 
 ## 2. MoE Operator Collection (collect_deepep_moe.py)
@@ -95,14 +97,16 @@ python collect_deepep_moe.py
 
 Edit the configuration at the bottom of the script:
 ```python
+# Configuration variables (modify as needed)
+num_experts=256,             # Number of experts to simulate different EP configurations
+
+# Server arguments
 server_args = ServerArgs(
     tp_size=2,                   # Tensor parallel size
     ep_size=2,                   # Expert parallel size
 )
 
-bench_args = MoEBenchArgs(
-    num_experts=256,             # Number of experts to simulate different EP configurations
-)
+
 ```
 
 **Simulating Different EP Configurations**:
@@ -132,7 +136,7 @@ Results are saved to:
 
 Output format:
 ```
-framework,version,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency
+framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency
 ```
 
 ## 3. MLP Operator Collection (collect_mlp.py)
@@ -140,7 +144,7 @@ framework,version,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_s
 ### Features
 - Tests DeepSeek V2/V3 MLP operator performance
 - Supports FP8 quantization
-- Tests prefill (direct execution) and decode (CUDA Graph) modes
+- Separately tests prefill (context, direct execution) and decode (generation, CUDA Graph) phases
 
 ### Usage
 
@@ -154,16 +158,20 @@ python collect_mlp.py
 - `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model (default: `/deepseek-v3`)
 
 ### Test Parameters
-The script automatically tests the following configurations:
-- Quantization: FP8
+The script automatically tests the following configurations for both prefill and decode phases:
+- Quantization: FP8 block quantization
 - Number of tokens: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072
 - Hidden size: 7168
 - Intermediate size: 2048
 
+### Test Phases
+1. **Prefill Phase**: Direct execution without CUDA Graph
+2. **Decode Phase**: CUDA Graph enabled for optimized performance
+
 ### Output
 Results are saved to:
-- `context_mlp_perf.txt`: Context phase performance data
-- `generation_mlp_perf.txt`: Generation phase performance data
+- `context_mlp_perf.txt`: Prefill phase performance data
+- `generation_mlp_perf.txt`: Decode phase performance data
 
 Output format:
 ```

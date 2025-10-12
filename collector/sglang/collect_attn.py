@@ -1,13 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#!/usr/bin/env python3
 import os
-import time
 import json
 import torch
 import numpy as np
-from typing import List, Tuple
-from dataclasses import dataclass, field
+from typing import List
 import logging
 
 # SGLang imports
@@ -35,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 def cleanup_distributed():
     """Clean up distributed environment if it exists"""
- 
     import sglang.srt.distributed.parallel_state as parallel_state
     # Reset all global group variables
     for var_name in ['_TP', '_PP', '_MOE_EP', '_MOE_TP', '_WORLD', '_PDMUX_PREFILL_TP_GROUP']:
@@ -46,43 +42,10 @@ def cleanup_distributed():
     if hasattr(expert_location, '_global_expert_location_metadata'):
         expert_location._global_expert_location_metadata = None
 
-@dataclass
-class BenchConfig:
-    # Prefill parameters
-    batch_sizes: List[int] = field(default_factory=lambda: [1, 4])
-    seq_lengths: List[int] = field(default_factory=lambda: [128, 512])
-    
-    # Decode parameters
-    decode_batch_sizes: List[int] = field(default_factory=lambda: [1, 4])
-    decode_kv_lengths: List[int] = field(default_factory=lambda: [128, 512])
-    
-    # Common parameters
-    test_layer: int = 0
-    num_warmup: int = 3
-    num_iterations: int = 10
-    model_path: str = DEEPSEEK_MODEL_PATH
-    dtype: str = "auto"
-    device: str = "cuda"
-    enable_profiler: bool = False
-    attention_backend: str = "auto"  # Available options: auto, fa3, flashinfer, aiter, triton, torch_native, flashmla, cutlass_mla, intel_amx
-    head_num: int = 128  
-
-@dataclass
-class BenchResult:
-    """Result for a single benchmark run"""
-    batch_size: int
-    seq_length: int
-    phase: str  # "prefill" or "decode" 
-    avg_time_ms: float
-    min_time_ms: float
-    max_time_ms: float
-    std_time_ms: float
-    num_iterations: int = 10
-    attention_backend: str = "unknown"
-    head_num: int = 128
-
 def get_attention_prefill_test_cases():
-    """Get prefill test cases for attention benchmarking with batch_size, seq_length, attention_backend, and head_num"""
+    """Get prefill test cases for attention benchmarking
+    Returns: list of [batch_size, seq_length, attention_backend, head_num, is_prefill]
+    """
     test_cases = []
     
     context_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
@@ -117,18 +80,17 @@ def get_attention_decode_test_cases():
             for batch_size in sorted(generation_batch_sizes):
                 for seq_length in sorted(generation_seq_lengths):
                     # Memory limit checks for generation
-                    if batch_size * seq_length > 1024 * 2048:  # More lenient for decode
+                    if batch_size * seq_length > 1024 * 2048:
                         continue
-
                     test_cases.append([batch_size, seq_length, attention_backend, head_num, False])
     
     return test_cases
 
-def load_model_runner(config: BenchConfig, tp_rank: int = 0) -> Tuple[ModelRunner, object, ServerArgs]:
-    """Load model runner similar to bench_one_batch.py
-    You can also set environment variables to control the number of layers:
+def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype="auto", device="cuda", tp_rank=0):
+    """Load model runner
+    Environment variables:
     - SGLANG_TEST_NUM_LAYERS=2  # Load only 2 layers
-    - SGLANG_TEST_LAYER=0       # Test layer 0's attention module
+    - SGLANG_LOAD_FORMAT=dummy  # Use dummy weights
     """
     suppress_other_loggers()
     
@@ -136,9 +98,9 @@ def load_model_runner(config: BenchConfig, tp_rank: int = 0) -> Tuple[ModelRunne
     load_format = os.environ.get("SGLANG_LOAD_FORMAT", "dummy")
     
     server_args = ServerArgs(
-        model_path=config.model_path,
-        dtype=config.dtype,
-        device=config.device,
+        model_path=model_path,
+        dtype=dtype,
+        device=device,
         load_format=load_format,
         tp_size=1,
         trust_remote_code=True,
@@ -146,15 +108,13 @@ def load_model_runner(config: BenchConfig, tp_rank: int = 0) -> Tuple[ModelRunne
         disable_radix_cache=True,
     )
 
-    server_args.attention_backend = config.attention_backend
-    print(f"Using attention backend: {config.attention_backend}")
+    server_args.attention_backend = attention_backend
+    print(f"Using attention backend: {attention_backend}")
     
     if num_layers > 0 and load_format == "dummy":
-        override_args = {
-            "num_hidden_layers": num_layers
-        }
-        if hasattr(config, 'head_num') and config.head_num != 128:
-            override_args["num_attention_heads"] = config.head_num
+        override_args = {"num_hidden_layers": num_layers}
+        if head_num != 128:
+            override_args["num_attention_heads"] = head_num
         server_args.json_model_override_args = json.dumps(override_args)
     
     _set_envs_and_config(server_args)
@@ -177,21 +137,15 @@ def load_model_runner(config: BenchConfig, tp_rank: int = 0) -> Tuple[ModelRunne
 
     return model_runner
 
-def run_attention_torch(
-    model_runner: ModelRunner,
-    cases: List,
-    backend_config: BenchConfig,
-    output_path: str
-) -> List[BenchResult]:
-    """Run prefill benchmark for attention module"""
+def run_attention_torch(model_runner, cases, attention_backend, head_num, test_layer, num_warmup, num_iterations, enable_profiler, device, output_path):
+    """Run attention benchmark for both prefill and decode phases"""
     
-    results = []
-    attention_module = model_runner.model.model.layers[backend_config.test_layer].self_attn
+    attention_module = model_runner.model.model.layers[test_layer].self_attn
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
 
     for test_case in cases:
-        batch_size, seq_length, attention_backend, head_num, is_prefill = test_case
+        batch_size, seq_length, _, _, is_prefill = test_case
         
         if is_prefill:
             print(f"\nPrefill: batch_size={batch_size}, seq_length={seq_length}")
@@ -240,9 +194,7 @@ def run_attention_torch(
                     device="cuda"
                 )
                 
-                use_cuda_graph = False
-                
-                for _ in range(backend_config.num_warmup):
+                for _ in range(num_warmup):
                     with torch.no_grad():
                         _ = attention_module(
                             positions=positions,
@@ -252,7 +204,7 @@ def run_attention_torch(
                         )
                 
                 cuda_times = []
-                for i in range(backend_config.num_iterations):
+                for i in range(num_iterations):
                     start_event = torch.cuda.Event(enable_timing=True)
                     end_event = torch.cuda.Event(enable_timing=True)
                     start_event.record()
@@ -268,16 +220,14 @@ def run_attention_torch(
                     if i > 1:
                         cuda_times.append(start_event.elapsed_time(end_event))
                 
-                avg_cuda_time = np.mean(cuda_times)
-                
                 # Profiler for detailed performance analysis (optional)
-                if backend_config.enable_profiler:
+                if enable_profiler:
                     profiler_output_dir = "/aiconfigurator/profiler_output"
                     try:
                         os.makedirs(profiler_output_dir, exist_ok=True)
                         profiler_trace_path = os.path.join(
                             profiler_output_dir, 
-                            f"prefill_attention_b{batch_size}_s{seq_length}_layer{backend_config.test_layer}"
+                            f"prefill_attention_b{batch_size}_s{seq_length}_layer{test_layer}"
                         )
                         
                         with profile(
@@ -287,21 +237,17 @@ def run_attention_torch(
                             with_stack=True,     
                             schedule=torch.profiler.schedule(wait=1, warmup=1, active=10, repeat=1)
                         ) as prof:
-                            for iter_idx in range(backend_config.num_iterations):
+                            for iter_idx in range(num_iterations):
                                 with record_function("attention_prefill"):
-                                    if use_cuda_graph:
-                                        g.replay()
-                                    else:
-                                        with torch.no_grad():
-                                            _ = attention_module(
-                                                positions=positions,
-                                                hidden_states=hidden_states,
-                                                forward_batch=forward_batch,
-                                                zero_allocator=zero_allocator
-                                            )
+                                    with torch.no_grad():
+                                        _ = attention_module(
+                                            positions=positions,
+                                            hidden_states=hidden_states,
+                                            forward_batch=forward_batch,
+                                            zero_allocator=zero_allocator
+                                        )
                                 torch.cuda.synchronize()
                                 prof.step()
-                        
                         
                         prof.export_chrome_trace(f"{profiler_trace_path}.json")
                         print(f"  Profiler trace saved: {profiler_trace_path}.json")
@@ -310,25 +256,11 @@ def run_attention_torch(
                         print(f"  Warning: Profiler failed: {str(e)}")
                 
                 avg_time_ms = np.mean(cuda_times)
-                
-                result = BenchResult(
-                    phase="prefill",
-                    batch_size=batch_size,
-                    seq_length=seq_length,
-                    avg_time_ms=avg_time_ms,
-                    min_time_ms=np.min(cuda_times),
-                    max_time_ms=np.max(cuda_times),
-                    std_time_ms=np.std(cuda_times),
-                    num_iterations=backend_config.num_iterations,
-                    attention_backend=backend_config.attention_backend,
-                    head_num=backend_config.head_num
-                )
-                results.append(result)
                 # Save via log_perf
                 try:
                     perf_filename = os.path.join(output_path, "context_mla_perf.txt")
                     os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
-                    device_name = torch.cuda.get_device_name(backend_config.device)
+                    device_name = torch.cuda.get_device_name(device)
                     version = pkg_resources.get_distribution('sglang').version
                     log_perf(
                         item_list=[{
@@ -351,8 +283,8 @@ def run_attention_torch(
                 except Exception as e:
                     print(f"  Warning: failed to log prefill metrics: {e}")
                 
-                print(f"  Prefill attention time: {result.avg_time_ms:.3f} ms "
-                        f"(min: {result.min_time_ms:.3f}, max: {result.max_time_ms:.3f}, std: {result.std_time_ms:.3f})")
+                print(f"  Prefill attention time: {avg_time_ms:.3f} ms "
+                        f"(min: {np.min(cuda_times):.3f}, max: {np.max(cuda_times):.3f}, std: {np.std(cuda_times):.3f})")
                 
                 
                 model_runner.req_to_token_pool.clear()
@@ -423,27 +355,26 @@ def run_attention_torch(
                             zero_allocator=zero_allocator
                         )
     
-                for _ in range(backend_config.num_warmup):
+                for _ in range(num_warmup):
                     g.replay()
                 
                 start_event = torch.cuda.Event(enable_timing=True)
                 end_event = torch.cuda.Event(enable_timing=True)
                 start_event.record()
-                for _ in range(backend_config.num_iterations):
+                for _ in range(num_iterations):
                     g.replay()
                 end_event.record()
                 torch.cuda.synchronize()  
                 
-                avg_cuda_time = start_event.elapsed_time(end_event) / backend_config.num_iterations
-                cuda_times = [avg_cuda_time] * backend_config.num_iterations  # For compatibility with existing code
+                avg_time_ms = start_event.elapsed_time(end_event) / num_iterations
  
-                if backend_config.enable_profiler:
+                if enable_profiler:
                     profiler_output_dir = "/aiconfigurator/profiler_output"
                     try:
                         os.makedirs(profiler_output_dir, exist_ok=True)
                         profiler_trace_path = os.path.join(
                             profiler_output_dir, 
-                            f"decode_attention_b{batch_size}_kv{seq_length}_layer{backend_config.test_layer}"
+                            f"decode_attention_b{batch_size}_kv{seq_length}_layer{test_layer}"
                         )
                         
                         with profile(
@@ -453,7 +384,7 @@ def run_attention_torch(
                             with_stack=False,
                             schedule=torch.profiler.schedule(wait=1, warmup=1, active=10, repeat=1)
                         ) as prof:
-                            for iter_idx in range(backend_config.num_iterations):
+                            for iter_idx in range(num_iterations):
                                 with record_function("attention_decode"):
                                     g.replay()  
                                 torch.cuda.synchronize()
@@ -466,26 +397,11 @@ def run_attention_torch(
                         print(f"  Warning: Profiler failed: {str(e)}")
 
                 torch.cuda.empty_cache()
-                avg_time_ms = avg_cuda_time
-                
-                result = BenchResult(
-                    phase="decode",
-                    batch_size=batch_size,
-                    seq_length=seq_length,  
-                    avg_time_ms=avg_time_ms,
-                    min_time_ms=avg_cuda_time,  
-                    max_time_ms=avg_cuda_time,  
-                    std_time_ms=0.0,           
-                    num_iterations=backend_config.num_iterations,
-                    attention_backend=backend_config.attention_backend,
-                    head_num=backend_config.head_num
-                )
-                results.append(result)
                 # Save via log_perf
                 try:
                     perf_filename = os.path.join(output_path, "generation_mla_perf.txt")
                     os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
-                    device_name = torch.cuda.get_device_name(backend_config.device)
+                    device_name = torch.cuda.get_device_name(device)
                     version = pkg_resources.get_distribution('sglang').version
                     log_perf(
                         item_list=[{
@@ -508,8 +424,7 @@ def run_attention_torch(
                 except Exception as e:
                     print(f"  Warning: failed to log decode metrics: {e}")
                 
-                print(f"  Decode attention time: {result.avg_time_ms:.3f} ms "
-                        f"(min: {result.min_time_ms:.3f}, max: {result.max_time_ms:.3f}, std: {result.std_time_ms:.3f})")
+                print(f"  Decode attention time: {avg_time_ms:.3f} ms")
                 
                 model_runner.req_to_token_pool.clear()
                 model_runner.token_to_kv_pool_allocator.clear()
@@ -520,36 +435,23 @@ def run_attention_torch(
                 print(f"  Decode test failed: {str(e)}")
                 print(f"  Skipping this configuration...")
                 continue
-    
-    return results
 
 
-def main():
+if __name__ == "__main__":
     output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
     model_path = DEEPSEEK_MODEL_PATH
+    test_layer = 0
+    num_warmup = 3
+    num_iterations = 10
+    dtype = "auto"
+    device = "cuda"
+    enable_profiler = False
     
     cleanup_distributed()
     
     print(f"Loading model from {model_path}...")
     print("\nTip: To test with dummy weights and limited layers, use:")
-    print("  SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 SGLANG_TEST_LAYER=0 python collect_attn.py")
-    
-    base_config = BenchConfig(
-        batch_sizes=[],  
-        seq_lengths=[],  
-        decode_batch_sizes=[],  
-        decode_kv_lengths=[],  
-        test_layer=0,
-        num_warmup=3,
-        num_iterations=10,
-        model_path=model_path,
-        dtype="auto",
-        attention_backend="flashinfer",
-        enable_profiler=False,
-        head_num=128  # Default head num, will be overridden in benchmark function
-    )
-
-    all_results = []
+    print("  SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 python collect_attn.py")
 
     # Get prefill and decode test cases separately
     prefill_test_cases = get_attention_prefill_test_cases()
@@ -571,34 +473,15 @@ def main():
         print(f"{'='*60}")
         cleanup_distributed()
 
-        backend_config = BenchConfig(
-            batch_sizes=[],  
-            seq_lengths=[],  
-            decode_batch_sizes=[],  
-            decode_kv_lengths=[],  
-            test_layer=base_config.test_layer,
-            num_warmup=base_config.num_warmup,
-            num_iterations=base_config.num_iterations,
-            model_path=base_config.model_path,
-            dtype=base_config.dtype,
-            attention_backend=attention_backend,
-            enable_profiler=base_config.enable_profiler,
-            head_num=head_num
-        )
         torch.cuda.empty_cache()
-        model_runner = load_model_runner(backend_config)
+        model_runner = load_model_runner(model_path, attention_backend, head_num, test_layer, dtype, device)
 
-        results = run_attention_torch(model_runner, cases, backend_config, output_path)
-        all_results.extend(results)
+        run_attention_torch(model_runner, cases, attention_backend, head_num, test_layer, num_warmup, num_iterations, enable_profiler, device, output_path)
 
         del model_runner
         cleanup_distributed()
         torch.cuda.empty_cache()
     
-    
     print("\n" + "="*50)
     print("ALL TESTS COMPLETED")
     print("="*50)
-
-if __name__ == "__main__":
-    main()
