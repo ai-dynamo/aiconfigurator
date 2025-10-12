@@ -9,7 +9,10 @@ import signal
 import sys
 import traceback
 import multiprocessing as mp 
-from cuda import cuda
+try:
+    from cuda import cuda
+except:
+    pass
 from datetime import datetime
 from pathlib import Path
 

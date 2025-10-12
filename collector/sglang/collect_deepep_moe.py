@@ -22,6 +22,13 @@ from sglang.srt.utils import (
     suppress_other_loggers,
 )
 from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPNormalOutput, DeepEPLLOutput
+try:
+    from helper import log_perf
+except ModuleNotFoundError:
+    import os, sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from helper import log_perf
+import pkg_resources
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 
@@ -168,7 +175,8 @@ def benchmark_moe_layer_prefill(
     moe_layer,
     num_experts: int,
     ep_size: int,
-    num_rank: int
+    num_rank: int,
+    output_path: str
 ) -> List[MoEBenchResult]:
 
     results = []
@@ -369,6 +377,36 @@ def benchmark_moe_layer_prefill(
             cuda_graph_used=False
         )
         results.append(prefill_result)
+        if tp_rank == 0:
+            try:
+                moe_tp_size = 1
+                moe_ep_size = server_args.ep_size if num_experts == 256 else int(server_args.ep_size * 256 // num_experts)
+                num_tokens_log = num_token * moe_ep_size
+                device_name = torch.cuda.get_device_name(server_args.device)
+                version = pkg_resources.get_distribution('sglang').version
+                perf_filename = os.path.join(output_path, "context_moe_perf.txt")
+                log_perf(
+                    item_list=[{
+                        'moe_dtype': 'fp8_block',
+                        'num_tokens': num_tokens_log,
+                        'hidden_size': 7168,
+                        'inter_size': 2048,
+                        'topk': 8,
+                        'num_experts': 256,
+                        'moe_tp_size': moe_tp_size,
+                        'moe_ep_size': moe_ep_size,
+                        'distribution': 'uniform',
+                        'latency': avg_latency_ms
+                    }],
+                    framework='SGLang',
+                    version=version,
+                    device_name=device_name,
+                    op_name='moe_context',
+                    kernel_source='deepepmoe',
+                    perf_filename=perf_filename
+                )
+            except Exception as e:
+                rank_print(f"  Warning: failed to log prefill MoE metrics: {e}")
         del hidden_states_per_token_iter, hidden_states_fp8_tensor_iter, scale_tensor_iter, topk_idx_iter, topk_weights_iter, num_recv, dispatch_output
         torch.cuda.empty_cache()
 
@@ -389,6 +427,7 @@ def benchmark_moe_layer_decode(
     num_rank: int,
     distributed = "power_law", 
     power_law_alpha = 0.8,
+    output_path: str = None,
 ) -> List[MoEBenchResult]:
     results = []
     
@@ -557,85 +596,42 @@ def benchmark_moe_layer_decode(
             cuda_graph_used=True
         )
         results.append(decode_result)
+        if tp_rank == 0:
+            try:
+                moe_tp_size = 1
+                moe_ep_size = server_args.ep_size if num_experts == 256 else int(server_args.ep_size * 256 // num_experts)
+                num_tokens_log = num_token * moe_ep_size
+                device_name = torch.cuda.get_device_name(server_args.device)
+                version = pkg_resources.get_distribution('sglang').version
+                distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
+                perf_filename = os.path.join(output_path, "generation_moe_perf.txt")
+                log_perf(
+                    item_list=[{
+                        'moe_dtype': 'fp8_block',
+                        'num_tokens': num_tokens_log,
+                        'hidden_size': 7168,
+                        'inter_size': 2048,
+                        'topk': 8,
+                        'num_experts': 256,
+                        'moe_tp_size': moe_tp_size,
+                        'moe_ep_size': moe_ep_size,
+                        'distribution': distribution_str,
+                        'latency': avg_latency_ms
+                    }],
+                    framework='SGLang',
+                    version=version,
+                    device_name=device_name,
+                    op_name='moe_generation',
+                    kernel_source='deepepmoe',
+                    perf_filename=perf_filename
+                )
+            except Exception as e:
+                rank_print(f"  Warning: failed to log decode MoE metrics: {e}")
         del hidden_states, hidden_states_fp8_tensor, scale_tensor, dispatch_output_list
         torch.cuda.empty_cache()
 
     return results
 
-
-def write_results_to_file(all_results, server_args, rank_print, tp_rank, distributed, power_law_alpha, output_path):
-    """Write benchmark results to separate prefill and decode files"""
-    if tp_rank != 0:
-        return
-    
-    try:
-        prefill_results = [r for r in all_results if "prefill" in r.phase]
-        decode_results = [r for r in all_results if "decode" in r.phase]
-        
-        context_output_path = os.path.join(output_path, "context_moe_perf.txt")
-        generation_output_path = os.path.join(output_path, "generation_moe_perf.txt")
-        device = "cuda"
-        device_name = torch.cuda.get_device_name(device)
-        
-        os.makedirs(output_path, exist_ok=True)
-        
-        if prefill_results:
-            file_exists = os.path.exists(context_output_path)
-            
-            with open(context_output_path, 'a' if file_exists else 'w') as f:
-                if not file_exists:
-                    f.write("framework,version,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency\n")
-                
-                for result in prefill_results:
-                    num_experts = result.num_experts
-                    hidden_size = 7168
-                    inter_size = 2048
-                    top_k = 8
-                    op_name = "moe_context"
-                    kernel_source = "deepepmoe"
-                    moe_dtype = "fp8_block"
-                    moe_tp_size = 1
-                    moe_ep_size = server_args.ep_size if num_experts==256 else int(server_args.ep_size*256//num_experts)
-                    num_tokens = result.num_token * moe_ep_size
-                    num_experts = 256
-                    
-                    f.write(f"SGLang,0.5.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{"uniform"},{result.avg_latency_ms}\n")
-            
-            if file_exists:
-                rank_print(f"\nPrefill results appended to {context_output_path}")
-            else:
-                rank_print(f"\nPrefill results saved to {context_output_path}")
-        
-        if decode_results:
-            file_exists = os.path.exists(generation_output_path)
-            
-            with open(generation_output_path, 'a' if file_exists else 'w') as f:
-                if not file_exists:
-                    f.write("framework,version,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency\n")
-                
-                for result in decode_results:
-                    num_experts = result.num_experts
-                    hidden_size = 7168
-                    inter_size = 2048
-                    top_k = 8  
-                    op_name = "moe_generation"
-                    kernel_source = "deepepmoe"
-                    moe_dtype = "fp8_block"
-                    moe_tp_size = 1
-                    moe_ep_size = server_args.ep_size if num_experts==256 else int(server_args.ep_size*256//num_experts)
-                    num_tokens = result.num_token * moe_ep_size
-                    num_experts = 256
-
-                    f.write(f"SGLang,0.5.0,{device_name},{op_name},{kernel_source},{moe_dtype},{num_tokens},{hidden_size},{inter_size},{top_k},{num_experts},{moe_tp_size},{moe_ep_size},{"power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed},{result.avg_latency_ms}\n")
-            
-            if file_exists:
-                rank_print(f"\nDecode results appended to {generation_output_path}")
-            else:
-                rank_print(f"\nDecode results saved to {generation_output_path}")
-
-        
-    except Exception as e:
-        rank_print(f"Error writing results to file: {e}")
 
 
 def run_moe_benchmark(
@@ -703,6 +699,7 @@ def run_moe_benchmark(
             actual_num_experts,
             ep_size,
             num_rank,
+            output_path,
         )
         all_results.extend(results)
 
@@ -724,6 +721,7 @@ def run_moe_benchmark(
             num_rank,
             distributed, 
             power_law_alpha,
+            output_path,
         )
         all_results.extend(results)
         
@@ -736,7 +734,6 @@ def run_moe_benchmark(
         rank_print(f"Traceback: {traceback.format_exc()}")
         return
     
-    write_results_to_file(all_results, server_args, rank_print, tp_rank, distributed, power_law_alpha, output_path)
     torch.cuda.empty_cache()
     
     rank_print(f"\n{'='*60}")

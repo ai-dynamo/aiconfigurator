@@ -5,7 +5,13 @@ import torch
 import math
 from dataclasses import dataclass, field
 from typing import List
-import fcntl
+try:
+    from helper import log_perf
+except ModuleNotFoundError:
+    import os, sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from helper import log_perf
+import pkg_resources
 
 from sglang.srt.models.deepseek_v2 import DeepseekV2MLP
 from sglang.srt.distributed.parallel_state import destroy_model_parallel
@@ -72,85 +78,6 @@ def get_mlp_test_cases():
     return test_cases
 
 
-def output_results(results: List[MLPBenchResult], output_path: str):
-    """Save results to separate files for prefill and decode phases"""
-    prefill_results = [r for r in results if r.kernel_source == 'deepseek_v2']
-    decode_results = [r for r in results if r.kernel_source == 'deepseek_v2_cuda_graph']
-    
-    if prefill_results:
-        prefill_filename = os.path.join(output_path, "context_mlp_perf.txt")
-        prefill_items = []
-        for result in prefill_results:
-            prefill_items.append({
-                'quant_type': result.quant_type,
-                'num_token': result.num_token,
-                'hidden_size': result.hidden_size,
-                'intermediate_size': result.intermediate_size,
-                'avg_ms': result.avg_time_ms
-            })
-
-        device_name = torch.cuda.get_device_name('cuda:0')
-        save_results_to_file(
-            item_list=prefill_items,
-            framework='SGLang',
-            version='0.5.0',
-            device_name=device_name,
-            op_name='mlp',
-            kernel_source='deepseek_v3',
-            perf_filename=prefill_filename
-        )
-        print(f"Prefill results saved to: {prefill_filename}")
-    
-    if decode_results:
-        decode_filename = os.path.join(output_path, "generation_mlp_perf.txt")
-        decode_items = []
-        for result in decode_results:
-            decode_items.append({
-                'quant_type': result.quant_type,
-                'num_token': result.num_token,
-                'hidden_size': result.hidden_size,
-                'intermediate_size': result.intermediate_size,
-                'avg_ms': result.avg_time_ms
-            })
-
-        device_name = torch.cuda.get_device_name('cuda:0')
-        save_results_to_file(
-            item_list=decode_items,
-            framework='SGLang',
-            version='0.5.0',
-            device_name=device_name,
-            op_name='mlp',
-            kernel_source='deepseek_v3_cuda_graph',
-            perf_filename=decode_filename
-        )
-        print(f"Decode results saved to: {decode_filename}")
-
-
-def save_results_to_file(item_list: list[dict], 
-             framework: str, 
-             version: str, 
-             device_name: str, 
-             op_name: str,
-             kernel_source: str,
-             perf_filename: str):
-    
-    header = 'framework,version,device,op_name,kernel_source,quant_type,num_token,hidden_size,intermediate_size,avg_ms'
-    
-    with open(perf_filename, 'a') as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-
-        if f.tell() == 0:
-            f.write(header + '\n')
-
-        for item in item_list:
-            quant_type = item.get('quant_type', '')
-            num_token = item.get('num_token', '')
-            hidden_size = item.get('hidden_size', '')
-            intermediate_size = item.get('intermediate_size', '')
-            avg_ms = item.get('avg_ms', '')
-            
-            line = f'{framework},{version},{device_name},{op_name},{kernel_source},{quant_type},{num_token},{hidden_size},{intermediate_size},{avg_ms}'
-            f.write(line + '\n')
 
 def cleanup_distributed():
     """Clean up distributed environment if it exists"""
@@ -187,7 +114,8 @@ def initialize_distributed():
 
 def run_mlp_torch(
     cases: List,
-    backend_config: BenchConfig
+    backend_config: BenchConfig,
+    output_path: str
 ) -> List[MLPBenchResult]:
     """Run prefill benchmark for MLP module"""
     
@@ -268,6 +196,29 @@ def run_mlp_torch(
                 kernel_source='deepseek_v2'
             )
             results.append(result)
+            # Save via log_perf
+            try:
+                perf_filename = os.path.join(output_path, "context_mlp_perf.txt")
+                os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                device_name = torch.cuda.get_device_name(backend_config.device)
+                version = pkg_resources.get_distribution('sglang').version
+                log_perf(
+                    item_list=[{
+                        'quant_type': quant_type,
+                        'num_token': num_token,
+                        'hidden_size': hidden_size,
+                        'intermediate_size': intermediate_size,
+                        'avg_ms': avg_time
+                    }],
+                    framework='SGLang',
+                    version=version,
+                    device_name=device_name,
+                    op_name='mlp',
+                    kernel_source='deepseek_v3',
+                    perf_filename=perf_filename
+                )
+            except Exception as e:
+                print(f"  Warning: failed to log prefill MLP metrics: {e}")
             
             del mlp, input_tensor
             torch.cuda.empty_cache()
@@ -281,7 +232,8 @@ def run_mlp_torch(
 
 def run_mlp_cuda_graph(
     cases: List,
-    backend_config: BenchConfig
+    backend_config: BenchConfig,
+    output_path: str
 ) -> List[MLPBenchResult]:
     """Run decode benchmark for MLP module using CUDA graph"""
     
@@ -356,6 +308,29 @@ def run_mlp_cuda_graph(
                 kernel_source='deepseek_v2_cuda_graph'
             )
             results.append(result)
+            # Save via log_perf
+            try:
+                perf_filename = os.path.join(output_path, "generation_mlp_perf.txt")
+                os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                device_name = torch.cuda.get_device_name(backend_config.device)
+                version = pkg_resources.get_distribution('sglang').version
+                log_perf(
+                    item_list=[{
+                        'quant_type': quant_type,
+                        'num_token': num_token,
+                        'hidden_size': hidden_size,
+                        'intermediate_size': intermediate_size,
+                        'avg_ms': avg_time
+                    }],
+                    framework='SGLang',
+                    version=version,
+                    device_name=device_name,
+                    op_name='mlp',
+                    kernel_source='deepseek_v3_cuda_graph',
+                    perf_filename=perf_filename
+                )
+            except Exception as e:
+                print(f"  Warning: failed to log decode MLP metrics: {e}")
             
             del mlp, input_tensor
             torch.cuda.empty_cache()
@@ -410,28 +385,28 @@ def main(output_path: str, base_config: BenchConfig):
         initialize_distributed()
         
         print("\n=== Running Prefill Benchmarks ===")
-        prefill_results = run_mlp_torch(cases, backend_config)
+        prefill_results = run_mlp_torch(cases, backend_config, output_path)
         all_results.extend(prefill_results)
         
         print("\n=== Running Decode Benchmarks (CUDA Graph) ===")
-        decode_results = run_mlp_cuda_graph(cases, backend_config)
+        decode_results = run_mlp_cuda_graph(cases, backend_config, output_path)
         all_results.extend(decode_results)
 
         cleanup_distributed()
         torch.cuda.empty_cache()
     
-    output_results(all_results, output_path)
+    # Results are saved via log_perf during benchmarking; no separate output step needed
     
     print("\n" + "="*50)
     print("MLP BENCHMARK COMPLETED")
     print("="*50)
-    print(f"Output files saved to:")
+    print("Output files saved to:")
     print(f"  - Context results: {os.path.join(output_path, 'context_mlp_perf.txt')}")
     print(f"  - Generation results: {os.path.join(output_path, 'generation_mlp_perf.txt')}")
     print("="*50)
 
 if __name__ == "__main__":
-    output_path = "aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
+    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
     model_path = DEEPSEEK_MODEL_PATH
     
     base_config = BenchConfig(

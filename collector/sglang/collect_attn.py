@@ -22,6 +22,13 @@ from sglang.srt.entrypoints.engine import _set_envs_and_config
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from torch.profiler import profile, ProfilerActivity, record_function
+try:
+    from helper import log_perf
+except ModuleNotFoundError:
+    import os, sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from helper import log_perf
+import pkg_resources
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 logger = logging.getLogger(__name__)
@@ -167,7 +174,8 @@ def load_model_runner(config: BenchConfig, tp_rank: int = 0) -> Tuple[ModelRunne
 def run_attention_torch(
     model_runner: ModelRunner,
     cases: List,
-    backend_config: BenchConfig
+    backend_config: BenchConfig,
+    output_path: str
 ) -> List[BenchResult]:
     """Run prefill benchmark for attention module"""
     
@@ -310,6 +318,32 @@ def run_attention_torch(
                     head_num=backend_config.head_num
                 )
                 results.append(result)
+                # Save via log_perf
+                try:
+                    perf_filename = os.path.join(output_path, "context_mla_perf.txt")
+                    os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                    device_name = torch.cuda.get_device_name(backend_config.device)
+                    version = pkg_resources.get_distribution('sglang').version
+                    log_perf(
+                        item_list=[{
+                            'mla_dtype': 'fp8_block',
+                            'kv_cache_dtype': 'fp8',
+                            'num_heads': head_num,
+                            'batch_size': batch_size,
+                            'isl': seq_length,
+                            'tp_size': 1,
+                            'step': 0,
+                            'latency': avg_time_ms
+                        }],
+                        framework='SGLang',
+                        version=version,
+                        device_name=device_name,
+                        op_name='mla_context',
+                        kernel_source=attention_backend,
+                        perf_filename=perf_filename
+                    )
+                except Exception as e:
+                    print(f"  Warning: failed to log prefill metrics: {e}")
                 
                 print(f"  Prefill attention time: {result.avg_time_ms:.3f} ms "
                         f"(min: {result.min_time_ms:.3f}, max: {result.max_time_ms:.3f}, std: {result.std_time_ms:.3f})")
@@ -441,6 +475,32 @@ def run_attention_torch(
                     head_num=backend_config.head_num
                 )
                 results.append(result)
+                # Save via log_perf
+                try:
+                    perf_filename = os.path.join(output_path, "generation_mla_perf.txt")
+                    os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                    device_name = torch.cuda.get_device_name(backend_config.device)
+                    version = pkg_resources.get_distribution('sglang').version
+                    log_perf(
+                        item_list=[{
+                            'mla_dtype': 'fp8_block',
+                            'kv_cache_dtype': 'fp8',
+                            'num_heads': head_num,
+                            'batch_size': batch_size,
+                            'isl': seq_length,
+                            'tp_size': 1,
+                            'step': 0,
+                            'latency': avg_time_ms
+                        }],
+                        framework='SGLang',
+                        version=version,
+                        device_name=device_name,
+                        op_name='mla_generation',
+                        kernel_source=attention_backend,
+                        perf_filename=perf_filename
+                    )
+                except Exception as e:
+                    print(f"  Warning: failed to log decode metrics: {e}")
                 
                 print(f"  Decode attention time: {result.avg_time_ms:.3f} ms "
                         f"(min: {result.min_time_ms:.3f}, max: {result.max_time_ms:.3f}, std: {result.std_time_ms:.3f})")
@@ -457,80 +517,6 @@ def run_attention_torch(
     
     return results
 
-def output_results(results: List[BenchResult], output_path: str):
-    """Save results to separate CSV files for prefill and decode phases"""
-    
-    prefill_results = [r for r in results if r.phase == "prefill"]
-    decode_results = [r for r in results if r.phase == "decode"]
-    os.makedirs(output_path, exist_ok=True)
-    context_output_path = os.path.join(output_path, "context_mla_perf.txt")
-    generation_output_path = os.path.join(output_path, "generation_mla_perf.txt")
-    device = "cuda"
-    device_name=torch.cuda.get_device_name(device)
-    
-    if prefill_results:
-        file_exists = os.path.exists(context_output_path)
-        with open(context_output_path, 'a' if file_exists else 'w') as f:
-            if not file_exists:
-                f.write("framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,tp_size,step,latency\n")
-    
-            for result in prefill_results:
-                attention_backend = getattr(result, 'attention_backend', 'unknown')
-                num_heads = getattr(result, 'head_num', 128)
-                op_name = "mla_context"
-                isl = result.seq_length
-                step = 0
-                mla_dtype = "fp8_block"
-                kv_cache_dtype = "fp8"
-                tp_size = 1 
-                
-                f.write(f"SGLang,0.5.0,{device_name},{op_name},{attention_backend},{mla_dtype},{kv_cache_dtype},{num_heads},{result.batch_size},{isl},{tp_size},{step},{result.avg_time_ms}\n")
-        
-        if file_exists:
-            print(f"\nPrefill results appended to {context_output_path}")
-        else:
-            print(f"\nPrefill results saved to {context_output_path}")
-    
-    if decode_results:
-        file_exists = os.path.exists(generation_output_path)
-        
-        with open(generation_output_path, 'a' if file_exists else 'w') as f:
-            if not file_exists:
-                f.write("framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,tp_size,step,latency\n")
-
-            for result in decode_results:
-                attention_backend = getattr(result, 'attention_backend', 'unknown')
-                num_heads = getattr(result, 'head_num', 128)
-                op_name = "mla_generation" 
-                isl = result.seq_length
-                step = 0
-                mla_dtype = "fp8_block"
-                kv_cache_dtype = "fp8"
-                tp_size = 1  
-                
-                f.write(f"SGLang,1.0.0,{device_name},{op_name},{attention_backend},{mla_dtype},{kv_cache_dtype},{num_heads},{result.batch_size},{isl},{tp_size},{step},{result.avg_time_ms}\n")
-        
-        if file_exists:
-            print(f"\nDecode results appended to {generation_output_path}")
-        else:
-            print(f"\nDecode results saved to {generation_output_path}")
-    
-    
-    if prefill_results:
-        print("\nPrefill Performance Summary:")
-        for result in prefill_results:
-            attention_backend = getattr(result, 'attention_backend', 'unknown')
-            head_num = getattr(result, 'head_num', 128)
-            print(f"  Backend: {attention_backend}, Heads: {head_num}, Batch: {result.batch_size}, Seq: {result.seq_length}: "
-                  f"{result.avg_time_ms:.3f} ms")
-    
-    if decode_results:
-        print("\nDecode Performance Summary:")
-        for result in decode_results:
-            attention_backend = getattr(result, 'attention_backend', 'unknown')
-            head_num = getattr(result, 'head_num', 128)
-            print(f"  Backend: {attention_backend}, Heads: {head_num}, Batch: {result.batch_size}, KV Cache: {result.seq_length}: "
-                  f"{result.avg_time_ms:.3f} ms")
 
 def main():
     output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
@@ -594,14 +580,13 @@ def main():
         torch.cuda.empty_cache()
         model_runner = load_model_runner(backend_config)
 
-        results = run_attention_torch(model_runner, cases, backend_config)
+        results = run_attention_torch(model_runner, cases, backend_config, output_path)
         all_results.extend(results)
 
         del model_runner
         cleanup_distributed()
         torch.cuda.empty_cache()
     
-    output_results(all_results, output_path)
     
     print("\n" + "="*50)
     print("ALL TESTS COMPLETED")
