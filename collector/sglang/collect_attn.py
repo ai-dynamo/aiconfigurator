@@ -81,12 +81,30 @@ class BenchResult:
     attention_backend: str = "unknown"
     head_num: int = 128
 
-def get_attention_test_cases():
-    """Get test cases for attention benchmarking with batch_size, seq_length, attention_backend, and head_num"""
+def get_attention_prefill_test_cases():
+    """Get prefill test cases for attention benchmarking with batch_size, seq_length, attention_backend, and head_num"""
     test_cases = []
     
     context_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     context_seq_lengths = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    
+    attention_backends = ["flashinfer", "fa3"]
+    head_nums = [128, 64, 32, 16]
+
+    for attention_backend in attention_backends:
+        for head_num in head_nums:
+            for batch_size in sorted(context_batch_sizes):
+                for seq_length in sorted(context_seq_lengths):
+                    # Memory limit checks for context
+                    if batch_size * seq_length > 1024 * 2048:
+                        continue
+                    test_cases.append([batch_size, seq_length, attention_backend, head_num, True])
+    
+    return test_cases
+
+def get_attention_decode_test_cases():
+    """Get decode test cases for attention benchmarking with batch_size, seq_length, attention_backend, and head_num"""
+    test_cases = []
     
     generation_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     generation_seq_lengths = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
@@ -94,26 +112,14 @@ def get_attention_test_cases():
     attention_backends = ["flashinfer", "fa3"]
     head_nums = [128, 64, 32, 16]
     
-    # Generate test cases
     for attention_backend in attention_backends:
         for head_num in head_nums:
-            # Context (prefill) test cases
-            for batch_size in sorted(context_batch_sizes):
-                for seq_length in sorted(context_seq_lengths):
-                    # Memory limit checks for context
-                    if batch_size * seq_length > 1024 * 2048:
-                        continue
-                    # Add prefill test case
-                    test_cases.append([batch_size, seq_length, attention_backend, head_num, True])
-            
-            # Generation (decode) test cases
             for batch_size in sorted(generation_batch_sizes):
                 for seq_length in sorted(generation_seq_lengths):
                     # Memory limit checks for generation
                     if batch_size * seq_length > 1024 * 2048:  # More lenient for decode
                         continue
-                    
-                    # Add decode test case (using seq_length as kv_length)
+
                     test_cases.append([batch_size, seq_length, attention_backend, head_num, False])
     
     return test_cases
@@ -545,9 +551,11 @@ def main():
 
     all_results = []
 
-    test_cases = get_attention_test_cases()
-    print(f"Running {len(test_cases)} test cases...")
-
+    # Get prefill and decode test cases separately
+    prefill_test_cases = get_attention_prefill_test_cases()
+    decode_test_cases = get_attention_decode_test_cases()
+    test_cases = prefill_test_cases + decode_test_cases
+    
     grouped_cases = {}
     for test_case in test_cases:
         batch_size, seq_length, attention_backend, head_num, is_prefill = test_case
