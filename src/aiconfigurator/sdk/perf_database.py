@@ -1566,8 +1566,23 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(num_tokens, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, quant_mode, workload_distribution)
         else:
-            if self.backend == common.BackendName.trtllm.value:
-            # aligned with trtllm, kernel source selection.
+            if self.backend == common.BackendName.sglang.value:
+                # Set default moe_backend if not specified
+                if moe_backend is None:
+                    moe_backend = "deepep_moe"
+                
+                if moe_backend == "deepep_moe":
+                    if is_context:
+                        moe_data = self._moe_data
+                    else:
+                        moe_data = self._generation_moe_data
+
+                    moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                    num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
+                    lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
+                    return lat 
+            else: # default to trtllm
+                # aligned with trtllm, kernel source selection.
                 if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
                     try:
                         if workload_distribution in self._moe_low_latency_data[quant_mode].keys():
@@ -1587,22 +1602,7 @@ class PerfDatabase(object):
                 num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
                 lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
                 return lat
-
-            elif self.backend == common.BackendName.sglang.value:
-                # Set default moe_backend if not specified
-                if moe_backend is None:
-                    moe_backend = "deepep_moe"
-                
-                if moe_backend == "deepep_moe":
-                    if is_context:
-                        moe_data = self._moe_data
-                    else:
-                        moe_data = self._generation_moe_data
-
-                    moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                    num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
-                    lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
-                    return lat 
+            
 
     def query_mla_bmm(self, 
                       num_tokens : int, 
