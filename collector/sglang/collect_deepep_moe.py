@@ -782,7 +782,7 @@ def main(server_args, bench_args: MoEBenchArgs, output_path: str):
 
 if __name__ == "__main__":
     model_path = DEEPSEEK_MODEL_PATH
-    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/"
+    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
     
     server_args = ServerArgs(
         model_path=model_path,
