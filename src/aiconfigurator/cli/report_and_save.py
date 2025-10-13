@@ -243,13 +243,16 @@ def save_results(
                     with open(os.path.join(top_config_dir, 'generator_config.yaml'), 'w') as f:
                         yaml.safe_dump(cfg, f, sort_keys=False)
                     
-                    artifacts = generate_backend_config.from_runtime(
-                        cfg=cfg,
-                        backend=exp_task_config.backend_name,
-                        version=generated_backend_version or exp_task_config.backend_version,
-                        overrides=dynamo_overrides,                    
-                        save_dir=top_config_dir,
-                    )
+                    try:
+                        artifacts = generate_backend_config.from_runtime(
+                            cfg=cfg,
+                            backend=exp_task_config.backend_name,
+                            version=generated_backend_version or exp_task_config.backend_version,
+                            overrides=dynamo_overrides,                    
+                            save_dir=top_config_dir,
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to generate backend config from aic generator: %s, %s", exc, traceback.format_exc())
 
     except Exception as exc:
         logger.error("Failed to save results: %s, %s", exc, traceback.format_exc())
