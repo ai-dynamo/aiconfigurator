@@ -46,9 +46,30 @@ def get_moe_prefill_test_cases(rank):
     return test_cases
 
 def get_moe_decode_test_cases():
-    """Get test cases for MoE decode phase"""
+    """Get test cases for MoE decode phase including distribution and alpha.
+
+    Returns a list of dicts with keys: 'num_tokens', 'distributed', 'power_law_alpha'.
+    For uniform distribution, 'power_law_alpha' is None.
+    """
     batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
-    return batch_sizes
+    power_law_alphas = [0.6, 0.8, 1.2]
+    test_cases = []
+    # Uniform cases
+    for bs in batch_sizes:
+        test_cases.append({
+            "num_tokens": bs,
+            "distributed": "uniform",
+            "power_law_alpha": None,
+        })
+    # Power-law cases
+    for bs in batch_sizes:
+        for alpha in power_law_alphas:
+            test_cases.append({
+                "num_tokens": bs,
+                "distributed": "power_law",
+                "power_law_alpha": alpha,
+            })
+    return test_cases
 
 def sample_power_law(size, alpha, xmin, xmax):
     u = torch.rand(size)
@@ -273,18 +294,6 @@ def benchmark_moe_layer_prefill(
             num_recv_tokens_per_expert=num_recv
         )
 
-        # if tp_rank == 0:
-        #     rank_print(f"Prefill setup:")
-        #     rank_print(f"  topk_idx: {topk_idx_iter.shape}, device: {topk_idx_iter.device}, dtype: {topk_idx_iter.dtype}")
-        #     rank_print(f"  topk_weights: {topk_weights_iter.shape}, device: {topk_weights_iter.device}, dtype: {topk_weights_iter.dtype}")
-        #     rank_print(f"  num_recv: {num_recv}")
-        #     rank_print(f"  ep_size: {ep_size}, total_tokens: {total_tokens}")
-        #     rank_print(f"  num_local_experts: {num_local_experts}")
-        #     rank_print(f"  Sample topk_idx[0]: {topk_idx_iter[0]}")
-        #     rank_print(f"  Sample topk_weights[0]: {topk_weights_iter[0]}")
-        #     rank_print(f"  topk_id sum: {sum(sum(topk_idx_iter!=-1))}")
-        #     rank_print(f"  topk_id expert 0: {sum(sum(topk_idx_iter==1))}")
-        
         # Warmup 
         for _ in range(num_warmup):
             hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
@@ -353,6 +362,7 @@ def benchmark_moe_layer_prefill(
                 device_name = torch.cuda.get_device_name(server_args.device)
                 version = pkg_resources.get_distribution('sglang').version
                 perf_filename = os.path.join(output_path, "context_moe_perf.txt")
+                os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                 log_perf(
                     item_list=[{
                         'moe_dtype': 'fp8_block',
@@ -393,8 +403,6 @@ def benchmark_moe_layer_decode(
     num_experts,
     ep_size,
     num_rank,
-    distributed="power_law", 
-    power_law_alpha=0.8,
     output_path=None
 ):
     """Benchmark MoE layer in decode phase"""
@@ -404,7 +412,10 @@ def benchmark_moe_layer_decode(
     top_k = moe_layer.topk.top_k
     num_local_experts = int(num_experts//ep_size)
     
-    for num_token in decode_test_cases:    
+    for case in decode_test_cases:
+        num_token = case["num_tokens"]
+        distributed = case["distributed"]
+        power_law_alpha = case.get("power_law_alpha", 0.8) if distributed == "power_law" else None
         num_max_dispatch_tokens_per_rank = 128
 
         if num_token > num_max_dispatch_tokens_per_rank:
@@ -454,26 +465,7 @@ def benchmark_moe_layer_decode(
 
         topk_idx_empty = torch.empty(0, device=device, dtype=torch.int32)
         topk_weights_empty = torch.empty(0, device=device, dtype=torch.float32)
-        
-
-        # Debug information (only for rank 0)
-        # if tp_rank == 0:
-        #     print(f"DeepEP Low Latency setup:")
-        #     print(f"  num_experts: {num_experts}")
-        #     print(f"  ep_size: {ep_size}")
-        #     print(f"  num_rank: {num_rank}")
-        #     print(f"  num_local_experts: {num_local_experts}")
-        #     print(f"  num_max_dispatch_tokens_per_rank: {num_max_dispatch_tokens_per_rank}")
-        #     print(f"  hidden_states shape: {hidden_states.shape}")
-        #     print(f"  scale_tensor shape: {scale_tensor.shape}")
-        #     print(f"  masked_m shape: {masked_m.shape}")
-        #     print(f"  masked_m values: {masked_m}")
-        #     print(f"  masked_m sum: {masked_m.sum()}")
-        #     print(f"  expected_m: {expected_m}")
-        #     print(f"  Token distribution: {[f'Expert {i}: {masked_m[i]} tokens' for i in range(min(5, num_local_experts))]}")
-        #     if num_local_experts > 5:
-        #         print(f"  ... and {num_local_experts - 5} more experts")
-        
+          
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
         
@@ -561,6 +553,7 @@ def benchmark_moe_layer_decode(
                 version = pkg_resources.get_distribution('sglang').version
                 distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
                 perf_filename = os.path.join(output_path, "generation_moe_perf.txt")
+                os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                 log_perf(
                     item_list=[{
                         'moe_dtype': 'fp8_block',
@@ -595,8 +588,6 @@ def run_moe(
     test_layer,
     num_experts,
     tp_rank,
-    distributed="power_law", 
-    power_law_alpha=0.8,
     output_path=None
 ):
     """Run the complete MoE benchmark"""
@@ -657,7 +648,6 @@ def run_moe(
 
         decode_test_cases = get_moe_decode_test_cases()
         rank_print(f"Testing {len(decode_test_cases)} decode configurations...")
-
         benchmark_moe_layer_decode(
             model_runner,
             server_args,
@@ -673,9 +663,7 @@ def run_moe(
             actual_num_experts,
             ep_size,
             num_rank,
-            distributed, 
-            power_law_alpha,
-            output_path,
+            output_path=output_path,
         )
         
         del model_runner, moe_layer
@@ -701,8 +689,6 @@ if __name__ == "__main__":
     num_iterations = 10
     test_layer = 3
     num_experts = 128
-    distributed = "uniform"
-    power_law_alpha = 0.8
     
     server_args = ServerArgs(
         model_path=model_path,
@@ -742,9 +728,8 @@ if __name__ == "__main__":
                 test_layer,
                 num_experts,
                 tp_rank,
-                distributed, 
-                power_law_alpha,
                 output_path,
+                
             ),
         )
         proc.start()
