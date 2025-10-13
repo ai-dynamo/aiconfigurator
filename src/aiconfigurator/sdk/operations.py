@@ -519,18 +519,20 @@ class GenerationMLASglang(Operation):
                  scale_factor: float, 
                  tp_size: int, 
                  kvcache_quant_mode: common.KVCacheQuantMode, 
-                 fmha_quant_mode: common.FMHAQuantMode) -> None:
+                 fmha_quant_mode: common.FMHAQuantMode,
+                 attn_backend: str = 'flashinfer') -> None:
         super().__init__(name, scale_factor)
         self._tp_size = tp_size
         self._weights = 0.0
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
+        self._attn_backend = attn_backend
 
     def query(self, database:PerfDatabase, **kwargs):
         batch_size = kwargs.get('batch_size')
         s = kwargs.get('s')
                 
-        return database.query_generation_mla_sglang(batch_size, s, self._tp_size, self._kvcache_quant_mode, self._fmha_quant_mode) * self._scale_factor
+        return database.query_generation_mla_sglang(batch_size, s, self._tp_size, self._kvcache_quant_mode, self._fmha_quant_mode, self._attn_backend) * self._scale_factor
         
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -545,18 +547,20 @@ class ContextMLASglang(Operation):
                  scale_factor: float, 
                  tp_size: int, 
                  kvcache_quant_mode: common.KVCacheQuantMode, 
-                 fmha_quant_mode: common.FMHAQuantMode) -> None:
+                 fmha_quant_mode: common.FMHAQuantMode,
+                 attn_backend: str = 'flashinfer') -> None:
         super().__init__(name, scale_factor)
         self._tp_size = tp_size
         self._weights = 0.0
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
+        self._attn_backend = attn_backend
 
     def query(self, database:PerfDatabase, **kwargs):
         batch_size = kwargs.get('batch_size')
         isl = kwargs.get('s')
 
-        return database.query_context_mla_sglang(batch_size, isl, self._tp_size, self._kvcache_quant_mode, self._fmha_quant_mode) * self._scale_factor
+        return database.query_context_mla_sglang(batch_size, isl, self._tp_size, self._kvcache_quant_mode, self._fmha_quant_mode, self._attn_backend) * self._scale_factor
       
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

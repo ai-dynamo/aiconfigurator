@@ -611,6 +611,89 @@ def load_generation_mla_data(generation_mla_file):
     
     return generation_mla_data
 
+def load_sglang_context_mla_data(context_mla_file):
+    """
+    Load the context mla data for sglang
+    """
+    if not os.path.exists(context_mla_file):
+        logger.warning(f"Context mla data file {context_mla_file} not found.")
+        return None
+    context_mla_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))
+
+    with open(context_mla_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames
+        rows = list(reader)
+
+    for row in rows:
+        quant_mode, kv_cache_dtype, b, s, latency, = \
+            row['mla_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['latency']
+        
+        kernel_source = row['kernel_source'] if 'kernel_source' in row else 'flashinfer'
+
+        if 'num_heads' not in row:
+            tp_size = int(row['tp_size'])
+            num_heads = 128 // tp_size
+        else:
+            num_heads = int(row['num_heads'])
+
+        b=int(b)
+        s=int(s)
+        latency=float(latency)
+
+        quant_mode = common.FMHAQuantMode[quant_mode]
+        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+        
+        try:
+            latency = context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
+            logger.debug('value conflict in context mla data: {} {} {} {} {} {} {}'.format(kernel_source, quant_mode, kv_cache_dtype, num_heads, s, b, latency))
+        except KeyError:
+            context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b] = latency
+        
+    return context_mla_data
+
+def load_sglang_generation_mla_data(generation_mla_file):
+    """
+    Load the generation mla data for sglang
+    """
+    if not os.path.exists(generation_mla_file):
+        logger.warning(f"Generation mla data file {generation_mla_file} not found.")
+        return None
+    generation_mla_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict()))))
+    with open(generation_mla_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames
+        rows = list(reader)
+
+    for row in rows:
+        kv_cache_dtype, b, s, step, latency = \
+            row['kv_cache_dtype'], row['batch_size'], row['isl'], row['step'], row['latency']
+        
+        kernel_source = row['kernel_source'] if 'kernel_source' in row else 'flashinfer'
+
+        if 'num_heads' not in row:
+            tp_size = int(row['tp_size'])
+            num_heads = 128 // tp_size
+        else:
+            num_heads = int(row['num_heads'])
+        
+        b=int(b)
+        s=int(s)
+        step=int(step)
+        latency=float(latency)
+
+        s = s + step
+        
+        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+
+        try:
+            latency = generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s]
+            logger.debug('value conflict in generation mla data: {} {} {} {} {} {} '.format(kernel_source, kv_cache_dtype, num_heads, b, s, latency))      
+        except KeyError:
+            generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s] = latency
+    
+    return generation_mla_data
+
 def load_mla_bmm_data(mla_bmm_file):
     """
     Load the mla bmm data for trtllm
@@ -767,8 +850,8 @@ class PerfDatabase(object):
             self._generation_attention_data = {}
             self._custom_allreduce_data = {}
             self._moe_data, self._generation_moe_data = load_sglang_moe_data(os.path.join(data_dir, common.PerfDataFilename.context_moe.value))
-            self._context_mla_data = load_context_mla_data(os.path.join(data_dir, common.PerfDataFilename.context_mla.value))
-            self._generation_mla_data = load_generation_mla_data(os.path.join(data_dir, common.PerfDataFilename.generation_mla.value))
+            self._context_mla_data = load_sglang_context_mla_data(os.path.join(data_dir, common.PerfDataFilename.context_mla.value))
+            self._generation_mla_data = load_sglang_generation_mla_data(os.path.join(data_dir, common.PerfDataFilename.generation_mla.value))
             self._context_mlp_data, self._generation_mlp_data = load_sglang_mlp_data(os.path.join(data_dir, common.PerfDataFilename.context_mlp.value))
             self._deepep_normal_data = load_deepep_normal_data(os.path.join(data_dir, common.PerfDataFilename.deepep_normal.value))
             self._deepep_ll_data = load_deepep_ll_data(os.path.join(data_dir, common.PerfDataFilename.deepep_ll.value))
@@ -836,32 +919,67 @@ class PerfDatabase(object):
                                   target_z_list=target_z_list)
         
         # mla
-        for quant_mode in self._context_mla_data.keys():
-            for kv_cache_dtype in self._context_mla_data[quant_mode].keys():
-                num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
-                data_dict=self._context_mla_data[quant_mode][kv_cache_dtype]
-                target_x_list=num_heads_list # to reuse x dim
-                # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
-                target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
-                    [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
-                target_z_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048] # b
+        # For sglang backend, context_mla_data structure is [kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
+        # For other backends, it's [quant_mode][kv_cache_dtype][num_heads][s][b]
+        if backend == 'sglang':
+            for kernel_source in self._context_mla_data.keys():
+                for quant_mode in self._context_mla_data[kernel_source].keys():
+                    for kv_cache_dtype in self._context_mla_data[kernel_source][quant_mode].keys():
+                        num_heads_list = list(self._context_mla_data[kernel_source][quant_mode][kv_cache_dtype].keys())
+                        data_dict=self._context_mla_data[kernel_source][quant_mode][kv_cache_dtype]
+                        target_x_list=num_heads_list # to reuse x dim
+                        # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
+                        target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
+                            [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
+                        target_z_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048] # b
 
-                self._extrapolate_data_grid(data_dict=data_dict, #tpsize,sb
+                        self._extrapolate_data_grid(data_dict=data_dict, #tpsize,sb
+                                                    target_x_list=target_x_list,
+                                                    target_y_list=target_y_list,
+                                                    target_z_list=target_z_list, sqrt_y_value=True)
+        else:
+            for quant_mode in self._context_mla_data.keys():
+                for kv_cache_dtype in self._context_mla_data[quant_mode].keys():
+                    num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
+                    data_dict=self._context_mla_data[quant_mode][kv_cache_dtype]
+                    target_x_list=num_heads_list # to reuse x dim
+                    # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
+                    target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
+                        [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
+                    target_z_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048] # b
+
+                    self._extrapolate_data_grid(data_dict=data_dict, #tpsize,sb
+                                                target_x_list=target_x_list,
+                                                target_y_list=target_y_list,
+                                                target_z_list=target_z_list, sqrt_y_value=True)
+
+        # For sglang backend, generation_mla_data structure is [kernel_source][kv_cache_dtype][num_heads][b][s]
+        # For other backends, it's [kv_cache_dtype][num_heads][b][s]
+        if backend == 'sglang':
+            for kernel_source in self._generation_mla_data.keys():
+                for kv_cache_dtype in self._generation_mla_data[kernel_source].keys():
+                    tp_list =  list(self._generation_mla_data[kernel_source][kv_cache_dtype].keys())
+                    data_dict=self._generation_mla_data[kernel_source][kv_cache_dtype]
+                    target_x_list=tp_list # n
+                    target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
+                    target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
+
+                    self._extrapolate_data_grid(data_dict=data_dict, #tpsize, bs
+                                                target_x_list=target_x_list,
+                                                target_y_list=target_y_list,
+                                                target_z_list=target_z_list)
+        else:
+            for kv_cache_dtype in self._generation_mla_data.keys():
+                tp_list =  list(self._generation_mla_data[kv_cache_dtype].keys())
+                data_dict=self._generation_mla_data[kv_cache_dtype]
+                target_x_list=tp_list # n
+                target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
+                target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
+
+                self._extrapolate_data_grid(data_dict=data_dict, #tpsize, bs
                                             target_x_list=target_x_list,
                                             target_y_list=target_y_list,
-                                            target_z_list=target_z_list, sqrt_y_value=True)
-
-        for kv_cache_dtype in self._generation_mla_data.keys():
-            tp_list =  list(self._generation_mla_data[kv_cache_dtype].keys())
-            data_dict=self._generation_mla_data[kv_cache_dtype]
-            target_x_list=tp_list # n
-            target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
-            target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
-
-            self._extrapolate_data_grid(data_dict=data_dict, #tpsize, bs
-                                        target_x_list=target_x_list,
-                                        target_y_list=target_y_list,
-                                        target_z_list=target_z_list)
+                                            target_z_list=target_z_list)
         
         # post-correction
         self._correct_data()
@@ -872,16 +990,42 @@ class PerfDatabase(object):
         """
         Update the support matrix
         """
-        self.supported_quant_mode = {
-            'gemm': [key.name for key in self._gemm_data.keys()],
-            'context_attention': [key.name for key in self._context_attention_data.keys()],
-            'generation_attention': [key.name for key in self._generation_attention_data.keys()],
-            'context_mla': [key.name for key in self._context_mla_data.keys()],
-            'generation_mla': [key.name for key in self._generation_mla_data.keys()],
-            'mla_bmm': [key.name for key in self._mla_bmm_data.keys()],
-            'nccl': [key.name for key in self._nccl_data.keys()],
-            'moe': [key.name for key in self._moe_data.keys()],
-        }
+        # For sglang backend, context_mla_data and generation_mla_data have kernel_source as first level
+        # We need to collect quant_modes from the nested structure
+        if self.backend == 'sglang':
+            context_mla_modes = set()
+            for kernel_source in self._context_mla_data.keys():
+                for quant_mode in self._context_mla_data[kernel_source].keys():
+                    context_mla_modes.add(quant_mode.name)
+            
+            generation_mla_modes = set()
+            for kernel_source in self._generation_mla_data.keys():
+                # For generation_mla in sglang, the structure is [kernel_source][kv_cache_dtype][...]
+                # We don't have quant_mode at this level, so we collect kv_cache_dtype
+                for kv_cache_dtype in self._generation_mla_data[kernel_source].keys():
+                    generation_mla_modes.add(kv_cache_dtype.name)
+            
+            self.supported_quant_mode = {
+                'gemm': [key.name for key in self._gemm_data.keys()],
+                'context_attention': [key.name for key in self._context_attention_data.keys()],
+                'generation_attention': [key.name for key in self._generation_attention_data.keys()],
+                'context_mla': list(context_mla_modes),
+                'generation_mla': list(generation_mla_modes),
+                'mla_bmm': [key.name for key in self._mla_bmm_data.keys()],
+                'nccl': [key.name for key in self._nccl_data.keys()],
+                'moe': [key.name for key in self._moe_data.keys()],
+            }
+        else:
+            self.supported_quant_mode = {
+                'gemm': [key.name for key in self._gemm_data.keys()],
+                'context_attention': [key.name for key in self._context_attention_data.keys()],
+                'generation_attention': [key.name for key in self._generation_attention_data.keys()],
+                'context_mla': [key.name for key in self._context_mla_data.keys()],
+                'generation_mla': [key.name for key in self._generation_mla_data.keys()],
+                'mla_bmm': [key.name for key in self._mla_bmm_data.keys()],
+                'nccl': [key.name for key in self._nccl_data.keys()],
+                'moe': [key.name for key in self._moe_data.keys()],
+            }
 
     def is_inter_node(self, num_gpus: int) -> bool:
         """
@@ -1305,6 +1449,7 @@ class PerfDatabase(object):
                                    tp_size : int, 
                                    kvcache_quant_mode : common.KVCacheQuantMode, 
                                    fmha_quant_mode : common.FMHAQuantMode,
+                                   attention_backend : Optional[str] = None,
                                    sol_mode : Optional[common.SOLMode] = None) -> float:
         """
         Query the generation mla data for SGLang backend with SOL calculation
@@ -1358,9 +1503,17 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
         else:
+            if attention_backend is None:
+                attention_backend = "flashinfer"
+            if attention_backend == "flashinfer":
+                attn_data = self._generation_mla_data["flashinfer"]
+            elif attention_backend == "fa3":
+                attn_data = self._generation_mla_data["fa3"]
+            else:
+                raise ValueError(f"Unsupported attention backend: {attention_backend}")
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
-            mla_dict = self._generation_mla_data[kvcache_quant_mode]
+            mla_dict = attn_data[kvcache_quant_mode]
             latency =  self._interp_3d(num_heads, b, s, mla_dict, 'bilinear')
             return latency
     
@@ -1370,6 +1523,7 @@ class PerfDatabase(object):
                                 tp_size : int, 
                                 kvcache_quant_mode : common.KVCacheQuantMode, 
                                 fmha_quant_mode : common.FMHAQuantMode,
+                                attention_backend : Optional[str] = None,
                                 sol_mode : Optional[common.SOLMode] = None) -> float:
         def get_sol(b : int, s : int, tp_size : int, kvcache_quant_mode : common.KVCacheQuantMode, fmha_quant_mode : common.FMHAQuantMode) -> Tuple[float, float, float]:
             
@@ -1416,9 +1570,18 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
         else:
+            if attention_backend is None:
+                attention_backend = "flashinfer"
+            if attention_backend == "flashinfer":
+                attn_data = self._context_mla_data["flashinfer"]
+            elif attention_backend == "fa3":
+                attn_data = self._context_mla_data["fa3"]
+            else:
+                raise ValueError(f"Unsupported attention backend: {attention_backend}")
+
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
-            mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
+            mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
             latency = self._interp_3d(num_heads, s, b, mla_dict, 'cubic')
             return latency
         

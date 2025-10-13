@@ -481,13 +481,15 @@ class DisaggDeepSeekModel(BaseModel):
         fmha_quant_mode = self.config.fmha_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
         moe_backend = self.config.moe_backend
+        attn_backend = self.config.attention_backend
+
         sms = self.config.sms
         workload_distribution = "uniform"
         gpu_per_node = 8
         node_num = moe_ep_size//gpu_per_node
 
         # context mla attention
-        self.context_ops.extend([ops.ContextMLASglang(f'context_attention', self._num_layers, tp_size, kvcache_quant_mode, fmha_quant_mode)])
+        self.context_ops.extend([ops.ContextMLASglang(f'context_attention', self._num_layers, tp_size, kvcache_quant_mode, fmha_quant_mode, attn_backend)])
 
         # shared expert
         self.context_ops.extend([ops.MLP(f'context_shared_expert', self._num_layers, h, self._moe_inter_size, moe_quant_mode)])
@@ -503,7 +505,7 @@ class DisaggDeepSeekModel(BaseModel):
                                          attention_dp_size, is_context=True, moe_backend=moe_backend)])
 
         # generation mla attention
-        self.generation_ops.extend([ops.GenerationMLASglang(f'generation_attention', self._num_layers*self._mtp_scale_factor, tp_size, kvcache_quant_mode, fmha_quant_mode)])
+        self.generation_ops.extend([ops.GenerationMLASglang(f'generation_attention', self._num_layers*self._mtp_scale_factor, tp_size, kvcache_quant_mode, fmha_quant_mode, attn_backend)])
 
         # shared expert
         self.generation_ops.extend([ops.MLP(f'generation_shared_expert', self._num_layers*self._mtp_scale_factor, h, self._moe_inter_size, moe_quant_mode)])

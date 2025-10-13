@@ -26,6 +26,7 @@ class ModelConfig:
     overwrite_num_layers: int = 0
     sms: int = 20
     moe_backend: str = 'deepep_moe'
+    attention_backend: str = 'flashinfer' # 'flashinfer' or 'fa3'
 
 @dataclass
 class RuntimeConfig:
