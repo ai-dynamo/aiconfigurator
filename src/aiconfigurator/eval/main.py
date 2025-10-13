@@ -12,7 +12,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     reuse_cli_parser(parser)
 
     g = parser.add_argument_group("Eval pipeline")
-    g.add_argument("--mode", choices=["disagg", "agg"], default="disagg",
+    g.add_argument("--service-mode", choices=["disagg", "agg"], default="disagg",
                    help="Which service to start. Default: disagg")
     g.add_argument("--service-dir", type=str, default="/workspace/components/backends/trtllm",
                    help="Where backend folders (disagg/agg) are copied and service is started.")
@@ -39,7 +39,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         type=int,
         nargs="+",
         help=(
-            "Benchmark concurrency list. If omitted -> auto mode: "
+            "Benchmark concurrency list. If omitted -> auto service_mode: "
             "read max_batch_size from backend YAML "
             "(agg: agg/agg_config.yaml; disagg: disagg/decode_config.yaml), "
             "then pick 6 values from 1..max (incl), roughly even and preferring multiples of 4/8 "
@@ -48,6 +48,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     g.add_argument("--artifact-root", type=str, default="",
                    help="Optional base folder for eval outputs (default under save_dir).")
+    g.add_argument("--venv-dir",  type=str, default="/workspace/aic",
+                   help="uv venv path for aiperf")
 
     parser.epilog = (parser.epilog or "") + (
         "\n\nEVAL NOTES:\n"
@@ -71,15 +73,16 @@ def main(args) -> int:
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_name = args.run_name or f"{args.model}_{args.system}_{ts}"
-    LOG.info("Eval start: run=%s  mode=%s  runs=%d", run_name, args.mode, args.runs)
+    LOG.info("Eval start: run=%s  service_mode=%s  runs=%d", run_name, args.service_mode, args.runs)
 
     from aiconfigurator.eval.pipeline import Pipeline, EvalConfig
     port = int(getattr(args, "port", 8000))
 
     cfg = EvalConfig(
-        mode=args.mode,
+        service_mode=args.service_mode,
         service_dir=args.service_dir,
         start_script=args.start_script,
+        venv_dir=args.venv_dir,
         port=port,
         health_timeout_s=args.health_timeout_s,
         coldstart_wait_s=args.coldstart_wait_s,

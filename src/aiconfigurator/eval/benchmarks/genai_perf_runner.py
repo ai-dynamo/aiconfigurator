@@ -9,6 +9,8 @@ import subprocess
 import sys
 import json
 import re
+import os
+import shlex
 import pandas as pd
 
 from . import register
@@ -26,6 +28,16 @@ _METRICS = {
 }
 _STATS = {"avg", "p50", "p90", "p95", "p99", "min", "max", "std"}
 
+_AIPERF_RECORD_KEYS = {
+    "request_throughput": "request_throughput",
+    "request_latency": "request_latency",
+    "time_to_first_token": "ttft",  # aiperf uses 'ttft'
+    "inter_token_latency": "inter_token_latency",
+    "output_token_throughput": "output_token_throughput",
+    "output_token_throughput_per_user": "output_token_throughput_per_user",
+}
+
+
 def _to_list(v) -> Sequence[int]:
     if v is None:
         return []
@@ -34,9 +46,9 @@ def _to_list(v) -> Sequence[int]:
     return [int(v)]
 
 def _stream(cmd: List[str], cwd: Path | None = None, env=None) -> int:
-    LOG.debug("Exec: %s", " ".join(cmd))
+    LOG.debug("Exec: %s", " ".join(map(str, cmd)))
     with subprocess.Popen(
-        cmd, cwd=cwd, env=env,
+        cmd, cwd=str(cwd) if cwd else None, env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
     ) as p:
         assert p.stdout
@@ -46,44 +58,106 @@ def _stream(cmd: List[str], cwd: Path | None = None, env=None) -> int:
         p.wait()
         return p.returncode
 
-def _json_to_df(p: Path) -> pd.DataFrame:
+
+def _ensure_uv_venv(venv_dir: Path) -> Path:
+    """
+    venv for aiperf
+    """
+    act = venv_dir / "bin" / "activate"
+    if act.exists():
+        LOG.info("Using existing venv: %s", venv_dir)
+        return act
+    LOG.info("Creating virtual environment with uv: uv venv %s", venv_dir)
+    rc = _stream(["uv", "venv", str(venv_dir)])
+    if rc:
+        raise RuntimeError(f"`uv venv {venv_dir}` failed with rc={rc}")
+    if not act.exists():
+        raise FileNotFoundError(f"Virtualenv created but activate not found: {act}")
+    return act
+
+
+def _warn_if_tool_missing(venv_dir: Path, tool: str = "genai-perf") -> None:
+    exe = venv_dir / "bin" / tool
+    if not exe.exists():
+        LOG.warning("%s not found at %s – make sure it is installed in the venv.",
+                    tool, exe)
+
+
+def _json_to_df(p: Path, folder_cc: int | None = None) -> pd.DataFrame:
+    """
+        aiperf result parser helper
+    """
     with p.open() as f:
         js = json.load(f)
     row = {"experiment": p.parent.name}
+    # Prefer aiperf 'records' layout; fallback to legacy top-level fields
+    records = js.get("records") or {}
     for m in _METRICS:
-        blob = js.get(m, {})
+        key = _AIPERF_RECORD_KEYS.get(m, m)
+        blob = records.get(key, js.get(m, {})) or {}
         for stat in _STATS:
             if stat in blob:
                 row[f"{m}_{stat}"] = blob[stat]
-    # extract concurrency if present in filename or JSON
-    m = re.search(r"_concurrency_(\d+)", p.stem)
-    if m:
+
+    # extract concurrency from folder name, or JSON
+    if folder_cc is not None:
         row["load_type"] = "concurrency"
-        row["load_value"] = int(m.group(1))
-        row["load_label"] = f"cc{row['load_value']}"
+        row["load_value"] = int(folder_cc)
+        row["load_label"] = f"cc{folder_cc}"
     else:
-        stim = js.get("input_config", {}).get("perf_analyzer", {}).get("stimulus", {})
-        cc = stim.get("concurrency")
-        if cc:
+        m = re.search(r"_concurrency_(\d+)", p.stem)
+        if m:
             row["load_type"] = "concurrency"
-            row["load_value"] = int(cc)
-            row["load_label"] = f"cc{cc}"
+            row["load_value"] = int(m.group(1))
+            row["load_label"] = f"cc{row['load_value']}"
+        else:
+            # aiperf JSON
+            cc = (js.get("input_config", {}) or {}).get("loadgen", {}).get("concurrency")
+            if not cc:
+                # legacy genai-perf JSON
+                stim = (js.get("input_config", {}) or {}).get("perf_analyzer", {}).get("stimulus", {}) or {}
+                cc = stim.get("concurrency")
+            if cc:
+                row["load_type"] = "concurrency"
+                row["load_value"] = int(cc)
+                row["load_label"] = f"cc{cc}"
+
     return pd.DataFrame([row])
 
+
 def parse(path: Path) -> pd.DataFrame:
-    if path.is_dir():
-        dfs = [_json_to_df(p) for p in path.rglob("profile_export*.json")]
+    """
+    Prefer new layout: <bench>/concurrency_<N>/profile_export_aiperf.json,
+    but keep backward compatibility with older 'profile_export*.json' files.
+    """
+    p = Path(path)
+    dfs: list[pd.DataFrame] = []
+
+    if p.is_dir():
+        # aiperf output structure: one folder per concurrency
+        for cc_dir in sorted(p.rglob("concurrency_*")):
+            if cc_dir.is_dir():
+                m = re.match(r"concurrency_(\d+)$", cc_dir.name)
+                f = cc_dir / "profile_export_aiperf.json"
+                if m and f.exists():
+                    dfs.append(_json_to_df(f, folder_cc=int(m.group(1))))
         if not dfs:
-            raise FileNotFoundError(f"No genai-perf JSON in {path}")
-        return pd.concat(dfs, ignore_index=True)
-    return _json_to_df(path)
+            # Fallback: legacy layout anywhere under the dir
+            dfs = [_json_to_df(fp) for fp in p.rglob("profile_export*.json")]
+    else:
+        dfs = [_json_to_df(p)]
+
+    if not dfs:
+        raise FileNotFoundError(f"No genai-perf/aiperf JSON in {path}")
+    return pd.concat(dfs, ignore_index=True)
+
 
 @register("genai_perf", parse=parse)
-def run(cfg: Cfg, *, bin_path: str = "genai-perf") -> None:
+def run(cfg: Cfg, *, bin_path: str = "aiperf") -> None:
     """
-    Execute genai-perf – text-only, concurrency only.
+    Execute aiperf.
     """
-    art_dir = Path(cfg["base_folder"]) / cfg.get("result_folder", cfg["name"])
+    art_dir = Path(cfg["base_folder"]) / str(cfg.get("result_folder", cfg["name"]))
     art_dir.mkdir(parents=True, exist_ok=True)
 
     model     = str(cfg.get("model", "unused"))
@@ -95,10 +169,19 @@ def run(cfg: Cfg, *, bin_path: str = "genai-perf") -> None:
     if not concs:
         raise ValueError("concurrency list is required")
 
-    LOG.info("genai-perf (chat) url=%s conc=%s isl=%d osl=%d", url, concs, isl, osl)
+    # make sure venv already created
+    venv_dir = Path(str(cfg.get("venv_dir") or os.environ.get("AIC_VENV", "aic")))
+    activate = _ensure_uv_venv(venv_dir)
+    _warn_if_tool_missing(venv_dir, tool=Path(bin_path).name)
+
+    LOG.info("genai-perf (chat) url=%s conc=%s isl=%d osl=%d [venv=%s]",
+             url, concs, isl, osl, venv_dir)
 
     for v in concs:
-        prof_name = f"profile_export_isl_{isl}_osl_{osl}_concurrency_{v}.json"
+        # Write each run into its own folder: <bench>/concurrency_<N>/
+        cc_dir = art_dir / f"concurrency_{v}"
+        cc_dir.mkdir(parents=True, exist_ok=True)
+
         cmd = [
             bin_path, "profile",
             "-m", model,
@@ -106,8 +189,7 @@ def run(cfg: Cfg, *, bin_path: str = "genai-perf") -> None:
             "--endpoint-type", "chat",
             "--url", url,
             "--streaming",
-            "--profile-export-file", prof_name,
-            "--artifact-dir", str(art_dir),
+            "--artifact-dir", str(cc_dir),
             "--endpoint", "/v1/chat/completions",
             "--synthetic-input-tokens-mean", str(isl),
             "--synthetic-input-tokens-stddev", "0",
@@ -120,9 +202,12 @@ def run(cfg: Cfg, *, bin_path: str = "genai-perf") -> None:
             "--request-count", str(v * 10),
             "--warmup-request-count", str(v * 2),
             "--num-dataset-entries", str(v * 12),
-            "--", "-v", "--max-threads", "256"
+            "-v",
         ]
-        rc = _stream(cmd)
+
+        cmdline = shlex.join(cmd)
+        shell_line = f"set -e; source {shlex.quote(str(activate))} && {cmdline}"
+        rc = _stream(["bash", "-lc", shell_line])
         if rc:
             LOG.error("genai-perf failed at concurrency=%s (rc=%s)", v, rc)
         else:

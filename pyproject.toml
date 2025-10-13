@@ -41,6 +41,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.9"
 
 dependencies = [
+    "uv",
     "fastapi>=0.115.12",
     "gradio==5.47.1",
     "jinja2>=3.1.0",
@@ -55,7 +56,6 @@ dependencies = [
     "pyyaml>=6.0",
     "scipy>=1.13.1",
     "uvicorn>=0.34.2",
-    "genai-perf",
     "bokeh",
     "nvidia-ml-py",
     "munch>=4.0.0"

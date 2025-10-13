@@ -26,7 +26,8 @@ LOG = logging.getLogger(__name__)
 
 @dataclass
 class EvalConfig:
-    mode: str
+    service_mode: str
+    venv_dir: str
     service_dir: str
     start_script: str
     port: int
@@ -56,6 +57,7 @@ class Pipeline:
         from aiconfigurator.cli import main as cli_runner
 
         args = self.cfg.cli_args
+        setattr(args, "service_mode", "default")
         save_dir = getattr(args, "save_dir", None)
         if not save_dir:
             raise ValueError("--save_dir is required for eval to pick artifacts.")
@@ -66,7 +68,7 @@ class Pipeline:
         t0 = time.time()
         rc = cli_runner.main(args)
         if rc not in (None, 0):
-            raise RuntimeError(f"`aiconfigurator cli` returned rc={rc}")
+            raise RuntimeError(f"`aiconfigurator cli default` returned rc={rc}")
 
         base = Path(save_dir)
         new_dirs = [p for p in base.glob("*") if p.is_dir() and p.name not in pre_existing]
@@ -77,26 +79,41 @@ class Pipeline:
         return result_dir
 
     def _copy_backend_configs(self, run_dir: Path, dest_root: Path) -> Dict[str, Path]:
-        """Copy backend_configs/{disagg,agg} into service dir (overwrite)."""
-        src_root = run_dir / "backend_configs"
-        if not src_root.exists():
-            raise FileNotFoundError(f"{src_root} does not exist")
-
+        """
+        Copy backend configs
+        """
         copied: Dict[str, Path] = {}
-        for mode in ("disagg", "agg"):
-            src = src_root / mode
-            if src.exists():
-                dst = dest_root / mode
-                if dst.exists():
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-                copied[mode] = dst
-                LOG.info("Copied backend configs: %s -> %s", src, dst)
+
+        def pick_src(service_mode: str) -> Path:
+            inner = service_mode
+            src = run_dir / service_mode / "top1" / inner
+            if not src.exists():
+                raise FileNotFoundError(
+                    f"Expected path not found for service_mode '{service_mode}': {src}"
+                )
+            
+            if service_mode == "agg":
+                if not (src / "agg_config.yaml").exists():
+                    LOG.warning("agg_config.yaml not found under %s", src)
             else:
-                LOG.info("No '%s' backend config in %s (skip)", mode, src_root)
+                if not ((src / "decode_config.yaml").exists() or (src / "prefill_config.yaml").exists()):
+                    LOG.warning("Neither decode_config.yaml nor prefill_config.yaml found under %s", src)
+            return src
+
+        for service_mode in ("disagg", "agg"):
+            src = pick_src(service_mode)
+            dst = dest_root / service_mode
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+            copied[service_mode] = dst
+            LOG.info("Copied %s backend configs: %s -> %s", service_mode, src, dst)
+
         if not copied:
-            raise FileNotFoundError("No backend config folders found to copy.")
+            raise FileNotFoundError(f"No backend config folders found to copy under {run_dir}")
+
         return copied
+
 
     def _ensure_art_root(self, save_dir: Path, run_name: str) -> Path:
         base = Path(self.cfg.artifact_root) if self.cfg.artifact_root else save_dir
@@ -104,8 +121,8 @@ class Pipeline:
         mkdir_p(out)
         return out
 
-    def _read_max_batch_size(self, service_dir: Path, mode: str) -> Optional[int]:
-        cfg_path = service_dir / ("agg/agg_config.yaml" if mode == "agg" else "disagg/decode_config.yaml")
+    def _read_max_batch_size(self, service_dir: Path, service_mode: str) -> Optional[int]:
+        cfg_path = service_dir / ("agg/agg_config.yaml" if service_mode == "agg" else "disagg/decode_config.yaml")
         if not cfg_path.exists():
             LOG.warning("YAML not found for auto concurrency: %s", cfg_path)
             return None
@@ -198,7 +215,7 @@ class Pipeline:
 
 
     def _start_service(self, service_dir: Path, log_file: Path) -> ServiceManager:
-        start_rel = self.cfg.start_script.strip() or ("disagg/node_0_run.sh" if self.cfg.mode == "disagg" else "agg/node_0_run.sh")
+        start_rel = self.cfg.start_script.strip() or ("disagg/node_0_run.sh" if self.cfg.service_mode == "disagg" else "agg/node_0_run.sh")
         sm = ServiceManager(
             workdir=service_dir,
             start_cmd=["bash", start_rel],
@@ -315,6 +332,7 @@ class Pipeline:
         args = self.cfg.cli_args
         model_path = str(getattr(args, "model_path", ""))
         served_model_name = str(getattr(args, "served_model_name", ""))
+        venv_dir = str(getattr(args,"venv_dir", "/workspace/aic"))
 
         cfg = {
             "name": "genai_perf_eval",
@@ -327,6 +345,7 @@ class Pipeline:
             "input_sequence_length": int(isl),
             "output_sequence_length": int(osl),
             "concurrency": list(concurrency),
+            "venv_dir": venv_dir
         }
         run_genai_perf(cfg)
         return art_dir / "bench"
@@ -338,7 +357,7 @@ class Pipeline:
         art_dir: Path,
         bench_dir: Path,
         workers_info: Dict[str, int],
-        mode: str,
+        service_mode: str,
         gpu_monitor_enabled: bool,
         gpu_csv: Optional[Path],
         optimal_configs: Optional[Dict[str, pd.DataFrame]] = None,
@@ -349,8 +368,8 @@ class Pipeline:
         df.to_csv(out_csv, index=False)
         LOG.info("Saved summary: %s", out_csv)
 
-        # Extract GPU count based on mode
-        if mode == "disagg":
+        # Extract GPU count based on service_mode
+        if service_mode == "disagg":
             p_workers = int(workers_info.get("PREFILL_WORKERS", 0) or 0)
             d_workers = int(workers_info.get("DECODE_WORKERS", 0) or 0)
             p_gpu = int(workers_info.get("PREFILL_GPU", 0) or 0)
@@ -358,7 +377,7 @@ class Pipeline:
             total_gpus = p_workers * p_gpu + d_workers * d_gpu
             legend = f"disagg_{p_workers}p({p_gpu} gpu){d_workers}d({d_gpu} gpu)"
         else:
-            # For agg mode, extract GPU count from config
+            # For agg service_mode, extract GPU count from config
             total_gpus = self._get_agg_gpu_count(workers_info)
             legend = f"agg_{total_gpus}gpu"
         
@@ -415,7 +434,7 @@ class Pipeline:
             LOG.info("Saved plot: %s", out_html)
 
     def _get_agg_gpu_count(self, workers_info: Dict[str, int]) -> int:
-        """Simple helper to get GPU count for agg mode."""
+        """Simple helper to get GPU count for agg service_mode."""
         return workers_info.get("AGG_GPU_COUNT", 1)
 
     def _extract_workers_from_start_script(self, service_dir: Path) -> Dict[str, int]:
@@ -423,14 +442,14 @@ class Pipeline:
         For disagg, read disagg/node_0_run.sh and extract worker/GPU info.
         For agg, extract GPU count from agg_config.yaml.
         """
-        if self.cfg.mode == "disagg":
+        if self.cfg.service_mode == "disagg":
             start_rel = self.cfg.start_script.strip() or "disagg/node_0_run.sh"
             script = service_dir / start_rel
             vals = parse_disagg_start_script(script)
             LOG.info("Parsed workers from %s: %s", script, vals)
             return vals
         else:
-            # For agg mode, extract GPU count from config
+            # For agg service_mode, extract GPU count from config
             agg_gpu_count = self._extract_agg_gpu_count_from_config(service_dir)
             return {
                 "PREFILL_GPU": -1,
@@ -504,7 +523,7 @@ class Pipeline:
             conc_list = list(self.cfg.bench_concurrency)
             LOG.info("Using provided benchmark concurrency: %s", conc_list)
         else:
-            mbs = self._read_max_batch_size(service_dir, self.cfg.mode)
+            mbs = self._read_max_batch_size(service_dir, self.cfg.service_mode)
             if not mbs:
                 # safe fallback if YAML missing
                 conc_list = [1, 2, 4, 8, 16, 32]
@@ -517,7 +536,7 @@ class Pipeline:
         # prepare log path
         log_dir = Path(getattr(args, "save_dir")).resolve() / "log"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / f"{run_name}_{self.cfg.mode}_p{self.cfg.port}.log"
+        log_file = log_dir / f"{run_name}_{self.cfg.service_mode}_p{self.cfg.port}.log"
 
         # 3) start + health
         self.service = self._start_service(service_dir, log_file)
@@ -566,7 +585,7 @@ class Pipeline:
                     art_dir=art_dir,
                     bench_dir=bench_dir,
                     workers_info=workers_info,
-                    mode=self.cfg.mode,
+                    service_mode=self.cfg.service_mode,
                     gpu_monitor_enabled=self.cfg.gpu_monitor,
                     gpu_csv=self._gpu_csv,
                     optimal_configs=optimal_configs,

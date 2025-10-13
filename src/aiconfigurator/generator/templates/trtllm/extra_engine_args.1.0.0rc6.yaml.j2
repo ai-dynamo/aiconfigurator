@@ -27,7 +27,6 @@ kv_cache_config:
 
 cache_transceiver_config:
   backend: {{ dynamo_config.cache_transceiver_backend | default('default') }} # dynamo_config.cache_transceiver_backend The communication backend type to use for the cache transceiver (default, ucx, nixl, mpi)
-  max_tokens_in_buffer: {{dynamo_config.max_tokens_in_buffer | default(1024)}} # dynamo_config.max_tokens_in_buffer The max number of tokens the transfer buffer can fit
 
 cuda_graph_config:
   enable_padding: {{ dynamo_config.cuda_graph_padding_enabled | default(true) }} # dynamo_config.cuda_graph_padding_enabled Pad CUDA graph
