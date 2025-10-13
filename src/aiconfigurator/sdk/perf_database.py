@@ -1013,7 +1013,7 @@ class PerfDatabase(object):
                 'nccl': [key.name for key in self._nccl_data.keys()],
                 'moe': [key.name for key in self._moe_data.keys()],
             }
-        else: #trtllm as default backend
+        elif self.backend == 'trtllm':
             self.supported_quant_mode = {
                 'gemm': [key.name for key in self._gemm_data.keys()],
                 'context_attention': [key.name for key in self._context_attention_data.keys()],
@@ -1023,6 +1023,9 @@ class PerfDatabase(object):
                 'mla_bmm': [key.name for key in self._mla_bmm_data.keys()],
                 'nccl': [key.name for key in self._nccl_data.keys()],
                 'moe': [key.name for key in self._moe_data.keys()],
+            }
+        elif self.backend == 'vllm':
+            self.supported_quant_mode = {
             }
 
     def is_inter_node(self, num_gpus: int) -> bool:
@@ -1742,7 +1745,7 @@ class PerfDatabase(object):
                     num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
                     lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
                     return lat 
-            else: # default to trtllm
+            elif self.backend == common.BackendName.trtllm.value: 
                 # aligned with trtllm, kernel source selection.
                 if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
                     try:
@@ -1763,6 +1766,8 @@ class PerfDatabase(object):
                 num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
                 lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
                 return lat
+            else:
+                raise NotImplementedError(f"backend {self.backend} not supported for moe")
             
 
     def query_mla_bmm(self, 
