@@ -145,7 +145,7 @@ class EventFn:
                                         nextn_accept_rates=nextn_accept_rates)
                 runtime_config = config.RuntimeConfig(batch_size=batch_size, isl=isl, osl=osl)
 
-                model = get_model(model_name, model_config)
+                model = get_model(model_name, model_config, backend_name)
                 stride = (osl + 8 - 1) // 8 # run at most 8 steps
                 backend = get_backend(backend_name)
                 session = InferenceSession(model, database, backend)
@@ -227,7 +227,7 @@ class EventFn:
                 results_df = None
         
                 backend = get_backend(backend_name)
-                model = get_model(model_name, model_config)
+                model = get_model(model_name, model_config, backend_name)
                 session = InferenceSession(model, database, backend)
                 summary = session.find_best_agg_result_under_constraints(runtime_config=runtime_config, 
                                                                             top_k = 10,
@@ -566,7 +566,7 @@ class EventFn:
                 decode_stride = (osl + 8 - 1) // 8
         
                 # prefill
-                prefill_model = get_model(model_name, prefill_model_config)
+                prefill_model = get_model(model_name, prefill_model_config, prefill_backend_name)
                 prefill_database = copy.deepcopy(get_database(prefill_system_name, prefill_backend_name, prefill_version))
                 assert prefill_database is not None
                 prefill_database.set_default_sol_mode(common.SOLMode(int(prefill_sol_mode)))
@@ -584,7 +584,7 @@ class EventFn:
                 prefill_throughput_html = create_scatter_plot(prefill_results_df, 'global_bs', 'seq/s', prefill_target_bs, 'context_latency', title)
 
                 # decode
-                decode_model = get_model(model_name, decode_model_config)
+                decode_model = get_model(model_name, decode_model_config, decode_backend_name)
                 decode_database = copy.deepcopy(get_database(decode_system_name, decode_backend_name, decode_version))
                 assert decode_database is not None
                 decode_database.set_default_sol_mode(common.SOLMode(int(decode_sol_mode)))

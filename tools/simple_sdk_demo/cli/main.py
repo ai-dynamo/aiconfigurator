@@ -125,7 +125,7 @@ def main(args):
                                       attention_dp_size=args.attention_dp_size, \
                                       overwrite_num_layers=args.overwrite_num_layers)
     runtime_config = config.RuntimeConfig(batch_size=args.batch_size, beam_width=1, isl=args.isl, osl=args.osl, ttft=args.ttft, tpot=args.tpot)
-    model = get_model(args.model, model_config)
+    model = get_model(args.model, model_config, args.backend)
     backend = get_backend(args.backend)
     session = InferenceSession(model, database, backend)
 

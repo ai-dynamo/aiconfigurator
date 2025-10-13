@@ -59,7 +59,7 @@ def enumerate_parallel_config(num_gpu_list: list[int],
                                     if dp > 1 and tp > 1:
                                         continue
                                 elif backend == common.BackendName.sglang: # sglang doesn't support moe tp and moe ep > 1 at the same time for now
-                                    if moe_tp > 1 and moe_ep > 1:
+                                    if moe_tp > 1:
                                         continue
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
             else:
@@ -109,7 +109,7 @@ def agg_pareto(model_name: str,
             overwritten_model_config.moe_tp_size = moe_tp_size
             overwritten_model_config.moe_ep_size = moe_ep_size
             overwritten_model_config.attention_dp_size = dp_size
-            model = get_model(model_name=model_name, model_config=overwritten_model_config)
+            model = get_model(model_name=model_name, model_config=overwritten_model_config, backend_name=backend_name)
             backend = get_backend(backend_name)
             sess = InferenceSession(model=model, database=database, backend=backend)
             for tpot in tpot_list:

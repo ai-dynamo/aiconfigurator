@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# ============================================================================
+# Description:
+# This script is designed for testing DeepSeek model performance configurations
+# under large-scale Prefill-Decode (PD) disaggregation architecture.
+# PD disaggregation is a serving mode that separates the prefill and decode phases
+# onto different workers to optimize resource utilization and serving performance.
+# ============================================================================
+
+# define your experiments here, the order will determine the execution order. If not defined, every exp will be executed.
+exps:
+  - exp_disagg_full
+
+exp_disagg_full:
+  mode: "patch" 
+  serving_mode: "disagg" 
+  model_name: "DEEPSEEK_V3" 
+  total_gpus: 512 # required
+  system_name: "h200_sxm" 
+  decode_system_name: "h200_sxm" 
+  backend_name: "sglang" 
+  backend_version: "0.5.0" 
+  isl: 1000 # input sequence length, optional, default to 4000
+  osl: 100 # output sequence length, optional, default to 1000
+  ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
+  tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
+  enable_wide_ep: ture # enable wide ep for prefill/decode, optional, default to false
+  profiles: [] # some inherit presets for easier patch, optional
+  config: # all optional, used to patch default values
+    nextn: 1 # mtp 1
+    nextn_accept_rates: [0.85,0,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
+    # each prefill worker config
+    prefill_worker_config:
+      gemm_quant_mode: "fp8_block" 
+      moe_quant_mode: "fp8_block" 
+      kvcache_quant_mode: "fp8" 
+      fmha_quant_mode: "fp8_block" 
+      comm_quant_mode: "half" 
+      num_gpu_per_worker: [8, 16, 32, 64] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
+      tp_list: [1]
+      pp_list: [1]
+      dp_list: [8, 16, 32, 64] 
+      moe_tp_list: [1]
+      moe_ep_list: [8, 16, 32, 64]
+    # each decode worker config
+    decode_worker_config:
+      gemm_quant_mode: "fp8_block" 
+      moe_quant_mode: "fp8_block" 
+      kvcache_quant_mode: "fp8" 
+      fmha_quant_mode: "fp8_block" 
+      comm_quant_mode: "half" 
+      num_gpu_per_worker: [8, 16, 32, 64] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
+      tp_list: [1]
+      pp_list: [1]
+      dp_list: [8, 16, 32, 64]
+      moe_tp_list: [1]
+      moe_ep_list: [8, 16, 32, 64]
+
+    replica_config:
+      max_gpu_per_replica: 512 # max gpus per replica
+
+    advanced_tuning_config:
+      prefill_correction_scale: 0.9 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * prefill_correction_scale
+      decode_correction_scale: 0.92 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * decode_correction_scale
+      prefill_max_batch_size: 1
+      decode_max_batch_size: 128

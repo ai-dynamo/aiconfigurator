@@ -341,6 +341,123 @@ def load_moe_data(moe_file):
         
     return moe_default_data, moe_low_latency_data
 
+def load_sglang_mlp_data(mlp_file):
+    """
+    Load the SGLang MLP data from context_mlp_perf.txt and generation_mlp_perf.txt
+    """
+    data_dir = os.path.dirname(mlp_file)
+    prefill_mlp_file = os.path.join(data_dir, common.PerfDataFilename.context_mlp.value)
+    generation_mlp_file = os.path.join(data_dir, common.PerfDataFilename.generation_mlp.value)
+    
+    context_mlp_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))
+    generation_mlp_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))
+    
+    if os.path.exists(prefill_mlp_file):
+        with open(prefill_mlp_file, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                quant_type, num_token, hidden_size, intermediate_size, avg_ms = \
+                    row['quant_type'], row['num_token'], row['hidden_size'], row['intermediate_size'], row['avg_ms']
+                
+                num_token = int(num_token)
+                hidden_size = int(hidden_size)
+                intermediate_size = int(intermediate_size)
+                avg_ms = float(avg_ms)
+                quant_mode = common.MoEQuantMode[quant_type]
+                
+                try:
+                    latency = context_mlp_data[quant_mode][hidden_size][intermediate_size][num_token]
+                    logger.debug('value conflict in prefill mlp data: {} {} {} {} {}'.format(quant_mode, hidden_size, intermediate_size, num_token, latency))
+                except KeyError:
+                    context_mlp_data[quant_mode][hidden_size][intermediate_size][num_token] = avg_ms
+    
+    if os.path.exists(generation_mlp_file):
+        with open(generation_mlp_file, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                quant_type, num_token, hidden_size, intermediate_size, avg_ms = \
+                    row['quant_type'], row['num_token'], row['hidden_size'], row['intermediate_size'], row['avg_ms']
+                
+                num_token = int(num_token)
+                hidden_size = int(hidden_size)
+                intermediate_size = int(intermediate_size)
+                avg_ms = float(avg_ms)
+                quant_mode = common.MoEQuantMode[quant_type]
+
+                try:
+                    latency = generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token]
+                    logger.debug('value conflict in generation mlp data: {} {} {} {} {}'.format(quant_mode, hidden_size, intermediate_size, num_token, latency))
+                except KeyError:
+                    generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token] = avg_ms
+    
+    return context_mlp_data, generation_mlp_data
+
+def load_sglang_moe_data(moe_file):
+    """
+    Load the SGLang MoE data from context_moe_pref.txt and generation_moe_pref.txt
+    """
+    if not os.path.exists(moe_file):
+        logger.warning(f"MoE data file {moe_file} not found.")
+        return None
+        
+    data_dir = os.path.dirname(moe_file)
+    context_moe_file = os.path.join(data_dir, common.PerfDataFilename.context_moe.value)
+    generation_moe_file = os.path.join(data_dir, common.PerfDataFilename.generation_moe.value)
+    
+    moe_default_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))))))
+    moe_low_latency_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))))))
+    
+    # Load context MoE data (normal mode)
+    if os.path.exists(context_moe_file):
+        logger.info(f"Loading context MoE data from: {context_moe_file}")
+        with open(context_moe_file, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Parse the new CSV format with num_tokens instead of batch_size and input_len
+                quant_mode = row['moe_dtype']
+                num_tokens = int(row['num_tokens'])
+                hidden_size = int(row['hidden_size'])
+                inter_size = int(row['inter_size'])
+                topk = int(row['topk'])
+                num_experts = int(row['num_experts'])
+                moe_tp_size = int(row['moe_tp_size'])
+                moe_ep_size = int(row['moe_ep_size'])
+                distribution = row['distribution']
+                latency = float(row['latency'])
+                quant_mode = common.MoEQuantMode[quant_mode]
+                
+                # Store the data, overwriting any previous entry with the same key
+                moe_default_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens] = latency
+                logger.debug(f"Loaded context MoE data: {quant_mode}, {distribution}, {topk}, {num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, {moe_ep_size}, {num_tokens} -> {latency}")
+    else:
+        logger.warning(f"Context MoE file not found: {context_moe_file}")
+    
+    # Load generation MoE data (low latency mode)
+    if os.path.exists(generation_moe_file):
+        logger.info(f"Loading generation MoE data from: {generation_moe_file}")
+        with open(generation_moe_file, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Parse the new CSV format with num_tokens instead of batch_size and input_len
+                quant_mode = row['moe_dtype']
+                num_tokens = int(row['num_tokens'])
+                hidden_size = int(row['hidden_size'])
+                inter_size = int(row['inter_size'])
+                topk = int(row['topk'])
+                num_experts = int(row['num_experts'])
+                moe_tp_size = int(row['moe_tp_size'])
+                moe_ep_size = int(row['moe_ep_size'])
+                distribution = row['distribution']
+                latency = float(row['latency'])
+                quant_mode = common.MoEQuantMode[quant_mode]
+                
+                # Store the data, overwriting any previous entry with the same key
+                moe_low_latency_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens] = latency
+                logger.debug(f"Loaded generation MoE data: {quant_mode}, {distribution}, {topk}, {num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, {moe_ep_size}, {num_tokens} -> {latency}")
+    else:
+        logger.warning(f"Generation MoE file not found: {generation_moe_file}")
+    
+    return moe_default_data, moe_low_latency_data
 
 def load_context_attention_data(context_attention_file):
     """
@@ -378,7 +495,6 @@ def load_context_attention_data(context_attention_file):
 
     return context_attention_data
 
-
 def load_generation_attention_data(generation_attention_file):
     """
     Load the generation attention data
@@ -415,7 +531,6 @@ def load_generation_attention_data(generation_attention_file):
             generation_attention_data[kv_cache_dtype][kv_n][n][b][s] = latency
         
     return generation_attention_data
-
 
 def load_context_mla_data(context_mla_file):
     """
@@ -496,6 +611,89 @@ def load_generation_mla_data(generation_mla_file):
     
     return generation_mla_data
 
+def load_sglang_context_mla_data(context_mla_file):
+    """
+    Load the context mla data for sglang
+    """
+    if not os.path.exists(context_mla_file):
+        logger.warning(f"Context mla data file {context_mla_file} not found.")
+        return None
+    context_mla_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))
+
+    with open(context_mla_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames
+        rows = list(reader)
+
+    for row in rows:
+        quant_mode, kv_cache_dtype, b, s, latency, = \
+            row['mla_dtype'], row['kv_cache_dtype'], row['batch_size'], row['isl'], row['latency']
+        
+        kernel_source = row['kernel_source'] if 'kernel_source' in row else 'flashinfer'
+
+        if 'num_heads' not in row:
+            tp_size = int(row['tp_size'])
+            num_heads = 128 // tp_size
+        else:
+            num_heads = int(row['num_heads'])
+
+        b=int(b)
+        s=int(s)
+        latency=float(latency)
+
+        quant_mode = common.FMHAQuantMode[quant_mode]
+        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+        
+        try:
+            latency = context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
+            logger.debug('value conflict in context mla data: {} {} {} {} {} {} {}'.format(kernel_source, quant_mode, kv_cache_dtype, num_heads, s, b, latency))
+        except KeyError:
+            context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b] = latency
+        
+    return context_mla_data
+
+def load_sglang_generation_mla_data(generation_mla_file):
+    """
+    Load the generation mla data for sglang
+    """
+    if not os.path.exists(generation_mla_file):
+        logger.warning(f"Generation mla data file {generation_mla_file} not found.")
+        return None
+    generation_mla_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict()))))
+    with open(generation_mla_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames
+        rows = list(reader)
+
+    for row in rows:
+        kv_cache_dtype, b, s, step, latency = \
+            row['kv_cache_dtype'], row['batch_size'], row['isl'], row['step'], row['latency']
+        
+        kernel_source = row['kernel_source'] if 'kernel_source' in row else 'flashinfer'
+
+        if 'num_heads' not in row:
+            tp_size = int(row['tp_size'])
+            num_heads = 128 // tp_size
+        else:
+            num_heads = int(row['num_heads'])
+        
+        b=int(b)
+        s=int(s)
+        step=int(step)
+        latency=float(latency)
+
+        s = s + step
+        
+        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+
+        try:
+            latency = generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s]
+            logger.debug('value conflict in generation mla data: {} {} {} {} {} {} '.format(kernel_source, kv_cache_dtype, num_heads, b, s, latency))      
+        except KeyError:
+            generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s] = latency
+    
+    return generation_mla_data
+
 def load_mla_bmm_data(mla_bmm_file):
     """
     Load the mla bmm data for trtllm
@@ -525,6 +723,76 @@ def load_mla_bmm_data(mla_bmm_file):
             mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = latency
     
     return mla_bmm_data
+
+def load_deepep_ll_data(deepep_ll_file):
+    """
+    Load the DeepEP LL operation data
+    """
+    if not os.path.exists(deepep_ll_file):
+        return None
+
+    deepep_ll_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+    
+    with open(deepep_ll_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames
+        rows = list(reader)
+    
+    for row in rows:
+        hidden_size = int(row['hidden_size'])
+        node_num = int(row['node_num'])
+        num_token = int(row['num_token'])
+        num_topk = int(row['num_topk'])
+        num_experts = int(row['num_experts'])
+        combine_avg_t_us = float(row['combine_avg_t_us'])
+        dispatch_avg_t_us = float(row['dispatch_avg_t_us'])
+        lat = combine_avg_t_us + dispatch_avg_t_us
+        
+        # Store the data with key structure: [hidden_size][num_topk][num_experts][num_token] -> timing data
+        try:
+            existing_data = deepep_ll_data[node_num][hidden_size][num_topk][num_experts][num_token]
+            logger.debug('value conflict in deepep ll data: {} {} {} {}'.format(hidden_size, num_topk, num_experts, num_token))
+        except KeyError:
+            deepep_ll_data[node_num][hidden_size][num_topk][num_experts][num_token] = lat
+    
+    return deepep_ll_data
+
+def load_deepep_normal_data(deepep_normal_file):
+    """
+    Load the DeepEP normal operation data
+    """
+    if not os.path.exists(deepep_normal_file):
+        return None
+
+    deepep_normal_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))))
+    
+    with open(deepep_normal_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        headers = reader.fieldnames
+        rows = list(reader)
+    
+    for row in rows:
+        num_token = int(row['num_token'])
+        topk = int(row['num_topk'])
+        node_num = int(row['node_num'])
+        num_experts = int(row['num_experts'])
+        hidden_size = int(row['hidden_size'])
+        dispatch_sms = int(row['dispatch_sms'])
+        dispatch_transmit_us = float(row['dispatch_transmit_us'])
+        dispatch_notify_us = float(row['dispatch_notify_us'])
+        combine_transmit_us = float(row['combine_transmit_us'])
+        combine_notify_us = float(row['combine_notify_us'])
+        lat = dispatch_transmit_us + dispatch_notify_us + combine_transmit_us + combine_notify_us
+        
+        # Store the data with key structure: [hidden_size][topk][num_experts][dispatch_sms][num_token] -> timing data
+        try:
+            existing_data = deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms][num_token]
+            logger.debug('value conflict in deepep normal data: {} {} {} {} {}'.format(hidden_size, topk, num_experts, dispatch_sms, num_token))
+        except KeyError:
+            deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms][num_token] = lat
+        
+    
+    return deepep_normal_data
 
 class PerfDatabase(object):
     """
@@ -574,18 +842,34 @@ class PerfDatabase(object):
 
         data_dir = os.path.join(systems_dir, self.system_spec['data_dir'], backend, version)
         nccl_data_dir = os.path.join(systems_dir, self.system_spec['data_dir'], 'nccl', self.system_spec['misc']['nccl_version'], common.PerfDataFilename.nccl.value)
-        self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
-        self._context_attention_data = load_context_attention_data(os.path.join(data_dir, common.PerfDataFilename.context_attention.value))
-        self._generation_attention_data = load_generation_attention_data(os.path.join(data_dir, common.PerfDataFilename.generation_attention.value))
-        self._custom_allreduce_data = load_custom_allreduce_data(os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value))
-        self._moe_data, self._moe_low_latency_data = load_moe_data(os.path.join(data_dir, common.PerfDataFilename.moe.value))
-        self._context_mla_data = load_context_mla_data(os.path.join(data_dir, common.PerfDataFilename.context_mla.value))
-        self._generation_mla_data = load_generation_mla_data(os.path.join(data_dir, common.PerfDataFilename.generation_mla.value))
-        self._nccl_data = load_nccl_data(nccl_data_dir)
-        self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
+        
+        if backend == 'sglang':
+            # For SGLang, only load MoE and MLP data and provide empty structures for other data
+            self._gemm_data = {}
+            self._context_attention_data = {}
+            self._generation_attention_data = {}
+            self._custom_allreduce_data = {}
+            self._moe_data, self._generation_moe_data = load_sglang_moe_data(os.path.join(data_dir, common.PerfDataFilename.context_moe.value))
+            self._context_mla_data = load_sglang_context_mla_data(os.path.join(data_dir, common.PerfDataFilename.context_mla.value))
+            self._generation_mla_data = load_sglang_generation_mla_data(os.path.join(data_dir, common.PerfDataFilename.generation_mla.value))
+            self._context_mlp_data, self._generation_mlp_data = load_sglang_mlp_data(os.path.join(data_dir, common.PerfDataFilename.context_mlp.value))
+            self._deepep_normal_data = load_deepep_normal_data(os.path.join(data_dir, common.PerfDataFilename.deepep_normal.value))
+            self._deepep_ll_data = load_deepep_ll_data(os.path.join(data_dir, common.PerfDataFilename.deepep_ll.value))
+            self._nccl_data = {}
+            self._mla_bmm_data = {}
+        else:
+            self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
+            self._context_attention_data = load_context_attention_data(os.path.join(data_dir, common.PerfDataFilename.context_attention.value))
+            self._generation_attention_data = load_generation_attention_data(os.path.join(data_dir, common.PerfDataFilename.generation_attention.value))
+            self._custom_allreduce_data = load_custom_allreduce_data(os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value))
+            self._moe_data, self._moe_low_latency_data = load_moe_data(os.path.join(data_dir, common.PerfDataFilename.moe.value))
+            self._context_mla_data = load_context_mla_data(os.path.join(data_dir, common.PerfDataFilename.context_mla.value))
+            self._generation_mla_data = load_generation_mla_data(os.path.join(data_dir, common.PerfDataFilename.generation_mla.value))
+            self._nccl_data = load_nccl_data(nccl_data_dir)
+            self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
 
-        # pre-correction
-        self._correct_data()
+            # pre-correction
+            self._correct_data()
 
         for quant_mode in self._context_attention_data.keys():
             for kv_cache_dtype in self._context_attention_data[quant_mode].keys():
@@ -635,32 +919,67 @@ class PerfDatabase(object):
                                   target_z_list=target_z_list)
         
         # mla
-        for quant_mode in self._context_mla_data.keys():
-            for kv_cache_dtype in self._context_mla_data[quant_mode].keys():
-                num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
-                data_dict=self._context_mla_data[quant_mode][kv_cache_dtype]
-                target_x_list=num_heads_list # to reuse x dim
-                # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
-                target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
-                    [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
-                target_z_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048] # b
+        # For sglang backend, context_mla_data structure is [kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
+        # For other backends, it's [quant_mode][kv_cache_dtype][num_heads][s][b]
+        if backend == 'sglang':
+            for kernel_source in self._context_mla_data.keys():
+                for quant_mode in self._context_mla_data[kernel_source].keys():
+                    for kv_cache_dtype in self._context_mla_data[kernel_source][quant_mode].keys():
+                        num_heads_list = list(self._context_mla_data[kernel_source][quant_mode][kv_cache_dtype].keys())
+                        data_dict=self._context_mla_data[kernel_source][quant_mode][kv_cache_dtype]
+                        target_x_list=num_heads_list # to reuse x dim
+                        # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
+                        target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
+                            [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
+                        target_z_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048] # b
 
-                self._extrapolate_data_grid(data_dict=data_dict, #tpsize,sb
+                        self._extrapolate_data_grid(data_dict=data_dict, #tpsize,sb
+                                                    target_x_list=target_x_list,
+                                                    target_y_list=target_y_list,
+                                                    target_z_list=target_z_list, sqrt_y_value=True)
+        else:
+            for quant_mode in self._context_mla_data.keys():
+                for kv_cache_dtype in self._context_mla_data[quant_mode].keys():
+                    num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
+                    data_dict=self._context_mla_data[quant_mode][kv_cache_dtype]
+                    target_x_list=num_heads_list # to reuse x dim
+                    # currently, support max seq to 1M. Because all the system is linear for now. it will be difficult to do square interpolation. Use more points to do the approximation
+                    target_y_list=[16,32,64,128,256,512,1024,2048] + [4096+i*2048 for i in range(14)] + \
+                        [32768 + 16384*i for i in range(6)] + [131072 + 32768*i for i in range(12)] + [524288 + 65536*i for i in range(9)]# s
+                    target_z_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048] # b
+
+                    self._extrapolate_data_grid(data_dict=data_dict, #tpsize,sb
+                                                target_x_list=target_x_list,
+                                                target_y_list=target_y_list,
+                                                target_z_list=target_z_list, sqrt_y_value=True)
+
+        # For sglang backend, generation_mla_data structure is [kernel_source][kv_cache_dtype][num_heads][b][s]
+        # For other backends, it's [kv_cache_dtype][num_heads][b][s]
+        if backend == 'sglang':
+            for kernel_source in self._generation_mla_data.keys():
+                for kv_cache_dtype in self._generation_mla_data[kernel_source].keys():
+                    tp_list =  list(self._generation_mla_data[kernel_source][kv_cache_dtype].keys())
+                    data_dict=self._generation_mla_data[kernel_source][kv_cache_dtype]
+                    target_x_list=tp_list # n
+                    target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
+                    target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
+
+                    self._extrapolate_data_grid(data_dict=data_dict, #tpsize, bs
+                                                target_x_list=target_x_list,
+                                                target_y_list=target_y_list,
+                                                target_z_list=target_z_list)
+        else:
+            for kv_cache_dtype in self._generation_mla_data.keys():
+                tp_list =  list(self._generation_mla_data[kv_cache_dtype].keys())
+                data_dict=self._generation_mla_data[kv_cache_dtype]
+                target_x_list=tp_list # n
+                target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
+                target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
+
+                self._extrapolate_data_grid(data_dict=data_dict, #tpsize, bs
                                             target_x_list=target_x_list,
                                             target_y_list=target_y_list,
-                                            target_z_list=target_z_list, sqrt_y_value=True)
-
-        for kv_cache_dtype in self._generation_mla_data.keys():
-            tp_list =  list(self._generation_mla_data[kv_cache_dtype].keys())
-            data_dict=self._generation_mla_data[kv_cache_dtype]
-            target_x_list=tp_list # n
-            target_y_list=[1,2,4,8,16,32,64,128,256,384,512,1024,2048,8192] # b
-            target_z_list=[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,262144,2097152*8] # s
-
-            self._extrapolate_data_grid(data_dict=data_dict, #tpsize, bs
-                                        target_x_list=target_x_list,
-                                        target_y_list=target_y_list,
-                                        target_z_list=target_z_list)
+                                            target_z_list=target_z_list)
         
         # post-correction
         self._correct_data()
@@ -671,16 +990,43 @@ class PerfDatabase(object):
         """
         Update the support matrix
         """
-        self.supported_quant_mode = {
-            'gemm': [key.name for key in self._gemm_data.keys()],
-            'context_attention': [key.name for key in self._context_attention_data.keys()],
-            'generation_attention': [key.name for key in self._generation_attention_data.keys()],
-            'context_mla': [key.name for key in self._context_mla_data.keys()],
-            'generation_mla': [key.name for key in self._generation_mla_data.keys()],
-            'mla_bmm': [key.name for key in self._mla_bmm_data.keys()],
-            'nccl': [key.name for key in self._nccl_data.keys()],
-            'moe': [key.name for key in self._moe_data.keys()],
-        }
+        # For sglang backend, context_mla_data and generation_mla_data have kernel_source as first level
+        # We need to collect quant_modes from the nested structure
+        if self.backend == 'sglang':
+            context_mla_modes = set()
+            for kernel_source in self._context_mla_data.keys():
+                for quant_mode in self._context_mla_data[kernel_source].keys():
+                    context_mla_modes.add(quant_mode.name)
+            
+            generation_mla_modes = set()
+            for kernel_source in self._generation_mla_data.keys():
+                for kv_cache_dtype in self._generation_mla_data[kernel_source].keys():
+                    generation_mla_modes.add(kv_cache_dtype.name)
+            
+            self.supported_quant_mode = {
+                'gemm': [key.name for key in self._moe_data.keys()],
+                'context_attention': list(context_mla_modes),
+                'generation_attention': list(generation_mla_modes),
+                'context_mla': list(context_mla_modes),
+                'generation_mla': list(generation_mla_modes),
+                'mla_bmm': [key.name for key in self._mla_bmm_data.keys()],
+                'nccl': [key.name for key in self._nccl_data.keys()],
+                'moe': [key.name for key in self._moe_data.keys()],
+            }
+        elif self.backend == 'trtllm':
+            self.supported_quant_mode = {
+                'gemm': [key.name for key in self._gemm_data.keys()],
+                'context_attention': [key.name for key in self._context_attention_data.keys()],
+                'generation_attention': [key.name for key in self._generation_attention_data.keys()],
+                'context_mla': [key.name for key in self._context_mla_data.keys()],
+                'generation_mla': [key.name for key in self._generation_mla_data.keys()],
+                'mla_bmm': [key.name for key in self._mla_bmm_data.keys()],
+                'nccl': [key.name for key in self._nccl_data.keys()],
+                'moe': [key.name for key in self._moe_data.keys()],
+            }
+        elif self.backend == 'vllm':
+            self.supported_quant_mode = {
+            }
 
     def is_inter_node(self, num_gpus: int) -> bool:
         """
@@ -707,6 +1053,10 @@ class PerfDatabase(object):
                 for z in target_z_list:
                     if z not in z_dict.keys():
                         z_left, z_right = self._nearest_1d_point_helper(z, list(z_dict.keys()), False)
+                        # Check if both left and right boundaries exist
+                        if z_left not in z_dict.keys() or z_right not in z_dict.keys():
+                            logger.warning(f"Skipping interpolation for z={z} as boundaries z_left={z_left} or z_right={z_right} do not exist in z_dict for x={x}, y={y}")
+                            continue
                         value = self._interp_1d([z_left, z_right], [data_dict[x][y][z_left],data_dict[x][y][z_right]], z)
                         z_dict[z] = value
             
@@ -714,8 +1064,18 @@ class PerfDatabase(object):
             for y in target_y_list:
                 if y not in data_dict[x].keys():
                     y_left, y_right = self._nearest_1d_point_helper(y, list(data_dict[x].keys()), False)
+                    # Check if both left and right boundaries exist
+                    if y_left not in data_dict[x].keys() or y_right not in data_dict[x].keys():
+                        logger.warning(f"Skipping interpolation for y={y} as boundaries y_left={y_left} or y_right={y_right} do not exist in data_dict[{x}]")
+                        continue
+                    
                     z_list = sorted(list(data_dict[x][y_left].keys()))
                     for z in z_list:
+                        # Check if z exists in both y_left and y_right
+                        if z not in data_dict[x][y_left].keys() or z not in data_dict[x][y_right].keys():
+                            logger.warning(f"Skipping interpolation for z={z} as it does not exist in both y_left={y_left} and y_right={y_right}")
+                            continue
+                            
                         y_left_value = data_dict[x][y_left][z]
                         y_right_value = data_dict[x][y_right][z]
                         assert(y_right_value is not None), "y_right_value cannot be None"
@@ -734,8 +1094,23 @@ class PerfDatabase(object):
         for x in target_x_list:
             if x not in data_dict.keys():
                 x_left, x_right = self._nearest_1d_point_helper(x, list(data_dict.keys()), False)
+                # Check if both left and right boundaries exist
+                if x_left not in data_dict.keys() or x_right not in data_dict.keys():
+                    logger.warning(f"Skipping interpolation for x={x} as boundaries x_left={x_left} or x_right={x_right} do not exist in data_dict")
+                    continue
+                    
                 for y in sorted(data_dict[x_left].keys()):
+                    # Check if y exists in both x_left and x_right
+                    if y not in data_dict[x_left].keys() or y not in data_dict[x_right].keys():
+                        logger.warning(f"Skipping interpolation for y={y} as it does not exist in both x_left={x_left} and x_right={x_right}")
+                        continue
+                        
                     for z in sorted(data_dict[x_left][y].keys()):
+                        # Check if z exists in both x_left and x_right for the given y
+                        if z not in data_dict[x_left][y].keys() or z not in data_dict[x_right][y].keys():
+                            logger.warning(f"Skipping interpolation for z={z} as it does not exist in both x_left={x_left} and x_right={x_right} for y={y}")
+                            continue
+                            
                         x_left_value = data_dict[x_left][y][z]
                         x_right_value = data_dict[x_right][y][z]
                         assert(x_right_value is not None), "x_right_value cannot be None"
@@ -801,6 +1176,21 @@ class PerfDatabase(object):
                 values_list.append(data[i][j][z_right])
         
         return self._validate(interpolate.griddata(np.array(points_list), np.array(values_list), (x,y,z), method='linear'))
+
+    def _interp_2d_linear(self, x:int, y:int, data:dict) -> float:
+        """
+        Interpolate the 3d data using linear interpolation
+        """
+        points_list = []
+        values_list = []
+        x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
+        for i in [x_left, x_right]:
+            y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
+            for j in [y_left, y_right]:
+                points_list.append([i, j])
+                values_list.append(data[i][j])
+        
+        return self._validate(interpolate.griddata(np.array(points_list), np.array(values_list), (x,y), method='linear'))
 
     def _interp_3d(self, x:int, y:int, z:int, data:dict, method:str) -> float:
         """
@@ -987,7 +1377,6 @@ class PerfDatabase(object):
             latency =  self._interp_3d(n, b, s, attention_dict, 'bilinear')
             return latency
 
-
     def query_context_mla(self, 
                           b : int, 
                           s : int, 
@@ -1053,6 +1442,148 @@ class PerfDatabase(object):
         else:
             mla_dict = self._generation_mla_data[kvcache_quant_mode]
             latency =  self._interp_3d(num_heads, b, s, mla_dict, 'bilinear')
+            return latency
+    
+    def query_generation_mla_sglang(self, 
+                                   b : int, 
+                                   s : int, 
+                                   tp_size : int, 
+                                   kvcache_quant_mode : common.KVCacheQuantMode, 
+                                   fmha_quant_mode : common.FMHAQuantMode,
+                                   attention_backend : Optional[str] = None,
+                                   sol_mode : Optional[common.SOLMode] = None) -> float:
+        """
+        Query the generation mla data for SGLang backend with SOL calculation
+        """
+        def get_sol(b : int, s : int, tp_size : int, kvcache_quant_mode : common.KVCacheQuantMode, fmha_quant_mode : common.FMHAQuantMode) -> Tuple[float, float, float]:
+            
+            hidden_size = 7168
+            q_lora_rank = 1536
+            kv_lora_rank = 512
+            qk_rope_head_dim = 64
+            qk_nope_head_dim = 128
+            v_head_dim = 128
+            num_head = 128 // tp_size 
+            
+            # qkv_a projection (decode mode)
+            qkv_a_flop = 2 * hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) * b
+            qkv_a_mem = b * hidden_size + hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) + 2 * b * (q_lora_rank + kv_lora_rank + qk_rope_head_dim)
+
+            # q_b projection
+            q_b_flop = 2 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b
+            q_b_mem = b * q_lora_rank + q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) + 2 * b * num_head * (qk_rope_head_dim + qk_nope_head_dim)
+
+            # q_w_kc (attention computation)
+            q_w_kc_flop = 2 * num_head * qk_nope_head_dim * kv_lora_rank * b
+            q_w_kc_mem = b * num_head * qk_nope_head_dim + num_head * kv_lora_rank * qk_nope_head_dim + 2 * b * num_head * kv_lora_rank
+
+            attn_flop = 2 * b * s * num_head * (qk_rope_head_dim + kv_lora_rank * 2)
+            attn_mem = b * num_head * (kv_lora_rank + qk_rope_head_dim) + b * s * (qk_rope_head_dim + kv_lora_rank) + b * num_head * kv_lora_rank
+
+            # s_w_vc (attention output projection)
+            s_w_vc_flop = 2 * b * num_head * kv_lora_rank * v_head_dim
+            s_w_vc_mem = b * num_head * kv_lora_rank + num_head * v_head_dim * kv_lora_rank + 2 * b * num_head * v_head_dim
+
+            # attention output projection
+            attn_out_flop = 2 * num_head * v_head_dim * hidden_size * b
+            attn_out_mem = b * num_head * v_head_dim + num_head * v_head_dim * hidden_size + 2 * b * hidden_size
+
+            ops = qkv_a_flop + q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop
+            mem_bytes = (qkv_a_mem + q_b_mem + q_w_kc_mem + attn_mem*2 + s_w_vc_mem + attn_out_mem) * fmha_quant_mode.value.memory
+            sol_math = ops / (self.system_spec['gpu']['float16_tc_flops'] * fmha_quant_mode.value.compute) * 1000
+            sol_math += attn_flop / (self.system_spec['gpu']['float16_tc_flops']) * 1000
+            sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
+            sol_time = max(sol_math, sol_mem)
+            
+            return sol_time, sol_math, sol_mem
+        
+        if sol_mode is None:
+            sol_mode = self._default_sol_mode
+        if sol_mode == common.SOLMode.SOL:
+            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+        elif sol_mode == common.SOLMode.SOL_FULL:
+            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
+        else:
+            if attention_backend is None:
+                attention_backend = "flashinfer"
+            if attention_backend == "flashinfer":
+                attn_data = self._generation_mla_data["flashinfer"]
+            elif attention_backend == "fa3":
+                attn_data = self._generation_mla_data["fa3"]
+            else:
+                raise ValueError(f"Unsupported attention backend: {attention_backend}")
+            # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
+            num_heads = 128 // tp_size
+            mla_dict = attn_data[kvcache_quant_mode]
+            latency =  self._interp_3d(num_heads, b, s, mla_dict, 'bilinear')
+            return latency
+    
+    def query_context_mla_sglang(self, 
+                                b : int, 
+                                s : int, 
+                                tp_size : int, 
+                                kvcache_quant_mode : common.KVCacheQuantMode, 
+                                fmha_quant_mode : common.FMHAQuantMode,
+                                attention_backend : Optional[str] = None,
+                                sol_mode : Optional[common.SOLMode] = None) -> float:
+        def get_sol(b : int, s : int, tp_size : int, kvcache_quant_mode : common.KVCacheQuantMode, fmha_quant_mode : common.FMHAQuantMode) -> Tuple[float, float, float]:
+            
+            hidden_size = 7168
+            q_lora_rank = 1536
+            kv_lora_rank = 512
+            qk_rope_head_dim = 64
+            qk_nope_head_dim = 128
+            v_head_dim = 128
+            num_head = 128 // tp_size      
+
+            # qkv_a projection (prefill mode)
+            qkv_a_flop = 2 * hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) * b * s
+            qkv_a_mem = b * hidden_size * s + hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) + 2 * b * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) * s
+            
+            # q_b projection
+            q_b_flop = 2 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b * s
+            q_b_mem = b * q_lora_rank * s + q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) + 2 * b * num_head * (qk_rope_head_dim + qk_nope_head_dim) * s
+            
+            # kv_b projection
+            kv_b_flop = 2 * kv_lora_rank * num_head * (qk_nope_head_dim + v_head_dim) * b * s
+            kv_b_mem = b * s * kv_lora_rank + num_head * (qk_nope_head_dim + v_head_dim) * kv_lora_rank + 2 * b * num_head * (qk_nope_head_dim + v_head_dim) * s
+                
+            # attention computation (prefill mode)
+            attn_flop = 2 * num_head * (qk_nope_head_dim * 2 + qk_rope_head_dim) * b * s * s // 2
+            attn_mem = b * s * num_head * (qk_nope_head_dim + qk_rope_head_dim) * 2+b * s * num_head * qk_nope_head_dim + b * s * num_head * qk_nope_head_dim
+         
+            # attention output projection
+            attn_out_flop = 2 * num_head * v_head_dim * hidden_size * b * s
+            attn_out_mem = b * num_head * v_head_dim * s + num_head * v_head_dim * hidden_size + 2 * b * hidden_size * s
+
+            ops = qkv_a_flop + q_b_flop + kv_b_flop + attn_out_flop
+            mem_bytes = (qkv_a_mem + q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha_quant_mode.value.memory
+            sol_math = ops / (self.system_spec['gpu']['float16_tc_flops'] * fmha_quant_mode.value.compute) * 1000
+            sol_math += attn_flop / (self.system_spec['gpu']['float16_tc_flops']) * 1000
+            sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
+            sol_time = max(sol_math, sol_mem)            
+            return sol_time, sol_math, sol_mem
+        
+        if sol_mode is None:
+            sol_mode = self._default_sol_mode
+        if sol_mode == common.SOLMode.SOL:
+            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+        elif sol_mode == common.SOLMode.SOL_FULL:
+            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
+        else:
+            if attention_backend is None:
+                attention_backend = "flashinfer"
+            if attention_backend == "flashinfer":
+                attn_data = self._context_mla_data["flashinfer"]
+            elif attention_backend == "fa3":
+                attn_data = self._context_mla_data["fa3"]
+            else:
+                raise ValueError(f"Unsupported attention backend: {attention_backend}")
+
+            # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
+            num_heads = 128 // tp_size
+            mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
+            latency = self._interp_3d(num_heads, s, b, mla_dict, 'cubic')
             return latency
         
     # to simplify, we no longer support allreduce_strategy
@@ -1162,6 +1693,8 @@ class PerfDatabase(object):
                   moe_ep_size : int, 
                   quant_mode : common.MoEQuantMode, 
                   workload_distribution : str, 
+                  is_context : bool = True,
+                  moe_backend : Optional[str] = None,
                   sol_mode : Optional[common.SOLMode] = None) -> float:
         """
         Query the moe data
@@ -1197,28 +1730,45 @@ class PerfDatabase(object):
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(num_tokens, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, quant_mode, workload_distribution)
         else:
-            # aligned with trtllm, kernel source selection.
-            if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
-                try:
-                    if workload_distribution in self._moe_low_latency_data[quant_mode].keys():
-                        moe_dict = self._moe_low_latency_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+            if self.backend == common.BackendName.sglang.value:
+                # Set default moe_backend if not specified
+                if moe_backend is None:
+                    moe_backend = "deepep_moe"
+                
+                if moe_backend == "deepep_moe":
+                    if is_context:
+                        moe_data = self._moe_data
                     else:
-                        moe_dict = self._moe_low_latency_data[quant_mode]["uniform"][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                    logger.debug(f"trying to find low latency data for moe {quant_mode} {workload_distribution} {topk} {num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} but failed.")
-                except:
+                        moe_data = self._generation_moe_data
+
+                    moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                    num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
+                    lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
+                    return lat 
+            elif self.backend == common.BackendName.trtllm.value: 
+                # aligned with trtllm, kernel source selection.
+                if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
+                    try:
+                        if workload_distribution in self._moe_low_latency_data[quant_mode].keys():
+                            moe_dict = self._moe_low_latency_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                        else:
+                            moe_dict = self._moe_low_latency_data[quant_mode]["uniform"][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                        logger.debug(f"trying to find low latency data for moe {quant_mode} {workload_distribution} {topk} {num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} but failed.")
+                    except:
+                        if workload_distribution in self._moe_data[quant_mode].keys():
+                            moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                        else:
+                            moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                else:
                     if workload_distribution in self._moe_data[quant_mode].keys():
                         moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                    else:
-                        moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-            else:
-                if workload_distribution in self._moe_data[quant_mode].keys():
-                    moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                else:
-                    moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
 
-            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
-            lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
-            return lat
+                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
+                lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
+                return lat
+            else:
+                raise NotImplementedError(f"backend {self.backend} not supported for moe")
+            
 
     def query_mla_bmm(self, 
                       num_tokens : int, 
@@ -1327,6 +1877,100 @@ class PerfDatabase(object):
                                 logger.debug('generation attention quant {} n{} n_kv{} b{} s{}: sol {} > perf_db {}'.format(quant_mode, n, n_kv_local, b, s, sol, self._generation_attention_data[quant_mode][n_kv][n][b][s]))
                                 self._generation_attention_data[quant_mode][n_kv][n][b][s] = sol
                 
+    def query_mlp(self, 
+                  num_tokens: int,
+                  hidden_size: int,
+                  intermediate_size: int,
+                  quant_mode: common.MoEQuantMode,
+                  is_context: bool = True,
+                  sol_mode: Optional[common.SOLMode] = None) -> float:
+        """
+        Query the SGLang MLP data for DeepSeek shared expert operations
+        """
+        def get_sol(num_tokens: int, hidden_size: int, intermediate_size: int, quant_mode: common.MoEQuantMode) -> Tuple[float, float, float]:
+            ops = 2 * num_tokens * hidden_size * intermediate_size * 3
+            mem_bytes = quant_mode.value.memory * (
+                num_tokens * hidden_size * 3 +  # input + output + intermediate
+                num_tokens * intermediate_size * 3 +  # intermediate
+                hidden_size * intermediate_size * 3  # weights for up + down projections
+            )
+            sol_math = ops / (self.system_spec['gpu']['float16_tc_flops'] * quant_mode.value.compute) * 1000
+            sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+        
+        if sol_mode is None:
+            sol_mode = self._default_sol_mode
+        if sol_mode == common.SOLMode.SOL:
+            return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)[0]
+        elif sol_mode == common.SOLMode.SOL_FULL:
+            return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)
+        else:
+            # Query the actual performance data
+            if is_context:
+                mlp_data = self._context_mlp_data
+            else:
+                mlp_data = self._generation_mlp_data
+
+            mlp_dict = mlp_data[quant_mode][hidden_size][intermediate_size]
+            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mlp_dict.keys()), inner_only=False)
+            lat = self._interp_1d([num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens)
+            return lat
     
+    def query_deepep_ll(self, 
+                        node_num: int,
+                        num_tokens: int,
+                        num_experts: int,
+                        topk: int,
+                        hidden_size: int,
+                        sol_mode: Optional[common.SOLMode] = None) -> float:
+        """
+        Query the DeepEP LL operation data
+        """
+        def get_sol(num_tokens: int, topk: int, num_experts: int) -> Tuple[float, float, float]:
+            pass
+            return 
+        if sol_mode is None:
+            sol_mode = self._default_sol_mode
+        if sol_mode == common.SOLMode.SOL:
+            return get_sol(num_tokens, topk, num_experts)[0]
+        elif sol_mode == common.SOLMode.SOL_FULL:
+            return get_sol(num_tokens, topk, num_experts)
+        else:
+            data = self._deepep_ll_data[node_num][hidden_size][topk][num_experts]
+            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
+            lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+            return lat / 1000.0 
+                
+    def query_deepep_normal(self, 
+                           node_num: int,
+                           num_tokens: int,
+                           num_experts: int,
+                           topk: int,
+                           hidden_size: int,
+                           sms: int,
+                           sol_mode: Optional[common.SOLMode] = None) -> float:
+        """
+        Query the DeepEP normal operation data
+        """
+        def get_sol(num_tokens: int, num_experts: int, topk: int, hidden_size: int) -> Tuple[float, float, float]:
+            pass
+            return 
+        if sol_mode is None:
+            sol_mode = self._default_sol_mode
+        if sol_mode == common.SOLMode.SOL:
+            return get_sol(num_tokens, num_experts, topk, hidden_size)[0]
+        elif sol_mode == common.SOLMode.SOL_FULL:
+            return get_sol(num_tokens, num_experts, topk, hidden_size)
+        else:
+            if node_num == 1 and sms == 20: # only collect sm=20 for now
+                data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
+                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
+                lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+            else:
+                data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts]
+                lat = self._interp_2d_linear(sms, num_tokens, data)
+            return lat / 1000.0 
+        
 if __name__ == '__main__':
     database_dict = get_all_databases()

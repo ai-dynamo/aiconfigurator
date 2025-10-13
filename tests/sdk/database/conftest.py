@@ -245,4 +245,4 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
     monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_mla_bmm_data', lambda path: dummy_mla_bmm_data)
     monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_nccl_data', lambda path: dummy_nccl_data)
     
-    return PerfDatabase('test_system', 'test_backend', 'v1', str(tmp_path)) 
+    return PerfDatabase('test_system', 'trtllm', 'v1', str(tmp_path)) 
