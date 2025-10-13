@@ -1013,7 +1013,7 @@ class PerfDatabase(object):
                 'nccl': [key.name for key in self._nccl_data.keys()],
                 'moe': [key.name for key in self._moe_data.keys()],
             }
-        elif self.backend == 'trtllm':
+        else: #trtllm as default backend
             self.supported_quant_mode = {
                 'gemm': [key.name for key in self._gemm_data.keys()],
                 'context_attention': [key.name for key in self._context_attention_data.keys()],
@@ -1023,9 +1023,6 @@ class PerfDatabase(object):
                 'mla_bmm': [key.name for key in self._mla_bmm_data.keys()],
                 'nccl': [key.name for key in self._nccl_data.keys()],
                 'moe': [key.name for key in self._moe_data.keys()],
-            }
-        elif self.backend == 'vllm':
-            self.supported_quant_mode = {
             }
 
     def is_inter_node(self, num_gpus: int) -> bool:
