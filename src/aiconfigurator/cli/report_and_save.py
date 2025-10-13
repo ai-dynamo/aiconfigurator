@@ -120,7 +120,7 @@ def log_final_summary(
             benefit_ratio = 0.0
         else:
             benefit_ratio = 0.0 # handle case where both are 0
-        summary_box.append(f"    Best Experiment Chosen: \033[1m{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu ({benefit_ratio:.2f}x better)\033[0m")        
+        summary_box.append(f"    Best Experiment Chosen: \033[1m{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu (disagg {benefit_ratio:.2f}x better)\033[0m")        
     else:
         summary_box.append(f"    Best Experiment Chosen: \033[1m{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu\033[0m")
         

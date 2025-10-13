@@ -61,7 +61,7 @@ exp_disagg_full:
       max_gpu_per_replica: 512 # max gpus per replica
 
     advanced_tuning_config:
-      prefill_correction_scale: 0.9 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * prefill_correction_scale
-      decode_correction_scale: 0.92 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, throughput_corrected = throughput_predicted * decode_correction_scale
+      prefill_latency_correction_scale: 1.1 # If you find the predicted prefill perf is too optimistic, you can set a scale factor to make it more realistic, latency_corrected = latency_predicted * prefill_latency_correction_scale
+      decode_latency_correction_scale: 1.08 # If you find the predicted decode perf is too optimistic, you can set a scale factor to make it more realistic, latency_corrected = latency_predicted * decode_latency_correction_scale
       prefill_max_batch_size: 1
       decode_max_batch_size: 128
