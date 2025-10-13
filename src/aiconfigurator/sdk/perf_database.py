@@ -1004,9 +1004,9 @@ class PerfDatabase(object):
                     generation_mla_modes.add(kv_cache_dtype.name)
             
             self.supported_quant_mode = {
-                'gemm': [key.name for key in self._gemm_data.keys()],
-                'context_attention': [key.name for key in self._context_attention_data.keys()],
-                'generation_attention': [key.name for key in self._generation_attention_data.keys()],
+                'gemm': [key.name for key in self._moe_data.keys()],
+                'context_attention': list(context_mla_modes),
+                'generation_attention': list(generation_mla_modes),
                 'context_mla': list(context_mla_modes),
                 'generation_mla': list(generation_mla_modes),
                 'mla_bmm': [key.name for key in self._mla_bmm_data.keys()],
