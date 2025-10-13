@@ -1000,8 +1000,6 @@ class PerfDatabase(object):
             
             generation_mla_modes = set()
             for kernel_source in self._generation_mla_data.keys():
-                # For generation_mla in sglang, the structure is [kernel_source][kv_cache_dtype][...]
-                # We don't have quant_mode at this level, so we collect kv_cache_dtype
                 for kv_cache_dtype in self._generation_mla_data[kernel_source].keys():
                     generation_mla_modes.add(kv_cache_dtype.name)
             
@@ -1015,7 +1013,7 @@ class PerfDatabase(object):
                 'nccl': [key.name for key in self._nccl_data.keys()],
                 'moe': [key.name for key in self._moe_data.keys()],
             }
-        else:
+        elif self.backend == 'trtllm':
             self.supported_quant_mode = {
                 'gemm': [key.name for key in self._gemm_data.keys()],
                 'context_attention': [key.name for key in self._context_attention_data.keys()],
@@ -1025,6 +1023,9 @@ class PerfDatabase(object):
                 'mla_bmm': [key.name for key in self._mla_bmm_data.keys()],
                 'nccl': [key.name for key in self._nccl_data.keys()],
                 'moe': [key.name for key in self._moe_data.keys()],
+            }
+        elif self.backend == 'vllm':
+            self.supported_quant_mode = {
             }
 
     def is_inter_node(self, num_gpus: int) -> bool:
