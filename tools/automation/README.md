@@ -44,6 +44,7 @@ SYSTEM=h200_sxm
 MODEL=QWEN3_32B
 VERSION=1.0.0rc3
 GENERATED_CONFIG_VERSION=1.0.0rc6
+VENV_PATH=/workspace/aic
 ISL=5000
 OSL=1000
 TTFT=1000
@@ -83,7 +84,8 @@ aiconfigurator eval ...
 
 1. Checks whether the target **Dynamo** container image exists.
 
-   * If not, it clones/updates the **dynamo** repo and **builds** the image:
+   * If not, it will pull the container
+   * if the container cannot be pulled, it clones/updates the **dynamo** repo and **builds** the image:
 
      ```
      ./container/build.sh --framework TRTLLM \
