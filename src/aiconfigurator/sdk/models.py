@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-def get_model(model_name: str, model_config: config.ModelConfig,  backend_name: str=common.BackendName.trtllm.value) -> BaseModel:
+def get_model(model_name: str, model_config: config.ModelConfig, backend_name: str) -> BaseModel:
     """
     Get model.
     """
@@ -717,7 +717,7 @@ if __name__ == '__main__':
         moe_quant_mode=common.MoEQuantMode.w4afp8,
         nextn=2,
         nextn_accept_rates=[0.5, 0.5],
-    ))
+    ), common.BackendName.trtllm.value)
     print(model.context_ops)
     print(model.generation_ops)
     print(model.config)
