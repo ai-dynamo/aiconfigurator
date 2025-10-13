@@ -483,8 +483,11 @@ class DisaggDeepSeekModel(BaseModel):
         moe_backend = self.config.moe_backend
         attn_backend = self.config.attention_backend
 
+        self._power_law_alpha = 0.8
+        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
+
+
         sms = self.config.sms
-        workload_distribution = "uniform"
         gpu_per_node = 8
         node_num = moe_ep_size//gpu_per_node
 
@@ -501,7 +504,7 @@ class DisaggDeepSeekModel(BaseModel):
         
         # moe computation
         self.context_ops.extend([ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts, 
-                                         moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, 
+                                         moe_tp_size, moe_ep_size, moe_quant_mode, 'uniform', 
                                          attention_dp_size, is_context=True, moe_backend=moe_backend)])
 
         # generation mla attention
