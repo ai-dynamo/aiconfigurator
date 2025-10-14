@@ -317,14 +317,14 @@ class TestCorrectData:
         )
         
         # Set an artificially low value
-        comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][n_kv][n][b][s] = sol_value * 0.5
+        comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s] = sol_value * 0.5
         
         # Run correction
         with caplog.at_level('DEBUG'):
             comprehensive_perf_db._correct_data()
         
         # Check that the value was corrected
-        corrected_value = comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][n_kv][n][b][s]
+        corrected_value = comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s]
         assert corrected_value >= sol_value
 
 
