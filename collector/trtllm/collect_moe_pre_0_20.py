@@ -43,13 +43,13 @@ def get_moe_test_cases():
     #[2048,1408,6,64], #deepseekv1_moe
     #[5120,1536,6,160], #deepseekv2    
     model_config_list=[
-        # [4096,14336,2,8],# mixtral_8x7b
-        # [6144,16384,2,8],# mixtral_8x22b
-        # [7168,2048,8,256], # deepseekv3, will have 1 shared expert
+        [4096,14336,2,8],# mixtral_8x7b
+        [6144,16384,2,8],# mixtral_8x22b
+        [7168,2048,8,256], # deepseekv3, will have 1 shared expert
         [2048,768,8,128], # qwen3-moe, 30b-a3b
-        # [4096,1536,8,128], # qwen3-moe, 235b-a22b
-        # [6144,2560,8,160], # qwen3-moe, 480b-a35b
-        # [7168,2048,8,384], # kimi k2
+        [4096,1536,8,128], # qwen3-moe, 235b-a22b
+        [6144,2560,8,160], # qwen3-moe, 480b-a35b
+        [7168,2048,8,384], # kimi k2
     ]
     moe_list=['float16']
 
