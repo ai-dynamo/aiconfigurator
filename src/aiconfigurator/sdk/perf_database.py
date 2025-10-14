@@ -1334,10 +1334,16 @@ class PerfDatabase(object):
             Get the sol time, sol math and sol mem
             """
             if w > 0 and s > w:
-                ops = 4 * b * n * (s-w) * w * d + 4 * b * n * w * w * d / 2
+                # Sliding window attention
+                # Each position attends to at most w previous positions
+                ops = 2 * b * s * w * n * h * 2
             else:
+                # Normal no sliding window
                 ops = 2 * b * s * s * n * h * 2 / 2 # 2 for fma, 2 for q*k^t+*v, /2 for causality.
-            mem_bytes = 2 * b * (n*s*h + 2*n_kv*s*h + n*s*h) # 2 for fp16 TODO
+            mem_bytes = 2 * b * (
+                n*s*h + # Q read, assuming 16 bits
+                2*n_kv*s*h + # K,V read
+                n*s*h) # Output write, assuming 16 bits
             sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
             sol_time = max(sol_math, sol_mem)
@@ -1383,7 +1389,11 @@ class PerfDatabase(object):
             # only consider fp16 mmha
             ops = 2 * b * n * h * 2 * (kv_len)   # 2 for fma, 2 for q*k^t+*v
             # kvcache load bytes will depend on kvcache quant. while input q and output might be in fp16.
-            mem_bytes = b * (n*h*2 + 2*n_kv*(kv_len)*h*kvcache_quant_mode.value.memory + n*h*2)
+            mem_bytes = b * (
+                n*h*2 +                              # Query read, assuming 16bits
+                2*n_kv*(kv_len)*h*kvcache_quant_mode.value.memory + # K, V cache read
+                n*h*2                                # Output write, assuming 16bits
+                )
             
             sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
