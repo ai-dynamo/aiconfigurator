@@ -350,10 +350,10 @@ def test_load_context_attention_data_basic(tmp_path):
     assert qm in data
     assert kcd in data[qm]
     assert 0 in data[qm][kcd]           # kv_n == 0
-    assert 4 in data[qm][kcd][0]        # n == 4
-    assert 2 in data[qm][kcd][0][4]     # s == 2
-    assert 1 in data[qm][kcd][0][4][2]  # b == 1
-    assert data[qm][kcd][0][4][2][1] == pytest.approx(0.321)
+    assert 4 in data[qm][kcd][0][16][0]       # n == 4
+    assert 2 in data[qm][kcd][0][16][0][4]     # s == 2
+    assert 1 in data[qm][kcd][0][16][0][4][2]  # b == 1
+    assert data[qm][kcd][0][16][0][4][2][1] == pytest.approx(0.321)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -407,10 +407,10 @@ def test_load_generation_attention_data_basic(tmp_path):
     kcd = KVCacheQuantMode.float16
     assert kcd in data
     assert 0 in data[kcd]            # kv_n turned into 0
-    assert 4 in data[kcd][0]         # n == 4
-    assert 1 in data[kcd][0][4]      # b == 1
-    assert 3 in data[kcd][0][4][1]   # s = original 2 + step 1 = 3
-    assert data[kcd][0][4][1][3] == pytest.approx(0.987)
+    assert 4 in data[kcd][0][16][0]         # n == 4
+    assert 1 in data[kcd][0][16][0][4]      # b == 1
+    assert 3 in data[kcd][0][16][0][4][1]   # s = original 2 + step 1 = 3
+    assert data[kcd][0][16][0][4][1][3] == pytest.approx(0.987)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
