@@ -1,3 +1,5 @@
+backend: pytorch
+
 {% if is_moe is defined %}  # is_moe from sdk
 moe_expert_parallel_size: {{ moe_ep }}
 moe_tensor_parallel_size: {{ moe_tp }}
@@ -5,7 +7,7 @@ moe_tensor_parallel_size: {{ moe_tp }}
 moe_config:
     backend: {{ dynamo_config.moe_backend | default('CUTLASS') }} # dynamo_config.moe_backend MOE backend to use (CUTLASS, CUTEDSL, WIDEEP, TRTLLM, VANILLA)
     {% if dynamo_config.moe_load_balancer is defined %}  # Configuration for MoE load balancing
-    load_balancer: {{ dynamo_config.moe_load_balancer }} # moe load balancer
+    load_balancer: {{ dynamo_config.moe_load_balancer }} # dynamo_config.moe_load_balancer MOE load balancer
     {% endif %}
 {% endif %}
 
@@ -25,7 +27,7 @@ kv_cache_config:
   dtype: {{ kv_cache_dtype | default('auto') }}
 
 cache_transceiver_config:
-  backend: {{ dynamo_config.cache_transceiver_backend | default('DEFAULT') }} # dynamo_config.cache_transceiver_backend The communication backend type to use for the cache transceiver ("DEFAULT","UCX","NIXL","MPI")
+  backend: {{ dynamo_config.cache_transceiver_backend | default('DEFAULT') }} # dynamo_config.cache_transceiver_backend The communication backend type to use for the cache transceiver (default, ucx, nixl, mpi)
 
 cuda_graph_config:
   enable_padding: {{ dynamo_config.cuda_graph_padding_enabled | default(true) }} # dynamo_config.cuda_graph_padding_enabled Pad CUDA graph
@@ -36,10 +38,14 @@ cuda_graph_config:
 disable_overlap_scheduler: {{ disable_overlap_scheduler | default(true) }}
 print_iter_log: {{ dynamo_config.print_iter_log | default(false) }}  # dynamo_config.print_iter_log Print iteration logs
 
-{% if is_speculative is defined %}  # speculative decoding
+{% if is_speculative is defined %}
+{% set dt = decoding_type %}
 speculative_config:
-  decoding_type: {{ decoding_type }}
-  {% if decoding_type == 'MTP' %}
+  decoding_type: {{ dt }}
+  {% if dt == 'MTP' %}
   num_nextn_predict_layers: {{ num_nextn_predict_layers }}
+  {% endif %}
+  {% if dt == 'Eagle' and eagle_speculative_model_dir is defined %}
+  speculative_model_dir: {{ eagle_speculative_model_dir }}
   {% endif %}
 {% endif %}
