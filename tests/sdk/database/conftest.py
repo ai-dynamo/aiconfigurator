@@ -160,25 +160,29 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
                     dummy_gemm_data[quant_mode][m][n][k] = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
     
     # Context attention data
-    dummy_context_attention_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))))
+    dummy_context_attention_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))))))
     for quant_mode in [common.FMHAQuantMode.float16, common.FMHAQuantMode.fp8]:
         for kv_cache_dtype in [common.KVCacheQuantMode.float16, common.KVCacheQuantMode.fp8]:
             for kv_n in [0, 1, 2, 4, 8]:  # 0 means MHA
-                for n in [4, 8, 16, 32]:
-                    for s in [16, 32, 64, 128, 256]:
-                        for b in [1, 2, 4, 8]:
-                            dummy_context_attention_data[quant_mode][kv_cache_dtype][kv_n][n][s][b] = 0.01 * (n * s * b) / 1000.0
+                for head_size in [64, 128]:
+                    for window_size in [0, 128]:
+                        for n in [4, 8, 16, 32]:
+                            for s in [16, 32, 64, 128, 256]:
+                                for b in [1, 2, 4, 8]:
+                                    dummy_context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = 0.01 * (n * s * b) / 1000.0
     
     # Generation attention data
-    dummy_generation_attention_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    dummy_generation_attention_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))))
     for kv_cache_dtype in [common.KVCacheQuantMode.float16, common.KVCacheQuantMode.fp8]:
         for kv_n in [0, 1, 2, 4, 8]:
-            for n in [4, 8, 16, 32]:
-                # Only create data where kv_n <= n to satisfy the assertion
-                if kv_n <= n:
-                    for b in [1, 2, 4, 8, 16]:
-                        for s in [1, 16, 32, 64, 128, 256, 512, 1024]:
-                            dummy_generation_attention_data[kv_cache_dtype][kv_n][n][b][s] = 0.001 * (n * b * s) / 1000.0
+            for head_size in [64, 128]:
+                for window_size in [0, 128]:
+                    for n in [4, 8, 16, 32]:
+                        # Only create data where kv_n <= n to satisfy the assertion
+                        if kv_n <= n:
+                            for b in [1, 2, 4, 8, 16]:
+                                for s in [1, 16, 32, 64, 128, 256, 512, 1024]:
+                                    dummy_generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = 0.001 * (n * b * s) / 1000.0
     
     # MoE data
     dummy_moe_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))))))
