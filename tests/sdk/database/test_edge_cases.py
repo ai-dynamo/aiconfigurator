@@ -166,11 +166,11 @@ class TestInitializationEdgeCases:
         
         # Create minimal context attention data
         from collections import defaultdict
-        dummy_context_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))))
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][4][16][1] = 0.1
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][4][32][1] = 0.2
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][8][16][1] = 0.15
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][8][32][1] = 0.25
+        dummy_context_data = defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict(lambda:defaultdict())))))))
+        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][4][16][1] = 0.1
+        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][4][32][1] = 0.2
+        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][8][16][1] = 0.15
+        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][8][32][1] = 0.25
         
         monkeypatch.setattr('aiconfigurator.sdk.perf_database.load_context_attention_data', lambda path: dummy_context_data)
         
@@ -206,9 +206,11 @@ class TestInitializationEdgeCases:
         for quant_mode in db._context_attention_data:
             for kv_cache in db._context_attention_data[quant_mode]:
                 for kv_n in db._context_attention_data[quant_mode][kv_cache]:
-                    for n in db._context_attention_data[quant_mode][kv_cache][kv_n]:
-                        for s in db._context_attention_data[quant_mode][kv_cache][kv_n][n]:
-                            total_points += len(db._context_attention_data[quant_mode][kv_cache][kv_n][n][s])
+                    for head_size in db._context_attention_data[quant_mode][kv_cache][kv_n]:
+                        for window_size in db._context_attention_data[quant_mode][kv_cache][kv_n][head_size]:
+                            for n in db._context_attention_data[quant_mode][kv_cache][kv_n][head_size][window_size]:
+                                for s in db._context_attention_data[quant_mode][kv_cache][kv_n][head_size][window_size][n]:
+                                    total_points += len(db._context_attention_data[quant_mode][kv_cache][kv_n][head_size][window_size][n][s])
         
         assert total_points > 4, "Extrapolation should have created additional data points"
 
