@@ -57,7 +57,7 @@ class TestContextAttention:
         )
         
         # Should use data from attention_dict[0] for MHA
-        expected = comprehensive_perf_db._context_attention_data[fmha_quant_mode][kv_cache_quant_mode][0][n][s][b]
+        expected = comprehensive_perf_db._context_attention_data[fmha_quant_mode][kv_cache_quant_mode][0][128][0][n][s][b]
         assert math.isclose(result, expected, rel_tol=1e-6)
     
     def test_query_context_attention_non_sol_mode_xqa(self, comprehensive_perf_db):
@@ -72,7 +72,7 @@ class TestContextAttention:
         )
         
         # Should use data from attention_dict[n_kv] for XQA
-        expected = comprehensive_perf_db._context_attention_data[fmha_quant_mode][kv_cache_quant_mode][n_kv][n][s][b]
+        expected = comprehensive_perf_db._context_attention_data[fmha_quant_mode][kv_cache_quant_mode][n_kv][128][0][n][s][b]
         assert math.isclose(result, expected, rel_tol=1e-6)
     
     def test_query_context_attention_assertion_error(self, comprehensive_perf_db):
