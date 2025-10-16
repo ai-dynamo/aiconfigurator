@@ -78,7 +78,7 @@ SupportedModels = {
 """
 Supported systems (GPU types)
 """
-SupportedSystems = {'a100_sxm', 'h100_sxm', 'h200_sxm', 'b200_sxm', 'gb200_sxm'}
+SupportedSystems = {'h100_sxm', 'h200_sxm', 'b200_sxm', 'gb200_sxm', 'a100_sxm'}
 
 """
 Model family for model definition
