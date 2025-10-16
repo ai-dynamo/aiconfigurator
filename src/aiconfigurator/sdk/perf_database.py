@@ -1939,17 +1939,12 @@ class PerfDatabase(object):
             )
             sol_math = ops / (self.system_spec['gpu']['float16_tc_flops'] * quant_mode.value.compute) * 1000
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
-                for n in self._generation_attention_data[quant_mode][n_kv].keys():
-                    for b in self._generation_attention_data[quant_mode][n_kv][n].keys():
-                        for s in self._generation_attention_data[quant_mode][n_kv][n][b].keys():
-                            if n_kv == 0:
-                                n_kv_local = n
-                            else:
-                                n_kv_local = n_kv
-                            sol = self.query_generation_attention(b, s, n, n_kv_local, quant_mode, sol_mode=common.SOLMode.SOL)
-                            if sol > self._generation_attention_data[quant_mode][n_kv][n][b][s]:
-                                logger.debug('generation attention quant {} n{} n_kv{} b{} s{}: sol {} > perf_db {}'.format(quant_mode, n, n_kv_local, b, s, sol, self._generation_attention_data[quant_mode][n_kv][n][b][s]))
-                                self._generation_attention_data[quant_mode][n_kv][n][b][s] = sol
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+        
+        if sol_mode is None:
+            sol_mode = self._default_sol_mode
+        if sol_mode == common.SOLMode.SOL:
             return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)
@@ -1964,7 +1959,7 @@ class PerfDatabase(object):
             num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mlp_dict.keys()), inner_only=False)
             lat = self._interp_1d([num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens)
             return lat
-    
+
     def query_deepep_ll(self, 
                         node_num: int,
                         num_tokens: int,
