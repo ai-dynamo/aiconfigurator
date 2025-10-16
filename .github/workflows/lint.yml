@@ -18,10 +18,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Ruff
-        uses: astral-sh/setup-ruff@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          version: latest
+          python-version: "3.12"
+
+      - name: Install Ruff
+        run: pip install ruff==0.14.1
 
       - name: Check Linting
         run: ruff check .
