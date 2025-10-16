@@ -12,7 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aiconfigurator.cli.main import configure_parser, main as cli_main
+from aiconfigurator.cli.main import configure_parser
+from aiconfigurator.cli.main import main as cli_main
 
 
 class TestCLIIntegration:
@@ -20,7 +21,9 @@ class TestCLIIntegration:
 
     @patch("aiconfigurator.cli.main._execute_task_configs")
     @patch("aiconfigurator.cli.main._build_default_task_configs")
-    def test_cli_main_success_flow(self, mock_build_default, mock_execute, sample_cli_args_with_save_dir):
+    def test_cli_main_success_flow(
+        self, mock_build_default, mock_execute, sample_cli_args_with_save_dir
+    ):
         """Test successful CLI main execution flow for default mode."""
         mock_task_config = MagicMock(name="TaskConfig")
         mock_build_default.return_value = {"agg": mock_task_config}
@@ -28,7 +31,12 @@ class TestCLIIntegration:
         mock_results_df = MagicMock(name="ResultsDF")
         mock_best_configs = {"agg": MagicMock(name="BestConfigDF")}
         mock_best_throughputs = {"agg": 123.4}
-        mock_execute.return_value = ("agg", mock_best_configs, {"agg": mock_results_df}, mock_best_throughputs)
+        mock_execute.return_value = (
+            "agg",
+            mock_best_configs,
+            {"agg": mock_results_df},
+            mock_best_throughputs,
+        )
 
         with patch("aiconfigurator.cli.main.save_results") as mock_save:
             cli_main(sample_cli_args_with_save_dir)
@@ -64,7 +72,12 @@ class TestCLIIntegration:
         mock_results_df = MagicMock(name="ResultsDF")
         mock_best_configs = {"my_exp": MagicMock(name="BestConfigDF")}
         mock_best_throughputs = {"my_exp": 123.4}
-        mock_execute.return_value = ("my_exp", mock_best_configs, {"my_exp": mock_results_df}, mock_best_throughputs)
+        mock_execute.return_value = (
+            "my_exp",
+            mock_best_configs,
+            {"my_exp": mock_results_df},
+            mock_best_throughputs,
+        )
 
         args = cli_args_factory(
             mode="exp",
@@ -133,7 +146,9 @@ class TestCLIIntegration:
         ],
     )
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    def test_cli_main_runtime_failure(self, mock_execute, builder_patch, cli_args_factory, tmp_path):
+    def test_cli_main_runtime_failure(
+        self, mock_execute, builder_patch, cli_args_factory, tmp_path
+    ):
         """Execution errors propagate as RuntimeError for visibility."""
         mock_execute.side_effect = RuntimeError("failed")
 

@@ -1,0 +1,31 @@
+name: Lint and Format
+
+on:
+  push:
+    branches:
+      - main
+      - "release/*"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+
+jobs:
+  ruff:
+    name: Lint and Format (Ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Ruff
+        uses: astral-sh/setup-ruff@v1
+        with:
+          version: latest
+
+      - name: Check Linting
+        run: ruff check .
+        continue-on-error: true
+
+      - name: Check Formatting
+        run: ruff format --check .

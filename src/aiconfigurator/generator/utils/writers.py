@@ -3,19 +3,25 @@
 """
 Artifact saving utilities.
 """
-import os, yaml
-from typing import Dict, Any
+
+import os
+from typing import Any
+
+import yaml
 
 
 class _LiteralDumper(yaml.SafeDumper):
     pass
+
 
 def _represent_multiline_str(dumper: yaml.SafeDumper, data: str):
     if "\n" in data:
         return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
     return dumper.represent_scalar("tag:yaml.org,2002:str", data)
 
+
 _LiteralDumper.add_representer(str, _represent_multiline_str)
+
 
 def _render_shell_text(val: Any) -> str:
     """Return shell script that can be used for launch the service."""
@@ -32,7 +38,8 @@ def _render_shell_text(val: Any) -> str:
         lines[-1] += "\n"
     return "\n".join(lines)
 
-def save_artifacts(by_mode: Dict[str, Dict[str, Any]], root_dir: str) -> None:
+
+def save_artifacts(by_mode: dict[str, dict[str, Any]], root_dir: str) -> None:
     """Persist artifacts to filesystem."""
     os.makedirs(root_dir, exist_ok=True)
     for mode, files in by_mode.items():
@@ -45,7 +52,8 @@ def save_artifacts(by_mode: Dict[str, Dict[str, Any]], root_dir: str) -> None:
                     f.write(_render_shell_text(content))
                 else:
                     yaml.dump(
-                        content, f,
+                        content,
+                        f,
                         Dumper=_LiteralDumper,
                         sort_keys=False,
                         allow_unicode=True,

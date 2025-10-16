@@ -3,19 +3,23 @@
 
 import json
 import logging
-import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 LOG = logging.getLogger(__name__)
+
 
 def run_stream(cmd, cwd: Path | None = None, env=None) -> int:
     LOG.debug("Exec: %s", " ".join(map(str, cmd)))
     with subprocess.Popen(
-        cmd, cwd=str(cwd) if cwd else None, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     ) as p:
         assert p.stdout
         for line in p.stdout:
@@ -23,19 +27,23 @@ def run_stream(cmd, cwd: Path | None = None, env=None) -> int:
         p.wait()
         return p.returncode
 
+
 def mkdir_p(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
+
 
 def write_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as f:
         json.dump(obj, f, indent=2)
 
-def find_newest_subdir(base: Path) -> Optional[Path]:
+
+def find_newest_subdir(base: Path) -> Path | None:
     cands = [p for p in base.glob("*") if p.is_dir()]
     if not cands:
         return None
     return max(cands, key=lambda p: p.stat().st_mtime)
+
 
 def parse_disagg_start_script(path: Path) -> dict:
     """
