@@ -300,6 +300,7 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 | h200_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
 | b200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | gb200_sxm | TRTLLM(1.0.0rc6) | ✅ |
+| a100_sxm | TRTLLM(1.0.0) | ✅ |
 
 > **Note**: b200 and gb200 are under dev. Results are to be aligned. For preview now. 
 
