@@ -40,7 +40,7 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
 def _add_default_mode_arguments(parser):
     parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")
     parser.add_argument("--model", choices=common.SupportedModels.keys(), type=str, required=True, help="Model name.")
-    parser.add_argument("--system", type=str, required=True, help="Default system name.")
+    parser.add_argument("--system", choices=common.SupportedSystems, type=str, required=True, help="Default system name (GPU type).")
     parser.add_argument("--decode_system", type=str, default=None, help="System name for disagg decode workers. Defaults to --system if omitted.")
     parser.add_argument("--backend", choices=[backend.value for backend in common.BackendName], type=str, default=common.BackendName.trtllm.value, help="Backend name.")
     parser.add_argument("--backend_version", type=str, default=None, help="Backend database version. Default is latest")
