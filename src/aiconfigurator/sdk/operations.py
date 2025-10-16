@@ -90,7 +90,8 @@ class GEMM(Operation):
         self._n = n
         self._k = k
         self._quant_mode = quant_mode
-        self._weights = self._n*self._k*quant_mode.value.memory 
+        self._weights = self._n*self._k*quant_mode.value.memory
+
     def query(self, database:PerfDatabase, **kwargs):
         x = kwargs.get('x')
         overwrite_quant_mode = kwargs.get('quant_mode', None)
@@ -99,7 +100,7 @@ class GEMM(Operation):
         return database.query_gemm(x, self._n, self._k, quant_mode)*self._scale_factor
     
     def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor     
+        return self._weights * self._scale_factor
 
 class MoE(Operation):
     """
@@ -576,5 +577,43 @@ class ContextMLASglang(Operation):
 
         return database.query_context_mla_sglang(batch_size, isl, self._tp_size, self._kvcache_quant_mode, self._fmha_quant_mode, self._attn_backend) * self._scale_factor
       
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+class Conv1D(Operation):
+    """
+    Conv1D operation.
+    """
+    def __init__(self, name: str, scale_factor: float, in_channels: int, out_channels: int, kernel_size: int, seq_length: int) -> None:
+        super().__init__(name, scale_factor)
+        self._in_channels = in_channels
+        self._out_channels = out_channels
+        self._kernel_size = kernel_size
+        self._seq_length = seq_length
+        self._weights = in_channels * out_channels * kernel_size * seq_length
+
+    def query(self, database:PerfDatabase, **kwargs):
+        x = kwargs.get('x')
+        return database.query_conv_1d(x, self._in_channels, self._out_channels, self._kernel_size, self._seq_length)*self._scale_factor
+    
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor    
+
+class ChunkGatedDeltaRule(Operation):
+    """
+    Chunk gated delta rule operation.
+    """
+    def __init__(self, name: str, scale_factor: float, in_channels: int, out_channels: int, kernel_size: int, seq_length: int) -> None:
+        super().__init__(name, scale_factor)
+        self._in_channels = in_channels
+        self._out_channels = out_channels
+        self._kernel_size = kernel_size
+        self._seq_length = seq_length
+        self._weights = in_channels * out_channels * kernel_size * seq_length
+    
+    def query(self, database:PerfDatabase, **kwargs):
+        x = kwargs.get('x')
+        return database.query_chunk_gated_delta_rule(x, self._in_channels, self._out_channels, self._kernel_size, self._seq_length)*self._scale_factor
+    
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

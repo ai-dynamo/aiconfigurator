@@ -1939,12 +1939,17 @@ class PerfDatabase(object):
             )
             sol_math = ops / (self.system_spec['gpu']['float16_tc_flops'] * quant_mode.value.compute) * 1000
             sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-        
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
+                for n in self._generation_attention_data[quant_mode][n_kv].keys():
+                    for b in self._generation_attention_data[quant_mode][n_kv][n].keys():
+                        for s in self._generation_attention_data[quant_mode][n_kv][n][b].keys():
+                            if n_kv == 0:
+                                n_kv_local = n
+                            else:
+                                n_kv_local = n_kv
+                            sol = self.query_generation_attention(b, s, n, n_kv_local, quant_mode, sol_mode=common.SOLMode.SOL)
+                            if sol > self._generation_attention_data[quant_mode][n_kv][n][b][s]:
+                                logger.debug('generation attention quant {} n{} n_kv{} b{} s{}: sol {} > perf_db {}'.format(quant_mode, n, n_kv_local, b, s, sol, self._generation_attention_data[quant_mode][n_kv][n][b][s]))
+                                self._generation_attention_data[quant_mode][n_kv][n][b][s] = sol
             return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)
@@ -2014,6 +2019,63 @@ class PerfDatabase(object):
                 data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts]
                 lat = self._interp_2d_linear(sms, num_tokens, data)
             return lat / 1000.0 
+
+    def query_conv_1d(self, 
+                   in_channels : int, 
+                   out_channels : int, 
+                   kernel_size : int, 
+                   seq_length : int, 
+                   sol_mode : Optional[common.SOLMode] = None) -> float:
+        """
+        Query the conv1d data
+        """
+        def get_sol(in_channels : int, out_channels : int, kernel_size : int, seq_length : int) -> Tuple[float, float, float]:
+            """
+            Get the sol time, sol math and sol mem
+            """
+            sol_math = in_channels * out_channels * kernel_size * seq_length / (self.system_spec['gpu']['float16_tc_flops']*1) * 1000
+            sol_mem = in_channels * out_channels * kernel_size * seq_length / self.system_spec['gpu']['mem_bw'] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
         
+        if sol_mode is None:
+            sol_mode = self._default_sol_mode
+        if sol_mode == common.SOLMode.SOL:
+            return get_sol(in_channels, out_channels, kernel_size, seq_length)[0]
+        elif sol_mode == common.SOLMode.SOL_FULL:
+            return get_sol(in_channels, out_channels, kernel_size, seq_length)
+        else:
+            result = self._interp_3d(in_channels, out_channels, kernel_size, seq_length, self._conv_1d_data, 'cubic')
+            return result
+
+    def query_chunk_gated_delta_rule(self, 
+
+                   num_tokens : int, 
+                   in_channels : int, 
+                   out_channels : int, 
+                   kernel_size : int, 
+                   seq_length : int, 
+                   sol_mode : Optional[common.SOLMode] = None) -> float:
+        """
+        Query the chunk gated delta rule data
+        """
+        def get_sol(num_tokens : int, in_channels : int, out_channels : int, kernel_size : int, seq_length : int) -> Tuple[float, float, float]:
+            """
+            Get the sol time, sol math and sol mem
+            """
+            sol_math = num_tokens * in_channels * out_channels * kernel_size * seq_length / (self.system_spec['gpu']['float16_tc_flops']*1) * 1000
+            sol_mem = in_channels * out_channels * kernel_size * seq_length / self.system_spec['gpu']['mem_bw'] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+        if sol_mode is None:
+            sol_mode = self._default_sol_mode
+        if sol_mode == common.SOLMode.SOL:
+            return get_sol(num_tokens, in_channels, out_channels, kernel_size, seq_length)[0]
+        elif sol_mode == common.SOLMode.SOL_FULL:
+            return get_sol(num_tokens, in_channels, out_channels, kernel_size, seq_length)
+        else:
+            result = self._interp_3d(num_tokens, in_channels, out_channels, kernel_size, seq_length, self._chunk_gated_delta_rule_data, 'cubic')
+            return result
+
 if __name__ == '__main__':
     database_dict = get_all_databases()

@@ -47,6 +47,7 @@ def get_moe_test_cases():
                   [4096,1536,8,128, 'QWEN3_235B'], # qwen3-moe, 235b-a22b
                   [6144,2560,8,160, 'QWEN3_480B'], # qwen3-moe, 480b-a35b
                   [7168,2048,8,384, 'KIMI_K2'], # kimi k2
+                  [2048,5120,50,512, 'QWEN3_NEXT_80B'], # qwen3-next, 80b-a3b
                   ]
     moe_list=['float16', 'fp8_block']
 

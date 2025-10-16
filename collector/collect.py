@@ -433,7 +433,25 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
                                       else 'trtllm.collect_moe_pre_1_0' if v.startswith(('0.21.0', '1.0.0'))
                                       else 'trtllm.collect_moe' if v.startswith(('1.1.0'))
                                       else None
-        }
+        },
+
+        # CONV 1D collections
+        {
+            'name': 'trtllm',
+            'type': 'conv_1d',
+            'module': 'trtllm.collect_conv_1d',
+            'get_func': 'get_conv_1d_test_cases',
+            'run_func': 'run_conv_1d'
+        },
+
+        # Chunk Gated Delta Rule collections
+        {
+            'name': 'trtllm',
+            'type': 'chunk_gated_delta_rule',
+            'module': 'trtllm.collect_chunk_gated_delta_rule',
+            'get_func': 'get_chunk_gated_delta_rule_test_cases',
+            'run_func': 'run_chunk_gated_delta_rule'
+        },
     ]
     
     for collection in collections:
