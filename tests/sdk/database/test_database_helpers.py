@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import os
-import sys
-import yaml
-import pytest
-from pathlib import Path
 import importlib
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
 
 
 @pytest.fixture(scope="module")
@@ -15,17 +15,18 @@ def perf_database():
     ensuring it takes precedence over any installed package.
     """
     project_root = Path(__file__).resolve().parents[3]
-    src_path = project_root / 'src'
+    src_path = project_root / "src"
     sys.path.insert(0, str(src_path))
 
     saved_aiconfigurator_modules = {}
 
     # Purge already-imported site-packages version if present
     for key in list(sys.modules.keys()):
-        if key == 'aiconfigurator' or key.startswith('aiconfigurator.'):
+        if key == "aiconfigurator" or key.startswith("aiconfigurator."):
             saved_aiconfigurator_modules[key] = sys.modules.pop(key)
 
-    import aiconfigurator.sdk.perf_database as perf_database  # noqa: E402
+    import aiconfigurator.sdk.perf_database as perf_database
+
     importlib.reload(perf_database)
     yield perf_database
 
@@ -53,7 +54,7 @@ def setup_mock_filesystem(systems_dir: Path, layout: dict) -> None:
             backend_dir.mkdir(exist_ok=True)
             for version in versions:
                 # Hidden dirs should be ignored by implementation
-                if version.startswith('.'):
+                if version.startswith("."):
                     (backend_dir / version).mkdir(exist_ok=True)
                 else:
                     (backend_dir / version).mkdir(exist_ok=True)
@@ -61,12 +62,15 @@ def setup_mock_filesystem(systems_dir: Path, layout: dict) -> None:
 
 # ----------------------------- get_supported_databases -----------------------------
 
-def test_get_supported_databases_basic(temp_systems_dir: Path, perf_database):
 
-    setup_mock_filesystem(temp_systems_dir, {
-        "h100": {"trtllm": ["1.0.0", "1.1.0", ".hidden"], "vllm": ["0.5.0"]},
-        "h200": {"trtllm": ["1.2.0", "1.3.0rc2"]},
-    })
+def test_get_supported_databases_basic(temp_systems_dir: Path, perf_database):
+    setup_mock_filesystem(
+        temp_systems_dir,
+        {
+            "h100": {"trtllm": ["1.0.0", "1.1.0", ".hidden"], "vllm": ["0.5.0"]},
+            "h200": {"trtllm": ["1.2.0", "1.3.0rc2"]},
+        },
+    )
 
     result = perf_database.get_supported_databases(str(temp_systems_dir))
 
@@ -96,17 +100,15 @@ def test_get_supported_databases_edge_cases(temp_systems_dir: Path, perf_databas
     assert "h100" in result  # Valid system should still be processed
 
     # Case 3: System YAML pointing to a non-existent data_dir
-    (temp_systems_dir / "bad_path.yaml").write_text(
-        yaml.safe_dump({"data_dir": "nonexistent_dir"})
-    )
+    (temp_systems_dir / "bad_path.yaml").write_text(yaml.safe_dump({"data_dir": "nonexistent_dir"}))
     result = perf_database.get_supported_databases(str(temp_systems_dir))
     assert "bad_path" not in result
 
 
 # ----------------------------- get_latest_database_version -----------------------------
 
-def test_get_latest_database_version_prefers_stable_over_rc(temp_systems_dir: Path, perf_database):
 
+def test_get_latest_database_version_prefers_stable_over_rc(temp_systems_dir: Path, perf_database):
     # With the corrected logic, 2.0.0rc1 is correctly considered newer than 1.1.0
     mock_supported = {"h100": {"trtllm": ["1.1.0", "2.0.0rc1"]}}
 
@@ -120,7 +122,6 @@ def test_get_latest_database_version_prefers_stable_over_rc(temp_systems_dir: Pa
 
 
 def test_get_latest_database_version_rc_only(temp_systems_dir: Path, perf_database):
-
     mock_supported = {"h100": {"trtllm": ["1.0.0rc1", "1.0.0rc2", "1.1.0rc1"]}}
 
     original = perf_database.get_supported_databases
@@ -132,7 +133,9 @@ def test_get_latest_database_version_rc_only(temp_systems_dir: Path, perf_databa
         perf_database.get_supported_databases = original
 
 
-def test_get_latest_database_version_nonexistent_returns_none(temp_systems_dir: Path, perf_database):
+def test_get_latest_database_version_nonexistent_returns_none(
+    temp_systems_dir: Path, perf_database
+):
     mock_supported = {"h100": {"trtllm": ["1.0.0"]}}
 
     original = perf_database.get_supported_databases
@@ -158,7 +161,9 @@ def test_get_latest_database_version_unparseable_versions(temp_systems_dir: Path
         perf_database.get_supported_databases = original
 
 
-def test_get_latest_database_version_major_version_rc_is_newer(temp_systems_dir: Path, perf_database):
+def test_get_latest_database_version_major_version_rc_is_newer(
+    temp_systems_dir: Path, perf_database
+):
     """Tests that a v1.0 RC is correctly considered newer than a v0.20 stable."""
     mock_supported = {"h200": {"trtllm": ["0.20.0", "1.0.0rc3"]}}
 

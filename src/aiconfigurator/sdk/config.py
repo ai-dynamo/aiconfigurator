@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Union
+
 from aiconfigurator.sdk import common
+
 
 @dataclass
 class ModelConfig:
     """
     Model configuration.
     """
+
     tp_size: int = 1
     pp_size: int = 1
     gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16
@@ -21,21 +23,23 @@ class ModelConfig:
     moe_ep_size: int = None
     attention_dp_size: int = 1
     workload_distribution: str = "power_law"
-    nextn: int = 0 # at most mtp5
+    nextn: int = 0  # at most mtp5
     nextn_accept_rates: list = None
     overwrite_num_layers: int = 0
     sms: int = 20
-    moe_backend: str = 'deepep_moe'
-    attention_backend: str = 'flashinfer' # 'flashinfer' or 'fa3'
+    moe_backend: str = "deepep_moe"
+    attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3'
+
 
 @dataclass
 class RuntimeConfig:
     """
     Runtime configuration.
     """
+
     batch_size: int = None
     beam_width: int = 1
     isl: int = None
     osl: int = None
     ttft: float = None
-    tpot: Union[float, list] = None
+    tpot: float | list = None
