@@ -3,22 +3,28 @@
 """
 TRT-LLM backend generator.
 """
-import yaml
+
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
+
+import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
-from .base import BaseGenerator, register
+
+from aiconfigurator.sdk.models import get_model_family
+
 from ..inputs.schema import GeneratorContext, ModeConfig
 from ..types import ArtifactBundle
 from ..utils.node_allocation import allocate_disagg_nodes
-from aiconfigurator.sdk.models import get_model_family
+from .base import BaseGenerator, register
 
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "templates" / "trtllm"
 
-def _pick_engine_tpl(version: Optional[str]) -> str:
+
+def _pick_engine_tpl(version: str | None) -> str:
     """Choose engine args template by version; fallback to default."""
     cand = TEMPLATE_ROOT / f"extra_engine_args.{version}.yaml.j2" if version else None
     return (cand if cand and cand.exists() else (TEMPLATE_ROOT / "extra_engine_args.yaml.j2")).name
+
 
 @register("trtllm")
 class TRTLLMGenerator(BaseGenerator):
@@ -32,14 +38,14 @@ class TRTLLMGenerator(BaseGenerator):
             lstrip_blocks=True,
         )
 
-    def _apply_kv_cache_mode(self, cfg: Dict[str, Any], kv_mode: Optional[str]) -> None:
+    def _apply_kv_cache_mode(self, cfg: dict[str, Any], kv_mode: str | None) -> None:
         """Map kv_cache quant mode into engine dtype if needed."""
         if not kv_mode:
             return
         if kv_mode.lower() == "fp8":
             cfg["kv_cache_dtype"] = "fp8"
 
-    def _apply_moe_attention_dp_mapping(self, cfg: Dict[str, Any], spec: ModeConfig, is_moe: bool) -> None:
+    def _apply_moe_attention_dp_mapping(self, cfg: dict[str, Any], spec: ModeConfig, is_moe: bool) -> None:
         """
         - If is_moe:
             - mark is_moe
@@ -63,7 +69,7 @@ class TRTLLMGenerator(BaseGenerator):
         else:
             cfg["enable_attention_dp"] = False
 
-    def _apply_deepseek_mtp(self, cfg: Dict[str, Any], ctx: GeneratorContext, role: str) -> None:
+    def _apply_deepseek_mtp(self, cfg: dict[str, Any], ctx: GeneratorContext, role: str) -> None:
         """
         Keep original behavior: Only enable MTP for DEEPSEEK family when nextn>=1.
         """
@@ -72,18 +78,19 @@ class TRTLLMGenerator(BaseGenerator):
             cfg["decoding_type"] = "MTP"
             cfg["num_nextn_predict_layers"] = int(ctx.runtime.nextn)
 
-    def _get_yaml_tpl(self, tpl_name: str, ctx: Dict[str, Any]) -> Dict[str, Any]:
+    def _get_yaml_tpl(self, tpl_name: str, ctx: dict[str, Any]) -> dict[str, Any]:
         import yaml
+
         tpl = self.env.get_template(tpl_name)
         return yaml.safe_load(tpl.render(**ctx))
 
-    def _build_worker_config(self, spec: ModeConfig, ctx: GeneratorContext, role: str) -> Dict[str, Any]:
+    def _build_worker_config(self, spec: ModeConfig, ctx: GeneratorContext, role: str) -> dict[str, Any]:
         """
         Build a per-role engine args dict based on the original implementation,
         with common parts factored into helpers and reading from GeneratorContext.
         `role` is one of: 'agg', 'prefill', 'decode'.
         """
-        cfg: Dict[str, Any] = dict(
+        cfg: dict[str, Any] = dict(
             tp=int(spec.tp),
             pp=int(spec.pp),
             dp=int(spec.dp),
@@ -116,14 +123,14 @@ class TRTLLMGenerator(BaseGenerator):
         k8s_tpl = (TEMPLATE_ROOT / "k8s_deploy.yaml.j2").name
         global_args, worker_args = ctx.overrides.split_by_worker_type()
 
-        out: Dict[str, Dict[str, Any]] = {}
+        out: dict[str, dict[str, Any]] = {}
 
         agg_spec = ctx.modes.get("agg")
         if agg_spec:
             agg_cfg = self._build_worker_config(agg_spec, ctx, role="agg")
 
             # perf considerations
-            agg_cfg["cuda_graph_batch_sizes"] = [i for i in range(1, agg_cfg["bs"] + 1)]
+            agg_cfg["cuda_graph_batch_sizes"] = list(range(1, agg_cfg["bs"] + 1))
             agg_cfg["disable_overlap_scheduler"] = False
 
             # max_num_tokens heuristic
@@ -159,13 +166,12 @@ class TRTLLMGenerator(BaseGenerator):
             out["agg"] = {
                 "agg_config.yaml": agg_yaml,
                 "node_0_run.sh": script,
-                "k8s_deploy.yaml": k8s_yaml_agg
+                "k8s_deploy.yaml": k8s_yaml_agg,
             }
 
         pre_spec = ctx.modes.get("disagg_prefill")
         dec_spec = ctx.modes.get("disagg_decode")
         if pre_spec and dec_spec:
-
             pre_cfg = self._build_worker_config(pre_spec, ctx, role="prefill")
             dec_cfg = self._build_worker_config(dec_spec, ctx, role="decode")
 
@@ -184,18 +190,22 @@ class TRTLLMGenerator(BaseGenerator):
                 dec_cfg["max_num_tokens"] = dec_cfg["bs"]
 
             # cuda graph sizes for decode
-            dec_cfg["cuda_graph_batch_sizes"] = [i for i in range(1, dec_cfg["bs"] + 1)]
+            dec_cfg["cuda_graph_batch_sizes"] = list(range(1, dec_cfg["bs"] + 1))
 
-            pre_yaml = self._get_yaml_tpl(engine_tpl, {**pre_cfg, "dynamo_config": {**global_args, **worker_args["prefill"]}})
-            dec_yaml = self._get_yaml_tpl(engine_tpl, {**dec_cfg, "dynamo_config": {**global_args, **worker_args["decode"]}})
+            pre_yaml = self._get_yaml_tpl(
+                engine_tpl, {**pre_cfg, "dynamo_config": {**global_args, **worker_args["prefill"]}}
+            )
+            dec_yaml = self._get_yaml_tpl(
+                engine_tpl, {**dec_cfg, "dynamo_config": {**global_args, **worker_args["decode"]}}
+            )
             pre_yaml_str = yaml.safe_dump(pre_yaml, sort_keys=False)
             dec_yaml_str = yaml.safe_dump(dec_yaml, sort_keys=False)
 
+            plan = allocate_disagg_nodes(
+                pre_cfg.get("workers", 1), pre_cfg["gpu"], dec_cfg.get("workers", 1), dec_cfg["gpu"]
+            )
 
-
-            plan = allocate_disagg_nodes(pre_cfg.get("workers", 1), pre_cfg["gpu"], dec_cfg.get("workers", 1), dec_cfg["gpu"])
-
-            node_files: Dict[str, str] = {}
+            node_files: dict[str, str] = {}
             for idx, cnt in enumerate(plan):
                 script = run_tpl.render(
                     mode="disagg",

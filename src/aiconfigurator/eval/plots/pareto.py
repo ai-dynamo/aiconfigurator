@@ -2,22 +2,32 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+
 
 def _split(spec: str):
     metric, stat = (spec.split("::", 1) + ["avg"])[:2]
     return metric, stat
 
+
 class ParetoPlot:
     name = "pareto"
 
-    def __init__(self, x_metric: str, y_metric: str, *,
-                 merge: bool = False, num_gpus: int | None = None,
-                 plot_label: str | None = None, show_cc_label: bool = True,
-                 expand_x: bool = False):
+    def __init__(
+        self,
+        x_metric: str,
+        y_metric: str,
+        *,
+        merge: bool = False,
+        num_gpus: int | None = None,
+        plot_label: str | None = None,
+        show_cc_label: bool = True,
+        expand_x: bool = False,
+    ):
         self._x_spec = x_metric
         self._y_spec = y_metric
         self._merge = merge
@@ -83,32 +93,55 @@ class ParetoPlot:
             ax.plot(front[:, 0], front[:, 1], "-", linewidth=1, color=colour)
 
             if self.show_cc_label:
-                for xv, yv, tag in zip(x_vals, y_vals, df.get("load_label", [""] * len(df))):
+                for xv, yv, tag in zip(x_vals, y_vals, df.get("load_label", [""] * len(df)), strict=False):
                     if tag:
-                        ax.annotate(tag, (xv, yv), textcoords="offset points",
-                                    xytext=(2, 2), fontsize=6, ha="left", va="bottom")
+                        ax.annotate(
+                            tag,
+                            (xv, yv),
+                            textcoords="offset points",
+                            xytext=(2, 2),
+                            fontsize=6,
+                            ha="left",
+                            va="bottom",
+                        )
 
         # Plot optimal configuration points with special markers
         for label, df in self._optimal_points:
             if df.empty:
                 continue
-                
+
             x_vals = self._col(df, self._x_spec)
             y_vals = self._col(df, self._y_spec)
-            # NOTE: Optimal points from pareto CSV already have per-GPU values, 
+            # NOTE: Optimal points from pareto CSV already have per-GPU values,
             # so we don't divide by num_gpus again to avoid double normalization
 
             all_x_vals = pd.concat([all_x_vals, x_vals])
 
             # Plot with distinctive markers (star shape, larger size, different color)
-            ax.scatter(x_vals, y_vals, label=f"{label} (Optimal)", 
-                      marker='*', s=150, c='red', edgecolors='black', linewidth=1, zorder=10)
-            
+            ax.scatter(
+                x_vals,
+                y_vals,
+                label=f"{label} (Optimal)",
+                marker="*",
+                s=150,
+                c="red",
+                edgecolors="black",
+                linewidth=1,
+                zorder=10,
+            )
+
             # Add labels for optimal points
-            for xv, yv in zip(x_vals, y_vals):
-                ax.annotate(f"Optimal\n{label}", (xv, yv), textcoords="offset points",
-                           xytext=(5, 5), fontsize=8, ha="left", va="bottom", 
-                           bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7))
+            for xv, yv in zip(x_vals, y_vals, strict=False):
+                ax.annotate(
+                    f"Optimal\n{label}",
+                    (xv, yv),
+                    textcoords="offset points",
+                    xytext=(5, 5),
+                    fontsize=8,
+                    ha="left",
+                    va="bottom",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7),
+                )
 
         if self._expand_x and not all_x_vals.empty:
             min_x = 0.0

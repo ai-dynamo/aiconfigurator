@@ -3,12 +3,13 @@
 
 import gradio as gr
 
+
 def create_readme_tab(app_config):
     with gr.Tab("Readme"):
         with gr.Accordion("Tabs introduction and Use cases"):
             use_cases_guide = gr.Markdown(
                 label="tabs introduction",
-                value=r'''
+                value=r"""
                 ### Static tab
                     This tab is used to do static batching estimation. 
                     1. Configure model, runtime, system, quantization, parallel, misc, inference mode one by one.
@@ -51,13 +52,13 @@ def create_readme_tab(app_config):
                     This tab is used to do comparison between different pareto estimation results.
                 #### Use cases
                     1. comparing agg vs. disagg, to understand whether disagg might help in your case and find the best deployment strategy of your target SLA. Disagg is not always better. You need to specify your SLA.
-                '''
+                """,
             )
 
         with gr.Accordion("Parameters settings"):
             parameters_settings_guide = gr.Markdown(
                 label="Parameters Settings",
-                value=r'''
+                value=r"""
                 #### ---> model name
                     Please select the model, if you need to specify a customed model, you need to modify the code for now.
                 #### ---> Runtime config
@@ -70,7 +71,7 @@ def create_readme_tab(app_config):
                         mtp0, mtp1, mtp2, mtp3, mtp4, mtp5.
                     2. nextn accept rates
                         The probability of the model accepting the input for a given nextn. It's a list of 5 numbers.
-                        0.85,0,0,0,0 means 1st draft token is accepted with 85% probability. Starting from 2nd draft token, the probability is zero.                  
+                        0.85,0,0,0,0 means 1st draft token is accepted with 85% probability. Starting from 2nd draft token, the probability is zero.
                 #### ---> System config
                     GPU type, which framework to use, specific version of the framework.
                 #### ---> Quantization config
@@ -99,7 +100,7 @@ def create_readme_tab(app_config):
                     3. num workers
                         Specifically, in disagg tab, you will need to configure num workers before specific parallel config. Num workers is used to do rate matching of prefill and decode workers.
                         num_prefill_workers * seq_throughput_per_prefill_worker <=matches=> num_decode_workers * decode_throughput_per_prefill_worker
-                        This parameter controls num worker here. -1 for auto, which we will try to find a good rate matching. 
+                        This parameter controls num worker here. -1 for auto, which we will try to find a good rate matching.
                         If a specific number is given, it will do fixed rate matching without searching. This is useful when you want to verify a certain p:d ratio real bench.
                 #### ---> inference mode
                     Define the inference mode in static tab: static, static_ctx(only computes context phase), static_gen(only computes generation phase).
@@ -110,7 +111,7 @@ def create_readme_tab(app_config):
                         this is used to correct the throughput of prefill/decode worker to do manual adjustment of prefill/decode rate matching. The tool will not be 100% correct. You can do some correction by yourself.
                     2. num total gpu list of the disagg system, say:8,16 or max gpus used in the disagg system
                         When we are doing rate matching to find a good prefill/decode worker ratio, we're not limiting the total number of GPUs in the disagg system.
-                        This will sometimes make the result difficult to reproduce. 
+                        This will sometimes make the result difficult to reproduce.
                             Say, if you find 17 prefill workers, each prefill worker has 8 gpus; The matched decode worker number is 23, each worker has 4 gpus.
                             Then the system has 17*8+23*4=228 gpus. Much more difficult than a 16-gpu disagg system to reproduce.
                         Thus we can add some constraints to the search space. (The perf gap will not be very very small actually. You can use comparison tab to verify this gap.)
@@ -123,17 +124,18 @@ def create_readme_tab(app_config):
                         This is used to limit the batch size of the prefill/decode workers when we do rate matching search. By default, it's 1 for prefill and 512 for decode.
                         Why 1 for prefill: in concurrency-based bench method, it's difficult to saturate prefill batch size slot.
                         If you isl is really small, say isl*prefill_batch_size is smaller than 1000, you can slightly increase the prefill batch size to 2 or 4 to make isl*prefill_batch_size larger than 1000.
-                '''
+                """,
             )
 
         with gr.Accordion("Troubleshooting"):
             troubleshooting_guide = gr.Markdown(
                 label="troubleshooting",
-                value=r'''
+                value=(
+                    r"""
                 ### Debugging box
                     Debugging box is contained in each tab. It prints the error message if any.
                 #### interpolation error
-                    It will report that there's no enough data points to interpolate. report as an error with traceback. 
+                    It will report that there's no enough data points to interpolate. report as an error with traceback.
                     Please check your runtime input (isl, osl) and parallel config. Choose a different parallel size. A super large isl will be invalid. Now we support ~1M isl.
                 #### no result or none reported
                     Typically caused by strict limitation of TTFT or a small parallel size where no non-oom data points are found. You can try to set a larger TTFT limit.
@@ -145,13 +147,14 @@ def create_readme_tab(app_config):
                     A run longer than 10 minutes is abnormal. Try to refresh the page. Set smaller search space by selecting fewer parallel options.
                 ### Others
                     If you have any other questions, please report to us.
-                '''
+                """
+                ),
             )
-        
+
         with gr.Accordion("Known Limitations"):
             known_limitations_guide = gr.Markdown(
                 label="known limitations",
-                value=r'''
+                value=r"""
                 ### Inaccurate modeling
                     1. pipeline parallel is not well supported.
                     2. inter-node communication modeling is not well supported.
@@ -160,13 +163,12 @@ def create_readme_tab(app_config):
                     5. kvcache transfer is not modeled in disagg.
                 ### Usability
                     1. The Record dataframe's height can be 0 after using horizontal scroll bar. Try to use the vertical scroll bar to scroll back.
-                '''
+                """,
             )
-
 
     return {
         "parameters_settings_guide": parameters_settings_guide,
         "tabs_introduction_and_use_cases_guide": use_cases_guide,
         "troubleshooting_guide": troubleshooting_guide,
-        "known_limitations_guide": known_limitations_guide
+        "known_limitations_guide": known_limitations_guide,
     }

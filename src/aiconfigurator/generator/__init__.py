@@ -10,4 +10,7 @@ be used by both CLI and WebApp. It offers:
 - A input schema and parser (inputs/*).
 - Utilities for saving artifacts and node allocation (utils/*).
 """
+
 from .api import generate_backend_config
+
+__all__ = ["generate_backend_config"]

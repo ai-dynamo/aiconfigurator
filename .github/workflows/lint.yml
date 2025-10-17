@@ -1,0 +1,34 @@
+name: Lint and Format
+
+on:
+  push:
+    branches:
+      - main
+      - "release/*"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+
+jobs:
+  ruff:
+    name: Lint and Format (Ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ruff
+        run: pip install ruff==0.14.1
+
+      - name: Check Linting
+        run: ruff check .
+        continue-on-error: true
+
+      - name: Check Formatting
+        run: ruff format --check .

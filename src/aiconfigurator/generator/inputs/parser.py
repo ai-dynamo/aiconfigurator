@@ -3,27 +3,31 @@
 """
 Input parser that transforms AIConfiguratorConfig/Result into GeneratorContext.
 """
-from typing import Optional
 
 from .schema import (
     DynamoConfig,
     GeneratorContext,
-    RuntimeView,
     ModeConfig,
+    RuntimeView,
 )
+
 
 class InputParser:
     """Factory of GeneratorContext from runtime objects."""
 
     @staticmethod
-    def _enum_name_or_str(x) -> Optional[str]:
+    def _enum_name_or_str(x) -> str | None:
         if x is None:
             return None
         return getattr(x, "name", str(x))
 
     @staticmethod
-    def _get_kv_mode(cfg) -> Optional[str]:
-        for key in ("agg_worker_config", "disagg_prefill_worker_config", "disagg_decode_worker_config"):
+    def _get_kv_mode(cfg) -> str | None:
+        for key in (
+            "agg_worker_config",
+            "disagg_prefill_worker_config",
+            "disagg_decode_worker_config",
+        ):
             worker_config = cfg.get(key, None)
             if worker_config is not None and worker_config.get("kvcache_quant_mode", None) is not None:
                 return InputParser._enum_name_or_str(worker_config.get("kvcache_quant_mode"))
@@ -41,12 +45,7 @@ class InputParser:
         )
 
     @staticmethod
-    def from_runtime(
-                    cfg: dict,
-                    overrides: DynamoConfig,
-                    backend: str,
-                    version: str) -> GeneratorContext:
-
+    def from_runtime(cfg: dict, overrides: DynamoConfig, backend: str, version: str) -> GeneratorContext:
         if cfg["serving_mode"] == "agg":
             modes = {
                 "agg": ModeConfig(
@@ -74,7 +73,7 @@ class InputParser:
                 ),
                 "disagg_decode": ModeConfig(
                     workers=cfg["disagg_decode_worker_config"]["workers"],
-                    bs=cfg["disagg_decode_worker_config"]["bs"],                    
+                    bs=cfg["disagg_decode_worker_config"]["bs"],
                     tp=cfg["disagg_decode_worker_config"]["tp"],
                     pp=cfg["disagg_decode_worker_config"]["pp"],
                     dp=cfg["disagg_decode_worker_config"].get("dp", 1),
@@ -83,25 +82,27 @@ class InputParser:
                     memory=cfg["disagg_decode_worker_config"].get("memory", None),
                 ),
             }
-        
+
         total_gpus = cfg["total_gpus"]
         if cfg["serving_mode"] == "disagg":
-            num_gpus_per_replica = (modes["disagg_prefill"].workers * 
-                                    modes["disagg_prefill"].tp * 
-                                    modes["disagg_prefill"].dp * 
-                                    modes["disagg_prefill"].pp + 
-                                    modes["disagg_decode"].workers * 
-                                    modes["disagg_decode"].tp * 
-                                    modes["disagg_decode"].dp * 
-                                    modes["disagg_decode"].pp)
+            num_gpus_per_replica = (
+                modes["disagg_prefill"].workers
+                * modes["disagg_prefill"].tp
+                * modes["disagg_prefill"].dp
+                * modes["disagg_prefill"].pp
+                + modes["disagg_decode"].workers
+                * modes["disagg_decode"].tp
+                * modes["disagg_decode"].dp
+                * modes["disagg_decode"].pp
+            )
         else:
             num_gpus_per_replica = modes["agg"].workers * modes["agg"].tp * modes["agg"].dp * modes["agg"].pp
         num_replicas = total_gpus // num_gpus_per_replica
         modes["total_gpus"] = total_gpus
         modes["num_gpus_per_replica"] = num_gpus_per_replica
         modes["num_replicas"] = num_replicas
-        
-        exp_config = cfg.get("exp_config", None)
+
+        exp_config = cfg.get("exp_config")
         if exp_config is not None:
             modes["exp_config"] = {
                 "ttft": exp_config.get("ttft", None),

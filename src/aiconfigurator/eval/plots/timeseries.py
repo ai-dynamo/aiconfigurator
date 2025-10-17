@@ -2,14 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
 
 import pandas as pd
-from bokeh.plotting import figure, save
-from bokeh.models import ColumnDataSource, HoverTool, DatetimeTickFormatter
+from bokeh.models import ColumnDataSource, DatetimeTickFormatter, HoverTool
 from bokeh.palettes import Category10, Category20, Turbo256
+from bokeh.plotting import figure, save
 from bokeh.resources import INLINE
 
 
@@ -23,14 +23,15 @@ class TimeSeriesSpec:
     - y: column name for numeric values
     - color: optional hex color
     """
+
     name: str
     data: pd.DataFrame
     x: str
     y: str
-    color: Optional[str] = None
+    color: str | None = None
 
 
-def _choose_palette(n: int) -> List[str]:
+def _choose_palette(n: int) -> list[str]:
     if n <= 10:
         return list(Category10[10][:n])
     if n <= 20:
@@ -56,7 +57,7 @@ def plot_gpu_timeseries(
     title: str = "GPU Utilization (%)",
     *,
     y_label: str = "util %",
-    extra_series: Optional[List[TimeSeriesSpec]] = None,
+    extra_series: list[TimeSeriesSpec] | None = None,
 ) -> Path:
     """
     Render a Bokeh HTML with one line per GPU showing utilization (%).
@@ -103,14 +104,24 @@ def plot_gpu_timeseries(
             )
         )
         p.line(
-            x="ts", y="value", source=source,
-            line_width=2, color=colors[i],
-            legend_label=f"GPU{gpu}", name=f"GPU{gpu}",
+            x="ts",
+            y="value",
+            source=source,
+            line_width=2,
+            color=colors[i],
+            legend_label=f"GPU{gpu}",
+            name=f"GPU{gpu}",
         )
         p.scatter(
-            x="ts", y="value", source=source,
-            marker="circle", size=3, alpha=0.55, color=colors[i],
-            legend_label=f"GPU{gpu}", name=f"GPU{gpu}",
+            x="ts",
+            y="value",
+            source=source,
+            marker="circle",
+            size=3,
+            alpha=0.55,
+            color=colors[i],
+            legend_label=f"GPU{gpu}",
+            name=f"GPU{gpu}",
         )
 
     for j, spec in enumerate(extra_series):
@@ -119,10 +130,26 @@ def plot_gpu_timeseries(
         d = d.dropna(subset=["__ts"]).sort_values("__ts")
         color = spec.color or _choose_palette(len(extra_series))[j % max(1, len(extra_series))]
         src = ColumnDataSource(dict(ts=d["__ts"], value=d[spec.y], series=[spec.name] * len(d)))
-        p.line(x="ts", y="value", source=src, line_width=2, color=color,
-               legend_label=spec.name, name=spec.name)
-        p.scatter(x="ts", y="value", source=src, marker="circle", size=3, alpha=0.55,
-                  color=color, legend_label=spec.name, name=spec.name)
+        p.line(
+            x="ts",
+            y="value",
+            source=src,
+            line_width=2,
+            color=color,
+            legend_label=spec.name,
+            name=spec.name,
+        )
+        p.scatter(
+            x="ts",
+            y="value",
+            source=src,
+            marker="circle",
+            size=3,
+            alpha=0.55,
+            color=color,
+            legend_label=spec.name,
+            name=spec.name,
+        )
 
     hover = p.select_one(HoverTool)
     hover.tooltips = [
@@ -148,7 +175,7 @@ def plot_gpu_timeseries_bokeh_from_df(
     title: str = "GPU Utilization (%)",
     *,
     y_label: str = "util %",
-    extra_series: Optional[List[TimeSeriesSpec]] = None,
+    extra_series: list[TimeSeriesSpec] | None = None,
 ) -> Path:
     """
     Same as above but takes an in-memory DataFrame with required columns.

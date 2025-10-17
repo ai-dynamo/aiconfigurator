@@ -62,7 +62,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev-test = [
+dev = [
+    "ruff==0.14.1",
+    "pre-commit==4.3.0",
     "pytest>=8.3.5",
     "pytest-asyncio>=0.26.0",
     "pytest-cov>=6.1.1",
@@ -94,4 +96,58 @@ where = ["src"]
 include = ["*"]
 exclude = ["tests", "docker", "collector", "systems"]
 
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["*.ipynb"]
 
+[tool.ruff.lint]
+select = [
+    "YTT",  # flake8-2020: check for misuse of sys.version
+    "B",  # flake8-bugbear: find likely bugs and design problems
+    "A",  # flake8-builtins: check for shadowing of Python builtins
+    "C4",  # flake8-comprehensions: check for unnecessary/slow comprehensions
+    "T10",  # flake8-debugger: check for debugger imports/calls
+    "SIM",  # flake8-simplify: suggest simplifications to code
+    "I",  # isort: check import sorting
+    "C90",  # mccabe: check cyclomatic complexity
+    "E",  # pycodestyle errors: PEP 8 error codes
+    "W",  # pycodestyle warnings: PEP 8 warning codes
+    "F",  # Pyflakes: check for various Python errors
+    "PGH",  # pygrep-hooks: miscellaneous lints via regex patterns
+    "UP",  # pyupgrade: check for outdated Python syntax
+    "RUF",  # Ruff-specific rules: additional lints unique to Ruff
+    "TRY",  # tryceratops: check for exception handling anti-patterns
+    "N",  # pep8-naming: enforce PEP 8 naming conventions
+    # "ERA001", # TODO: enable checking for commented-out code
+    # "ANN", # TODO: enable checking for type annotations
+]
+ignore = [
+    "A005",  # module shadows builtin name
+    "E731",  # do not assign lambda, use def
+    "RUF005",  # unpack instead of concatenation
+    "C901",  # function is too complex
+    "C408",  # unnecessary dict call, use literal
+    "B007",  # unused loop control variable
+    "SIM105",  # use contextlib.suppress instead of try-except-pass
+    "E402",  # module level import not at top of file
+    "E722",  # bare except
+    "C401",  # unnecessary generator for set/dict
+    "TRY003",  # avoid specifying long messages outside exception class
+    "TRY300",  # consider moving statement to else block
+    "TRY301",  # abstract raise to inner function
+    "SIM108",  # use ternary operator instead of if-else
+    "B006",  # mutable default argument
+    "RUF015",  # prefer next(iter()) over list/tuple indexing
+    "N812",  # lowercase imported as non-lowercase
+    "PGH003",  # use specific rule codes for type ignore/noqa
+    "RUF059",  # unpacked variable is never used
+    "UP007",  # require using X | Y for type annotations
+    "UP045", # require using X | None for type annotations
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["aiconfigurator", "utils", "helper"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/aiconfigurator/webapp/components/**/*.py" = ["E501", "W291", "SIM117"]

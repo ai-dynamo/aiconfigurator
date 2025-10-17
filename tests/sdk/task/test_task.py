@@ -53,6 +53,7 @@ def stub_pareto_analysis(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "aiconfigurator.sdk.pareto_analysis", stub_module)
     import aiconfigurator.sdk as sdk_pkg
+
     monkeypatch.setattr(sdk_pkg, "pareto_analysis", stub_module, raising=False)
 
 

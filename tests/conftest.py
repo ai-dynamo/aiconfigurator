@@ -10,8 +10,6 @@ Module-specific fixtures are located in their respective conftest.py files:
 - tests/cli/conftest.py - CLI-related fixtures
 """
 
-import pytest
-
 
 # Global pytest configuration can go here
 # For now, keeping it minimal since module-specific fixtures
