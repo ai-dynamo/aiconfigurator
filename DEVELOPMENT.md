@@ -93,7 +93,16 @@ pre-commit run --all-files
 
 ### Running Tests
 
-TODO: documentation for testing
+This project uses [pytest](https://docs.pytest.org/en/stable/) for testing.
+
+```bash
+# Run all tests
+pytest tests
+
+# Run tests for a specific component
+pytest tests/sdk
+pytest tests/cli
+```
 
 ## Data Collection (Advanced)
 
