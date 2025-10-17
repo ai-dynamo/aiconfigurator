@@ -34,6 +34,7 @@ apt-get install git-lfs  # (Linux)
 
 # 2. Clone the repo
 git clone https://github.com/ai-dynamo/aiconfigurator.git
+git lfs pull
 
 # 3. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.9 or later)
