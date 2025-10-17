@@ -3,7 +3,6 @@
 
 import tensorrt_llm
 import torch
-from helper import log_perf
 from tensorrt_llm._torch.attention_backend import AttentionInputType, TrtllmAttentionMetadata
 from tensorrt_llm._torch.attention_backend.interface import (
     AttentionRuntimeFeatures,
@@ -17,6 +16,8 @@ from tensorrt_llm.functional import PositionEmbeddingType, RotaryScalingType
 from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantConfig
+
+from helper import log_perf
 
 
 def get_context_mla_test_cases():

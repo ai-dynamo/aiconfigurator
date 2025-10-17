@@ -5,13 +5,14 @@ import tensorrt as trt
 import tensorrt_llm
 import torch
 from cuda import cudart
-from helper import log_perf
 from polygraphy.backend.trt import CreateConfig, EngineFromNetwork, TrtRunner
 from tensorrt_llm import Tensor
 from tensorrt_llm._utils import str_dtype_to_torch
 from tensorrt_llm.layers import Linear
 from tensorrt_llm.quantization.layers import FP8Linear, SmoothQuantLinear, WeightOnlyQuantLinear
 from tensorrt_llm.quantization.mode import QuantMode
+
+from helper import log_perf
 
 
 def get_gemm_test_cases():

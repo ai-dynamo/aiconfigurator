@@ -5,7 +5,6 @@ import os
 
 import tensorrt_llm
 import torch
-from helper import get_sm_version, log_perf
 from tensorrt_llm._torch.attention_backend import TrtllmAttentionMetadata
 from tensorrt_llm._torch.attention_backend.interface import (
     AttentionRuntimeFeatures,
@@ -19,6 +18,8 @@ from tensorrt_llm.functional import PositionEmbeddingType
 from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
+
+from helper import get_sm_version, log_perf
 
 
 def run_attention_torch(

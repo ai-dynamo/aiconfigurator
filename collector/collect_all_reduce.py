@@ -27,12 +27,13 @@ import torch
 # isort: on
 import tensorrt_llm as tllm
 from cuda import cudart
-from helper import log_perf
 from tensorrt_llm import Mapping
 from tensorrt_llm._torch.distributed import AllReduce, AllReduceFusionOp
 from tensorrt_llm._torch.distributed import AllReduceParams as TorchAllReduceParams
 from tensorrt_llm._utils import OMPI_COMM_TYPE_HOST, mpi_comm
 from tensorrt_llm.functional import AllReduceStrategy
+
+from helper import log_perf
 
 
 def get_input_shape_and_comm_size(size, token_dim=4096):

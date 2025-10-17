@@ -11,11 +11,11 @@ from einops import rearrange
 
 # pip install flashinfer-python
 from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+from sgl_kernel.flash_attn import flash_attn_varlen_func as flash_attn_varlen_func_v3
+from triton.testing import do_bench
 
 # cudnn = None
 from helper import log_perf
-from sgl_kernel.flash_attn import flash_attn_varlen_func as flash_attn_varlen_func_v3
-from triton.testing import do_bench
 
 
 class Timing(NamedTuple):

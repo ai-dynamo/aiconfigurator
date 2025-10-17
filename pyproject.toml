@@ -147,7 +147,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["aiconfigurator"]
+known-first-party = ["aiconfigurator", "utils", "helper"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/aiconfigurator/webapp/components/**/*.py" = ["E501", "W291", "SIM117"]

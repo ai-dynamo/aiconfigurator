@@ -6,12 +6,13 @@ import math
 import tensorrt_llm
 import torch
 import torch.nn.functional as F
-from helper import get_sm_version, log_perf
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.modules.fused_moe import FusedMoE, RenormalizeMoeRoutingMethod
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 from torch.nn.parameter import Parameter
+
+from helper import get_sm_version, log_perf
 
 
 def balanced_logits(num_tokens, num_experts, topk):
