@@ -32,3 +32,4 @@ RUN WHL=$(ls -d /wheelhouse/*) && \
 
 COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/
+COPY src/ /workspace/src/
