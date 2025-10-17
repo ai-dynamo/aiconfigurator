@@ -90,7 +90,8 @@ class GEMM(Operation):
         self._n = n
         self._k = k
         self._quant_mode = quant_mode
-        self._weights = self._n*self._k*quant_mode.value.memory 
+        self._weights = self._n*self._k*quant_mode.value.memory
+
     def query(self, database:PerfDatabase, **kwargs):
         x = kwargs.get('x')
         overwrite_quant_mode = kwargs.get('quant_mode', None)
@@ -99,7 +100,7 @@ class GEMM(Operation):
         return database.query_gemm(x, self._n, self._k, quant_mode)*self._scale_factor
     
     def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor     
+        return self._weights * self._scale_factor
 
 class MoE(Operation):
     """
@@ -576,5 +577,83 @@ class ContextMLASglang(Operation):
 
         return database.query_context_mla_sglang(batch_size, isl, self._tp_size, self._kvcache_quant_mode, self._fmha_quant_mode, self._attn_backend) * self._scale_factor
       
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+class Conv1DFn(Operation):
+    """
+    Conv1DFn operation.
+    """
+    def __init__(self, name: str, scale_factor: float, conv_kernel_size: int, conv_dim: int, tp_size: int) -> None:
+        super().__init__(name, scale_factor)
+        self._conv_kernel_size = conv_kernel_size
+        self._conv_dim = conv_dim
+        self._tp_size = tp_size
+        self._weights = 0.0
+
+    def query(self, database:PerfDatabase, **kwargs):
+        batch_size = kwargs.get('batch_size')
+        isl = kwargs.get('s')
+        return database.query_conv1d_fn(batch_size, isl, self._conv_kernel_size, self._conv_dim, self._tp_size)*self._scale_factor
+    
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor    
+
+class Conv1DUpdate(Operation):
+    """
+    Conv1DUpdate operation.
+    """
+    def __init__(self, name: str, scale_factor: float, conv_kernel_size: int, conv_dim: int, tp_size: int) -> None:
+        super().__init__(name, scale_factor)
+        self._conv_kernel_size = conv_kernel_size
+        self._conv_dim = conv_dim
+        self._tp_size = tp_size
+        self._weights = 0.0
+
+    def query(self, database:PerfDatabase, **kwargs):
+        batch_size = kwargs.get('batch_size')
+        isl = kwargs.get('s')
+        return database.query_conv1d_update(batch_size, isl, self._conv_kernel_size, self._conv_dim, self._tp_size)*self._scale_factor
+    
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor   
+
+class ChunkGatedDeltaRule(Operation):
+    """
+    Chunk gated delta rule operation.
+    """
+    def __init__(self, name: str, scale_factor: float, num_heads: int, head_k_dim: int, head_v_dim: int, num_value_heads: int) -> None:
+        super().__init__(name, scale_factor)
+        self._num_heads = num_heads
+        self._head_k_dim = head_k_dim
+        self._head_v_dim = head_v_dim
+        self._num_value_heads = num_value_heads
+        self._weights = 0.0
+    
+    def query(self, database:PerfDatabase, **kwargs):
+        isl = kwargs.get('s')
+        return database.query_chunk_gated_delta_rule(self._num_heads, self._head_k_dim, self._head_v_dim, self._num_value_heads, isl)*self._scale_factor
+    
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+class GatedDeltaRuleUpdate(Operation):
+    """
+    Gated delta rule update operation.
+    """
+    def __init__(self, name: str, scale_factor: float, num_heads: int, head_k_dim: int, head_v_dim: int, num_value_heads: int, max_batch_size: int) -> None:
+        super().__init__(name, scale_factor)
+        self._num_heads = num_heads
+        self._head_k_dim = head_k_dim
+        self._head_v_dim = head_v_dim
+        self._num_value_heads = num_value_heads
+        self._max_batch_size = max_batch_size
+        self._weights = 0.0
+
+    def query(self, database:PerfDatabase, **kwargs):
+        batch_size = kwargs.get('batch_size')
+        isl = kwargs.get('s')
+        return database.query_gated_delta_rule_update(batch_size, isl, self._num_heads, self._head_k_dim, self._head_v_dim, self._num_value_heads, self._max_batch_size)*self._scale_factor
+    
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

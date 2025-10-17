@@ -23,6 +23,27 @@ class BlockConfig:
     ffn_no_op: bool = False
     num_inst: int = 0
 
+@dataclass(frozen=True)
+class LinearAttentionConfig:
+    """
+    Configuration for a single linear attention block in Qwen3Next.
+    
+    Attributes:
+        used_ratio (float): Used ratio of the linear attention block within all attention blocks
+        linear_conv_kernel_dim (int): Kernel dimension for the linear convolution
+        linear_key_head_dim (int): Head dimension for the linear key
+        linear_num_key_heads (int): Number of key heads for the linear attention
+        linear_num_value_heads (int): Number of value heads for the linear attention
+        linear_value_head_dim (int): Head dimension for the linear value
+    """
+    used_ratio: float = 0.75
+    linear_conv_kernel_dim: int = 4
+    linear_key_head_dim: int = 128
+    linear_num_key_heads: int = 16
+    linear_num_value_heads: int = 32
+    linear_value_head_dim: int = 128
+
+
 """
 Supported models
     model name: model_family,l,n,n_kv,d,hidden_size,inter_size,vocab,context,topk,num_experts,moe_inter_size,extra_params
@@ -59,6 +80,7 @@ SupportedModels = {
                 'QWEN3_8B':['LLAMA', 36,32,8,128,32*128,12288,151936,40960, 0, 0, 0, None],                
                 'QWEN3_235B':['MOE', 94,64,4,128,4096,12288,151936,40960, 8, 128, 1536, None],
                 'QWEN3_480B':['MOE', 62,96,8,128,6144,8192,151936,262144,8,160,2560, None],
+                'QWEN3_NEXT_80B':['QWEN3NEXT', 48,16,2,256,2048,5120,151936,262144,10,512,512, LinearAttentionConfig(0.75, 4, 128, 16, 32, 128)],
                 'Nemotron_super_v1.1':['NEMOTRONNAS', 80, 64, 0, 128, 8192, 0, 128256, 131072, 0, 0, 0, 
                                                     [
                                                         BlockConfig(8, False, 5.25, False, 48),
@@ -78,7 +100,7 @@ SupportedModels = {
 """
 Model family for model definition
 """
-ModelFamily = {'GPT', 'LLAMA', 'MOE', 'DEEPSEEK', 'NEMOTRONNAS'}
+ModelFamily = {'GPT', 'LLAMA', 'MOE', 'DEEPSEEK', 'NEMOTRONNAS', 'QWEN3NEXT'}
 
 """
 All reduce strategy for trtllm custom allreduce

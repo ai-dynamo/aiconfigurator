@@ -18,7 +18,7 @@ def get_model(model_name: str, model_config: config.ModelConfig, backend_name: s
     """
     assert(model_name in common.SupportedModels), f"unsupport model {model_name}"
     model_family,l,n,n_kv,d,hidden,inter,vocab,context,topk,num_experts,moe_inter_size, extra_params = common.SupportedModels[model_name]
-    assert(model_family in common.ModelFamily), f"model is not in ModelFamily(GPT, LLAMA, MOE, DEEPSEEK, NEMOTRONNAS)"
+    assert(model_family in common.ModelFamily), f"model is not in ModelFamily(GPT, LLAMA, MOE, DEEPSEEK, NEMOTRONNAS, QWEN3NEXT)"
 
     if model_config.overwrite_num_layers > 0:
         l = model_config.overwrite_num_layers
@@ -53,6 +53,13 @@ def get_model(model_name: str, model_config: config.ModelConfig, backend_name: s
                             model_config)
         model.context_ops = extra_params
         model.generation_ops = extra_params
+    elif model_family == 'QWEN3NEXT':
+        model = Qwen3NextModel(topk, num_experts, moe_inter_size, \
+                         model_name, model_family, l, n, n_kv, d, \
+                    hidden, inter, vocab, context, \
+                    model_config)
+        model.context_ops = extra_params
+        model.generation_ops = extra_params
 
     return model
 
@@ -68,7 +75,7 @@ def check_is_moe(model_name: str) -> bool:
     """
     Check if the model is a MoE model.
     """
-    return get_model_family(model_name) == 'MOE' or get_model_family(model_name) == 'DEEPSEEK'
+    return get_model_family(model_name) == 'MOE' or get_model_family(model_name) == 'DEEPSEEK' or get_model_family(model_name) == 'QWEN3NEXT'
 
 def calc_expectation(nextn: int, nextn_accept_rates: list[float]) -> float:
     """
@@ -732,7 +739,259 @@ class NemotronNas(BaseModel):
         if inter_size % 256 == 0:
             return inter_size
         return inter_size + 256 - (inter_size % 256)
-       
+
+
+class Qwen3NextModel(BaseModel):
+    """
+    Qwen3Next model uses this model impl.
+    Currently Qwen3Next only has a series of 80B A3B models, which is similar to MOEModel but with different attention:
+    1/4 of the layers are the same to MOE model, using self attention.
+    3/4 of the layers are using linear attention with convolution 1d operation.
+    Some rules to follow,
+    Due to implementation, attn layer name needs to be context_attention or generation_attention, exact match is required. Same for logits_gemm.
+
+    Refer to tensorrt_llm/_torch/models/modeling_qwen3_next.py for more details.
+    """
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+        super().__init__(*args)
+        assert self._nextn == 0, 'Qwen3Next only supports mtp=0'
+
+        # make sure the parallel width is same
+        assert(self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size), \
+            f"tp_size ({self.config.tp_size}) * attention_dp_size ({self.config.attention_dp_size}) should be equal to moe_tp_size ({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        
+        assert(num_experts >= self.config.moe_ep_size), f"ep size cannot be larger than num_experts {num_experts}"
+        assert(self.config.tp_size * self.config.attention_dp_size <= 256), f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} should not be larger than 256"
+        assert(self._num_layers % 4 == 0), f"num_layers {self._num_layers} should be divisible by 4"
+
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_inter_size = moe_inter_size
+
+        self._power_law_alpha = 1.2
+
+    @property
+    def context_ops(self):
+        """
+        Get the context(prefill) processing operations pipeline.
+        
+        Returns:
+            List[ops.Operation]: List of operations for processing context 
+            sequences, including: 
+                - embedding, 
+                - attention blocks, 
+                - FFN blocks, 
+                - P2P communication,
+                - all reduce communication 
+                - logits computation.
+        """
+        return self._context_ops
+
+    @context_ops.setter
+    def context_ops(self, linear_attention_config: common.LinearAttentionConfig):
+        """
+        Set the context(prefill) processing operations pipeline based on linear attention configurations.
+        
+        Constructs a pipeline of operations for processing input context by creating operations
+        for each configured transformer block. The pipeline includes embedding lookup, 
+        transformer blocks (with optional attention and FFN components), pipeline parallel
+        communication, and final logits computation.
+
+        Args:
+            linear_attention_config (common.LinearAttentionConfig or list): Linear attention configuration
+                or empty list for initialization
+        """
+        self._context_ops = []
+        if not isinstance(linear_attention_config, common.LinearAttentionConfig):
+            return
+        
+        num_v_heads = linear_attention_config.linear_num_value_heads
+        num_k_heads = linear_attention_config.linear_num_key_heads
+        head_k_dim = linear_attention_config.linear_key_head_dim
+        head_v_dim = linear_attention_config.linear_value_head_dim
+        key_dim = head_k_dim * num_k_heads
+        value_dim = head_v_dim * num_v_heads
+        conv_kernel_size = linear_attention_config.linear_conv_kernel_dim
+        conv_dim = key_dim * 2 + value_dim
+        moe_quant_mode = self.config.moe_quant_mode
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        moe_tp_size = self.config.moe_tp_size
+        moe_ep_size = self.config.moe_ep_size
+        attention_dp_size = self.config.attention_dp_size
+        pp_size = self.config.pp_size
+        num_kv_heads_per_GPU = self._num_kv_heads_per_GPU
+        gemm_quant_mode = self.config.gemm_quant_mode
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        fmha_quant_mode = self.config.fmha_quant_mode
+        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
+
+        # 1 embedding for all layers
+        # 1 norm before attention per layer
+        self._context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
+                                ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8)])
+
+        # self attention
+        self._context_ops.extend([
+            ops.GEMM(f'context_qkv_gemm', self._num_layers * (1 - linear_attention_config.used_ratio), self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode),
+            ops.ContextAttention(f'context_attention', self._num_layers * (1 - linear_attention_config.used_ratio), self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode),
+            ops.GEMM(f'context_proj_gemm', self._num_layers * (1 - linear_attention_config.used_ratio), h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
+        ])
+        
+        # linear attention (Qwen3NextGatedDeltaNet)
+        self._context_ops.extend([
+            # Input projections for qkvz and ba
+            ops.GEMM(f'context_qkvz_gemm', self._num_layers * linear_attention_config.used_ratio, (key_dim*2 + value_dim*2)//tp_size, h, gemm_quant_mode),
+            ops.GEMM(f'context_ba_gemm', self._num_layers * linear_attention_config.used_ratio, num_v_heads*2//tp_size, h, gemm_quant_mode),
+            # Conv1D and gated delta rule operations - weights handled internally
+            # Conv1DFn(name, scale_factor, conv_kernel_size, conv_dim, tp_size) - batch_size and isl from kwargs
+            ops.Conv1DFn(f'context_conv1d_fn', self._num_layers * linear_attention_config.used_ratio, conv_kernel_size, conv_dim, tp_size),
+            # ChunkGatedDeltaRule(name, scale_factor, num_heads, head_k_dim, head_v_dim, num_value_heads) - isl from kwargs
+            ops.ChunkGatedDeltaRule(f'context_chunk_gated_delta_rule', self._num_layers * linear_attention_config.used_ratio, num_k_heads, head_k_dim, head_v_dim, num_v_heads),
+            # Output projection
+            ops.GEMM(f'context_proj_gemm', self._num_layers * linear_attention_config.used_ratio, h, value_dim//tp_size, gemm_quant_mode),
+        ])
+
+        # 1 norm before MOE per layer
+        self._context_ops.extend([
+                                ops.ElementWise(f'context_add_norm_2', self._num_layers // linear_attention_config.used_ratio, 2*h, 2*h, 0.8)])
+
+        #router, only take it into account when num_experts >= 128
+        if self._num_experts >= 128:
+            self._context_ops.extend([
+                            ops.GEMM(f'context_router_gemm', self._num_layers, self._num_experts, h, common.GEMMQuantMode.float16)
+                            ])
+
+        # dispatch tokens to experts, moe calc and get tokens back
+        # Qwen3Next has one more shared expert.
+        self._context_ops.extend([
+                                ops.MoEDispatch(f'context_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, attention_dp_size, True),
+                                ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size),
+                                ops.MoEDispatch(f'context_moe_post_dispatch', self._num_layers, h, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, attention_dp_size, False)])
+        
+        self._context_ops.extend([ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+
+        # # # when tp_size=0, the comm part will be 0
+        # self._context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
+        # self._context_ops.append(ops.AllReduce('context_ar_2', self._num_layers, h, tp_size))
+
+        # pp
+        pp_scale_factor = pp_size-1
+        self._context_ops.append(ops.P2P('context_p2p', pp_scale_factor, h, pp_size))
+
+    @property
+    def generation_ops(self):
+        """
+        Get the generation (decoding) operations pipeline.
+        
+        Returns:
+            List[ops.Operation]: List of operations for the decoding phase 
+            including: 
+                - embedding, 
+                - attention blocks, 
+                - FFN blocks, 
+                - P2P communication,
+                - all reduce communication 
+                - logits computation.
+        """
+        return self._generation_ops 
+
+    @generation_ops.setter
+    def generation_ops(self, linear_attention_config: common.LinearAttentionConfig):
+        """
+        Set the generation (decoding) operations pipeline based on linear attention configurations.
+        
+        Constructs a pipeline of operations for generating output tokens by creating operations
+        for each configured transformer block. The pipeline includes embedding lookup, 
+        transformer blocks (with optional attention and FFN components), pipeline parallel
+        communication, and final logits computation.
+
+        Args:
+            linear_attention_config (common.LinearAttentionConfig): Linear attention configuration
+                or empty list for initialization
+        """
+        self._generation_ops = []
+        if not isinstance(linear_attention_config, common.LinearAttentionConfig):
+            return
+        
+        num_v_heads = linear_attention_config.linear_num_value_heads
+        num_k_heads = linear_attention_config.linear_num_key_heads
+        head_k_dim = linear_attention_config.linear_key_head_dim
+        head_v_dim = linear_attention_config.linear_value_head_dim
+        key_dim = head_k_dim * num_k_heads
+        value_dim = head_v_dim * num_v_heads
+        conv_kernel_size = linear_attention_config.linear_conv_kernel_dim
+        conv_dim = key_dim * 2 + value_dim
+        moe_quant_mode = self.config.moe_quant_mode
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        moe_tp_size = self.config.moe_tp_size
+        moe_ep_size = self.config.moe_ep_size
+        attention_dp_size = self.config.attention_dp_size
+        pp_size = self.config.pp_size
+        num_kv_heads_per_GPU = self._num_kv_heads_per_GPU
+        gemm_quant_mode = self.config.gemm_quant_mode
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        fmha_quant_mode = self.config.fmha_quant_mode
+        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
+
+        # 1 embedding for all layers
+        # 1 norm before attention per layer
+        self._generation_ops.extend([ops.Embedding(f'generation_embedding', 1, self._vocab_size, h, 0.3),
+                                ops.ElementWise(f'generation_add_norm_1', self._num_layers, 2*h, 2*h, 0.8)])
+
+        # self attention
+        self._generation_ops.extend([
+            ops.GEMM(f'generation_qkv_gemm', self._num_layers * (1 - linear_attention_config.used_ratio), self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode),
+            ops.GenerationAttention(f'generation_attention', self._num_layers * (1 - linear_attention_config.used_ratio), self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode),
+            ops.GEMM(f'generation_proj_gemm', self._num_layers * (1 - linear_attention_config.used_ratio), h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
+        ])
+
+        # linear attention (Qwen3NextGatedDeltaNet)
+        self._generation_ops.extend([
+            # Input projections for qkvz and ba
+            ops.GEMM(f'generation_qkvz_gemm', self._num_layers * linear_attention_config.used_ratio, (key_dim*2 + value_dim*2)//tp_size, h, gemm_quant_mode),
+            ops.GEMM(f'generation_ba_gemm', self._num_layers * linear_attention_config.used_ratio, num_v_heads*2//tp_size, h, gemm_quant_mode),
+            # Conv1D and gated delta rule operations - weights handled internally
+            # TODO: for mixed steps, add ops.Conv1DFn(...)
+            # Conv1DUpdate(name, scale_factor, conv_kernel_size, conv_dim, tp_size) - batch_size and isl from kwargs
+            ops.Conv1DUpdate(f'generation_conv1d_update', self._num_layers * linear_attention_config.used_ratio, conv_kernel_size, conv_dim, tp_size),
+            # GatedDeltaRuleUpdate(name, scale_factor, num_heads, head_k_dim, head_v_dim, num_value_heads, max_batch_size) - batch_size and isl from kwargs
+            # max_batch_size is dynamic, need to determine appropriate value
+            ops.GatedDeltaRuleUpdate(f'generation_gated_delta_rule_update', self._num_layers * linear_attention_config.used_ratio, num_k_heads, head_k_dim, head_v_dim, num_v_heads, 1024),
+            # Output projection
+            ops.GEMM(f'generation_proj_gemm', self._num_layers * linear_attention_config.used_ratio, h, value_dim//tp_size, gemm_quant_mode),
+        ])
+
+        # 1 norm before MOE per layer
+        self._generation_ops.extend([
+                                ops.ElementWise(f'generation_add_norm_2', self._num_layers // linear_attention_config.used_ratio, 2*h, 2*h, 0.8)])
+
+        #router, only take it into account when num_experts >= 128
+        if self._num_experts >= 128:
+            self._generation_ops.extend([
+                            ops.GEMM(f'generation_router_gemm', self._num_layers, self._num_experts, h, common.GEMMQuantMode.float16)
+                            ])
+
+        # dispatch tokens to experts, moe calc and get tokens back
+        # Qwen3Next has one more shared expert.
+        self._generation_ops.extend([
+                                ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, attention_dp_size, True),
+                                ops.MoE(f'generation_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size),
+                                ops.MoEDispatch(f'generation_moe_post_dispatch', self._num_layers, h, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, attention_dp_size, False)
+                                ])
+        # logits gemm
+        self._generation_ops.extend([ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+
+        # # # when tp_size=0, the comm part will be 0
+        # self._generation_ops.append(ops.AllReduce('generation_ar_1', self._num_layers, h, tp_size))
+        # self._generation_ops.append(ops.AllReduce('generation_ar_2', self._num_layers, h, tp_size))
+
+        # pp
+        pp_scale_factor = pp_size-1
+        self._generation_ops.append(ops.P2P('generation_p2p', pp_scale_factor, h, pp_size))
+
+
 if __name__ == '__main__':
     # TODO, move to unit tests
     model = get_model('DEEPSEEK_V3', config.ModelConfig(
