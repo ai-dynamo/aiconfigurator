@@ -29,9 +29,7 @@ class TestNcclEdgeCases:
         )
 
         # Should use interpolation from nccl_data
-        expected = comprehensive_perf_db._nccl_data[common.CommQuantMode.half]["all_gather"][4][
-            1024
-        ]
+        expected = comprehensive_perf_db._nccl_data[common.CommQuantMode.half]["all_gather"][4][1024]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_nccl_non_sol_large_gpu_count(self, comprehensive_perf_db):
@@ -50,9 +48,7 @@ class TestNcclEdgeCases:
         intra_node_slowdown = node_info["intra_node_bw"] / node_info["inter_node_bw"]
         baseline_transfers_per_gpu = (8 - 1) / 8
         result_transfers_per_gpu = (16 - 1) / 16
-        correction_factor = (
-            intra_node_slowdown * result_transfers_per_gpu / baseline_transfers_per_gpu
-        )
+        correction_factor = intra_node_slowdown * result_transfers_per_gpu / baseline_transfers_per_gpu
 
         expected = baseline * correction_factor
         assert math.isclose(result, expected, rel_tol=1e-6)
@@ -172,25 +168,15 @@ class TestInitializationEdgeCases:
             lambda: defaultdict(
                 lambda: defaultdict(
                     lambda: defaultdict(
-                        lambda: defaultdict(
-                            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-                        )
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
                     )
                 )
             )
         )
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][
-            0
-        ][4][16][1] = 0.1
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][
-            0
-        ][4][32][1] = 0.2
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][
-            0
-        ][8][16][1] = 0.15
-        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][
-            0
-        ][8][32][1] = 0.25
+        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][4][16][1] = 0.1
+        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][4][32][1] = 0.2
+        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][8][16][1] = 0.15
+        dummy_context_data[common.FMHAQuantMode.float16][common.KVCacheQuantMode.float16][0][128][0][8][32][1] = 0.25
 
         monkeypatch.setattr(
             "aiconfigurator.sdk.perf_database.load_context_attention_data",
@@ -206,7 +192,7 @@ class TestInitializationEdgeCases:
             (
                 "load_moe_data",
                 9,
-            ),  # quant -> workload -> topk -> experts -> hidden -> inter -> tp -> ep -> tokens -> value  # noqa: E501
+            ),  # quant -> workload -> topk -> experts -> hidden -> inter -> tp -> ep -> tokens -> value
             ("load_context_mla_data", 5),  # quant -> kv_cache -> tp -> s -> b -> value
             ("load_generation_mla_data", 4),  # kv_cache -> tp -> b -> s -> value
             ("load_mla_bmm_data", 4),  # quant -> pre/post -> heads -> tokens -> value
@@ -236,19 +222,15 @@ class TestInitializationEdgeCases:
             for kv_cache in db._context_attention_data[quant_mode]:
                 for kv_n in db._context_attention_data[quant_mode][kv_cache]:
                     for head_size in db._context_attention_data[quant_mode][kv_cache][kv_n]:
-                        for window_size in db._context_attention_data[quant_mode][kv_cache][kv_n][
-                            head_size
-                        ]:
-                            for n in db._context_attention_data[quant_mode][kv_cache][kv_n][
-                                head_size
-                            ][window_size]:
-                                for s in db._context_attention_data[quant_mode][kv_cache][kv_n][
-                                    head_size
-                                ][window_size][n]:
+                        for window_size in db._context_attention_data[quant_mode][kv_cache][kv_n][head_size]:
+                            for n in db._context_attention_data[quant_mode][kv_cache][kv_n][head_size][window_size]:
+                                for s in db._context_attention_data[quant_mode][kv_cache][kv_n][head_size][window_size][
+                                    n
+                                ]:
                                     total_points += len(
-                                        db._context_attention_data[quant_mode][kv_cache][kv_n][
-                                            head_size
-                                        ][window_size][n][s]
+                                        db._context_attention_data[quant_mode][kv_cache][kv_n][head_size][window_size][
+                                            n
+                                        ][s]
                                     )
 
         assert total_points > 4, "Extrapolation should have created additional data points"
@@ -276,12 +258,8 @@ class TestGemmInterpolation:
         assert result > 0
 
         # Should be between surrounding values
-        lower_bound = comprehensive_perf_db.query_gemm(
-            2, 128, 128, quant_mode, sol_mode=common.SOLMode.NON_SOL
-        )
-        upper_bound = comprehensive_perf_db.query_gemm(
-            4, 256, 256, quant_mode, sol_mode=common.SOLMode.NON_SOL
-        )
+        lower_bound = comprehensive_perf_db.query_gemm(2, 128, 128, quant_mode, sol_mode=common.SOLMode.NON_SOL)
+        upper_bound = comprehensive_perf_db.query_gemm(4, 256, 256, quant_mode, sol_mode=common.SOLMode.NON_SOL)
         assert lower_bound < result < upper_bound
 
     def test_query_gemm_extrapolation(self, comprehensive_perf_db):
@@ -289,17 +267,13 @@ class TestGemmInterpolation:
         quant_mode = common.GEMMQuantMode.fp8
 
         # Query a very large size (beyond our test data)
-        result = comprehensive_perf_db.query_gemm(
-            512, 2048, 2048, quant_mode, sol_mode=common.SOLMode.NON_SOL
-        )
+        result = comprehensive_perf_db.query_gemm(512, 2048, 2048, quant_mode, sol_mode=common.SOLMode.NON_SOL)
 
         # Should return a reasonable value
         assert result > 0
 
         # For large sizes, should be larger than smaller sizes
-        smaller = comprehensive_perf_db.query_gemm(
-            256, 1024, 1024, quant_mode, sol_mode=common.SOLMode.NON_SOL
-        )
+        smaller = comprehensive_perf_db.query_gemm(256, 1024, 1024, quant_mode, sol_mode=common.SOLMode.NON_SOL)
         assert result > smaller
 
 

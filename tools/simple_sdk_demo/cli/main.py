@@ -16,9 +16,7 @@ def parse(args):
     parser.add_argument("--batch_size", type=int, help="batch_size")
     parser.add_argument("--isl", type=int, help="input sequence length, max 256k")
     parser.add_argument("--osl", type=int, help="output sequence length")
-    parser.add_argument(
-        "--stride", type=int, default=32, help="stride for fast generation, 32 by default"
-    )
+    parser.add_argument("--stride", type=int, default=32, help="stride for fast generation, 32 by default")
     parser.add_argument(
         "--mode",
         type=str,
@@ -53,9 +51,7 @@ def parse(args):
         default=0,
         help="if larger than 0, overwrite model layers to the value assigned",
     )
-    parser.add_argument(
-        "--attention_dp_size", type=int, default=1, help="attention data parallel size  moe models"
-    )
+    parser.add_argument("--attention_dp_size", type=int, default=1, help="attention data parallel size  moe models")
     parser.add_argument(
         "--tp_size",
         type=int,

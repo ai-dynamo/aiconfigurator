@@ -108,9 +108,7 @@ class E2ETestRunner:
             raise ValueError(f"Unknown smoke test level: {level}")
 
         config = configs[level]
-        return self._execute_test(
-            description=f"Smoke test - {level} level", **config, **self._filter_kwargs(**kwargs)
-        )
+        return self._execute_test(description=f"Smoke test - {level} level", **config, **self._filter_kwargs(**kwargs))
 
     def _run_selective_test(
         self,
@@ -261,26 +259,20 @@ Examples:
         choices=["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"],
         help="Systems to test",
     )
-    parser.add_argument(
-        "--gpu-configs", nargs="+", type=int, choices=[8, 512], help="GPU configurations"
-    )
+    parser.add_argument("--gpu-configs", nargs="+", type=int, choices=[8, 512], help="GPU configurations")
     parser.add_argument("--isl-osl", nargs="+", help="ISL,OSL combinations (format: 4000,1000)")
     parser.add_argument("--tpot", nargs="+", type=int, choices=[10, 100], help="TPOT values")
 
     # Execution options
     parser.add_argument("--parallel", type=int, help="Number of parallel workers")
     parser.add_argument("--maxfail", type=int, default=10, help="Maximum failures before stopping")
-    parser.add_argument(
-        "--continue-on-error", action="store_true", help="Continue testing after failures"
-    )
+    parser.add_argument("--continue-on-error", action="store_true", help="Continue testing after failures")
 
     # Output options
     parser.add_argument("--show-warnings", action="store_true", help="Show pytest warnings")
     parser.add_argument("--quiet", action="store_true", help="Minimize output for CI/CD")
     parser.add_argument("--estimate-only", action="store_true", help="Show time estimate only")
-    parser.add_argument(
-        "--check-infrastructure", action="store_true", help="Check test infrastructure only"
-    )
+    parser.add_argument("--check-infrastructure", action="store_true", help="Check test infrastructure only")
 
     args = parser.parse_args()
 

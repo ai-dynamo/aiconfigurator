@@ -25,10 +25,7 @@ class TestContextAttention:
         ops = 2 * b * s * s * n * 128 * 2 / 2  # 2 for fma, 2 for q*k^t+*v, 2 for causality
         mem_bytes = 2 * b * (n * s * 128 + 2 * n_kv * s * 128 + n * s * 128)
         sol_math = (
-            ops
-            / comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"]
-            * 1000
-            / fmha_quant_mode.value.compute
+            ops / comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
         )
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec["gpu"]["mem_bw"] * 1000
         expected = max(sol_math, sol_mem)
@@ -61,9 +58,9 @@ class TestContextAttention:
         )
 
         # Should use data from attention_dict[0] for MHA
-        expected = comprehensive_perf_db._context_attention_data[fmha_quant_mode][
-            kv_cache_quant_mode
-        ][0][128][0][n][s][b]
+        expected = comprehensive_perf_db._context_attention_data[fmha_quant_mode][kv_cache_quant_mode][0][128][0][n][s][
+            b
+        ]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_context_attention_non_sol_mode_xqa(self, comprehensive_perf_db):
@@ -77,9 +74,9 @@ class TestContextAttention:
         )
 
         # Should use data from attention_dict[n_kv] for XQA
-        expected = comprehensive_perf_db._context_attention_data[fmha_quant_mode][
-            kv_cache_quant_mode
-        ][n_kv][128][0][n][s][b]
+        expected = comprehensive_perf_db._context_attention_data[fmha_quant_mode][kv_cache_quant_mode][n_kv][128][0][n][
+            s
+        ][b]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_context_attention_assertion_error(self, comprehensive_perf_db):
@@ -109,9 +106,7 @@ class TestGenerationAttention:
         kv_len = s - 1
         # Calculate expected SOL result
         ops = 2 * b * n * 128 * 2 * (kv_len)  # 2 for fma, 2 for q*k^t+*v
-        mem_bytes = b * (
-            n * 128 * 2 + 2 * n_kv * kv_len * 128 * kv_cache_quant_mode.value.memory + n * 128 * 2
-        )
+        mem_bytes = b * (n * 128 * 2 + 2 * n_kv * kv_len * 128 * kv_cache_quant_mode.value.memory + n * 128 * 2)
         sol_math = ops / comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * 1000
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec["gpu"]["mem_bw"] * 1000
         expected = max(sol_math, sol_mem)
@@ -170,10 +165,7 @@ class TestContextMLA:
         ops = b * num_heads * 2 / 2 * (s * s * 192 + s * s * 128)
         mem_bytes = b * num_heads * 2 * (2 * s * 192 + 2 * s * 128)
         sol_math = (
-            ops
-            / comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"]
-            * 1000
-            / fmha_quant_mode.value.compute
+            ops / comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
         )
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec["gpu"]["mem_bw"] * 1000
         expected = max(sol_math, sol_mem)
@@ -191,9 +183,7 @@ class TestContextMLA:
         )
 
         # Should use data from context_mla_data
-        expected = comprehensive_perf_db._context_mla_data[fmha_quant_mode][kv_cache_quant_mode][
-            num_heads
-        ][s][b]
+        expected = comprehensive_perf_db._context_mla_data[fmha_quant_mode][kv_cache_quant_mode][num_heads][s][b]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_context_mla_different_tp_sizes(self, comprehensive_perf_db):

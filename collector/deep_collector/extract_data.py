@@ -359,9 +359,7 @@ def _format_number(val):
     return str(val)
 
 
-def create_normal_txt(
-    all_rows: list[dict], output_path: str, node_num: int = NODE_NUM_DEFAULT
-) -> bool:
+def create_normal_txt(all_rows: list[dict], output_path: str, node_num: int = NODE_NUM_DEFAULT) -> bool:
     """
     Create normal-format TXT.
     Columns: framework,version,device,op_name,node_num,kernel_source,hidden_size,num_token,num_topk,
@@ -395,9 +393,7 @@ def create_normal_txt(
         print("Warning: normal data is empty, no TXT generated")
         return False
 
-    rows_sorted = sorted(
-        rows, key=lambda x: (x.get("hidden", 0), x.get("num_tokens", 0), x.get("dispatch_sms", 0))
-    )
+    rows_sorted = sorted(rows, key=lambda x: (x.get("hidden", 0), x.get("num_tokens", 0), x.get("dispatch_sms", 0)))
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(header + "\n")
@@ -562,10 +558,7 @@ def try_create_excel_report(all_data: list[dict], output_path: str):
     try:
         from openpyxl import Workbook
     except ImportError:
-        print(
-            "Error: openpyxl not installed. Cannot generate Excel. Please install: pip install "
-            "openpyxl"
-        )
+        print("Error: openpyxl not installed. Cannot generate Excel. Please install: pip install openpyxl")
         return False
 
     # Assemble column headers (priority important columns)
@@ -628,9 +621,7 @@ def try_create_excel_report(all_data: list[dict], output_path: str):
     return True
 
 
-def try_create_excel_report_multi_sheet(
-    logfile_to_data: dict[str, list[dict]], output_path: str
-) -> bool:
+def try_create_excel_report_multi_sheet(logfile_to_data: dict[str, list[dict]], output_path: str) -> bool:
     """
     Generate multi-sheet Excel: each log file corresponds to a sheet, sheet name is the log
     filename.
@@ -647,10 +638,7 @@ def try_create_excel_report_multi_sheet(
     try:
         from openpyxl import Workbook  # type: ignore
     except ImportError:
-        print(
-            "Error: openpyxl not installed. Cannot generate Excel. Please install: pip install "
-            "openpyxl"
-        )
+        print("Error: openpyxl not installed. Cannot generate Excel. Please install: pip install openpyxl")
         return False
 
     wb = Workbook()
@@ -735,9 +723,7 @@ def try_create_excel_report_multi_sheet(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate TXT reports from all .log files in directory"
-    )
+    parser = argparse.ArgumentParser(description="Generate TXT reports from all .log files in directory")
     parser.add_argument(
         "--log-dir",
         default="path/to/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/",

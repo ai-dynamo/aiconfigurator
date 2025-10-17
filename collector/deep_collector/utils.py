@@ -53,9 +53,7 @@ def per_token_cast_to_fp8(x: torch.Tensor):
     m, n = x.shape
     x_view = x.view(m, -1, 128)
     x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
-    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), (
-        x_amax / 448.0
-    ).view(m, -1)
+    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), (x_amax / 448.0).view(m, -1)
 
 
 def per_token_cast_back(x_fp8: torch.Tensor, x_scales: torch.Tensor):
@@ -116,9 +114,7 @@ def bench(fn, num_warmups: int = 50, num_tests: int = 50, post_fn=None):
             post_fn()
     torch.cuda.synchronize()
 
-    times = np.array(
-        [s.elapsed_time(e) / 1e3 for s, e in zip(start_events, end_events, strict=False)]
-    )[1:]
+    times = np.array([s.elapsed_time(e) / 1e3 for s, e in zip(start_events, end_events, strict=False)])[1:]
     return np.average(times), np.min(times), np.max(times)
 
 
@@ -178,9 +174,7 @@ def bench_kineto(
     suppress = SupressOutputStderr if suppress_kineto_output else EmptySuppress
     with suppress():
         schedule = torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1)
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule
-        ) as prof:
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule) as prof:
             for i in range(2):
                 # NOTES: use a large kernel and a barrier to eliminate the unbalanced CPU launch
                 # overhead
@@ -197,15 +191,11 @@ def bench_kineto(
     # Parse the profiling table
     assert isinstance(kernel_names, str | tuple)
     is_tuple = isinstance(kernel_names, tuple)
-    prof_lines = (
-        prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=100).split("\n")
-    )
+    prof_lines = prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=100).split("\n")
     kernel_names = (kernel_names,) if isinstance(kernel_names, str) else kernel_names
     assert all(isinstance(name, str) for name in kernel_names)
     for name in kernel_names:
-        assert sum([name in line for line in prof_lines]) == 1, (
-            f"Errors of the kernel {name} in the profiling table"
-        )
+        assert sum([name in line for line in prof_lines]) == 1, f"Errors of the kernel {name} in the profiling table"
 
     # Save chrome traces
     if trace_path is not None:
@@ -231,18 +221,13 @@ def bench_kineto(
             profile_data = json.loads(Path(tmp.name).read_text())
 
         for i, kernel_name in enumerate(kernel_names):
-            events = [
-                event
-                for event in profile_data["traceEvents"]
-                if f"::{kernel_name}" in event["name"]
-            ]
+            events = [event for event in profile_data["traceEvents"] if f"::{kernel_name}" in event["name"]]
             events = sorted(events, key=lambda event: event["ts"])
             durations = [event["dur"] / 1e6 for event in events]
             assert len(durations) % num_kernels_per_period == 0
             num_kernel_patterns = len(durations) // num_kernels_per_period
             kernel_durations[i] = [
-                sum(durations[j::num_kernels_per_period]) / num_kernel_patterns
-                for j in range(num_kernels_per_period)
+                sum(durations[j::num_kernels_per_period]) / num_kernel_patterns for j in range(num_kernels_per_period)
             ]
 
     # Return execution durations

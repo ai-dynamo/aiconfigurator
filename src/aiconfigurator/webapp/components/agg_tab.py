@@ -34,14 +34,10 @@ def create_agg_tab(app_config):
         model_misc_config_components = create_model_misc_config(app_config)
         # agg section, by default, they are invisible
         estimate_btn = gr.Button("Estimate Agg Inference", visible=True)
-        result_df = gr.Dataframe(
-            label="Suggested Config List", headers=ColumnsAgg, interactive=False, visible=True
-        )
+        result_df = gr.Dataframe(label="Suggested Config List", headers=ColumnsAgg, interactive=False, visible=True)
         debugging_box = gr.Textbox(label="Debugging", lines=5)
         download_btn = gr.Button("Download")
-        output_file = gr.File(
-            label="When you click the download button, the downloaded form will be displayed here."
-        )
+        output_file = gr.File(label="When you click the download button, the downloaded form will be displayed here.")
 
     return {
         "model_name_components": model_name_components,

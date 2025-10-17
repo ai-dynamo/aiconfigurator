@@ -31,9 +31,7 @@ class TRTLLMBackend(BaseBackend):
         self,
     ):
         super().__init__()
-        self._agg_cache = defaultdict(
-            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-        )
+        self._agg_cache = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
         self.name = common.BackendName.trtllm
 
     def run_agg(
@@ -72,8 +70,7 @@ class TRTLLMBackend(BaseBackend):
                     num_mix_ctx_tokens = ctx_tokens
                     num_mix_gen_tokens = b - np.ceil(ctx_tokens / isl)  # the error check is outside
                     assert num_mix_gen_tokens >= 1, (
-                        f"num_mix_gen_tokens: {num_mix_gen_tokens}, b: {b}, "
-                        f"ctx_tokens: {ctx_tokens}, isl: {isl}"
+                        f"num_mix_gen_tokens: {num_mix_gen_tokens}, b: {b}, ctx_tokens: {ctx_tokens}, isl: {isl}"
                     )
                     num_genonly_steps = osl - num_mix_steps
                     num_genonly_tokens = b
@@ -119,9 +116,7 @@ class TRTLLMBackend(BaseBackend):
                     mode="static_ctx",
                 )
                 latency_dict = summary.get_context_latency_dict()
-                ctx_attention_latency = latency_dict["context_attention"] / (
-                    np.ceil(isl / ctx_tokens)
-                )
+                ctx_attention_latency = latency_dict["context_attention"] / (np.ceil(isl / ctx_tokens))
 
                 # third pass to get generation attn. use isl+osl//2 for avg generation attn latency.
                 if gen_tokens > 0:
@@ -129,9 +124,7 @@ class TRTLLMBackend(BaseBackend):
                     summary = self.run_static(
                         model,
                         database,
-                        RuntimeConfig(
-                            batch_size=num_tokens, beam_width=1, isl=isl + osl // 2, osl=2
-                        ),
+                        RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl + osl // 2, osl=2),
                         mode="static_gen",
                     )
                     latency_dict = summary.get_generation_latency_dict()
@@ -160,12 +153,8 @@ class TRTLLMBackend(BaseBackend):
 
                 return genonly_step_latency
 
-            mix_step_latency = _get_mix_step_latency(
-                model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl
-            )
-            genonly_step_latency = _get_genonly_step_latency(
-                model, database, num_genonly_tokens, isl, osl
-            )
+            mix_step_latency = _get_mix_step_latency(model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl)
+            genonly_step_latency = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
 
             ttft = mix_step_latency * np.ceil(isl / ctx_tokens)
             # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency
@@ -179,15 +168,11 @@ class TRTLLMBackend(BaseBackend):
                 f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
             )
 
-            tpot = (
-                mix_step_latency * num_mix_steps_for_tpot_calc
-                + genonly_step_latency * num_genonly_steps
-            ) / (num_mix_steps_for_tpot_calc + num_genonly_steps)
+            tpot = (mix_step_latency * num_mix_steps_for_tpot_calc + genonly_step_latency * num_genonly_steps) / (
+                num_mix_steps_for_tpot_calc + num_genonly_steps
+            )
             output_throughput = (
-                1000
-                / (num_mix_steps * mix_step_latency + num_genonly_steps * genonly_step_latency)
-                * b
-                * (osl - 1)
+                1000 / (num_mix_steps * mix_step_latency + num_genonly_steps * genonly_step_latency) * b * (osl - 1)
             )
             logger.debug(
                 f"ctx_tokens: {ctx_tokens}, b: {b}, osl: {osl}, isl: {isl}, "
@@ -196,10 +181,7 @@ class TRTLLMBackend(BaseBackend):
                 f"num_mix_gen_tokens: {num_mix_gen_tokens}, "
                 f"num_genonly_tokens: {num_genonly_tokens}"
             )
-            logger.debug(
-                f"mix_step_latency: {mix_step_latency}, "
-                f"genonly_step_latency: {genonly_step_latency}"
-            )
+            logger.debug(f"mix_step_latency: {mix_step_latency}, genonly_step_latency: {genonly_step_latency}")
             logger.debug(f"ttft: {ttft}, tpot: {tpot}, output_throughput: {output_throughput}")
 
             num_ctx_requests = np.ceil(ctx_tokens / isl)
@@ -364,9 +346,7 @@ class TRTLLMBackend(BaseBackend):
         ctx_tokens = 0
         while True:
             ctx_tokens = (
-                (ctx_tokens + ctx_stride)
-                if ctx_tokens < MAX_NORMAL_CTX_TOKENS
-                else (ctx_tokens + ctx_stride_large)
+                (ctx_tokens + ctx_stride) if ctx_tokens < MAX_NORMAL_CTX_TOKENS else (ctx_tokens + ctx_stride_large)
             )
             if ctx_tokens > max_ctx_tokens:
                 break
@@ -409,10 +389,7 @@ class TRTLLMBackend(BaseBackend):
 
                 if summary.check_oom():
                     break  # larger ctx tokens will cause oom
-                if (
-                    summary.get_summary_df().loc[0, "tpot"] <= tpot
-                    and summary.get_summary_df().loc[0, "ttft"] <= ttft
-                ):
+                if summary.get_summary_df().loc[0, "tpot"] <= tpot and summary.get_summary_df().loc[0, "ttft"] <= ttft:
                     df_list.append(summary.get_summary_df())
 
         if df_list:
@@ -498,9 +475,7 @@ class TRTLLMBackend(BaseBackend):
         if get_model_family(model.model_name) == "DEEPSEEK":
             kvcache_per_token = model._num_layers * 576
         else:
-            num_kv_heads_per_gpu = (
-                model._num_kv_heads + model.config.tp_size - 1
-            ) // model.config.tp_size
+            num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size
             kvcache_per_token = num_kv_heads_per_gpu * model._head_size * model._num_layers * 2
         # should not be divided by pp_size as you need to hold all kvcache for stages.
         kvcache = (

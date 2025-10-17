@@ -49,12 +49,8 @@ def test_query_allreduce_sol_mode_calculation(perf_db):
 
     sol_time = perf_db.query_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.SOL)
 
-    expected = (
-        2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]
-    ) * 1000
-    assert math.isclose(sol_time, expected), (
-        f"SOL-mode allreduce mismatch: expected {expected}, got {sol_time}"
-    )
+    expected = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
+    assert math.isclose(sol_time, expected), f"SOL-mode allreduce mismatch: expected {expected}, got {sol_time}"
 
 
 def test_query_allreduce_sol_full_returns_full_tuple(perf_db):
@@ -68,17 +64,11 @@ def test_query_allreduce_sol_full_returns_full_tuple(perf_db):
 
     result = perf_db.query_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.SOL_FULL)
     # The get_sol function returns: (sol_time, 0, 0)
-    sol_time = (
-        2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]
-    ) * 1000
+    sol_time = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
     expected = (sol_time, 0, 0)
 
     assert isinstance(result, tuple) and len(result) == 3
-    assert (
-        math.isclose(result[0], expected[0])
-        and result[1] == expected[1]
-        and result[2] == expected[2]
-    )
+    assert math.isclose(result[0], expected[0]) and result[1] == expected[1] and result[2] == expected[2]
 
 
 def test_query_allreduce_non_sol_mode_uses_custom_latency(perf_db):
@@ -96,12 +86,8 @@ def test_query_allreduce_non_sol_mode_uses_custom_latency(perf_db):
     quant_mode = "float16"
 
     # Use a “non-SOL” mode to force fallback into the custom-data path
-    custom_latency = perf_db.query_allreduce(
-        quant_mode, tp_size, size, sol_mode=common.SOLMode.NON_SOL
-    )
-    assert math.isclose(custom_latency, 5.0), (
-        f"Expected custom-allreduce latency 5.0, got {custom_latency}"
-    )
+    custom_latency = perf_db.query_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.NON_SOL)
+    assert math.isclose(custom_latency, 5.0), f"Expected custom-allreduce latency 5.0, got {custom_latency}"
 
 
 @pytest.mark.skip("TODO: fix comm SOL calculations")
@@ -124,12 +110,8 @@ def test_query_nccl_sol_mode_all_gather(perf_db):
     operation = "all_gather"
     message_size = 512
 
-    sol_time = perf_db.query_nccl(
-        dtype, num_gpus, operation, message_size, sol_mode=common.SOLMode.SOL
-    )
-    expected = (
-        message_size * (num_gpus - 1) * 2 / perf_db.system_spec["node"]["inter_node_bw"]
-    ) * 1000
+    sol_time = perf_db.query_nccl(dtype, num_gpus, operation, message_size, sol_mode=common.SOLMode.SOL)
+    expected = (message_size * (num_gpus - 1) * 2 / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
 
     assert math.isclose(sol_time, expected), f"Expected {expected}, got {sol_time}"
 
@@ -148,9 +130,7 @@ def test_query_nccl_sol_mode_alltoall_and_reduce_scatter(perf_db, operation):
     num_gpus = 8  # num_gpus only matters for 'all_gather'
     sol_time = perf_db.query_nccl(dtype, num_gpus, operation, 1000, sol_mode=common.SOLMode.SOL)
     expected = (2 * 1000 * 1 / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
-    assert math.isclose(sol_time, expected), (
-        f"Expected {expected} for op {operation}, got {sol_time}"
-    )
+    assert math.isclose(sol_time, expected), f"Expected {expected} for op {operation}, got {sol_time}"
 
 
 def test_query_p2p_sol_mode(perf_db):

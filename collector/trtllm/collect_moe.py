@@ -28,9 +28,7 @@ def balanced_logits(num_tokens, num_experts, topk):
             if num_tokens >= stride:
                 h_selected_experts[token_i][i] = (token_i + i * stride) % num_experts
             else:
-                h_selected_experts[token_i][i] = (
-                    token_i * stride / num_tokens + i * stride
-                ) % num_experts
+                h_selected_experts[token_i][i] = (token_i * stride / num_tokens + i * stride) % num_experts
 
     expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
     router_logits = F.softmax(expert_map.bfloat16(), dim=1)
@@ -39,9 +37,7 @@ def balanced_logits(num_tokens, num_experts, topk):
 
 def sample_power_law(size, alpha, xmin, xmax):
     u = torch.rand(size)
-    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (
-        1 / (1 - alpha)
-    )
+    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (1 / (1 - alpha))
     return inv_cdf
 
 
@@ -195,9 +191,7 @@ def get_moe_test_cases():
     test_cases = []
 
     # currently, we support max-throughput for typical quantizations. support min-latency for nvfp4.
-    for (
-        num_gpu
-    ) in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
+    for num_gpu in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
         for moe_type in moe_list:
             for model_config in model_config_list:
                 hs, inter_s, topk, num_experts, model_name = model_config
@@ -362,9 +356,7 @@ def run_moe_torch(
     model_config = ModelConfig()
     model_config.mapping = mapping
     model_config.quant_config = quant_config
-    model_config.moe_max_num_tokens = num_tokens_lists[
-        -1
-    ]  # to avoid multi-chunk auxi stream in cuda-graph mode.
+    model_config.moe_max_num_tokens = num_tokens_lists[-1]  # to avoid multi-chunk auxi stream in cuda-graph mode.
     swiglu_alpha = None
     swiglu_beta = None
     swiglu_limit = None
@@ -372,13 +364,9 @@ def run_moe_torch(
     if model_name in ["GPT_OSS_120B", "GPT_OSS_20B"]:
         # use triton backend for best performance on Hopper
         model_config.moe_backend = "triton"
-        swiglu_alpha = torch.tensor(
-            [1.702] * (num_experts // moe_ep_size), dtype=torch.float32
-        ).cuda()
+        swiglu_alpha = torch.tensor([1.702] * (num_experts // moe_ep_size), dtype=torch.float32).cuda()
         swiglu_beta = torch.tensor([1.0] * (num_experts // moe_ep_size), dtype=torch.float32).cuda()
-        swiglu_limit = torch.tensor(
-            [7.0] * (num_experts // moe_ep_size), dtype=torch.float32
-        ).cuda()
+        swiglu_limit = torch.tensor([7.0] * (num_experts // moe_ep_size), dtype=torch.float32).cuda()
         if 86 < get_sm_version() < 100:
             model_config.moe_backend = "triton"
         else:
@@ -444,21 +432,15 @@ def run_moe_torch(
     while True:
         try:
             hidden_states_max_tokens = (
-                torch.randn([num_tokens_lists[max_index], hidden_size])
-                .bfloat16()
-                .to(torch.device(device))
+                torch.randn([num_tokens_lists[max_index], hidden_size]).bfloat16().to(torch.device(device))
             )
             logits_max_tokens = (
-                torch.randn([num_tokens_lists[max_index], num_experts])
-                .to(router_logits_dtype)
-                .to(torch.device(device))
+                torch.randn([num_tokens_lists[max_index], num_experts]).to(router_logits_dtype).to(torch.device(device))
             )
             torch.cuda.synchronize()
             AutoTuner.get().clear_cache()
             with torch.inference_mode(), autotune():
-                moe.forward(
-                    hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode
-                )
+                moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
             torch.cuda.synchronize()
             if aic_debug == 1:
                 print(f"tune success for tokens size {num_tokens_lists[max_index]}")
@@ -487,9 +469,7 @@ def run_moe_torch(
             ]
         elif distributed == "balanced":
             actual_logits = (
-                balanced_logits(num_tokens, num_experts, topk)
-                .to(router_logits_dtype)
-                .to(torch.device(device))
+                balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype).to(torch.device(device))
             )
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
@@ -537,9 +517,7 @@ def run_moe_torch(
                     "num_experts": num_experts,
                     "moe_tp_size": moe_tp_size,
                     "moe_ep_size": moe_ep_size,
-                    "distribution": "power_law_" + str(power_law_alpha)
-                    if distributed == "power_law"
-                    else distributed,
+                    "distribution": "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed,
                     "latency": latency,
                 }
             ],

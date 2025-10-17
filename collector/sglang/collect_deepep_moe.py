@@ -84,9 +84,7 @@ def get_moe_decode_test_cases():
 
 def sample_power_law(size, alpha, xmin, xmax):
     u = torch.rand(size)
-    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (
-        1 / (1 - alpha)
-    )
+    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (1 / (1 - alpha))
     return inv_cdf
 
 
@@ -142,9 +140,7 @@ def power_law_logits_v4(num_tokens, num_experts, topk, ep, alpha):
 
         res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
         max_ep_idx = torch.argmax(res).item()
-        num_tokens_per_expert_rank0 = num_tokens_per_expert.view(ep, num_experts // ep)[
-            max_ep_idx
-        ].view(-1)
+        num_tokens_per_expert_rank0 = num_tokens_per_expert.view(ep, num_experts // ep)[max_ep_idx].view(-1)
         if max(num_tokens_per_expert_rank0) <= num_tokens:
             return num_tokens_per_expert_rank0
 
@@ -224,9 +220,7 @@ def benchmark_moe_layer_prefill(
 
         if hidden_states_per_token_iter.shape[1] % 128 != 0:
             pad_size = 128 - (hidden_states_per_token_iter.shape[1] % 128)
-            hidden_states_per_token_iter = torch.nn.functional.pad(
-                hidden_states_per_token_iter, (0, pad_size)
-            )
+            hidden_states_per_token_iter = torch.nn.functional.pad(hidden_states_per_token_iter, (0, pad_size))
 
         hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
         scale_tensor_iter = torch.ones(
@@ -392,9 +386,7 @@ def benchmark_moe_layer_prefill(
             try:
                 moe_tp_size = 1
                 moe_ep_size = (
-                    server_args.ep_size
-                    if num_experts == 256
-                    else int(server_args.ep_size * 256 // num_experts)
+                    server_args.ep_size if num_experts == 256 else int(server_args.ep_size * 256 // num_experts)
                 )
                 num_tokens_log = num_token * moe_ep_size
                 device_name = torch.cuda.get_device_name(server_args.device)
@@ -469,8 +461,7 @@ def benchmark_moe_layer_decode(
 
         if num_token > num_max_dispatch_tokens_per_rank:
             print(
-                f"num_token {num_token} > num_max_dispatch_tokens_per_rank "
-                f"{num_max_dispatch_tokens_per_rank}, skipping"
+                f"num_token {num_token} > num_max_dispatch_tokens_per_rank {num_max_dispatch_tokens_per_rank}, skipping"
             )
             continue
 
@@ -625,16 +616,12 @@ def benchmark_moe_layer_decode(
             try:
                 moe_tp_size = 1
                 moe_ep_size = (
-                    server_args.ep_size
-                    if num_experts == 256
-                    else int(server_args.ep_size * 256 // num_experts)
+                    server_args.ep_size if num_experts == 256 else int(server_args.ep_size * 256 // num_experts)
                 )
                 num_tokens_log = num_token * moe_ep_size
                 device_name = torch.cuda.get_device_name(server_args.device)
                 version = pkg_resources.get_distribution("sglang").version
-                distribution_str = (
-                    f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
-                )
+                distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
                 perf_filename = os.path.join(output_path, "generation_moe_perf.txt")
                 os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                 log_perf(
@@ -693,9 +680,7 @@ def run_moe(
         rank_print(f"{'=' * 50}")
 
         original_json_override = server_args.json_model_override_args
-        server_args.json_model_override_args = json.dumps(
-            {"num_hidden_layers": 4, "n_routed_experts": num_experts}
-        )
+        server_args.json_model_override_args = json.dumps({"num_hidden_layers": 4, "n_routed_experts": num_experts})
 
         model_runner = load_model_with_dummy_weights(server_args, port_args, tp_rank)
 
@@ -708,9 +693,7 @@ def run_moe(
 
         ep_size = server_args.ep_size
         actual_num_experts // ep_size
-        num_rank = (
-            ep_size if actual_num_experts == 256 else int(256 // actual_num_experts * ep_size)
-        )
+        num_rank = ep_size if actual_num_experts == 256 else int(256 // actual_num_experts * ep_size)
         prefill_test_cases = get_moe_prefill_test_cases(num_rank)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 

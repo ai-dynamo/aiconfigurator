@@ -97,9 +97,7 @@ def get_attention_decode_test_cases():
     return test_cases
 
 
-def load_model_runner(
-    model_path, attention_backend, head_num, test_layer, dtype="auto", device="cuda", tp_rank=0
-):
+def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype="auto", device="cuda", tp_rank=0):
     """Load model runner
     Environment variables:
     - SGLANG_TEST_NUM_LAYERS=2  # Load only 2 layers
@@ -214,12 +212,7 @@ def run_attention_torch(
                     dtype=torch.bfloat16,
                     device="cuda",
                 )
-                positions = (
-                    torch.arange(seq_length, device="cuda")
-                    .unsqueeze(0)
-                    .expand(batch_size, -1)
-                    .flatten()
-                )
+                positions = torch.arange(seq_length, device="cuda").unsqueeze(0).expand(batch_size, -1).flatten()
                 zero_allocator = BumpAllocator(buffer_size=256, dtype=torch.float32, device="cuda")
 
                 for _ in range(num_warmup):
@@ -363,9 +356,7 @@ def run_attention_torch(
                 batch.output_ids = seq_length
                 batch.prepare_for_decode()
                 model_worker_batch_decode = batch.get_model_worker_batch()
-                forward_batch_decode = ForwardBatch.init_new(
-                    model_worker_batch_decode, model_runner
-                )
+                forward_batch_decode = ForwardBatch.init_new(model_worker_batch_decode, model_runner)
                 model_runner.attn_backend.init_forward_metadata(forward_batch_decode)
                 decode_hidden = torch.randn(
                     batch_size,
@@ -506,9 +497,7 @@ if __name__ == "__main__":
         cleanup_distributed()
 
         torch.cuda.empty_cache()
-        model_runner = load_model_runner(
-            model_path, attention_backend, head_num, test_layer, dtype, device
-        )
+        model_runner = load_model_runner(model_path, attention_backend, head_num, test_layer, dtype, device)
 
         run_attention_torch(
             model_runner,

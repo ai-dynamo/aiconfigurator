@@ -63,9 +63,7 @@ def run_attention_torch(
         )
         # query_start_loc marks the starting position of each sequence in the flattened token array
         # Format: [0, input_len, 2*input_len, ..., batch_size*input_len]
-        query_start_loc = (
-            torch.arange(0, batch_size + 1, 1, dtype=torch.int32, device=device) * input_len
-        )
+        query_start_loc = torch.arange(0, batch_size + 1, 1, dtype=torch.int32, device=device) * input_len
         # seq_lens stores the length of each sequence (all equal to input_len here)
         seq_lens = torch.full((batch_size,), input_len, dtype=torch.int32, device=device)
         # block_table maps each sequence to its allocated physical blocks
@@ -78,9 +76,7 @@ def run_attention_torch(
         slot_mapping = torch.arange(0, num_tokens, dtype=torch.long, device=device)
         # Safety checks
         assert block_table.max() < total_blocks, "block_table references non-existent blocks"
-        assert slot_mapping.max() < total_blocks * block_size, (
-            "slot_mapping exceeds physical storage capacity"
-        )
+        assert slot_mapping.max() < total_blocks * block_size, "slot_mapping exceeds physical storage capacity"
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_tokens,
@@ -116,17 +112,13 @@ def run_attention_torch(
         class DummyLayer(torch.nn.Module):
             def __init__(self, num_heads, num_key_value_heads, head_dim, device):
                 super().__init__()
-                assert num_heads % num_key_value_heads == 0, (
-                    "num_heads must be divisible by num_key_value_heads"
-                )
+                assert num_heads % num_key_value_heads == 0, "num_heads must be divisible by num_key_value_heads"
 
                 self.num_heads = num_heads
                 self.num_key_value_heads = num_key_value_heads
 
                 # orignal scale tensor
-                self.register_buffer(
-                    "_q_scale_base", torch.ones(num_heads, dtype=torch.float32, device=device)
-                )
+                self.register_buffer("_q_scale_base", torch.ones(num_heads, dtype=torch.float32, device=device))
                 self.register_buffer(
                     "_k_scale_base",
                     torch.ones(num_key_value_heads, dtype=torch.float32, device=device),
@@ -153,14 +145,10 @@ def run_attention_torch(
 
         if use_fp8_kv_cache:
             # FP8 input requires BF16 output
-            output = torch.empty(
-                (num_tokens, num_heads, head_dim), dtype=torch.bfloat16, device=device
-            )
+            output = torch.empty((num_tokens, num_heads, head_dim), dtype=torch.bfloat16, device=device)
         else:
             # FP16 input requires FP16 output
-            output = torch.empty(
-                (num_tokens, num_heads, head_dim), dtype=torch.float16, device=device
-            )
+            output = torch.empty((num_tokens, num_heads, head_dim), dtype=torch.float16, device=device)
 
         # cudagraph capture
         g = torch.cuda.CUDAGraph()
@@ -238,12 +226,8 @@ def run_attention_torch(
         # Initialize metadata - key correction section
         qo_indptr = torch.arange(0, batch_size + 1, dtype=torch.int32, device=device)
         paged_kv_indptr = torch.arange(0, batch_size + 1, dtype=torch.int32, device=device)
-        paged_kv_indices = torch.arange(
-            0, batch_size, dtype=torch.int32, device=device
-        )  # 1 block per sequence
-        paged_kv_last_page_len = torch.ones(
-            batch_size, dtype=torch.int32, device=device
-        )  # last page length = 1
+        paged_kv_indices = torch.arange(0, batch_size, dtype=torch.int32, device=device)  # 1 block per sequence
+        paged_kv_last_page_len = torch.ones(batch_size, dtype=torch.int32, device=device)  # last page length = 1
         slot_mapping = torch.arange(0, batch_size, dtype=torch.long, device=device)
 
         attn_metadata = FlashInferMetadata(
@@ -281,22 +265,14 @@ def run_attention_torch(
         class DummyLayer(torch.nn.Module):
             def __init__(self, num_heads, num_key_value_heads, head_dim, device):
                 super().__init__()
-                assert num_heads % num_key_value_heads == 0, (
-                    "num_heads must be divisible by num_key_value_heads"
-                )
+                assert num_heads % num_key_value_heads == 0, "num_heads must be divisible by num_key_value_heads"
                 self.num_heads = num_heads
                 self.num_key_value_heads = num_key_value_heads
 
                 # Original scale tensors
-                self.register_buffer(
-                    "_q_scale", torch.ones(num_heads, dtype=torch.float32, device=device)
-                )
-                self.register_buffer(
-                    "_k_scale", torch.ones(num_key_value_heads, dtype=torch.float32, device=device)
-                )
-                self.register_buffer(
-                    "_v_scale", torch.ones(num_key_value_heads, dtype=torch.float32, device=device)
-                )
+                self.register_buffer("_q_scale", torch.ones(num_heads, dtype=torch.float32, device=device))
+                self.register_buffer("_k_scale", torch.ones(num_key_value_heads, dtype=torch.float32, device=device))
+                self.register_buffer("_v_scale", torch.ones(num_key_value_heads, dtype=torch.float32, device=device))
 
                 # FlashInfer required additional interfaces
                 self._k_scale_float = self._k_scale
@@ -514,9 +490,7 @@ def get_generation_attention_test_cases():
                 if n_kv > n or n % n_kv != 0:
                     continue
                 for s in target_s_list:
-                    test_cases.append(
-                        [b, s, n, n_kv, 128, False, False, False, "generation_attention_perf.txt"]
-                    )
+                    test_cases.append([b, s, n, n_kv, 128, False, False, False, "generation_attention_perf.txt"])
                     if has_fp8_kv_cache:
                         test_cases.append(
                             [

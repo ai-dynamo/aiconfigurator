@@ -13,9 +13,7 @@ from aiconfigurator.webapp.main import main as webapp_main
 
 
 def _run_cli(extra_args: list[str]) -> None:
-    cli_parser = argparse.ArgumentParser(
-        description="Dynamo AIConfigurator for disaggregated serving deployment."
-    )
+    cli_parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for disaggregated serving deployment.")
     configure_cli_parser(cli_parser)
     cli_args = cli_parser.parse_args(extra_args)
     cli_main(cli_args)
@@ -29,18 +27,14 @@ def _run_webapp(extra_args: list[str]) -> None:
 
 
 def _run_eval(extra_args: list[str]) -> None:
-    eval_parser = argparse.ArgumentParser(
-        description="Generate config -> Launch Service -> Benchmarking -> Analysis"
-    )
+    eval_parser = argparse.ArgumentParser(description="Generate config -> Launch Service -> Benchmarking -> Analysis")
     configure_eval_parser(eval_parser)
     eval_args = eval_parser.parse_args(extra_args)
     eval_main(eval_args)
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(
-        description="Dynamo AIConfigurator for disaggregated serving deployment."
-    )
+    parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for disaggregated serving deployment.")
     subparsers = parser.add_subparsers(dest="command", help="Command to run", required=True)
 
     # CLI subcommand

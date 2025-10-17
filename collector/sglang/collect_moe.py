@@ -74,9 +74,7 @@ def get_moe_test_cases():
 
     test_cases = []
 
-    for (
-        num_gpu
-    ) in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
+    for num_gpu in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
         for moe_type in moe_list:
             for num_token in num_tokens:
                 for model_config in model_config_list:
@@ -154,9 +152,7 @@ def balanced_logits(num_tokens, num_experts, topk):
             if num_tokens >= stride:
                 h_selected_experts[token_i][i] = (token_i + i * stride) % num_experts
             else:
-                h_selected_experts[token_i][i] = (
-                    token_i * stride / num_tokens + i * stride
-                ) % num_experts
+                h_selected_experts[token_i][i] = (token_i * stride / num_tokens + i * stride) % num_experts
 
     expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
     router_logits = F.softmax(expert_map.bfloat16(), dim=1)
@@ -165,9 +161,7 @@ def balanced_logits(num_tokens, num_experts, topk):
 
 def sample_power_law(size, alpha, xmin, xmax):
     u = torch.rand(size)
-    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (
-        1 / (1 - alpha)
-    )
+    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (1 / (1 - alpha))
     return inv_cdf
 
 
@@ -306,8 +300,7 @@ def benchmark_config(
     elif distributed == "power_law":
         # only support ep=1 for sglang
         gating_output = [
-            power_law_logits_v3(num_tokens, num_experts, topk, 1, power_law_alpha)
-            for _ in range(num_iters)
+            power_law_logits_v3(num_tokens, num_experts, topk, 1, power_law_alpha) for _ in range(num_iters)
         ]
     else:
         raise ValueError(f"Unsupported distributed mode: {distributed}")
@@ -419,16 +412,12 @@ def benchmark(
     power_law_alpha: float = 0,
 ) -> tuple[dict[str, int], float]:
     torch.cuda.manual_seed_all(0)
-    dtype_str = get_config_dtype_str(
-        dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
-    )
+    dtype_str = get_config_dtype_str(dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8)
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
     block_n = block_shape[0] if block_shape else 0
     block_k = block_shape[1] if block_shape else 0
-    op_config = get_moe_configs(
-        num_experts, shard_intermediate_size // 2, dtype_str, block_n, block_k
-    )
+    op_config = get_moe_configs(num_experts, shard_intermediate_size // 2, dtype_str, block_n, block_k)
     if op_config is None:
         config = get_default_config(
             num_tokens,
@@ -480,9 +469,7 @@ def run_moe_torch(
     torch.set_default_device(device)
 
     assert moe_ep_size == 1, "only support moe ep size = 1"
-    assert moe_type == "fp8_block" or moe_type == "float16", (
-        "only support moe type = fp8_block or float16"
-    )
+    assert moe_type == "fp8_block" or moe_type == "float16", "only support moe type = fp8_block or float16"
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
 
     latency = benchmark(
@@ -511,9 +498,7 @@ def run_moe_torch(
                 "num_experts": num_experts,
                 "moe_tp_size": moe_tp_size,
                 "moe_ep_size": moe_ep_size,
-                "distribution": "power_law_" + str(power_law_alpha)
-                if distributed == "power_law"
-                else distributed,
+                "distribution": "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed,
                 "latency": latency,
             }
         ],

@@ -40,9 +40,7 @@ def get_supported_databases(
         return supported_dict
 
     system_yamls = [
-        f
-        for f in os.listdir(systems_dir)
-        if f.endswith(".yaml") and os.path.isfile(os.path.join(systems_dir, f))
+        f for f in os.listdir(systems_dir) if f.endswith(".yaml") and os.path.isfile(os.path.join(systems_dir, f))
     ]
     for system_yaml in system_yamls:
         system = system_yaml.split(".")[0]
@@ -157,10 +155,7 @@ def get_latest_database_version(
     # correct sorting across stable and RC releases.
     latest_version = max(versions_ids, key=lambda x: x[0])
 
-    logger.debug(
-        f"Latest version for {system}/{backend}: {latest_version[1]} "
-        f"(parsed as {latest_version[0]})"
-    )
+    logger.debug(f"Latest version for {system}/{backend}: {latest_version[1]} (parsed as {latest_version[0]})")
     return latest_version[1]
 
 
@@ -211,9 +206,7 @@ def get_all_databases(
     Get all the databases for all the systems, backends and versions
     """
     database_dict = defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    system_yamls = [
-        system_yaml for system_yaml in os.listdir(systems_dir) if system_yaml.endswith(".yaml")
-    ]
+    system_yamls = [system_yaml for system_yaml in os.listdir(systems_dir) if system_yaml.endswith(".yaml")]
     for system_yaml in system_yamls:
         system = system_yaml.split(".")[0]
         with open(os.path.join(systems_dir, system_yaml)) as f:
@@ -242,9 +235,7 @@ def load_custom_allreduce_data(custom_allreduce_file):
     if not os.path.exists(custom_allreduce_file):
         logger.warning(f"Custom allreduce data file {custom_allreduce_file} not found.")
         return None
-    custom_allreduce_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    )
+    custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
 
     with open(custom_allreduce_file) as f:
         reader = csv.DictReader(f)
@@ -303,10 +294,7 @@ def load_nccl_data(nccl_file):
         dtype = common.CommQuantMode[dtype]
         try:
             latency = nccl_data[dtype][op_name][num_gpus][message_size]
-            logger.debug(
-                f"value conflict in nccl data: {dtype} {op_name} {num_gpus} "
-                f"{message_size} {latency}"
-            )
+            logger.debug(f"value conflict in nccl data: {dtype} {op_name} {num_gpus} {message_size} {latency}")
         except KeyError:
             nccl_data[dtype][op_name][num_gpus][message_size] = latency
 
@@ -363,9 +351,7 @@ def load_moe_data(moe_file):
             lambda: defaultdict(
                 lambda: defaultdict(
                     lambda: defaultdict(
-                        lambda: defaultdict(
-                            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-                        )
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
                     )
                 )
             )
@@ -376,9 +362,7 @@ def load_moe_data(moe_file):
             lambda: defaultdict(
                 lambda: defaultdict(
                     lambda: defaultdict(
-                        lambda: defaultdict(
-                            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-                        )
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
                     )
                 )
             )
@@ -413,9 +397,7 @@ def load_moe_data(moe_file):
             row["distribution"],
             row["latency"],
         )
-        kernel_source = row[
-            "kernel_source"
-        ]  # moe_torch_flow, moe_torch_flow_min_latency, moe_torch_flow
+        kernel_source = row["kernel_source"]  # moe_torch_flow, moe_torch_flow_min_latency, moe_torch_flow
         num_tokens = int(num_tokens)
         hidden_size = int(hidden_size)
         inter_size = int(inter_size)
@@ -427,25 +409,21 @@ def load_moe_data(moe_file):
 
         quant_mode = common.MoEQuantMode[quant_mode]
 
-        moe_data = (
-            moe_low_latency_data
-            if kernel_source == "moe_torch_flow_min_latency"
-            else moe_default_data
-        )
+        moe_data = moe_low_latency_data if kernel_source == "moe_torch_flow_min_latency" else moe_default_data
 
         try:
-            latency = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][
-                inter_size
-            ][moe_tp_size][moe_ep_size][num_tokens]
+            latency = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][
+                moe_tp_size
+            ][moe_ep_size][num_tokens]
             logger.debug(
                 f"value conflict in moe data: {workload_distribution} {quant_mode} {topk} "
                 f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} "
                 f"{num_tokens} {latency}"
             )
         except KeyError:
-            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][
-                moe_tp_size
-            ][moe_ep_size][num_tokens] = latency
+            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                moe_ep_size
+            ][num_tokens] = latency
 
     return moe_default_data, moe_low_latency_data
 
@@ -459,9 +437,7 @@ def load_sglang_mlp_data(mlp_file):
     generation_mlp_file = os.path.join(data_dir, common.PerfDataFilename.generation_mlp.value)
 
     context_mlp_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-    generation_mlp_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    )
+    generation_mlp_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
 
     if os.path.exists(prefill_mlp_file):
         with open(prefill_mlp_file, encoding="utf-8") as f:
@@ -482,9 +458,7 @@ def load_sglang_mlp_data(mlp_file):
                 quant_mode = common.MoEQuantMode[quant_type]
 
                 try:
-                    latency = context_mlp_data[quant_mode][hidden_size][intermediate_size][
-                        num_token
-                    ]
+                    latency = context_mlp_data[quant_mode][hidden_size][intermediate_size][num_token]
                     logger.debug(
                         f"value conflict in prefill mlp data: {quant_mode} {hidden_size} "
                         f"{intermediate_size} {num_token} {latency}"
@@ -511,17 +485,13 @@ def load_sglang_mlp_data(mlp_file):
                 quant_mode = common.MoEQuantMode[quant_type]
 
                 try:
-                    latency = generation_mlp_data[quant_mode][hidden_size][intermediate_size][
-                        num_token
-                    ]
+                    latency = generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token]
                     logger.debug(
                         f"value conflict in generation mlp data: {quant_mode} {hidden_size} "
                         f"{intermediate_size} {num_token} {latency}"
                     )
                 except KeyError:
-                    generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token] = (
-                        avg_ms
-                    )
+                    generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token] = avg_ms
 
     return context_mlp_data, generation_mlp_data
 
@@ -543,9 +513,7 @@ def load_sglang_moe_data(moe_file):
             lambda: defaultdict(
                 lambda: defaultdict(
                     lambda: defaultdict(
-                        lambda: defaultdict(
-                            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-                        )
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
                     )
                 )
             )
@@ -556,9 +524,7 @@ def load_sglang_moe_data(moe_file):
             lambda: defaultdict(
                 lambda: defaultdict(
                     lambda: defaultdict(
-                        lambda: defaultdict(
-                            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-                        )
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
                     )
                 )
             )
@@ -585,9 +551,9 @@ def load_sglang_moe_data(moe_file):
                 quant_mode = common.MoEQuantMode[quant_mode]
 
                 # Store the data, overwriting any previous entry with the same key
-                moe_default_data[quant_mode][distribution][topk][num_experts][hidden_size][
-                    inter_size
-                ][moe_tp_size][moe_ep_size][num_tokens] = latency
+                moe_default_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                    moe_ep_size
+                ][num_tokens] = latency
                 logger.debug(
                     f"Loaded context MoE data: {quant_mode}, {distribution}, {topk}, "
                     f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
@@ -616,9 +582,9 @@ def load_sglang_moe_data(moe_file):
                 quant_mode = common.MoEQuantMode[quant_mode]
 
                 # Store the data, overwriting any previous entry with the same key
-                moe_low_latency_data[quant_mode][distribution][topk][num_experts][hidden_size][
-                    inter_size
-                ][moe_tp_size][moe_ep_size][num_tokens] = latency
+                moe_low_latency_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                    moe_ep_size
+                ][num_tokens] = latency
                 logger.debug(
                     f"Loaded generation MoE data: {quant_mode}, {distribution}, {topk}, "
                     f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
@@ -641,9 +607,7 @@ def load_context_attention_data(context_attention_file):
         lambda: defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-                    )
+                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
                 )
             )
         )
@@ -682,17 +646,13 @@ def load_context_attention_data(context_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][
-                window_size
-            ][n][s][b]
+            latency = context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
             logger.debug(
                 f"value conflict in context attention data: {quant_mode} {kv_cache_dtype} "
                 f"{head_size} {window_size} {kv_n} {n} {s}"
             )
         except KeyError:
-            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][
-                b
-            ] = latency
+            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = latency
 
     return context_attention_data
 
@@ -706,9 +666,7 @@ def load_generation_attention_data(generation_attention_file):
         return None
     generation_attention_data = defaultdict(
         lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-            )
+            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
         )
     )
     with open(generation_attention_file, encoding="utf-8") as f:
@@ -747,17 +705,13 @@ def load_generation_attention_data(generation_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][
-                s
-            ]
+            latency = generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
             logger.debug(
                 f"value conflict in generation attention data: {kv_cache_dtype} {kv_n} "
                 f"{head_size} {window_size} {n} {b}"
             )
         except KeyError:
-            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = (
-                latency
-            )
+            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = latency
 
     return generation_attention_data
 
@@ -769,9 +723,7 @@ def load_context_mla_data(context_mla_file):
     if not os.path.exists(context_mla_file):
         logger.warning(f"Context mla data file {context_mla_file} not found.")
         return None
-    context_mla_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-    )
+    context_mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
 
     with open(context_mla_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -802,8 +754,7 @@ def load_context_mla_data(context_mla_file):
         try:
             latency = context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b]
             logger.debug(
-                f"value conflict in context mla data: {quant_mode} {kv_cache_dtype} {num_heads} "
-                f"{s} {b} {latency}"
+                f"value conflict in context mla data: {quant_mode} {kv_cache_dtype} {num_heads} {s} {b} {latency}"
             )
         except KeyError:
             context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = latency
@@ -818,9 +769,7 @@ def load_generation_mla_data(generation_mla_file):
     if not os.path.exists(generation_mla_file):
         logger.warning(f"Generation mla data file {generation_mla_file} not found.")
         return None
-    generation_mla_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    )
+    generation_mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     with open(generation_mla_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
@@ -852,10 +801,7 @@ def load_generation_mla_data(generation_mla_file):
 
         try:
             latency = generation_mla_data[kv_cache_dtype][num_heads][b][s]
-            logger.debug(
-                f"value conflict in generation mla data: {kv_cache_dtype} {num_heads} "
-                f"{b} {s} {latency} "
-            )
+            logger.debug(f"value conflict in generation mla data: {kv_cache_dtype} {num_heads} {b} {s} {latency} ")
         except KeyError:
             generation_mla_data[kv_cache_dtype][num_heads][b][s] = latency
 
@@ -870,9 +816,7 @@ def load_sglang_context_mla_data(context_mla_file):
         logger.warning(f"Context mla data file {context_mla_file} not found.")
         return None
     context_mla_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-        )
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
     )
 
     with open(context_mla_file, encoding="utf-8") as f:
@@ -996,10 +940,7 @@ def load_mla_bmm_data(mla_bmm_file):
 
         try:
             latency = mla_bmm_data[quant_mode][op_name][num_heads][num_tokens]
-            logger.debug(
-                f"value conflict in mla bmm data: {op_name} {quant_mode} {num_heads} "
-                f"{num_tokens} {latency} "
-            )
+            logger.debug(f"value conflict in mla bmm data: {op_name} {quant_mode} {num_heads} {num_tokens} {latency} ")
         except KeyError:
             mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = latency
 
@@ -1013,9 +954,7 @@ def load_deepep_ll_data(deepep_ll_file):
     if not os.path.exists(deepep_ll_file):
         return None
 
-    deepep_ll_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
-    )
+    deepep_ll_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
 
     with open(deepep_ll_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -1034,10 +973,7 @@ def load_deepep_ll_data(deepep_ll_file):
         # Store the data with key structure: [hidden_size][num_topk][num_experts][num_token]
         # -> timing data
         try:
-            logger.debug(
-                f"value conflict in deepep ll data: {hidden_size} {num_topk} "
-                f"{num_experts} {num_token}"
-            )
+            logger.debug(f"value conflict in deepep ll data: {hidden_size} {num_topk} {num_experts} {num_token}")
         except KeyError:
             deepep_ll_data[node_num][hidden_size][num_topk][num_experts][num_token] = lat
 
@@ -1076,13 +1012,10 @@ def load_deepep_normal_data(deepep_normal_file):
         # [hidden_size][topk][num_experts][dispatch_sms][num_token] -> timing data
         try:
             logger.debug(
-                f"value conflict in deepep normal data: {hidden_size} {topk} {num_experts} "
-                f"{dispatch_sms} {num_token}"
+                f"value conflict in deepep normal data: {hidden_size} {topk} {num_experts} {dispatch_sms} {num_token}"
             )
         except KeyError:
-            deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms][
-                num_token
-            ] = lat
+            deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms][num_token] = lat
 
     return deepep_normal_data
 
@@ -1121,9 +1054,7 @@ class PerfDatabase:
         query_moe: query the moe data
     """
 
-    def __init__(
-        self, system: str, backend: str, version: str, systems_dir: str = "./systems"
-    ) -> None:
+    def __init__(self, system: str, backend: str, version: str, systems_dir: str = "./systems") -> None:
         """
         Initialize the perf database
         """
@@ -1164,15 +1095,11 @@ class PerfDatabase:
             self._deepep_normal_data = load_deepep_normal_data(
                 os.path.join(data_dir, common.PerfDataFilename.deepep_normal.value)
             )
-            self._deepep_ll_data = load_deepep_ll_data(
-                os.path.join(data_dir, common.PerfDataFilename.deepep_ll.value)
-            )
+            self._deepep_ll_data = load_deepep_ll_data(os.path.join(data_dir, common.PerfDataFilename.deepep_ll.value))
             self._nccl_data = {}
             self._mla_bmm_data = {}
         else:
-            self._gemm_data = load_gemm_data(
-                os.path.join(data_dir, common.PerfDataFilename.gemm.value)
-            )
+            self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
                 os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
             )
@@ -1192,9 +1119,7 @@ class PerfDatabase:
                 os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
             )
             self._nccl_data = load_nccl_data(nccl_data_dir)
-            self._mla_bmm_data = load_mla_bmm_data(
-                os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value)
-            )
+            self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
 
             # pre-correction
             self._correct_data()
@@ -1202,15 +1127,13 @@ class PerfDatabase:
         for quant_mode in self._context_attention_data:
             for kv_cache_dtype in self._context_attention_data[quant_mode]:
                 for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype]:
-                    for head_size in self._context_attention_data[quant_mode][kv_cache_dtype][
-                        num_kv_heads
-                    ]:
-                        for window_size in self._context_attention_data[quant_mode][kv_cache_dtype][
-                            num_kv_heads
-                        ][head_size]:
-                            data_dict = self._context_attention_data[quant_mode][kv_cache_dtype][
-                                num_kv_heads
-                            ][head_size][window_size]
+                    for head_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads]:
+                        for window_size in self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][
+                            head_size
+                        ]:
+                            data_dict = self._context_attention_data[quant_mode][kv_cache_dtype][num_kv_heads][
+                                head_size
+                            ][window_size]
                             min_x = min(data_dict.keys())
                             target_x_list = [
                                 4,
@@ -1276,9 +1199,7 @@ class PerfDatabase:
         for kv_cache_dtype in self._generation_attention_data:
             for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
                 for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
-                    for window_size in self._generation_attention_data[kv_cache_dtype][
-                        num_kv_heads
-                    ][head_size]:
+                    for window_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size]:
                         target_x_list = [
                             4,
                             5,
@@ -1340,9 +1261,9 @@ class PerfDatabase:
                             262144,
                             2097152 * 8,
                         ]  # s
-                        data_dict = self._generation_attention_data[kv_cache_dtype][num_kv_heads][
-                            head_size
-                        ][window_size]
+                        data_dict = self._generation_attention_data[kv_cache_dtype][num_kv_heads][head_size][
+                            window_size
+                        ]
                         min_x = min(data_dict.keys())
                         filtered_x_list = []
                         for i in target_x_list:
@@ -1440,12 +1361,8 @@ class PerfDatabase:
             for kernel_source in self._context_mla_data:
                 for quant_mode in self._context_mla_data[kernel_source]:
                     for kv_cache_dtype in self._context_mla_data[kernel_source][quant_mode]:
-                        num_heads_list = list(
-                            self._context_mla_data[kernel_source][quant_mode][kv_cache_dtype].keys()
-                        )
-                        data_dict = self._context_mla_data[kernel_source][quant_mode][
-                            kv_cache_dtype
-                        ]
+                        num_heads_list = list(self._context_mla_data[kernel_source][quant_mode][kv_cache_dtype].keys())
+                        data_dict = self._context_mla_data[kernel_source][quant_mode][kv_cache_dtype]
                         target_x_list = num_heads_list  # to reuse x dim
                         # currently, support max seq to 1M.
                         # Because all the system is linear for now.
@@ -1675,9 +1592,7 @@ class PerfDatabase:
                     continue
                 for z in target_z_list:
                     if z not in z_dict:
-                        z_left, z_right = self._nearest_1d_point_helper(
-                            z, list(z_dict.keys()), False
-                        )
+                        z_left, z_right = self._nearest_1d_point_helper(z, list(z_dict.keys()), False)
                         # Check if both left and right boundaries exist
                         if z_left not in z_dict or z_right not in z_dict:
                             logger.warning(
@@ -1695,9 +1610,7 @@ class PerfDatabase:
             # y_direction
             for y in target_y_list:
                 if y not in data_dict[x]:
-                    y_left, y_right = self._nearest_1d_point_helper(
-                        y, list(data_dict[x].keys()), False
-                    )
+                    y_left, y_right = self._nearest_1d_point_helper(y, list(data_dict[x].keys()), False)
                     # Check if both left and right boundaries exist
                     if y_left not in data_dict[x] or y_right not in data_dict[x]:
                         logger.warning(
@@ -1771,9 +1684,7 @@ class PerfDatabase:
                         else:
                             data_dict[x][y][z] = value
 
-    def _nearest_1d_point_helper(
-        self, x: int, values: list[int], inner_only: bool = True
-    ) -> tuple[int, int]:
+    def _nearest_1d_point_helper(self, x: int, values: list[int], inner_only: bool = True) -> tuple[int, int]:
         """
         Find the nearest 1d point
         """
@@ -1782,16 +1693,12 @@ class PerfDatabase:
 
         if x < sorted_values[0]:
             if inner_only:
-                raise ValueError(
-                    f"x is less than the smallest value in the list. {x=}, {sorted_values=}"
-                )
+                raise ValueError(f"x is less than the smallest value in the list. {x=}, {sorted_values=}")
             else:
                 return sorted_values[0], sorted_values[1]
         elif x > sorted_values[-1]:
             if inner_only:
-                raise ValueError(
-                    f"x is greater than the largest value in the list. {x=}, {sorted_values=}"
-                )
+                raise ValueError(f"x is greater than the largest value in the list. {x=}, {sorted_values=}")
             else:
                 return sorted_values[-2], sorted_values[-1]
 
@@ -1803,9 +1710,7 @@ class PerfDatabase:
                 start = sorted_values[i - 1]
                 break
         if start is None or end is None:
-            raise ValueError(
-                f"start or end is None. {x=}, {sorted_values=}, start={start=}, end={end=}"
-            )
+            raise ValueError(f"start or end is None. {x=}, {sorted_values=}, start={start=}, end={end=}")
         return start, end
 
     def _validate(self, value: float) -> float:
@@ -1833,9 +1738,7 @@ class PerfDatabase:
                 values_list.append(data[i][j][z_right])
 
         return self._validate(
-            interpolate.griddata(
-                np.array(points_list), np.array(values_list), (x, y, z), method="linear"
-            )
+            interpolate.griddata(np.array(points_list), np.array(values_list), (x, y, z), method="linear")
         )
 
     def _interp_2d_linear(self, x: int, y: int, data: dict) -> float:
@@ -1852,9 +1755,7 @@ class PerfDatabase:
                 values_list.append(data[i][j])
 
         return self._validate(
-            interpolate.griddata(
-                np.array(points_list), np.array(values_list), (x, y), method="linear"
-            )
+            interpolate.griddata(np.array(points_list), np.array(values_list), (x, y), method="linear")
         )
 
     def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str) -> float:
@@ -1866,9 +1767,7 @@ class PerfDatabase:
         else:
             return self._interp_2d_1d(x, y, z, data, method)
 
-    def _bilinear_interpolation(
-        self, x_list: list[int], y_list: list[int], x: int, y: int, data: dict
-    ) -> float:
+    def _bilinear_interpolation(self, x_list: list[int], y_list: list[int], x: int, y: int, data: dict) -> float:
         """
         Interpolate the 2d data using bilinear interpolation
         """
@@ -1907,18 +1806,12 @@ class PerfDatabase:
             if method == "cubic":
                 x_values.append(
                     self._validate(
-                        interpolate.griddata(
-                            np.array(points_list), np.array(values_list), (y, z), method="cubic"
-                        )
+                        interpolate.griddata(np.array(points_list), np.array(values_list), (y, z), method="cubic")
                     )
                 )
             elif method == "bilinear":
                 x_values.append(
-                    self._validate(
-                        self._bilinear_interpolation(
-                            [y_left, y_right], [z_left, z_right], y, z, data[i]
-                        )
-                    )
+                    self._validate(self._bilinear_interpolation([y_left, y_right], [z_left, z_right], y, z, data[i]))
                 )
             else:
                 raise NotImplementedError
@@ -1963,26 +1856,12 @@ class PerfDatabase:
         Query the gemm data
         """
 
-        def get_sol(
-            m: int, n: int, k: int, quant_mode: common.GEMMQuantMode
-        ) -> tuple[float, float, float]:
+        def get_sol(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> tuple[float, float, float]:
             """
             Get the sol time, sol math and sol mem
             """
-            sol_math = (
-                2
-                * m
-                * n
-                * k
-                / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute)
-                * 1000
-            )
-            sol_mem = (
-                quant_mode.value.memory
-                * (m * n + m * k + n * k)
-                / self.system_spec["gpu"]["mem_bw"]
-                * 1000
-            )
+            sol_math = 2 * m * n * k / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_mem = quant_mode.value.memory * (m * n + m * k + n * k) / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
@@ -2041,12 +1920,7 @@ class PerfDatabase:
                     + n * s * h
                 )
             )  # Output write, assuming 16 bits
-            sol_math = (
-                ops
-                / self.system_spec["gpu"]["float16_tc_flops"]
-                * 1000
-                / fmha_quant_mode.value.compute
-            )
+            sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -2056,26 +1930,20 @@ class PerfDatabase:
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(
-                b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode
-            )[0]
+            return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(
-                b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode
-            )
+            return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
         else:
             if head_size not in [64, 128]:
-                return get_sol(
-                    b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode
-                )[0]
+                return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
             if n_kv == n:
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][
-                    0
-                ][head_size][window_size]
+                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][0][head_size][
+                    window_size
+                ]
             else:
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][
-                    n_kv
-                ][head_size][window_size]
+                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
+                    window_size
+                ]
             latency = self._interp_3d(n, s, b, attention_dict, "cubic")
             return latency
 
@@ -2137,9 +2005,7 @@ class PerfDatabase:
             if head_size not in [64, 128]:
                 return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
             else:
-                attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][
-                    head_size
-                ][window_size]
+                attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
 
             latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
             return latency
@@ -2171,12 +2037,7 @@ class PerfDatabase:
                 b * num_heads * 2 / 2 * (s * s * 192 + s * s * 128)
             )  # 2 for fma, 2 for causality. num_heads, for local heads
             mem_bytes = b * num_heads * 2 * (2 * s * 192 + 2 * s * 128)  # 2 for fp16, TODO
-            sol_math = (
-                ops
-                / self.system_spec["gpu"]["float16_tc_flops"]
-                * 1000
-                / fmha_quant_mode.value.compute
-            )
+            sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -2214,9 +2075,7 @@ class PerfDatabase:
             ops = 2 * b * num_heads * 1088 * s  # 2 for fma
             # kvcache load bytes will depend on kvcache quant.
             # while input q and output might be in fp16.
-            mem_bytes = b * (
-                num_heads * 1088 * 2 + (s - 1) * 1088 * kvcache_quant_mode.value.memory
-            )
+            mem_bytes = b * (num_heads * 1088 * 2 + (s - 1) * 1088 * kvcache_quant_mode.value.memory)
 
             sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000  # only fp16
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
@@ -2297,28 +2156,18 @@ class PerfDatabase:
             # s_w_vc (attention output projection)
             s_w_vc_flop = 2 * b * num_head * kv_lora_rank * v_head_dim
             s_w_vc_mem = (
-                b * num_head * kv_lora_rank
-                + num_head * v_head_dim * kv_lora_rank
-                + 2 * b * num_head * v_head_dim
+                b * num_head * kv_lora_rank + num_head * v_head_dim * kv_lora_rank + 2 * b * num_head * v_head_dim
             )
 
             # attention output projection
             attn_out_flop = 2 * num_head * v_head_dim * hidden_size * b
-            attn_out_mem = (
-                b * num_head * v_head_dim
-                + num_head * v_head_dim * hidden_size
-                + 2 * b * hidden_size
-            )
+            attn_out_mem = b * num_head * v_head_dim + num_head * v_head_dim * hidden_size + 2 * b * hidden_size
 
             ops = qkv_a_flop + q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop
             mem_bytes = (
                 qkv_a_mem + q_b_mem + q_w_kc_mem + attn_mem * 2 + s_w_vc_mem + attn_out_mem
             ) * fmha_quant_mode.value.memory
-            sol_math = (
-                ops
-                / (self.system_spec["gpu"]["float16_tc_flops"] * fmha_quant_mode.value.compute)
-                * 1000
-            )
+            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
             sol_math += attn_flop / (self.system_spec["gpu"]["float16_tc_flops"]) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
@@ -2405,21 +2254,11 @@ class PerfDatabase:
 
             # attention output projection
             attn_out_flop = 2 * num_head * v_head_dim * hidden_size * b * s
-            attn_out_mem = (
-                b * num_head * v_head_dim * s
-                + num_head * v_head_dim * hidden_size
-                + 2 * b * hidden_size * s
-            )
+            attn_out_mem = b * num_head * v_head_dim * s + num_head * v_head_dim * hidden_size + 2 * b * hidden_size * s
 
             ops = qkv_a_flop + q_b_flop + kv_b_flop + attn_out_flop
-            mem_bytes = (
-                qkv_a_mem + q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem
-            ) * fmha_quant_mode.value.memory
-            sol_math = (
-                ops
-                / (self.system_spec["gpu"]["float16_tc_flops"] * fmha_quant_mode.value.compute)
-                * 1000
-            )
+            mem_bytes = (qkv_a_mem + q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha_quant_mode.value.memory
+            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
             sol_math += attn_flop / (self.system_spec["gpu"]["float16_tc_flops"]) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
@@ -2459,9 +2298,7 @@ class PerfDatabase:
         Query the allreduce data
         """
 
-        def get_sol(
-            quant_mode: common.CommQuantMode, tp_size: int, size: int
-        ) -> tuple[float, float, float]:
+        def get_sol(quant_mode: common.CommQuantMode, tp_size: int, size: int) -> tuple[float, float, float]:
             """
             Get the sol time, sol math and sol mem
             """
@@ -2492,15 +2329,9 @@ class PerfDatabase:
             comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
                 "AUTO"
             ]  # use AUTO for allreduce strategy
-            size_left, size_right = self._nearest_1d_point_helper(
-                size, list(comm_dict.keys()), inner_only=False
-            )
-            lat = self._interp_1d(
-                [size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size
-            )
-            if (
-                tp_size > 8
-            ):  # FIXME, to collect real data, use inter-node and intra-node data seperately
+            size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
+            lat = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
+            if tp_size > 8:  # FIXME, to collect real data, use inter-node and intra-node data seperately
                 if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
                     lat = (
                         lat
@@ -2543,24 +2374,10 @@ class PerfDatabase:
                 else self.system_spec["node"]["intra_node_bw"]
             )
 
-            if (
-                operation == "all_gather"
-                or operation == "alltoall"
-                or operation == "reduce_scatter"
-            ):
-                sol_time = (
-                    dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
-                )
+            if operation == "all_gather" or operation == "alltoall" or operation == "reduce_scatter":
+                sol_time = dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
             elif operation == "all_reduce":
-                sol_time = (
-                    2
-                    * dtype.value.memory
-                    * message_size
-                    * (num_gpus - 1)
-                    / num_gpus
-                    / p2p_bw
-                    * 1000
-                )
+                sol_time = 2 * dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
             return sol_time, 0, sol_time
 
         if sol_mode is None:
@@ -2575,25 +2392,15 @@ class PerfDatabase:
 
         max_num_gpus = max(self._nccl_data[dtype][operation].keys())
         nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
-        size_left, size_right = self._nearest_1d_point_helper(
-            message_size, list(nccl_dict.keys()), inner_only=False
-        )
-        lat = self._interp_1d(
-            [size_left, size_right], [nccl_dict[size_left], nccl_dict[size_right]], message_size
-        )
+        size_left, size_right = self._nearest_1d_point_helper(message_size, list(nccl_dict.keys()), inner_only=False)
+        lat = self._interp_1d([size_left, size_right], [nccl_dict[size_left], nccl_dict[size_right]], message_size)
 
         if num_gpus > max_num_gpus:  # need to do some correction
-            logger.debug(
-                f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, "
-                f"need to do some correction"
-            )
+            logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")
             if max_num_gpus > self.system_spec["node"]["num_gpus_per_node"]:  # all inter node
                 scale_factor = 1
             elif num_gpus > self.system_spec["node"]["num_gpus_per_node"]:
-                scale_factor = (
-                    self.system_spec["node"]["intra_node_bw"]
-                    / self.system_spec["node"]["inter_node_bw"]
-                )
+                scale_factor = self.system_spec["node"]["intra_node_bw"] / self.system_spec["node"]["inter_node_bw"]
             else:  # all intra node
                 scale_factor = 1
             lat = lat * (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
@@ -2637,26 +2444,16 @@ class PerfDatabase:
             # tp already impacted inter_size.
             # only consider even workload.
             total_tokens = num_tokens * topk
-            ops = (
-                total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size
-            )  # ffn1, ffn2, gate
+            ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size  # ffn1, ffn2, gate
             mem_bytes = quant_mode.value.memory * (
                 total_tokens * hidden_size * 3  # input+output
                 + total_tokens
                 * inter_size
                 * 3
                 // moe_tp_size  # intermediate, assume ffn1/gate all need to write results.
-                + hidden_size
-                * inter_size
-                * 3
-                // moe_tp_size
-                * min(num_experts // moe_ep_size, total_tokens)
+                + hidden_size * inter_size * 3 // moe_tp_size * min(num_experts // moe_ep_size, total_tokens)
             )
-            sol_math = (
-                ops
-                / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute)
-                * 1000
-            )
+            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -2699,32 +2496,26 @@ class PerfDatabase:
                     else:
                         moe_data = self._generation_moe_data
 
-                    moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][
-                        hidden_size
-                    ][inter_size][moe_tp_size][moe_ep_size]
+                    moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][
+                        moe_tp_size
+                    ][moe_ep_size]
                     num_left, num_right = self._nearest_1d_point_helper(
                         num_tokens, list(moe_dict.keys()), inner_only=False
                     )
-                    lat = self._interp_1d(
-                        [num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens
-                    )
+                    lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
                     return lat
             elif self.backend == common.BackendName.trtllm.value:
                 # aligned with trtllm, kernel source selection.
-                if (
-                    num_tokens <= 128
-                    and self._moe_low_latency_data
-                    and quant_mode == common.MoEQuantMode.nvfp4
-                ):
+                if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
                     try:
                         if workload_distribution in self._moe_low_latency_data[quant_mode]:
-                            moe_dict = self._moe_low_latency_data[quant_mode][
-                                workload_distribution
-                            ][topk][num_experts][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                            moe_dict = self._moe_low_latency_data[quant_mode][workload_distribution][topk][num_experts][
+                                hidden_size
+                            ][inter_size][moe_tp_size][moe_ep_size]
                         else:
-                            moe_dict = self._moe_low_latency_data[quant_mode]["uniform"][topk][
-                                num_experts
-                            ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                            moe_dict = self._moe_low_latency_data[quant_mode]["uniform"][topk][num_experts][
+                                hidden_size
+                            ][inter_size][moe_tp_size][moe_ep_size]
                         logger.debug(
                             f"trying to find low latency data for moe {quant_mode} "
                             f"{workload_distribution} {topk} {num_experts} {hidden_size} "
@@ -2732,22 +2523,22 @@ class PerfDatabase:
                         )
                     except:
                         if workload_distribution in self._moe_data[quant_mode]:
-                            moe_dict = self._moe_data[quant_mode][workload_distribution][topk][
-                                num_experts
-                            ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                        else:
-                            moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][
+                            moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][
                                 hidden_size
                             ][inter_size][moe_tp_size][moe_ep_size]
+                        else:
+                            moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][
+                                inter_size
+                            ][moe_tp_size][moe_ep_size]
                 else:
                     if workload_distribution in self._moe_data[quant_mode]:
-                        moe_dict = self._moe_data[quant_mode][workload_distribution][topk][
-                            num_experts
-                        ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                        moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][
+                            inter_size
+                        ][moe_tp_size][moe_ep_size]
                     else:
-                        moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][
-                            hidden_size
-                        ][inter_size][moe_tp_size][moe_ep_size]
+                        moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][inter_size][
+                            moe_tp_size
+                        ][moe_ep_size]
                 if not moe_dict:
                     return get_sol(
                         num_tokens,
@@ -2760,12 +2551,8 @@ class PerfDatabase:
                         quant_mode,
                         workload_distribution,
                     )[0]
-                num_left, num_right = self._nearest_1d_point_helper(
-                    num_tokens, list(moe_dict.keys()), inner_only=False
-                )
-                lat = self._interp_1d(
-                    [num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens
-                )
+                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
+                lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
                 return lat
             else:
                 raise NotImplementedError(f"backend {self.backend} not supported for moe")
@@ -2790,11 +2577,7 @@ class PerfDatabase:
             """
             ops = 2 * num_tokens * num_heads * 128 * 512  # 2 for fma
             mem_bytes = num_heads * (num_tokens * 640 + 128 * 512) * quant_mode.value.memory
-            sol_math = (
-                ops
-                / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute)
-                * 1000
-            )
+            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -2808,15 +2591,9 @@ class PerfDatabase:
         else:
             if quant_mode not in self._mla_bmm_data:
                 quant_mode = common.GEMMQuantMode.float16
-            mla_bmm_dict = self._mla_bmm_data[quant_mode][
-                "mla_gen_pre" if if_pre else "mla_gen_post"
-            ][num_heads]
-            num_left, num_right = self._nearest_1d_point_helper(
-                num_tokens, list(mla_bmm_dict.keys()), inner_only=False
-            )
-            lat = self._interp_1d(
-                [num_left, num_right], [mla_bmm_dict[num_left], mla_bmm_dict[num_right]], num_tokens
-            )
+            mla_bmm_dict = self._mla_bmm_data[quant_mode]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
+            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mla_bmm_dict.keys()), inner_only=False)
+            lat = self._interp_1d([num_left, num_right], [mla_bmm_dict[num_left], mla_bmm_dict[num_right]], num_tokens)
             return lat
 
     def query_mem_op(self, mem_bytes: int, sol_mode: common.SOLMode | None = None) -> float:
@@ -2840,10 +2617,7 @@ class PerfDatabase:
         else:
             lat = (
                 mem_bytes
-                / (
-                    self.system_spec["gpu"]["mem_bw"]
-                    * self.system_spec["gpu"]["mem_bw_empirical_scaling_factor"]
-                )
+                / (self.system_spec["gpu"]["mem_bw"] * self.system_spec["gpu"]["mem_bw_empirical_scaling_factor"])
                 + self.system_spec["gpu"]["mem_empirical_constant_latency"]
             ) * 1000
             return lat
@@ -2869,8 +2643,7 @@ class PerfDatabase:
             return get_sol(message_bytes)
         else:
             return (
-                message_bytes / self.system_spec["node"]["inter_node_bw"]
-                + self.system_spec["node"]["p2p_latency"]
+                message_bytes / self.system_spec["node"]["inter_node_bw"] + self.system_spec["node"]["p2p_latency"]
             ) * 1000
 
     def _correct_data(self) -> None:
@@ -2888,24 +2661,18 @@ class PerfDatabase:
                                 f"gemm quant {quant_mode} m{m} n{n} k{k}: sol {sol} > "
                                 f"perf_db {self._gemm_data[quant_mode][m][n][k]}"
                             )
-                            self._gemm_data[quant_mode][m][n][k] = max(
-                                sol, self._gemm_data[quant_mode][m][n][k]
-                            )
+                            self._gemm_data[quant_mode][m][n][k] = max(sol, self._gemm_data[quant_mode][m][n][k])
 
         # correct generation attention
         for quant_mode in self._generation_attention_data:
             for n_kv in self._generation_attention_data[quant_mode]:
                 for head_size in self._generation_attention_data[quant_mode][n_kv]:
                     for window_size in self._generation_attention_data[quant_mode][n_kv][head_size]:
-                        for n in self._generation_attention_data[quant_mode][n_kv][head_size][
-                            window_size
-                        ]:
-                            for b in self._generation_attention_data[quant_mode][n_kv][head_size][
-                                window_size
-                            ][n]:
-                                for s in self._generation_attention_data[quant_mode][n_kv][
-                                    head_size
-                                ][window_size][n][b]:
+                        for n in self._generation_attention_data[quant_mode][n_kv][head_size][window_size]:
+                            for b in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n]:
+                                for s in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][
+                                    b
+                                ]:
                                     if n_kv == 0:
                                         n_kv_local = n
                                     else:
@@ -2922,18 +2689,18 @@ class PerfDatabase:
                                     )
                                     if (
                                         sol
-                                        > self._generation_attention_data[quant_mode][n_kv][
-                                            head_size
-                                        ][window_size][n][b][s]
+                                        > self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][
+                                            b
+                                        ][s]
                                     ):
                                         logger.debug(
                                             f"generation attention quant {quant_mode} n{n} "
                                             f"n_kv{n_kv_local} b{b} s{s}: sol {window_size} > "
                                             f"perf_db {sol}"
                                         )
-                                        self._generation_attention_data[quant_mode][n_kv][
-                                            head_size
-                                        ][window_size][n][b][s] = sol
+                                        self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][b][
+                                            s
+                                        ] = sol
 
     def query_mlp(
         self,
@@ -2960,11 +2727,7 @@ class PerfDatabase:
                 + num_tokens * intermediate_size * 3  # intermediate
                 + hidden_size * intermediate_size * 3  # weights for up + down projections
             )
-            sol_math = (
-                ops
-                / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute)
-                * 1000
-            )
+            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -2983,12 +2746,8 @@ class PerfDatabase:
                 mlp_data = self._generation_mlp_data
 
             mlp_dict = mlp_data[quant_mode][hidden_size][intermediate_size]
-            num_left, num_right = self._nearest_1d_point_helper(
-                num_tokens, list(mlp_dict.keys()), inner_only=False
-            )
-            lat = self._interp_1d(
-                [num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens
-            )
+            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mlp_dict.keys()), inner_only=False)
+            lat = self._interp_1d([num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens)
             return lat
 
     def query_deepep_ll(
@@ -3016,12 +2775,8 @@ class PerfDatabase:
             return get_sol(num_tokens, topk, num_experts)
         else:
             data = self._deepep_ll_data[node_num][hidden_size][topk][num_experts]
-            num_left, num_right = self._nearest_1d_point_helper(
-                num_tokens, list(data.keys()), inner_only=False
-            )
-            lat = self._interp_1d(
-                [num_left, num_right], [data[num_left], data[num_right]], num_tokens
-            )
+            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
+            lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
             return lat / 1000.0
 
     def query_deepep_normal(
@@ -3038,9 +2793,7 @@ class PerfDatabase:
         Query the DeepEP normal operation data
         """
 
-        def get_sol(
-            num_tokens: int, num_experts: int, topk: int, hidden_size: int
-        ) -> tuple[float, float, float]:
+        def get_sol(num_tokens: int, num_experts: int, topk: int, hidden_size: int) -> tuple[float, float, float]:
             pass
             return
 
@@ -3053,12 +2806,8 @@ class PerfDatabase:
         else:
             if node_num == 1 and sms == 20:  # only collect sm=20 for now
                 data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
-                num_left, num_right = self._nearest_1d_point_helper(
-                    num_tokens, list(data.keys()), inner_only=False
-                )
-                lat = self._interp_1d(
-                    [num_left, num_right], [data[num_left], data[num_right]], num_tokens
-                )
+                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
+                lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
             else:
                 data = self._deepep_normal_data[node_num][hidden_size][topk][num_experts]
                 lat = self._interp_2d_linear(sms, num_tokens, data)

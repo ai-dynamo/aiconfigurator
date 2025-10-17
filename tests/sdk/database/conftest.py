@@ -71,9 +71,7 @@ def patch_all_loaders_and_yaml(request, monkeypatch):
                 128: {128: {256: 12.0, 512: 22.0}, 256: {256: 17.0, 512: 27.0}},
             }
         }
-        monkeypatch.setattr(
-            "aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data
-        )
+        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data)
 
         # 3) Patch load_custom_allreduce_data to return proper structure
         #    Structure: { 'float16': { 2: { 'AUTO': { 1024:  5.0 } } } }
@@ -140,18 +138,14 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
         for m in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
             for n in [128, 256, 512, 1024]:
                 for k in [128, 256, 512, 1024]:
-                    dummy_gemm_data[quant_mode][m][n][k] = (
-                        0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
-                    )
+                    dummy_gemm_data[quant_mode][m][n][k] = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
 
     # Context attention data
     dummy_context_attention_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-                    )
+                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
                 )
             )
         )
@@ -164,16 +158,14 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
                         for n in [4, 8, 16, 32]:
                             for s in [16, 32, 64, 128, 256]:
                                 for b in [1, 2, 4, 8]:
-                                    dummy_context_attention_data[quant_mode][kv_cache_dtype][kv_n][
-                                        head_size
-                                    ][window_size][n][s][b] = 0.01 * (n * s * b) / 1000.0
+                                    dummy_context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][
+                                        window_size
+                                    ][n][s][b] = 0.01 * (n * s * b) / 1000.0
 
     # Generation attention data
     dummy_generation_attention_data = defaultdict(
         lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-            )
+            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
         )
     )
     for kv_cache_dtype in [common.KVCacheQuantMode.float16, common.KVCacheQuantMode.fp8]:
@@ -185,9 +177,9 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
                         if kv_n <= n:
                             for b in [1, 2, 4, 8, 16]:
                                 for s in [1, 16, 32, 64, 128, 256, 512, 1024]:
-                                    dummy_generation_attention_data[kv_cache_dtype][kv_n][
-                                        head_size
-                                    ][window_size][n][b][s] = 0.001 * (n * b * s) / 1000.0
+                                    dummy_generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][
+                                        s
+                                    ] = 0.001 * (n * b * s) / 1000.0
 
     # MoE data
     dummy_moe_data = defaultdict(
@@ -195,9 +187,7 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
             lambda: defaultdict(
                 lambda: defaultdict(
                     lambda: defaultdict(
-                        lambda: defaultdict(
-                            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-                        )
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
                     )
                 )
             )
@@ -212,24 +202,20 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
                             for moe_tp in [1, 2]:
                                 for moe_ep in [1, 2]:
                                     for num_tokens in [1, 2, 4, 8, 16, 32]:
-                                        dummy_moe_data[quant_mode][workload][topk][num_experts][
-                                            hidden_size
-                                        ][inter_size][moe_tp][moe_ep][num_tokens] = 0.1 * num_tokens
+                                        dummy_moe_data[quant_mode][workload][topk][num_experts][hidden_size][
+                                            inter_size
+                                        ][moe_tp][moe_ep][num_tokens] = 0.1 * num_tokens
 
     # Context MLA data
     dummy_context_mla_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-        )
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
     )
     for quant_mode in [common.FMHAQuantMode.float16]:
         for kv_cache_dtype in [common.KVCacheQuantMode.float16]:
             for num_heads in [16, 32, 64, 128]:
                 for s in [16, 32, 64, 128]:
                     for b in [1, 2, 4, 8]:
-                        dummy_context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = (
-                            0.0001 * s * b * num_heads
-                        )
+                        dummy_context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = 0.0001 * s * b * num_heads
 
     # Generation MLA data
     dummy_generation_mla_data = defaultdict(
@@ -239,33 +225,23 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
         for num_heads in [16, 32, 64, 128]:
             for b in [1, 2, 4, 8]:
                 for s in [1, 16, 32, 64, 128]:
-                    dummy_generation_mla_data[kv_cache_dtype][num_heads][b][s] = (
-                        0.00001 * b * s * num_heads
-                    )
+                    dummy_generation_mla_data[kv_cache_dtype][num_heads][b][s] = 0.00001 * b * s * num_heads
 
     # MLA BMM data
-    dummy_mla_bmm_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    )
+    dummy_mla_bmm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for quant_mode in [common.GEMMQuantMode.float16, common.GEMMQuantMode.fp8]:
         for op_name in ["mla_gen_pre", "mla_gen_post"]:
             for num_heads in [1, 2, 4, 8]:
                 for num_tokens in [1, 2, 4, 8, 16, 32]:
-                    dummy_mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = (
-                        0.01 * num_heads * num_tokens
-                    )
+                    dummy_mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = 0.01 * num_heads * num_tokens
 
     # Custom allreduce data
-    dummy_custom_allreduce_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    )
+    dummy_custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for dtype in [common.CommQuantMode.half]:
         for tp_size in [1, 2, 4, 8]:
             for strategy in ["AUTO"]:
                 for msg_size in [512, 1024, 2048, 4096, 8192]:
-                    dummy_custom_allreduce_data[dtype][tp_size][strategy][msg_size] = (
-                        0.001 * msg_size * tp_size
-                    )
+                    dummy_custom_allreduce_data[dtype][tp_size][strategy][msg_size] = 0.001 * msg_size * tp_size
 
     # NCCL data
     dummy_nccl_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
@@ -273,14 +249,10 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
         for operation in ["all_gather", "alltoall", "reduce_scatter"]:
             for num_gpus in [1, 2, 4, 8]:
                 for msg_size in [512, 1024, 2048, 4096]:
-                    dummy_nccl_data[dtype][operation][num_gpus][msg_size] = (
-                        0.001 * msg_size * num_gpus
-                    )
+                    dummy_nccl_data[dtype][operation][num_gpus][msg_size] = 0.001 * msg_size * num_gpus
 
     # Apply all patches
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data
-    )
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data)
     monkeypatch.setattr(
         "aiconfigurator.sdk.perf_database.load_context_attention_data",
         lambda path: dummy_context_attention_data,
@@ -305,11 +277,7 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
         "aiconfigurator.sdk.perf_database.load_generation_mla_data",
         lambda path: dummy_generation_mla_data,
     )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_mla_bmm_data", lambda path: dummy_mla_bmm_data
-    )
-    monkeypatch.setattr(
-        "aiconfigurator.sdk.perf_database.load_nccl_data", lambda path: dummy_nccl_data
-    )
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_mla_bmm_data", lambda path: dummy_mla_bmm_data)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_nccl_data", lambda path: dummy_nccl_data)
 
     return PerfDatabase("test_system", "trtllm", "v1", str(tmp_path))

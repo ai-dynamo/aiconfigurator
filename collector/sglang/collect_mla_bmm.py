@@ -88,9 +88,7 @@ def get_mla_gen_post_test_cases():
     return test_cases
 
 
-def run_mla_gen_pre(
-    num_tokens, num_heads, dtype, num_warmups, num_runs, perf_filename, device="cuda:0"
-):
+def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_filename, device="cuda:0"):
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
@@ -99,16 +97,14 @@ def run_mla_gen_pre(
     qk_nope_head_dim = 128
     kv_lora_rank = 512
 
-    q_nope = torch.randn(
-        (num_tokens, num_heads, qk_nope_head_dim), device=device, dtype=torch.bfloat16
-    )
+    q_nope = torch.randn((num_tokens, num_heads, qk_nope_head_dim), device=device, dtype=torch.bfloat16)
 
     if dtype == "fp8":
         zeroscale = torch.tensor([0], dtype=torch.float32, device=device)
         q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(q_nope.transpose(0, 1), zeroscale)
-        w_kc = torch.randn(
-            (num_heads, kv_lora_rank, qk_nope_head_dim), dtype=torch.bfloat16, device=device
-        ).to(dtype=torch.float8_e4m3fn)
+        w_kc = torch.randn((num_heads, kv_lora_rank, qk_nope_head_dim), dtype=torch.bfloat16, device=device).to(
+            dtype=torch.float8_e4m3fn
+        )
         w_kc = w_kc.transpose(1, 2)
         w_scale = torch.randn(
             (num_heads, kv_lora_rank // 128, qk_nope_head_dim // 128),
@@ -122,9 +118,7 @@ def run_mla_gen_pre(
             q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(q_nope.transpose(0, 1), zeroscale)
             bmm_fp8(q_nope_val, w_kc, q_nope_scale, w_scale, torch.bfloat16)
     else:
-        w_kc = torch.randn(
-            (num_heads, kv_lora_rank, qk_nope_head_dim), dtype=torch.bfloat16, device=device
-        )
+        w_kc = torch.randn((num_heads, kv_lora_rank, qk_nope_head_dim), dtype=torch.bfloat16, device=device)
         w_kc = w_kc.transpose(1, 2)
         torch.bmm(q_nope.transpose(0, 1), w_kc)
         g = torch.cuda.CUDAGraph()
@@ -161,9 +155,7 @@ def run_mla_gen_pre(
     )
 
 
-def run_mla_gen_post(
-    num_tokens, num_heads, dtype, num_warmups, num_runs, perf_filename, device="cuda:0"
-):
+def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_filename, device="cuda:0"):
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
@@ -174,12 +166,8 @@ def run_mla_gen_post(
     v_head_dim = 128
 
     if dtype == "float16":
-        attn_output = (
-            torch.randn([num_tokens, num_heads, kv_lora_rank]).bfloat16().to(torch.device(device))
-        )
-        w_vc = (
-            torch.randn([num_heads, v_head_dim, kv_lora_rank]).bfloat16().to(torch.device(device))
-        )
+        attn_output = torch.randn([num_tokens, num_heads, kv_lora_rank]).bfloat16().to(torch.device(device))
+        w_vc = torch.randn([num_heads, v_head_dim, kv_lora_rank]).bfloat16().to(torch.device(device))
         w_vc = w_vc.transpose(1, 2)
         attn_bmm_output = torch.empty(
             (attn_output.shape[0], qk_nope_head_dim * v_head_dim),
@@ -201,19 +189,13 @@ def run_mla_gen_post(
                 out=attn_bmm_output.view(-1, qk_nope_head_dim, v_head_dim).transpose(0, 1),
             )
     else:
-        attn_output = torch.randn(
-            [num_tokens, num_heads, kv_lora_rank], dtype=torch.bfloat16, device=device
+        attn_output = torch.randn([num_tokens, num_heads, kv_lora_rank], dtype=torch.bfloat16, device=device)
+        w_vc = torch.randn([num_heads, v_head_dim, kv_lora_rank], dtype=torch.bfloat16, device=device).to(
+            dtype=torch.float8_e4m3fn
         )
-        w_vc = torch.randn(
-            [num_heads, v_head_dim, kv_lora_rank], dtype=torch.bfloat16, device=device
-        ).to(dtype=torch.float8_e4m3fn)
         w_vc = w_vc.transpose(1, 2)
-        w_scale = torch.randn(
-            [num_heads, v_head_dim // 128, kv_lora_rank // 128], dtype=torch.float32, device=device
-        )
-        attn_bmm_output = (
-            torch.randn([num_tokens, num_heads, v_head_dim]).bfloat16().to(torch.device(device))
-        )
+        w_scale = torch.randn([num_heads, v_head_dim // 128, kv_lora_rank // 128], dtype=torch.float32, device=device)
+        attn_bmm_output = torch.randn([num_tokens, num_heads, v_head_dim]).bfloat16().to(torch.device(device))
 
         zeroscale = torch.tensor([1], dtype=torch.float32, device=device)
         attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(

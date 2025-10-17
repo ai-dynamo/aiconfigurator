@@ -44,9 +44,7 @@ def quick_nvml_snapshot() -> dict[str, Any]:
             h = nv.nvmlDeviceGetHandleByIndex(i)
             try:
                 name_raw = nv.nvmlDeviceGetName(h)
-                name = (
-                    name_raw.decode() if isinstance(name_raw, (bytes, bytearray)) else str(name_raw)
-                )
+                name = name_raw.decode() if isinstance(name_raw, (bytes, bytearray)) else str(name_raw)
             except Exception:
                 name = f"GPU{i}"
             mem = nv.nvmlDeviceGetMemoryInfo(h)
@@ -110,9 +108,7 @@ class GPUWatcher:
     def _open_writer(self):
         existed = self.out_csv.exists()
         self._fp = open(self.out_csv, "a", newline="")  # noqa: SIM115
-        self._writer = csv.DictWriter(
-            self._fp, fieldnames=["timestamp", "gpu_index", "util_percent", "mem_used_mb"]
-        )
+        self._writer = csv.DictWriter(self._fp, fieldnames=["timestamp", "gpu_index", "util_percent", "mem_used_mb"])
         if not existed or self.out_csv.stat().st_size == 0:
             self._writer.writeheader()
         self._last_flush = time.time()

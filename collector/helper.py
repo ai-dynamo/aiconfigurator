@@ -26,9 +26,7 @@ def setup_signal_handlers(worker_id, error_queue=None):
         error_info = {
             "worker_id": worker_id,
             "signal": signum,
-            "signal_name": signal.Signals(signum).name
-            if hasattr(signal, "Signals")
-            else str(signum),
+            "signal_name": signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum),
             "timestamp": datetime.now().isoformat(),
             "traceback": "".join(traceback.format_stack(frame)),
         }
@@ -112,9 +110,7 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
 
         # File handler - append to main log file
         if log_dir:
-            file_formatter = logging.Formatter(
-                "%(asctime)s|%(levelname)s|Worker-%(name)s|%(funcName)s|%(message)s"
-            )
+            file_formatter = logging.Formatter("%(asctime)s|%(levelname)s|Worker-%(name)s|%(funcName)s|%(message)s")
             file_handler = logging.FileHandler(f"{log_dir}/collector.log", mode="a")
             file_handler.setFormatter(file_formatter)
             logger.addHandler(file_handler)
@@ -165,9 +161,7 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
     # Create formatters
     console_formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
 
-    file_formatter = logging.Formatter(
-        "%(asctime)s|%(levelname)s|%(name)s|%(funcName)s|%(message)s"
-    )
+    file_formatter = logging.Formatter("%(asctime)s|%(levelname)s|%(name)s|%(funcName)s|%(message)s")
 
     # Configure root logger
     root_logger = logging.getLogger()

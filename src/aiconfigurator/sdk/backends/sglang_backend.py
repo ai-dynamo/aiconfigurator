@@ -104,9 +104,7 @@ class SGLANGBackend(BaseBackend):
         if "DEEPSEEK" in model.model_name:
             kvcache_per_token = model._num_layers * 576
         else:
-            num_kv_heads_per_gpu = (
-                model._num_kv_heads + model.config.tp_size - 1
-            ) // model.config.tp_size
+            num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size
             kvcache_per_token = num_kv_heads_per_gpu * model._head_size * model._num_layers * 2
 
         kvcache = (

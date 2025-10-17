@@ -93,9 +93,7 @@ class ParetoPlot:
             ax.plot(front[:, 0], front[:, 1], "-", linewidth=1, color=colour)
 
             if self.show_cc_label:
-                for xv, yv, tag in zip(
-                    x_vals, y_vals, df.get("load_label", [""] * len(df)), strict=False
-                ):
+                for xv, yv, tag in zip(x_vals, y_vals, df.get("load_label", [""] * len(df)), strict=False):
                     if tag:
                         ax.annotate(
                             tag,

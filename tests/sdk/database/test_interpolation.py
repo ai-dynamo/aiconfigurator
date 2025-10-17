@@ -193,9 +193,7 @@ class TestExtrapolateDataGrid:
         target_z_list = [30, 35, 40]
 
         # Apply extrapolation
-        comprehensive_perf_db._extrapolate_data_grid(
-            data_dict, target_x_list, target_y_list, target_z_list
-        )
+        comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
 
         # Check that new points were created
         assert 15 in data_dict  # New x value
@@ -242,9 +240,7 @@ class TestExtrapolateDataGrid:
         target_z_list = [30, 40]  # Try to extrapolate in z
 
         with caplog.at_level("WARNING"):
-            comprehensive_perf_db._extrapolate_data_grid(
-                data_dict, target_x_list, target_y_list, target_z_list
-            )
+            comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
             # Should warn about insufficient data
             assert "only one data point" in caplog.text
 
@@ -262,9 +258,7 @@ class TestExtrapolateDataGrid:
         target_y_list = [20, 30, 40, 50]  # 20 and 50 are outside
         target_z_list = [40, 50, 60, 70]  # 40 and 70 are outside
 
-        comprehensive_perf_db._extrapolate_data_grid(
-            data_dict, target_x_list, target_y_list, target_z_list
-        )
+        comprehensive_perf_db._extrapolate_data_grid(data_dict, target_x_list, target_y_list, target_z_list)
 
         # Check extrapolated values exist
         assert 5 in data_dict
@@ -289,9 +283,7 @@ class TestCorrectData:
         m, n, k = 64, 128, 256
 
         # Calculate what SOL should be
-        sol_value = comprehensive_perf_db.query_gemm(
-            m, n, k, quant_mode, sol_mode=common.SOLMode.SOL
-        )
+        sol_value = comprehensive_perf_db.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.SOL)
 
         # Set an artificially low value
         comprehensive_perf_db._gemm_data[quant_mode][m][n][k] = sol_value * 0.5
@@ -316,18 +308,14 @@ class TestCorrectData:
         )
 
         # Set an artificially low value
-        comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][
-            s
-        ] = sol_value * 0.5
+        comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s] = sol_value * 0.5
 
         # Run correction
         with caplog.at_level("DEBUG"):
             comprehensive_perf_db._correct_data()
 
         # Check that the value was corrected
-        corrected_value = comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][
-            n_kv
-        ][128][0][n][b][s]
+        corrected_value = comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s]
         assert corrected_value >= sol_value
 
 

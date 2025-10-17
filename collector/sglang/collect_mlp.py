@@ -285,10 +285,7 @@ if __name__ == "__main__":
 
     prefill_test_cases = get_mlp_prefill_test_cases()
     decode_test_cases = get_mlp_decode_test_cases()
-    print(
-        f"Running {len(prefill_test_cases)} prefill test cases and {len(decode_test_cases)} "
-        f"decode test cases..."
-    )
+    print(f"Running {len(prefill_test_cases)} prefill test cases and {len(decode_test_cases)} decode test cases...")
 
     # Process prefill test cases
     print(f"\n{'=' * 60}")

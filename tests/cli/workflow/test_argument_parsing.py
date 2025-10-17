@@ -23,9 +23,7 @@ class TestCLIArgumentParsing:
         subparser_action = subparsers[0]
         default_parser = subparser_action.choices["default"]
 
-        required_actions = [
-            action for action in default_parser._actions if getattr(action, "required", False)
-        ]
+        required_actions = [action for action in default_parser._actions if getattr(action, "required", False)]
         required_args = [action.dest for action in required_actions]
 
         assert "model" in required_args
@@ -40,9 +38,7 @@ class TestCLIArgumentParsing:
         subparser_action = subparsers[0]
         exp_parser = subparser_action.choices["exp"]
 
-        required_actions = [
-            action for action in exp_parser._actions if getattr(action, "required", False)
-        ]
+        required_actions = [action for action in exp_parser._actions if getattr(action, "required", False)]
         required_args = [action.dest for action in required_actions]
 
         assert "yaml_path" in required_args
@@ -77,9 +73,7 @@ class TestCLIArgumentParsing:
 
     def test_default_values_are_set(self, cli_parser):
         """Test that default values are properly set for optional arguments."""
-        args = cli_parser.parse_args(
-            ["default", "--model", "QWEN3_32B", "--total_gpus", "8", "--system", "h200_sxm"]
-        )
+        args = cli_parser.parse_args(["default", "--model", "QWEN3_32B", "--total_gpus", "8", "--system", "h200_sxm"])
 
         assert args.backend == common.BackendName.trtllm.value
         assert args.backend_version is None
@@ -158,9 +152,7 @@ class TestCLIArgumentParsing:
 
     def test_decode_system_defaults_to_system(self, cli_parser):
         """Decode system defaults to system when omitted and can be overridden."""
-        args = cli_parser.parse_args(
-            ["default", "--model", "QWEN3_32B", "--total_gpus", "8", "--system", "h200_sxm"]
-        )
+        args = cli_parser.parse_args(["default", "--model", "QWEN3_32B", "--total_gpus", "8", "--system", "h200_sxm"])
         assert args.decode_system is None
 
         args_with_decode = cli_parser.parse_args(

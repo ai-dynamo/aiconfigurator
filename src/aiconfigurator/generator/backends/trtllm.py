@@ -45,9 +45,7 @@ class TRTLLMGenerator(BaseGenerator):
         if kv_mode.lower() == "fp8":
             cfg["kv_cache_dtype"] = "fp8"
 
-    def _apply_moe_attention_dp_mapping(
-        self, cfg: dict[str, Any], spec: ModeConfig, is_moe: bool
-    ) -> None:
+    def _apply_moe_attention_dp_mapping(self, cfg: dict[str, Any], spec: ModeConfig, is_moe: bool) -> None:
         """
         - If is_moe:
             - mark is_moe
@@ -75,11 +73,7 @@ class TRTLLMGenerator(BaseGenerator):
         """
         Keep original behavior: Only enable MTP for DEEPSEEK family when nextn>=1.
         """
-        if (
-            ctx.runtime.nextn
-            and ctx.runtime.nextn >= 1
-            and get_model_family(ctx.model_name) == "DEEPSEEK"
-        ):
+        if ctx.runtime.nextn and ctx.runtime.nextn >= 1 and get_model_family(ctx.model_name) == "DEEPSEEK":
             cfg["is_speculative"] = True
             cfg["decoding_type"] = "MTP"
             cfg["num_nextn_predict_layers"] = int(ctx.runtime.nextn)
@@ -90,9 +84,7 @@ class TRTLLMGenerator(BaseGenerator):
         tpl = self.env.get_template(tpl_name)
         return yaml.safe_load(tpl.render(**ctx))
 
-    def _build_worker_config(
-        self, spec: ModeConfig, ctx: GeneratorContext, role: str
-    ) -> dict[str, Any]:
+    def _build_worker_config(self, spec: ModeConfig, ctx: GeneratorContext, role: str) -> dict[str, Any]:
         """
         Build a per-role engine args dict based on the original implementation,
         with common parts factored into helpers and reading from GeneratorContext.
@@ -142,14 +134,8 @@ class TRTLLMGenerator(BaseGenerator):
             agg_cfg["disable_overlap_scheduler"] = False
 
             # max_num_tokens heuristic
-            if (
-                ctx.runtime.nextn
-                and ctx.runtime.nextn >= 1
-                and get_model_family(ctx.model_name) == "DEEPSEEK"
-            ):
-                agg_cfg["max_num_tokens"] = (
-                    agg_cfg["bs"] * (1 + ctx.runtime.nextn) + ctx.runtime.isl + 1500
-                )
+            if ctx.runtime.nextn and ctx.runtime.nextn >= 1 and get_model_family(ctx.model_name) == "DEEPSEEK":
+                agg_cfg["max_num_tokens"] = agg_cfg["bs"] * (1 + ctx.runtime.nextn) + ctx.runtime.isl + 1500
             else:
                 agg_cfg["max_num_tokens"] = agg_cfg["bs"] + ctx.runtime.isl + 1500
 
@@ -195,11 +181,7 @@ class TRTLLMGenerator(BaseGenerator):
 
             # tokens bound
             pre_cfg["max_num_tokens"] = pre_cfg["bs"] * ctx.runtime.isl + 1500
-            if (
-                ctx.runtime.nextn
-                and ctx.runtime.nextn >= 1
-                and get_model_family(ctx.model_name) == "DEEPSEEK"
-            ):
+            if ctx.runtime.nextn and ctx.runtime.nextn >= 1 and get_model_family(ctx.model_name) == "DEEPSEEK":
                 dec_cfg["is_speculative"] = True
                 dec_cfg["decoding_type"] = "MTP"
                 dec_cfg["num_nextn_predict_layers"] = int(ctx.runtime.nextn)

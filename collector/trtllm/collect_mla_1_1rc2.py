@@ -259,8 +259,7 @@ def _run_attn_for_backend(
         num_kv_heads=1,
         head_dim=kv_lora_rank + qk_rope_head_dim,
         tokens_per_block=kv_cache_tokens_per_block,
-        max_seq_len=max(context_sequence_lengths)
-        + (num_generation_steps + 1) * generation_seq_len_q,
+        max_seq_len=max(context_sequence_lengths) + (num_generation_steps + 1) * generation_seq_len_q,
         max_batch_size=len(context_sequence_lengths),
         mapping=mapping,
         dtype=kv_cache_dtype,
@@ -299,9 +298,7 @@ def _run_attn_for_backend(
             for _ in range(generation_seq_len_q):
                 kv_cache_manager.impl.add_token(req_id)
         attn_metadata = attention_cls.Metadata(
-            seq_lens=torch.tensor(
-                [generation_seq_len_q] * len(context_sequence_lengths), dtype=torch.int
-            ),
+            seq_lens=torch.tensor([generation_seq_len_q] * len(context_sequence_lengths), dtype=torch.int),
             request_ids=list(range(len(context_sequence_lengths))),
             max_num_requests=len(context_sequence_lengths),
             num_contexts=0,
@@ -345,9 +342,7 @@ def _run_attn_for_backend(
             device=device,
         )
         # ctx_v.stride(0) == num_kv_heads * (qk_nope_head_dim + v_head_dim)
-        ctx_k_nope, ctx_v = ctx_kv.split(
-            [num_kv_heads * qk_nope_head_dim, num_kv_heads * v_head_dim], dim=-1
-        )
+        ctx_k_nope, ctx_v = ctx_kv.split([num_kv_heads * qk_nope_head_dim, num_kv_heads * v_head_dim], dim=-1)
         ctx_k_nope = ctx_k_nope.view(-1, num_kv_heads, qk_nope_head_dim)
         ctx_k = torch.cat(
             [ctx_k_nope, ctx_k_pe.view(-1, 1, qk_rope_head_dim).expand(-1, num_kv_heads, -1)],

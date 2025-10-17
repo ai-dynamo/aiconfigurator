@@ -73,9 +73,7 @@ def allreduce_benchmark(
 
     torch.cuda.set_device(local_rank)
     cudart.cudaSetDevice(local_rank)
-    mapping = Mapping(
-        world_size=world_size, rank=rank, gpus_per_node=gpus_per_node, tp_size=world_size
-    )
+    mapping = Mapping(world_size=world_size, rank=rank, gpus_per_node=gpus_per_node, tp_size=world_size)
 
     # Parse test range
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
@@ -167,9 +165,7 @@ if __name__ == "__main__":
         default="128,1073741824,2",  # 128B to 1024MB
         help="min_size,max_size,multiplicative_ratio",
     )
-    parser.add_argument(
-        "--use-slurm", action="store_true", help="Use SLURM environment variables instead of MPI"
-    )
+    parser.add_argument("--use-slurm", action="store_true", help="Use SLURM environment variables instead of MPI")
     parser.add_argument(
         "--perf-filename",
         "-f",

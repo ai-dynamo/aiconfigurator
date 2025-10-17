@@ -45,9 +45,7 @@ def setup_mock_filesystem(systems_dir: Path, layout: dict) -> None:
         data_dir = systems_dir / data_dir_name
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        (systems_dir / f"{system_name}.yaml").write_text(
-            yaml.safe_dump({"data_dir": data_dir_name})
-        )
+        (systems_dir / f"{system_name}.yaml").write_text(yaml.safe_dump({"data_dir": data_dir_name}))
 
         for backend_name, versions in backends.items():
             backend_dir = data_dir / backend_name
@@ -133,9 +131,7 @@ def test_get_latest_database_version_rc_only(temp_systems_dir: Path, perf_databa
         perf_database.get_supported_databases = original
 
 
-def test_get_latest_database_version_nonexistent_returns_none(
-    temp_systems_dir: Path, perf_database
-):
+def test_get_latest_database_version_nonexistent_returns_none(temp_systems_dir: Path, perf_database):
     mock_supported = {"h100": {"trtllm": ["1.0.0"]}}
 
     original = perf_database.get_supported_databases
@@ -161,9 +157,7 @@ def test_get_latest_database_version_unparseable_versions(temp_systems_dir: Path
         perf_database.get_supported_databases = original
 
 
-def test_get_latest_database_version_major_version_rc_is_newer(
-    temp_systems_dir: Path, perf_database
-):
+def test_get_latest_database_version_major_version_rc_is_newer(temp_systems_dir: Path, perf_database):
     """Tests that a v1.0 RC is correctly considered newer than a v0.20 stable."""
     mock_supported = {"h200": {"trtllm": ["0.20.0", "1.0.0rc3"]}}
 

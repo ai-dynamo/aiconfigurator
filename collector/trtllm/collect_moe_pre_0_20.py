@@ -23,9 +23,7 @@ def balanced_logits(num_tokens, num_experts, topk):
             if num_tokens >= stride:
                 h_selected_experts[token_i][i] = (token_i + i * stride) % num_experts
             else:
-                h_selected_experts[token_i][i] = (
-                    token_i * stride / num_tokens + i * stride
-                ) % num_experts
+                h_selected_experts[token_i][i] = (token_i * stride / num_tokens + i * stride) % num_experts
 
     expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
     router_logits = F.softmax(expert_map.bfloat16(), dim=1)
@@ -93,9 +91,7 @@ def get_moe_test_cases():
 
     test_cases = []
 
-    for (
-        num_gpu
-    ) in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
+    for num_gpu in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
         for moe_type in moe_list:
             for num_token in num_tokens:
                 for model_config in model_config_list:
@@ -232,9 +228,7 @@ def run_moe_torch(
     )
 
     hidden_states = torch.randn([num_tokens, hidden_size]).bfloat16().to(torch.device(device))
-    router_logits = (
-        balanced_logits(num_tokens, num_experts, topk).bfloat16().to(torch.device(device))
-    )
+    router_logits = balanced_logits(num_tokens, num_experts, topk).bfloat16().to(torch.device(device))
 
     ffn1_weights = Parameter(
         torch.randn(moe.w3_w1_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(

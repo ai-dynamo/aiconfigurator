@@ -469,10 +469,7 @@ def test_load_context_mla_data_basic(tmp_path):
         context_mla_data[quant_mode_enum][kv_cache_dtype_enum][tp_size][s][b] = latency
     """
     csv_file = tmp_path / "ctx_mla.csv"
-    headers = (
-        "framework,version,device,op_name,mla_dtype,kv_cache_dtype,batch_size,isl,tp_size,"
-        "step,latency\n"
-    )
+    headers = "framework,version,device,op_name,mla_dtype,kv_cache_dtype,batch_size,isl,tp_size,step,latency\n"
     fields = [
         "trt",  # backend_name (ignored)
         "1.0",  # version (ignored)
@@ -529,10 +526,7 @@ def test_load_generation_mla_data_basic(tmp_path):
       generation_mla_data[kv_cache_dtype_enum][tp_size][b][new_s] = latency
     """
     csv_file = tmp_path / "gen_mla.csv"
-    headers = (
-        "framework,version,device,op_name,mla_dtype,kv_cache_dtype,batch_size,isl,tp_size,"
-        "step,latency\n"
-    )
+    headers = "framework,version,device,op_name,mla_dtype,kv_cache_dtype,batch_size,isl,tp_size,step,latency\n"
     fields = [
         "trt",  # backend_name (ignored)
         "1.0",  # version (ignored)

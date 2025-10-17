@@ -104,12 +104,10 @@ def _plot_worker_setup_table(
                 p_parallel = f"tp\033[4m{row['(p)tp']}\033[0mpp\033[4m{row['(p)pp']}\033[0m"
                 d_parallel = f"tp\033[4m{row['(d)tp']}\033[0mpp\033[4m{row['(d)pp']}\033[0m"
                 p_gpus_worker = (
-                    f"{row['(p)pp'] * row['(p)tp']} "
-                    f"(=\033[4m{row['(p)tp']}\033[0mx\033[4m{row['(p)pp']}\033[0m)"
+                    f"{row['(p)pp'] * row['(p)tp']} (=\033[4m{row['(p)tp']}\033[0mx\033[4m{row['(p)pp']}\033[0m)"
                 )
                 d_gpus_worker = (
-                    f"{row['(d)pp'] * row['(d)tp']} "
-                    f"(=\033[4m{row['(d)tp']}\033[0mx\033[4m{row['(d)pp']}\033[0m)"
+                    f"{row['(d)pp'] * row['(d)tp']} (=\033[4m{row['(d)tp']}\033[0mx\033[4m{row['(d)pp']}\033[0m)"
                 )
             table.add_row(
                 [
@@ -117,14 +115,8 @@ def _plot_worker_setup_table(
                     f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['ttft']:.2f}",
-                    (
-                        f"{row['concurrency'] * row['replicas']}(="
-                        f"{row['concurrency']}x{row['replicas']})"
-                    ),
-                    (
-                        f"{total_gpus} "
-                        f"({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})"
-                    ),
+                    (f"{row['concurrency'] * row['replicas']}(={row['concurrency']}x{row['replicas']})"),
+                    (f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})"),
                     row["replicas"],
                     (
                         f"{row['num_total_gpus']} "
@@ -177,14 +169,8 @@ def _plot_worker_setup_table(
                     f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['ttft']:.2f}",
-                    (
-                        f"{row['concurrency'] * row['replicas']}(="
-                        f"{row['concurrency']}x{row['replicas']})",
-                    ),
-                    (
-                        f"{total_gpus} "
-                        f"({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})"
-                    ),
+                    (f"{row['concurrency'] * row['replicas']}(={row['concurrency']}x{row['replicas']})",),
+                    (f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})"),
                     row["replicas"],
                     row["num_total_gpus"],
                     gpus_worker,
@@ -216,8 +202,7 @@ def log_final_summary(
     summary_box.append("  " + "-" * 76)
     summary_box.append("  Input Configuration & SLA Target:")
     summary_box.append(
-        f"    Model: {task_configs[chosen_exp].config.model_name} "
-        f"(is_moe: {task_configs[chosen_exp].config.is_moe})"
+        f"    Model: {task_configs[chosen_exp].config.model_name} (is_moe: {task_configs[chosen_exp].config.is_moe})"
     )
     summary_box.append(f"    Total GPUs: {task_configs[chosen_exp].total_gpus}")
     if mode == "default":
@@ -238,8 +223,7 @@ def log_final_summary(
         )
     else:
         summary_box.append(
-            f"    Best Experiment Chosen: \033[1m{chosen_exp} at "
-            f"{best_throughputs[chosen_exp]:.2f} tokens/s/gpu\033[0m"
+            f"    Best Experiment Chosen: \033[1m{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu\033[0m"
         )
 
     summary_box.append("  " + "-" * 76)
@@ -252,9 +236,7 @@ def log_final_summary(
     summary_box.append(f"    - Best Throughput: {best_throughput:.2f} tokens/s/gpu")
     if not best_config_df.empty:
         best_conf_details = best_config_df.iloc[0]
-        summary_box.append(
-            f"    - User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user"
-        )
+        summary_box.append(f"    - User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
     summary_box.append("  " + "-" * 76)
@@ -264,9 +246,7 @@ def log_final_summary(
     if len(pareto_fronts) <= 10:  # avoid overly crowded plots
         summary_box.append("  Pareto Frontier:")
         series_payload = [
-            {"df": df, "label": name}
-            for name, df in pareto_fronts.items()
-            if df is not None and not df.empty
+            {"df": df, "label": name} for name, df in pareto_fronts.items() if df is not None and not df.empty
         ]
         highlight_series = None
         if not best_config_df.empty:
@@ -392,9 +372,7 @@ def save_results(
             if best_config_df is not None:
                 dynamo_overrides = build_dynamo_config(args)
                 for i, (idx, result_df) in enumerate(best_config_df.iterrows()):
-                    cfg = task_config_to_generator_config(
-                        task_config=exp_task_config, result_df=result_df
-                    )
+                    cfg = task_config_to_generator_config(task_config=exp_task_config, result_df=result_df)
 
                     top_config_dir = os.path.join(exp_dir, f"top{i + 1}")
                     safe_mkdir(top_config_dir, exist_ok=True)

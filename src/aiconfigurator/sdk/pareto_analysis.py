@@ -55,9 +55,7 @@ def enumerate_parallel_config(
                 for dp in dp_list:
                     for moe_tp in moe_tp_list:
                         for moe_ep in moe_ep_list:
-                            if (
-                                dp * tp * pp in num_gpu_list and dp * tp == moe_tp * moe_ep
-                            ):  # check num gpu and width
+                            if dp * tp * pp in num_gpu_list and dp * tp == moe_tp * moe_ep:  # check num gpu and width
                                 # backend specific filters
                                 if (
                                     backend == common.BackendName.trtllm and dp > 1 and tp > 1
@@ -75,10 +73,7 @@ def enumerate_parallel_config(
 
     for parallel_config in parallel_config_list:
         tp, pp, dp, moe_tp, moe_ep = parallel_config
-        logger.info(
-            f"Enumerated parallel config: tp={tp}, pp={pp}, dp={dp}, "
-            f"moe_tp={moe_tp}, moe_ep={moe_ep}"
-        )
+        logger.info(f"Enumerated parallel config: tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
 
     return parallel_config_list
 
@@ -109,9 +104,7 @@ def agg_pareto(
         results_df: dataframe of the results
     """
 
-    tpot_list = (
-        runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
-    )
+    tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
 
     # agg is agg server, the loop over parallel is outside here.
     results_df = pd.DataFrame(columns=ColumnsAgg)
@@ -242,19 +235,12 @@ def disagg_pareto(
     prefill_backend = get_backend(prefill_backend_name)
     decode_backend = get_backend(decode_backend_name)
 
-    disagg_sess = DisaggInferenceSession(
-        prefill_database, prefill_backend, decode_database, decode_backend
-    )
-    disagg_sess.set_latency_correction_scales(
-        prefill_latency_correction_scale, decode_latency_correction_scale
-    )
+    disagg_sess = DisaggInferenceSession(prefill_database, prefill_backend, decode_database, decode_backend)
+    disagg_sess.set_latency_correction_scales(prefill_latency_correction_scale, decode_latency_correction_scale)
 
     prefill_max_num_tokens = kwargs.get("prefill_max_num_tokens", 16384)
     decode_max_num_tokens = kwargs.get("decode_max_num_tokens", 512)
-    logger.debug(
-        f"prefill_max_num_tokens: {prefill_max_num_tokens}, "
-        f"decode_max_num_tokens: {decode_max_num_tokens}"
-    )
+    logger.debug(f"prefill_max_num_tokens: {prefill_max_num_tokens}, decode_max_num_tokens: {decode_max_num_tokens}")
 
     # num gpu constraint for the whole system
     num_gpu_list = kwargs.get("num_gpu_list")
@@ -266,18 +252,14 @@ def disagg_pareto(
     prefill_num_worker_list = kwargs.get("prefill_num_worker_list")
     prefill_max_num_worker = kwargs.get("prefill_max_num_worker")
     logger.debug(
-        f"prefill_num_worker_list: {prefill_num_worker_list}, "
-        f"prefill_max_num_worker: {prefill_max_num_worker}"
+        f"prefill_num_worker_list: {prefill_num_worker_list}, prefill_max_num_worker: {prefill_max_num_worker}"
     )
     prefill_num_worker_list = get_working_list(prefill_num_worker_list, prefill_max_num_worker)
 
     # decode worker constraint
     decode_num_worker_list = kwargs.get("decode_num_worker_list")
     decode_max_num_worker = kwargs.get("decode_max_num_worker")
-    logger.debug(
-        f"decode_num_worker_list: {decode_num_worker_list}, "
-        f"decode_max_num_worker: {decode_max_num_worker}"
-    )
+    logger.debug(f"decode_num_worker_list: {decode_num_worker_list}, decode_max_num_worker: {decode_max_num_worker}")
     decode_num_worker_list = get_working_list(decode_num_worker_list, decode_max_num_worker)
 
     summary = disagg_sess.find_best_disagg_result_under_constraints(
@@ -308,9 +290,7 @@ def get_pareto_front(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:
         for i, c in enumerate(costs):
             if is_better[i]:
                 # Keep any point with a lower cost
-                is_better[is_better] = np.any(
-                    costs[is_better] > c, axis=1
-                )  # Remove dominated points
+                is_better[is_better] = np.any(costs[is_better] > c, axis=1)  # Remove dominated points
                 is_better[i] = True  # And keep self
         return is_better
 
@@ -323,9 +303,7 @@ def get_pareto_front(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:
     return pareto_front
 
 
-def draw_pareto(
-    df: pd.DataFrame, x_col: str, y_col: str, ax: plt.Axes, color: str, label: str
-) -> None:
+def draw_pareto(df: pd.DataFrame, x_col: str, y_col: str, ax: plt.Axes, color: str, label: str) -> None:
     """
     Draw Pareto front to plot.
     """
@@ -505,8 +483,7 @@ def get_best_configs_under_tpot_constraint(
     # Ensure 'tpot' and 'tokens/s/gpu' columns exist
     if "tpot" not in pareto_df.columns or "tokens/s/gpu" not in pareto_df.columns:
         logger.warning(
-            "Pareto DataFrame for _get_best_configs_under_tpot_constraint is missing 'tpot' or "
-            "'tokens/s/gpu' columns."
+            "Pareto DataFrame for _get_best_configs_under_tpot_constraint is missing 'tpot' or 'tokens/s/gpu' columns."
         )
         return pd.DataFrame()
 
@@ -528,9 +505,7 @@ def get_best_configs_under_tpot_constraint(
             top_indexes = candidate_configs.groupby(group_by)["tokens/s/gpu_cluster"].idxmax()
             candidate_configs = candidate_configs.loc[top_indexes]
         candidate_configs = (
-            candidate_configs.sort_values(by="tokens/s/gpu_cluster", ascending=False)
-            .head(top_n)
-            .reset_index(drop=True)
+            candidate_configs.sort_values(by="tokens/s/gpu_cluster", ascending=False).head(top_n).reset_index(drop=True)
         )
         logger.debug(
             f"actual replica-level throughputs: {candidate_configs['tokens/s/gpu'].iloc[0]:.2f} "

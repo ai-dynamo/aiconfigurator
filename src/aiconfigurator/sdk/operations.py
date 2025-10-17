@@ -38,10 +38,7 @@ class AllReduce(Operation):
         # count, not size in bytes
         size = kwargs.get("x") * self._h
 
-        return (
-            database.query_allreduce(common.CommQuantMode.half, self._tp_size, size)
-            * self._scale_factor
-        )
+        return database.query_allreduce(common.CommQuantMode.half, self._tp_size, size) * self._scale_factor
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -98,8 +95,7 @@ class NCCL(Operation):
         message_size = kwargs.get("x") * self._num_elements_per_token
 
         return (
-            database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
-            * self._scale_factor
+            database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size) * self._scale_factor
         )
 
     def get_weights(self, **kwargs):
@@ -111,9 +107,7 @@ class GEMM(Operation):
     GEMM operation.
     """
 
-    def __init__(
-        self, name: str, scale_factor: float, n: int, k: int, quant_mode: common.GEMMQuantMode
-    ) -> None:
+    def __init__(self, name: str, scale_factor: float, n: int, k: int, quant_mode: common.GEMMQuantMode) -> None:
         super().__init__(name, scale_factor)
         self._n = n
         self._k = k
@@ -251,16 +245,12 @@ class MoEDispatch(Operation):
                 if self._pre_dispatch:
                     if self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
-                        if (
-                            _num_gpus_per_node == 72 and self.num_gpus > 4
-                        ):  # to do: nvl72, node per gpu
+                        if _num_gpus_per_node == 72 and self.num_gpus > 4:  # to do: nvl72, node per gpu
                             comm_latency = database.query_nccl(
                                 common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
                             )
                         else:
-                            comm_latency = database.query_allreduce(
-                                common.CommQuantMode.half, self.num_gpus, volume
-                            )
+                            comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
                     elif self._attention_dp_size > 1:
                         if self._enable_fp4_all2all:
                             # Calculate all2all communication volume for nvfp4 all2all operation
@@ -285,9 +275,7 @@ class MoEDispatch(Operation):
                                 "alltoall",
                                 all2all_volume / 8,
                             )  # volume_scale_factor = 1/8 volume
-                            comm_latency = (
-                                all2all_latency + all2all_sf_latency + 1e-2
-                            )  # msg size static latency 10us
+                            comm_latency = all2all_latency + all2all_sf_latency + 1e-2  # msg size static latency 10us
                         else:
                             all_gather_volume = volume * self._attention_dp_size / 4
                             all_gather_latency = database.query_nccl(
@@ -308,16 +296,12 @@ class MoEDispatch(Operation):
                 else:
                     if self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
-                        if (
-                            _num_gpus_per_node == 72 and self.num_gpus > 4
-                        ):  # to do: nvl72, node per gpu
+                        if _num_gpus_per_node == 72 and self.num_gpus > 4:  # to do: nvl72, node per gpu
                             comm_latency = database.query_nccl(
                                 common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
                             )
                         else:
-                            comm_latency = database.query_allreduce(
-                                common.CommQuantMode.half, self.num_gpus, volume
-                            )
+                            comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
                     elif self._attention_dp_size > 1:
                         if self._enable_fp4_all2all:
                             # to do: nvfp4 all2all
@@ -340,9 +324,7 @@ class MoEDispatch(Operation):
                 if self._pre_dispatch:
                     if self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
-                        comm_latency = database.query_allreduce(
-                            common.CommQuantMode.half, self.num_gpus, volume
-                        )
+                        comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
                     elif self._attention_dp_size > 1:
                         comm_latency = database.query_nccl(
                             common.CommQuantMode.half,
@@ -355,9 +337,7 @@ class MoEDispatch(Operation):
                 else:
                     if self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
-                        comm_latency = database.query_allreduce(
-                            common.CommQuantMode.half, self.num_gpus, volume
-                        )
+                        comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
                     elif self._attention_dp_size > 1:
                         comm_latency = database.query_nccl(
                             common.CommQuantMode.half,
@@ -419,12 +399,8 @@ class MoEDispatch(Operation):
                     "reduce_scatter",
                     reduce_scatter1_v,
                 )
-                + database.query_nccl(
-                    common.CommQuantMode.half, all2all1_num_gpus, "alltoall", all2all1_v
-                )
-                + database.query_nccl(
-                    common.CommQuantMode.half, allgather1_num_gpus, "all_gather", allgather1_v
-                )
+                + database.query_nccl(common.CommQuantMode.half, all2all1_num_gpus, "alltoall", all2all1_v)
+                + database.query_nccl(common.CommQuantMode.half, allgather1_num_gpus, "all_gather", allgather1_v)
             )
         else:
             reduce_scatter2_v = volume
@@ -443,12 +419,8 @@ class MoEDispatch(Operation):
                     "reduce_scatter",
                     reduce_scatter2_v,
                 )
-                + database.query_nccl(
-                    common.CommQuantMode.half, all2all2_num_gpus, "alltoall", all2all2_v
-                )
-                + database.query_nccl(
-                    common.CommQuantMode.half, allgather2_num_gpus, "all_gather", allgather2_v
-                )
+                + database.query_nccl(common.CommQuantMode.half, all2all2_num_gpus, "alltoall", all2all2_v)
+                + database.query_nccl(common.CommQuantMode.half, allgather2_num_gpus, "all_gather", allgather2_v)
             )
 
         return comm_latency * self._scale_factor
@@ -604,10 +576,7 @@ class GenerationMLA(Operation):
         assert beam_width == 1, "only support beam_width=1"
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
-        return (
-            database.query_generation_mla(batch_size, s, self._num_heads, self._kv_cache_dtype)
-            * self._scale_factor
-        )
+        return database.query_generation_mla(batch_size, s, self._num_heads, self._kv_cache_dtype) * self._scale_factor
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -637,10 +606,7 @@ class MLABmm(Operation):
         beam_width = kwargs.get("beam_width")
         assert beam_width == 1, "only support beam_width=1"
         batch_size = kwargs.get("batch_size")
-        return (
-            database.query_mla_bmm(batch_size, self._num_heads, self._quant_mode, self._if_pre)
-            * self._scale_factor
-        )
+        return database.query_mla_bmm(batch_size, self._num_heads, self._quant_mode, self._if_pre) * self._scale_factor
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -736,9 +702,7 @@ class MLP(Operation):
         is_context = kwargs.get("is_context", True)  # Default to context mode
 
         return (
-            database.query_mlp(
-                x, self._hidden_size, self._intermediate_size, quant_mode, is_context
-            )
+            database.query_mlp(x, self._hidden_size, self._intermediate_size, quant_mode, is_context)
             * self._scale_factor
         )
 

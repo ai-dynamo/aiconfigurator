@@ -32,19 +32,11 @@ def create_system_config(app_config):
     default_version = version_choices[-1]
 
     with gr.Accordion("System config"), gr.Row():
-        system = gr.Dropdown(
-            choices=system_choices, label="System", value=default_system, interactive=True
-        )
-        backend = gr.Dropdown(
-            choices=backend_choices, label="Backend", value=default_backend, interactive=True
-        )
-        version = gr.Dropdown(
-            choices=version_choices, label="Version", value=default_version, interactive=True
-        )
+        system = gr.Dropdown(choices=system_choices, label="System", value=default_system, interactive=True)
+        backend = gr.Dropdown(choices=backend_choices, label="Backend", value=default_backend, interactive=True)
+        version = gr.Dropdown(choices=version_choices, label="Version", value=default_version, interactive=True)
 
-        sol_mode = gr.Checkbox(
-            label="SOL Mode", value=False, interactive=True, visible=app_config["experimental"]
-        )
+        sol_mode = gr.Checkbox(label="SOL Mode", value=False, interactive=True, visible=app_config["experimental"])
 
     return {"system": system, "backend": backend, "version": version, "sol_mode": sol_mode}
 
@@ -78,27 +70,21 @@ def create_model_quant_config(app_config):
                 choices=kvcache_quant_mode_choices,
                 label="kvcache quant mode",
                 allow_custom_value=False,
-                value="fp8"
-                if "fp8" in kvcache_quant_mode_choices
-                else kvcache_quant_mode_choices[0],
+                value="fp8" if "fp8" in kvcache_quant_mode_choices else kvcache_quant_mode_choices[0],
                 interactive=True,
             )
             fmha_quant_mode = gr.Dropdown(
                 choices=fmha_quant_mode_choices,
                 label="fmha quant mode",
                 allow_custom_value=False,
-                value="float16"
-                if "float16" in fmha_quant_mode_choices
-                else fmha_quant_mode_choices[0],
+                value="float16" if "float16" in fmha_quant_mode_choices else fmha_quant_mode_choices[0],
                 interactive=True,
             )
             moe_quant_mode = gr.Dropdown(
                 choices=moe_quant_mode_choices,
                 label="moe quant mode",
                 allow_custom_value=False,
-                value="fp8_block"
-                if "fp8_block" in moe_quant_mode_choices
-                else moe_quant_mode_choices[0],
+                value="fp8_block" if "fp8_block" in moe_quant_mode_choices else moe_quant_mode_choices[0],
                 interactive=True,
             )
             comm_quant_mode = gr.Dropdown(
@@ -124,21 +110,15 @@ def create_model_parallel_config(app_config, single_select=True, disagg=False):
     if single_select:
         with gr.Accordion("Parallel config"):
             with gr.Row():
-                tp_size = gr.Dropdown(
-                    choices=[1, 2, 4, 8, 16, 32, 64], label="tp size", value=8, interactive=True
-                )
-                pp_size = gr.Dropdown(
-                    choices=[1, 2, 4, 8], label="pp size", value=1, interactive=True
-                )
+                tp_size = gr.Dropdown(choices=[1, 2, 4, 8, 16, 32, 64], label="tp size", value=8, interactive=True)
+                pp_size = gr.Dropdown(choices=[1, 2, 4, 8], label="pp size", value=1, interactive=True)
                 dp_size = gr.Dropdown(
                     choices=[1, 2, 4, 8, 16, 32, 64, 128, 256],
                     label="dp size",
                     value=1,
                     interactive=True,
                 )
-                moe_tp_size = gr.Dropdown(
-                    choices=[1, 2, 4, 8, 16], label="moe tp size", value=1, interactive=True
-                )
+                moe_tp_size = gr.Dropdown(choices=[1, 2, 4, 8, 16], label="moe tp size", value=1, interactive=True)
                 moe_ep_size = gr.Dropdown(
                     choices=[1, 2, 4, 8, 16, 32, 64, 128, 256],
                     label="moe ep size",
@@ -149,30 +129,22 @@ def create_model_parallel_config(app_config, single_select=True, disagg=False):
         with gr.Accordion("Parallel config"):
             with gr.Row():
                 if disagg:
-                    num_worker = gr.Number(
-                        label="num worker, -1 for auto", value=-1, interactive=True
-                    )
+                    num_worker = gr.Number(label="num worker, -1 for auto", value=-1, interactive=True)
                 num_gpus = gr.CheckboxGroup(
                     choices=[1, 2, 4, 8, 16, 32, 64, 128, 256],
                     label="num gpus in a worker",
                     value=8,
                     interactive=True,
                 )
-                tp_size = gr.CheckboxGroup(
-                    choices=[1, 2, 4, 8, 16, 32, 64], label="tp size", value=8, interactive=True
-                )
-                pp_size = gr.CheckboxGroup(
-                    choices=[1, 2, 4, 8], label="pp size", value=1, interactive=True
-                )
+                tp_size = gr.CheckboxGroup(choices=[1, 2, 4, 8, 16, 32, 64], label="tp size", value=8, interactive=True)
+                pp_size = gr.CheckboxGroup(choices=[1, 2, 4, 8], label="pp size", value=1, interactive=True)
                 dp_size = gr.CheckboxGroup(
                     choices=[1, 2, 4, 8, 16, 32, 64, 128, 256],
                     label="dp size",
                     value=1,
                     interactive=True,
                 )
-                moe_tp_size = gr.CheckboxGroup(
-                    choices=[1, 2, 4, 8, 16], label="moe tp size", value=1, interactive=True
-                )
+                moe_tp_size = gr.CheckboxGroup(choices=[1, 2, 4, 8, 16], label="moe tp size", value=1, interactive=True)
                 moe_ep_size = gr.CheckboxGroup(
                     choices=[1, 2, 4, 8, 16, 32, 64, 128, 256],
                     label="moe ep size",
@@ -197,12 +169,8 @@ def create_model_misc_config(app_config):
     """create model misc config components"""
     with gr.Accordion("Misc config"):
         with gr.Row():
-            nextn = gr.Dropdown(
-                choices=[0, 1, 2, 3, 4, 5], value=0, label="nextn", interactive=True
-            )
-            nextn_accept_rates = gr.Textbox(
-                value="0.85,0.2,0.0,0.0,0.0", label="nextn accept rates", interactive=True
-            )
+            nextn = gr.Dropdown(choices=[0, 1, 2, 3, 4, 5], value=0, label="nextn", interactive=True)
+            nextn_accept_rates = gr.Textbox(value="0.85,0.2,0.0,0.0,0.0", label="nextn accept rates", interactive=True)
 
     return {"nextn": nextn, "nextn_accept_rates": nextn_accept_rates}
 

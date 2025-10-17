@@ -304,9 +304,7 @@ def run_mla(
         )
         q, k, v = [x.detach().to(kv_cache_dtype).requires_grad_() for x in [q, k, v]]
 
-        q_unpad, k_unpad, v_unpad = [
-            rearrange(x.detach(), "b s h d -> (b s) h d").requires_grad_() for x in [q, k, v]
-        ]
+        q_unpad, k_unpad, v_unpad = [rearrange(x.detach(), "b s h d -> (b s) h d").requires_grad_() for x in [q, k, v]]
         cu_seqlens_q = torch.arange(batch_size + 1, device=device, dtype=torch.int32) * seqlen_q
         cu_seqlens_k = torch.arange(batch_size + 1, device=device, dtype=torch.int32) * seqlen
 

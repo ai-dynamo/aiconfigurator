@@ -37,8 +37,7 @@ def test_main(
     assert num_experts % num_ranks == 0
     if local_rank == 0:
         print(
-            f"[config] num_tokens={num_tokens}, hidden={hidden}, num_topk={num_topk}, "
-            f"num_experts={num_experts}",
+            f"[config] num_tokens={num_tokens}, hidden={hidden}, num_topk={num_topk}, num_experts={num_experts}",
             flush=True,
         )
 
@@ -77,8 +76,8 @@ def test_main(
     gbl_num_tokens_per_rank = num_tokens_per_rank.clone()
     dist.all_reduce(gbl_num_tokens_per_rank, group=group)
 
-    ref_num_tokens_per_rank, _, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = (
-        buffer.get_dispatch_layout(topk_idx, num_experts)
+    ref_num_tokens_per_rank, _, ref_num_tokens_per_expert, ref_is_token_in_rank, _ = buffer.get_dispatch_layout(
+        topk_idx, num_experts
     )
     assert torch.allclose(ref_num_tokens_per_rank, num_tokens_per_rank)
     assert torch.allclose(ref_num_tokens_per_expert, num_tokens_per_expert)
@@ -129,9 +128,7 @@ def test_main(
                         dispatch_args.update(
                             {
                                 "topk_idx": topk_idx,
-                                "topk_weights": topk_weights_pure_rand
-                                if current_x is x_pure_rand
-                                else topk_weights,
+                                "topk_weights": topk_weights_pure_rand if current_x is x_pure_rand else topk_weights,
                             }
                         )
                     if previous_mode:
@@ -153,8 +150,7 @@ def test_main(
                         f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
                     )
                     assert (
-                        gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist()
-                        == recv_num_tokens_per_expert_list
+                        gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist() == recv_num_tokens_per_expert_list
                     )
                     if current_x is not x_pure_rand:
                         check_data(recv_x, rank_prefix_matrix)
@@ -162,8 +158,7 @@ def test_main(
                     if with_topk:
                         # Check `topk_idx`
                         assert (
-                            recv_topk_idx.eq(-1)
-                            | ((recv_topk_idx >= 0) & (recv_topk_idx < (num_experts // num_ranks)))
+                            recv_topk_idx.eq(-1) | ((recv_topk_idx >= 0) & (recv_topk_idx < (num_experts // num_ranks)))
                         ).sum().item() == recv_topk_idx.numel()
                         for i, count in enumerate(recv_num_tokens_per_expert_list):
                             assert recv_topk_idx.eq(i).sum().item() == count
@@ -190,9 +185,7 @@ def test_main(
                         ) = buffer.dispatch(**dispatch_args)
                         event.current_stream_wait() if async_mode else ()
                         recv_worst_x = (
-                            per_token_cast_back(*recv_worst_x)
-                            if isinstance(recv_worst_x, tuple)
-                            else recv_worst_x
+                            per_token_cast_back(*recv_worst_x) if isinstance(recv_worst_x, tuple) else recv_worst_x
                         )
                         assert len(empty_list) == 0
                         assert num_worst_tokens == recv_worst_x.size(0)
@@ -200,9 +193,7 @@ def test_main(
                         assert num_worst_tokens == recv_worst_topk_weights.size(0)
                         assert torch.equal(recv_x, recv_worst_x[: recv_x.size(0)])
                         assert torch.equal(recv_topk_idx, recv_worst_topk_idx[: recv_x.size(0)])
-                        assert torch.equal(
-                            recv_topk_weights_clone, recv_worst_topk_weights[: recv_x.size(0)]
-                        )
+                        assert torch.equal(recv_topk_weights_clone, recv_worst_topk_weights[: recv_x.size(0)])
                         assert torch.all(recv_worst_topk_idx[recv_x.size(0) :] == -1).item()
 
                     # Test cached dispatch (must without top-k staffs)
@@ -217,9 +208,7 @@ def test_main(
                             dispatch_args.update({"previous_event": buffer.capture()})
                         recv_x, _, _, _, _, event = buffer.dispatch(**dispatch_args)
                         event.current_stream_wait() if async_mode else ()
-                        recv_x = (
-                            per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
-                        )
+                        recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
                         if current_x is not x_pure_rand:
                             check_data(recv_x, rank_prefix_matrix)
 
@@ -245,9 +234,7 @@ def test_main(
                             if (current_x is x_pure_rand)
                             else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
                         )
-                        ref_topk_weights = (
-                            topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
-                        )
+                        ref_topk_weights = topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
                         assert calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
 
                     # For later tuning
@@ -299,18 +286,13 @@ def test_main(
 
         # Gather the best config from rank 0 and the first test setting
         if best_dispatch_results is None:
-            best_dispatch_results = torch.tensor(
-                [best_results[0], best_results[1]], dtype=torch.int32, device="cuda"
-            )
+            best_dispatch_results = torch.tensor([best_results[0], best_results[1]], dtype=torch.int32, device="cuda")
             all_best_fp8_results_list = [
-                torch.zeros_like(best_dispatch_results)
-                for _ in range(torch.distributed.get_world_size())
+                torch.zeros_like(best_dispatch_results) for _ in range(torch.distributed.get_world_size())
             ]
             dist.all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
-    dispatch_config = deep_ep.Config(
-        best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size
-    )
+    dispatch_config = deep_ep.Config(best_dispatch_results[0], best_dispatch_results[1], nvl_buffer_size)
 
     dispatch_args = {
         "x": x,
@@ -400,21 +382,11 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test intranode EP kernels")
-    parser.add_argument(
-        "--num-processes", type=int, default=8, help="Number of processes to spawn (default: 8)"
-    )
-    parser.add_argument(
-        "--num-tokens", type=int, default=4096, help="Number of tokens (default: 4096)"
-    )
-    parser.add_argument(
-        "--hidden", type=int, default=7168, help="Hidden dimension size (default: 7168)"
-    )
-    parser.add_argument(
-        "--num-topk", type=int, default=8, help="Number of top-k experts (default: 8)"
-    )
-    parser.add_argument(
-        "--num-experts", type=int, default=256, help="Number of experts (default: 256)"
-    )
+    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to spawn (default: 8)")
+    parser.add_argument("--num-tokens", type=int, default=4096, help="Number of tokens (default: 4096)")
+    parser.add_argument("--hidden", type=int, default=7168, help="Hidden dimension size (default: 7168)")
+    parser.add_argument("--num-topk", type=int, default=8, help="Number of top-k experts (default: 8)")
+    parser.add_argument("--num-experts", type=int, default=256, help="Number of experts (default: 256)")
     args = parser.parse_args()
 
     num_processes = args.num_processes

@@ -34,8 +34,7 @@ def find_project_root():
 
     # If not found, raise an error
     raise RuntimeError(
-        "Cannot find project root directory. "
-        "Make sure you're running this script from within the project."
+        "Cannot find project root directory. Make sure you're running this script from within the project."
     )
 
 
@@ -148,9 +147,7 @@ def run_pytest_command(cmd, description):
     return return_code == 0, result
 
 
-def generate_test_filter(
-    models=None, systems=None, gpu_configs=None, isl_osl_combinations=None, tpot_values=None
-):
+def generate_test_filter(models=None, systems=None, gpu_configs=None, isl_osl_combinations=None, tpot_values=None):
     """
     Generate pytest filter string based on test parameters.
 
@@ -225,9 +222,7 @@ def cleanup_temp_dir(temp_dir):
         print(f"⚠️ Warning: Could not clean up {temp_dir}: {e}")
 
 
-def print_cicd_summary(
-    test_type, success, total_tests=None, failed_tests=None, execution_time=None
-):
+def print_cicd_summary(test_type, success, total_tests=None, failed_tests=None, execution_time=None):
     """
     Print a CI/CD friendly summary of test results.
 
@@ -243,9 +238,7 @@ def print_cicd_summary(
     print(f"{'=' * 80}")
 
     if total_tests is not None:
-        success_rate = (
-            ((total_tests - (failed_tests or 0)) / total_tests * 100) if total_tests > 0 else 0
-        )
+        success_rate = ((total_tests - (failed_tests or 0)) / total_tests * 100) if total_tests > 0 else 0
         print(f"📊 Total tests: {total_tests}")
         if failed_tests is not None:
             print(f"❌ Failed: {failed_tests}")

@@ -44,9 +44,7 @@ def get_context_mla_test_cases():
     ]
     for n in n_list:
         for b in b_list:
-            for s in (
-                s_list
-            ):  # [2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072]:
+            for s in s_list:  # [2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072]:
                 for dtype in dtype_list:
                     for tp_size in [1, 2, 4, 8, 16, 32, 64]:
                         if b * s > 32768:
@@ -307,11 +305,7 @@ def run_mla(
                 num_tokens,
                 num_heads
                 * (
-                    qk_nope_head_dim
-                    + qk_rope_head_dim
-                    + qk_nope_head_dim
-                    + qk_rope_head_dim
-                    + v_head_dim
+                    qk_nope_head_dim + qk_rope_head_dim + qk_nope_head_dim + qk_rope_head_dim + v_head_dim
                 ),  # 128 128 64
             ],
             device=device,
@@ -324,9 +318,7 @@ def run_mla(
             device=device,
             dtype=torch.bfloat16,
         )
-        q_pe = torch.randn(
-            [num_tokens, num_heads, qk_rope_head_dim], dtype=torch.bfloat16, device=device
-        )
+        q_pe = torch.randn([num_tokens, num_heads, qk_rope_head_dim], dtype=torch.bfloat16, device=device)
 
     # dry run
     if is_context_phase:
