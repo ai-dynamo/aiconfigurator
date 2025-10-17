@@ -29,10 +29,7 @@ class InputParser:
             "disagg_decode_worker_config",
         ):
             worker_config = cfg.get(key, None)
-            if (
-                worker_config is not None
-                and worker_config.get("kvcache_quant_mode", None) is not None
-            ):
+            if worker_config is not None and worker_config.get("kvcache_quant_mode", None) is not None:
                 return InputParser._enum_name_or_str(worker_config.get("kvcache_quant_mode"))
         return None
 
@@ -48,9 +45,7 @@ class InputParser:
         )
 
     @staticmethod
-    def from_runtime(
-        cfg: dict, overrides: DynamoConfig, backend: str, version: str
-    ) -> GeneratorContext:
+    def from_runtime(cfg: dict, overrides: DynamoConfig, backend: str, version: str) -> GeneratorContext:
         if cfg["serving_mode"] == "agg":
             modes = {
                 "agg": ModeConfig(
@@ -101,9 +96,7 @@ class InputParser:
                 * modes["disagg_decode"].pp
             )
         else:
-            num_gpus_per_replica = (
-                modes["agg"].workers * modes["agg"].tp * modes["agg"].dp * modes["agg"].pp
-            )
+            num_gpus_per_replica = modes["agg"].workers * modes["agg"].tp * modes["agg"].dp * modes["agg"].pp
         num_replicas = total_gpus // num_gpus_per_replica
         modes["total_gpus"] = total_gpus
         modes["num_gpus_per_replica"] = num_gpus_per_replica

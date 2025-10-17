@@ -183,9 +183,7 @@ def plot_gpu_timeseries_bokeh_from_df(
     tmp_csv = Path(output_html_path).with_suffix(".tmp.csv")
     df.to_csv(tmp_csv, index=False)
     try:
-        return plot_gpu_timeseries(
-            tmp_csv, output_html_path, title, y_label=y_label, extra_series=extra_series
-        )
+        return plot_gpu_timeseries(tmp_csv, output_html_path, title, y_label=y_label, extra_series=extra_series)
     finally:
         if tmp_csv.exists():
             try:

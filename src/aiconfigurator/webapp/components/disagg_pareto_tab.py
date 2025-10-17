@@ -76,23 +76,13 @@ def create_disagg_pareto_tab(app_config):
                     label="num total gpu list of the disagg system, say,: 8,16",
                     interactive=True,
                 )
-                max_num_gpu = gr.Number(
-                    value=None, label="max gpus used in the disagg system", interactive=True
-                )
+                max_num_gpu = gr.Number(value=None, label="max gpus used in the disagg system", interactive=True)
             with gr.Row():
-                prefill_max_num_worker = gr.Number(
-                    value=32, label="Prefill max num worker", interactive=True
-                )
-                decode_max_num_worker = gr.Number(
-                    value=32, label="Decode max num worker", interactive=True
-                )
+                prefill_max_num_worker = gr.Number(value=32, label="Prefill max num worker", interactive=True)
+                decode_max_num_worker = gr.Number(value=32, label="Decode max num worker", interactive=True)
             with gr.Row():
-                prefill_max_batch_size = gr.Number(
-                    value=1, label="Prefill max batch size", interactive=True
-                )
-                decode_max_batch_size = gr.Number(
-                    value=512, label="Decode max batch size", interactive=True
-                )
+                prefill_max_batch_size = gr.Number(value=1, label="Prefill max batch size", interactive=True)
+                decode_max_batch_size = gr.Number(value=512, label="Decode max batch size", interactive=True)
 
         estimate_btn = gr.Button("Estimate Disaggregation Pareto")
         with gr.Row(equal_height=True):
@@ -109,9 +99,7 @@ def create_disagg_pareto_tab(app_config):
         debugging_box = gr.Textbox(label="Debugging", lines=5)
 
         download_btn = gr.Button("Download")
-        output_file = gr.File(
-            label="When you click the download button, the downloaded form will be displayed here."
-        )
+        output_file = gr.File(label="When you click the download button, the downloaded form will be displayed here.")
 
     return {
         "model_name_components": model_name_components,

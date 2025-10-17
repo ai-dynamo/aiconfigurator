@@ -140,10 +140,7 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
     )
 
     html_str = fig.to_html(include_plotlyjs="cdn", full_html=False)
-    iframe_html = (
-        f'<iframe srcdoc="{html_str.replace(chr(34), chr(39))}" width="100%" height="650px">'
-        "</iframe>"
-    )
+    iframe_html = f'<iframe srcdoc="{html_str.replace(chr(34), chr(39))}" width="100%" height="650px"></iframe>'
     return iframe_html
 
 
@@ -207,9 +204,7 @@ class EventFn:
                 stride = (osl + 8 - 1) // 8  # run at most 8 steps
                 backend = get_backend(backend_name)
                 session = InferenceSession(model, database, backend)
-                summary = session.run_static(
-                    runtime_config=runtime_config, mode=mode, stride=stride
-                )
+                summary = session.run_static(runtime_config=runtime_config, mode=mode, stride=stride)
             except Exception:
                 traceback_log = traceback.format_exc()
                 is_error = True
@@ -310,10 +305,7 @@ class EventFn:
                 for parallel_config in parallel_config_list:
                     tp, pp, dp, moe_tp, moe_ep = parallel_config
                     if is_moe:
-                        logger.info(
-                            f"enumerated config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} "
-                            f"moe_ep {moe_ep}"
-                        )
+                        logger.info(f"enumerated config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {moe_ep}")
                     else:
                         logger.info(f"enumerated config: tp {tp} pp {pp}")
                 if len(parallel_config_list) == 0:
@@ -418,10 +410,7 @@ class EventFn:
                 for parallel_config in parallel_config_list:
                     tp, pp, dp, moe_tp, moe_ep = parallel_config
                     if is_moe:
-                        logger.info(
-                            f"enumerated config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} "
-                            f"moe_ep {moe_ep}"
-                        )
+                        logger.info(f"enumerated config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {moe_ep}")
                     else:
                         logger.info(f"enumerated config: tp {tp} pp {pp}")
 
@@ -440,9 +429,7 @@ class EventFn:
                     parallel_config_list=parallel_config_list,
                 )
 
-                results_df = pareto_analysis.get_pareto_front(
-                    results_df, "tokens/s/user", "tokens/s/gpu"
-                )
+                results_df = pareto_analysis.get_pareto_front(results_df, "tokens/s/user", "tokens/s/gpu")
                 results_df = results_df.reset_index(drop=True).reset_index()
                 if results_df.size == 0:
                     logger.error(
@@ -457,9 +444,7 @@ class EventFn:
                     f"{model_config.fmha_quant_mode}_{model_config.moe_quant_mode}_"
                     f"{model_config.comm_quant_mode}_Agg_Pareto"
                 )
-                pareto_html = create_scatter_plot(
-                    results_df, "tokens/s/user", "tokens/s/gpu", title
-                )
+                pareto_html = create_scatter_plot(results_df, "tokens/s/user", "tokens/s/gpu", title)
             except Exception:
                 results_df = pd.DataFrame(columns=common.ColumnsAgg)
                 traceback_log = traceback.format_exc()
@@ -545,9 +530,7 @@ class EventFn:
                 prefill_database = copy.deepcopy(
                     get_database(prefill_system_name, prefill_backend_name, prefill_version)
                 )
-                decode_database = copy.deepcopy(
-                    get_database(decode_system_name, decode_backend_name, decode_version)
-                )
+                decode_database = copy.deepcopy(get_database(decode_system_name, decode_backend_name, decode_version))
                 assert prefill_database is not None
                 assert decode_database is not None
                 prefill_database.set_default_sol_mode(common.SOLMode(int(prefill_sol_mode)))
@@ -615,8 +598,7 @@ class EventFn:
                     tp, pp, dp, moe_tp, moe_ep = prefill_parallel_config
                     if is_moe:
                         logger.info(
-                            f"enumerated prefill config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} "
-                            "moe_ep {moe_ep}"
+                            f"enumerated prefill config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {{moe_ep}}"
                         )
                     else:
                         logger.info(f"enumerated prefill config: tp {tp} pp {pp}")
@@ -625,8 +607,7 @@ class EventFn:
                     tp, pp, dp, moe_tp, moe_ep = decode_parallel_config
                     if is_moe:
                         logger.info(
-                            f"enumerated decode config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} "
-                            "moe_ep {moe_ep}"
+                            f"enumerated decode config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {{moe_ep}}"
                         )
                     else:
                         logger.info(f"enumerated decode config: tp {tp} pp {pp}")
@@ -646,9 +627,7 @@ class EventFn:
                 else:
                     decode_num_worker_list = [decode_num_worker]
 
-                num_gpu_list = (
-                    [int(x) for x in num_gpu_list.split(",")] if len(num_gpu_list) > 0 else None
-                )
+                num_gpu_list = [int(x) for x in num_gpu_list.split(",")] if len(num_gpu_list) > 0 else None
                 # logger.info(f"target num_gpu_list in the disagg system: {num_gpu_list}")
                 results_df = pareto_analysis.disagg_pareto(
                     model_name=model_name,
@@ -671,9 +650,7 @@ class EventFn:
                     decode_max_num_tokens=decode_max_batch_size,
                 )
 
-                results_df = pareto_analysis.get_pareto_front(
-                    results_df, "tokens/s/user", "tokens/s/gpu"
-                )
+                results_df = pareto_analysis.get_pareto_front(results_df, "tokens/s/user", "tokens/s/gpu")
                 results_df = results_df.reset_index(drop=True).reset_index()
                 if results_df.size == 0:
                     logger.error(
@@ -690,9 +667,7 @@ class EventFn:
                     f"{decode_kvcache_quant_mode}_{decode_fmha_quant_mode}_{decode_moe_quant_mode}_"
                     f"{decode_comm_quant_mode}_Disagg_Pareto"
                 )
-                pareto_html = create_scatter_plot(
-                    results_df, "tokens/s/user", "tokens/s/gpu", title, is_disagg=True
-                )
+                pareto_html = create_scatter_plot(results_df, "tokens/s/user", "tokens/s/gpu", title, is_disagg=True)
             except Exception:
                 results_df = pd.DataFrame(columns=common.ColumnsDisagg)
                 traceback_log = traceback.format_exc()
@@ -804,7 +779,7 @@ class EventFn:
 
             html_str = fig.to_html(full_html=False, include_plotlyjs="cdn")
 
-            iframe_html = f'<iframe srcdoc="{html_str.replace(chr(34), chr(39))}" width="100%" height="850px"></iframe>'  # noqa: E501
+            iframe_html = f'<iframe srcdoc="{html_str.replace(chr(34), chr(39))}" width="100%" height="850px"></iframe>'
             return iframe_html
 
         is_error = False
@@ -869,10 +844,7 @@ class EventFn:
                     prefill_results_df = pd.concat(
                         [prefill_results_df, prefill_summary.get_summary_df()], ignore_index=True
                     )
-                    if (
-                        prefill_summary.get_summary_df().loc[0, "context_latency"] > ttft
-                        and prefill_target_bs == 0
-                    ):
+                    if prefill_summary.get_summary_df().loc[0, "context_latency"] > ttft and prefill_target_bs == 0:
                         prefill_target_bs = b * prefill_dp_size  # global_bs
                 prefill_results_df = prefill_results_df.reset_index(drop=True).reset_index()
                 title = (
@@ -893,9 +865,7 @@ class EventFn:
 
                 # decode
                 decode_model = get_model(model_name, decode_model_config, decode_backend_name)
-                decode_database = copy.deepcopy(
-                    get_database(decode_system_name, decode_backend_name, decode_version)
-                )
+                decode_database = copy.deepcopy(get_database(decode_system_name, decode_backend_name, decode_version))
                 assert decode_database is not None
                 decode_database.set_default_sol_mode(common.SOLMode(int(decode_sol_mode)))
                 decode_backend = get_backend(decode_backend_name)
@@ -918,10 +888,7 @@ class EventFn:
                     decode_results_df = pd.concat(
                         [decode_results_df, decode_summary.get_summary_df()], ignore_index=True
                     )
-                    if (
-                        decode_summary.get_summary_df().loc[0, "tpot"] > tpot
-                        and decode_target_bs == 0
-                    ):
+                    if decode_summary.get_summary_df().loc[0, "tpot"] > tpot and decode_target_bs == 0:
                         decode_target_bs = b * decode_dp_size  # global_bs
                     if (
                         decode_summary.get_summary_df().loc[0, "tpot"] > 1.5 * tpot and b > 10
@@ -976,10 +943,7 @@ class EventFn:
                 button_text = "Save for comparison"
                 if result_name == "" or result_name in pareto_results_state:
                     logger.error(f"Result name {result_name} is invalid or already exists")
-                    button_text = (
-                        "Save for comparison (Result name is invalid or already exists, "
-                        "please rename)"
-                    )
+                    button_text = "Save for comparison (Result name is invalid or already exists, please rename)"
                     is_interactive = True
                 else:
                     pareto_results_state[result_name] = result_df
@@ -1021,18 +985,8 @@ class EventFn:
                 memory = result_df["memory"].astype(str)
             else:
                 system_type = "disagg"
-                parallel = (
-                    "(p)"
-                    + result_df["(p)parallel"].astype(str)
-                    + "_(d)"
-                    + result_df["(d)parallel"].astype(str)
-                )
-                memory = (
-                    "(p)"
-                    + result_df["(p)memory"].astype(str)
-                    + "_(d)"
-                    + result_df["(d)memory"].astype(str)
-                )
+                parallel = "(p)" + result_df["(p)parallel"].astype(str) + "_(d)" + result_df["(d)parallel"].astype(str)
+                memory = "(p)" + result_df["(p)memory"].astype(str) + "_(d)" + result_df["(d)memory"].astype(str)
             fig.add_trace(
                 go.Scatter(
                     x=result_df["tokens/s/user"],
@@ -1088,10 +1042,7 @@ class EventFn:
 
         html_str = fig.to_html(full_html=False, include_plotlyjs="cdn")
 
-        iframe_html = (
-            f'<iframe srcdoc="{html_str.replace(chr(34), chr(39))}" width="100%" height="850px">'
-            "</iframe>"
-        )
+        iframe_html = f'<iframe srcdoc="{html_str.replace(chr(34), chr(39))}" width="100%" height="850px"></iframe>'
 
         return gr.update(value=iframe_html)
 
@@ -1113,54 +1064,28 @@ class EventFn:
                 gr.update(choices=[], value=None, interactive=True),
             )
         database_dict = get_all_databases()
-        gemm_quant_mode_choices = sorted(
-            database_dict[system_name][backend_name][version].supported_quant_mode["gemm"]
-        )
+        gemm_quant_mode_choices = sorted(database_dict[system_name][backend_name][version].supported_quant_mode["gemm"])
         kvcache_quant_mode_choices = (
-            sorted(
-                database_dict[system_name][backend_name][version].supported_quant_mode[
-                    "generation_attention"
-                ]
-            )
+            sorted(database_dict[system_name][backend_name][version].supported_quant_mode["generation_attention"])
             if get_model_family(model_name) != "DEEPSEEK"
-            else sorted(
-                database_dict[system_name][backend_name][version].supported_quant_mode[
-                    "generation_mla"
-                ]
-            )
+            else sorted(database_dict[system_name][backend_name][version].supported_quant_mode["generation_mla"])
         )
         fmha_quant_mode_choices = (
-            sorted(
-                database_dict[system_name][backend_name][version].supported_quant_mode[
-                    "context_attention"
-                ]
-            )
+            sorted(database_dict[system_name][backend_name][version].supported_quant_mode["context_attention"])
             if get_model_family(model_name) != "DEEPSEEK"
-            else sorted(
-                database_dict[system_name][backend_name][version].supported_quant_mode[
-                    "context_mla"
-                ]
-            )
+            else sorted(database_dict[system_name][backend_name][version].supported_quant_mode["context_mla"])
         )
-        moe_quant_mode_choices = sorted(
-            database_dict[system_name][backend_name][version].supported_quant_mode["moe"]
-        )
+        moe_quant_mode_choices = sorted(database_dict[system_name][backend_name][version].supported_quant_mode["moe"])
 
         return (
-            gr.update(
-                choices=gemm_quant_mode_choices, value=gemm_quant_mode_choices[0], interactive=True
-            ),
+            gr.update(choices=gemm_quant_mode_choices, value=gemm_quant_mode_choices[0], interactive=True),
             gr.update(
                 choices=kvcache_quant_mode_choices,
                 value=kvcache_quant_mode_choices[0],
                 interactive=True,
             ),
-            gr.update(
-                choices=fmha_quant_mode_choices, value=fmha_quant_mode_choices[0], interactive=True
-            ),
-            gr.update(
-                choices=moe_quant_mode_choices, value=moe_quant_mode_choices[0], interactive=True
-            ),
+            gr.update(choices=fmha_quant_mode_choices, value=fmha_quant_mode_choices[0], interactive=True),
+            gr.update(choices=moe_quant_mode_choices, value=moe_quant_mode_choices[0], interactive=True),
         )
 
     @staticmethod

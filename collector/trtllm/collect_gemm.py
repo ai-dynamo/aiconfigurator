@@ -133,9 +133,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
             w = torch.randn((n, k), dtype=torch.float16, device=torch.device(device))
             w_sf_global = (448 * 6) / w.abs().max().float()
             w_fp4, w_sf_block = torch.ops.trtllm.fp4_quantize(w, w_sf_global, 16, False)
-            w_sf_block_unswizzled = torch.ops.trtllm.nvfp4_block_scale_interleave_reverse(
-                w_sf_block.cpu().view(k, -1)
-            )
+            w_sf_block_unswizzled = torch.ops.trtllm.nvfp4_block_scale_interleave_reverse(w_sf_block.cpu().view(k, -1))
             weights = {
                 "weight": w_fp4.cpu(),
                 "weight_scale": w_sf_block_unswizzled.view(torch.float8_e4m3fn),
@@ -143,9 +141,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
                 "input_scale": 1.0 / x_sf_global.cpu(),
             }
         else:
-            weights = {
-                "weight": torch.randn((n, k), dtype=torch.bfloat16, device=torch.device(device))
-            }
+            weights = {"weight": torch.randn((n, k), dtype=torch.bfloat16, device=torch.device(device))}
 
         gemm.load_weights([weights])
         gemm.to(torch.device(device))

@@ -107,16 +107,14 @@ class InferenceSummary:
 
             breakdown_string += f"total                      ({latency:>10.5f} ms)\n"
             for op, op_latency in metrics.items():
-                breakdown_string += (
-                    f"{op:<25}   {op_latency:>10.3f} ms {int(op_latency / latency * 100):>5}%\n"
-                )
+                breakdown_string += f"{op:<25}   {op_latency:>10.3f} ms {int(op_latency / latency * 100):>5}%\n"
             return latency, breakdown_string
 
-        context_latency, context_latency_string = (
-            get_latency_and_breakdown_percentage_string_helper(self._context_latency_dict)
+        context_latency, context_latency_string = get_latency_and_breakdown_percentage_string_helper(
+            self._context_latency_dict
         )
-        generation_latency, generation_latency_string = (
-            get_latency_and_breakdown_percentage_string_helper(self._generation_latency_dict)
+        generation_latency, generation_latency_string = get_latency_and_breakdown_percentage_string_helper(
+            self._generation_latency_dict
         )
 
         assert self._summary_df is not None, "summary df is not set"

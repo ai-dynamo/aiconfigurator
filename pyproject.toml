@@ -97,7 +97,7 @@ include = ["*"]
 exclude = ["tests", "docker", "collector", "systems"]
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py39"
 extend-exclude = ["*.ipynb"]
 

@@ -8,9 +8,7 @@ import torch
 from helper import log_perf
 
 
-def nccl_benchmark(
-    dtype: str, nccl_op: str = "all_gather", test_range: str = "10,10000000,1000", num_gpus: int = 8
-):
+def nccl_benchmark(dtype: str, nccl_op: str = "all_gather", test_range: str = "10,10000000,1000", num_gpus: int = 8):
     nccl_test_bin = ""
     if nccl_op == "all_gather":
         nccl_test_bin = "all_gather_perf"
@@ -88,9 +86,7 @@ if __name__ == "__main__":
         choices=["all_gather", "alltoall", "reduce_scatter", "all_reduce"],
         help="NCCL OP: all_gather, alltoall, reduce_scatter, all_reduce",
     )
-    parser.add_argument(
-        "--dtype", "-t", default="half", choices=["half", "int8"], help="NCCL OP data type"
-    )
+    parser.add_argument("--dtype", "-t", default="half", choices=["half", "int8"], help="NCCL OP data type")
     parser.add_argument(
         "--range",
         "-r",

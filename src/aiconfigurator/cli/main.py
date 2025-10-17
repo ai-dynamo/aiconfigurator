@@ -26,9 +26,7 @@ logger = logging.getLogger(__name__)
 
 def _build_common_cli_parser() -> argparse.ArgumentParser:
     common_parser = argparse.ArgumentParser(add_help=False)
-    common_parser.add_argument(
-        "--save_dir", type=str, default=None, help="Directory to save the results."
-    )
+    common_parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")
     common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     add_config_generation_cli(common_parser, default_backend=common.BackendName.trtllm.value)
     return common_parser
@@ -149,9 +147,7 @@ _EXPERIMENT_RESERVED_KEYS = {
 def _build_yaml_config(exp_config: dict, config_section: dict) -> dict | None:
     if not config_section:
         config_section = {
-            key: copy.deepcopy(value)
-            for key, value in exp_config.items()
-            if key not in _EXPERIMENT_RESERVED_KEYS
+            key: copy.deepcopy(value) for key, value in exp_config.items() if key not in _EXPERIMENT_RESERVED_KEYS
         }
     if not config_section:
         return None
@@ -199,9 +195,7 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
         serving_mode = exp_config["serving_mode"]
         model_name = exp_config["model_name"]
         if serving_mode not in {"agg", "disagg"} or not model_name:
-            logger.warning(
-                "Skipping experiment '%s': missing serving_mode or model_name.", exp_name
-            )
+            logger.warning("Skipping experiment '%s': missing serving_mode or model_name.", exp_name)
             continue
 
         # system
@@ -294,9 +288,7 @@ def _execute_task_configs(
             pareto_frontier_df = task_result["pareto_frontier_df"]
             if pareto_frontier_df is not None and not pareto_frontier_df.empty:
                 results[exp_name] = task_result
-                logger.info(
-                    "Experiment %s completed with %d results.", exp_name, len(pareto_frontier_df)
-                )
+                logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_frontier_df))
             else:
                 logger.warning("Experiment %s returned no results.", exp_name)
         except Exception:
@@ -378,9 +370,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Dynamo AIConfigurator for Disaggregated Serving Deployment"
-    )
+    parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for Disaggregated Serving Deployment")
     configure_parser(parser)
     args = parser.parse_args()
     main(args)

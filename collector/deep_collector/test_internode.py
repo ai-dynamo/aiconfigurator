@@ -42,8 +42,7 @@ def test_main(
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     if local_rank == 0:
         print(
-            f"[config] num_tokens={num_tokens}, hidden={hidden}, num_topk={num_topk}, "
-            f"num_experts={num_experts}",
+            f"[config] num_tokens={num_tokens}, hidden={hidden}, num_topk={num_topk}, num_experts={num_experts}",
             flush=True,
         )
 
@@ -146,9 +145,7 @@ def test_main(
                         dispatch_args.update(
                             {
                                 "topk_idx": topk_idx,
-                                "topk_weights": topk_weights_pure_rand
-                                if current_x is x_pure_rand
-                                else topk_weights,
+                                "topk_weights": topk_weights_pure_rand if current_x is x_pure_rand else topk_weights,
                             }
                         )
                     if previous_mode:
@@ -170,16 +167,14 @@ def test_main(
                         f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
                     )
                     assert (
-                        gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist()
-                        == recv_num_tokens_per_expert_list
+                        gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist() == recv_num_tokens_per_expert_list
                     )
                     if current_x is not x_pure_rand:
                         check_data(recv_x, recv_gbl_rank_prefix_sum)
                     if with_topk:
                         # Check `topk_idx`
                         assert (
-                            recv_topk_idx.eq(-1)
-                            | ((recv_topk_idx >= 0) & (recv_topk_idx < (num_experts // num_ranks)))
+                            recv_topk_idx.eq(-1) | ((recv_topk_idx >= 0) & (recv_topk_idx < (num_experts // num_ranks)))
                         ).sum().item() == recv_topk_idx.numel()
                         for i, count in enumerate(recv_num_tokens_per_expert_list):
                             assert recv_topk_idx.eq(i).sum().item() == count
@@ -203,9 +198,7 @@ def test_main(
                             dispatch_args.update({"previous_event": buffer.capture()})
                         recv_x, _, _, _, _, event = buffer.dispatch(**dispatch_args)
                         event.current_stream_wait() if async_mode else ()
-                        recv_x = (
-                            per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
-                        )
+                        recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
                         if current_x is not x_pure_rand:
                             check_data(recv_x, recv_gbl_rank_prefix_sum)
 
@@ -225,9 +218,9 @@ def test_main(
                         combine_args.update({"previous_event": buffer.capture()})
                     combined_x, combined_topk_weights, event = buffer.combine(**combine_args)
                     event.current_stream_wait() if async_mode else ()
-                    check_x = (
-                        combined_x.float() - bias_0.float() - bias_1.float()
-                    ) / is_token_in_rank.sum(dim=1).unsqueeze(1)
+                    check_x = (combined_x.float() - bias_0.float() - bias_1.float()) / is_token_in_rank.sum(
+                        dim=1
+                    ).unsqueeze(1)
                     ref_x = x_pure_rand if current_x is x_pure_rand else x
                     assert calc_diff(check_x, ref_x) < 5e-6
                     if with_topk:
@@ -236,9 +229,7 @@ def test_main(
                             if (current_x is x_pure_rand)
                             else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
                         )
-                        ref_topk_weights = (
-                            topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
-                        )
+                        ref_topk_weights = topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
                         assert calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
 
                     # For later tuning
@@ -269,13 +260,9 @@ def test_main(
         )
         for nvl_chunk_size in range(4, 45, 4):
             for rdma_chunk_size in range(4, 33, 4):
-                config = deep_ep.Config(
-                    num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size
-                )
+                config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
                 tune_args = {"x": current_x, "handle": handle, "config": config}
-                t, notify_t = bench_kineto(
-                    lambda args=tune_args: buffer.dispatch(**args), ("dispatch", "notify")
-                )
+                t, notify_t = bench_kineto(lambda args=tune_args: buffer.dispatch(**args), ("dispatch", "notify"))
                 if t < best_time:
                     best_time, best_results = (
                         t,
@@ -300,8 +287,7 @@ def test_main(
                 device="cuda",
             )
             all_best_fp8_results_list = [
-                torch.zeros_like(best_dispatch_results)
-                for _ in range(torch.distributed.get_world_size())
+                torch.zeros_like(best_dispatch_results) for _ in range(torch.distributed.get_world_size())
             ]
             dist.all_gather(all_best_fp8_results_list, best_dispatch_results, group=group)
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
@@ -327,13 +313,9 @@ def test_main(
     best_time, best_results = 1e10, None
     for nvl_chunk_size in range(1, 8, 1):
         for rdma_chunk_size in range(12 if num_nodes == 2 else 8, 33, 4):
-            config = deep_ep.Config(
-                num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size
-            )
+            config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size, rdma_chunk_size, rdma_buffer_size)
             tune_args = {"x": recv_x, "handle": handle, "config": config}
-            t, notify_t = bench_kineto(
-                lambda args=tune_args: buffer.combine(**args), ("combine", "notify")
-            )
+            t, notify_t = bench_kineto(lambda args=tune_args: buffer.combine(**args), ("combine", "notify"))
             if local_rank == 0 and t < best_time:
                 best_time, best_results = (
                     t,
@@ -456,27 +438,17 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test internode EP kernels")
-    parser.add_argument(
-        "--num-processes", type=int, default=8, help="Number of processes to spawn (default: 8)"
-    )
-    parser.add_argument(
-        "--num-tokens", type=int, default=4096, help="Number of tokens (default: 4096)"
-    )
-    parser.add_argument(
-        "--hidden", type=int, default=7168, help="Hidden dimension size (default: 7168)"
-    )
+    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to spawn (default: 8)")
+    parser.add_argument("--num-tokens", type=int, default=4096, help="Number of tokens (default: 4096)")
+    parser.add_argument("--hidden", type=int, default=7168, help="Hidden dimension size (default: 7168)")
     parser.add_argument(
         "--num-topk-groups",
         type=int,
         default=None,
         help="Number of top-k groups (default: `min(num_nodes, 4)`)",
     )
-    parser.add_argument(
-        "--num-topk", type=int, default=8, help="Number of top-k experts (default: 8)"
-    )
-    parser.add_argument(
-        "--num-experts", type=int, default=256, help="Number of experts (default: 256)"
-    )
+    parser.add_argument("--num-topk", type=int, default=8, help="Number of top-k experts (default: 8)")
+    parser.add_argument("--num-experts", type=int, default=256, help="Number of experts (default: 256)")
     parser.add_argument(
         "--test-ll-compatibility",
         action="store_true",

@@ -53,9 +53,7 @@ def create_static_tab(app_config):
         with gr.Row():
             clear_btn = gr.Button("Clear")
             download_btn = gr.Button("Download")
-        output_file = gr.File(
-            label="When you click the download button, the downloaded form will be displayed here."
-        )
+        output_file = gr.File(label="When you click the download button, the downloaded form will be displayed here.")
 
     return {
         "model_name_components": model_name_components,

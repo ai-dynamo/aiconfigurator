@@ -119,9 +119,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
     elif gemm_type == "awq":
         qc = AWQConfig(weight_bits=4, group_size=128, zero_point=True, modules_to_not_convert=None)
     elif gemm_type == "gptq":
-        qc = GPTQConfig(
-            weight_bits=8, group_size=128, desc_act=False, lm_head_quantized=False, dynamic={}
-        )
+        qc = GPTQConfig(weight_bits=8, group_size=128, desc_act=False, lm_head_quantized=False, dynamic={})
     else:
         qc = None
     # print(f"dtype: {dtype}, type: {type(dtype)}")
@@ -171,10 +169,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
     torch.cuda.synchronize()
     latency = start_event.elapsed_time(end_event) / (num_runs * num_runs)
 
-    prefix = (
-        f"VLLM,{vllm_version},{torch.cuda.get_device_name(device)},gemm_torch,{gemm_type},"
-        f"{m},{n},{k}"
-    )
+    prefix = f"VLLM,{vllm_version},{torch.cuda.get_device_name(device)},gemm_torch,{gemm_type},{m},{n},{k}"
 
     fd = os.open(perf_filename, os.O_APPEND | os.O_WRONLY | os.O_CREAT)
     content = prefix + f",gemm_vllm,{latency}\n"

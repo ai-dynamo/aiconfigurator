@@ -28,9 +28,7 @@ def balanced_logits(num_tokens, num_experts, topk):
             if num_tokens >= stride:
                 h_selected_experts[token_i][i] = (token_i + i * stride) % num_experts
             else:
-                h_selected_experts[token_i][i] = (
-                    token_i * stride / num_tokens + i * stride
-                ) % num_experts
+                h_selected_experts[token_i][i] = (token_i * stride / num_tokens + i * stride) % num_experts
 
     expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
     router_logits = F.softmax(expert_map.bfloat16(), dim=1)
@@ -39,9 +37,7 @@ def balanced_logits(num_tokens, num_experts, topk):
 
 def sample_power_law(size, alpha, xmin, xmax):
     u = torch.rand(size)
-    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (
-        1 / (1 - alpha)
-    )
+    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (1 / (1 - alpha))
     return inv_cdf
 
 
@@ -192,9 +188,7 @@ def get_moe_test_cases():
     test_cases = []
 
     # currently, we support max-throughput for typical quantizations. support min-latency for nvfp4.
-    for (
-        num_gpu
-    ) in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
+    for num_gpu in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
         for moe_type in moe_list:
             for model_config in model_config_list:
                 hs, inter_s, topk, num_experts, model_name = model_config
@@ -353,9 +347,7 @@ def run_moe_torch(
     model_config = ModelConfig()
     model_config.mapping = mapping
     model_config.quant_config = quant_config
-    model_config.moe_max_num_tokens = num_tokens_lists[
-        -1
-    ]  # to avoid multi-chunk auxi stream in cuda-graph mode.
+    model_config.moe_max_num_tokens = num_tokens_lists[-1]  # to avoid multi-chunk auxi stream in cuda-graph mode.
     model_config.moe_backend = "cutlass" if not min_latency_mode else "trtllm"
 
     router_logits_dtype = torch.bfloat16
@@ -394,15 +386,11 @@ def run_moe_torch(
     )
 
     ffn1_weights = Parameter(
-        torch.randn(moe.w3_w1_weight.shape, dtype=torch.bfloat16, device=device).to(
-            dtype=moe.w3_w1_weight.dtype
-        ),
+        torch.randn(moe.w3_w1_weight.shape, dtype=torch.bfloat16, device=device).to(dtype=moe.w3_w1_weight.dtype),
         requires_grad=False,
     )
     ffn2_weights = Parameter(
-        torch.randn(moe.w2_weight.shape, dtype=torch.bfloat16, device=device).to(
-            dtype=moe.w2_weight.dtype
-        ),
+        torch.randn(moe.w2_weight.shape, dtype=torch.bfloat16, device=device).to(dtype=moe.w2_weight.dtype),
         requires_grad=False,
     )
 
@@ -412,18 +400,14 @@ def run_moe_torch(
     max_index = -1
     while True:
         try:
-            hidden_states_max_tokens = torch.randn(
-                [num_tokens_lists[max_index], hidden_size], device=device
-            ).bfloat16()
-            logits_max_tokens = torch.randn(
-                [num_tokens_lists[max_index], num_experts], device=device
-            ).to(router_logits_dtype)
+            hidden_states_max_tokens = torch.randn([num_tokens_lists[max_index], hidden_size], device=device).bfloat16()
+            logits_max_tokens = torch.randn([num_tokens_lists[max_index], num_experts], device=device).to(
+                router_logits_dtype
+            )
             torch.cuda.synchronize()
             AutoTuner.get().clear_cache()
             with torch.inference_mode(), autotune():
-                moe.forward(
-                    hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode
-                )
+                moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
             torch.cuda.synchronize()
             if aic_debug == 1:
                 print(f"tune success for tokens size {num_tokens_lists[max_index]}")
@@ -445,9 +429,7 @@ def run_moe_torch(
         num_iter = 5 if distributed == "power_law" else 1
         if distributed == "power_law":
             actual_logits_list = [
-                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(
-                    router_logits_dtype
-                )
+                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype)
                 for _ in range(num_iter)
             ]
         elif distributed == "balanced":
@@ -498,9 +480,7 @@ def run_moe_torch(
                     "num_experts": num_experts,
                     "moe_tp_size": moe_tp_size,
                     "moe_ep_size": moe_ep_size,
-                    "distribution": "power_law_" + str(power_law_alpha)
-                    if distributed == "power_law"
-                    else distributed,
+                    "distribution": "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed,
                     "latency": latency,
                 }
             ],

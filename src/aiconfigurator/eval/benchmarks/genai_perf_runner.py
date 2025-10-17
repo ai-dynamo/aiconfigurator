@@ -121,9 +121,7 @@ def _json_to_df(p: Path, folder_cc: int | None = None) -> pd.DataFrame:
             cc = (js.get("input_config", {}) or {}).get("loadgen", {}).get("concurrency")
             if not cc:
                 # legacy genai-perf JSON
-                stim = (js.get("input_config", {}) or {}).get("perf_analyzer", {}).get(
-                    "stimulus", {}
-                ) or {}
+                stim = (js.get("input_config", {}) or {}).get("perf_analyzer", {}).get("stimulus", {}) or {}
                 cc = stim.get("concurrency")
             if cc:
                 row["load_type"] = "concurrency"
@@ -182,9 +180,7 @@ def run(cfg: Cfg, *, bin_path: str = "aiperf") -> None:
     activate = _ensure_uv_venv(venv_dir)
     _warn_if_tool_missing(venv_dir, tool=Path(bin_path).name)
 
-    LOG.info(
-        "genai-perf (chat) url=%s conc=%s isl=%d osl=%d [venv=%s]", url, concs, isl, osl, venv_dir
-    )
+    LOG.info("genai-perf (chat) url=%s conc=%s isl=%d osl=%d [venv=%s]", url, concs, isl, osl, venv_dir)
 
     for v in concs:
         # Write each run into its own folder: <bench>/concurrency_<N>/

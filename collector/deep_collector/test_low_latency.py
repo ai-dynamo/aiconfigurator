@@ -37,11 +37,7 @@ def test_main(
     x_list = [x]
     for i in range(4 if use_logfmt else 0):
         # NOTES: make more LogFMT casts and also with some BF16
-        x_list.append(
-            torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
-            * 0.5
-            * random.random()
-        )
+        x_list.append(torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * 0.5 * random.random())
     # NOTES: the last one is for performance testing
     # Most of the values in the perf case is lower than the threshold, casting most channels
     x_list.append(torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * 0.1)
@@ -67,25 +63,21 @@ def test_main(
                             cumulative_local_expert_recv_stats = torch.zeros(
                                 (num_local_experts,), dtype=torch.int, device="cuda"
                             )
-                            packed_recv_x, packed_recv_count, handle, event, hook = (
-                                buffer.low_latency_dispatch(
-                                    current_x,
-                                    topk_idx,
-                                    num_tokens,
-                                    num_experts,
-                                    use_fp8=dispatch_use_fp8,
-                                    round_scale=round_scale,
-                                    use_ue8m0=use_ue8m0,
-                                    cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-                                    async_finish=not return_recv_hook,
-                                    return_recv_hook=return_recv_hook,
-                                )
+                            packed_recv_x, packed_recv_count, handle, event, hook = buffer.low_latency_dispatch(
+                                current_x,
+                                topk_idx,
+                                num_tokens,
+                                num_experts,
+                                use_fp8=dispatch_use_fp8,
+                                round_scale=round_scale,
+                                use_ue8m0=use_ue8m0,
+                                cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
+                                async_finish=not return_recv_hook,
+                                return_recv_hook=return_recv_hook,
                             )
                             hook() if return_recv_hook else event.current_stream_wait()
                         packed_recv_x = (
-                            (packed_recv_x[0], packed_recv_x[1].contiguous())
-                            if dispatch_use_fp8
-                            else packed_recv_x
+                            (packed_recv_x[0], packed_recv_x[1].contiguous()) if dispatch_use_fp8 else packed_recv_x
                         )
                         simulated_gemm_x = (
                             per_token_cast_back(
@@ -115,15 +107,12 @@ def test_main(
                             # Check expert indices
                             int_mask = (2**32) - 1
                             num_valid_tokens = recv_count.item()
-                            assert (
-                                cumulative_local_expert_recv_stats[i].item() == num_valid_tokens
-                            ), (
-                                f"{cumulative_local_expert_recv_stats[i].item()} != "
-                                f"{num_valid_tokens}"
+                            assert cumulative_local_expert_recv_stats[i].item() == num_valid_tokens, (
+                                f"{cumulative_local_expert_recv_stats[i].item()} != {num_valid_tokens}"
                             )
-                            assert (
-                                num_valid_tokens == (recv_layout_range & int_mask).sum().item()
-                            ), f"{num_valid_tokens} != {recv_layout_range & int_mask}.sum().item()"
+                            assert num_valid_tokens == (recv_layout_range & int_mask).sum().item(), (
+                                f"{num_valid_tokens} != {recv_layout_range & int_mask}.sum().item()"
+                            )
                             assert num_valid_tokens == (all_topk_idx == expert_id).sum().item(), (
                                 f"{num_valid_tokens} != {(all_topk_idx == expert_id).sum().item()}"
                             )
@@ -139,9 +128,7 @@ def test_main(
                                 if round_scale:
                                     assert calc_diff(recv_x[:, -1], recv_src_info.view(-1)) < 0.007
                                 else:
-                                    assert (
-                                        recv_x[:, -128:] - recv_src_info.view(-1, 1) % num_tokens
-                                    ).sum().item() == 0
+                                    assert (recv_x[:, -128:] - recv_src_info.view(-1, 1) % num_tokens).sum().item() == 0
                                 for j in range(num_ranks):
                                     begin_idx, count = (
                                         (recv_layout_range[j] >> 32).item(),
@@ -152,9 +139,7 @@ def test_main(
                                             all_topk_idx[j] == expert_id
                                         ).sum().item()
                                         assert (
-                                            recv_x[begin_idx : begin_idx + count, :-128]
-                                            - j
-                                            + rank_offset
+                                            recv_x[begin_idx : begin_idx + count, :-128] - j + rank_offset
                                         ).sum().item() == 0
                             if dispatch_use_fp8:
                                 hash_value ^= hash_tensor(packed_recv_x[0][i, :num_valid_tokens])
@@ -165,12 +150,8 @@ def test_main(
                         # Check combine correctness
                         for zero_copy in (False,) if use_logfmt else (False, True):
                             if zero_copy:
-                                buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = (
-                                    simulated_gemm_x
-                                )
-                            out = torch.empty(
-                                (num_tokens, hidden), dtype=torch.bfloat16, device="cuda"
-                            )
+                                buffer.get_next_low_latency_combine_buffer(handle)[:, :, :] = simulated_gemm_x
+                            out = torch.empty((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
                             combined_x, event, hook = buffer.low_latency_combine(
                                 simulated_gemm_x,
                                 topk_idx,
@@ -185,10 +166,7 @@ def test_main(
                             hook() if return_recv_hook else event.current_stream_wait()
                             if do_check:
                                 diff = calc_diff(
-                                    current_x
-                                    * topk_weights.masked_fill(topk_idx == -1, 0)
-                                    .sum(dim=1)
-                                    .view(-1, 1),
+                                    current_x * topk_weights.masked_fill(topk_idx == -1, 0).sum(dim=1).view(-1, 1),
                                     combined_x,
                                 )
                                 assert torch.isnan(combined_x).sum().item() == 0
@@ -234,9 +212,7 @@ def test_main(
     for i in range(num_tokens):
         num_selections = (topk_idx[i] != -1).sum().item()
         num_dispatch_comm_bytes += num_fp8_bytes * num_selections
-        num_combine_comm_bytes += (
-            num_logfmt10_bytes if use_logfmt else num_bf16_bytes
-        ) * num_selections
+        num_combine_comm_bytes += (num_logfmt10_bytes if use_logfmt else num_bf16_bytes) * num_selections
 
     # Dispatch + combine testing
     avg_t, min_t, max_t = bench(partial(test_func, return_recv_hook=False))
@@ -289,9 +265,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
 
-    num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-        num_tokens, hidden, num_ranks, num_experts
-    )
+    num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(num_tokens, hidden, num_ranks, num_experts)
     if local_rank == 0:
         print(f"Allocating buffer size: {num_rdma_bytes / 1e6} MB ...", flush=True)
     buffer = deep_ep.Buffer(
@@ -359,25 +333,13 @@ if __name__ == "__main__":
     # TODO: you may modify NUMA binding for less CPU overhead
     # TODO: buggy with `num_tokens=512`
     parser = argparse.ArgumentParser(description="Test low-latency EP kernels")
-    parser.add_argument(
-        "--num-processes", type=int, default=8, help="Number of processes to spawn (default: 8)"
-    )
-    parser.add_argument(
-        "--num-tokens", type=int, default=128, help="Number of tokens (default: 128)"
-    )
-    parser.add_argument(
-        "--hidden", type=int, default=7168, help="Hidden dimension size (default: 7168)"
-    )
-    parser.add_argument(
-        "--num-topk", type=int, default=8, help="Number of top-k experts (default: 8)"
-    )
-    parser.add_argument(
-        "--num-experts", type=int, default=288, help="Number of experts (default: 288)"
-    )
+    parser.add_argument("--num-processes", type=int, default=8, help="Number of processes to spawn (default: 8)")
+    parser.add_argument("--num-tokens", type=int, default=128, help="Number of tokens (default: 128)")
+    parser.add_argument("--hidden", type=int, default=7168, help="Hidden dimension size (default: 7168)")
+    parser.add_argument("--num-topk", type=int, default=8, help="Number of top-k experts (default: 8)")
+    parser.add_argument("--num-experts", type=int, default=288, help="Number of experts (default: 288)")
     parser.add_argument("--allow-mnnvl", action="store_true", help="Allow MNNVL for communication")
-    parser.add_argument(
-        "--disable-nvlink", action="store_true", help="Whether to disable NVLink for testing"
-    )
+    parser.add_argument("--disable-nvlink", action="store_true", help="Whether to disable NVLink for testing")
     parser.add_argument("--use-logfmt", action="store_true", help="Whether to test LogFMT combine")
     parser.add_argument("--pressure-test", action="store_true", help="Whether to do pressure test")
     args = parser.parse_args()

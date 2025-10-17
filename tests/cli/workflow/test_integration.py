@@ -21,9 +21,7 @@ class TestCLIIntegration:
 
     @patch("aiconfigurator.cli.main._execute_task_configs")
     @patch("aiconfigurator.cli.main._build_default_task_configs")
-    def test_cli_main_success_flow(
-        self, mock_build_default, mock_execute, sample_cli_args_with_save_dir
-    ):
+    def test_cli_main_success_flow(self, mock_build_default, mock_execute, sample_cli_args_with_save_dir):
         """Test successful CLI main execution flow for default mode."""
         mock_task_config = MagicMock(name="TaskConfig")
         mock_build_default.return_value = {"agg": mock_task_config}
@@ -146,9 +144,7 @@ class TestCLIIntegration:
         ],
     )
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    def test_cli_main_runtime_failure(
-        self, mock_execute, builder_patch, cli_args_factory, tmp_path
-    ):
+    def test_cli_main_runtime_failure(self, mock_execute, builder_patch, cli_args_factory, tmp_path):
         """Execution errors propagate as RuntimeError for visibility."""
         mock_execute.side_effect = RuntimeError("failed")
 

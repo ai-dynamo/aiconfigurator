@@ -126,13 +126,9 @@ def _generate_recommendations(error_log):
     failure_rate = summary["failed"] / summary["total_combinations"]
 
     if failure_rate > 0.5:
-        recommendations.append(
-            "High failure rate detected. Review database availability and system configurations."
-        )
+        recommendations.append("High failure rate detected. Review database availability and system configurations.")
     elif failure_rate > 0.1:
-        recommendations.append(
-            "Significant number of failures. Recommended to investigate common error patterns."
-        )
+        recommendations.append("Significant number of failures. Recommended to investigate common error patterns.")
 
     errors_by_type = summary["errors_by_type"]
     if errors_by_type:
@@ -185,21 +181,14 @@ Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 ### GPU Configurations
 """
-    report_content += (
-        ", ".join(map(str, summary_report["test_configuration"]["gpu_configs_tested"])) or "N/A"
-    )
+    report_content += ", ".join(map(str, summary_report["test_configuration"]["gpu_configs_tested"])) or "N/A"
 
     report_content += """
 
 ### ISL/OSL Combinations
 """
     report_content += (
-        ", ".join(
-            [
-                f"({isl}, {osl})"
-                for isl, osl in summary_report["test_configuration"]["isl_osl_combinations"]
-            ]
-        )
+        ", ".join([f"({isl}, {osl})" for isl, osl in summary_report["test_configuration"]["isl_osl_combinations"]])
         or "N/A"
     )
 
@@ -209,10 +198,7 @@ Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """
     report_content += (
         ", ".join(
-            [
-                f"({ttft}, {tpot})"
-                for ttft, tpot in summary_report["test_configuration"]["ttft_tpot_combinations"]
-            ]
+            [f"({ttft}, {tpot})" for ttft, tpot in summary_report["test_configuration"]["ttft_tpot_combinations"]]
         )
         or "N/A"
     )

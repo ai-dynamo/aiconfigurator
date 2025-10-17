@@ -31,9 +31,7 @@ def get_model(model_name: str, model_config: config.ModelConfig, backend_name: s
         moe_inter_size,
         extra_params,
     ) = common.SupportedModels[model_name]
-    assert model_family in common.ModelFamily, (
-        "model is not in ModelFamily(GPT, LLAMA, MOE, DEEPSEEK, NEMOTRONNAS)"
-    )
+    assert model_family in common.ModelFamily, "model is not in ModelFamily(GPT, LLAMA, MOE, DEEPSEEK, NEMOTRONNAS)"
 
     if model_config.overwrite_num_layers > 0:
         layers = model_config.overwrite_num_layers
@@ -218,9 +216,7 @@ class BaseModel:
         self._inter_size = inter_size
         self._vocab_size = vocab_size
         self._context_length = context_length
-        self._num_kv_heads_per_gpu = (
-            self._num_kv_heads + model_config.tp_size - 1
-        ) // model_config.tp_size
+        self._num_kv_heads_per_gpu = (self._num_kv_heads + model_config.tp_size - 1) // model_config.tp_size
 
         if self._num_layers % model_config.pp_size != 0:
             logger.warning(
@@ -229,10 +225,7 @@ class BaseModel:
                 f"Currently we're nothing to correct this."
             )
 
-        assert (
-            self._num_heads % model_config.tp_size == 0
-            and self._num_heads // model_config.tp_size >= 4
-        ), (
+        assert self._num_heads % model_config.tp_size == 0 and self._num_heads // model_config.tp_size >= 4, (
             f"num_heads {self._num_heads} should be divisible by tp_size {model_config.tp_size} "
             f"and the division result should be >= 4"
         )
@@ -269,8 +262,7 @@ class GPTModel(BaseModel):
                 ops.GEMM(
                     "context_qkv_gemm",
                     self._num_layers,
-                    self._num_heads * self._head_size // tp_size
-                    + self._head_size * num_kv_heads_per_gpu * 2,
+                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
                 ),
@@ -328,8 +320,7 @@ class GPTModel(BaseModel):
                 ops.GEMM(
                     "generation_qkv_gemm",
                     self._num_layers,
-                    self._num_heads * self._head_size // tp_size
-                    + self._head_size * num_kv_heads_per_gpu * 2,
+                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
                 ),
@@ -420,8 +411,7 @@ class LLAMAModel(BaseModel):
                 ops.GEMM(
                     "context_qkv_gemm",
                     self._num_layers,
-                    self._num_heads * self._head_size // tp_size
-                    + self._head_size * num_kv_heads_per_gpu * 2,
+                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
                 ),
@@ -479,8 +469,7 @@ class LLAMAModel(BaseModel):
                 ops.GEMM(
                     "generation_qkv_gemm",
                     self._num_layers,
-                    self._num_heads * self._head_size // tp_size
-                    + self._head_size * num_kv_heads_per_gpu * 2,
+                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
                 ),
@@ -559,17 +548,14 @@ class MOEModel(BaseModel):
 
         # make sure the paralel width is same
         assert (
-            self.config.tp_size * self.config.attention_dp_size
-            == self.config.moe_tp_size * self.config.moe_ep_size
+            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
             f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
 
-        assert num_experts >= self.config.moe_ep_size, (
-            f"ep size cannot be larger than num_experts {num_experts}"
-        )
+        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
         assert self.config.tp_size * self.config.attention_dp_size <= 256, (
             f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
             f"should not be larger than 256"
@@ -633,8 +619,7 @@ class MOEModel(BaseModel):
                 ops.GEMM(
                     "context_qkv_gemm",
                     self._num_layers,
-                    self._num_heads * self._head_size // tp_size
-                    + self._head_size * num_kv_heads_per_gpu * 2,
+                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
                 ),
@@ -720,8 +705,7 @@ class MOEModel(BaseModel):
                 ops.GEMM(
                     "generation_qkv_gemm",
                     self._num_layers,
-                    self._num_heads * self._head_size // tp_size
-                    + self._head_size * num_kv_heads_per_gpu * 2,
+                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
                 ),
@@ -751,8 +735,7 @@ class MOEModel(BaseModel):
                 ops.GEMM(
                     "generation_qkv_gemm",
                     self._num_layers,
-                    self._num_heads * self._head_size // tp_size
-                    + self._head_size * num_kv_heads_per_gpu * 2,
+                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
                 ),
@@ -863,17 +846,14 @@ class DeepSeekModel(BaseModel):
 
         # make sure the paralel width is same
         assert (
-            self.config.tp_size * self.config.attention_dp_size
-            == self.config.moe_tp_size * self.config.moe_ep_size
+            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
             f"tp_size ({self.config.tp_size}) * attention_dp_size "
             f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
 
-        assert num_experts >= self.config.moe_ep_size, (
-            f"ep size cannot be larger than num_experts {num_experts}"
-        )
+        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
         assert self.config.tp_size * self.config.attention_dp_size <= 256, (
             f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
             f"should not be larger than 256"
@@ -923,9 +903,7 @@ class DeepSeekModel(BaseModel):
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.GEMM(
-                    "context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode
-                ),  # on every gpu, fused_a
+                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),  # on every gpu, fused_a
                 ops.GEMM(
                     "context_q_b_proj_gemm",
                     self._num_layers,
@@ -1068,9 +1046,7 @@ class DeepSeekModel(BaseModel):
         #####generation part, only generation part is scaled by mtp_scale_factor
         self.generation_ops.extend(
             [
-                ops.Embedding(
-                    "generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3
-                ),
+                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
                 ops.ElementWise(
                     "generation_add_norm_1",
                     self._num_layers * self._mtp_scale_factor,
@@ -1253,12 +1229,8 @@ class DeepSeekModel(BaseModel):
 
         # pp
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(
-            ops.P2P("context_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size)
-        )
-        self.generation_ops.append(
-            ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size)
-        )
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
         # TODO
         # a lot of quantization ops
@@ -1272,9 +1244,7 @@ class DisaggDeepSeekModel(BaseModel):
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 
-        assert num_experts >= self.config.moe_ep_size, (
-            f"ep size cannot be larger than num_experts {num_experts}"
-        )
+        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
 
         self._topk = topk
         self._num_experts = num_experts
@@ -1532,9 +1502,7 @@ class NemotronNas(BaseModel):
             kvcache_quant_mode = self.config.kvcache_quant_mode
             fmha_quant_mode = self.config.fmha_quant_mode
             pp_scale_factor = pp_size - 1
-            self._context_ops.append(
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3)
-            )
+            self._context_ops.append(ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3))
             for b in puzzle_block_configs:
                 count = b.num_inst
                 if not b.attn_no_op:
@@ -1654,9 +1622,7 @@ class NemotronNas(BaseModel):
             gemm_quant_mode = self.config.gemm_quant_mode
             kvcache_quant_mode = self.config.kvcache_quant_mode
             pp_scale_factor = pp_size - 1
-            self._generation_ops.append(
-                ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3)
-            )
+            self._generation_ops.append(ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3))
             for b in puzzle_block_configs:
                 count = b.num_inst
                 if not b.attn_no_op:

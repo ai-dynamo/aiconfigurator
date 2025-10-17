@@ -25,9 +25,7 @@ def configure_parser(parser):
     parser.add_argument("--server_name", type=str, default="0.0.0.0", help="Server name")
     parser.add_argument("--server_port", type=int, default=7860, help="Server port")
     parser.add_argument("--enable_agg", action="store_true", help="Enable Agg tab")
-    parser.add_argument(
-        "--enable_disagg_pd_ratio", action="store_true", help="Enable Disagg PD Ratio tab"
-    )
+    parser.add_argument("--enable_disagg_pd_ratio", action="store_true", help="Enable Disagg PD Ratio tab")
     parser.add_argument("--debug", help="Debug mode", action="store_true")
     parser.add_argument("--experimental", help="enable experimental features", action="store_true")
 
@@ -116,9 +114,7 @@ def main(args):
         )
         if app_config["enable_disagg_pd_ratio"]:
             EventHandler.setup_disagg_pd_ratio_events(disagg_pd_ratio_components)
-        EventHandler.setup_pareto_comparison_events(
-            pareto_comparison_components, pareto_results_state
-        )
+        EventHandler.setup_pareto_comparison_events(pareto_comparison_components, pareto_results_state)
 
         demo.launch(server_name=args.server_name, server_port=args.server_port)
 

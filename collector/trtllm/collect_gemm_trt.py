@@ -164,15 +164,9 @@ def run_gemm(gemm_type, use_plugin, m, n, k, device="cuda:0"):
         #    False, False, False, False, False, False, False,False,True)
 
         gemm_list = []
-        gemm_list.append(
-            Linear(k, 12288, bias=False, dtype=tensor_type, gather_output=False, tp_size=1)
-        )
-        gemm_list.append(
-            Linear(12288, 12288, bias=False, dtype=tensor_type, gather_output=False, tp_size=1)
-        )
-        gemm_list.append(
-            Linear(12288, k, bias=False, dtype=tensor_type, gather_output=False, tp_size=1)
-        )
+        gemm_list.append(Linear(k, 12288, bias=False, dtype=tensor_type, gather_output=False, tp_size=1))
+        gemm_list.append(Linear(12288, 12288, bias=False, dtype=tensor_type, gather_output=False, tp_size=1))
+        gemm_list.append(Linear(12288, k, bias=False, dtype=tensor_type, gather_output=False, tp_size=1))
         gm = None
         if gemm_type == "float16":
             gm = Linear(k, n, bias=False, gather_output=False, dtype=tensor_type, tp_size=1)
@@ -221,14 +215,10 @@ def run_gemm(gemm_type, use_plugin, m, n, k, device="cuda:0"):
     # trt run
     build_engine = EngineFromNetwork(
         (builder.trt_builder, net.trt_network),
-        CreateConfig(
-            fp16=True, int8=use_int8, fp8=use_fp8, precision_constraints="obey", max_aux_streams=0
-        ),
+        CreateConfig(fp16=True, int8=use_int8, fp8=use_fp8, precision_constraints="obey", max_aux_streams=0),
     )
 
-    profiler = GEMMProfiler(
-        m=m, n=n, k=k, device=device, perf_filename="gemm_perf.txt", gemm_type=gemm_type
-    )
+    profiler = GEMMProfiler(m=m, n=n, k=k, device=device, perf_filename="gemm_perf.txt", gemm_type=gemm_type)
     # l2_cache_flusher = L2CacheFlusher()
     cudart.cudaProfilerStart()
     x_data = x_data.to(torch.device(device))
@@ -236,9 +226,7 @@ def run_gemm(gemm_type, use_plugin, m, n, k, device="cuda:0"):
         runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
         if use_fp8 and not use_plugin:  # additional warmup for fp8 OOTB
             for i in range(4):
-                runner.infer(
-                    feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False
-                )
+                runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
         runner.context.profiler = profiler
         runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
     cudart.cudaProfilerStop()

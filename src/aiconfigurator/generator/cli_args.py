@@ -79,8 +79,7 @@ def build_dynamo_config(args) -> DynamoConfig:
     extras = {
         k: smart_cast(v)
         for k, v in vars(args).items()
-        if (k in meta or any(k.startswith(p) for p in ("decode_", "prefill_", "agg_")))
-        and v is not None
+        if (k in meta or any(k.startswith(p) for p in ("decode_", "prefill_", "agg_"))) and v is not None
     }
     return DynamoConfig(extras=extras)
 
@@ -101,10 +100,7 @@ def add_config_generation_cli(parser: argparse.ArgumentParser, default_backend: 
         "--generated_config_version",
         type=str,
         default=None,
-        help=(
-            "Target engine version for generated configs. "
-            "If none is given, will skip the generation"
-        ),
+        help=("Target engine version for generated configs. If none is given, will skip the generation"),
     )
 
     for v, m in sorted(meta.items()):

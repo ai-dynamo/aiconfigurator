@@ -91,8 +91,7 @@ def safe_mkdir(target_path: str, exist_ok: bool = True) -> Path:
 
         # Verify the parent path is under an allowed prefix
         is_allowed = any(
-            resolved_parent == prefix or resolved_parent.is_relative_to(prefix)
-            for prefix in allowed_prefixes
+            resolved_parent == prefix or resolved_parent.is_relative_to(prefix) for prefix in allowed_prefixes
         )
 
         if not is_allowed:

@@ -119,9 +119,7 @@ def post_sla(
             overwritten_model_config.moe_tp_size = moe_tp_size
             overwritten_model_config.moe_ep_size = moe_ep_size
             overwritten_model_config.attention_dp_size = dp_size
-            model = get_model(
-                model_name=model_name, model_config=overwritten_model_config, backend_name=backend
-            )
+            model = get_model(model_name=model_name, model_config=overwritten_model_config, backend_name=backend)
             sess = InferenceSession(model, database, backend_instance)
 
             for cc in cc_list:
@@ -139,14 +137,11 @@ def post_sla(
                         results_df = pd.concat([results_df, result_df], axis=0, ignore_index=True)
                 else:
                     logger.info(
-                        f"Invalid config for cc: {cc} tpot: {result_df.loc[0, 'tpot']} ttft: "
-                        f"{result_df.loc[0, 'ttft']}"
+                        f"Invalid config for cc: {cc} tpot: {result_df.loc[0, 'tpot']} ttft: {result_df.loc[0, 'ttft']}"
                     )
                     break
 
-        results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(
-            drop=True
-        )
+        results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
 
         if len(results_df) != 0:
             result_dict = results_df.loc[0].to_dict()

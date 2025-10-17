@@ -40,19 +40,10 @@ class TestMoE:
         mem_bytes = quant_mode.value.memory * (
             total_tokens * hidden_size * 3
             + total_tokens * inter_size * 3 // moe_tp_size
-            + hidden_size
-            * inter_size
-            * 3
-            // moe_tp_size
-            * min(num_experts // moe_ep_size, total_tokens)
+            + hidden_size * inter_size * 3 // moe_tp_size * min(num_experts // moe_ep_size, total_tokens)
         )
         sol_math = (
-            ops
-            / (
-                comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"]
-                * quant_mode.value.compute
-            )
-            * 1000
+            ops / (comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
         )
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec["gpu"]["mem_bw"] * 1000
         expected = max(sol_math, sol_mem)
@@ -104,9 +95,9 @@ class TestMoE:
         )
 
         # Should use data from moe_data
-        expected = comprehensive_perf_db._moe_data[quant_mode][workload_distribution][topk][
-            num_experts
-        ][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens]
+        expected = comprehensive_perf_db._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][
+            inter_size
+        ][moe_tp_size][moe_ep_size][num_tokens]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_moe_different_workload_distributions(self, comprehensive_perf_db):
@@ -123,12 +114,8 @@ class TestMoE:
             "sol_mode": common.SOLMode.NON_SOL,
         }
 
-        uniform_result = comprehensive_perf_db.query_moe(
-            **base_params, workload_distribution="uniform"
-        )
-        imbalanced_result = comprehensive_perf_db.query_moe(
-            **base_params, workload_distribution="imbalanced"
-        )
+        uniform_result = comprehensive_perf_db.query_moe(**base_params, workload_distribution="uniform")
+        imbalanced_result = comprehensive_perf_db.query_moe(**base_params, workload_distribution="imbalanced")
 
         # Both should return valid results
         assert uniform_result > 0
@@ -185,12 +172,7 @@ class TestMLABMM:
         ops = 2 * num_tokens * num_heads * 128 * 512  # 2 for fma
         mem_bytes = num_heads * (num_tokens * 640 + 128 * 512) * quant_mode.value.memory
         sol_math = (
-            ops
-            / (
-                comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"]
-                * quant_mode.value.compute
-            )
-            * 1000
+            ops / (comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
         )
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec["gpu"]["mem_bw"] * 1000
         expected = max(sol_math, sol_mem)
@@ -212,12 +194,7 @@ class TestMLABMM:
         ops = 2 * num_tokens * num_heads * 128 * 512
         mem_bytes = num_heads * (num_tokens * 640 + 128 * 512) * quant_mode.value.memory
         sol_math = (
-            ops
-            / (
-                comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"]
-                * quant_mode.value.compute
-            )
-            * 1000
+            ops / (comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
         )
         sol_mem = mem_bytes / comprehensive_perf_db.system_spec["gpu"]["mem_bw"] * 1000
         expected = max(sol_math, sol_mem)
@@ -245,9 +222,7 @@ class TestMLABMM:
         )
 
         # Should use data from mla_bmm_data
-        expected = comprehensive_perf_db._mla_bmm_data[quant_mode]["mla_gen_pre"][num_heads][
-            num_tokens
-        ]
+        expected = comprehensive_perf_db._mla_bmm_data[quant_mode]["mla_gen_pre"][num_heads][num_tokens]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_mla_bmm_non_sol_mode_post(self, comprehensive_perf_db):
@@ -261,9 +236,7 @@ class TestMLABMM:
         )
 
         # Should use data from mla_bmm_data
-        expected = comprehensive_perf_db._mla_bmm_data[quant_mode]["mla_gen_post"][num_heads][
-            num_tokens
-        ]
+        expected = comprehensive_perf_db._mla_bmm_data[quant_mode]["mla_gen_post"][num_heads][num_tokens]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_mla_bmm_different_configs(self, comprehensive_perf_db):
@@ -280,8 +253,7 @@ class TestMLABMM:
                 num_tokens, num_heads, quant_mode, if_pre, sol_mode=common.SOLMode.NON_SOL
             )
             assert result > 0, (
-                f"Failed for config: tokens={num_tokens}, heads={num_heads}, quant={quant_mode}, "
-                f"pre={if_pre}"
+                f"Failed for config: tokens={num_tokens}, heads={num_heads}, quant={quant_mode}, pre={if_pre}"
             )
 
 

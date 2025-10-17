@@ -16,13 +16,9 @@ def setup_warning_filters():
     )
 
     # Suppress the cuda.cudart deprecation warning
-    warnings.filterwarnings(
-        "ignore", message="The cuda.cudart module is deprecated", category=FutureWarning
-    )
+    warnings.filterwarnings("ignore", message="The cuda.cudart module is deprecated", category=FutureWarning)
 
-    warnings.filterwarnings(
-        "ignore", message="The cuda.cuda module is deprecated", category=FutureWarning
-    )
+    warnings.filterwarnings("ignore", message="The cuda.cuda module is deprecated", category=FutureWarning)
 
     # Suppress TensorRT-LLM specific warnings if needed
     warnings.filterwarnings("ignore", category=DeprecationWarning, module="tensorrt_llm")
@@ -74,9 +70,7 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         ]
 
 
-def worker(
-    queue, device_id: int, func, progress_value, lock, error_queue=None, module_name="unknown"
-):
+def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, module_name="unknown"):
     """worker with automatic logging setup"""
 
     # Setup logging for this worker - reads config from environment automatically
@@ -301,9 +295,7 @@ def collect_vllm(num_processes: int):
         version = vllm_version
 
     except:
-        logger.exception(
-            "VLLM is not installed. Please install it from https://github.com/vllm-project/vllm"
-        )
+        logger.exception("VLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
         return
 
     # supported vllm v1 GEMM collection wich supports fp16,fp8,fp8_block_wise,awq and gptq
@@ -377,9 +369,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             "module": "trtllm.collect_mla",
             "get_func": "get_context_mla_test_cases",
             "run_func": "run_mla",
-            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2"
-            if v.startswith("1.1")
-            else "trtllm.collect_mla",
+            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2" if v.startswith("1.1") else "trtllm.collect_mla",
         },
         {
             "name": "trtllm",
@@ -387,9 +377,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             "module": "trtllm.collect_mla",
             "get_func": "get_generation_mla_test_cases",
             "run_func": "run_mla",
-            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2"
-            if v.startswith("1.1")
-            else "trtllm.collect_mla",
+            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2" if v.startswith("1.1") else "trtllm.collect_mla",
         },
         # Attention collections - separate entries for context and generation
         {
@@ -447,8 +435,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
                 module_name = collection["version_handler"](version)
                 if not module_name:
                     logger.warning(
-                        f"Skipping {collection['name']}.{collection['type']} - unsupported "
-                        f"version {version}",
+                        f"Skipping {collection['name']}.{collection['type']} - unsupported version {version}",
                     )
                     continue
             else:
@@ -460,9 +447,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
 
-            errors = collect_module_safe(
-                collection["name"], collection["type"], get_func, run_func, num_processes
-            )
+            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
             all_errors.extend(errors)
 
         except Exception as e:
@@ -527,9 +512,7 @@ def generate_collection_summary(all_errors, backend, version):
 def main():
     global logger
     parser = argparse.ArgumentParser(description="Collect performance data for backends")
-    parser.add_argument(
-        "--backend", type=str, choices=["trtllm", "sglang", "vllm"], default="trtllm"
-    )
+    parser.add_argument("--backend", type=str, choices=["trtllm", "sglang", "vllm"], default="trtllm")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--ops",

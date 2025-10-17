@@ -69,9 +69,7 @@ class BaseBackend(ABC):
 
             return context_latency_dict
 
-        def _run_generation(
-            batch_size: int, beam_width: int, isl: int, osl: int, stride: int
-        ) -> dict[str, float]:
+        def _run_generation(batch_size: int, beam_width: int, isl: int, osl: int, stride: int) -> dict[str, float]:
             # mtp/speculative decoding correction
             batch_size = batch_size * (model._nextn + 1)
 
@@ -134,9 +132,7 @@ class BaseBackend(ABC):
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl)
 
         if latency_correction_scale != 1.0:
-            logger.debug(
-                f"latency_correction_scale: {latency_correction_scale} is applied to the latency"
-            )
+            logger.debug(f"latency_correction_scale: {latency_correction_scale} is applied to the latency")
             for op, op_latency in context_latency_dict.items():
                 context_latency_dict[op] *= latency_correction_scale
             for op, op_latency in generation_latency_dict.items():
@@ -158,15 +154,11 @@ class BaseBackend(ABC):
         seq_s = (
             0.0 if latency == 0.0 else global_bs / latency * 1000 * model.config.pp_size
         )  # handle statc_gen only with osl==1, scale by pp
-        seq_s_gpu = (
-            seq_s / model.config.tp_size / model.config.pp_size / model.config.attention_dp_size
-        )
+        seq_s_gpu = seq_s / model.config.tp_size / model.config.pp_size / model.config.attention_dp_size
         tokens_s = seq_s * osl if mode != "static_gen" else seq_s * (osl - 1)
         if mode == "static_ctx":
             tokens_s = seq_s * 1  # only first token
-        tokens_s_gpu = (
-            tokens_s / model.config.tp_size / model.config.pp_size / model.config.attention_dp_size
-        )
+        tokens_s_gpu = tokens_s / model.config.tp_size / model.config.pp_size / model.config.attention_dp_size
         tokens_s_user = 0.0 if tpot == 0.0 else 1000.0 / tpot
         tp = model.config.tp_size
         pp = model.config.pp_size

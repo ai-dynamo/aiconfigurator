@@ -328,9 +328,7 @@ class EventHandler:
         )
 
     @staticmethod
-    def setup_save_events(
-        result_name, save_btn, result_df, candidates_dropdown, pareto_results_state
-    ):
+    def setup_save_events(result_name, save_btn, result_df, candidates_dropdown, pareto_results_state):
         save_btn.click(
             fn=EventFn.save_result_for_comparison,
             inputs=[result_name, result_df, pareto_results_state],

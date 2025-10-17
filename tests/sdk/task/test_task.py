@@ -47,9 +47,7 @@ def stub_pareto_analysis(monkeypatch):
     stub_module = SimpleNamespace(
         enumerate_parallel_config=lambda **kwargs: [kwargs],
         agg_pareto=lambda **kwargs: pd.DataFrame({"tokens/s/user": [1.0], "tokens/s/gpu": [0.5]}),
-        disagg_pareto=lambda **kwargs: pd.DataFrame(
-            {"tokens/s/user": [0.8], "tokens/s/gpu": [0.4]}
-        ),
+        disagg_pareto=lambda **kwargs: pd.DataFrame({"tokens/s/user": [0.8], "tokens/s/gpu": [0.4]}),
         get_pareto_front=fake_get_pareto_front,
     )
 
@@ -254,9 +252,7 @@ def test_taskconfig_disagg_total_gpus_small_rejected():
 
 def test_taskrunner_runs_agg_and_disagg():
     agg_task = TaskConfig(serving_mode="agg", model_name="QWEN3_32B", system_name="h200_sxm")
-    disagg_task = TaskConfig(
-        serving_mode="disagg", model_name="QWEN3_32B", system_name="h200_sxm", total_gpus=8
-    )
+    disagg_task = TaskConfig(serving_mode="disagg", model_name="QWEN3_32B", system_name="h200_sxm", total_gpus=8)
 
     runner = TaskRunner()
 

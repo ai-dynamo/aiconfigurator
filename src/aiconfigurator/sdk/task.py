@@ -137,9 +137,7 @@ class TaskConfigFactory:
         config = DefaultMunch.fromDict(config_dict, DefaultMunch)
 
         if config.model_name != ctx.model_name:
-            raise ValueError(
-                f"Model name mismatch: base {ctx.model_name} vs. merged {config.model_name}"
-            )
+            raise ValueError(f"Model name mismatch: base {ctx.model_name} vs. merged {config.model_name}")
 
         if ctx.serving_mode == "agg":
             cls._finalize_agg(config, ctx)
@@ -260,9 +258,7 @@ class TaskConfigFactory:
 
                 decode_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32, 64]
                 decode_worker_config["tp_list"] = [1, 2, 4, 8]
-                decode_worker_config["pp_list"] = (
-                    [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
-                )
+                decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
                 decode_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
                 decode_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32, 64]
 
@@ -318,9 +314,7 @@ class TaskConfigFactory:
 
         if ctx.total_gpus is not None:
             if ctx.total_gpus < 0:
-                raise ValueError(
-                    f"total_gpus of agg must be no smaller than 0, got {ctx.total_gpus}"
-                )
+                raise ValueError(f"total_gpus of agg must be no smaller than 0, got {ctx.total_gpus}")
             worker_config.num_gpu_per_worker = [
                 num for num in worker_config.num_gpu_per_worker if num <= ctx.total_gpus
             ]
@@ -351,12 +345,8 @@ class TaskConfigFactory:
         # using total gpus to limit the max gpu per replica
         if ctx.total_gpus is not None:
             if ctx.total_gpus < 2:
-                raise ValueError(
-                    f"total_gpus must be greater than 2 for disagg, got {ctx.total_gpus}"
-                )
-            replica_cfg.max_gpu_per_replica = min(
-                ctx.total_gpus, replica_cfg.get("max_gpu_per_replica")
-            )
+                raise ValueError(f"total_gpus must be greater than 2 for disagg, got {ctx.total_gpus}")
+            replica_cfg.max_gpu_per_replica = min(ctx.total_gpus, replica_cfg.get("max_gpu_per_replica"))
             logger.debug("Using max gpu per replica %s", replica_cfg.max_gpu_per_replica)
 
         cls._apply_quant_modes(
@@ -604,9 +594,7 @@ class TaskConfig:
                 raise ValueError(f"Invalid yaml mode: {yaml_mode}")
             yaml_profiles = yaml_config.get("profiles", [])
             if profiles and yaml_profiles:
-                logger.warning(
-                    "Both constructor profiles and YAML profiles provided; combining them"
-                )
+                logger.warning("Both constructor profiles and YAML profiles provided; combining them")
             effective_profiles = list(dict.fromkeys([*effective_profiles, *yaml_profiles]))
             yaml_patch = yaml_config.get("config", yaml_config)
 
@@ -727,11 +715,7 @@ class TaskConfig:
 
         runtime_dict = _convert(self.config.runtime_config)
         printable.update(
-            {
-                k: runtime_dict.get(k)
-                for k in ("isl", "osl", "ttft", "tpot")
-                if runtime_dict.get(k) is not None
-            }
+            {k: runtime_dict.get(k) for k in ("isl", "osl", "ttft", "tpot") if runtime_dict.get(k) is not None}
         )
 
         base_config = _convert(getattr(self.config, "yaml_patch", getattr(self, "yaml_patch", {})))
@@ -1038,9 +1022,7 @@ class TaskRunner:
             result = None
 
         if result is None:
-            logger.warning(
-                "No result found for %s in %s mode.", task_config.task_name, serving_mode
-            )
+            logger.warning("No result found for %s in %s mode.", task_config.task_name, serving_mode)
 
         return result
 

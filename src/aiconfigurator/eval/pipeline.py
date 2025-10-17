@@ -75,9 +75,7 @@ class Pipeline:
 
         base = Path(save_dir)
         new_dirs = [p for p in base.glob("*") if p.is_dir() and p.name not in pre_existing]
-        result_dir = (
-            max(new_dirs, key=lambda p: p.stat().st_mtime) if new_dirs else find_newest_subdir(base)
-        )
+        result_dir = max(new_dirs, key=lambda p: p.stat().st_mtime) if new_dirs else find_newest_subdir(base)
         if not result_dir:
             raise FileNotFoundError("No new result folder found in save_dir.")
         LOG.info("Config generated in %.1fs: %s", time.time() - t0, result_dir)
@@ -93,20 +91,14 @@ class Pipeline:
             inner = service_mode
             src = run_dir / service_mode / "top1" / inner
             if not src.exists():
-                raise FileNotFoundError(
-                    f"Expected path not found for service_mode '{service_mode}': {src}"
-                )
+                raise FileNotFoundError(f"Expected path not found for service_mode '{service_mode}': {src}")
 
             if service_mode == "agg":
                 if not (src / "agg_config.yaml").exists():
                     LOG.warning("agg_config.yaml not found under %s", src)
             else:
-                if not (
-                    (src / "decode_config.yaml").exists() or (src / "prefill_config.yaml").exists()
-                ):
-                    LOG.warning(
-                        "Neither decode_config.yaml nor prefill_config.yaml found under %s", src
-                    )
+                if not ((src / "decode_config.yaml").exists() or (src / "prefill_config.yaml").exists()):
+                    LOG.warning("Neither decode_config.yaml nor prefill_config.yaml found under %s", src)
             return src
 
         for service_mode in ("disagg", "agg"):
@@ -130,9 +122,7 @@ class Pipeline:
         return out
 
     def _read_max_batch_size(self, service_dir: Path, service_mode: str) -> Optional[int]:
-        cfg_path = service_dir / (
-            "agg/agg_config.yaml" if service_mode == "agg" else "disagg/decode_config.yaml"
-        )
+        cfg_path = service_dir / ("agg/agg_config.yaml" if service_mode == "agg" else "disagg/decode_config.yaml")
         if not cfg_path.exists():
             LOG.warning("YAML not found for auto concurrency: %s", cfg_path)
             return None
@@ -244,9 +234,7 @@ class Pipeline:
         write_json(where / "gpu_snapshot_prebench.json", snap)
         return snap
 
-    def _load_optimal_configs(
-        self, config_dir: Path, target_tpot: float | None = None
-    ) -> dict[str, pd.DataFrame]:
+    def _load_optimal_configs(self, config_dir: Path, target_tpot: float | None = None) -> dict[str, pd.DataFrame]:
         """Load optimal configuration data from saved aiconfigurator results with TPOT filtering."""
         optimal_configs = {}
 
@@ -275,9 +263,7 @@ class Pipeline:
             try:
                 disagg_pareto = pd.read_csv(disagg_pareto_path)
                 if not disagg_pareto.empty:
-                    best_disagg = self._get_best_config_under_tpot_constraint(
-                        disagg_pareto, target_tpot
-                    )
+                    best_disagg = self._get_best_config_under_tpot_constraint(disagg_pareto, target_tpot)
                     if not best_disagg.empty:
                         optimal_configs["disagg"] = best_disagg
                         LOG.info(
@@ -315,23 +301,17 @@ class Pipeline:
 
         if not candidate_configs.empty:
             # Among valid candidates, pick the one with highest tokens/s/gpu
-            best_config = (
-                candidate_configs.loc[candidate_configs["tokens/s/gpu"].idxmax()].to_frame().T
-            )
+            best_config = candidate_configs.loc[candidate_configs["tokens/s/gpu"].idxmax()].to_frame().T
             LOG.info(
                 f"Found {len(candidate_configs)} configs meeting TPOT <= {target_tpot}ms, "
                 f"selected best with {best_config['tokens/s/gpu'].iloc[0]:.2f} tokens/s/gpu"
             )
             return best_config
         else:
-            LOG.warning(
-                f"No config found with TPOT <= {target_tpot}ms, using best overall configuration"
-            )
+            LOG.warning(f"No config found with TPOT <= {target_tpot}ms, using best overall configuration")
             return pareto_df.loc[pareto_df["tokens/s/gpu"].idxmax()].to_frame().T
 
-    def _convert_optimal_config_to_plot_format(
-        self, config_df: pd.DataFrame, config_type: str
-    ) -> pd.DataFrame:
+    def _convert_optimal_config_to_plot_format(self, config_df: pd.DataFrame, config_type: str) -> pd.DataFrame:
         """Convert optimal configuration DataFrame to format expected by ParetoPlot."""
         try:
             # Create a DataFrame with the required columns for plotting
@@ -359,9 +339,7 @@ class Pipeline:
             LOG.warning(f"Failed to convert optimal {config_type} config to plot format: {e}")
             return pd.DataFrame()
 
-    def _run_benchmark(
-        self, art_dir: Path, url: str, isl: int, osl: int, concurrency: list[int]
-    ) -> Path:
+    def _run_benchmark(self, art_dir: Path, url: str, isl: int, osl: int, concurrency: list[int]) -> Path:
         args = self.cfg.cli_args
         model_path = str(getattr(args, "model_path", ""))
         served_model_name = str(getattr(args, "served_model_name", ""))
@@ -421,9 +399,7 @@ class Pipeline:
         y_metric = "output_token_throughput::avg"
         if f"{x_metric.split('::')[0]}_avg" not in df.columns:
             x_metric = "request_throughput::avg"
-            LOG.warning(
-                "Per-user throughput missing; fallback to request_throughput::avg for X-axis."
-            )
+            LOG.warning("Per-user throughput missing; fallback to request_throughput::avg for X-axis.")
 
         import matplotlib.pyplot as plt
 
@@ -446,9 +422,7 @@ class Pipeline:
             for config_type, config_df in optimal_configs.items():
                 if not config_df.empty:
                     # Convert the optimal config data to match the expected format
-                    optimal_point_df = self._convert_optimal_config_to_plot_format(
-                        config_df, config_type
-                    )
+                    optimal_point_df = self._convert_optimal_config_to_plot_format(config_df, config_type)
                     if not optimal_point_df.empty:
                         p.add_optimal_point(config_type.capitalize(), optimal_point_df)
                         LOG.info(f"Added optimal {config_type} point to plot")
@@ -591,9 +565,7 @@ class Pipeline:
             from .gpu import GPUWatcher
 
             self._gpu_csv = self.art_root / "gpu_stats.csv"
-            self._gpu_watcher = GPUWatcher(
-                interval_s=self.cfg.nvml_interval_s, out_csv=self._gpu_csv
-            )
+            self._gpu_watcher = GPUWatcher(interval_s=self.cfg.nvml_interval_s, out_csv=self._gpu_csv)
             # optional one-shot snapshot before benchmark
             self._collect_gpu_once(self.art_root)
             self._gpu_watcher.start()
@@ -618,12 +590,8 @@ class Pipeline:
                 tag = f"{run_name}_r{i + 1}"
                 art_dir = self.art_root / tag
                 mkdir_p(art_dir)
-                LOG.info(
-                    "Run %d/%d -> %s (concurrency=%s)", i + 1, self.cfg.runs, art_dir, conc_list
-                )
-                bench_dir = self._run_benchmark(
-                    art_dir, url=base_url, isl=isl, osl=osl, concurrency=conc_list
-                )
+                LOG.info("Run %d/%d -> %s (concurrency=%s)", i + 1, self.cfg.runs, art_dir, conc_list)
+                bench_dir = self._run_benchmark(art_dir, url=base_url, isl=isl, osl=osl, concurrency=conc_list)
                 self._analyze_and_plot(
                     art_dir=art_dir,
                     bench_dir=bench_dir,

@@ -32,9 +32,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         default="",
         help="Optional override of start script path (relative to service-dir).",
     )
-    g.add_argument(
-        "--health-timeout-s", type=int, default=600, help="Max seconds to wait for service ready."
-    )
+    g.add_argument("--health-timeout-s", type=int, default=600, help="Max seconds to wait for service ready.")
     g.add_argument(
         "--coldstart-wait-s",
         type=int,
@@ -46,15 +44,9 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Skip running `aiconfigurator cli`; use an existing save_dir run.",
     )
-    g.add_argument(
-        "--run-name", type=str, default="", help="Optional run label (folder name suffix)."
-    )
-    g.add_argument(
-        "--runs", type=int, default=1, help="Number of pipeline cycles to execute (same service)."
-    )
-    g.add_argument(
-        "--keep-running", action="store_true", help="Do not stop service after evaluation."
-    )
+    g.add_argument("--run-name", type=str, default="", help="Optional run label (folder name suffix).")
+    g.add_argument("--runs", type=int, default=1, help="Number of pipeline cycles to execute (same service).")
+    g.add_argument("--keep-running", action="store_true", help="Do not stop service after evaluation.")
     g.add_argument(
         "--gpu-monitor",
         action="store_true",

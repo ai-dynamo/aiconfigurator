@@ -22,9 +22,7 @@ class TestSupportedModels:
         assert isinstance(common.SupportedModels, dict)
         assert len(common.SupportedModels) > 0
 
-    @pytest.mark.parametrize(
-        "model_name", ["QWEN3_32B", "LLAMA3.1_8B", "DEEPSEEK_V3", "MOE_Mixtral8x7B"]
-    )
+    @pytest.mark.parametrize("model_name", ["QWEN3_32B", "LLAMA3.1_8B", "DEEPSEEK_V3", "MOE_Mixtral8x7B"])
     def test_specific_models_are_supported(self, model_name):
         """Test that specific models are in the supported list."""
         assert model_name in common.SupportedModels

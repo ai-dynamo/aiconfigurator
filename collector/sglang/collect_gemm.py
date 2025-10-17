@@ -135,9 +135,7 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
             op_list = []
 
             for _ in range(repeat_n):
-                op_list.append(
-                    lambda: fp8_gemm_deepgemm(a_fp8, scale_a_col_major, b_fp8, scale_b, M, N, K)
-                )
+                op_list.append(lambda: fp8_gemm_deepgemm(a_fp8, scale_a_col_major, b_fp8, scale_b, M, N, K))
         else:
 
             def sglang_scaled_fp8_quant(
@@ -164,9 +162,7 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
             op_list = []
 
             for _ in range(repeat_n):
-                op_list.append(
-                    lambda: fp8_scaled_mm(a_fp8, b_fp8, scale_a_fp8, scale_b_fp8, torch.bfloat16)
-                )
+                op_list.append(lambda: fp8_scaled_mm(a_fp8, b_fp8, scale_a_fp8, scale_b_fp8, torch.bfloat16))
 
     elif gemm_type == "float16":
         fp16_info = torch.finfo(torch.float16)

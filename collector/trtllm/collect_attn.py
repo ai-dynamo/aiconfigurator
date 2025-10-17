@@ -70,9 +70,7 @@ def run_attention_torch(
     else:
         kv_cache_dtype = tensorrt_llm.bindings.DataType.BF16
 
-    pos_embd_params = PositionalEmbeddingParams(
-        type=PositionEmbeddingType.rope_gpt_neox, rope=RopeParams(dim=128)
-    )
+    pos_embd_params = PositionalEmbeddingParams(type=PositionEmbeddingType.rope_gpt_neox, rope=RopeParams(dim=128))
 
     quant_config = QuantConfig(
         quant_algo=quant_algo,  # fp8 fmha
@@ -118,9 +116,7 @@ def run_attention_torch(
         num_kv_heads=num_key_value_heads,
         head_dim=head_dim,
         tokens_per_block=tokens_per_block,
-        max_seq_len=input_len
-        + output_len
-        + 1,  # +1 for the magic fixme mentioned in trtllm xqa JIT path impl.
+        max_seq_len=input_len + output_len + 1,  # +1 for the magic fixme mentioned in trtllm xqa JIT path impl.
         max_batch_size=batch_size,
         mapping=mapping,
         dtype=kv_cache_dtype,
@@ -193,11 +189,7 @@ def run_attention_torch(
 
     sinks = torch.randn(num_heads, dtype=torch.float32) if head_dim == 64 else None
     q = torch.randn([num_tokens, num_heads * head_dim]).bfloat16().to(torch.device(device))
-    kv = (
-        torch.randn([num_tokens, 2 * num_key_value_heads * head_dim])
-        .bfloat16()
-        .to(torch.device(device))
-    )
+    kv = torch.randn([num_tokens, 2 * num_key_value_heads * head_dim]).bfloat16().to(torch.device(device))
     input_qkv = torch.concat([q, kv], dim=-1)
     attn.forward(
         input_qkv,
@@ -549,14 +541,10 @@ def get_generation_attention_test_cases():
                 # print(f'collecting MHA heads: {n} batchsize: {b}  steps: {s_list_limited}')
                 # fp8 kv cache, fp8 context fmha, is_context_phase
                 for s in target_s_list:
-                    test_cases.append(
-                        [b, s, n, n, h, 0, False, False, False, "generation_attention_perf.txt"]
-                    )
+                    test_cases.append([b, s, n, n, h, 0, False, False, False, "generation_attention_perf.txt"])
 
                     if has_fp8:
-                        test_cases.append(
-                            [b, s, n, n, h, 0, True, False, False, "generation_attention_perf.txt"]
-                        )
+                        test_cases.append([b, s, n, n, h, 0, True, False, False, "generation_attention_perf.txt"])
                         # currently, fp8 is not for generation compute
                         # test_cases.append(
                         #     [b, s, n, n, 128, True, True, False, "generation_attention_perf.txt"]
