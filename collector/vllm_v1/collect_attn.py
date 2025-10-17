@@ -3,13 +3,14 @@
 
 
 import torch
-from helper import get_sm_version, log_perf
 from vllm.attention.backends.abstract import (
     AttentionType,
 )
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl, FlashAttentionMetadata
 from vllm.v1.attention.backends.flashinfer import FlashInferImpl, FlashInferMetadata
 from vllm.version import __version__ as vllm_version
+
+from helper import get_sm_version, log_perf
 
 # https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends
 # support MHA GQA MQA fp16 tensor and float16/fp8 kv cache

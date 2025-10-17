@@ -7,7 +7,6 @@ import os
 import tensorrt_llm
 import torch
 import torch.nn.functional as F
-from helper import get_sm_version, log_perf
 from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
@@ -15,6 +14,8 @@ from tensorrt_llm._torch.modules.fused_moe import RenormalizeMoeRoutingMethod, c
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 from torch.nn.parameter import Parameter
+
+from helper import get_sm_version, log_perf
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 

@@ -5,9 +5,10 @@ import math
 
 import tensorrt_llm
 import torch
-from helper import get_sm_version, log_perf
 from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
+
+from helper import get_sm_version, log_perf
 
 
 def get_gemm_test_cases():

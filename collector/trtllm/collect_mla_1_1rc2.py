@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 import tensorrt_llm
 import torch
-from helper import log_perf
 from tensorrt_llm._torch.attention_backend.interface import (
     AttentionInputType,
     MLAParams,
@@ -23,6 +22,8 @@ from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
 from tensorrt_llm.sampling_params import SamplingParams
+
+from helper import log_perf
 
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half

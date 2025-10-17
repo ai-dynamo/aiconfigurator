@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import pkg_resources
 import torch
-from helper import log_perf
 from sgl_kernel import bmm_fp8
 from sglang.srt.layers.quantization.fp8_kernel import (
     per_tensor_quant_mla_fp8,
 )
+
+from helper import log_perf
 
 
 def get_mla_gen_pre_test_cases():

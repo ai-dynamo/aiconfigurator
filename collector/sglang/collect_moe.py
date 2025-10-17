@@ -7,7 +7,6 @@ from typing import TypedDict
 import pkg_resources
 import torch
 import torch.nn.functional as F
-from helper import log_perf
 from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
     fused_moe,
     get_config_dtype_str,
@@ -16,6 +15,8 @@ from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
 )
 from sglang.srt.layers.moe.topk import TopKConfig, select_experts
 from sglang.srt.utils import is_hip
+
+from helper import log_perf
 
 _is_hip = is_hip()
 

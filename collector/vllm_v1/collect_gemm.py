@@ -4,7 +4,6 @@
 import os
 
 import torch
-from helper import get_sm_version, log_perf
 from vllm.distributed import (
     init_distributed_environment,
 )
@@ -15,6 +14,8 @@ from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.version import __version__ as vllm_version
+
+from helper import get_sm_version, log_perf
 
 
 # If we want to use advanced linear implementations like MergedColumnParallelLinear and

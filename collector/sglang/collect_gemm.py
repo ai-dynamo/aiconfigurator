@@ -6,8 +6,9 @@ import pkg_resources
 import torch
 import torch.nn.functional as F
 from deep_gemm import get_col_major_tma_aligned_tensor
-from helper import log_perf
 from sgl_kernel import fp8_scaled_mm, sgl_per_tensor_quant_fp8
+
+from helper import log_perf
 
 
 def get_gemm_test_cases():
