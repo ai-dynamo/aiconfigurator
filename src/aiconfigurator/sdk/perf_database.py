@@ -2015,62 +2015,223 @@ class PerfDatabase(object):
                 lat = self._interp_2d_linear(sms, num_tokens, data)
             return lat / 1000.0 
 
-    def query_conv_1d(self, 
-                   in_channels : int, 
-                   out_channels : int, 
-                   kernel_size : int, 
-                   seq_length : int, 
-                   sol_mode : Optional[common.SOLMode] = None) -> float:
+    def query_conv1d_fn(self, 
+                        batch_size: int, 
+                        isl: int, 
+                        conv_kernel_size: int, 
+                        conv_dim: int, 
+                        tp_size: int,
+                        sol_mode: Optional[common.SOLMode] = None) -> float:
         """
-        Query the conv1d data
+        Query the Conv1D Fn operation data.
+        
+        Args:
+            batch_size: Batch size
+            isl: Sequence length
+            conv_kernel_size: Size of the convolution kernel
+            conv_dim: Dimension of the convolution
+            tp_size: Tensor parallel size
+            sol_mode: SOL mode for theoretical performance calculation
+            
+        Returns:
+            Latency in milliseconds
         """
-        def get_sol(in_channels : int, out_channels : int, kernel_size : int, seq_length : int) -> Tuple[float, float, float]:
+        def get_sol(batch_size: int, isl: int, conv_kernel_size: int, conv_dim: int, tp_size: int) -> Tuple[float, float, float]:
             """
-            Get the sol time, sol math and sol mem
+            Get the sol time, sol math and sol mem for Conv1D Fn
             """
-            sol_math = in_channels * out_channels * kernel_size * seq_length / (self.system_spec['gpu']['float16_tc_flops']*1) * 1000
-            sol_mem = in_channels * out_channels * kernel_size * seq_length / self.system_spec['gpu']['mem_bw'] * 1000
+            # Conv1D operations: batch_size * isl * (conv_dim // tp_size) * conv_kernel_size
+            ops = batch_size * isl * (conv_dim // tp_size) * conv_kernel_size * 2  # 2 for FMA
+            mem_bytes = 2 * (  # Assuming fp16/bf16
+                batch_size * isl * (conv_dim // tp_size) +  # Input
+                (conv_dim // tp_size) * conv_kernel_size +  # Weights
+                batch_size * isl * (conv_dim // tp_size)    # Output
+            )
+            sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000
+            sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
         
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(in_channels, out_channels, kernel_size, seq_length)[0]
+            return get_sol(batch_size, isl, conv_kernel_size, conv_dim, tp_size)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(in_channels, out_channels, kernel_size, seq_length)
+            return get_sol(batch_size, isl, conv_kernel_size, conv_dim, tp_size)
         else:
-            result = self._interp_3d(in_channels, out_channels, kernel_size, seq_length, self._conv_1d_data, 'cubic')
-            return result
+            # TODO: Add actual data interpolation when measurement data is available
+            # For now, return SOL estimation
+            return get_sol(batch_size, isl, conv_kernel_size, conv_dim, tp_size)[0]
 
-    def query_chunk_gated_delta_rule(self, 
-
-                   num_tokens : int, 
-                   in_channels : int, 
-                   out_channels : int, 
-                   kernel_size : int, 
-                   seq_length : int, 
-                   sol_mode : Optional[common.SOLMode] = None) -> float:
+    def query_conv1d_update(self, 
+                           batch_size: int, 
+                           isl: int, 
+                           conv_kernel_size: int, 
+                           conv_dim: int, 
+                           tp_size: int,
+                           sol_mode: Optional[common.SOLMode] = None) -> float:
         """
-        Query the chunk gated delta rule data
+        Query the Conv1D Update operation data.
+        
+        Args:
+            batch_size: Batch size
+            isl: Sequence length
+            conv_kernel_size: Size of the convolution kernel
+            conv_dim: Dimension of the convolution
+            tp_size: Tensor parallel size
+            sol_mode: SOL mode for theoretical performance calculation
+            
+        Returns:
+            Latency in milliseconds
         """
-        def get_sol(num_tokens : int, in_channels : int, out_channels : int, kernel_size : int, seq_length : int) -> Tuple[float, float, float]:
+        def get_sol(batch_size: int, isl: int, conv_kernel_size: int, conv_dim: int, tp_size: int) -> Tuple[float, float, float]:
             """
-            Get the sol time, sol math and sol mem
+            Get the sol time, sol math and sol mem for Conv1D Update
             """
-            sol_math = num_tokens * in_channels * out_channels * kernel_size * seq_length / (self.system_spec['gpu']['float16_tc_flops']*1) * 1000
-            sol_mem = in_channels * out_channels * kernel_size * seq_length / self.system_spec['gpu']['mem_bw'] * 1000
+            # Conv1D update is typically lighter than full conv1d_fn
+            ops = batch_size * isl * (conv_dim // tp_size) * conv_kernel_size * 2  # 2 for FMA
+            mem_bytes = 2 * (  # Assuming fp16/bf16
+                batch_size * isl * (conv_dim // tp_size) +  # Input
+                (conv_dim // tp_size) * conv_kernel_size +  # Weights
+                batch_size * isl * (conv_dim // tp_size)    # Output
+            )
+            sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000
+            sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
+        
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(num_tokens, in_channels, out_channels, kernel_size, seq_length)[0]
+            return get_sol(batch_size, isl, conv_kernel_size, conv_dim, tp_size)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(num_tokens, in_channels, out_channels, kernel_size, seq_length)
+            return get_sol(batch_size, isl, conv_kernel_size, conv_dim, tp_size)
         else:
-            result = self._interp_3d(num_tokens, in_channels, out_channels, kernel_size, seq_length, self._chunk_gated_delta_rule_data, 'cubic')
-            return result
+            # TODO: Add actual data interpolation when measurement data is available
+            # For now, return SOL estimation
+            return get_sol(batch_size, isl, conv_kernel_size, conv_dim, tp_size)[0]
+
+    def query_chunk_gated_delta_rule(self, 
+                                     num_heads: int, 
+                                     head_k_dim: int, 
+                                     head_v_dim: int, 
+                                     num_value_heads: int, 
+                                     isl: int,
+                                     sol_mode: Optional[common.SOLMode] = None) -> float:
+        """
+        Query the Chunk Gated Delta Rule operation data.
+        
+        Args:
+            num_heads: Number of heads
+            head_k_dim: Dimension of the key heads
+            head_v_dim: Dimension of the value heads
+            num_value_heads: Number of value heads
+            isl: Sequence length
+            sol_mode: SOL mode for theoretical performance calculation
+            
+        Returns:
+            Latency in milliseconds
+        """
+        def get_sol(num_heads: int, head_k_dim: int, head_v_dim: int, num_value_heads: int, isl: int) -> Tuple[float, float, float]:
+            """
+            Get the sol time, sol math and sol mem for Chunk Gated Delta Rule
+            """
+            # Gated delta rule involves attention-like operations
+            # Operations: q*k^T, gating, and weighted sum with values
+            ops = (
+                num_heads * isl * isl * head_k_dim * 2 +  # q*k^T
+                num_heads * isl * isl * 2 +  # gating operations
+                num_value_heads * isl * isl * head_v_dim * 2  # weighted sum with values
+            )
+            mem_bytes = 2 * (  # Assuming fp16/bf16
+                num_heads * isl * head_k_dim +  # Q
+                num_heads * isl * head_k_dim +  # K
+                num_value_heads * isl * head_v_dim +  # V
+                num_heads * isl +  # gate
+                num_heads * isl +  # beta
+                num_value_heads * isl * head_v_dim  # output
+            )
+            sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000
+            sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+        
+        if sol_mode is None:
+            sol_mode = self._default_sol_mode
+        if sol_mode == common.SOLMode.SOL:
+            return get_sol(num_heads, head_k_dim, head_v_dim, num_value_heads, isl)[0]
+        elif sol_mode == common.SOLMode.SOL_FULL:
+            return get_sol(num_heads, head_k_dim, head_v_dim, num_value_heads, isl)
+        else:
+            # TODO: Add actual data interpolation when measurement data is available
+            # For now, return SOL estimation
+            return get_sol(num_heads, head_k_dim, head_v_dim, num_value_heads, isl)[0]
+
+    def query_gated_delta_rule_update(self, 
+                                      batch_size: int, 
+                                      isl: int, 
+                                      num_heads: int, 
+                                      head_k_dim: int, 
+                                      head_v_dim: int, 
+                                      num_value_heads: int, 
+                                      max_batch_size: int,
+                                      sol_mode: Optional[common.SOLMode] = None) -> float:
+        """
+        Query the Gated Delta Rule Update operation data.
+        
+        Args:
+            batch_size: Batch size
+            isl: Sequence length
+            num_heads: Number of heads
+            head_k_dim: Dimension of the key heads
+            head_v_dim: Dimension of the value heads
+            num_value_heads: Number of value heads
+            max_batch_size: Maximum batch size
+            sol_mode: SOL mode for theoretical performance calculation
+            
+        Returns:
+            Latency in milliseconds
+        """
+        def get_sol(batch_size: int, isl: int, num_heads: int, head_k_dim: int, 
+                   head_v_dim: int, num_value_heads: int, max_batch_size: int) -> Tuple[float, float, float]:
+            """
+            Get the sol time, sol math and sol mem for Gated Delta Rule Update
+            """
+            # Fused sigmoid gating delta rule update involves state updates
+            ops = (
+                batch_size * isl * num_heads * head_k_dim * 2 +  # q processing
+                batch_size * isl * num_heads * head_k_dim * 2 +  # k processing
+                batch_size * isl * num_value_heads * head_v_dim * 2 +  # v processing
+                batch_size * isl * num_heads * num_value_heads * 2 +  # gating operations
+                max_batch_size * num_heads * num_value_heads * head_k_dim * head_v_dim * 2  # state operations
+            )
+            mem_bytes = 2 * (  # Assuming fp16/bf16
+                num_heads * num_value_heads +  # A_log
+                num_heads * num_value_heads +  # dt_bias
+                batch_size * isl * num_heads * head_k_dim +  # q
+                batch_size * isl * num_heads * head_k_dim +  # k
+                batch_size * isl * num_value_heads * head_v_dim +  # v
+                batch_size * isl * num_heads * num_value_heads +  # a
+                batch_size * isl * num_heads * num_value_heads +  # b
+                max_batch_size * num_heads * num_value_heads * head_k_dim * head_v_dim +  # initial_state_source
+                batch_size  # initial_state_indices
+            )
+            sol_math = ops / self.system_spec['gpu']['float16_tc_flops'] * 1000
+            sol_mem = mem_bytes / self.system_spec['gpu']['mem_bw'] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+        
+        if sol_mode is None:
+            sol_mode = self._default_sol_mode
+        if sol_mode == common.SOLMode.SOL:
+            return get_sol(batch_size, isl, num_heads, head_k_dim, head_v_dim, num_value_heads, max_batch_size)[0]
+        elif sol_mode == common.SOLMode.SOL_FULL:
+            return get_sol(batch_size, isl, num_heads, head_k_dim, head_v_dim, num_value_heads, max_batch_size)
+        else:
+            # TODO: Add actual data interpolation when measurement data is available
+            # For now, return SOL estimation
+            return get_sol(batch_size, isl, num_heads, head_k_dim, head_v_dim, num_value_heads, max_batch_size)[0]
+
 
 if __name__ == '__main__':
     database_dict = get_all_databases()

@@ -749,6 +749,8 @@ class Qwen3NextModel(BaseModel):
     3/4 of the layers are using linear attention with convolution 1d operation.
     Some rules to follow,
     Due to implementation, attn layer name needs to be context_attention or generation_attention, exact match is required. Same for logits_gemm.
+
+    Refer to tensorrt_llm/_torch/models/modeling_qwen3_next.py for more details.
     """
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
@@ -796,14 +798,21 @@ class Qwen3NextModel(BaseModel):
         communication, and final logits computation.
 
         Args:
-            linear_attention_config (common.LinearAttentionConfig): Linear attention configuration
+            linear_attention_config (common.LinearAttentionConfig or list): Linear attention configuration
+                or empty list for initialization
         """
+        self._context_ops = []
+        if not isinstance(linear_attention_config, common.LinearAttentionConfig):
+            return
+        
         num_v_heads = linear_attention_config.linear_num_value_heads
         num_k_heads = linear_attention_config.linear_num_key_heads
         head_k_dim = linear_attention_config.linear_key_head_dim
         head_v_dim = linear_attention_config.linear_value_head_dim
         key_dim = head_k_dim * num_k_heads
         value_dim = head_v_dim * num_v_heads
+        conv_kernel_size = linear_attention_config.linear_conv_kernel_dim
+        conv_dim = key_dim * 2 + value_dim
         moe_quant_mode = self.config.moe_quant_mode
         h = self._hidden_size
         tp_size = self.config.tp_size
@@ -819,60 +828,56 @@ class Qwen3NextModel(BaseModel):
 
         # 1 embedding for all layers
         # 1 norm before attention per layer
-        self.context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
+        self._context_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
                                 ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8)])
 
         # self attention
-        # (self_attn): Qwen3NextAttention(
-        #   (q_proj): Linear(in_features=2048, out_features=8192, bias=False)    out_features = num_heads * head dimension(head_size)
-        #   (k_proj): Linear(in_features=2048, out_features=512, bias=False)    out_features = num_key_value_heads * head dimension(head_size)  = 2 * 256 = 512
-        #   (v_proj): Linear(in_features=2048, out_features=512, bias=False)    out_features = num_key_value_heads * head dimension(head_size)  = 2 * 256 = 512
-        #   (o_proj): Linear(in_features=4096, out_features=2048, bias=False)    out_features = hidden size = 2048
-        #   (q_norm): Qwen3NextRMSNorm((256,), eps=1e-06)   ignored since the latency is ignorable
-        #   (k_norm): Qwen3NextRMSNorm((256,), eps=1e-06)   ignored since the latency is ignorable
-        # context_qkv_gemm: q + k + v
-        # context_attention: num of heads / tp_size
-        # context_proj_gemm: num of heads * head_size / tp_size
-        self.context_ops.extend([
+        self._context_ops.extend([
             ops.GEMM(f'context_qkv_gemm', self._num_layers * (1 - linear_attention_config.used_ratio), self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode),
             ops.ContextAttention(f'context_attention', self._num_layers * (1 - linear_attention_config.used_ratio), self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode),
             ops.GEMM(f'context_proj_gemm', self._num_layers * (1 - linear_attention_config.used_ratio), h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
         ])
         
         # linear attention (Qwen3NextGatedDeltaNet)
-        self.context_ops.extend([
-            ops.GEMM(f'context_qkvz_ba_gemm', self._num_layers * linear_attention_config.used_ratio, (key_dim*2 + value_dim*2 + num_v_heads*2)//tp_size, h, gemm_quant_mode),
-            ops.Conv1D(f'context_conv1d', self._num_layers * linear_attention_config.used_ratio, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, kernel_size=4, stride=1, padding=3, groups=self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, bias=False, gemm_quant_mode),
-            ops.ChunkGatedDeltaRule(f'context_chunk_gated_delta_rule', self._num_layers * linear_attention_config.used_ratio, in_channels=self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, out_channels=h, kernel_size=4, seq_length=seq_length),
+        self._context_ops.extend([
+            # Input projections for qkvz and ba
+            ops.GEMM(f'context_qkvz_gemm', self._num_layers * linear_attention_config.used_ratio, (key_dim*2 + value_dim*2)//tp_size, h, gemm_quant_mode),
+            ops.GEMM(f'context_ba_gemm', self._num_layers * linear_attention_config.used_ratio, num_v_heads*2//tp_size, h, gemm_quant_mode),
+            # Conv1D and gated delta rule operations - weights handled internally
+            # Conv1DFn(name, scale_factor, conv_kernel_size, conv_dim, tp_size) - batch_size and isl from kwargs
+            ops.Conv1DFn(f'context_conv1d_fn', self._num_layers * linear_attention_config.used_ratio, conv_kernel_size, conv_dim, tp_size),
+            # ChunkGatedDeltaRule(name, scale_factor, num_heads, head_k_dim, head_v_dim, num_value_heads) - isl from kwargs
+            ops.ChunkGatedDeltaRule(f'context_chunk_gated_delta_rule', self._num_layers * linear_attention_config.used_ratio, num_k_heads, head_k_dim, head_v_dim, num_v_heads),
+            # Output projection
             ops.GEMM(f'context_proj_gemm', self._num_layers * linear_attention_config.used_ratio, h, value_dim//tp_size, gemm_quant_mode),
         ])
 
         # 1 norm before MOE per layer
-        self.context_ops.extend([
+        self._context_ops.extend([
                                 ops.ElementWise(f'context_add_norm_2', self._num_layers // linear_attention_config.used_ratio, 2*h, 2*h, 0.8)])
 
         #router, only take it into account when num_experts >= 128
         if self._num_experts >= 128:
-            self.context_ops.extend([
+            self._context_ops.extend([
                             ops.GEMM(f'context_router_gemm', self._num_layers, self._num_experts, h, common.GEMMQuantMode.float16)
                             ])
 
         # dispatch tokens to experts, moe calc and get tokens back
         # Qwen3Next has one more shared expert.
-        self.context_ops.extend([
+        self._context_ops.extend([
                                 ops.MoEDispatch(f'context_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, attention_dp_size, True),
                                 ops.MoE(f'context_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size),
                                 ops.MoEDispatch(f'context_moe_post_dispatch', self._num_layers, h, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, attention_dp_size, False)])
         
-        self.context_ops.extend([ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+        self._context_ops.extend([ops.GEMM(f'context_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
 
         # # # when tp_size=0, the comm part will be 0
-        # self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
-        # self.context_ops.append(ops.AllReduce('context_ar_2', self._num_layers, h, tp_size))
+        # self._context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
+        # self._context_ops.append(ops.AllReduce('context_ar_2', self._num_layers, h, tp_size))
 
         # pp
         pp_scale_factor = pp_size-1
-        self.context_ops.append(ops.P2P('context_p2p', pp_scale_factor, h, pp_size))
+        self._context_ops.append(ops.P2P('context_p2p', pp_scale_factor, h, pp_size))
 
     @property
     def generation_ops(self):
@@ -903,13 +908,20 @@ class Qwen3NextModel(BaseModel):
 
         Args:
             linear_attention_config (common.LinearAttentionConfig): Linear attention configuration
+                or empty list for initialization
         """
+        self._generation_ops = []
+        if not isinstance(linear_attention_config, common.LinearAttentionConfig):
+            return
+        
         num_v_heads = linear_attention_config.linear_num_value_heads
         num_k_heads = linear_attention_config.linear_num_key_heads
         head_k_dim = linear_attention_config.linear_key_head_dim
         head_v_dim = linear_attention_config.linear_value_head_dim
         key_dim = head_k_dim * num_k_heads
         value_dim = head_v_dim * num_v_heads
+        conv_kernel_size = linear_attention_config.linear_conv_kernel_dim
+        conv_dim = key_dim * 2 + value_dim
         moe_quant_mode = self.config.moe_quant_mode
         h = self._hidden_size
         tp_size = self.config.tp_size
@@ -923,63 +935,61 @@ class Qwen3NextModel(BaseModel):
         fmha_quant_mode = self.config.fmha_quant_mode
         workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
 
-       # 1 embedding for all layers
+        # 1 embedding for all layers
         # 1 norm before attention per layer
-        self.generation_ops.extend([ops.Embedding(f'context_embedding', 1, self._vocab_size, h, 0.3),
-                                ops.ElementWise(f'context_add_norm_1', self._num_layers, 2*h, 2*h, 0.8)])
+        self._generation_ops.extend([ops.Embedding(f'generation_embedding', 1, self._vocab_size, h, 0.3),
+                                ops.ElementWise(f'generation_add_norm_1', self._num_layers, 2*h, 2*h, 0.8)])
 
         # self attention
-        # (self_attn): Qwen3NextAttention(
-        #   (q_proj): Linear(in_features=2048, out_features=8192, bias=False)    out_features = num_heads * head dimension(head_size)
-        #   (k_proj): Linear(in_features=2048, out_features=512, bias=False)    out_features = num_key_value_heads * head dimension(head_size)  = 2 * 256 = 512
-        #   (v_proj): Linear(in_features=2048, out_features=512, bias=False)    out_features = num_key_value_heads * head dimension(head_size)  = 2 * 256 = 512
-        #   (o_proj): Linear(in_features=4096, out_features=2048, bias=False)    out_features = hidden size = 2048
-        #   (q_norm): Qwen3NextRMSNorm((256,), eps=1e-06)   ignored since the latency is ignorable
-        #   (k_norm): Qwen3NextRMSNorm((256,), eps=1e-06)   ignored since the latency is ignorable
-        # context_qkv_gemm: q + k + v
-        # context_attention: num of heads / tp_size
-        # context_proj_gemm: num of heads * head_size / tp_size
-        self.generation_ops.extend([
+        self._generation_ops.extend([
             ops.GEMM(f'generation_qkv_gemm', self._num_layers * (1 - linear_attention_config.used_ratio), self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, gemm_quant_mode),
-            ops.GenerationAttention(f'generation_attention', self._num_layers * (1 - linear_attention_config.used_ratio), self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode),
+            ops.GenerationAttention(f'generation_attention', self._num_layers * (1 - linear_attention_config.used_ratio), self._num_heads//tp_size, num_kv_heads_per_GPU, kvcache_quant_mode, fmha_quant_mode),
             ops.GEMM(f'generation_proj_gemm', self._num_layers * (1 - linear_attention_config.used_ratio), h, self._num_heads*self._head_size//tp_size, gemm_quant_mode),
         ])
-        
+
         # linear attention (Qwen3NextGatedDeltaNet)
-        self.generation_ops.extend([
-            ops.GEMM(f'generation_qkvz_ba_gemm', self._num_layers * linear_attention_config.used_ratio, (key_dim*2 + value_dim*2 + num_v_heads*2)//tp_size, h, gemm_quant_mode),
-            ops.Conv1D(f'generation_conv1d', self._num_layers * linear_attention_config.used_ratio, self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, h, kernel_size=4, stride=1, padding=3, groups=self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, bias=False, gemm_quant_mode),
-            ops.ChunkGatedDeltaRule(f'generation_chunk_gated_delta_rule', self._num_layers * linear_attention_config.used_ratio, in_channels=self._num_heads*self._head_size//tp_size+self._head_size*num_kv_heads_per_GPU*2, out_channels=h, kernel_size=4, seq_length=seq_length),
+        self._generation_ops.extend([
+            # Input projections for qkvz and ba
+            ops.GEMM(f'generation_qkvz_gemm', self._num_layers * linear_attention_config.used_ratio, (key_dim*2 + value_dim*2)//tp_size, h, gemm_quant_mode),
+            ops.GEMM(f'generation_ba_gemm', self._num_layers * linear_attention_config.used_ratio, num_v_heads*2//tp_size, h, gemm_quant_mode),
+            # Conv1D and gated delta rule operations - weights handled internally
+            # TODO: for mixed steps, add ops.Conv1DFn(...)
+            # Conv1DUpdate(name, scale_factor, conv_kernel_size, conv_dim, tp_size) - batch_size and isl from kwargs
+            ops.Conv1DUpdate(f'generation_conv1d_update', self._num_layers * linear_attention_config.used_ratio, conv_kernel_size, conv_dim, tp_size),
+            # GatedDeltaRuleUpdate(name, scale_factor, num_heads, head_k_dim, head_v_dim, num_value_heads, max_batch_size) - batch_size and isl from kwargs
+            # max_batch_size is dynamic, need to determine appropriate value
+            ops.GatedDeltaRuleUpdate(f'generation_gated_delta_rule_update', self._num_layers * linear_attention_config.used_ratio, num_k_heads, head_k_dim, head_v_dim, num_v_heads, 1024),
+            # Output projection
             ops.GEMM(f'generation_proj_gemm', self._num_layers * linear_attention_config.used_ratio, h, value_dim//tp_size, gemm_quant_mode),
         ])
 
         # 1 norm before MOE per layer
-        self.generation_ops.extend([
-                                ops.ElementWise(f'context_add_norm_2', self._num_layers // linear_attention_config.used_ratio, 2*h, 2*h, 0.8)])
+        self._generation_ops.extend([
+                                ops.ElementWise(f'generation_add_norm_2', self._num_layers // linear_attention_config.used_ratio, 2*h, 2*h, 0.8)])
 
         #router, only take it into account when num_experts >= 128
         if self._num_experts >= 128:
-            self.generation_ops.extend([
+            self._generation_ops.extend([
                             ops.GEMM(f'generation_router_gemm', self._num_layers, self._num_experts, h, common.GEMMQuantMode.float16)
                             ])
 
         # dispatch tokens to experts, moe calc and get tokens back
         # Qwen3Next has one more shared expert.
-        self.generation_ops.extend([
+        self._generation_ops.extend([
                                 ops.MoEDispatch(f'generation_moe_pre_dispatch', self._num_layers, h, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, attention_dp_size, True),
                                 ops.MoE(f'generation_moe', self._num_layers, h, self._moe_inter_size, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, moe_quant_mode, workload_distribution, attention_dp_size),
                                 ops.MoEDispatch(f'generation_moe_post_dispatch', self._num_layers, h, self._topk, self._num_experts + 1, moe_tp_size, moe_ep_size, attention_dp_size, False)
                                 ])
         # logits gemm
-        self.generation_ops.extend([ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
+        self._generation_ops.extend([ops.GEMM(f'generation_logits_gemm', 1, self._vocab_size//tp_size, h, common.GEMMQuantMode.float16)])
 
         # # # when tp_size=0, the comm part will be 0
-        # self.generation_ops.append(ops.AllReduce('generation_ar_1', self._num_layers, h, tp_size))
-        # self.generation_ops.append(ops.AllReduce('generation_ar_2', self._num_layers, h, tp_size))
+        # self._generation_ops.append(ops.AllReduce('generation_ar_1', self._num_layers, h, tp_size))
+        # self._generation_ops.append(ops.AllReduce('generation_ar_2', self._num_layers, h, tp_size))
 
         # pp
         pp_scale_factor = pp_size-1
-        self.generation_ops.append(ops.P2P('generation_p2p', pp_scale_factor, h, pp_size))
+        self._generation_ops.append(ops.P2P('generation_p2p', pp_scale_factor, h, pp_size))
 
 
 if __name__ == '__main__':
