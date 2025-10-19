@@ -51,17 +51,17 @@ def run_conv1d_fn(batch_size, isl, conv_kernel_size, conv_dim, tp_size, perf_fil
         device: CUDA device to use
     """
     dtype = torch.bfloat16
-    mixed_qkv = torch.randn((batch_size * isl, conv_dim // tp_size), dtype=dtype).to(torch.device(device))
+    # Create input with proper 3D shape: (batch_size, dim, seqlen)
+    mixed_qkv = torch.randn((batch_size, conv_dim // tp_size, isl), dtype=dtype, device=device)
     conv1d_weights = torch.randn((conv_dim // tp_size, conv_kernel_size), dtype=dtype, device=device)
 
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
-        mixed_qkv_trans = mixed_qkv.transpose(0, 1)
         # TODO: measure optional arguments
         causal_conv1d_fn(
-            mixed_qkv_trans,
+            mixed_qkv,
             conv1d_weights,
-        ).transpose(0, 1)
+        )
 
     num_warmups = 3
     num_runs = 6
