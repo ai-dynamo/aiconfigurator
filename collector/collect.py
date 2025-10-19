@@ -438,34 +438,34 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
         # CONV 1D collections
         {
             'name': 'trtllm',
-            'type': 'conv_1d_fn',
-            'module': 'trtllm.collect_conv_1d',
-            'get_func': 'get_conv_1d_fn_test_cases',
-            'run_func': 'run_conv_1d_fn'
+            'type': 'conv1d_fn',
+            'module': 'trtllm.collect_conv1d',
+            'get_func': 'get_conv1d_fn_test_cases',
+            'run_func': 'run_conv1d_fn'
         },
         {
             'name': 'trtllm',
-            'type': 'conv_1d_update',
-            'module': 'trtllm.collect_conv_1d',
-            'get_func': 'get_conv_1d_update_test_cases',
-            'run_func': 'run_conv_1d_update'
+            'type': 'conv1d_update',
+            'module': 'trtllm.collect_conv1d',
+            'get_func': 'get_conv1d_update_test_cases',
+            'run_func': 'run_conv1d_update'
         },
 
         # Gated Delta Rule collections
-        {
-            'name': 'trtllm',
-            'type': 'chunk_gated_delta_rule',
-            'module': 'trtllm.collect_gated_delta_rule',
-            'get_func': 'get_chunk_gated_delta_rule_test_cases',
-            'run_func': 'run_chunk_gated_delta_rule'
-        },
-        {
-            'name': 'trtllm',
-            'type': 'gated_delta_rule_update',
-            'module': 'trtllm.collect_gated_delta_rule',
-            'get_func': 'get_gated_delta_rule_update_test_cases',
-            'run_func': 'run_gated_delta_rule_update'
-        },
+        # {
+        #     'name': 'trtllm',
+        #     'type': 'chunk_gated_delta_rule',
+        #     'module': 'trtllm.collect_gated_delta_rule',
+        #     'get_func': 'get_chunk_gated_delta_rule_test_cases',
+        #     'run_func': 'run_chunk_gated_delta_rule'
+        # },
+        # {
+        #     'name': 'trtllm',
+        #     'type': 'gated_delta_rule_update',
+        #     'module': 'trtllm.collect_gated_delta_rule',
+        #     'get_func': 'get_gated_delta_rule_update_test_cases',
+        #     'run_func': 'run_gated_delta_rule_update'
+        # },
     ]
     
     for collection in collections:

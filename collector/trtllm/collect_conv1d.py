@@ -6,7 +6,7 @@ import os
 from cuda import cuda
 import torch
 import tensorrt_llm
-from tensorrt_llm.modules.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+from tensorrt_llm._torch.modules.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from helper import log_perf
 
 def get_conv1d_fn_test_cases():
