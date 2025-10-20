@@ -32,6 +32,10 @@ def get_chunk_gated_delta_rule_test_cases():
             for head_k_dim in head_k_dim_list:
                 for head_v_dim in head_v_dim_list:
                     for num_value_heads in num_value_heads_list:
+                        # Skip invalid combinations: num_heads must be >= num_value_heads and divisible by it
+                        # This constraint is typical for Grouped-Query Attention (GQA)
+                        if num_heads < num_value_heads or num_heads % num_value_heads != 0:
+                            continue
                         for isl in isl_list:
                             test_cases.append([num_heads, head_k_dim, head_v_dim, num_value_heads, isl, 'chunk_gated_delta_rule_perf.txt'])
 
@@ -125,7 +129,14 @@ def get_gated_delta_rule_update_test_cases():
                 for head_k_dim in head_k_dim_list:
                     for head_v_dim in head_v_dim_list:
                         for num_value_heads in num_value_heads_list:
+                            # Skip invalid combinations: num_heads must be >= num_value_heads and divisible by it
+                            # This constraint is typical for Grouped-Query Attention (GQA)
+                            if num_heads < num_value_heads or num_heads % num_value_heads != 0:
+                                continue
                             for max_batch_size in max_batch_size_list:
+                                # max_batch_size must be >= batch_size
+                                if max_batch_size < batch_size:
+                                    continue
                                 test_cases.append([batch_size, isl, num_heads, head_k_dim, head_v_dim, num_value_heads, max_batch_size, 'gated_delta_rule_update_perf.txt'])
 
     return test_cases
@@ -153,7 +164,8 @@ def run_gated_delta_rule_update(batch_size, isl, num_heads, head_k_dim, head_v_d
     a = torch.randn((batch_size * isl, num_heads * num_value_heads), dtype=dtype).to(torch.device(device))
     b = torch.randn((batch_size, isl, num_heads * num_value_heads), dtype=dtype).to(torch.device(device))
     initial_state_source = torch.randn((max_batch_size, num_heads * num_value_heads, head_k_dim, head_v_dim), dtype=dtype).to(torch.device(device))
-    initial_state_indices = torch.randn((batch_size), dtype=dtype).to(torch.device(device))
+    # initial_state_indices should be integers, not floats - they index into initial_state_source
+    initial_state_indices = torch.randint(0, max_batch_size, (batch_size,), dtype=torch.int32, device=device)
     softplus_beta = 1.0
     softplus_threshold = 20.0
 
