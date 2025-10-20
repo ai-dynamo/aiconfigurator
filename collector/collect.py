@@ -452,20 +452,20 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
         # },
 
         # Gated Delta Rule collections
-        {
-            'name': 'trtllm',
-            'type': 'chunk_gated_delta_rule',
-            'module': 'trtllm.collect_gated_delta_rule',
-            'get_func': 'get_chunk_gated_delta_rule_test_cases',
-            'run_func': 'run_chunk_gated_delta_rule'
-        },
         # {
         #     'name': 'trtllm',
-        #     'type': 'gated_delta_rule_update',
+        #     'type': 'chunk_gated_delta_rule',
         #     'module': 'trtllm.collect_gated_delta_rule',
-        #     'get_func': 'get_gated_delta_rule_update_test_cases',
-        #     'run_func': 'run_gated_delta_rule_update'
+        #     'get_func': 'get_chunk_gated_delta_rule_test_cases',
+        #     'run_func': 'run_chunk_gated_delta_rule'
         # },
+        {
+            'name': 'trtllm',
+            'type': 'gated_delta_rule_update',
+            'module': 'trtllm.collect_gated_delta_rule',
+            'get_func': 'get_gated_delta_rule_update_test_cases',
+            'run_func': 'run_gated_delta_rule_update'
+        },
     ]
     
     for collection in collections:
