@@ -179,7 +179,7 @@ def run_conv1d_update(batch_size, isl, conv_kernel_size, conv_dim, tp_size, perf
         framework='TRTLLM', 
         version=tensorrt_llm.__version__, 
         device_name=torch.cuda.get_device_name(device), 
-        op_name='conv1d_fn', 
+        op_name='conv1d_update',
         kernel_source='default', 
         perf_filename=perf_filename
     )

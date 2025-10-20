@@ -436,13 +436,13 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
         # },
 
         # CONV 1D collections
-        {
-            'name': 'trtllm',
-            'type': 'conv1d_fn',
-            'module': 'trtllm.collect_conv1d',
-            'get_func': 'get_conv1d_fn_test_cases',
-            'run_func': 'run_conv1d_fn'
-        },
+        # {
+        #     'name': 'trtllm',
+        #     'type': 'conv1d_fn',
+        #     'module': 'trtllm.collect_conv1d',
+        #     'get_func': 'get_conv1d_fn_test_cases',
+        #     'run_func': 'run_conv1d_fn'
+        # },
         {
             'name': 'trtllm',
             'type': 'conv1d_update',
