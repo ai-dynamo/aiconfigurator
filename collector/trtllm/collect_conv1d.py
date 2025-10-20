@@ -103,17 +103,18 @@ def get_conv1d_update_test_cases():
     
     Test parameters:
     - batch_size: batch size
-    - conv_kernel_size: size of the convolution kernel
+    - conv_kernel_size: size of the convolution kernel (must be between 2 and 4)
     - conv_dim: dimension of the convolution
     - tp_size: attention tensor parallel size
 
     Note: isl (sequence length) is not used for conv1d_update as it processes
     individual tokens in incremental/streaming inference mode.
+    Note: causal_conv1d_update only supports kernel widths between 2 and 4.
     """
     b_list = [1,2,4,8,16,32,64,128,256,512,1024,2048]
     tp_sizes = [1, 2, 4, 8]
     conv_dims = [1,2,4,8,16,32]
-    kernel_sizes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]    
+    kernel_sizes = [2, 3, 4]  # causal_conv1d_update only supports widths 2-4
 
     test_cases = []
     for batch_size in b_list:
