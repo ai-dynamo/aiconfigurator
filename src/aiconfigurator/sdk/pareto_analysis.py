@@ -61,10 +61,9 @@ def enumerate_parallel_config(
                                     backend == common.BackendName.trtllm and dp > 1 and tp > 1
                                 ):  # trtllm as trtllm don't supports attn tp > 1
                                     continue
-                            elif backend == common.BackendName.sglang:
-                                # sglang doesn't support moe tp and moe ep > 1 at the same time
-                                # for now
-                                if moe_tp > 1:
+                                elif backend == common.BackendName.sglang and moe_tp > 1:
+                                    # sglang doesn't support moe tp and moe ep > 1 at the same time
+                                    # for now
                                     continue
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
             else:
