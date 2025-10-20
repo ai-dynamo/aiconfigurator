@@ -377,7 +377,7 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
             'module': 'trtllm.collect_mla',
             'get_func': 'get_context_mla_test_cases',
             'run_func': 'run_mla',
-            'version_handler': lambda v: 'trtllm.collect_mla_1_1rc2' if v.startswith('1.1')
+            'version_handler': lambda v: 'trtllm.collect_mla_1_1rc2' if v.startswith('1.1', '1.2')
                                         else 'trtllm.collect_mla'
         },
         {
@@ -386,7 +386,7 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
             'module': 'trtllm.collect_mla',
             'get_func': 'get_generation_mla_test_cases',
             'run_func': 'run_mla',
-            'version_handler': lambda v: 'trtllm.collect_mla_1_1rc2' if v.startswith('1.1')
+            'version_handler': lambda v: 'trtllm.collect_mla_1_1rc2' if v.startswith('1.1', '1.2')
                                         else 'trtllm.collect_mla'
         },
         
@@ -431,9 +431,41 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
             'run_func': 'run_moe_torch',
             'version_handler': lambda v: 'trtllm.collect_moe_pre_0_20' if v.startswith('0.20.0') 
                                       else 'trtllm.collect_moe_pre_1_0' if v.startswith(('0.21.0', '1.0.0'))
-                                      else 'trtllm.collect_moe' if v.startswith(('1.1.0'))
+                                      else 'trtllm.collect_moe' if v.startswith(('1.1.', '1.2.'))
                                       else None
-        }
+        },
+
+        # CONV 1D collections
+        {
+            'name': 'trtllm',
+            'type': 'conv1d_fn',
+            'module': 'trtllm.collect_conv1d',
+            'get_func': 'get_conv1d_fn_test_cases',
+            'run_func': 'run_conv1d_fn'
+        },
+        {
+            'name': 'trtllm',
+            'type': 'conv1d_update',
+            'module': 'trtllm.collect_conv1d',
+            'get_func': 'get_conv1d_update_test_cases',
+            'run_func': 'run_conv1d_update'
+        },
+
+        # Gated Delta Rule collections
+        {
+            'name': 'trtllm',
+            'type': 'chunk_gated_delta_rule',
+            'module': 'trtllm.collect_gated_delta_rule',
+            'get_func': 'get_chunk_gated_delta_rule_test_cases',
+            'run_func': 'run_chunk_gated_delta_rule'
+        },
+        {
+            'name': 'trtllm',
+            'type': 'gated_delta_rule_update',
+            'module': 'trtllm.collect_gated_delta_rule',
+            'get_func': 'get_gated_delta_rule_update_test_cases',
+            'run_func': 'run_gated_delta_rule_update'
+        },
     ]
     
     for collection in collections:
@@ -529,7 +561,8 @@ def main():
     parser.add_argument('--ops', nargs='*', type=str, choices=['gemm_trt', 'gemm', 'mla_context', 
                                                                'mla_generation', 'attention_context',
                                                                'attention_generation', 'mla_bmm_gen_pre',
-                                                               'mla_bmm_gen_post', 'moe'],
+                                                               'mla_bmm_gen_post', 'moe', 'conv1d_fn', 'conv1d_update',
+                                                               'chunk_gated_delta_rule', 'gated_delta_rule_update'],
                         help='Run only specified collection items. Leave empty to run all.',
                         default=None)
     args = parser.parse_args()

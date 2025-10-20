@@ -46,6 +46,7 @@ class BaseBackend(ABC):
                 step, default is 32.
             latency_correction_scale (float): the correction scale to adjust the latency, default is 1.0. corrected latency = latency * latency_correction_scale
         """
+
         def _run_context(batch_size: int, isl: int) -> dict[str, float]:
             context_latency_dict = defaultdict(float)
 

@@ -317,7 +317,8 @@ class TRTLLMBackend(BaseBackend):
             c_dict = {1:11, 2:6.5, 4:5, 8:5}
             activations = 2*num_tokens*h*c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 70*1024*1024) # minimum act
-        elif get_model_family(model.model_name) == 'MOE':
+        elif get_model_family(model.model_name) in ['MOE', 'QWEN3NEXT']:
+            # TODO: Qwen3Next has different activation memory calculation.
             c_dict = {1:22, 2:13, 4:10, 8:10}
             activations = 2*num_tokens*h*c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 70*1024*1024) # minimum act
