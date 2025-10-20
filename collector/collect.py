@@ -377,7 +377,7 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
             'module': 'trtllm.collect_mla',
             'get_func': 'get_context_mla_test_cases',
             'run_func': 'run_mla',
-            'version_handler': lambda v: 'trtllm.collect_mla_1_1rc2' if v.startswith('1.1')
+            'version_handler': lambda v: 'trtllm.collect_mla_1_1rc2' if v.startswith('1.1', '1.2')
                                         else 'trtllm.collect_mla'
         },
         {
@@ -386,7 +386,7 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
             'module': 'trtllm.collect_mla',
             'get_func': 'get_generation_mla_test_cases',
             'run_func': 'run_mla',
-            'version_handler': lambda v: 'trtllm.collect_mla_1_1rc2' if v.startswith('1.1')
+            'version_handler': lambda v: 'trtllm.collect_mla_1_1rc2' if v.startswith('1.1', '1.2')
                                         else 'trtllm.collect_mla'
         },
         
@@ -431,7 +431,7 @@ def collect_trtllm(num_processes: int, ops: List[str]=None):
             'run_func': 'run_moe_torch',
             'version_handler': lambda v: 'trtllm.collect_moe_pre_0_20' if v.startswith('0.20.0') 
                                       else 'trtllm.collect_moe_pre_1_0' if v.startswith(('0.21.0', '1.0.0'))
-                                      else 'trtllm.collect_moe' if v.startswith(('1.1.0'))
+                                      else 'trtllm.collect_moe' if v.startswith(('1.1.', '1.2.'))
                                       else None
         },
 
