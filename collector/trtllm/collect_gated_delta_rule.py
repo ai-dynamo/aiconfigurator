@@ -54,7 +54,7 @@ def run_chunk_gated_delta_rule(num_heads, head_k_dim, head_v_dim, num_value_head
     # NOTICE: ignored fused_gdn_gating operation
     dtype = torch.bfloat16
     q = torch.randn((1, isl, num_heads, head_k_dim), dtype=dtype).to(torch.device(device))
-    k = torch.randn((1, isl, num_heads, head_v_dim), dtype=dtype).to(torch.device(device))
+    k = torch.randn((1, isl, num_heads, head_k_dim), dtype=dtype).to(torch.device(device))
     v = torch.randn((1, isl, num_value_heads, head_v_dim), dtype=dtype).to(torch.device(device))
     gate = torch.randn((1, isl, num_heads), dtype=dtype).to(torch.device(device))
     beta = torch.randn((1, isl, num_heads), dtype=dtype).to(torch.device(device))
