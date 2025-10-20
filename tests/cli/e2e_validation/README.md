@@ -40,7 +40,7 @@ python3 tests/cli/e2e_validation/e2e_runner.py --mode <smoke|selective|full> [op
 **Usage**: `python3 e2e_runner.py --mode full --parallel 4 --continue-on-error`
 
 - ALL model combinations (~15 models)
-- ALL system configurations (h100_sxm, h200_sxm)
+- ALL system configurations (h100_sxm, h200_sxm, b200_sxm, gb200_sxm, a100_sxm)
 - ALL GPU configurations (8, 512 GPUs)  
 - ALL workload patterns (3 ISL/OSL combinations)
 - ALL performance targets (2 TPOT values)
@@ -117,7 +117,7 @@ pipeline {
 The testing framework systematically validates:
 
 - **15+ Models**: QWEN, LLAMA, DEEPSEEK, MOE variants
-- **2 Systems**: h100_sxm, h200_sxm, b200_sxm, gb200_sxm
+- **2 Systems**: h100_sxm, h200_sxm, b200_sxm, gb200_sxm, a100_sxm
 - **2 GPU Configs**: 8 GPUs, 512 GPUs
 - **3 Workload Patterns**: (4000,1000), (1000,2), (32,1000) ISL/OSL
 - **2 Performance Targets**: 10ms, 100ms TPOT
