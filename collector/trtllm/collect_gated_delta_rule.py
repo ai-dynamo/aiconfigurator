@@ -6,7 +6,8 @@ import os
 from cuda import cuda
 import torch
 import tensorrt_llm
-from tensorrt_llm._torch.modules.flash_attention import chunk_gated_delta_rule, fused_sigmoid_gating_delta_rule_update
+from tensorrt_llm._torch.modules.fla.chunk import chunk_gated_delta_rule
+from tensorrt_llm._torch.modules.fla.fused_sigmoid_gating_recurrent import fused_sigmoid_gating_delta_rule_update
 from helper import log_perf
 
 def get_chunk_gated_delta_rule_test_cases():
