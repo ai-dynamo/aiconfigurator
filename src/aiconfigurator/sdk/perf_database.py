@@ -972,9 +972,9 @@ def load_deepep_ll_data(deepep_ll_file):
 
         # Store the data with key structure: [hidden_size][num_topk][num_experts][num_token]
         # -> timing data
-        try:
+        if num_token in deepep_ll_data[node_num][hidden_size][num_topk][num_experts]:
             logger.debug(f"value conflict in deepep ll data: {hidden_size} {num_topk} {num_experts} {num_token}")
-        except KeyError:
+        else:
             deepep_ll_data[node_num][hidden_size][num_topk][num_experts][num_token] = lat
 
     return deepep_ll_data
@@ -1010,11 +1010,11 @@ def load_deepep_normal_data(deepep_normal_file):
 
         # Store the data with key structure:
         # [hidden_size][topk][num_experts][dispatch_sms][num_token] -> timing data
-        try:
+        if num_token in deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms]:
             logger.debug(
                 f"value conflict in deepep normal data: {hidden_size} {topk} {num_experts} {dispatch_sms} {num_token}"
             )
-        except KeyError:
+        else:
             deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms][num_token] = lat
 
     return deepep_normal_data
