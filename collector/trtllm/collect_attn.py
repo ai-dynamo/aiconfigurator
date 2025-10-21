@@ -514,7 +514,6 @@ def get_generation_attention_test_cases():
 
     # MHA
     max_bsn = 8192 * 1024  # 2*1024*1024*1024/128/2 INT32MAX/128/2
-    max_bsn // 2
     for n in sorted(n_list, reverse=True):
         b_s_dict = {}
         s_b_dict = {}

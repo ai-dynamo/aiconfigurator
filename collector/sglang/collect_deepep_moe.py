@@ -208,8 +208,6 @@ def benchmark_moe_layer_prefill(
         model_runner.req_to_token_pool.clear()
         model_runner.token_to_kv_pool_allocator.clear()
 
-        num_token * 8
-
         # Fake dispatch outputs with random data
         hidden_states_per_token_iter = torch.randn(
             int(num_token * num_rank),
@@ -692,7 +690,6 @@ def run_moe(
         server_args.json_model_override_args = original_json_override
 
         ep_size = server_args.ep_size
-        actual_num_experts // ep_size
         num_rank = ep_size if actual_num_experts == 256 else int(256 // actual_num_experts * ep_size)
         prefill_test_cases = get_moe_prefill_test_cases(num_rank)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
