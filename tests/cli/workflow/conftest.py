@@ -4,7 +4,7 @@
 import argparse
 import tempfile
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
@@ -27,23 +27,23 @@ def cli_args_factory():
         parser = argparse.ArgumentParser()
         configure_cli_parser(parser)
 
-        base_args: Dict[str, Any] = {}
+        base_args: dict[str, Any] = {}
         temp_file: Path | None = None
 
         if mode == "default":
-            base_args.update({
-                "model": "QWEN3_32B",
-                "total_gpus": 8,
-                "system": "h200_sxm",
-            })
+            base_args.update(
+                {
+                    "model": "QWEN3_32B",
+                    "total_gpus": 8,
+                    "system": "h200_sxm",
+                }
+            )
         elif mode == "exp":
             yaml_override = overrides.pop("yaml_path", None)
-            if yaml_override is None:
-                if not extra_args or "--yaml_path" not in extra_args:
-                    tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+            if yaml_override is None and (not extra_args or "--yaml_path" not in extra_args):
+                with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as tmp:
                     tmp.write("exps: []\n")
                     tmp.flush()
-                    tmp.close()
                     temp_file = Path(tmp.name)
                     yaml_override = tmp.name
             if yaml_override is not None:
@@ -103,4 +103,3 @@ def mock_exp_yaml_path(tmp_path):
     exp_file = tmp_path / "exp.yaml"
     exp_file.write_text(yaml_content)
     return exp_file
-

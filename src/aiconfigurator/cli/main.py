@@ -7,24 +7,19 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import pandas as pd
 import yaml
 
 from aiconfigurator import __version__
-from aiconfigurator.generator.api import generate_backend_config
-from aiconfigurator.generator.cli_args import add_config_generation_cli, build_dynamo_config
-from aiconfigurator.sdk import common, pareto_analysis, task
+from aiconfigurator.cli.report_and_save import log_final_summary, save_results
+from aiconfigurator.generator.cli_args import add_config_generation_cli
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.pareto_analysis import (
-    draw_pareto_to_string,
     get_best_configs_under_tpot_constraint,
 )
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-from aiconfigurator.sdk.utils import safe_mkdir
-from aiconfigurator.cli.report_and_save import log_final_summary, save_results
-
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +34,33 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
 
 def _add_default_mode_arguments(parser):
     parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")
-    parser.add_argument("--model", choices=common.SupportedModels.keys(), type=str, required=True, help="Model name.")
+    parser.add_argument(
+        "--model",
+        choices=common.SupportedModels.keys(),
+        type=str,
+        required=True,
+        help="Model name.",
+    )
     parser.add_argument("--system", type=str, required=True, help="Default system name.")
-    parser.add_argument("--decode_system", type=str, default=None, help="System name for disagg decode workers. Defaults to --system if omitted.")
-    parser.add_argument("--backend", choices=[backend.value for backend in common.BackendName], type=str, default=common.BackendName.trtllm.value, help="Backend name.")
-    parser.add_argument("--backend_version", type=str, default=None, help="Backend database version. Default is latest")
+    parser.add_argument(
+        "--decode_system",
+        type=str,
+        default=None,
+        help="System name for disagg decode workers. Defaults to --system if omitted.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=[backend.value for backend in common.BackendName],
+        type=str,
+        default=common.BackendName.trtllm.value,
+        help="Backend name.",
+    )
+    parser.add_argument(
+        "--backend_version",
+        type=str,
+        default=None,
+        help="Backend database version. Default is latest",
+    )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
     parser.add_argument("--ttft", type=float, default=1000.0, help="Time to first token in ms.")
@@ -51,26 +68,33 @@ def _add_default_mode_arguments(parser):
 
 
 def _add_experiments_mode_arguments(parser):
-    parser.add_argument("--yaml_path", type=str, required=True, help="Path to a YAML file containing experiment definitions.")
+    parser.add_argument(
+        "--yaml_path",
+        type=str,
+        required=True,
+        help="Path to a YAML file containing experiment definitions.",
+    )
 
 
 def configure_parser(parser):
     common_cli_parser = _build_common_cli_parser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
-    default_parser = subparsers.add_parser("default", parents=[common_cli_parser], help="Run the default agg vs disagg comparison.")
+    default_parser = subparsers.add_parser(
+        "default", parents=[common_cli_parser], help="Run the default agg vs disagg comparison."
+    )
     _add_default_mode_arguments(default_parser)
 
     help_text = "Run one or more experiments defined in a YAML file. Example: example.yaml"
     # an example yaml for demonstration
     example_yaml_path = os.path.join(os.path.dirname(__file__), "example.yaml")
-    with open(example_yaml_path, "r") as f:
+    with open(example_yaml_path) as f:
         example_yaml = yaml.safe_load(f)
     description = help_text + "\n\nExample:\n" + json.dumps(example_yaml, indent=2)
 
     experiments_parser = subparsers.add_parser(
-        "exp", 
-        parents=[common_cli_parser], 
+        "exp",
+        parents=[common_cli_parser],
         help=help_text,
         description=description,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -78,9 +102,9 @@ def configure_parser(parser):
     _add_experiments_mode_arguments(experiments_parser)
 
 
-def _build_default_task_configs(args) -> Dict[str, TaskConfig]:
+def _build_default_task_configs(args) -> dict[str, TaskConfig]:
     decode_system = args.decode_system or args.system
-    common_kwargs: Dict[str, Any] = {
+    common_kwargs: dict[str, Any] = {
         "model_name": args.model,
         "system_name": args.system,
         "backend_name": args.backend,
@@ -120,12 +144,10 @@ _EXPERIMENT_RESERVED_KEYS = {
 }
 
 
-def _build_yaml_config(exp_config: dict, config_section: dict) -> Optional[dict]:
+def _build_yaml_config(exp_config: dict, config_section: dict) -> dict | None:
     if not config_section:
         config_section = {
-            key: copy.deepcopy(value)
-            for key, value in exp_config.items()
-            if key not in _EXPERIMENT_RESERVED_KEYS
+            key: copy.deepcopy(value) for key, value in exp_config.items() if key not in _EXPERIMENT_RESERVED_KEYS
         }
     if not config_section:
         return None
@@ -138,12 +160,12 @@ def _build_yaml_config(exp_config: dict, config_section: dict) -> Optional[dict]
     return yaml_config
 
 
-def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
+def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
     try:
-        with open(args.yaml_path, "r", encoding="utf-8") as fh:
+        with open(args.yaml_path, encoding="utf-8") as fh:
             experiment_data = yaml.safe_load(fh) or {}
     except Exception as exc:
-        logger.error("Error loading experiment YAML file '%s': %s", args.yaml_path, exc)
+        logger.exception("Error loading experiment YAML file '%s'", args.yaml_path)
         raise SystemExit(1) from exc
 
     if not isinstance(experiment_data, dict):
@@ -154,9 +176,9 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
     if isinstance(order, list):
         experiment_names = [name for name in order if name in experiment_data]
     else:
-        experiment_names = [name for name in experiment_data.keys() if name != "exps"]
+        experiment_names = [name for name in experiment_data if name != "exps"]
 
-    task_configs: Dict[str, TaskConfig] = {}
+    task_configs: dict[str, TaskConfig] = {}
 
     for exp_name in experiment_names:
         exp_config = experiment_data[exp_name]
@@ -186,7 +208,8 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
         system_name = inferred_system
         if not system_name:
             logger.warning(
-                "Skipping experiment '%s': no system name provided (provide system_name at the top level or inside worker config).",
+                "Skipping experiment '%s': no system name provided "
+                "(provide system_name at the top level or inside worker config).",
                 exp_name,
             )
             continue
@@ -204,7 +227,7 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
             logger.warning("Skipping experiment '%s': total_gpus not provided in YAML.", exp_name)
             continue
 
-        task_kwargs: Dict[str, Any] = {
+        task_kwargs: dict[str, Any] = {
             "serving_mode": serving_mode,
             "model_name": model_name,
             "system_name": system_name,
@@ -235,9 +258,8 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
 
         try:
             task_configs[exp_name] = TaskConfig(**task_kwargs)
-        except Exception as exc:
-            logger.error("Failed to build TaskConfig for experiment '%s': %s", exp_name, exc)
-            logger.exception("Full traceback")
+        except Exception:
+            logger.exception("Failed to build TaskConfig for experiment '%s'", exp_name)
 
     if not task_configs:
         logger.error("No valid experiments found in '%s'.", args.yaml_path)
@@ -247,11 +269,12 @@ def _build_experiment_task_configs(args) -> Dict[str, TaskConfig]:
 
 
 def _execute_task_configs(
-    task_configs: Dict[str, TaskConfig],
+    task_configs: dict[str, TaskConfig],
     mode: str,
-) -> Tuple[str, Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, float]]:
-    """Execute the task configs and return the chosen experiment, best configs, results, and best throughputs."""
-    results: Dict[str, Dict[str, pd.DataFrame]] = {}
+) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float]]:
+    """Execute the task configs and return the chosen experiment, best configs, results, and best
+    throughputs."""
+    results: dict[str, dict[str, pd.DataFrame]] = {}
     start_time = time.time()
     runner = TaskRunner()
 
@@ -268,24 +291,23 @@ def _execute_task_configs(
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_frontier_df))
             else:
                 logger.warning("Experiment %s returned no results.", exp_name)
-        except Exception as exc:
-            logger.error("Error running experiment %s: %s", exp_name, exc)
-            logger.exception("Full traceback")
+        except Exception:
+            logger.exception("Error running experiment %s", exp_name)
 
     if len(results) < 1:
         logger.error("No successful experiment runs to compare.")
         raise SystemExit(1)
 
-    best_configs: Dict[str, pd.DataFrame] = {}
-    best_throughputs: Dict[str, float] = {}
-    pareto_fronts: Dict[str, Optional[pd.DataFrame]] = {}
+    best_configs: dict[str, pd.DataFrame] = {}
+    best_throughputs: dict[str, float] = {}
+    pareto_fronts: dict[str, pd.DataFrame | None] = {}
     for name, task_result in results.items():
         pareto_df = task_result["pareto_df"]
         pareto_frontier_df = task_result["pareto_frontier_df"]
         target_tpot = task_configs[name].config.runtime_config.tpot
         total_gpus = getattr(task_configs[name], "total_gpus", None) or 0
         group_by_key = "(d)parallel" if task_configs[name].serving_mode == "disagg" else "parallel"
-        best_config_df = get_best_configs_under_tpot_constraint( # based on all data points
+        best_config_df = get_best_configs_under_tpot_constraint(  # based on all data points
             total_gpus=total_gpus,
             pareto_df=pareto_df,
             target_tpot=target_tpot,
@@ -295,18 +317,18 @@ def _execute_task_configs(
         best_configs[name] = best_config_df
         pareto_fronts[name] = pareto_frontier_df
         if not best_config_df.empty:
-            best_throughputs[name] = best_config_df['tokens/s/gpu_cluster'].values[0]
+            best_throughputs[name] = best_config_df["tokens/s/gpu_cluster"].values[0]
         else:
             best_throughputs[name] = 0.0
 
     chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
 
     log_final_summary(
-        chosen_exp=chosen_exp, # for summary
-        best_throughputs=best_throughputs, # for summary
-        best_configs=best_configs, # for table
-        pareto_fronts=pareto_fronts, # for plotting
-        task_configs=task_configs, # for info in summary
+        chosen_exp=chosen_exp,  # for summary
+        best_throughputs=best_throughputs,  # for summary
+        best_configs=best_configs,  # for table
+        pareto_fronts=pareto_fronts,  # for plotting
+        task_configs=task_configs,  # for info in summary
         mode=mode,
     )
 
@@ -317,8 +339,10 @@ def _execute_task_configs(
 
 
 def main(args):
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
-                        format='%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s')
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
+    )
 
     logger.info(f"Loading Dynamo AIConfigurator version: {__version__}")
 
@@ -337,9 +361,9 @@ def main(args):
     if args.save_dir:
         save_results(
             args=args,
-            best_configs=best_configs, 
-            pareto_fronts=pareto_fronts, 
-            task_configs=task_configs, 
+            best_configs=best_configs,
+            pareto_fronts=pareto_fronts,
+            task_configs=task_configs,
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,
         )
@@ -350,4 +374,3 @@ if __name__ == "__main__":
     configure_parser(parser)
     args = parser.parse_args()
     main(args)
-    

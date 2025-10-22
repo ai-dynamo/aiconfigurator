@@ -1,27 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import pytest
 import math
 
-# Import PerfDatabase and its dependencies
-from aiconfigurator.sdk.perf_database import (
-    PerfDatabase,
-    load_gemm_data,
-    load_context_attention_data,
-    load_generation_attention_data,
-    load_custom_allreduce_data,
-    load_moe_data,
-    load_context_mla_data,
-    load_generation_mla_data,
-    load_mla_bmm_data,
-    load_nccl_data,
-)
+import pytest
+
 from aiconfigurator.sdk import common
-import yaml
+
+# Import PerfDatabase and its dependencies
 
 # Mark all tests to use the patch
 pytestmark = pytest.mark.patch_loader_and_yaml
+
 
 def test_query_gemm_exact_match(perf_db):
     """
@@ -35,7 +25,7 @@ def test_query_gemm_exact_match(perf_db):
     observed = perf_db.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.NON_SOL)
     # The value may have been corrected by _correct_data(), but we can check it's reasonable
     assert observed > 0, f"Expected positive value, got {observed}"
-    
+
     # Also test that SOL mode works
     sol_value = perf_db.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.SOL)
     assert sol_value > 0, f"Expected positive SOL value, got {sol_value}"
@@ -55,12 +45,12 @@ def test_query_allreduce_sol_mode_calculation(perf_db):
     """
     size = 1024
     tp_size = 2
-    quant_mode = 'float16'  # for SOL branch we ignore the custom allreduce dict
+    quant_mode = "float16"  # for SOL branch we ignore the custom allreduce dict
 
     sol_time = perf_db.query_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.SOL)
 
-    expected = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec['node']['inter_node_bw']) * 1000
-    assert math.isclose(sol_time, expected), f"SOL‐mode allreduce mismatch: expected {expected}, got {sol_time}"
+    expected = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
+    assert math.isclose(sol_time, expected), f"SOL-mode allreduce mismatch: expected {expected}, got {sol_time}"
 
 
 def test_query_allreduce_sol_full_returns_full_tuple(perf_db):
@@ -70,11 +60,11 @@ def test_query_allreduce_sol_full_returns_full_tuple(perf_db):
     """
     size = 1024
     tp_size = 2
-    quant_mode = 'float16'
+    quant_mode = "float16"
 
     result = perf_db.query_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.SOL_FULL)
     # The get_sol function returns: (sol_time, 0, 0)
-    sol_time = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec['node']['inter_node_bw']) * 1000
+    sol_time = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
     expected = (sol_time, 0, 0)
 
     assert isinstance(result, tuple) and len(result) == 3
@@ -93,11 +83,11 @@ def test_query_allreduce_non_sol_mode_uses_custom_latency(perf_db):
     """
     size = 1024
     tp_size = 2
-    quant_mode = 'float16'
+    quant_mode = "float16"
 
-    # Use a “non‐SOL” mode to force fallback into the custom‐data path
+    # Use a “non-SOL” mode to force fallback into the custom-data path
     custom_latency = perf_db.query_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.NON_SOL)
-    assert math.isclose(custom_latency, 5.0), f"Expected custom‐allreduce latency 5.0, got {custom_latency}"
+    assert math.isclose(custom_latency, 5.0), f"Expected custom-allreduce latency 5.0, got {custom_latency}"
 
 
 @pytest.mark.skip("TODO: fix comm SOL calculations")
@@ -117,17 +107,17 @@ def test_query_nccl_sol_mode_all_gather(perf_db):
     """
     dtype = common.CommQuantMode.half
     num_gpus = 4
-    operation = 'all_gather'
+    operation = "all_gather"
     message_size = 512
 
     sol_time = perf_db.query_nccl(dtype, num_gpus, operation, message_size, sol_mode=common.SOLMode.SOL)
-    expected = (message_size * (num_gpus - 1) * 2 / perf_db.system_spec['node']['inter_node_bw']) * 1000
+    expected = (message_size * (num_gpus - 1) * 2 / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
 
     assert math.isclose(sol_time, expected), f"Expected {expected}, got {sol_time}"
 
 
 @pytest.mark.skip("TODO: fix comm SOL calculations")
-@pytest.mark.parametrize('operation', ['alltoall', 'reduce_scatter'])
+@pytest.mark.parametrize("operation", ["alltoall", "reduce_scatter"])
 def test_query_nccl_sol_mode_alltoall_and_reduce_scatter(perf_db, operation):
     """
     The code for 'alltoall' and 'reduce_scatter' in get_sol is identical:
@@ -137,12 +127,10 @@ def test_query_nccl_sol_mode_alltoall_and_reduce_scatter(perf_db, operation):
         sol_time = 2 * 1000 * 1 / 100.0 * 1000 = (2000 / 100.0)*1000 = 20*1000 = 20000.0
     """
     dtype = common.CommQuantMode.int8  # type_bytes = 1 for int8
-    num_gpus = 8             # num_gpus only matters for 'all_gather'
+    num_gpus = 8  # num_gpus only matters for 'all_gather'
     sol_time = perf_db.query_nccl(dtype, num_gpus, operation, 1000, sol_mode=common.SOLMode.SOL)
-    expected = (2 * 1000 * 1 / perf_db.system_spec['node']['inter_node_bw']) * 1000
-    assert math.isclose(sol_time, expected), (
-        f"Expected {expected} for op {operation}, got {sol_time}"
-    )
+    expected = (2 * 1000 * 1 / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
+    assert math.isclose(sol_time, expected), f"Expected {expected} for op {operation}, got {sol_time}"
 
 
 def test_query_p2p_sol_mode(perf_db):
@@ -153,7 +141,7 @@ def test_query_p2p_sol_mode(perf_db):
         sol_time = (256 / 100.0) * 1000 = 2.56 * 1000 = 2560.0
     """
     sol_time = perf_db.query_p2p(256, sol_mode=common.SOLMode.SOL)
-    expected = (256 / perf_db.system_spec['node']['inter_node_bw']) * 1000
+    expected = (256 / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
     assert math.isclose(sol_time, expected), f"Expected {expected}, got {sol_time}"
 
 
@@ -163,5 +151,5 @@ def test_system_spec_was_loaded_correctly(perf_db):
     """
     spec = perf_db.system_spec
     assert isinstance(spec, dict)
-    assert spec['gpu']['float16_tc_flops'] == 1_000.0
-    assert spec['node']['inter_node_bw'] == 100.0
+    assert spec["gpu"]["float16_tc_flops"] == 1_000.0
+    assert spec["node"]["inter_node_bw"] == 100.0

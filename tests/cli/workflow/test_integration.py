@@ -12,7 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aiconfigurator.cli.main import configure_parser, main as cli_main
+from aiconfigurator.cli.main import configure_parser
+from aiconfigurator.cli.main import main as cli_main
 
 
 class TestCLIIntegration:
@@ -28,7 +29,12 @@ class TestCLIIntegration:
         mock_results_df = MagicMock(name="ResultsDF")
         mock_best_configs = {"agg": MagicMock(name="BestConfigDF")}
         mock_best_throughputs = {"agg": 123.4}
-        mock_execute.return_value = ("agg", mock_best_configs, {"agg": mock_results_df}, mock_best_throughputs)
+        mock_execute.return_value = (
+            "agg",
+            mock_best_configs,
+            {"agg": mock_results_df},
+            mock_best_throughputs,
+        )
 
         with patch("aiconfigurator.cli.main.save_results") as mock_save:
             cli_main(sample_cli_args_with_save_dir)
@@ -64,7 +70,12 @@ class TestCLIIntegration:
         mock_results_df = MagicMock(name="ResultsDF")
         mock_best_configs = {"my_exp": MagicMock(name="BestConfigDF")}
         mock_best_throughputs = {"my_exp": 123.4}
-        mock_execute.return_value = ("my_exp", mock_best_configs, {"my_exp": mock_results_df}, mock_best_throughputs)
+        mock_execute.return_value = (
+            "my_exp",
+            mock_best_configs,
+            {"my_exp": mock_results_df},
+            mock_best_throughputs,
+        )
 
         args = cli_args_factory(
             mode="exp",

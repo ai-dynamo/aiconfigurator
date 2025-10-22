@@ -27,7 +27,7 @@ FROM runtime AS test
 
 COPY --from=build /workspace/dist /wheelhouse
 RUN WHL=$(ls -d /wheelhouse/*) && \
-    uv pip install "$WHL[dev-test]" && \
+    uv pip install "$WHL[dev]" && \
     rm -rf /wheelhouse
 
 COPY pytest.ini /workspace/
