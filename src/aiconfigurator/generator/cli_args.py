@@ -7,13 +7,17 @@ This module scans template files to auto-inject CLI options for
 dynamo_config.* overrides, and exposes a 'build_dynamo_config' helper
 to materialize user overrides into a DynamoConfig object.
 """
-import sys, re, argparse
+
+import argparse
+import re
+import sys
 from pathlib import Path
-from typing import Dict, Any
+
 from .inputs.schema import DynamoConfig
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent / "templates"
 _PREFIX = r"dynamo_config"
+
 
 def _detect_backend_from_argv(default_backend: str) -> str:
     it = iter(sys.argv[1:])
@@ -27,23 +31,25 @@ def _detect_backend_from_argv(default_backend: str) -> str:
                 break
     return default_backend
 
+
 def _backend_template_dir(backend: str) -> Path:
     return TEMPLATE_ROOT / backend
 
-def _scan_templates_for_help(backend: str) -> Dict[str, Dict[str, str]]:
+
+def _scan_templates_for_help(backend: str) -> dict[str, dict[str, str]]:
     """Parse Jinja templates to auto-extract CLI help metadata."""
     tmpl_dir = _backend_template_dir(backend)
     comment = re.compile(rf"#\s*{_PREFIX}\.([A-Za-z_][\w]*)\s+(.*)$")
     default = re.compile(rf"{_PREFIX}\.([A-Za-z_][\w]*)\s*\|\s*default\(([^)]+)\)")
     var_pat = re.compile(rf"{_PREFIX}\.([A-Za-z_][\w]*)")
 
-    meta: Dict[str, Dict[str, str]] = {}
+    meta: dict[str, dict[str, str]] = {}
     for name in ("run.sh.j2", "extra_engine_args.yaml.j2", "k8s_deploy.yaml.j2"):
         p = tmpl_dir / name
         if not p.exists():
             continue
         for ln in p.read_text().splitlines():
-            if (m := comment.search(ln)):
+            if m := comment.search(ln):
                 meta.setdefault(m[1], {})["desc"] = m[2].strip()
             for v, d in default.findall(ln):
                 meta.setdefault(v, {})["default"] = d.strip().strip("'\"")
@@ -53,6 +59,7 @@ def _scan_templates_for_help(backend: str) -> Dict[str, Dict[str, str]]:
         meta[k].setdefault("desc", "")
         meta[k].setdefault("default", "")
     return meta
+
 
 def smart_cast(val: str):
     """Cast CLI string into bool / int / float / list when possible."""
@@ -65,19 +72,17 @@ def smart_cast(val: str):
     except ValueError:
         return val
 
+
 def build_dynamo_config(args) -> DynamoConfig:
     """Collect overrides from argparse Namespace into DynamoConfig."""
     meta = args._dyn_meta
     extras = {
         k: smart_cast(v)
         for k, v in vars(args).items()
-        if (
-            k in meta
-            or any(k.startswith(p) for p in ("decode_", "prefill_", "agg_"))
-        )
-        and v is not None
+        if (k in meta or any(k.startswith(p) for p in ("decode_", "prefill_", "agg_"))) and v is not None
     }
     return DynamoConfig(extras=extras)
+
 
 def add_config_generation_cli(parser: argparse.ArgumentParser, default_backend: str) -> str:
     """
@@ -95,7 +100,7 @@ def add_config_generation_cli(parser: argparse.ArgumentParser, default_backend: 
         "--generated_config_version",
         type=str,
         default=None,
-        help="Target engine version for generated configs. If none is given, will skip the generation",
+        help=("Target engine version for generated configs. If none is given, will skip the generation"),
     )
 
     for v, m in sorted(meta.items()):

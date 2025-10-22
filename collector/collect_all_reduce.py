@@ -10,28 +10,29 @@ providing efficient and accurate performance measurements.
 Usage:
     # With MPI
     mpirun -n 4 python collect_all_reduce.py
-    
+
     # With SLURM
     python collect_all_reduce.py --use-slurm
-    
+
     # Custom range and output file
     python collect_all_reduce.py --range "128,1000000,2" --perf-filename "my_perf.txt"
 """
 
-from argparse import ArgumentParser
 import os
+from argparse import ArgumentParser
 
 # isort: off
 import torch
-# isort: on
-from cuda import cuda, cudart
 
+# isort: on
 import tensorrt_llm as tllm
+from cuda import cudart
 from tensorrt_llm import Mapping
+from tensorrt_llm._torch.distributed import AllReduce, AllReduceFusionOp
+from tensorrt_llm._torch.distributed import AllReduceParams as TorchAllReduceParams
 from tensorrt_llm._utils import OMPI_COMM_TYPE_HOST, mpi_comm
 from tensorrt_llm.functional import AllReduceStrategy
-from tensorrt_llm._torch.distributed import (AllReduce, AllReduceFusionOp,
-                                             AllReduceParams as TorchAllReduceParams)
+
 from helper import log_perf
 
 
@@ -44,10 +45,12 @@ def get_input_shape_and_comm_size(size, token_dim=4096):
         return [num_token, token_dim]
 
 
-def allreduce_benchmark(dtype: str,
-                        test_range: str = "128,1073741824,2",
-                        use_slurm: bool = False,
-                        perf_filename: str = 'custom_allreduce_perf.txt'):
+def allreduce_benchmark(
+    dtype: str,
+    test_range: str = "128,1073741824,2",
+    use_slurm: bool = False,
+    perf_filename: str = "custom_allreduce_perf.txt",
+):
     """
     CUDA Graph based AllReduce benchmark method
     """
@@ -76,15 +79,17 @@ def allreduce_benchmark(dtype: str,
     # Parse test range
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
     torch_dtype = tllm._utils.str_dtype_to_torch(dtype)
-    
+
     # AllReduce parameters
-    all_reduce_params = TorchAllReduceParams(strategy=AllReduceStrategy.AUTO,
-                                           fusion_op=AllReduceFusionOp.NONE,
-                                           residual=None,
-                                           norm_weight=None,
-                                           scale=None,
-                                           bias=None,
-                                           eps=1e-6)
+    all_reduce_params = TorchAllReduceParams(
+        strategy=AllReduceStrategy.AUTO,
+        fusion_op=AllReduceFusionOp.NONE,
+        residual=None,
+        norm_weight=None,
+        scale=None,
+        bias=None,
+        eps=1e-6,
+    )
 
     # Benchmark parameters
     repeat_n = 5
@@ -94,19 +99,19 @@ def allreduce_benchmark(dtype: str,
     size = min_size
     while size < max_size:
         input_shape = get_input_shape_and_comm_size(size)
-        input = torch.ones(input_shape, dtype=torch_dtype, device="cuda")
+        input_tensor = torch.ones(input_shape, dtype=torch_dtype, device="cuda")
 
         op_list = []
         for i in range(repeat_n):
             allreduce = AllReduce(mapping=mapping).cuda()
-            output = allreduce(input, all_reduce_params=all_reduce_params)  # dry run to init        
+            allreduce(input_tensor, all_reduce_params=all_reduce_params)  # dry run to init
             op_list.append(allreduce)
 
         # Capture CUDA Graph
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             for op in op_list:
-                op(input, all_reduce_params=all_reduce_params)
+                op(input_tensor, all_reduce_params=all_reduce_params)
 
         # Warmup and timing
         start_event = torch.cuda.Event(enable_timing=True)
@@ -116,7 +121,7 @@ def allreduce_benchmark(dtype: str,
         for i in range(num_warmups):
             g.replay()
         torch.cuda.synchronize()
-        
+
         start_event.record()
         for i in range(num_runs):
             g.replay()
@@ -124,27 +129,31 @@ def allreduce_benchmark(dtype: str,
         torch.cuda.synchronize()
 
         latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
-        
+
         if rank == 0 and local_rank == 0:
             print(f"Size: {size}, Latency: {latency:.4f} ms")
-            
+
             # Get TensorRT-LLM version
-            trtllm_version = tllm.__version__ if hasattr(tllm, '__version__') else 'unknown'
-            
-            # Use log_perf directly, similar to collect_NCCL.py
-            log_perf(item_list=[{
-                        'allreduce_dtype': dtype,
-                        'num_gpus': world_size,
-                        'message_size': size, # element count, not bytes
-                        'latency': latency
-                        }], 
-                    framework='TRTLLM', 
-                    version=trtllm_version, 
-                    device_name=torch.cuda.get_device_name(), 
-                    op_name='all_reduce', 
-                    kernel_source='TRTLLM', 
-                    perf_filename=perf_filename)
-        
+            trtllm_version = tllm.__version__ if hasattr(tllm, "__version__") else "unknown"
+
+            # Use log_perf directly, similar to collect_nccl.py
+            log_perf(
+                item_list=[
+                    {
+                        "allreduce_dtype": dtype,
+                        "num_gpus": world_size,
+                        "message_size": size,  # element count, not bytes
+                        "latency": latency,
+                    }
+                ],
+                framework="TRTLLM",
+                version=trtllm_version,
+                device_name=torch.cuda.get_device_name(),
+                op_name="all_reduce",
+                kernel_source="TRTLLM",
+                perf_filename=perf_filename,
+            )
+
         size *= ratio
 
 
@@ -155,11 +164,15 @@ if __name__ == "__main__":
         "--range",
         "-r",
         default="128,1073741824,2",  # 128B to 1024MB
-        help="min_size,max_size,multiplicative_ratio")
-    parser.add_argument("--use-slurm", action="store_true",
-                       help="Use SLURM environment variables instead of MPI")
-    parser.add_argument("--perf-filename", "-f", default="custom_allreduce_perf.txt",
-                       help="Output performance file name")
+        help="min_size,max_size,multiplicative_ratio",
+    )
+    parser.add_argument("--use-slurm", action="store_true", help="Use SLURM environment variables instead of MPI")
+    parser.add_argument(
+        "--perf-filename",
+        "-f",
+        default="custom_allreduce_perf.txt",
+        help="Output performance file name",
+    )
     args = parser.parse_args()
 
     allreduce_benchmark(args.dtype, args.range, args.use_slurm, args.perf_filename)

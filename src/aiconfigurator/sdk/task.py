@@ -4,17 +4,14 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Literal, Optional, Union
-from collections.abc import Mapping
+from typing import Any, ClassVar, Literal
 
-import yaml
 import pandas as pd
 from munch import DefaultMunch, Munch
-import json
-from typing import Dict, Any
 
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import check_is_moe
@@ -30,10 +27,10 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ConfigLayer:
     name: str
-    data: Union[dict, Callable[["TaskContext"], dict]]
-    condition: Optional[Callable[["TaskContext"], bool]] = None
+    data: dict | Callable[[TaskContext], dict]
+    condition: Callable[[TaskContext], bool] | None = None
 
-    def applies_to(self, ctx: "TaskContext") -> bool:
+    def applies_to(self, ctx: TaskContext) -> bool:
         if self.condition is None:
             return True
         try:
@@ -42,7 +39,7 @@ class ConfigLayer:
             logger.debug("Layer %s condition evaluation failed", self.name)
             return False
 
-    def resolve(self, ctx: "TaskContext") -> dict:
+    def resolve(self, ctx: TaskContext) -> dict:
         payload = self.data(ctx) if callable(self.data) else self.data
         return copy.deepcopy(payload)
 
@@ -52,16 +49,16 @@ class TaskContext:
     serving_mode: Literal["agg", "disagg"]
     model_name: str
     system_name: str
-    decode_system_name: Optional[str]
+    decode_system_name: str | None
     backend_name: str
-    backend_version: Optional[str]
-    use_specific_quant_mode: Optional[str]
+    backend_version: str | None
+    use_specific_quant_mode: str | None
     enable_wide_ep: bool
     isl: int
     osl: int
     ttft: float
     tpot: float
-    total_gpus: Optional[int]
+    total_gpus: int | None
     profiles: list[str] = field(default_factory=list)
     yaml_patch: dict = field(default_factory=dict)
     yaml_mode: Literal["patch", "replace"] = "patch"
@@ -91,14 +88,14 @@ def _deep_merge(target: dict, source: Mapping, *, allow_new: bool = True) -> dic
     return target
 
 
-def _ensure_munch(obj: Union[dict, DefaultMunch, Munch]) -> DefaultMunch:
+def _ensure_munch(obj: dict | DefaultMunch | Munch) -> DefaultMunch:
     if isinstance(obj, (DefaultMunch, Munch)):
         return DefaultMunch.fromDict(obj.toDict(), DefaultMunch)
     return DefaultMunch.fromDict(obj, DefaultMunch)
 
 
 class TaskConfigFactory:
-    PROFILE_REGISTRY: dict[str, list[ConfigLayer]] = {}
+    PROFILE_REGISTRY: ClassVar[dict[str, list[ConfigLayer]]] = {}
 
     @classmethod
     def register_profile(cls, name: str, layers: list[ConfigLayer]) -> None:
@@ -140,9 +137,7 @@ class TaskConfigFactory:
         config = DefaultMunch.fromDict(config_dict, DefaultMunch)
 
         if config.model_name != ctx.model_name:
-            raise ValueError(
-                f"Model name mismatch: base {ctx.model_name} vs. merged {config.model_name}"
-            )
+            raise ValueError(f"Model name mismatch: base {ctx.model_name} vs. merged {config.model_name}")
 
         if ctx.serving_mode == "agg":
             cls._finalize_agg(config, ctx)
@@ -319,15 +314,11 @@ class TaskConfigFactory:
 
         if ctx.total_gpus is not None:
             if ctx.total_gpus < 0:
-                raise ValueError(
-                    f"total_gpus of agg must be no smaller than 0, got {ctx.total_gpus}"
-                )
+                raise ValueError(f"total_gpus of agg must be no smaller than 0, got {ctx.total_gpus}")
             worker_config.num_gpu_per_worker = [
                 num for num in worker_config.num_gpu_per_worker if num <= ctx.total_gpus
             ]
-            logger.debug(
-                "Overwriting num gpu per worker to %s", worker_config.num_gpu_per_worker
-            )
+            logger.debug("Overwriting num gpu per worker to %s", worker_config.num_gpu_per_worker)
 
         cls._apply_quant_modes(
             target_cfg=worker_config,
@@ -344,21 +335,17 @@ class TaskConfigFactory:
         decode_cfg = config.decode_worker_config
         replica_cfg = config.replica_config
 
-        # if replica_cfg.max_gpu_per_replica is overwritten by patch, extend the num_gpu_per_replica if needed
+        # if replica_cfg.max_gpu_per_replica is overwritten by patch, extend the num_gpu_per_replica
+        # if needed
         max_from_config = replica_cfg.get("max_gpu_per_replica")
-        if max_from_config and max_from_config > 0:
-            if replica_cfg.num_gpu_per_replica is not None:
-                while max_from_config > max(replica_cfg.num_gpu_per_replica):
-                    replica_cfg.num_gpu_per_replica.append(
-                        max(replica_cfg.num_gpu_per_replica) + 8
-                    )
+        if max_from_config and max_from_config > 0 and replica_cfg.num_gpu_per_replica is not None:
+            while max_from_config > max(replica_cfg.num_gpu_per_replica):
+                replica_cfg.num_gpu_per_replica.append(max(replica_cfg.num_gpu_per_replica) + 8)
 
         # using total gpus to limit the max gpu per replica
         if ctx.total_gpus is not None:
             if ctx.total_gpus < 2:
-                raise ValueError(
-                    f"total_gpus must be greater than 2 for disagg, got {ctx.total_gpus}"
-                )
+                raise ValueError(f"total_gpus must be greater than 2 for disagg, got {ctx.total_gpus}")
             replica_cfg.max_gpu_per_replica = min(ctx.total_gpus, replica_cfg.get("max_gpu_per_replica"))
             logger.debug("Using max gpu per replica %s", replica_cfg.max_gpu_per_replica)
 
@@ -387,7 +374,7 @@ class TaskConfigFactory:
         system: str,
         backend: str,
         version: str,
-        preferred_mode: Optional[str],
+        preferred_mode: str | None,
     ) -> None:
         quant_keys = [
             "gemm_quant_mode",
@@ -409,7 +396,7 @@ class TaskConfigFactory:
             use_specific_quant_mode=preferred_mode,
         )
 
-        for key, value in zip(quant_keys, defaults):
+        for key, value in zip(quant_keys, defaults, strict=False):
             current = getattr(target_cfg, key, None)
             if current is None or not isinstance(current, str):
                 setattr(target_cfg, key, value)
@@ -418,7 +405,7 @@ class TaskConfigFactory:
     def _get_quant_mode(
         model_name: str,
         database: PerfDatabase,
-        use_specific_quant_mode: Optional[str] = None,
+        use_specific_quant_mode: str | None = None,
     ) -> tuple[str, str, str, str, str]:
         gemm_quant_mode = "fp8_block"
         moe_quant_mode = "fp8_block"
@@ -446,10 +433,13 @@ class TaskConfigFactory:
 
         if model_name in ["DEEPSEEK_V3", "KIMI_K2"]:
             fmha_quant_mode = "float16"
-        if any(keyword in model_name for keyword in ["MOE_Mixtral", "QWEN2", "LLAMA"]):
-            if sm_version < 100 and sm_version >= 89:
-                gemm_quant_mode = "fp8"
-                moe_quant_mode = "fp8"
+        if (
+            any(keyword in model_name for keyword in ["MOE_Mixtral", "QWEN2", "LLAMA"])
+            and sm_version < 100
+            and sm_version >= 89
+        ):
+            gemm_quant_mode = "fp8"
+            moe_quant_mode = "fp8"
 
         if use_specific_quant_mode is not None:
             if use_specific_quant_mode != "w4afp8":
@@ -520,23 +510,25 @@ def register_builtin_profiles() -> None:
 
 register_builtin_profiles()
 
+
 def task_config_to_generator_config(task_config: TaskConfig, result_df: pd.DataFrame) -> dict:
     """Convert a task config and result dataframe to a generator config."""
+
     def _build_worker_config_from_result_df(prefix: str, result_df: pd.Series) -> dict:
         return {
-            "gemm_quant_mode": result_df[f'{prefix}gemm'],
-            "moe_quant_mode": result_df[f'{prefix}moe'],
-            "kvcache_quant_mode": result_df[f'{prefix}kvcache'],
-            "fmha_quant_mode": result_df[f'{prefix}fmha'],
-            "comm_quant_mode": result_df[f'{prefix}comm'],
-            "bs": result_df[f'{prefix}bs'],
-            "workers": result_df.get(f'{prefix}workers', 1),
-            "tp": result_df[f'{prefix}tp'],
-            "pp": result_df[f'{prefix}pp'],
-            "dp": result_df[f'{prefix}dp'],
-            "moe_tp": result_df[f'{prefix}moe_tp'],
-            "moe_ep": result_df[f'{prefix}moe_ep'],
-            "memory": result_df[f'{prefix}memory'],
+            "gemm_quant_mode": result_df[f"{prefix}gemm"],
+            "moe_quant_mode": result_df[f"{prefix}moe"],
+            "kvcache_quant_mode": result_df[f"{prefix}kvcache"],
+            "fmha_quant_mode": result_df[f"{prefix}fmha"],
+            "comm_quant_mode": result_df[f"{prefix}comm"],
+            "bs": result_df[f"{prefix}bs"],
+            "workers": result_df.get(f"{prefix}workers", 1),
+            "tp": result_df[f"{prefix}tp"],
+            "pp": result_df[f"{prefix}pp"],
+            "dp": result_df[f"{prefix}dp"],
+            "moe_tp": result_df[f"{prefix}moe_tp"],
+            "moe_ep": result_df[f"{prefix}moe_ep"],
+            "memory": result_df[f"{prefix}memory"],
         }
 
     cfg = {
@@ -558,10 +550,10 @@ def task_config_to_generator_config(task_config: TaskConfig, result_df: pd.DataF
         cfg["disagg_decode_worker_config"] = _build_worker_config_from_result_df("(d)", result_df)
 
     cfg["exp_config"] = {
-        "ttft": result_df['ttft'],
-        "tps_per_user": result_df['tokens/s/user'],                        
-        "tps_per_gpu": result_df['tokens/s/gpu_cluster'] or result_df['tokens/s/gpu'],
-        "concurrency_per_replica": result_df['concurrency'],
+        "ttft": result_df["ttft"],
+        "tps_per_user": result_df["tokens/s/user"],
+        "tps_per_gpu": result_df["tokens/s/gpu_cluster"] or result_df["tokens/s/gpu"],
+        "concurrency_per_replica": result_df["concurrency"],
         "num_requests_multiplier": 10,
     }
 
@@ -574,18 +566,18 @@ class TaskConfig:
         serving_mode: str,
         model_name: str,
         system_name: str,
-        decode_system_name: Optional[str] = None,
+        decode_system_name: str | None = None,
         backend_name: str = "trtllm",
-        backend_version: Optional[str] = None,
-        use_specific_quant_mode: Optional[str] = None,
+        backend_version: str | None = None,
+        use_specific_quant_mode: str | None = None,
         isl: int = 4000,
         osl: int = 1000,
         ttft: float = 1000,
         tpot: float = 50,
         enable_wide_ep: bool = False,
-        total_gpus: Optional[int] = None,
-        profiles: Optional[list[str]] = None,
-        yaml_config: Optional[dict] = None,
+        total_gpus: int | None = None,
+        profiles: list[str] | None = None,
+        yaml_config: dict | None = None,
     ) -> None:
         yaml_mode = "patch"
         yaml_patch: dict = {}
@@ -658,9 +650,13 @@ class TaskConfig:
             self.backend_version = backend_version
 
         self.task_name = (
-            f"{serving_mode}_{model_name}_{system_name}_{decode_system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{ttft}_{tpot}"
-        ) if serving_mode == "disagg" else (
-            f"{serving_mode}_{model_name}_{system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{ttft}_{tpot}"
+            (
+                f"{serving_mode}_{model_name}_{system_name}_{decode_system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{ttft}_{tpot}"
+            )
+            if serving_mode == "disagg"
+            else (
+                f"{serving_mode}_{model_name}_{system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{ttft}_{tpot}"
+            )
         )
         self.config.task_name = self.task_name
 
@@ -672,10 +668,22 @@ class TaskConfig:
             self._convert_worker_config_to_enum(self.config.prefill_worker_config)
             self._convert_worker_config_to_enum(self.config.decode_worker_config)
             logger.info("Task %s: Runtime config: %s", self.task_name, self.config.runtime_config)
-            logger.info("Task %s: Prefill worker config: %s", self.task_name, self.config.prefill_worker_config)
-            logger.info("Task %s: Decode worker config: %s", self.task_name, self.config.decode_worker_config)
+            logger.info(
+                "Task %s: Prefill worker config: %s",
+                self.task_name,
+                self.config.prefill_worker_config,
+            )
+            logger.info(
+                "Task %s: Decode worker config: %s",
+                self.task_name,
+                self.config.decode_worker_config,
+            )
             logger.info("Task %s: Replica config: %s", self.task_name, self.config.replica_config)
-            logger.info("Task %s: Advanced tuning config: %s", self.task_name, self.config.advanced_tuning_config)
+            logger.info(
+                "Task %s: Advanced tuning config: %s",
+                self.task_name,
+                self.config.advanced_tuning_config,
+            )
         else:
             raise ValueError(f"Invalid serving mode: {serving_mode}")
 
@@ -688,10 +696,10 @@ class TaskConfig:
             if isinstance(obj, tuple):
                 return tuple(_convert(item) for item in obj)
             if hasattr(obj, "name"):
-                return getattr(obj, "name")
+                return obj.name
             return obj
 
-        printable: Dict[str, Any] = {
+        printable: dict[str, Any] = {
             "mode": self.yaml_mode,
             "serving_mode": self.serving_mode,
             "model_name": self.model_name,
@@ -706,18 +714,20 @@ class TaskConfig:
         printable["backend_version"] = self.backend_version
 
         runtime_dict = _convert(self.config.runtime_config)
-        printable.update({k: runtime_dict.get(k) for k in ("isl", "osl", "ttft", "tpot") if runtime_dict.get(k) is not None})
+        printable.update(
+            {k: runtime_dict.get(k) for k in ("isl", "osl", "ttft", "tpot") if runtime_dict.get(k) is not None}
+        )
 
         base_config = _convert(getattr(self.config, "yaml_patch", getattr(self, "yaml_patch", {})))
         printable["profiles"] = self.profiles
 
-        def _ensure_dict(target: Dict[str, Any], key: str) -> Dict[str, Any]:
+        def _ensure_dict(target: dict[str, Any], key: str) -> dict[str, Any]:
             value = target.setdefault(key, {})
             if not isinstance(value, dict):
-                raise ValueError(f"Expected dict for config['{key}'], got {type(value)}")
+                raise TypeError(f"Expected dict for config['{key}'], got {type(value)}")
             return value
 
-        config_section: Dict[str, Any] = dict(base_config) if isinstance(base_config, dict) else {}
+        config_section: dict[str, Any] = dict(base_config) if isinstance(base_config, dict) else {}
 
         if getattr(self.config, "nextn", None) is not None:
             config_section.setdefault("nextn", self.config.nextn)
@@ -728,7 +738,12 @@ class TaskConfig:
             wc = _convert(self.config.worker_config)
             _ensure_dict(config_section, "worker_config").update(wc)
         elif self.config.serving_mode == "disagg":
-            for key in ("prefill_worker_config", "decode_worker_config", "replica_config", "advanced_tuning_config"):
+            for key in (
+                "prefill_worker_config",
+                "decode_worker_config",
+                "replica_config",
+                "advanced_tuning_config",
+            ):
                 value = getattr(self.config, key, None)
                 if value is not None:
                     cfg = _convert(value)
@@ -739,15 +754,15 @@ class TaskConfig:
 
         if config_section:
             printable["config"] = config_section
-        
+
         final_dict = {self.task_name: printable}
 
         return json.dumps(final_dict, indent=2)
 
-    def _convert_worker_config_to_enum(self, worker_config: Union[dict, DefaultMunch]) -> None:
+    def _convert_worker_config_to_enum(self, worker_config: dict | DefaultMunch) -> None:
         """Convert string quant mode values to enums, skip if already converted."""
         worker_cfg = _ensure_munch(worker_config)
-        
+
         # Only convert if the value is a string
         if isinstance(worker_cfg.gemm_quant_mode, str):
             worker_cfg.gemm_quant_mode = common.GEMMQuantMode[worker_cfg.gemm_quant_mode]
@@ -759,7 +774,7 @@ class TaskConfig:
             worker_cfg.fmha_quant_mode = common.FMHAQuantMode[worker_cfg.fmha_quant_mode]
         if isinstance(worker_cfg.comm_quant_mode, str):
             worker_cfg.comm_quant_mode = common.CommQuantMode[worker_cfg.comm_quant_mode]
-        
+
         if isinstance(worker_config, dict):
             worker_config.update(worker_cfg)
         else:
@@ -771,7 +786,7 @@ class TaskConfig:
 
 
 class TaskRunner:
-    def run_agg(self, task_config: DefaultMunch) -> dict[str, Optional[pd.DataFrame]]:
+    def run_agg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
         logger.info("Task %s: Setting up runtime config", task_config.task_name)
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
@@ -788,13 +803,12 @@ class TaskRunner:
                     version=task_config.worker_config.backend_version,
                 )
             )
-        except Exception as e:  # pragma: no cover
-            logger.error(
-                "Error getting database for %s %s %s: %s",
+        except Exception:  # pragma: no cover
+            logger.exception(
+                "Error getting database for %s %s %s",
                 task_config.worker_config.system_name,
                 task_config.worker_config.backend_name,
                 task_config.worker_config.backend_version,
-                e,
             )
             return None
         logger.info("Task %s: Setting up model config", task_config.task_name)
@@ -821,13 +835,12 @@ class TaskRunner:
                 is_moe=check_is_moe(task_config.model_name),
                 backend=common.BackendName(task_config.worker_config.backend_name),
             )
-        except Exception as e:  # pragma: no cover
-            logger.error(
-                "Error enumerating parallel config for %s %s %s: %s",
+        except Exception:  # pragma: no cover
+            logger.exception(
+                "Error enumerating parallel config for %s %s %s",
                 task_config.worker_config.system_name,
                 task_config.worker_config.backend_name,
                 task_config.worker_config.backend_version,
-                e,
             )
             return None
         logger.info("Task %s: Running agg pareto", task_config.task_name)
@@ -839,9 +852,14 @@ class TaskRunner:
             model_config=model_config,
             parallel_config_list=parallel_config_list,
         )
-        return {"pareto_df": result_df, "pareto_frontier_df": pa.get_pareto_front(result_df, 'tokens/s/user', 'tokens/s/gpu').reset_index(drop=True).reset_index()}
+        return {
+            "pareto_df": result_df,
+            "pareto_frontier_df": pa.get_pareto_front(result_df, "tokens/s/user", "tokens/s/gpu")
+            .reset_index(drop=True)
+            .reset_index(),
+        }
 
-    def run_disagg(self, task_config: DefaultMunch) -> dict[str, Optional[pd.DataFrame]]:
+    def run_disagg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
         logger.info("Task %s: Setting up runtime config", task_config.task_name)
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
@@ -859,13 +877,12 @@ class TaskRunner:
                     version=task_config.prefill_worker_config.backend_version,
                 )
             )
-        except Exception as e:  # pragma: no cover
-            logger.error(
-                "Error getting prefill database for %s %s %s: %s",
+        except Exception:  # pragma: no cover
+            logger.exception(
+                "Error getting prefill database for %s %s %s",
                 task_config.prefill_worker_config.system_name,
                 task_config.prefill_worker_config.backend_name,
                 task_config.prefill_worker_config.backend_version,
-                e,
             )
             return None
         logger.info("Task %s: Setting up prefill model config", task_config.task_name)
@@ -893,13 +910,12 @@ class TaskRunner:
                 is_moe=check_is_moe(task_config.model_name),
                 backend=common.BackendName(task_config.prefill_worker_config.backend_name),
             )
-        except Exception as e:  # pragma: no cover
-            logger.error(
-                "Error enumerating prefill parallel config for %s %s %s: %s",
+        except Exception:  # pragma: no cover
+            logger.exception(
+                "Error enumerating prefill parallel config for %s %s %s",
                 task_config.prefill_worker_config.system_name,
                 task_config.prefill_worker_config.backend_name,
                 task_config.prefill_worker_config.backend_version,
-                e,
             )
             return None
 
@@ -912,13 +928,12 @@ class TaskRunner:
                     version=task_config.decode_worker_config.backend_version,
                 )
             )
-        except Exception as e:  # pragma: no cover
-            logger.error(
-                "Error getting decode database for %s %s %s: %s",
+        except Exception:  # pragma: no cover
+            logger.exception(
+                "Error getting decode database for %s %s %s",
                 task_config.decode_worker_config.system_name,
                 task_config.decode_worker_config.backend_name,
                 task_config.decode_worker_config.backend_version,
-                e,
             )
             return None
         logger.info("Task %s: Setting up decode model config", task_config.task_name)
@@ -946,13 +961,12 @@ class TaskRunner:
                 is_moe=check_is_moe(task_config.model_name),
                 backend=common.BackendName(task_config.decode_worker_config.backend_name),
             )
-        except Exception as e:  # pragma: no cover
-            logger.error(
-                "Error enumerating decode parallel config for %s %s %s: %s",
+        except Exception:  # pragma: no cover
+            logger.exception(
+                "Error enumerating decode parallel config for %s %s %s",
                 task_config.decode_worker_config.system_name,
                 task_config.decode_worker_config.backend_name,
                 task_config.decode_worker_config.backend_version,
-                e,
             )
             return None
 
@@ -972,14 +986,20 @@ class TaskRunner:
             max_num_gpu=task_config.replica_config.max_gpu_per_replica,
             prefill_max_num_worker=task_config.replica_config.max_prefill_worker,
             decode_max_num_worker=task_config.replica_config.max_decode_worker,
-            prefill_max_num_tokens=task_config.advanced_tuning_config.prefill_max_batch_size*task_config.runtime_config.isl,
+            prefill_max_num_tokens=task_config.advanced_tuning_config.prefill_max_batch_size
+            * task_config.runtime_config.isl,
             decode_max_num_tokens=task_config.advanced_tuning_config.decode_max_batch_size,
             prefill_latency_correction_scale=task_config.advanced_tuning_config.prefill_latency_correction_scale,
             decode_latency_correction_scale=task_config.advanced_tuning_config.decode_latency_correction_scale,
         )
-        return {"pareto_df": result_df, "pareto_frontier_df": pa.get_pareto_front(result_df, 'tokens/s/user', 'tokens/s/gpu').reset_index(drop=True).reset_index()}
+        return {
+            "pareto_df": result_df,
+            "pareto_frontier_df": pa.get_pareto_front(result_df, "tokens/s/user", "tokens/s/gpu")
+            .reset_index(drop=True)
+            .reset_index(),
+        }
 
-    def run(self, task_config: TaskConfig) -> dict[str, Optional[pd.DataFrame]]:
+    def run(self, task_config: TaskConfig) -> dict[str, pd.DataFrame | None]:
         serving_mode = task_config.config.serving_mode
         logger.info(
             "Starting Pareto Analysis for %s in %s mode...",
@@ -993,12 +1013,11 @@ class TaskRunner:
                 result = self.run_disagg(task_config.config)
             else:
                 raise ValueError(f"Invalid serving mode: {serving_mode}")
-        except Exception as e:
-            logger.error(
-                "Error running pareto analysis for %s in %s mode: %s",
+        except Exception:
+            logger.exception(
+                "Error running pareto analysis for %s in %s mode",
                 task_config.task_name,
                 serving_mode,
-                e,
             )
             result = None
 
@@ -1007,8 +1026,8 @@ class TaskRunner:
 
         return result
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
     task_agg = TaskConfig(
         serving_mode="agg",
         model_name="QWEN3_32B",
@@ -1040,7 +1059,10 @@ if __name__ == "__main__":
         yaml_config={
             "mode": "patch",
             "config": {
-                "advanced_tuning_config": {"prefill_latency_correction_scale": 1.1, "decode_latency_correction_scale": 1.08},
+                "advanced_tuning_config": {
+                    "prefill_latency_correction_scale": 1.1,
+                    "decode_latency_correction_scale": 1.08,
+                },
             },
         },
     )

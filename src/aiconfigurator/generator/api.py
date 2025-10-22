@@ -8,26 +8,29 @@ This module exposes a single entry point that:
 - Selects the proper backend generator.
 - Optionally saves the generated artifacts to disk.
 """
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
-from .inputs.schema import DynamoConfig, GeneratorContext
-from .inputs.parser import InputParser
-from .backends import get_generator
-from .utils.writers import save_artifacts
-from .types import ArtifactBundle
-from pandas import DataFrame
+
 import yaml
+
+from .backends import get_generator
+from .inputs.parser import InputParser
+from .inputs.schema import DynamoConfig, GeneratorContext
+from .types import ArtifactBundle
+from .utils.writers import save_artifacts
+
 
 class _GenerateAPI:
     @staticmethod
     def from_runtime(
         cfg: dict,
-        backend: Optional[str],        
-        version: Optional[str],
-        overrides: DynamoConfig = DynamoConfig(),
-        save_dir: Optional[str] = None,
+        backend: str | None,
+        version: str | None,
+        overrides: DynamoConfig | None = None,
+        save_dir: str | None = None,
     ) -> ArtifactBundle:
         """Generate artifacts from runtime objects."""
+        if overrides is None:
+            overrides = DynamoConfig()
+
         ctx: GeneratorContext = InputParser.from_runtime(
             cfg=cfg,
             overrides=overrides,
@@ -43,14 +46,17 @@ class _GenerateAPI:
     @staticmethod
     def from_file(
         yaml_path: str,
-        backend: Optional[str],
-        version: Optional[str],
-        overrides: DynamoConfig = DynamoConfig(),
-        save_dir: Optional[str] = None,
+        backend: str | None,
+        version: str | None,
+        overrides: DynamoConfig | None = None,
+        save_dir: str | None = None,
     ) -> ArtifactBundle:
         """Generate artifacts from files."""
+        if overrides is None:
+            overrides = DynamoConfig()
+
         try:
-            with open(yaml_path, "r") as f:
+            with open(yaml_path) as f:
                 cfg = yaml.safe_load(f)
         except Exception as e:
             raise ValueError(f"Failed to load yaml file: {yaml_path}") from e
@@ -65,6 +71,7 @@ class _GenerateAPI:
         if save_dir:
             save_artifacts(artifacts.by_mode, root_dir=save_dir)
         return artifacts
+
 
 # public alias
 generate_backend_config = _GenerateAPI

@@ -2,21 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-from pathlib import Path
-from typing import Dict, List, Sequence
+
+import json
 import logging
+import os
+import re
+import shlex
 import subprocess
 import sys
-import json
-import re
-import os
-import shlex
+from pathlib import Path
+
 import pandas as pd
 
 from . import register
 
 LOG = logging.getLogger(__name__)
-Cfg = Dict[str, object]
+Cfg = dict[str, object]
 
 _METRICS = {
     "request_throughput",
@@ -38,18 +39,24 @@ _AIPERF_RECORD_KEYS = {
 }
 
 
-def _to_list(v) -> Sequence[int]:
+def _to_list(v) -> list[int]:
     if v is None:
         return []
     if isinstance(v, (list, tuple)):
         return list(map(int, v))
     return [int(v)]
 
-def _stream(cmd: List[str], cwd: Path | None = None, env=None) -> int:
+
+def _stream(cmd: list[str], cwd: Path | None = None, env=None) -> int:
     LOG.debug("Exec: %s", " ".join(map(str, cmd)))
     with subprocess.Popen(
-        cmd, cwd=str(cwd) if cwd else None, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     ) as p:
         assert p.stdout
         for line in p.stdout:
@@ -79,13 +86,12 @@ def _ensure_uv_venv(venv_dir: Path) -> Path:
 def _warn_if_tool_missing(venv_dir: Path, tool: str = "genai-perf") -> None:
     exe = venv_dir / "bin" / tool
     if not exe.exists():
-        LOG.warning("%s not found at %s – make sure it is installed in the venv.",
-                    tool, exe)
+        LOG.warning("%s not found at %s - make sure it is installed in the venv.", tool, exe)
 
 
 def _json_to_df(p: Path, folder_cc: int | None = None) -> pd.DataFrame:
     """
-        aiperf result parser helper
+    aiperf result parser helper
     """
     with p.open() as f:
         js = json.load(f)
@@ -160,12 +166,12 @@ def run(cfg: Cfg, *, bin_path: str = "aiperf") -> None:
     art_dir = Path(cfg["base_folder"]) / str(cfg.get("result_folder", cfg["name"]))
     art_dir.mkdir(parents=True, exist_ok=True)
 
-    model     = str(cfg.get("model", "unused"))
+    model = str(cfg.get("model", "unused"))
     tokenizer = str(cfg.get("tokenizer", model))
-    url       = str(cfg["url"])
-    isl       = int(cfg.get("input_sequence_length", 1024))
-    osl       = int(cfg.get("output_sequence_length", 128))
-    concs     = _to_list(cfg.get("concurrency"))
+    url = str(cfg["url"])
+    isl = int(cfg.get("input_sequence_length", 1024))
+    osl = int(cfg.get("output_sequence_length", 128))
+    concs = _to_list(cfg.get("concurrency"))
     if not concs:
         raise ValueError("concurrency list is required")
 
@@ -174,8 +180,7 @@ def run(cfg: Cfg, *, bin_path: str = "aiperf") -> None:
     activate = _ensure_uv_venv(venv_dir)
     _warn_if_tool_missing(venv_dir, tool=Path(bin_path).name)
 
-    LOG.info("genai-perf (chat) url=%s conc=%s isl=%d osl=%d [venv=%s]",
-             url, concs, isl, osl, venv_dir)
+    LOG.info("genai-perf (chat) url=%s conc=%s isl=%d osl=%d [venv=%s]", url, concs, isl, osl, venv_dir)
 
     for v in concs:
         # Write each run into its own folder: <bench>/concurrency_<N>/
@@ -183,25 +188,43 @@ def run(cfg: Cfg, *, bin_path: str = "aiperf") -> None:
         cc_dir.mkdir(parents=True, exist_ok=True)
 
         cmd = [
-            bin_path, "profile",
-            "-m", model,
-            "--tokenizer", tokenizer,
-            "--endpoint-type", "chat",
-            "--url", url,
+            bin_path,
+            "profile",
+            "-m",
+            model,
+            "--tokenizer",
+            tokenizer,
+            "--endpoint-type",
+            "chat",
+            "--url",
+            url,
             "--streaming",
-            "--artifact-dir", str(cc_dir),
-            "--endpoint", "/v1/chat/completions",
-            "--synthetic-input-tokens-mean", str(isl),
-            "--synthetic-input-tokens-stddev", "0",
-            "--output-tokens-mean", str(osl),
-            "--output-tokens-stddev", "0",
-            "--extra-inputs", f"max_tokens:{osl}",
-            "--extra-inputs", f"min_tokens:{osl}",
-            "--extra-inputs", "ignore_eos:true",
-            "--concurrency", str(v),
-            "--request-count", str(v * 10),
-            "--warmup-request-count", str(v * 2),
-            "--num-dataset-entries", str(v * 12),
+            "--artifact-dir",
+            str(cc_dir),
+            "--endpoint",
+            "/v1/chat/completions",
+            "--synthetic-input-tokens-mean",
+            str(isl),
+            "--synthetic-input-tokens-stddev",
+            "0",
+            "--output-tokens-mean",
+            str(osl),
+            "--output-tokens-stddev",
+            "0",
+            "--extra-inputs",
+            f"max_tokens:{osl}",
+            "--extra-inputs",
+            f"min_tokens:{osl}",
+            "--extra-inputs",
+            "ignore_eos:true",
+            "--concurrency",
+            str(v),
+            "--request-count",
+            str(v * 10),
+            "--warmup-request-count",
+            str(v * 2),
+            "--num-dataset-entries",
+            str(v * 12),
             "-v",
         ]
 
