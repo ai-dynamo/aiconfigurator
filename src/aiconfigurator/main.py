@@ -3,6 +3,8 @@
 
 import argparse
 import sys
+
+from aiconfigurator import __version__
 from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.eval.main import configure_parser as configure_eval_parser
@@ -55,7 +57,7 @@ def main(argv: list[str] | None = None) -> None:
     eval_parser.set_defaults(handler=_run_eval)
 
     # Version subcommand
-    version_parser = subparsers.add_parser('version', help='Show version information', add_help=False)
+    version_parser = subparsers.add_parser("version", help="Show version information", add_help=False)
     version_parser.set_defaults(handler=_show_version)
 
     args, extras = parser.parse_known_args(argv)
