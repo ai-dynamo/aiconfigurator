@@ -1,21 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import gradio as gr
-from aiconfigurator.webapp.components.static_tab import create_static_tab
-from aiconfigurator.webapp.components.agg_tab import create_agg_tab
-from aiconfigurator.webapp.components.agg_pareto_tab import create_agg_pareto_tab
-from aiconfigurator.webapp.components.disagg_pareto_tab import create_disagg_pareto_tab
-from aiconfigurator.webapp.components.pareto_comparison_tab import create_pareto_comparison_tab
-from aiconfigurator.webapp.components.disagg_pd_ratio_tab import create_disagg_pd_ratio_tab
-from aiconfigurator.webapp.components.readme_tab import create_readme_tab
-from aiconfigurator.webapp.events.event_handler import EventHandler
-from collections import defaultdict
 import argparse
 import logging
+from collections import defaultdict
+
+import gradio as gr
+
 import aiconfigurator
-import sys
-from typing import List
+from aiconfigurator.webapp.components.agg_pareto_tab import create_agg_pareto_tab
+from aiconfigurator.webapp.components.agg_tab import create_agg_tab
+from aiconfigurator.webapp.components.disagg_pareto_tab import create_disagg_pareto_tab
+from aiconfigurator.webapp.components.disagg_pd_ratio_tab import create_disagg_pd_ratio_tab
+from aiconfigurator.webapp.components.pareto_comparison_tab import create_pareto_comparison_tab
+from aiconfigurator.webapp.components.readme_tab import create_readme_tab
+from aiconfigurator.webapp.components.static_tab import create_static_tab
+from aiconfigurator.webapp.events.event_handler import EventHandler
+
 
 def configure_parser(parser):
     """
@@ -28,27 +29,33 @@ def configure_parser(parser):
     parser.add_argument("--debug", help="Debug mode", action="store_true")
     parser.add_argument("--experimental", help="enable experimental features", action="store_true")
 
+
 def main(args):
     """
     Main function for the WebApp.
     """
     app_config = {
-        'enable_agg': args.enable_agg,
-        'enable_disagg_pd_ratio': args.enable_disagg_pd_ratio,
-        'experimental': args.experimental,
-        'debug': args.debug,
+        "enable_agg": args.enable_agg,
+        "enable_disagg_pd_ratio": args.enable_disagg_pd_ratio,
+        "experimental": args.experimental,
+        "debug": args.debug,
     }
 
-    if app_config['debug']:
-        logging.basicConfig(level=logging.DEBUG,
-                    format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
-                    datefmt="%m-%d %H:%M:%S")
+    if app_config["debug"]:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
+            datefmt="%m-%d %H:%M:%S",
+        )
     else:
-        logging.basicConfig(level=logging.INFO,
-                    format="%(levelname)s %(asctime)s] %(message)s",
-                    datefmt="%m-%d %H:%M:%S")
-    
-    with gr.Blocks(css="""
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(levelname)s %(asctime)s] %(message)s",
+            datefmt="%m-%d %H:%M:%S",
+        )
+
+    with gr.Blocks(
+        css="""
         .config-column {
             border-right: 5px solid #e0e0e0;
             padding-right: 20px;
@@ -56,7 +63,8 @@ def main(args):
         .config-column:last-child {
             border-right: none;
         }
-    """) as demo:
+    """
+    ) as demo:
         pareto_results_state = gr.State(defaultdict())
 
         # title
@@ -65,32 +73,46 @@ def main(args):
                 f"""
                 <div style="text-align: center;">
                     <h1>Dynamo aiconfigurator for Disaggregated Serving Deployment</h1>
-                    <p style="font-size: 14px; margin-top: -10px;">Version {aiconfigurator.__version__}</p>
+                    <p style="font-size: 14px; margin-top: -10px;">
+                        Version {aiconfigurator.__version__}
+                    </p>
                 </div>
                 """
             )
-        
+
         # create tabs
-        with gr.Tabs() as tabs:
-            readme_components = create_readme_tab(app_config)            
+        with gr.Tabs():
+            readme_components = create_readme_tab(app_config)  # noqa: F841
             static_components = create_static_tab(app_config)
-            if app_config['enable_agg']:
+            if app_config["enable_agg"]:
                 agg_components = create_agg_tab(app_config)
             agg_pareto_components = create_agg_pareto_tab(app_config)
             disagg_pareto_components = create_disagg_pareto_tab(app_config)
-            if app_config['enable_disagg_pd_ratio']:
+            if app_config["enable_disagg_pd_ratio"]:
                 disagg_pd_ratio_components = create_disagg_pd_ratio_tab(app_config)
             pareto_comparison_components = create_pareto_comparison_tab(app_config)
-        
+
         # setup events
         EventHandler.setup_static_events(static_components)
-        if app_config['enable_agg']:
+        if app_config["enable_agg"]:
             EventHandler.setup_agg_events(agg_components)
         EventHandler.setup_agg_pareto_events(agg_pareto_components)
         EventHandler.setup_disagg_pareto_events(disagg_pareto_components)
-        EventHandler.setup_save_events(agg_pareto_components['result_name'], agg_pareto_components['save_btn'], agg_pareto_components['result_df'], pareto_comparison_components['candidates_dropdown'], pareto_results_state)
-        EventHandler.setup_save_events(disagg_pareto_components['result_name'], disagg_pareto_components['save_btn'], disagg_pareto_components['result_df'], pareto_comparison_components['candidates_dropdown'], pareto_results_state)
-        if app_config['enable_disagg_pd_ratio']:
+        EventHandler.setup_save_events(
+            agg_pareto_components["result_name"],
+            agg_pareto_components["save_btn"],
+            agg_pareto_components["result_df"],
+            pareto_comparison_components["candidates_dropdown"],
+            pareto_results_state,
+        )
+        EventHandler.setup_save_events(
+            disagg_pareto_components["result_name"],
+            disagg_pareto_components["save_btn"],
+            disagg_pareto_components["result_df"],
+            pareto_comparison_components["candidates_dropdown"],
+            pareto_results_state,
+        )
+        if app_config["enable_disagg_pd_ratio"]:
             EventHandler.setup_disagg_pd_ratio_events(disagg_pd_ratio_components)
         EventHandler.setup_pareto_comparison_events(pareto_comparison_components, pareto_results_state)
 

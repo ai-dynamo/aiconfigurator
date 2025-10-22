@@ -69,7 +69,7 @@ source "$CONFIG_FILE"
 : "${SERVED_MODEL_NAME:?SERVED_MODEL_NAME is required}"
 
 : "${PORT:=8000}"
-
+: "${VENV_PATH:=/workspace/aic}"
 
 # Container/image settings
 : "${DYNAMO_IMAGE:=}"
@@ -170,6 +170,13 @@ ensure_compose_stack() {
 }
 
 ensure_image() {
+  require docker
+
+  local user_set_image="false"
+  if [[ -n "${DYNAMO_IMAGE:-}" ]]; then
+    user_set_image="true"
+  fi
+
   if [[ -z "$DYNAMO_IMAGE" ]]; then
     local tag_ver="local"
     if [[ -n "$TRTLLM_PIP" ]]; then
@@ -184,9 +191,18 @@ ensure_image() {
     return 0
   fi
 
-  [[ -n "$TRTLLM_PIP" ]] || err "TRTLLM_PIP is required to build image (e.g., tensorrt-llm==1.0.0rc4)"
+  if [[ "$user_set_image" == "true" ]]; then
+    log "Attempting to pull image: $DYNAMO_IMAGE"
+    if docker pull "$DYNAMO_IMAGE" >/dev/null 2>&1; then
+      log "Pulled image: $DYNAMO_IMAGE"
+      return 0
+    else
+      warn "Pull failed for $DYNAMO_IMAGE; will try local build if possible."
+    fi
+  fi
+
+  [[ -n "$TRTLLM_PIP" ]] || err "Cannot build image: TRTLLM_PIP is required (e.g., tensorrt-llm==1.0.0rc4)"
   ensure_dynamo_repo
-  require docker
 
   local framework="TRTLLM"
   if [[ -n "$DYNAMO_BRANCH" && "$DYNAMO_BRANCH" =~ 0\.([0-9]+)\.([0-9]+)$ ]]; then
@@ -227,6 +243,10 @@ compose_eval_cmd() {
 
   EVAL_CMD=$(cat <<-EOF
 aiconfigurator eval \
+  --service-mode "$MODE" \
+  ${BC_ARG} \
+  --venv-dir "$VENV_PATH" \
+  default \
   --model "$MODEL" \
   --model_path "$model_path_arg" \
   --served_model_name "$SERVED_MODEL_NAME" \
@@ -237,13 +257,10 @@ aiconfigurator eval \
   --decode_free_gpu_memory_fraction "$DECODE_FREE_GPU_MEM_FRAC" \
   --port "$PORT" \
   --system "$SYSTEM" \
-  --backend trtllm \
-  --version "$VERSION" \
+  --backend_version "$VERSION" \
   --generated_config_version "$GENERATED_CONFIG_VERSION" \
   --isl "$ISL" --osl "$OSL" --ttft "$TTFT" --tpot "$TPOT" \
-  --save_dir "$CONTAINER_SAVE_DIR" \
-  --mode "$MODE" \
-  ${BC_ARG}
+  --save_dir "$CONTAINER_SAVE_DIR"
 EOF
 )
 }
@@ -259,8 +276,13 @@ run_inside_container() {
   if ! command -v aiconfigurator >/dev/null 2>&1; then
     log "Installing aiconfigurator from source: $SRC_ROOT_INNER"
     python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
-    python3 -m pip install -U pip
-    (cd "$SRC_ROOT_INNER" && python3 -m pip install -e .)
+    (cd "$SRC_ROOT_INNER" && python3 -m pip install -e . --break-system-packages)
+
+    # Prepare uv virtualenv for aiperf
+    uv venv "$VENV_PATH"
+    source "$VENV_PATH/bin/activate"
+    uv pip install aiperf
+    deactivate
   fi
 
   log "Eval command:\n$EVAL_CMD"
@@ -291,9 +313,14 @@ set -euo pipefail
 if ! command -v aiconfigurator >/dev/null 2>&1; then
   echo "[BOOT] installing aiconfigurator from $AICONF_SRC"
   python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
-  python3 -m pip install -U pip
   cd "$AICONF_SRC"
-  python3 -m pip install -e .
+  python3 -m pip install -e . --break-system-packages
+
+  # Prepare uv virtualenv for aiperf
+  uv venv "$VENV_PATH"
+  source "$VENV_PATH/bin/activate"
+  uv pip install aiperf
+  deactivate
 fi
 
 # ---- EVAL_CMD will be appended below ----
@@ -311,6 +338,7 @@ BASH
   local docker_env=()
   [[ -n "$HF_TOKEN" ]] && docker_env+=(-e "HF_TOKEN=$HF_TOKEN")
   docker_env+=(-e "AICONF_SRC=$AICONF_SRC_CONTAINER")
+  docker_env+=(-e "VENV_PATH=$VENV_PATH")
 
   log "Starting container: $CONTAINER_NAME"
   docker run --rm --gpus all \

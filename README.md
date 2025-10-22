@@ -34,6 +34,7 @@ apt-get install git-lfs  # (Linux)
 
 # 2. Clone the repo
 git clone https://github.com/ai-dynamo/aiconfigurator.git
+git lfs pull
 
 # 3. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.9 or later)
@@ -300,11 +301,19 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 | h200_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
 | b200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | gb200_sxm | TRTLLM(1.0.0rc6) | ✅ |
+| a100_sxm | TRTLLM(1.0.0) | ✅ |
 
 > **Note**: b200 and gb200 are under dev. Results are to be aligned. For preview now. 
 
+## Contributing and Development
+
+We welcome contributions from the community! Check out the below resources to get started:
+
+- [DEVELOPMENT.md](DEVELOPMENT.md) - Set up your development environment, run tests, and follow our coding standards
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines and requirements
+
 ### How To Add A New Model
-Adding a new model needs to modify the source code and perhaps to collect new data for the model. Please refer to [add_a_new_model](docs/add_a_new_model.md)
+Adding a new model will require modifying the source code and perhaps collecting new data for the model. Please refer to [How to Add a New Model](docs/add_a_new_model.md).
 
 ## Known Issues
 
