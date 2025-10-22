@@ -97,8 +97,11 @@ def get_moe_test_cases():
         for moe_type in moe_list:
             for num_token in num_tokens:
                 for model_config in model_config_list:
-                    hs, inter_s, topk, num_experts = model_config
+                    hs, inter_s, topk, num_experts, model_name = model_config
                     for tp in tp_list:
+                        # QWEN3_30B_A3B: exclude tp >= 8 as they are not used for actual deployments
+                        if model_name == "QWEN3_30B_A3B" and tp >= 8:
+                            continue
                         for ep in ep_list:
                             if tp * ep != num_gpu:
                                 continue
