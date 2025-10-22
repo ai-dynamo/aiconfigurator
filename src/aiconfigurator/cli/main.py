@@ -41,7 +41,9 @@ def _add_default_mode_arguments(parser):
         required=True,
         help="Model name.",
     )
-    parser.add_argument("--system", type=str, required=True, help="Default system name.")
+    parser.add_argument(
+        "--system", choices=common.SupportedSystems, type=str, required=True, help="Default system name (GPU type)."
+    )
     parser.add_argument(
         "--decode_system",
         type=str,

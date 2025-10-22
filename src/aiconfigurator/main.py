@@ -4,6 +4,7 @@
 import argparse
 import sys
 
+from aiconfigurator import __version__
 from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.eval.main import configure_parser as configure_eval_parser
@@ -33,6 +34,10 @@ def _run_eval(extra_args: list[str]) -> None:
     eval_main(eval_args)
 
 
+def _show_version(extra_args: list[str]) -> None:
+    print(f"aiconfigurator {__version__}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for disaggregated serving deployment.")
     subparsers = parser.add_subparsers(dest="command", help="Command to run", required=True)
@@ -50,6 +55,10 @@ def main(argv: list[str] | None = None) -> None:
         "eval", help="Generate config -> Launch Service -> Benchmarking -> Analysis", add_help=False
     )
     eval_parser.set_defaults(handler=_run_eval)
+
+    # Version subcommand
+    version_parser = subparsers.add_parser("version", help="Show version information", add_help=False)
+    version_parser.set_defaults(handler=_show_version)
 
     args, extras = parser.parse_known_args(argv)
 
