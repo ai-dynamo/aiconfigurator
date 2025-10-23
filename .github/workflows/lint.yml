@@ -28,7 +28,6 @@ jobs:
 
       - name: Check Linting
         run: ruff check .
-        continue-on-error: true
 
       - name: Check Formatting
         run: ruff format --check .
