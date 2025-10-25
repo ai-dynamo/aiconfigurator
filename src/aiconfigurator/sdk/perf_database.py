@@ -2057,9 +2057,9 @@ class PerfDatabase:
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(b, s, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(b, s, num_heads, kvcache_quant_mode, fmha_quant_mode)
+            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         else:
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
@@ -2287,9 +2287,9 @@ class PerfDatabase:
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
+            return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
         else:
             if attention_backend is None:
                 attention_backend = "flashinfer"
