@@ -63,7 +63,7 @@ exp_disagg_full:
   backend_version: "0.20.0" # optional, default to the latest version in the database
   isl: 4000 # input sequence length, optional, default to 4000
   osl: 1000 # output sequence length, optional, default to 1000
-  prefix: 0 # prefix len of isl, optional, default to 0
+  prefix: 0 # prefix cache len, default to 0
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
   tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
   enable_wide_ep: false # enable wide ep for prefill/decode, optional, default to false
