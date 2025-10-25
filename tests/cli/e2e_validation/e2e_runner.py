@@ -42,7 +42,7 @@ class E2ETestRunner:
             "models",
             "systems",
             "gpu_configs",
-            "isl_osl_combinations",
+            "isl_osl_prefix_combinations",
             "tpot_values",
             "maxfail",
             "continue_on_error",
@@ -74,7 +74,7 @@ class E2ETestRunner:
                 "models": ["QWEN3_32B"],
                 "systems": ["h200_sxm"],
                 "gpu_configs": [8],
-                "isl_osl_combinations": [(4000, 1000)],
+                "isl_osl_prefix_combinations": [(4000, 1000, 0)],
                 "tpot_values": [10],
                 "maxfail": 1,
             },
@@ -82,7 +82,7 @@ class E2ETestRunner:
                 "models": ["QWEN3_32B", "LLAMA3.1_8B", "DEEPSEEK_V3"],
                 "systems": ["h200_sxm"],
                 "gpu_configs": [8],
-                "isl_osl_combinations": [(4000, 1000)],
+                "isl_osl_prefix_combinations": [(4000, 1000, 0)],
                 "tpot_values": [10],
                 "maxfail": 3,
             },
@@ -90,16 +90,16 @@ class E2ETestRunner:
                 "models": ["QWEN3_32B"],
                 "systems": ["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"],
                 "gpu_configs": [8],
-                "isl_osl_combinations": [(4000, 1000)],
+                "isl_osl_prefix_combinations": [(4000, 1000, 0)],
                 "tpot_values": [10],
                 "maxfail": 4,
             },
             "comprehensive": {
-                "models": ["QWEN3_32B", "LLAMA3.1_8B"],
-                "systems": ["h100_sxm", "h200_sxm"],
-                "gpu_configs": [8],
-                "isl_osl_combinations": [(4000, 1000), (1000, 2)],
-                "tpot_values": [10],
+                "models": ["QWEN3_32B", "LLAMA3.1_8B", "DEEPSEEK_V3"],
+                "systems": ["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"],
+                "gpu_configs": [8, 32],
+                "isl_osl_prefix_combinations": [(4000, 1000, 0), (4000, 1000, 2000), (1000, 2, 0)],
+                "tpot_values": [10, 30],
                 "maxfail": 5,
             },
         }
@@ -115,7 +115,7 @@ class E2ETestRunner:
         models=None,
         systems=None,
         gpu_configs=None,
-        isl_osl_combinations=None,
+        isl_osl_prefix_combinations=None,
         tpot_values=None,
         maxfail=10,
         **kwargs,
@@ -123,7 +123,7 @@ class E2ETestRunner:
         """Run selective test with custom parameters."""
 
         # Validate at least one filter is provided
-        if not any([models, systems, gpu_configs, isl_osl_combinations, tpot_values]):
+        if not any([models, systems, gpu_configs, isl_osl_prefix_combinations, tpot_values]):
             print("⚠️ Warning: No filters specified for selective test!")
             print("Use --mode full for comprehensive testing.")
             return False, None
@@ -133,7 +133,7 @@ class E2ETestRunner:
             models=models,
             systems=systems,
             gpu_configs=gpu_configs,
-            isl_osl_combinations=isl_osl_combinations,
+            isl_osl_prefix_combinations=isl_osl_prefix_combinations,
             tpot_values=tpot_values,
             maxfail=maxfail,
             **self._filter_kwargs(**kwargs),
@@ -153,7 +153,7 @@ class E2ETestRunner:
         models=None,
         systems=None,
         gpu_configs=None,
-        isl_osl_combinations=None,
+        isl_osl_prefix_combinations=None,
         tpot_values=None,
         maxfail=10,
         parallel_workers=None,
@@ -167,7 +167,7 @@ class E2ETestRunner:
             models=models,
             systems=systems,
             gpu_configs=gpu_configs,
-            isl_osl_combinations=isl_osl_combinations,
+            isl_osl_prefix_combinations=isl_osl_prefix_combinations,
             tpot_values=tpot_values,
         )
 
@@ -260,7 +260,7 @@ Examples:
         help="Systems to test",
     )
     parser.add_argument("--gpu-configs", nargs="+", type=int, choices=[8, 512], help="GPU configurations")
-    parser.add_argument("--isl-osl", nargs="+", help="ISL,OSL combinations (format: 4000,1000)")
+    parser.add_argument("--isl-osl-prefix", nargs="+", help="ISL,OSL,PREFIX combinations (format: 4000,1000,0)")
     parser.add_argument("--tpot", nargs="+", type=int, choices=[10, 100], help="TPOT values")
 
     # Execution options
@@ -293,15 +293,15 @@ Examples:
         sys.exit(0)
 
     # Parse ISL/OSL combinations
-    isl_osl_combinations = None
-    if args.isl_osl:
+    isl_osl_prefix_combinations = None
+    if args.isl_osl_prefix:
         try:
-            isl_osl_combinations = []
-            for combo in args.isl_osl:
-                isl, osl = map(int, combo.split(","))
-                isl_osl_combinations.append((isl, osl))
+            isl_osl_prefix_combinations = []
+            for combo in args.isl_osl_prefix:
+                isl, osl, prefix = map(int, combo.split(","))
+                isl_osl_prefix_combinations.append((isl, osl, prefix))
         except ValueError:
-            print("❌ Error: ISL/OSL format should be 'isl,osl' (e.g., '4000,1000')")
+            print("❌ Error: ISL/OSL/PREFIX format should be 'isl,osl,prefix' (e.g., '4000,1000,0')")
             sys.exit(1)
 
     # Print header
@@ -328,7 +328,7 @@ Examples:
             models=args.models,
             systems=args.systems,
             gpu_configs=args.gpu_configs,
-            isl_osl_combinations=isl_osl_combinations,
+            isl_osl_prefix_combinations=isl_osl_prefix_combinations,
             tpot_values=args.tpot,
             parallel_workers=args.parallel,
             maxfail=args.maxfail,
