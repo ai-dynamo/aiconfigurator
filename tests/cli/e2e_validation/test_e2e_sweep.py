@@ -24,13 +24,53 @@ from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import get_latest_database_version
 
-_LATEST_VERSIONS_CACHE = {}
+_SUPPORTED_MODELS = [model for model in common.SupportedModels if model not in ["QWEN3_480B", "KIMI_K2"]]
+_SUPPORTED_SYSTEMS = ["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"]
+_SUPPORTED_GPU_CONFIGS = [8, 512]
+_SUPPORTED_ISL_OSL_PREFIX_COMBINATIONS = [(4000, 1000, 0), (4000, 1000, 2000), (1000, 2, 0), (32, 1000, 0)]
+_SUPPORTED_TTFT_TPOT_COMBINATIONS = [(5000, 10), (5000, 100)]
+_EXCLUDED_MODEL_SYSTEM_PAIRS = {
+    ("DEEPSEEK_V3", "h100_sxm"),
+    ("DEEPSEEK_V3", "a100_sxm"),
+}
+_SUPPORTED_BACKENDS = ["trtllm"]
 
 
-def get_all_backends():
-    """Get all backends to test."""
-    # In the future, this could come from common.BackendName
-    return ["trtllm"]
+def _iter_valid_parameter_combinations():
+    for model_name in _SUPPORTED_MODELS:
+        for system in _SUPPORTED_SYSTEMS:
+            if (model_name, system) in _EXCLUDED_MODEL_SYSTEM_PAIRS:
+                continue
+            for total_gpus in _SUPPORTED_GPU_CONFIGS:
+                for isl, osl, prefix in _SUPPORTED_ISL_OSL_PREFIX_COMBINATIONS:
+                    for ttft, tpot in _SUPPORTED_TTFT_TPOT_COMBINATIONS:
+                        for backend in _SUPPORTED_BACKENDS:
+                            yield pytest.param(
+                                model_name,
+                                system,
+                                total_gpus,
+                                isl,
+                                osl,
+                                prefix,
+                                ttft,
+                                tpot,
+                                backend,
+                                id=(
+                                    f"MODEL_{model_name}"
+                                    f"__SYSTEM_{system}"
+                                    f"__GPU_{total_gpus}"
+                                    f"__ISL_{isl}__OSL_{osl}__PREFIX_{prefix}"
+                                    f"__TTFT_{int(ttft)}__TPOT_{int(tpot)}"
+                                    f"__BACKEND_{backend}"
+                                ),
+                            )
+
+
+_VALID_PARAMETER_COMBINATIONS = list(_iter_valid_parameter_combinations())
+
+
+def _value_or_placeholder(value):
+    return value or "N/A"
 
 
 @pytest.fixture(scope="session")
@@ -41,10 +81,19 @@ def test_results_dir():
     results_dir.mkdir(parents=True, exist_ok=True)
 
     latest_dir = Path("e2e_test_results/latest")
-    if latest_dir.is_symlink():
-        latest_dir.unlink()
-    elif latest_dir.exists():
-        shutil.rmtree(latest_dir) if latest_dir.is_dir() else latest_dir.unlink()
+    try:
+        if latest_dir.is_symlink():
+            latest_dir.unlink(missing_ok=True)
+        elif latest_dir.exists():
+            if latest_dir.is_dir():
+                shutil.rmtree(latest_dir, ignore_errors=True)
+            else:
+                latest_dir.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        if latest_dir.exists() and latest_dir.is_dir():
+            shutil.rmtree(latest_dir, ignore_errors=True)
 
     try:
         latest_dir.symlink_to(results_dir.resolve(), target_is_directory=True)
@@ -185,10 +234,15 @@ Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
     report_content += """
 
-### ISL/OSL Combinations
+### ISL/OSL/PREFIX Combinations
 """
     report_content += (
-        ", ".join([f"({isl}, {osl})" for isl, osl in summary_report["test_configuration"]["isl_osl_combinations"]])
+        ", ".join(
+            [
+                f"({isl}, {osl}, {prefix})"
+                for isl, osl, prefix in summary_report["test_configuration"]["isl_osl_prefix_combinations"]
+            ]
+        )
         or "N/A"
     )
 
@@ -268,26 +322,22 @@ def session_summary_report(request, test_results_dir, error_log):
     error_log["end_time"] = datetime.now().isoformat()
 
     # Collect configuration details from the TestE2ESweep class
-    test_class = TestE2ESweep()
-
-    versions_tested = {}
-    systems_to_check = test_class.get_all_systems()
-    for system in systems_to_check:
-        versions_tested[system] = {}
-        for backend in get_all_backends():
-            version = get_latest_database_version(system=system, backend=backend)
-            if version:
-                versions_tested[system][backend] = version
 
     summary_report = {
         "test_execution_summary": error_log["test_summary"],
         "test_configuration": {
-            "models_tested": test_class.get_all_models(),
-            "systems_tested": test_class.get_all_systems(),
-            "gpu_configs_tested": test_class.get_all_gpu_configs(),
-            "isl_osl_combinations": test_class.get_all_isl_osl_combinations(),
-            "ttft_tpot_combinations": test_class.get_all_ttft_tpot_combinations(),
-            "versions_tested": versions_tested,
+            "models_tested": _SUPPORTED_MODELS,
+            "systems_tested": _SUPPORTED_SYSTEMS,
+            "gpu_configs_tested": _SUPPORTED_GPU_CONFIGS,
+            "isl_osl_prefix_combinations": _SUPPORTED_ISL_OSL_PREFIX_COMBINATIONS,
+            "ttft_tpot_combinations": _SUPPORTED_TTFT_TPOT_COMBINATIONS,
+            "versions_tested": {
+                system: {
+                    backend: _value_or_placeholder(get_latest_database_version(system=system, backend=backend))
+                    for backend in _SUPPORTED_BACKENDS
+                }
+                for system in _SUPPORTED_SYSTEMS
+            },
         },
         "error_analysis": _analyze_errors(error_log["errors"]),
         "recommendations": _generate_recommendations(error_log),
@@ -316,35 +366,43 @@ def session_summary_report(request, test_results_dir, error_log):
 class TestE2ESweep:
     """End-to-end sweep tests for all configuration combinations."""
 
-    def get_all_models(self):
+    @staticmethod
+    def get_all_models():
         """Get all supported models from common.SupportedModels."""
         return [model for model in common.SupportedModels if model not in ["QWEN3_480B", "KIMI_K2"]]
 
-    def get_all_systems(self):
+    @staticmethod
+    def get_all_systems():
         """Get all supported systems."""
-        return ["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm"]
+        return ["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"]
 
-    def get_all_gpu_configs(self):
+    @staticmethod
+    def get_all_gpu_configs():
         """Get all GPU configurations to test."""
         return [8, 512]
 
-    def get_all_isl_osl_combinations(self):
-        """Get all ISL/OSL combinations to test."""
-        return [(4000, 1000), (1000, 2), (32, 1000)]
+    @staticmethod
+    def get_all_isl_osl_prefix_combinations():
+        """Get all ISL/OSL/PREFIX combinations to test."""
+        return [(4000, 1000, 0), (4000, 1000, 2000), (1000, 2, 0), (32, 1000, 0)]
 
-    def get_all_ttft_tpot_combinations(self):
+    @staticmethod
+    def get_all_ttft_tpot_combinations():
         """Get all TTFT/TPOT combinations to test."""
         return [(5000, 10), (5000, 100)]
 
+    @staticmethod
+    def get_excluded_model_system_pairs():
+        """Return model/system combinations that should be skipped."""
+        return {
+            ("DEEPSEEK_V3", "h100_sxm"),
+            ("DEEPSEEK_V3", "a100_sxm"),
+        }
+
     @pytest.mark.parametrize(
-        "model_name",
-        [pytest.param(model, id=f"model_{model}") for model in common.SupportedModels],
+        "model_name,system,total_gpus,isl,osl,prefix,ttft,tpot,backend",
+        _VALID_PARAMETER_COMBINATIONS,
     )
-    @pytest.mark.parametrize("system", ["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm"])
-    @pytest.mark.parametrize("total_gpus", [8, 512])
-    @pytest.mark.parametrize("isl,osl", [(4000, 1000), (1000, 2), (32, 1000)])
-    @pytest.mark.parametrize("ttft,tpot", [(5000, 10), (5000, 100)])
-    @pytest.mark.parametrize("backend", get_all_backends())
     def test_e2e_configuration_sweep(
         self,
         model_name,
@@ -352,6 +410,7 @@ class TestE2ESweep:
         total_gpus,
         isl,
         osl,
+        prefix,
         ttft,
         tpot,
         backend,
@@ -364,6 +423,7 @@ class TestE2ESweep:
         This test executes the full aiconfigurator pipeline and captures any errors
         that occur during execution, logging them for analysis.
         """
+
         version = get_latest_database_version(system=system, backend=backend)
         if not version:
             pytest.skip(f"No latest version found for {system=}, {backend=}")
@@ -372,7 +432,7 @@ class TestE2ESweep:
 
         # Create unique test case identifier
         test_case_id = (
-            f"{model_name}_{system}_{total_gpus}gpu_isl{isl}_osl{osl}_ttft{int(ttft)}"
+            f"{model_name}_{system}_{total_gpus}gpu_isl{isl}_osl{osl}_prefix{prefix}_ttft{int(ttft)}"
             f"_tpot{int(tpot)}_{backend}_{version}"
         )
 
@@ -386,6 +446,7 @@ class TestE2ESweep:
                 "total_gpus": total_gpus,
                 "isl": isl,
                 "osl": osl,
+                "prefix": prefix,
                 "ttft": ttft,
                 "tpot": tpot,
                 "backend": backend,
@@ -413,6 +474,7 @@ class TestE2ESweep:
                 args.total_gpus = total_gpus
                 args.isl = isl
                 args.osl = osl
+                args.prefix = prefix
                 args.ttft = float(ttft)
                 args.tpot = float(tpot)
                 args.backend = backend

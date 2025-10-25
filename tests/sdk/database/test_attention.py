@@ -13,17 +13,18 @@ class TestContextAttention:
 
     def test_query_context_attention_sol_mode(self, comprehensive_perf_db):
         """Test SOL mode calculation for context attention."""
-        b, s, n, n_kv = 2, 64, 16, 8
+        b, s, prefix, n, n_kv = 2, 64, 0, 16, 8
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_attention(
-            b, s, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.SOL
+            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.SOL
         )
 
         # Calculate expected SOL result
-        ops = 2 * b * s * s * n * 128 * 2 / 2  # 2 for fma, 2 for q*k^t+*v, 2 for causality
-        mem_bytes = 2 * b * (n * s * 128 + 2 * n_kv * s * 128 + n * s * 128)
+        ops = 2 * b * (s * s - prefix * prefix) * n * 128 * 2 / 2  # 2 for fma, 2 for q*k^t+*v, 2 for causality
+        mem_bytes = 2 * b * (n * (s - prefix) * 128 + 2 * n_kv * s * 128 + n * (s - prefix) * 128)
+
         sol_math = (
             ops / comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
         )
@@ -34,12 +35,12 @@ class TestContextAttention:
 
     def test_query_context_attention_sol_full_mode(self, comprehensive_perf_db):
         """Test SOL_FULL mode returns tuple with math and memory components."""
-        b, s, n, n_kv = 1, 32, 8, 4
+        b, s, prefix, n, n_kv = 1, 32, 0, 8, 4
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_attention(
-            b, s, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.SOL_FULL
+            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.SOL_FULL
         )
 
         assert isinstance(result, tuple)
@@ -48,13 +49,13 @@ class TestContextAttention:
 
     def test_query_context_attention_non_sol_mode_mha(self, comprehensive_perf_db):
         """Test non-SOL mode with MHA (n_kv == n)."""
-        b, s, n = 2, 32, 16
+        b, s, prefix, n = 2, 32, 0, 16
         n_kv = n  # MHA case
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_attention(
-            b, s, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
+            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
         )
 
         # Should use data from attention_dict[0] for MHA
@@ -65,12 +66,12 @@ class TestContextAttention:
 
     def test_query_context_attention_non_sol_mode_xqa(self, comprehensive_perf_db):
         """Test non-SOL mode with XQA (n_kv < n)."""
-        b, s, n, n_kv = 2, 32, 16, 4
+        b, s, prefix, n, n_kv = 2, 32, 0, 16, 4
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_attention(
-            b, s, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
+            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
         )
 
         # Should use data from attention_dict[n_kv] for XQA
@@ -85,6 +86,7 @@ class TestContextAttention:
             comprehensive_perf_db.query_context_attention(
                 1,
                 32,
+                0,
                 8,
                 16,  # n_kv=16 > n=8
                 common.KVCacheQuantMode.float16,
@@ -153,17 +155,20 @@ class TestContextMLA:
 
     def test_query_context_mla_sol_mode(self, comprehensive_perf_db):
         """Test SOL mode calculation for context MLA."""
-        b, s, num_heads = 2, 64, 32
+        b, s, prefix, num_heads = 2, 64, 0, 32
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_mla(
-            b, s, num_heads, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.SOL
+            b, s, prefix, num_heads, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.SOL
         )
 
         # Calculate expected SOL result
-        ops = b * num_heads * 2 / 2 * (s * s * 192 + s * s * 128)
-        mem_bytes = b * num_heads * 2 * (2 * s * 192 + 2 * s * 128)
+        ops = (
+            b * num_heads * 2 / 2 * (192 + 128) * (s * s - prefix * prefix)
+        )  # 2 for fma, 2 for causality. num_heads, for local heads
+        # s * 192 for q read, full_s * 192 for k read, full_s * 128 for v read, s * 192 for write.
+        mem_bytes = b * num_heads * 2 * (s * (192 + 128) + (s - prefix) * (192 + 128))  # 2 for fp16, TODO
         sol_math = (
             ops / comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
         )
@@ -174,12 +179,12 @@ class TestContextMLA:
 
     def test_query_context_mla_non_sol_mode(self, comprehensive_perf_db):
         """Test non-SOL mode with interpolation."""
-        b, s, num_heads = 4, 32, 32
+        b, s, prefix, num_heads = 4, 32, 0, 32
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_mla(
-            b, s, num_heads, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
+            b, s, prefix, num_heads, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
         )
 
         # Should use data from context_mla_data
@@ -197,6 +202,7 @@ class TestContextMLA:
             result = comprehensive_perf_db.query_context_mla(
                 b,
                 s,
+                0,
                 num_heads,
                 kv_cache_quant_mode,
                 fmha_quant_mode,
@@ -265,6 +271,6 @@ def test_default_sol_mode(comprehensive_perf_db):
 
     # Query should use default mode when not specified
     result = comprehensive_perf_db.query_context_attention(
-        1, 32, 8, 4, common.KVCacheQuantMode.float16, common.FMHAQuantMode.float16
+        1, 32, 0, 8, 4, common.KVCacheQuantMode.float16, common.FMHAQuantMode.float16
     )
     assert isinstance(result, float)
