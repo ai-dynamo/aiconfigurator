@@ -1913,7 +1913,9 @@ class PerfDatabase:
                 ops = 2 * b * (full_s - prefix) * w * n * h * 2
             else:
                 # Normal no sliding window
-                ops = 2 * b * (full_s * full_s - prefix * prefix) * n * h * 2 / 2  # 2 for fma, 2 for q*k^t+*v, /2 for causality.
+                ops = (
+                    2 * b * (full_s * full_s - prefix * prefix) * n * h * 2 / 2
+                )  # 2 for fma, 2 for q*k^t+*v, /2 for causality.
             mem_bytes = (
                 2
                 * b
@@ -2260,12 +2262,14 @@ class PerfDatabase:
 
             # attention computation (prefill mode)
             full_s = s + prefix
-            attn_flop = 2 * num_head * (qk_nope_head_dim * 2 + qk_rope_head_dim) * b * (full_s * full_s - prefix * prefix) // 2
+            attn_flop = (
+                2 * num_head * (qk_nope_head_dim * 2 + qk_rope_head_dim) * b * (full_s * full_s - prefix * prefix) // 2
+            )
             attn_mem = (
-                b * s * num_head * (qk_nope_head_dim + qk_rope_head_dim) # q read
-                + b * full_s * num_head * (qk_nope_head_dim + qk_rope_head_dim) # k read
-                + b * full_s * num_head * qk_nope_head_dim # v read
-                + b * s * num_head * qk_nope_head_dim # write
+                b * s * num_head * (qk_nope_head_dim + qk_rope_head_dim)  # q read
+                + b * full_s * num_head * (qk_nope_head_dim + qk_rope_head_dim)  # k read
+                + b * full_s * num_head * qk_nope_head_dim  # v read
+                + b * s * num_head * qk_nope_head_dim  # write
             )
 
             # attention output projection

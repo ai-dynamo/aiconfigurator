@@ -41,6 +41,6 @@ class RuntimeConfig:
     beam_width: int = 1
     isl: int = None
     osl: int = None
-    prefix: int = 0 # prefix len of isl    
+    prefix: int = 0  # prefix len of isl
     ttft: float = None
     tpot: float | list = None

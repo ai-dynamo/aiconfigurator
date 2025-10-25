@@ -60,10 +60,10 @@ class BaseBackend(ABC):
 
         def _run_context(batch_size: int, isl: int, prefix) -> dict[str, float]:
             context_latency_dict = defaultdict(float)
-            
-            # isl is corrected based on prefix. 
+
+            # isl is corrected based on prefix.
             # Please handle the real logic in your context attention related operations.
-            isl = isl - prefix 
+            isl = isl - prefix
             if isl <= 0:
                 raise ValueError(f"isl must be greater than 0 after removing prefix, but got {isl}")
 

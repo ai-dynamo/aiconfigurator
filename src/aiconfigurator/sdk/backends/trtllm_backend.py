@@ -101,7 +101,9 @@ class TRTLLMBackend(BaseBackend):
                     model,
                     database,
                     # num tokens for gemm needs to be adjusted for prefix, depends on the avg prefix len per request
-                    RuntimeConfig(batch_size=1, beam_width=1, isl=num_tokens, osl=1, prefix=prefix*np.floor(ctx_tokens/isl)),
+                    RuntimeConfig(
+                        batch_size=1, beam_width=1, isl=num_tokens, osl=1, prefix=prefix * np.floor(ctx_tokens / isl)
+                    ),
                     mode="static_ctx",
                 )
                 latency_dict = summary.get_context_latency_dict()
@@ -158,7 +160,9 @@ class TRTLLMBackend(BaseBackend):
 
                 return genonly_step_latency
 
-            mix_step_latency = _get_mix_step_latency(model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl, prefix)
+            mix_step_latency = _get_mix_step_latency(
+                model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl, prefix
+            )
             genonly_step_latency = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
 
             ttft = mix_step_latency * np.ceil(isl / ctx_tokens)

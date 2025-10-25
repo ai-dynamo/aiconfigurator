@@ -56,7 +56,7 @@ class TaskContext:
     enable_wide_ep: bool
     isl: int
     osl: int
-    prefix: int    
+    prefix: int
     ttft: float
     tpot: float
     total_gpus: int | None
@@ -173,7 +173,7 @@ class TaskConfigFactory:
             "runtime_config": {
                 "isl": ctx.isl,
                 "osl": ctx.osl,
-                "prefix": ctx.prefix,                
+                "prefix": ctx.prefix,
                 "ttft": ctx.ttft,
                 "tpot": ctx.tpot,
             },
@@ -575,7 +575,7 @@ class TaskConfig:
         use_specific_quant_mode: str | None = None,
         isl: int = 4000,
         osl: int = 1000,
-        prefix: int = 0,        
+        prefix: int = 0,
         ttft: float = 1000,
         tpot: float = 50,
         enable_wide_ep: bool = False,
@@ -613,7 +613,7 @@ class TaskConfig:
             enable_wide_ep=enable_wide_ep,
             isl=isl,
             osl=osl,
-            prefix=prefix,            
+            prefix=prefix,
             ttft=ttft,
             tpot=tpot,
             total_gpus=total_gpus,
@@ -720,7 +720,11 @@ class TaskConfig:
 
         runtime_dict = _convert(self.config.runtime_config)
         printable.update(
-            {k: runtime_dict.get(k) for k in ("isl", "osl", "prefix", "ttft", "tpot") if runtime_dict.get(k) is not None}
+            {
+                k: runtime_dict.get(k)
+                for k in ("isl", "osl", "prefix", "ttft", "tpot")
+                if runtime_dict.get(k) is not None
+            }
         )
 
         base_config = _convert(getattr(self.config, "yaml_patch", getattr(self, "yaml_patch", {})))
