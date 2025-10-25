@@ -58,13 +58,19 @@ class BaseBackend(ABC):
                 corrected latency = latency * latency_correction_scale
         """
 
-        def _run_context(batch_size: int, isl: int) -> dict[str, float]:
+        def _run_context(batch_size: int, isl: int, prefix) -> dict[str, float]:
             context_latency_dict = defaultdict(float)
+            
+            # isl is corrected based on prefix. 
+            # Please handle the real logic in your context attention related operations.
+            isl = isl - prefix 
+            if isl <= 0:
+                raise ValueError(f"isl must be greater than 0 after removing prefix, but got {isl}")
 
             for op in model.context_ops:
                 # query latency and store the latency
                 x = batch_size * isl if "logits_gemm" not in op._name else batch_size
-                latency = op.query(database, x=x, batch_size=batch_size, beam_width=1, s=isl)
+                latency = op.query(database, x=x, batch_size=batch_size, beam_width=1, s=isl, prefix=prefix)
                 context_latency_dict[op._name] += latency
 
             return context_latency_dict
@@ -104,16 +110,17 @@ class BaseBackend(ABC):
             return generation_latency_dict
 
         summary = InferenceSummary(runtime_config)
-        batch_size, beam_width, isl, osl = (
+        batch_size, beam_width, isl, osl, prefix = (
             runtime_config.batch_size,
             runtime_config.beam_width,
             runtime_config.isl,
             runtime_config.osl,
+            runtime_config.prefix,
         )
 
         context_latency_dict, generation_latency_dict = {}, {}
         if mode == "static_ctx":
-            context_latency_dict = _run_context(batch_size, isl)
+            context_latency_dict = _run_context(batch_size, isl, prefix)
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, 1)
         elif mode == "static_gen":
             generation_latency_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
@@ -127,7 +134,7 @@ class BaseBackend(ABC):
                 num_tokens=batch_size * beam_width,
             )  # for gen only, all kvcache is needed.
         else:
-            context_latency_dict = _run_context(batch_size, isl)
+            context_latency_dict = _run_context(batch_size, isl, prefix)
             generation_latency_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl)
 
@@ -179,6 +186,7 @@ class BaseBackend(ABC):
                 model.model_name,
                 isl,
                 osl,
+                prefix,
                 concurrency,
                 request_rate,
                 bs,

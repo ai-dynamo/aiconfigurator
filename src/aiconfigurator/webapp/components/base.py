@@ -182,11 +182,12 @@ def create_runtime_config(app_config, with_sla=False):
         with gr.Row():
             isl = gr.Number(value=2048, label="input sequence length", interactive=True)
             osl = gr.Number(value=128, label="output sequence length", interactive=True)
+            prefix = gr.Number(value=0, label="prefix cache length", interactive=True)
 
             if with_sla:
                 ttft = gr.Number(value=2000, label="first token latency(ms)", interactive=True)
                 tpot = gr.Number(value=50, label="inter token latency(ms)", interactive=True)
-                return {"isl": isl, "osl": osl, "ttft": ttft, "tpot": tpot}
+                return {"isl": isl, "osl": osl, "prefix": prefix, "ttft": ttft, "tpot": tpot}
             else:
                 batch_size = gr.Number(value=1, label="batch size", interactive=True)
-                return {"isl": isl, "osl": osl, "batch_size": batch_size}
+                return {"isl": isl, "osl": osl, "prefix": prefix, "batch_size": batch_size}

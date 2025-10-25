@@ -67,6 +67,7 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
     parser.add_argument("--ttft", type=float, default=1000.0, help="Time to first token in ms.")
     parser.add_argument("--tpot", type=float, default=20.0, help="Time per output token in ms.")
+    parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length.")
 
 
 def _add_experiments_mode_arguments(parser):
@@ -116,6 +117,7 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
         "osl": args.osl,
         "ttft": args.ttft,
         "tpot": args.tpot,
+        "prefix": args.prefix,
     }
 
     agg_task = TaskConfig(serving_mode="agg", **common_kwargs)

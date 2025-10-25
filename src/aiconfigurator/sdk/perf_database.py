@@ -1879,6 +1879,7 @@ class PerfDatabase:
         self,
         b: int,
         s: int,
+        prefix: int,
         n: int,
         n_kv: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
@@ -1894,6 +1895,7 @@ class PerfDatabase:
         def get_sol(
             b: int,
             s: int,
+            prefix: int,
             n: int,
             n_kv: int,
             h: int,
@@ -1904,20 +1906,21 @@ class PerfDatabase:
             """
             Get the sol time, sol math and sol mem
             """
+            full_s = s + prefix
             if w > 0 and s > w:
                 # Sliding window attention
                 # Each position attends to at most w previous positions
-                ops = 2 * b * s * w * n * h * 2
+                ops = 2 * b * (full_s - prefix) * w * n * h * 2
             else:
                 # Normal no sliding window
-                ops = 2 * b * s * s * n * h * 2 / 2  # 2 for fma, 2 for q*k^t+*v, /2 for causality.
+                ops = 2 * b * (full_s * full_s - prefix * prefix) * n * h * 2 / 2  # 2 for fma, 2 for q*k^t+*v, /2 for causality.
             mem_bytes = (
                 2
                 * b
                 * (
-                    n * s * h  # Q read, assuming 16 bits
-                    + 2 * n_kv * s * h  # K,V read
-                    + n * s * h
+                    n * (full_s - prefix) * h  # Q read, assuming 16 bits
+                    + 2 * n_kv * full_s * h  # K,V read
+                    + n * (full_s - prefix) * h
                 )
             )  # Output write, assuming 16 bits
             sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
@@ -1930,12 +1933,15 @@ class PerfDatabase:
         if sol_mode is None:
             sol_mode = self._default_sol_mode
         if sol_mode == common.SOLMode.SOL:
-            return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
+            return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
         else:
             if head_size not in [64, 128]:
-                return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+                return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+
+            full_s = s + prefix
+            prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             if n_kv == n:
                 attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][0][head_size][
                     window_size
@@ -1944,7 +1950,7 @@ class PerfDatabase:
                 attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
                     window_size
                 ]
-            latency = self._interp_3d(n, s, b, attention_dict, "cubic")
+            latency = self._interp_3d(n, full_s, b, attention_dict, "cubic") * prefix_correction
             return latency
 
     def query_generation_attention(
@@ -2014,6 +2020,7 @@ class PerfDatabase:
         self,
         b: int,
         s: int,
+        prefix: int,
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
@@ -2026,6 +2033,7 @@ class PerfDatabase:
         def get_sol(
             b: int,
             s: int,
+            prefix: int,
             num_heads: int,
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
@@ -2033,10 +2041,12 @@ class PerfDatabase:
             """
             Get the sol time, sol math and sol mem
             """
+            full_s = s + prefix
             ops = (
-                b * num_heads * 2 / 2 * (s * s * 192 + s * s * 128)
+                b * num_heads * 2 / 2 * (192 + 128) * (full_s * full_s - prefix * prefix)
             )  # 2 for fma, 2 for causality. num_heads, for local heads
-            mem_bytes = b * num_heads * 2 * (2 * s * 192 + 2 * s * 128)  # 2 for fp16, TODO
+            # s * 192 for q read, full_s * 192 for k read, full_s * 128 for v read, s * 192 for write.
+            mem_bytes = b * num_heads * 2 * (full_s * (192 + 128) + s * (192 + 128))  # 2 for fp16, TODO
             sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
@@ -2049,8 +2059,10 @@ class PerfDatabase:
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(b, s, num_heads, kvcache_quant_mode, fmha_quant_mode)
         else:
+            full_s = s + prefix
+            prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
-            latency = self._interp_3d(num_heads, s, b, mla_dict, "cubic")
+            latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
             return latency
 
     def query_generation_mla(
@@ -2199,6 +2211,7 @@ class PerfDatabase:
         self,
         b: int,
         s: int,
+        prefix: int,
         tp_size: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
@@ -2208,6 +2221,7 @@ class PerfDatabase:
         def get_sol(
             b: int,
             s: int,
+            prefix: int,
             tp_size: int,
             kvcache_quant_mode: common.KVCacheQuantMode,
             fmha_quant_mode: common.FMHAQuantMode,
@@ -2245,11 +2259,13 @@ class PerfDatabase:
             )
 
             # attention computation (prefill mode)
-            attn_flop = 2 * num_head * (qk_nope_head_dim * 2 + qk_rope_head_dim) * b * s * s // 2
+            full_s = s + prefix
+            attn_flop = 2 * num_head * (qk_nope_head_dim * 2 + qk_rope_head_dim) * b * (full_s * full_s - prefix * prefix) // 2
             attn_mem = (
-                b * s * num_head * (qk_nope_head_dim + qk_rope_head_dim) * 2
-                + b * s * num_head * qk_nope_head_dim
-                + b * s * num_head * qk_nope_head_dim
+                b * s * num_head * (qk_nope_head_dim + qk_rope_head_dim) # q read
+                + b * full_s * num_head * (qk_nope_head_dim + qk_rope_head_dim) # k read
+                + b * full_s * num_head * qk_nope_head_dim # v read
+                + b * s * num_head * qk_nope_head_dim # write
             )
 
             # attention output projection
@@ -2283,7 +2299,9 @@ class PerfDatabase:
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
             mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
-            latency = self._interp_3d(num_heads, s, b, mla_dict, "cubic")
+            full_s = s + prefix
+            prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
+            latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
             return latency
 
     # to simplify, we no longer support allreduce_strategy
