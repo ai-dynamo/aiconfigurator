@@ -29,7 +29,7 @@ jobs:
           docker build -f docker/Dockerfile -t aiconfigurator:test --target test .
           docker run --name aic aiconfigurator:test \
             pytest \
-            tests/cli/e2e_validation/test_e2e_sweep.py::TestE2ESweep::test_e2e_configuration_sweep[trtllm-5000-10-4000-1000-8-h200_sxm-model_QWEN3_32B] \
+            tests/cli/e2e_validation/test_e2e_sweep.py::TestE2ESweep::test_e2e_configuration_sweep[MODEL_QWEN3_32B__SYSTEM_h200_sxm__GPU_8__ISL_4000__OSL_1000__PREFIX_0__TTFT_5000__TPOT_10__BACKEND_trtllm] \
             tests/sdk \
             -v --tb=short --maxfail=1 --timeout=600 \
             -n 4 \
