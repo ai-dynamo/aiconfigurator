@@ -688,21 +688,22 @@ class MLP(Operation):
         hidden_size: int,
         intermediate_size: int,
         quant_mode: common.GEMMQuantMode,
+        **kwargs,
     ) -> None:
         super().__init__(name, scale_factor)
         self._hidden_size = hidden_size
         self._intermediate_size = intermediate_size
         self._quant_mode = quant_mode
         self._weights = (3 * self._hidden_size * self._intermediate_size) * quant_mode.value.memory
+        self.is_context = kwargs.get("is_context", True)  # Default to context mode
 
     def query(self, database: PerfDatabase, **kwargs):
         x = kwargs.get("x")  # num_tokens
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
-        is_context = kwargs.get("is_context", True)  # Default to context mode
 
         return (
-            database.query_mlp(x, self._hidden_size, self._intermediate_size, quant_mode, is_context)
+            database.query_mlp(x, self._hidden_size, self._intermediate_size, quant_mode, self.is_context)
             * self._scale_factor
         )
 

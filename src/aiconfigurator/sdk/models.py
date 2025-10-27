@@ -1367,6 +1367,7 @@ class DisaggDeepSeekModel(BaseModel):
                     h,
                     self._moe_inter_size,
                     moe_quant_mode,
+                    is_context=False,
                 )
             ]
         )
@@ -1405,7 +1406,7 @@ class DisaggDeepSeekModel(BaseModel):
                     moe_tp_size,
                     moe_ep_size,
                     moe_quant_mode,
-                    workload_distribution,
+                    'uniform',
                     attention_dp_size,
                     is_context=False,
                     moe_backend=moe_backend,
