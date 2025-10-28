@@ -235,6 +235,16 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
             backend_version = exp_config.get("backend_version")
 
+        # Validate backend compatibility with serving mode
+        if serving_mode == "agg" and backend_name in [common.BackendName.sglang.value, common.BackendName.vllm.value]:
+            logger.error(
+                "Experiment '%s': serving_mode 'agg' is not supported with backend '%s'. "
+                "Please either use serving_mode 'disagg' or switch to backend 'trtllm'.",
+                exp_name,
+                backend_name,
+            )
+            raise SystemExit(1)
+
         total_gpus = exp_config.get("total_gpus")
         if total_gpus is None:
             logger.warning("Skipping experiment '%s': total_gpus not provided in YAML.", exp_name)
