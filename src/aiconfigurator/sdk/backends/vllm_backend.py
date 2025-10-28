@@ -41,4 +41,7 @@ class VLLMBackend(BaseBackend):
         osl: int,
         num_tokens: int = 0,
     ) -> dict[str, float]:
-        pass
+        # TODO
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+
+        return TRTLLMBackend()._get_memory_usage(model, database, batch_size, beam_width, isl, osl, num_tokens)
