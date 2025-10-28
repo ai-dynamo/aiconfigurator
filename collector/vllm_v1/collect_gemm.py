@@ -9,14 +9,22 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.version import __version__ as vllm_version
+from vllm.distributed.parallel_state import ensure_model_parallel_initialized
 
-from helper import get_sm_version, log_perf
+# from helper import get_sm_version, log_perf
 
+def get_sm_version():
+    return 89
+
+def log_perf(*args, **kwargs):
+    pass
 
 # If we want to use advanced linear implementations like MergedColumnParallelLinear and
 # RowParallelLinear, we need to unit and destroy TP and rank group before and after each test case.
@@ -125,7 +133,28 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         qc = None
     # print(f"dtype: {dtype}, type: {type(dtype)}")
     # print(f"qc: {qc}, type: {type(qc)}")
-    gemm = ReplicatedLinear(
+    # gemm = ReplicatedLinear(
+    #     input_size=k,
+    #     output_size=n,
+    #     bias=False,
+    #     skip_bias_add=True,
+    #     params_dtype=dtype,
+    #     quant_config=qc,
+    #     prefix="",
+    #     return_bias=True,
+    # )
+    # gemm = MergedColumnParallelLinear(
+    #     input_size=k,
+    #     output_sizes=[n],
+    #     bias=False,
+    #     skip_bias_add=True,
+    #     params_dtype=dtype,
+    #     quant_config=qc,
+    #     prefix="",
+    #     return_bias=True,
+    #     disable_tp=True,
+    # )
+    gemm = RowParallelLinear(
         input_size=k,
         output_size=n,
         bias=False,
@@ -134,6 +163,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         quant_config=qc,
         prefix="",
         return_bias=True,
+        disable_tp=True,
     )
     # TODO, to evaluate random weights impact
     gemm.to(torch.device(device))
@@ -186,3 +216,12 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         kernel_source="vllm_default",
         perf_filename=perf_filename,
     )
+
+if __name__ == "__main__":
+    test_cases = get_gemm_test_cases()
+    test_cases = test_cases[:10]
+    setup_distributed()
+    ensure_model_parallel_initialized(1, 1)
+    for tc in test_cases:
+        print(f"Running test case: {tc}")
+        run_gemm(*tc)

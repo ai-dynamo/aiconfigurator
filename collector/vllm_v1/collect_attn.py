@@ -3,340 +3,281 @@
 
 
 import torch
-from vllm.attention.backends.abstract import (
-    AttentionType,
-)
-from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl, FlashAttentionMetadata
-from vllm.v1.attention.backends.flashinfer import FlashInferImpl, FlashInferMetadata
+from vllm.platforms import current_platform
+from vllm.utils import is_torch_equal_or_newer
+from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.version import __version__ as vllm_version
 
-from helper import get_sm_version, log_perf
+from utils import (
+    BatchSpec,
+    _Backend,
+    create_and_prepopulate_kv_cache,
+    create_common_attn_metadata,
+    create_standard_kv_cache_spec,
+    create_vllm_config,
+    get_attention_backend,
+)
+
+# from helper import get_sm_version, log_perf
+
+
+def get_sm_version():
+    return 89
+
+
+def log_perf(*args, **kwargs):
+    pass
+
+
+class MockAttentionLayer:
+    """A mock attention layer for testing."""
+
+    def __init__(self, device: torch.device):
+        self._q_scale = torch.tensor(1.0, device=device)
+        self._k_scale = torch.tensor(1.0, device=device)
+        self._v_scale = torch.tensor(1.0, device=device)
+        # Add float versions for flashinfer
+        self._q_scale_float = 1.0
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
+
 
 # https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends
 # support MHA GQA MQA fp16 tensor and float16/fp8 kv cache
-# flashatten for prefill and flashinfer for decode (TODO) actual model support status
-# TODO to support cross-attention
 
 
 def run_attention_torch(
     batch_size,
     input_len,
     num_heads,
-    num_key_value_heads,  # keep same as num_heads for MHA
+    num_kv_heads,  # keep same as num_heads for MHA
     head_dim,
     use_fp8_kv_cache,
-    use_fp8_context_fmha,
+    use_fp8_context_fmha,  # FIXME: unused
     is_context_phase,
     perf_filename,
     device="cuda:0",
 ):
     torch.cuda.set_device(device)
-    warming_up = 10
-    test_ite = 6
+
+    dtype = torch.float16
+    model = "Qwen/Qwen2.5-0.5B-Instruct"
+
+    # TODO: add more backends
+    backend_name = _Backend.FLASH_ATTN
+
+    # Fast FlexAttention needs to run with block_size=128
+    if backend_name == _Backend.FLEX_ATTENTION and is_torch_equal_or_newer("2.9.0.dev0"):
+        block_size = 128
+    else:
+        block_size = 64
 
     if is_context_phase:
-        # Context phase: always use FlashAttentionImpl
-        dtype = torch.float16
-        num_tokens = input_len * batch_size
-        # Create query/key/value tensors
-        # Note: For MHA, num_key_value_heads must equal num_heads
-        # For MQA/GQA, num_key_value_heads can be smaller (but must divide num_heads)
-        q = torch.randn([num_tokens, num_heads, head_dim], dtype=dtype, device=device)
-        k = torch.randn([num_tokens, num_key_value_heads, head_dim], dtype=dtype, device=device)
-        v = torch.randn([num_tokens, num_key_value_heads, head_dim], dtype=dtype, device=device)
-        # Calculate required number of blocks
-        # Each block holds 64 tokens (block_size), and we need enough blocks to store input_len
-        # tokens per sequence
-        block_size = 64  # Fixed block size (tokens per block)
-        num_blocks_per_seq = (input_len + block_size - 1) // block_size  # Ceiling division
-        # Initialize KV cache
-        # Shape: [num_layers, total_blocks, block_size, num_key_value_heads, head_dim]
-        # Total blocks needed = batch_size * blocks_per_sequence
-        total_blocks = batch_size * num_blocks_per_seq
-        if use_fp8_kv_cache:
-            kv_cache_dtype = torch.float8_e4m3fn
-        else:
-            kv_cache_dtype = torch.float16
-        kv_cache = torch.zeros(
-            (2, total_blocks, block_size, num_key_value_heads, head_dim),
-            dtype=kv_cache_dtype,
-            device=device,
+        batch_spec = BatchSpec(
+            seq_lens=[input_len] * batch_size,
+            query_lens=[input_len] * batch_size,
         )
-        # query_start_loc marks the starting position of each sequence in the flattened token array
-        # Format: [0, input_len, 2*input_len, ..., batch_size*input_len]
-        query_start_loc = torch.arange(0, batch_size + 1, 1, dtype=torch.int32, device=device) * input_len
-        # seq_lens stores the length of each sequence (all equal to input_len here)
-        seq_lens = torch.full((batch_size,), input_len, dtype=torch.int32, device=device)
-        # block_table maps each sequence to its allocated physical blocks
-        # Linear allocation: first sequence gets blocks 0...N-1, second gets N...2N-1, etc.
-        block_table = torch.arange(0, total_blocks, dtype=torch.int32, device=device).reshape(
-            batch_size, num_blocks_per_seq
+    else:
+        batch_spec = BatchSpec(
+            seq_lens=[input_len] * batch_size,
+            query_lens=[1] * batch_size,
         )
-        # slot_mapping maps each token to its physical storage location
-        # Linear mapping: token i goes to slot i in the KV cache
-        slot_mapping = torch.arange(0, num_tokens, dtype=torch.long, device=device)
-        # Safety checks
-        assert block_table.max() < total_blocks, "block_table references non-existent blocks"
-        assert slot_mapping.max() < total_blocks * block_size, "slot_mapping exceeds physical storage capacity"
 
-        attn_metadata = FlashAttentionMetadata(
-            num_actual_tokens=num_tokens,
-            max_query_len=input_len,
-            query_start_loc=query_start_loc,
-            max_seq_len=input_len,
-            seq_lens=seq_lens,
-            block_table=block_table,
-            slot_mapping=slot_mapping,
-            use_cascade=False,
+    current_platform.seed_everything(42)
+    vllm_config = create_vllm_config(
+        model_name=model, max_model_len=max(batch_spec.seq_lens), block_size=block_size, num_gpu_blocks=8192
+    )
+
+    # FIXME: should be fp8 kv cache?
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+
+    # Generate data and compute SDPA reference output
+    all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
+    k_contexts, v_contexts = [], []
+
+    for i in range(batch_size):
+        s_len = batch_spec.seq_lens[i]
+        q_len = batch_spec.query_lens[i]
+        context_len = s_len - q_len
+
+        # Generate Q, K, V for the whole sequence to be used in SDPA
+        q = torch.randn(q_len, num_heads, head_dim, dtype=dtype, device=device)
+        k_full = torch.randn(s_len, num_kv_heads, head_dim, dtype=dtype, device=device)
+        v_full = torch.randn(s_len, num_kv_heads, head_dim, dtype=dtype, device=device)
+
+        # Inputs for vLLM backends are just the new tokens
+        all_q_vllm.append(q)
+        all_k_vllm.append(k_full[context_len:])
+        all_v_vllm.append(v_full[context_len:])
+
+        # Contextual K/V data used to populate the paged cache
+        if not is_context_phase:
+            k_contexts.append(k_full[:context_len])
+            v_contexts.append(v_full[:context_len])
+
+    query_vllm = torch.cat(all_q_vllm, dim=0)
+    key_vllm = torch.cat(all_k_vllm, dim=0)
+    value_vllm = torch.cat(all_v_vllm, dim=0)
+
+    common_attn_metadata = create_common_attn_metadata(batch_spec, vllm_config.cache_config.block_size, device)
+
+    # 3. Simulate Paged KV Cache and a realistic slot_mapping
+    kv_cache = create_and_prepopulate_kv_cache(
+        k_contexts=k_contexts,
+        v_contexts=v_contexts,
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_dim,
+        dtype=current_platform.fp8_dtype() if use_fp8_kv_cache else dtype,
+        device=device,
+        num_blocks=vllm_config.cache_config.num_gpu_blocks or 1000,
+        common_attn_metadata=common_attn_metadata,
+        randomize_blocks=True,
+    )
+
+    # Fix backend-specific kv cache layout.
+    if backend_name == _Backend.FLASHINFER:
+        kv_cache = kv_cache.transpose(0, 1)
+
+        # For FlashInfer default to HND layout
+        kv_cache = kv_cache.transpose(2, 3).contiguous().transpose(2, 3)
+        set_kv_cache_layout("HND")
+
+    # Handle special case for FLEX_ATTENTION_SLOW
+    actual_backend = backend_name
+    use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
+    if backend_name == "FLEX_ATTENTION_SLOW":
+        actual_backend = _Backend.FLEX_ATTENTION
+        use_direct_block_mask = False
+
+    builder_cls, impl_cls = get_attention_backend(actual_backend)
+    layer_names = ["placeholder"]
+
+    # Mock flashinfer's get_per_layer_parameters if needed
+    if actual_backend == _Backend.FLASHINFER:
+        import unittest.mock
+
+        from vllm.v1.attention.backends.utils import PerLayerParameters
+
+        def mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
+            # Return mock parameters for a single layer
+            return {
+                layer_name: PerLayerParameters(
+                    window_left=-1,  # No sliding window
+                    logits_soft_cap=0.0,  # No soft cap
+                    sm_scale=1.0 / (head_dim**0.5),  # Standard scale
+                )
+                for layer_name in layer_names
+            }
+
+        with unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters", mock_get_per_layer_parameters
+        ):
+            builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
+            attn_metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+    else:
+        # Build metadata
+        builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
+        if actual_backend == _Backend.FLEX_ATTENTION:
+            builder.direct_build = use_direct_block_mask
+        attn_metadata = builder.build(
             common_prefix_len=0,
-            cu_prefix_query_lens=None,
-            prefix_kv_lens=None,
-            suffix_kv_lens=None,
-            scheduler_metadata=None,
-            prefix_scheduler_metadata=None,
-            local_attn_metadata=None,
-        )
-        attn = FlashAttentionImpl(
-            num_heads=num_heads,
-            head_size=head_dim,
-            scale=1.0 / (head_dim**0.5),
-            num_kv_heads=num_key_value_heads,
-            alibi_slopes=None,
-            sliding_window=None,
-            kv_cache_dtype="fp8" if use_fp8_kv_cache else "auto",
-            blocksparse_params=None,
-            logits_soft_cap=None,
-            attn_type=AttentionType.DECODER,
-            use_irope=False,
+            common_attn_metadata=common_attn_metadata,
         )
 
-        class DummyLayer(torch.nn.Module):
-            def __init__(self, num_heads, num_key_value_heads, head_dim, device):
-                super().__init__()
-                assert num_heads % num_key_value_heads == 0, "num_heads must be divisible by num_key_value_heads"
+    # Instantiate implementation
+    sliding_window = vllm_config.model_config.get_sliding_window()
+    scale = 1.0 / (head_dim**0.5)
+    impl = impl_cls(
+        num_heads=num_heads,
+        head_size=head_dim,
+        scale=scale,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=sliding_window,
+        kv_cache_dtype="fp8" if use_fp8_kv_cache else "auto",
+    )
 
-                self.num_heads = num_heads
-                self.num_key_value_heads = num_key_value_heads
+    # Create mock layer and output buffer
+    mock_layer = MockAttentionLayer(device)
+    output = torch.empty_like(query_vllm)
 
-                # orignal scale tensor
-                self.register_buffer("_q_scale_base", torch.ones(num_heads, dtype=torch.float32, device=device))
-                self.register_buffer(
-                    "_k_scale_base",
-                    torch.ones(num_key_value_heads, dtype=torch.float32, device=device),
-                )
-                self.register_buffer(
-                    "_v_scale_base",
-                    torch.ones(num_key_value_heads, dtype=torch.float32, device=device),
-                )
+    # Run forward pass
 
-                # FlashAttention demanded API
-                self.register_buffer("_k_scale", self._k_scale_base)
-                self.register_buffer("_v_scale", self._v_scale_base)
+    test_ite = 6
+    warm_up = 3
 
-                # adapt reshape_and_cache_flash API
-                self._k_scale_float = self._k_scale_base
-                self._v_scale_float = self._v_scale_base
+    def run():
+        impl.forward(
+            mock_layer,
+            query_vllm,
+            key_vllm,
+            value_vllm,
+            kv_cache,
+            attn_metadata,
+            output=output,
+        )
 
-            @property
-            def _q_scale(self):
-                # return scalar mean, avoid shape problem
-                return self._q_scale_base.mean().unsqueeze(0)
+    # Warmup
+    for i in range(warm_up):
+        run()
 
-        layer = DummyLayer(num_heads, num_key_value_heads, head_dim, device)
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
 
-        if use_fp8_kv_cache:
-            # FP8 input requires BF16 output
-            output = torch.empty((num_tokens, num_heads, head_dim), dtype=torch.bfloat16, device=device)
-        else:
-            # FP16 input requires FP16 output
-            output = torch.empty((num_tokens, num_heads, head_dim), dtype=torch.float16, device=device)
+    torch.cuda.synchronize()
+    start_event.record()
+    for i in range(test_ite):
+        run()
+    end_event.record()
+    torch.cuda.synchronize()
 
-        # cudagraph capture
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            # for i in range(test_ite):
-            attn.forward(layer, q, k, v, kv_cache, attn_metadata, output)
-        # warmup
-        for i in range(warming_up):
-            # DEBUG
-            # print(
-            #     f"q: {q.shape}, k: {k.shape}, v: {v.shape} kv_cache: {kv_cache.shape} "
-            #     f"attn_metadata: {attn_metadata.num_actual_tokens} output: {output.shape}"
-            # )
-            # print(f"all attn_metadata: {attn_metadata}")
-            g.replay()
+    latency = start_event.elapsed_time(end_event) / test_ite
+    print(f"attn latency: {latency}")
 
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
-        for i in range(test_ite):
-            g.replay()
-        end_event.record()
-        torch.cuda.synchronize()
-        # latency = start_event.elapsed_time(end_event)/(test_ite*test_ite)
-        latency = start_event.elapsed_time(end_event) / test_ite
-
+    if is_context_phase:
         isl = input_len
         step = 0
         op_name = "context_attention"
-        kv_cache_dtype_str = "float16" if not use_fp8_kv_cache else "fp8"
-        dtype_str = "float16"
-
-        log_perf(
-            item_list=[
-                {
-                    "batch_size": batch_size,
-                    "isl": isl,
-                    "num_heads": num_heads,
-                    "num_key_value_heads": num_key_value_heads,
-                    "head_dim": head_dim,
-                    "beam_width": 1,
-                    "attn_dtype": dtype_str,
-                    "kv_cache_dtype": kv_cache_dtype_str,
-                    "step": step,
-                    "latency": latency,
-                }
-            ],
-            framework="VLLM",
-            version=vllm_version,
-            device_name=torch.cuda.get_device_name(device),
-            op_name=op_name,
-            kernel_source="vllm_flashattention",
-            perf_filename=perf_filename,
-        )
     else:
-        # Generation phase: always use FlashInferImpl
-        dtype = torch.float16
-        num_tokens = batch_size
-        block_size = 64
-        q = torch.randn([num_tokens, num_heads, head_dim], dtype=dtype, device=device)
-        k = torch.randn([num_tokens, num_key_value_heads, head_dim], dtype=dtype, device=device)
-        v = torch.randn([num_tokens, num_key_value_heads, head_dim], dtype=dtype, device=device)
-        num_blocks = batch_size
-        # Initialize KV cache - note FlashInfer shape requirements
-        if use_fp8_kv_cache:
-            kv_cache_dtype = torch.float8_e4m3fn  # or torch.float8_e5m2
-        else:
-            kv_cache_dtype = torch.float16
-        kv_cache = torch.zeros(
-            (num_blocks, 2, block_size, num_key_value_heads, head_dim),
-            dtype=kv_cache_dtype,
-            device=device,
-        )
-
-        # Initialize metadata - key correction section
-        qo_indptr = torch.arange(0, batch_size + 1, dtype=torch.int32, device=device)
-        paged_kv_indptr = torch.arange(0, batch_size + 1, dtype=torch.int32, device=device)
-        paged_kv_indices = torch.arange(0, batch_size, dtype=torch.int32, device=device)  # 1 block per sequence
-        paged_kv_last_page_len = torch.ones(batch_size, dtype=torch.int32, device=device)  # last page length = 1
-        slot_mapping = torch.arange(0, batch_size, dtype=torch.long, device=device)
-
-        attn_metadata = FlashInferMetadata(
-            num_actual_tokens=num_tokens,
-            qo_indptr=qo_indptr,
-            paged_kv_indptr=paged_kv_indptr,
-            paged_kv_indices=paged_kv_indices,
-            paged_kv_last_page_len=paged_kv_last_page_len,
-            num_qo_heads=num_heads,
-            num_kv_heads=num_key_value_heads,
-            head_dim=head_dim,
-            page_size=64,
-            data_type=dtype,
-            q_data_type=dtype,
-            slot_mapping=slot_mapping,
-            num_decodes=0,
-            num_decode_tokens=0,
-            num_prefills=batch_size,
-            num_prefill_tokens=num_tokens,
-            use_cascade=False,
-        )
-
-        attn = FlashInferImpl(
-            num_heads=num_heads,
-            head_size=head_dim,
-            scale=1.0 / (head_dim**0.5),
-            num_kv_heads=num_key_value_heads,
-            alibi_slopes=None,
-            sliding_window=None,
-            kv_cache_dtype="fp8" if use_fp8_kv_cache else "auto",
-            blocksparse_params=None,
-            logits_soft_cap=None,
-        )
-
-        class DummyLayer(torch.nn.Module):
-            def __init__(self, num_heads, num_key_value_heads, head_dim, device):
-                super().__init__()
-                assert num_heads % num_key_value_heads == 0, "num_heads must be divisible by num_key_value_heads"
-                self.num_heads = num_heads
-                self.num_key_value_heads = num_key_value_heads
-
-                # Original scale tensors
-                self.register_buffer("_q_scale", torch.ones(num_heads, dtype=torch.float32, device=device))
-                self.register_buffer("_k_scale", torch.ones(num_key_value_heads, dtype=torch.float32, device=device))
-                self.register_buffer("_v_scale", torch.ones(num_key_value_heads, dtype=torch.float32, device=device))
-
-                # FlashInfer required additional interfaces
-                self._k_scale_float = self._k_scale
-                self._v_scale_float = self._v_scale
-
-        layer = DummyLayer(num_heads, num_key_value_heads, head_dim, device)
-        output = torch.empty((num_tokens, num_heads, head_dim), dtype=dtype, device=device)
-        # cudagraph capture
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            for i in range(test_ite):
-                attn.forward(layer, q, k, v, kv_cache, attn_metadata, output)
-        # warmup
-        for i in range(warming_up):
-            # DEBUG
-            # print(
-            #     f"q: {q.shape}, k: {k.shape}, v: {v.shape} kv_cache: {kv_cache.shape} "
-            #     f"attn_metadata: {attn_metadata.num_actual_tokens} output: {output.shape}"
-            # )
-            # print(f"all attn_metadata: {attn_metadata}")
-            g.replay()
-
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
-        for i in range(test_ite):
-            g.replay()
-        end_event.record()
-        torch.cuda.synchronize()
-        latency = start_event.elapsed_time(end_event) / (test_ite * test_ite)
-
         isl = 1
         step = input_len
         op_name = "generation_attention"
-        kv_cache_dtype_str = "float16" if not use_fp8_kv_cache else "fp8"
-        dtype_str = "float16"
 
-        log_perf(
-            item_list=[
-                {
-                    "batch_size": batch_size,
-                    "isl": isl,
-                    "num_heads": num_heads,
-                    "num_key_value_heads": num_key_value_heads,
-                    "head_dim": head_dim,
-                    "beam_width": 1,
-                    "attn_dtype": dtype_str,
-                    "kv_cache_dtype": kv_cache_dtype_str,
-                    "step": step,
-                    "latency": latency,
-                }
-            ],
-            framework="VLLM",
-            version=vllm_version,
-            device_name=torch.cuda.get_device_name(device),
-            op_name=op_name,
-            kernel_source="vllm_flashinfer",
-            perf_filename=perf_filename,
-        )
+    kv_cache_dtype_str = "float16" if not use_fp8_kv_cache else "fp8"
+    dtype_str = "float16"
+    kernel_source = f"vllm_{backend_name}".lower()
+
+    log_perf(
+        item_list=[
+            {
+                "batch_size": batch_size,
+                "isl": isl,
+                "num_heads": num_heads,
+                "num_key_value_heads": num_kv_heads,
+                "head_dim": head_dim,
+                "beam_width": 1,
+                "attn_dtype": dtype_str,
+                "kv_cache_dtype": kv_cache_dtype_str,
+                "step": step,
+                "latency": latency,
+            }
+        ],
+        framework="VLLM",
+        version=vllm_version,
+        device_name=torch.cuda.get_device_name(device),
+        op_name=op_name,
+        kernel_source=kernel_source,
+        perf_filename=perf_filename,
+    )
 
 
 def get_context_attention_test_cases(if_unit_test=False):
     has_fp8_kv_cache = get_sm_version() > 86
+    has_fp8_kv_cache = False
     test_cases = []
 
     if not if_unit_test:
@@ -431,6 +372,7 @@ def get_context_attention_test_cases(if_unit_test=False):
                         #     ]
                         # )
 
+    return test_cases[:50]
     return test_cases
 
 
@@ -506,14 +448,19 @@ def get_generation_attention_test_cases():
                                 "generation_attention_perf.txt",
                             ]
                         )
+    return test_cases[:50]
     return test_cases
 
 
 if __name__ == "__main__":
     test_cases = get_context_attention_test_cases()
+    test_cases = test_cases[:10]
     for test_case in test_cases:
+        print(f"Running context attention test case: {test_case}")
         run_attention_torch(*test_case)
 
-    test_cases = get_generation_attention_test_cases()
-    for test_case in test_cases:
-        run_attention_torch(*test_case)
+    # test_cases = get_generation_attention_test_cases()
+    # test_cases = test_cases[30:]
+    # for test_case in test_cases:
+    # print(f"Running generation attention test case: {test_case}")
+    # run_attention_torch(*test_case)
