@@ -118,13 +118,24 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
         "tpot": args.tpot,
     }
 
-    agg_task = TaskConfig(serving_mode="agg", **common_kwargs)
+    task_configs: dict[str, TaskConfig] = {}
+
+    # Validate backend compatibility with aggregated serving mode
+    if args.backend in [common.BackendName.sglang.value, common.BackendName.vllm.value]:
+        logger.warning(
+            "Backend '%s' is not supported with serving_mode 'agg'. Only 'disagg' mode will be configured.",
+            args.backend,
+        )
+    else:
+        agg_task = TaskConfig(serving_mode="agg", **common_kwargs)
+        task_configs["agg"] = agg_task
 
     disagg_kwargs = dict(common_kwargs)
     disagg_kwargs["decode_system_name"] = decode_system
     disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
+    task_configs["disagg"] = disagg_task
 
-    return {"disagg": disagg_task, "agg": agg_task}
+    return task_configs
 
 
 _EXPERIMENT_RESERVED_KEYS = {

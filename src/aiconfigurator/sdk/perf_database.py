@@ -1076,10 +1076,16 @@ class PerfDatabase:
 
         if backend == "sglang":
             # For SGLang, only load MoE and MLP data and provide empty structures for other data
-            self._gemm_data = {}
-            self._context_attention_data = {}
-            self._generation_attention_data = {}
-            self._custom_allreduce_data = {}
+            self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
+            self._context_attention_data = load_context_attention_data(
+                os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
+            )
+            self._generation_attention_data = load_generation_attention_data(
+                os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
+            )
+            self._custom_allreduce_data = load_custom_allreduce_data(
+                os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
+            )
             self._moe_data, self._generation_moe_data = load_sglang_moe_data(
                 os.path.join(data_dir, common.PerfDataFilename.context_moe.value)
             )
@@ -1096,8 +1102,8 @@ class PerfDatabase:
                 os.path.join(data_dir, common.PerfDataFilename.deepep_normal.value)
             )
             self._deepep_ll_data = load_deepep_ll_data(os.path.join(data_dir, common.PerfDataFilename.deepep_ll.value))
-            self._nccl_data = {}
-            self._mla_bmm_data = {}
+            self._nccl_data = load_nccl_data(nccl_data_dir)
+            self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
         else:
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
