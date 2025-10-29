@@ -199,6 +199,7 @@ class DisaggInferenceSession:
         model_name = prefill_summary_df["model"]
         isl = prefill_summary_df["isl"]
         osl = prefill_summary_df["osl"]
+        prefix = prefill_summary_df["prefix"]
         concurrency = (
             decode_summary_df["concurrency"] * decode_num_worker
         )  # this is not exact matching. You can use this concurrency to benchmark the system.
@@ -254,6 +255,7 @@ class DisaggInferenceSession:
                     model_name,
                     isl,
                     osl,
+                    prefix,
                     concurrency,
                     request_rate,
                     p_bs,
@@ -521,7 +523,7 @@ class DisaggInferenceSession:
                     continue
             return summary_df
 
-        def _find_best_result_under_constraints_with_diversity(
+        def _find_best_result_under_constraints(
             ttft: float,
             tpot: float,
             prefill_summary_df: pd.DataFrame,
@@ -632,91 +634,7 @@ class DisaggInferenceSession:
                 .reset_index(drop=True)
             )
             return disagg_summary_df
-
-        def _find_best_result_under_constraints(
-            ttft: float,
-            tpot: float,
-            prefill_summary_df: pd.DataFrame,
-            decode_summary_df: pd.DataFrame,
-            return_top_k: int,
-            num_gpu_list: list[int] | None,
-        ) -> InferenceSummary:
-            """
-            Find the best result under constraints
-            """
-            # 0.7 is empirical value, filter out some workers to improve searching speed
-            decode_worker_candidates = decode_summary_df[
-                (decode_summary_df["tpot"] < tpot) & (decode_summary_df["tpot"] > tpot * 0.7)
-            ]
-            if len(decode_worker_candidates) == 0:
-                logger.debug(f"No decode worker candidates found for tpot {tpot}ms.")
-                return None
-            decode_worker_candidates = (
-                decode_worker_candidates.sort_values(by=["seq/s/gpu"], ascending=False)
-                .reset_index(drop=True)
-                .head(MAX_NUM_DECODE_WORKER_CANDIDATES)
-            )
-            # don't filter prefill worker candidates, because prefill worker candidates are
-            # much fewer
-            prefill_worker_candidates = prefill_summary_df[prefill_summary_df["context_latency"] < ttft]
-            if len(prefill_worker_candidates) == 0:
-                logger.debug(f"No prefill worker candidates found for ttft {ttft}ms.")
-                return None
-            prefill_worker_candidates = (
-                prefill_worker_candidates.sort_values(by=["seq/s/gpu"], ascending=False)
-                .reset_index(drop=True)
-                .head(MAX_NUM_PREFILL_WORKER_CANDIDATES)
-            )
-
-            logger.debug(
-                f"num decode worker candidates: {len(decode_worker_candidates)} "
-                f"num prefill worker candidates: {len(prefill_worker_candidates)}"
-            )
-
-            disagg_summary_df = pd.DataFrame(columns=common.ColumnsDisagg)
-            # this can be used to reduce the search space, disabled for now due to no strong demand
-            # to reduce the searching time.
-            pmax = decode_worker_candidates["seq/s"].max() / prefill_worker_candidates["seq/s"].min()
-            logger.debug(f"{pmax=}")
-            dmax = prefill_worker_candidates["seq/s"].max() / decode_worker_candidates["seq/s"].min()
-            logger.debug(f"{dmax=}")
-            for prefill_index, prefill_worker in prefill_worker_candidates.iterrows():
-                for decode_index, decode_worker in decode_worker_candidates.iterrows():
-                    prefill_throughput = prefill_worker["seq/s"]
-                    decode_throughput = decode_worker["seq/s"]
-                    prefill_gpus = prefill_worker["pp"] * prefill_worker["tp"] * prefill_worker["dp"]
-                    decode_gpus = decode_worker["pp"] * decode_worker["tp"] * decode_worker["dp"]
-                    prefill_num_worker, decode_num_worker = _match_workers(
-                        prefill_throughput,
-                        prefill_gpus,
-                        decode_throughput,
-                        decode_gpus,
-                        prefill_num_worker_list,
-                        decode_num_worker_list,
-                        num_gpu_list,
-                    )
-                    if prefill_num_worker == -1 or decode_num_worker == -1:
-                        continue
-                    disagg_summary_df = pd.concat(
-                        [
-                            disagg_summary_df,
-                            self._get_disagg_summary_df(
-                                prefill_worker, prefill_num_worker, decode_worker, decode_num_worker
-                            ),
-                        ],
-                        axis=0,
-                        ignore_index=True,
-                    )
-            if len(disagg_summary_df) == 0:
-                logger.debug(f"No disagg summary df found for tpot {tpot}ms.")
-                return None
-
-            filtered_disagg_summary_df = (
-                disagg_summary_df.sort_values(by=["tokens/s/gpu", "num_total_gpus"], ascending=[False, True])
-                .head(return_top_k)
-                .reset_index(drop=True)
-            )
-            return filtered_disagg_summary_df
+            # _find_best_result_under_constraints() ends here
 
         # start, get all possible p/d servers
         if decode_max_num_tokens < 1:
@@ -768,7 +686,7 @@ class DisaggInferenceSession:
         tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
         for tpot in tpot_list:
             logger.debug(f"Finding best result under constraints for tpot={tpot}ms...")
-            filtered_disagg_summary_df = _find_best_result_under_constraints_with_diversity(
+            filtered_disagg_summary_df = _find_best_result_under_constraints(
                 ttft=ttft,
                 tpot=tpot,
                 prefill_summary_df=prefill_summary_df,

@@ -8,6 +8,7 @@ Shared functions for infrastructure checking, command execution, and result anal
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -147,48 +148,57 @@ def run_pytest_command(cmd, description):
     return return_code == 0, result
 
 
-def generate_test_filter(models=None, systems=None, gpu_configs=None, isl_osl_combinations=None, tpot_values=None):
-    """
-    Generate pytest filter string based on test parameters.
+def _sanitize_token(value: str) -> str:
+    """Normalize values so they match parametrized ID fragments."""
+    return re.sub(r"[^0-9A-Za-z_]", "_", str(value))
 
-    The actual test names follow this format:
-    test_e2e_configuration_sweep[0.20.0-5000-10-4000-1000-8-h200_sxm-model_QWEN3_32B]
+
+def generate_test_filter(
+    models=None, systems=None, gpu_configs=None, isl_osl_prefix_combinations=None, tpot_values=None
+):
+    """
+    Generate pytest filter string based on test parameters aligned with structured test IDs.
 
     Args:
         models (list): List of model names to include
         systems (list): List of systems to include
         gpu_configs (list): List of GPU configurations to include
-        isl_osl_combinations (list): List of (isl, osl) tuples to include
+        isl_osl_prefix_combinations (list): List of (isl, osl, prefix) tuples to include
         tpot_values (list): List of TPOT values to include
 
     Returns:
         str: pytest filter string (-k argument)
     """
-    filters = []
+    filters: list[str] = []
 
     if models:
-        # Model names in test IDs have "model_" prefix
-        model_filter = " or ".join([f"model_{model}" for model in models])
+        model_filter = " or ".join([f"MODEL_{_sanitize_token(model)}" for model in models])
         filters.append(f"({model_filter})")
 
     if systems:
-        # Systems appear directly in the test ID
-        system_filter = " or ".join(systems)
+        system_filter = " or ".join([f"SYSTEM_{_sanitize_token(system)}" for system in systems])
         filters.append(f"({system_filter})")
 
     if gpu_configs:
-        # GPU configs appear as "-{gpu}-" in test ID
-        gpu_filter = " or ".join([f"-{gpu}-" for gpu in gpu_configs])
+        gpu_filter = " or ".join([f"GPU_{_sanitize_token(gpu)}" for gpu in gpu_configs])
         filters.append(f"({gpu_filter})")
 
-    if isl_osl_combinations:
-        # ISL values appear as "-{isl}-" in test ID
-        isl_filter = " or ".join([f"-{isl}-" for isl, _ in isl_osl_combinations])
-        filters.append(f"({isl_filter})")
+    if isl_osl_prefix_combinations:
+        combo_filters = []
+        for isl, osl, prefix in isl_osl_prefix_combinations:
+            combo_filters.append(
+                " and ".join(
+                    [
+                        f"ISL_{_sanitize_token(isl)}",
+                        f"OSL_{_sanitize_token(osl)}",
+                        f"PREFIX_{_sanitize_token(prefix)}",
+                    ]
+                )
+            )
+        filters.append("(" + " or ".join([f"({combo})" for combo in combo_filters]) + ")")
 
     if tpot_values:
-        # TPOT values appear as "-{tpot}-" in test ID
-        tpot_filter = " or ".join([f"-{tpot}-" for tpot in tpot_values])
+        tpot_filter = " or ".join([f"TPOT_{_sanitize_token(tpot)}" for tpot in tpot_values])
         filters.append(f"({tpot_filter})")
 
     return " and ".join(filters) if filters else ""

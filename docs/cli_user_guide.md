@@ -7,17 +7,18 @@ This mode is triggered by
 ```bash
 aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm
 or
-aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0
 ```
 `model`, `total_gpus`, `system` are three required arguments to define the problem.  
-If you want to specify your problem with more details, we allow to define `ttft`, `tpot`, `isl` and `osl`.
+If you want to specify your problem with more details, we allow to define `ttft`, `tpot`, `isl`, `osl` and `prefix`.
 
 The command will create two experiments for the given problem, one is `agg` and another one is `disagg`. Compare them to find the better one and estimates the perf gain.
 
 The command will print out the result to your terminal with the basic info of the comparison, the pareto curve (the best point is tagged as `x`), 
 the worker setup for your reference. Let's split them into sections.
 
-Let's run `aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512`
+Let's run `aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0`
+> Note that the result might differ based on different versions of your aiconfigurator.
 1. Basic info of the comparison
 ```
   Input Configuration & SLA Target:
@@ -169,6 +170,7 @@ exp_disagg_full:
   backend_version: "0.20.0" # optional, default to the latest version in the database
   isl: 4000 # input sequence length, optional, default to 4000
   osl: 1000 # output sequence length, optional, default to 1000
+  prefix: 0 # prefix cache len, default to 0
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
   tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
   enable_wide_ep: false # enable wide ep for prefill/decode, optional, default to false
