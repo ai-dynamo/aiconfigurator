@@ -287,11 +287,11 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
     all_errors = []
 
     try:
-        import sglang
+        import pkg_resources
 
-        version = sglang.__version__
+        version = pkg_resources.get_distribution("sglang").version
         logger.info(f"SGLang version: {version}")
-    except:
+    except pkg_resources.DistributionNotFound:
         logger.exception("SGLang is not installed")
         return
 
