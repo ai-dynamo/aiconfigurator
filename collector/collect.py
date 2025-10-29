@@ -282,8 +282,164 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     return errors
 
 
-def collect_sglang():
-    pass
+def collect_sglang(num_processes: int, ops: list[str] | None = None):
+    """Collect performance data for SGLang with enhanced error tracking"""
+    all_errors = []
+
+    try:
+        import sglang
+
+        version = sglang.__version__
+        logger.info(f"SGLang version: {version}")
+    except:
+        logger.exception("SGLang is not installed")
+        return
+
+    # Define collection modules - each test type as separate entry
+    collections = [
+        # GEMM collection
+        {
+            "name": "sglang",
+            "type": "gemm",
+            "module": "sglang.collect_gemm",
+            "get_func": "get_gemm_test_cases",
+            "run_func": "run_gemm",
+        },
+        # Attention collections - separate entries for prefill and decode
+        {
+            "name": "sglang",
+            "type": "attention_prefill",
+            "module": "sglang.collect_attn",
+            "get_func": "get_attention_prefill_test_cases",
+            "run_func": "run_attention_torch",
+        },
+        {
+            "name": "sglang",
+            "type": "attention_decode",
+            "module": "sglang.collect_attn",
+            "get_func": "get_attention_decode_test_cases",
+            "run_func": "run_attention_torch",
+        },
+        # MLA collections - separate entries for context and generation
+        {
+            "name": "sglang",
+            "type": "mla_context",
+            "module": "sglang.collect_mla",
+            "get_func": "get_context_mla_test_cases",
+            "run_func": "run_mla",
+        },
+        {
+            "name": "sglang",
+            "type": "mla_generation",
+            "module": "sglang.collect_mla",
+            "get_func": "get_generation_mla_test_cases",
+            "run_func": "run_mla",
+        },
+        # MLA BMM collections
+        {
+            "name": "sglang",
+            "type": "mla_bmm_gen_pre",
+            "module": "sglang.collect_mla_bmm",
+            "get_func": "get_mla_gen_pre_test_cases",
+            "run_func": "run_mla_gen_pre",
+        },
+        {
+            "name": "sglang",
+            "type": "mla_bmm_gen_post",
+            "module": "sglang.collect_mla_bmm",
+            "get_func": "get_mla_gen_post_test_cases",
+            "run_func": "run_mla_gen_post",
+        },
+        # MOE collection
+        {
+            "name": "sglang",
+            "type": "moe",
+            "module": "sglang.collect_moe",
+            "get_func": "get_moe_test_cases",
+            "run_func": "run_moe_torch",
+        },
+        # MLP collections - separate entries for prefill and decode
+        {
+            "name": "sglang",
+            "type": "mlp_prefill",
+            "module": "sglang.collect_mlp",
+            "get_func": "get_mlp_prefill_test_cases",
+            "run_func": "run_mlp_torch",
+        },
+        {
+            "name": "sglang",
+            "type": "mlp_decode",
+            "module": "sglang.collect_mlp",
+            "get_func": "get_mlp_decode_test_cases",
+            "run_func": "run_mlp_torch",
+        },
+        # DeepSeek MOE collections - separate entries for prefill and decode
+        {
+            "name": "sglang",
+            "type": "deepseek_moe_prefill",
+            "module": "sglang.collect_deepep_moe",
+            "get_func": "get_moe_prefill_test_cases",
+            "run_func": "run_moe",
+        },
+        {
+            "name": "sglang",
+            "type": "deepseek_moe_decode",
+            "module": "sglang.collect_deepep_moe",
+            "get_func": "get_moe_decode_test_cases",
+            "run_func": "run_moe",
+        },
+        # Normal attention collections - separate entries for context and generation
+        {
+            "name": "sglang",
+            "type": "normal_attention_context",
+            "module": "sglang.collect_normal_attn",
+            "get_func": "get_context_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+        {
+            "name": "sglang",
+            "type": "normal_attention_generation",
+            "module": "sglang.collect_normal_attn",
+            "get_func": "get_generation_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+    ]
+
+    for collection in collections:
+        if ops and (collection["type"] not in ops):
+            continue
+        try:
+            module_name = collection["module"]
+
+            get_module = __import__(module_name, fromlist=[collection["get_func"]])
+            run_module = __import__(module_name, fromlist=[collection["run_func"]])
+
+            get_func = getattr(get_module, collection["get_func"])
+            run_func = getattr(run_module, collection["run_func"])
+
+            # Special handling for deepseek_moe_prefill which requires rank parameter
+            if collection["type"] == "deepseek_moe_prefill":
+                get_func_wrapped = lambda f=get_func: f(num_processes)
+                errors = collect_module_safe(
+                    collection["name"], collection["type"], get_func_wrapped, run_func, num_processes
+                )
+            else:
+                errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
+            all_errors.extend(errors)
+
+        except Exception as e:
+            logger.exception(f"Failed to process {collection['name']}.{collection['type']}")
+            all_errors.append(
+                {
+                    "module": f"{collection['name']}.{collection['type']}",
+                    "error_type": "ImportError",
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+
+    # Generate summary report
+    generate_collection_summary(all_errors, "sglang", version)
 
 
 def collect_vllm(num_processes: int):
@@ -520,6 +676,7 @@ def main():
         nargs="*",
         type=str,
         choices=[
+            # TensorRT-LLM ops
             "gemm_trt",
             "gemm",
             "mla_context",
@@ -529,6 +686,15 @@ def main():
             "mla_bmm_gen_pre",
             "mla_bmm_gen_post",
             "moe",
+            # SGLang ops
+            "attention_prefill",
+            "attention_decode",
+            "mlp_prefill",
+            "mlp_decode",
+            "deepseek_moe_prefill",
+            "deepseek_moe_decode",
+            "normal_attention_context",
+            "normal_attention_generation",
         ],
         help="Run only specified collection items. Leave empty to run all.",
         default=None,
@@ -551,7 +717,7 @@ def main():
     if args.backend == "trtllm":
         collect_trtllm(num_processes, ops)
     elif args.backend == "sglang":
-        collect_sglang(num_processes)
+        collect_sglang(num_processes, ops)
     elif args.backend == "vllm":
         collect_vllm(num_processes)
 
