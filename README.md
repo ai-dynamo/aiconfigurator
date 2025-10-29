@@ -152,7 +152,7 @@ These results indicate that deploying Qwen3-32B on h200_sxm in FP8 can achieve *
 Try different ISL:OSL values and SLA limits to fit your use case, for example:
 
 ```bash
-aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200 --prefix 0
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200 --prefix 500
 ```
 
 You will get different results.
