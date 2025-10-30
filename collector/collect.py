@@ -305,21 +305,6 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
             "get_func": "get_gemm_test_cases",
             "run_func": "run_gemm",
         },
-        # Attention collections - separate entries for prefill and decode
-        {
-            "name": "sglang",
-            "type": "attention_prefill",
-            "module": "sglang.collect_attn",
-            "get_func": "get_attention_prefill_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "sglang",
-            "type": "attention_decode",
-            "module": "sglang.collect_attn",
-            "get_func": "get_attention_decode_test_cases",
-            "run_func": "run_attention_torch",
-        },
         # MLA collections - separate entries for context and generation
         {
             "name": "sglang",
@@ -334,6 +319,21 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
             "module": "sglang.collect_mla",
             "get_func": "get_generation_mla_test_cases",
             "run_func": "run_mla",
+        },
+        # Normal attention collections - separate entries for context and generation
+        {
+            "name": "sglang",
+            "type": "normal_attention_context",
+            "module": "sglang.collect_normal_attn",
+            "get_func": "get_context_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+        {
+            "name": "sglang",
+            "type": "normal_attention_generation",
+            "module": "sglang.collect_normal_attn",
+            "get_func": "get_generation_attention_test_cases",
+            "run_func": "run_attention_torch",
         },
         # MLA BMM collections
         {
@@ -387,21 +387,6 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
             "module": "sglang.collect_deepep_moe",
             "get_func": "get_moe_decode_test_cases",
             "run_func": "run_moe",
-        },
-        # Normal attention collections - separate entries for context and generation
-        {
-            "name": "sglang",
-            "type": "normal_attention_context",
-            "module": "sglang.collect_normal_attn",
-            "get_func": "get_context_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "sglang",
-            "type": "normal_attention_generation",
-            "module": "sglang.collect_normal_attn",
-            "get_func": "get_generation_attention_test_cases",
-            "run_func": "run_attention_torch",
         },
     ]
 
