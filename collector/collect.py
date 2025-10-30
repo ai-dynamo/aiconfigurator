@@ -286,10 +286,12 @@ def collect_sglang():
     pass
 
 
-def collect_vllm(num_processes: int):
+def collect_vllm(num_processes: int, ops: list[str] | None = None):
     """
     Collect performance data for VLLM v1.
     """
+    all_errors = []
+
     try:
         from vllm.version import __version__ as vllm_version
 
@@ -299,29 +301,69 @@ def collect_vllm(num_processes: int):
         logger.exception("VLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
         return
 
-    # supported vllm v1 GEMM collection wich supports fp16,fp8,fp8_block_wise,awq and gptq
-    try:
-        import vllm_v1.collect_gemm
+    collections = [
+        # GEMM collections
+        # vllm v1 GEMM collection for fp16,fp8,fp8_block_wise,awq and gptq
+        {
+            "name": "vllm",
+            "type": "gemm",
+            "module": "vllm_v1.collect_gemm",
+            "get_func": "get_gemm_test_cases",
+            "run_func": "run_gemm",
+        },
+        # Attention collections - separate entries for context and generation
+        {
+            "name": "vllm",
+            "type": "attention_context",
+            "module": "vllm_v1.collect_attn",
+            "get_func": "get_context_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+        {
+            "name": "vllm",
+            "type": "attention_generation",
+            "module": "vllm_v1.collect_attn",
+            "get_func": "get_generation_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+    ]
 
-        test_cases = vllm_v1.collect_gemm.get_gemm_test_cases(is_unit_test=False)
-        parallel_run(test_cases, vllm_v1.collect_gemm.run_gemm, num_processes)
-        logger.info(f"collected gemm_vllm test cases for VLLM {version}")
-    except:
-        logger.warning("cannot collect gemm_vllm test cases, skipping...")
+    for collection in collections:
+        if ops and (collection["type"] not in ops):
+            continue
+        try:
+            # Handle version-specific modules
+            if "version_handler" in collection:
+                module_name = collection["version_handler"](version)
+                if not module_name:
+                    logger.warning(
+                        f"Skipping {collection['name']}.{collection['type']} - unsupported version {version}",
+                    )
+                    continue
+            else:
+                module_name = collection["module"]
 
-    # supported vllm v1 atten collection which supports fp16(auto) and fp8 kv cache. flashatten
-    # impl for prefill and flashinfer impl for decode.
-    try:
-        import vllm_v1.collect_attn
+            get_module = __import__(module_name, fromlist=[collection["get_func"]])
+            run_module = __import__(module_name, fromlist=[collection["run_func"]])
 
-        test_cases = vllm_v1.collect_attn.get_context_attention_test_cases(if_unit_test=False)
-        parallel_run(test_cases, vllm_v1.collect_attn.run_attention_torch, num_processes)
-        logger.info(f"collected context attention test cases for VLLM {version}")
-        test_cases = vllm_v1.collect_attn.get_generation_attention_test_cases()
-        parallel_run(test_cases, vllm_v1.collect_attn.run_attention_torch, num_processes)
-        logger.info(f"collected generation attention test cases for VLLM {version}")
-    except:
-        logger.warning("cannot collect VLLM attention test cases, skipping...")
+            get_func = getattr(get_module, collection["get_func"])
+            run_func = getattr(run_module, collection["run_func"])
+
+            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
+            all_errors.extend(errors)
+
+        except Exception as e:
+            logger.exception(f"Failed to process {collection['name']}.{collection['type']}")
+            all_errors.append(
+                {
+                    "module": f"{collection['name']}.{collection['type']}",
+                    "error_type": "ImportError",
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+
+    generate_collection_summary(all_errors, "vllm", version)
 
 
 def collect_trtllm(num_processes: int, ops: list[str] | None = None):
@@ -553,7 +595,7 @@ def main():
     elif args.backend == "sglang":
         collect_sglang(num_processes)
     elif args.backend == "vllm":
-        collect_vllm(num_processes)
+        collect_vllm(num_processes, ops)
 
 
 if __name__ == "__main__":
