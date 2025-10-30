@@ -30,7 +30,7 @@ _LATEST_VERSIONS_CACHE = {}
 def get_all_backends():
     """Get all backends to test."""
     # In the future, this could come from common.BackendName
-    return ["trtllm"]
+    return ["trtllm", "sglang"]
 
 
 @pytest.fixture(scope="session")
