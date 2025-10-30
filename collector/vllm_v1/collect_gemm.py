@@ -77,10 +77,13 @@ def get_gemm_test_cases(is_unit_test=False):
         12288,
     ]
     nk_list_ext = [16384, 65536]  # for coverage and interp purpose
-    # gemm_list = ['float16']
-    gemm_list = ["awq", "gptq"]
-    if get_sm_version() < 86:
-        gemm_list += ["fp8", "fp8_block", "awq", "gptq"]
+
+    gemm_list = ["float16", "awq", "gptq"]
+    if get_sm_version() > 86:
+        gemm_list += ["fp8", "fp8_block"]
+
+    # if get_sm_version() >= 100:
+    #     gemm_list += ["nvfp4"]
 
     if is_unit_test:
         x_list = [1, 2, 4, 8]
@@ -96,6 +99,8 @@ def get_gemm_test_cases(is_unit_test=False):
             for n in sorted(nk_list + nk_list_ext, reverse=True):
                 for k in sorted(nk_list + nk_list_ext, reverse=True):
                     if n * k == 65536 * 65536:
+                        continue
+                    if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
                         continue
                     test_cases.append([gemm_type, x, n, k, "gemm_perf_vllm.txt"])
     return test_cases

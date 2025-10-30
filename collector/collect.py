@@ -282,51 +282,13 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     return errors
 
 
-def collect_sglang():
-    pass
-
-
-def collect_vllm(num_processes: int, ops: list[str] | None = None):
-    """
-    Collect performance data for VLLM v1.
-    """
+def collect_ops(
+    num_processes: int,
+    collections: list[dict],
+    ops: list[str] | None = None,
+    framework_version: str | None = None,
+) -> list[dict]:
     all_errors = []
-
-    try:
-        from vllm.version import __version__ as vllm_version
-
-        version = vllm_version
-
-    except:
-        logger.exception("VLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
-        return
-
-    collections = [
-        # GEMM collections
-        # vllm v1 GEMM collection for fp16,fp8,fp8_block_wise,awq and gptq
-        {
-            "name": "vllm",
-            "type": "gemm",
-            "module": "vllm_v1.collect_gemm",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
-        # Attention collections - separate entries for context and generation
-        {
-            "name": "vllm",
-            "type": "attention_context",
-            "module": "vllm_v1.collect_attn",
-            "get_func": "get_context_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "attention_generation",
-            "module": "vllm_v1.collect_attn",
-            "get_func": "get_generation_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-    ]
 
     for collection in collections:
         if ops and (collection["type"] not in ops):
@@ -334,10 +296,10 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         try:
             # Handle version-specific modules
             if "version_handler" in collection:
-                module_name = collection["version_handler"](version)
+                module_name = collection["version_handler"](framework_version)
                 if not module_name:
                     logger.warning(
-                        f"Skipping {collection['name']}.{collection['type']} - unsupported version {version}",
+                        f"Skipping {collection['name']}.{collection['type']} - unsupported version {framework_version}",
                     )
                     continue
             else:
@@ -363,12 +325,61 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
                 }
             )
 
+    return all_errors
+
+
+def collect_sglang():
+    pass
+
+
+def collect_vllm(num_processes: int, ops: list[str] | None = None):
+    """
+    Collect performance data for VLLM v1.
+    """
+
+    try:
+        from vllm.version import __version__ as vllm_version
+
+        version = vllm_version
+
+    except:
+        logger.exception("VLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
+        return
+
+    collections = [
+        # GEMM collections
+        # vllm v1 GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
+        {
+            "name": "vllm",
+            "type": "gemm",
+            "module": "vllm_v1.collect_gemm",
+            "get_func": "get_gemm_test_cases",
+            "run_func": "run_gemm",
+        },
+        # Attention collections - separate entries for context and generation
+        {
+            "name": "vllm",
+            "type": "attention_context",
+            "module": "vllm_v1.collect_attn",
+            "get_func": "get_context_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+        {
+            "name": "vllm",
+            "type": "attention_generation",
+            "module": "vllm_v1.collect_attn",
+            "get_func": "get_generation_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+    ]
+
+    all_errors = collect_ops(num_processes, collections, ops, version)
+
     generate_collection_summary(all_errors, "vllm", version)
 
 
 def collect_trtllm(num_processes: int, ops: list[str] | None = None):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
-    all_errors = []
 
     os.environ["TLLM_LOG_LEVEL"] = "ERROR"
     os.environ["TRTLLM_DG_ENABLED"] = "1"
@@ -469,40 +480,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         },
     ]
 
-    for collection in collections:
-        if ops and (collection["type"] not in ops):
-            continue
-        try:
-            # Handle version-specific modules
-            if "version_handler" in collection:
-                module_name = collection["version_handler"](version)
-                if not module_name:
-                    logger.warning(
-                        f"Skipping {collection['name']}.{collection['type']} - unsupported version {version}",
-                    )
-                    continue
-            else:
-                module_name = collection["module"]
-
-            get_module = __import__(module_name, fromlist=[collection["get_func"]])
-            run_module = __import__(module_name, fromlist=[collection["run_func"]])
-
-            get_func = getattr(get_module, collection["get_func"])
-            run_func = getattr(run_module, collection["run_func"])
-
-            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
-            all_errors.extend(errors)
-
-        except Exception as e:
-            logger.exception(f"Failed to process {collection['name']}.{collection['type']}")
-            all_errors.append(
-                {
-                    "module": f"{collection['name']}.{collection['type']}",
-                    "error_type": "ImportError",
-                    "error_message": str(e),
-                    "traceback": traceback.format_exc(),
-                }
-            )
+    all_errors = collect_ops(num_processes, collections, ops, version)
 
     # Generate summary report
     generate_collection_summary(all_errors, "trtllm", version)
