@@ -373,21 +373,9 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
             "get_func": "get_mlp_decode_test_cases",
             "run_func": "run_mlp_torch",
         },
-        # DeepSeek MOE collections - separate entries for prefill and decode
-        {
-            "name": "sglang",
-            "type": "deepseek_moe_prefill",
-            "module": "sglang.collect_deepep_moe",
-            "get_func": "get_moe_prefill_test_cases",
-            "run_func": "run_moe",
-        },
-        {
-            "name": "sglang",
-            "type": "deepseek_moe_decode",
-            "module": "sglang.collect_deepep_moe",
-            "get_func": "get_moe_decode_test_cases",
-            "run_func": "run_moe",
-        },
+        # NOTE: DeepSeek MOE (collect_deepep_moe.py) is disabled here because it uses
+        # its own multiprocessing system and is designed to be run as a standalone script.
+        # Use the standalone script directly: python collector/sglang/collect_deepep_moe.py
     ]
 
     for collection in collections:
@@ -402,14 +390,7 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
 
-            # Special handling for deepseek_moe_prefill which requires rank parameter
-            if collection["type"] == "deepseek_moe_prefill":
-                get_func_wrapped = lambda f=get_func: f(num_processes)
-                errors = collect_module_safe(
-                    collection["name"], collection["type"], get_func_wrapped, run_func, num_processes
-                )
-            else:
-                errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
+            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
             all_errors.extend(errors)
 
         except Exception as e:
@@ -676,8 +657,8 @@ def main():
             "attention_decode",
             "mlp_prefill",
             "mlp_decode",
-            "deepseek_moe_prefill",
-            "deepseek_moe_decode",
+            # Note: deepseek_moe_prefill and deepseek_moe_decode are disabled.
+            # Run collect_deepep_moe.py standalone instead.
             "normal_attention_context",
             "normal_attention_generation",
         ],
