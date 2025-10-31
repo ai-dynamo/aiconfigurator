@@ -14,7 +14,7 @@ import pandas as pd
 from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.models import check_is_moe
+from aiconfigurator.sdk.models import check_is_moe, get_model_family
 from aiconfigurator.sdk.perf_database import (
     PerfDatabase,
     get_database,
@@ -48,6 +48,7 @@ class ConfigLayer:
 class TaskContext:
     serving_mode: Literal["agg", "disagg"]
     model_name: str
+    model_family: str
     system_name: str
     decode_system_name: str | None
     backend_name: str
@@ -626,6 +627,7 @@ class TaskConfig:
         ctx = TaskContext(
             serving_mode=serving_mode,
             model_name=model_name,
+            model_family=get_model_family(model_name),
             system_name=system_name,
             decode_system_name=decode_system_name,
             backend_name=backend_name,
