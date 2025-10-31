@@ -198,7 +198,15 @@ class TaskConfigFactory:
                 worker_config["tp_list"] = [1, 2, 4, 8, 16]
                 worker_config["pp_list"] = [1]
         else:
-            if ctx.enable_wide_ep:
+            # For DEEPSEEK_V3 with sglang backend, require moe_ep >= 8 due to missing node_num=0 perf data
+            if ctx.model_name == "DEEPSEEK_V3" and ctx.backend_name == "sglang":
+                # Constrain to moe_ep >= 8 to avoid node_num < 1 (intra-node configs)
+                worker_config["num_gpu_per_worker"] = [8, 16, 32] if ctx.total_gpus >= 32 else [8]
+                worker_config["tp_list"] = [1]
+                worker_config["pp_list"] = [1]
+                worker_config["dp_list"] = [8, 16, 32] if ctx.total_gpus >= 32 else [8]
+                worker_config["moe_ep_list"] = [8, 16, 32] if ctx.total_gpus >= 32 else [8]
+            elif ctx.enable_wide_ep:
                 worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32]
                 worker_config["tp_list"] = [1, 2, 4, 8]
                 worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
@@ -249,7 +257,23 @@ class TaskConfigFactory:
                 decode_worker_config["tp_list"] = [1, 2, 4, 8, 16]
                 decode_worker_config["pp_list"] = [1]
         else:
-            if ctx.enable_wide_ep:
+            # For DEEPSEEK_V3 with sglang backend, require moe_ep >= 8 due to missing node_num=0 perf data
+            if ctx.model_name == "DEEPSEEK_V3" and ctx.backend_name == "sglang":
+                # Constrain to moe_ep >= 8 to avoid node_num < 1 (intra-node configs)
+                moe_ep_options = [8, 16, 32, 64] if ctx.total_gpus >= 64 else [8, 16, 32] if ctx.total_gpus >= 32 else [8]
+                
+                prefill_worker_config["num_gpu_per_worker"] = moe_ep_options
+                prefill_worker_config["tp_list"] = [1]
+                prefill_worker_config["pp_list"] = [1]
+                prefill_worker_config["dp_list"] = [1]
+                prefill_worker_config["moe_ep_list"] = moe_ep_options
+
+                decode_worker_config["num_gpu_per_worker"] = moe_ep_options
+                decode_worker_config["tp_list"] = [1]
+                decode_worker_config["pp_list"] = [1]
+                decode_worker_config["dp_list"] = moe_ep_options
+                decode_worker_config["moe_ep_list"] = moe_ep_options
+            elif ctx.enable_wide_ep:
                 prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
                 prefill_worker_config["tp_list"] = [1, 2, 4, 8]
                 prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16] if should_enable_pp else [1]
