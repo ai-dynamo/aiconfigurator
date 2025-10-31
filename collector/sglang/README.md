@@ -28,10 +28,13 @@ docker run -itd --shm-size 32g --gpus all --ipc=host --network=host --name sglan
 
 ## General Configuration
 
-All scripts save results to the same output directory. Modify `output_path` in each script to your desired location:
-```python
-output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
-```
+All scripts accept command-line arguments for configuration. Key arguments include:
+- `--model_path`: Path to the DeepSeek model directory (default: `./deepseek-v3`)
+- `--output_path`: Path to save benchmark results (default: `./`)
+- `--num_warmup`: Number of warmup iterations (default: 3)
+- `--num_iterations`: Number of benchmark iterations (default: 10)
+
+You can also modify defaults by editing the argument parser in each script.
 
 
 ## 1. Attention Operator Collection (collect_attn.py)
@@ -44,16 +47,37 @@ output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0
 
 ### Usage
 
-#### Basic Run with dummy weight
+#### Basic Run with dummy weights
 ```bash
-export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python collect_attn.py
+# Using default paths (./deepseek-v3 for model, ./ for output)
+SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 python collect_attn.py
+
+# Specify custom paths
+python collect_attn.py --model_path /path/to/deepseek-v3 --output_path /path/to/output
+
+# With additional options
+python collect_attn.py \
+    --model_path /path/to/deepseek-v3 \
+    --output_path /path/to/output \
+    --test_layer 0 \
+    --num_warmup 3 \
+    --num_iterations 10 \
+    --enable_profiler
 ```
+
+#### Command-Line Arguments
+- `--model_path`: Path to DeepSeek model directory (default: `./deepseek-v3`)
+- `--output_path`: Path to save benchmark results (default: `./`)
+- `--test_layer`: Layer index to test (default: 0)
+- `--num_warmup`: Number of warmup iterations (default: 3)
+- `--num_iterations`: Number of benchmark iterations (default: 10)
+- `--dtype`: Data type (default: auto)
+- `--device`: Device to use (default: cuda)
+- `--enable_profiler`: Enable torch profiler for detailed analysis
+
 #### Environment Variables
-- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model 
 - `SGLANG_LOAD_FORMAT`: Load format, set to `dummy` to skip weight loading
 - `SGLANG_TEST_NUM_LAYERS`: Load only specified number of layers (with dummy mode)
-- `SGLANG_TEST_LAYER`: Layer index to test (default: 0)
 
 ### Test Parameters
 The script automatically tests the following configuration combinations:
@@ -82,45 +106,64 @@ framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_head
 
 ### Usage
 
-#### Basic Run
-```bash
-export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python collect_deepep_moe.py
-```
-
-#### Environment Variables
-- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model
-
-#### Modify Configuration
-
 **Important**: DeepEP MoE collection requires **at least 2 GPUs** for distributed execution.
 
-Edit the configuration at the bottom of the script:
-```python
-# Configuration variables (modify as needed)
-num_experts=256,             # Number of experts to simulate different EP configurations
+#### Basic Run
+```bash
+# Using default paths and 2 GPUs
+python collect_deepep_moe.py --tp_size 2 --ep_size 2
 
-# Server arguments
-server_args = ServerArgs(
-    tp_size=2,                   # Tensor parallel size
-    ep_size=2,                   # Expert parallel size
-)
+# Specify custom paths
+python collect_deepep_moe.py \
+    --model_path /path/to/deepseek-v3 \
+    --output_path /path/to/output \
+    --tp_size 2 \
+    --ep_size 2 \
+    --num_experts 256
 
-
+# Full configuration example
+python collect_deepep_moe.py \
+    --model_path /path/to/deepseek-v3 \
+    --output_path /path/to/output \
+    --tp_size 2 \
+    --ep_size 2 \
+    --num_experts 128 \
+    --test_layer 3 \
+    --num_warmup 3 \
+    --num_iterations 10 \
+    --load_format dummy
 ```
 
-**Simulating Different EP Configurations**:
+#### Command-Line Arguments
+- `--model_path`: Path to DeepSeek model directory (default: `./deepseek-v3`)
+- `--output_path`: Path to save benchmark results (default: `./`)
+- `--num_experts`: Number of experts to test (default: 128)
+- `--tp_size`: Tensor parallel size (default: 2)
+- `--ep_size`: Expert parallel size (default: 2)
+- `--test_layer`: Layer to test (default: 3)
+- `--num_warmup`: Number of warmup iterations (default: 3)
+- `--num_iterations`: Number of benchmark iterations (default: 10)
+- `--dtype`: Data type (default: auto)
+- `--device`: Device to use (default: cuda)
+- `--load_format`: Load format (default: dummy)
+- `--mem_fraction_static`: Memory fraction static (default: 0.3)
+- `--node_rank`: Node rank (default: 0)
+- `--host`: Host (default: localhost)
+- `--port`: Port (default: 30000)
+- `--cuda_graph_max_bs`: CUDA graph max batch size (default: 4)
 
-The `num_experts` parameter in `MoEBenchArgs` is used to simulate different expert parallel (EP) sizes. For example, when using 2 GPUs with `tp_size=2` and `ep_size=2`:
+#### Simulating Different EP Configurations
 
-- `num_experts=256` → simulates **EP 2** (256 experts / 2 = 128 experts per GPU)
-- `num_experts=128` → simulates **EP 4** (128 experts / 4 = 32 experts per GPU)
-- `num_experts=64` → simulates **EP 8** (64 experts / 8 = 8 experts per GPU)
-- `num_experts=32` → simulates **EP 16** (32 experts / 16 = 2 experts per GPU)
-- `num_experts=16` → simulates **EP 32**
-- `num_experts=8` → simulates **EP 64**
-- `num_experts=4` → simulates **EP 128**
-- `num_experts=2` → simulates **EP 256** (2 experts / 2 = 1 experts per GPU)
+The `--num_experts` parameter is used to simulate different expert parallel (EP) sizes. For example, when using 2 GPUs with `--tp_size=2` and `--ep_size=2`:
+
+- `--num_experts 256` → simulates **EP 2** (256 experts / 2 = 128 experts per GPU)
+- `--num_experts 128` → simulates **EP 4** (128 experts / 4 = 32 experts per GPU)
+- `--num_experts 64` → simulates **EP 8** (64 experts / 8 = 8 experts per GPU)
+- `--num_experts 32` → simulates **EP 16** (32 experts / 16 = 2 experts per GPU)
+- `--num_experts 16` → simulates **EP 32**
+- `--num_experts 8` → simulates **EP 64**
+- `--num_experts 4` → simulates **EP 128**
+- `--num_experts 2` → simulates **EP 256** (2 experts / 2 = 1 expert per GPU)
 
 The actual `moe_ep_size` is automatically calculated based on the relationship between `num_experts` and the base EP size (256).
 
@@ -150,12 +193,32 @@ framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,
 
 #### Basic Run
 ```bash
-export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
+# Using default paths
 python collect_mlp.py
+
+# Specify custom paths
+python collect_mlp.py --model_path /path/to/deepseek-v3 --output_path /path/to/output
+
+# With additional options
+python collect_mlp.py \
+    --model_path /path/to/deepseek-v3 \
+    --output_path /path/to/output \
+    --hidden_size 7168 \
+    --intermediate_size 2048 \
+    --num_warmup 3 \
+    --num_iterations 10 \
+    --device cuda:0
 ```
 
-#### Environment Variables
-- `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model (default: `/deepseek-v3`)
+#### Command-Line Arguments
+- `--model_path`: Path to DeepSeek model directory (default: `./deepseek-v3`)
+- `--output_path`: Path to save benchmark results (default: `./`)
+- `--hidden_size`: Hidden size (default: 7168)
+- `--intermediate_size`: Intermediate size (default: 2048)
+- `--num_warmup`: Number of warmup iterations (default: 3)
+- `--num_iterations`: Number of benchmark iterations (default: 10)
+- `--dtype`: Data type (default: auto)
+- `--device`: Device to use (default: cuda:0)
 
 ### Test Parameters
 The script automatically tests the following configurations for both prefill and decode phases:

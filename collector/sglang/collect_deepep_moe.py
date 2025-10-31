@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import argparse
 import json
 import logging
 import multiprocessing
@@ -32,8 +33,6 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from helper import log_perf
 import pkg_resources
-
-DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 
 
 def get_moe_prefill_test_cases(rank):
@@ -750,28 +749,61 @@ def run_moe(
 
 
 if __name__ == "__main__":
-    model_path = DEEPSEEK_MODEL_PATH
-    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
-    num_warmup = 3
-    num_iterations = 10
-    test_layer = 3
-    num_experts = 128
+    parser = argparse.ArgumentParser(description="Collect DeepEP MoE benchmarking data for SGLang")
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        default="./",
+        help="Path to save output benchmark results",
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default="./deepseek-v3",
+        help="Path to the model directory",
+    )
+    parser.add_argument("--num_warmup", type=int, default=3, help="Number of warmup iterations (default: 3)")
+    parser.add_argument("--num_iterations", type=int, default=10, help="Number of benchmark iterations (default: 10)")
+    parser.add_argument("--test_layer", type=int, default=3, help="Layer to test (default: 3)")
+    parser.add_argument("--num_experts", type=int, default=128, help="Number of experts (default: 128)")
+    parser.add_argument("--tp_size", type=int, default=2, help="Tensor parallel size (default: 2)")
+    parser.add_argument("--ep_size", type=int, default=2, help="Expert parallel size (default: 2)")
+    parser.add_argument("--dtype", type=str, default="auto", help="Data type (default: auto)")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use (default: cuda)")
+    parser.add_argument("--load_format", type=str, default="dummy", help="Load format (default: dummy)")
+    parser.add_argument("--mem_fraction_static", type=float, default=0.3, help="Memory fraction static (default: 0.3)")
+    parser.add_argument("--node_rank", type=int, default=0, help="Node rank (default: 0)")
+    parser.add_argument("--host", type=str, default="localhost", help="Host (default: localhost)")
+    parser.add_argument("--port", type=int, default=30000, help="Port (default: 30000)")
+    parser.add_argument("--cuda_graph_max_bs", type=int, default=4, help="CUDA graph max batch size (default: 4)")
+
+    args = parser.parse_args()
+
+    model_path = args.model_path
+    output_path = args.output_path
+    num_warmup = args.num_warmup
+    num_iterations = args.num_iterations
+    test_layer = args.test_layer
+    num_experts = args.num_experts
+
+    print(f"Model path: {model_path}")
+    print(f"Output path: {output_path}")
 
     server_args = ServerArgs(
         model_path=model_path,
-        dtype="auto",
-        device="cuda",
-        load_format="dummy",
-        tp_size=2,
+        dtype=args.dtype,
+        device=args.device,
+        load_format=args.load_format,
+        tp_size=args.tp_size,
         trust_remote_code=True,
-        mem_fraction_static=0.3,
+        mem_fraction_static=args.mem_fraction_static,
         enable_deepep_moe=True,
         enable_ep_moe=True,
-        ep_size=2,
-        node_rank=0,
-        host="localhost",
-        port=30000,
-        cuda_graph_max_bs=4,
+        ep_size=args.ep_size,
+        node_rank=args.node_rank,
+        host=args.host,
+        port=args.port,
+        cuda_graph_max_bs=args.cuda_graph_max_bs,
         disable_cuda_graph=True,
     )
 

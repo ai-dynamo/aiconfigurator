@@ -282,8 +282,124 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     return errors
 
 
-def collect_sglang():
-    pass
+def collect_sglang(num_processes: int, ops: list[str] | None = None):
+    """Collect performance data for SGLang with enhanced error tracking"""
+    all_errors = []
+
+    os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
+
+    try:
+        # Try to get version from package metadata
+        try:
+            from importlib.metadata import version as get_version
+
+            version = get_version("sglang")
+        except:
+            try:
+                import pkg_resources
+
+                version = pkg_resources.get_distribution("sglang").version
+            except:
+                version = "unknown"
+
+        logger.info(f"SGLang version: {version}")
+    except:
+        logger.exception("SGLang is not installed")
+        return
+
+    # Define collection modules - each test type as separate entry
+    collections = [
+        # GEMM collection
+        {
+            "name": "sglang",
+            "type": "gemm",
+            "module": "sglang.collect_gemm",
+            "get_func": "get_gemm_test_cases",
+            "run_func": "run_gemm",
+        },
+        # MLA collections - context and generation
+        {
+            "name": "sglang",
+            "type": "mla_context",
+            "module": "sglang.collect_mla",
+            "get_func": "get_context_mla_test_cases",
+            "run_func": "run_mla",
+        },
+        {
+            "name": "sglang",
+            "type": "mla_generation",
+            "module": "sglang.collect_mla",
+            "get_func": "get_generation_mla_test_cases",
+            "run_func": "run_mla",
+        },
+        # MLA BMM collections - gen_pre and gen_post
+        {
+            "name": "sglang",
+            "type": "mla_bmm_gen_pre",
+            "module": "sglang.collect_mla_bmm",
+            "get_func": "get_mla_gen_pre_test_cases",
+            "run_func": "run_mla_gen_pre",
+        },
+        {
+            "name": "sglang",
+            "type": "mla_bmm_gen_post",
+            "module": "sglang.collect_mla_bmm",
+            "get_func": "get_mla_gen_post_test_cases",
+            "run_func": "run_mla_gen_post",
+        },
+        # MOE collection
+        {
+            "name": "sglang",
+            "type": "moe",
+            "module": "sglang.collect_moe",
+            "get_func": "get_moe_test_cases",
+            "run_func": "run_moe_torch",
+        },
+        # Normal Attention collections - context and generation
+        {
+            "name": "sglang",
+            "type": "attention_context",
+            "module": "sglang.collect_normal_attn",
+            "get_func": "get_context_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+        {
+            "name": "sglang",
+            "type": "attention_generation",
+            "module": "sglang.collect_normal_attn",
+            "get_func": "get_generation_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+    ]
+
+    for collection in collections:
+        if ops and (collection["type"] not in ops):
+            continue
+        try:
+            module_name = collection["module"]
+
+            get_module = __import__(module_name, fromlist=[collection["get_func"]])
+            run_module = __import__(module_name, fromlist=[collection["run_func"]])
+
+            get_func = getattr(get_module, collection["get_func"])
+            run_func = getattr(run_module, collection["run_func"])
+
+            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
+            all_errors.extend(errors)
+
+        except Exception as e:
+            logger.exception(f"Failed to process {collection['name']}.{collection['type']}")
+            all_errors.append(
+                {
+                    "module": f"{collection['name']}.{collection['type']}",
+                    "error_type": "ImportError",
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+
+    # Generate summary report
+    generate_collection_summary(all_errors, "sglang", version)
 
 
 def collect_vllm(num_processes: int):
@@ -530,7 +646,8 @@ def main():
             "mla_bmm_gen_post",
             "moe",
         ],
-        help="Run only specified collection items. Leave empty to run all.",
+        help="Run only specified collection items. Leave empty to run all. "
+        "Available ops vary by backend - see backend-specific collectors for details.",
         default=None,
     )
     args = parser.parse_args()
@@ -551,7 +668,7 @@ def main():
     if args.backend == "trtllm":
         collect_trtllm(num_processes, ops)
     elif args.backend == "sglang":
-        collect_sglang(num_processes)
+        collect_sglang(num_processes, ops)
     elif args.backend == "vllm":
         collect_vllm(num_processes)
 

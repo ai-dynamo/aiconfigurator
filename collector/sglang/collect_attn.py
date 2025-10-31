@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import argparse
 import json
 import logging
 import os
@@ -29,7 +30,6 @@ except ModuleNotFoundError:
     from helper import log_perf
 import pkg_resources
 
-DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 logger = logging.getLogger(__name__)
 
 
@@ -461,18 +461,41 @@ def run_attention_torch(
 
 
 if __name__ == "__main__":
-    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
-    model_path = DEEPSEEK_MODEL_PATH
-    test_layer = 0
-    num_warmup = 3
-    num_iterations = 10
-    dtype = "auto"
-    device = "cuda"
-    enable_profiler = False
+    parser = argparse.ArgumentParser(description="Collect attention benchmarking data for SGLang")
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        default="./",
+        help="Path to save output benchmark results",
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default="./deepseek-v3",
+        help="Path to the model directory",
+    )
+    parser.add_argument("--test_layer", type=int, default=0, help="Layer to test (default: 0)")
+    parser.add_argument("--num_warmup", type=int, default=3, help="Number of warmup iterations (default: 3)")
+    parser.add_argument("--num_iterations", type=int, default=10, help="Number of benchmark iterations (default: 10)")
+    parser.add_argument("--dtype", type=str, default="auto", help="Data type (default: auto)")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use (default: cuda)")
+    parser.add_argument("--enable_profiler", action="store_true", help="Enable torch profiler for detailed analysis")
+
+    args = parser.parse_args()
+
+    output_path = args.output_path
+    model_path = args.model_path
+    test_layer = args.test_layer
+    num_warmup = args.num_warmup
+    num_iterations = args.num_iterations
+    dtype = args.dtype
+    device = args.device
+    enable_profiler = args.enable_profiler
 
     cleanup_distributed()
 
     print(f"Loading model from {model_path}...")
+    print(f"Output path: {output_path}")
     print("\nTip: To test with dummy weights and limited layers, use:")
     print("  SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 python collect_attn.py")
 
