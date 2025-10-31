@@ -358,8 +358,22 @@ class MoEDispatch(Operation):
                     else:
                         comm_latency = 0
         elif database.backend == common.BackendName.vllm.value:
-            raise NotImplementedError("Need to implement MoE dispatch for vllm")
-        elif database.backend == common.BackendName.sglang.value:  # sglang
+            assert self._moe_tp_size == 1, "vllm does not support moe_tp_size > 1"
+
+            comm_latency = 0
+
+            # Add allreduce latency when TP > 1
+            if self._attention_tp_size > 1:
+                comm_latency += database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+
+            if self._attention_dp_size > 1:
+                comm_latency += database.query_nccl(
+                    common.CommQuantMode.half,
+                    self.num_gpus,
+                    "all_gather" if self._pre_dispatch else "reduce_scatter",
+                    volume * self._attention_dp_size,
+                )
+        elif database.backend == common.BackendName.sglang.value:
             assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
                 "We don't enable the path for SGLang to support TP>1 and DP>1 for attn simultaneously"
             )

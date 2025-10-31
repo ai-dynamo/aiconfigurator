@@ -128,6 +128,12 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             for handler in worker_logger.handlers:
                 handler.flush()
 
+            # This error is could be fatal and require a process restart.
+            if isinstance(e, torch.AcceleratorError):
+                # Exiting with non-zero code will add an additional error to the summary,
+                # which we don't want.
+                exit(0)
+
 
 def parallel_run(tasks, func, num_processes, module_name="unknown"):
     """parallel runner with error collection"""
@@ -329,6 +335,7 @@ def collect_ops(
                     "traceback": traceback.format_exc(),
                 }
             )
+    return all_errors
 
     return all_errors
 
@@ -427,7 +434,7 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
 
 def collect_vllm(num_processes: int, ops: list[str] | None = None):
     """
-    Collect performance data for VLLM v1.
+    Collect performance data for VLLM
     """
 
     try:
@@ -441,7 +448,7 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
 
     collections = [
         # GEMM collections
-        # vllm v1 GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
+        # vllm GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
         {
             "name": "vllm",
             "type": "gemm",
@@ -463,6 +470,13 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
             "module": "collector.vllm.collect_attn",
             "get_func": "get_generation_attention_test_cases",
             "run_func": "run_attention_torch",
+        },
+        {
+            "name": "vllm",
+            "type": "moe",
+            "module": "collector.vllm.collect_moe",
+            "get_func": "get_moe_test_cases",
+            "run_func": "run_moe_torch",
         },
     ]
 
