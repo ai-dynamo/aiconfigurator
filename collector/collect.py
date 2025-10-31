@@ -289,9 +289,19 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
 
     try:
-        import sglang
+        # Try to get version from package metadata
+        try:
+            from importlib.metadata import version as get_version
 
-        version = sglang.__version__
+            version = get_version("sglang")
+        except:
+            try:
+                import pkg_resources
+
+                version = pkg_resources.get_distribution("sglang").version
+            except:
+                version = "unknown"
+
         logger.info(f"SGLang version: {version}")
     except:
         logger.exception("SGLang is not installed")
