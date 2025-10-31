@@ -198,8 +198,8 @@ class TaskConfigFactory:
                 worker_config["tp_list"] = [1, 2, 4, 8, 16]
                 worker_config["pp_list"] = [1]
         else:
-            # For DEEPSEEK_V3 with sglang backend, require moe_ep >= 8 due to missing node_num=0 perf data
-            if ctx.model_name == "DEEPSEEK_V3" and ctx.backend_name == "sglang":
+            # For DEEPSEEK with sglang backend, require moe_ep >= 8 due to missing node_num=0 perf data
+            if ctx.model_family == "DEEPSEEK" and ctx.backend_name == "sglang":
                 # Constrain to moe_ep >= 8 to avoid node_num < 1 (intra-node configs)
                 worker_config["num_gpu_per_worker"] = [8, 16, 32] if ctx.total_gpus >= 32 else [8]
                 worker_config["tp_list"] = [1]
@@ -257,11 +257,12 @@ class TaskConfigFactory:
                 decode_worker_config["tp_list"] = [1, 2, 4, 8, 16]
                 decode_worker_config["pp_list"] = [1]
         else:
-            # For DEEPSEEK_V3 with sglang backend, require moe_ep >= 8 due to missing node_num=0 perf data
-            if ctx.model_name == "DEEPSEEK_V3" and ctx.backend_name == "sglang":
+            # For DEEPSEEK with sglang backend, require moe_ep >= 8 due to missing node_num=0 perf data
+            if ctx.model_family == "DEEPSEEK" and ctx.backend_name == "sglang":
                 # Constrain to moe_ep >= 8 to avoid node_num < 1 (intra-node configs)
-                moe_ep_options = [8, 16, 32, 64] if ctx.total_gpus >= 64 else [8, 16, 32] if ctx.total_gpus >= 32 else [8]
-                
+                moe_ep_options = (
+                    [8, 16, 32, 64] if ctx.total_gpus >= 64 else [8, 16, 32] if ctx.total_gpus >= 32 else [8]
+                )
                 prefill_worker_config["num_gpu_per_worker"] = moe_ep_options
                 prefill_worker_config["tp_list"] = [1]
                 prefill_worker_config["pp_list"] = [1]
