@@ -7,8 +7,7 @@ from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.version import __version__ as vllm_version
-
-from utils import (
+from vllm_v1.utils import (
     BatchSpec,
     _Backend,
     create_and_prepopulate_kv_cache,
@@ -18,15 +17,7 @@ from utils import (
     get_attention_backend,
 )
 
-# from helper import get_sm_version, log_perf
-
-
-def get_sm_version():
-    return 89
-
-
-def log_perf(*args, **kwargs):
-    pass
+from helper import get_sm_version, log_perf
 
 
 class MockAttentionLayer:
@@ -100,7 +91,7 @@ def run_attention_torch(
         q_len = batch_spec.query_lens[i]
         context_len = s_len - q_len
 
-        # Generate Q, K, V for the whole sequence to be used in SDPA
+        # Generate Q, K, V for the whole sequence
         q = torch.randn(q_len, num_heads, head_dim, dtype=dtype, device=device)
         k_full = torch.randn(s_len, num_kv_heads, head_dim, dtype=dtype, device=device)
         v_full = torch.randn(s_len, num_kv_heads, head_dim, dtype=dtype, device=device)
@@ -111,9 +102,8 @@ def run_attention_torch(
         all_v_vllm.append(v_full[context_len:])
 
         # Contextual K/V data used to populate the paged cache
-        if not is_context_phase:
-            k_contexts.append(k_full[:context_len])
-            v_contexts.append(v_full[:context_len])
+        k_contexts.append(k_full[:context_len])
+        v_contexts.append(v_full[:context_len])
 
     query_vllm = torch.cat(all_q_vllm, dim=0)
     key_vllm = torch.cat(all_k_vllm, dim=0)
@@ -277,7 +267,6 @@ def run_attention_torch(
 
 def get_context_attention_test_cases(if_unit_test=False):
     has_fp8_kv_cache = get_sm_version() > 86
-    has_fp8_kv_cache = False
     test_cases = []
 
     if not if_unit_test:
@@ -372,7 +361,6 @@ def get_context_attention_test_cases(if_unit_test=False):
                         #     ]
                         # )
 
-    return test_cases[:50]
     return test_cases
 
 
@@ -448,7 +436,6 @@ def get_generation_attention_test_cases():
                                 "generation_attention_perf.txt",
                             ]
                         )
-    return test_cases[:50]
     return test_cases
 
 
@@ -459,8 +446,8 @@ if __name__ == "__main__":
         print(f"Running context attention test case: {test_case}")
         run_attention_torch(*test_case)
 
-    # test_cases = get_generation_attention_test_cases()
-    # test_cases = test_cases[30:]
-    # for test_case in test_cases:
-    # print(f"Running generation attention test case: {test_case}")
-    # run_attention_torch(*test_case)
+    test_cases = get_generation_attention_test_cases()
+    test_cases = test_cases[:10]
+    for test_case in test_cases:
+        print(f"Running generation attention test case: {test_case}")
+        run_attention_torch(*test_case)
