@@ -198,7 +198,7 @@ def run_mlp_torch(
             intermediate_size=intermediate_size,
             hidden_act="silu",
             quant_config=quant_config,
-            reduce_results=True,
+            reduce_results=False,  # Set to False for single-GPU benchmarking (tp_size=1)
             prefix="",
             tp_rank=0,
             tp_size=1,
