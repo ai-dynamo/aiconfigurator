@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import argparse
 import math
 import os
 
@@ -20,8 +21,6 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.layers.quantization import Fp8Config
 from sglang.srt.models.deepseek_v2 import DeepseekV2MLP
-
-DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 
 
 def get_mlp_prefill_test_cases():
@@ -268,19 +267,42 @@ def run_mlp_torch(
 
 
 if __name__ == "__main__":
-    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
-    model_path = DEEPSEEK_MODEL_PATH
-    hidden_size = 7168
-    intermediate_size = 2048
-    num_warmup = 3
-    num_iterations = 10
-    dtype = "auto"
-    device = "cuda:0"
+    parser = argparse.ArgumentParser(description="Collect MLP benchmarking data for SGLang")
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        default="./",
+        help="Path to save output benchmark results",
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default="./deepseek-v3",
+        help="Path to the model directory",
+    )
+    parser.add_argument("--hidden_size", type=int, default=7168, help="Hidden size (default: 7168)")
+    parser.add_argument("--intermediate_size", type=int, default=2048, help="Intermediate size (default: 2048)")
+    parser.add_argument("--num_warmup", type=int, default=3, help="Number of warmup iterations (default: 3)")
+    parser.add_argument("--num_iterations", type=int, default=10, help="Number of benchmark iterations (default: 10)")
+    parser.add_argument("--dtype", type=str, default="auto", help="Data type (default: auto)")
+    parser.add_argument("--device", type=str, default="cuda:0", help="Device to use (default: cuda:0)")
+
+    args = parser.parse_args()
+
+    output_path = args.output_path
+    model_path = args.model_path
+    hidden_size = args.hidden_size
+    intermediate_size = args.intermediate_size
+    num_warmup = args.num_warmup
+    num_iterations = args.num_iterations
+    dtype = args.dtype
+    device = args.device
 
     cleanup_distributed()
 
     print("Starting SGLang MLP Benchmark")
     print(f"Model path: {model_path}")
+    print(f"Output path: {output_path}")
     print(f"Device: {torch.cuda.get_device_name()}")
 
     prefill_test_cases = get_mlp_prefill_test_cases()
