@@ -125,6 +125,38 @@ SupportedModels = {
     "GPT_OSS_120B": ["MOE", 36, 64, 8, 64, 2880, 2880, 201088, 131072, 4, 128, 2880, None],
     "GPT_OSS_20B": ["MOE", 24, 64, 8, 64, 2880, 2880, 201088, 131072, 4, 32, 2880, None],
 }
+SupportedHFModels = {
+    # Llama 2 Models
+    "meta-llama/Llama-2-7b-hf": "LLAMA2_7B",
+    "meta-llama/Llama-2-13b-hf": "LLAMA2_13B",
+    "meta-llama/Llama-2-70b-hf": "LLAMA2_70B",
+    # Llama 3.1 Models
+    "meta-llama/Meta-Llama-3.1-8B": "LLAMA3.1_8B",
+    "meta-llama/Meta-Llama-3.1-70B": "LLAMA3.1_70B",
+    "meta-llama/Meta-Llama-3.1-405B": "LLAMA3.1_405B",
+    # Mixtral Models
+    "mistralai/Mixtral-8x7B-v0.1": "MOE_Mixtral8x7B",
+    "mistralai/Mixtral-8x22B-v0.1": "MOE_Mixtral8x22B",
+    # DeepSeek Models
+    "deepseek-ai/DeepSeek-V3": "DEEPSEEK_V3",
+    # Qwen 2.5 Models
+    "Qwen/Qwen2.5-1.5B": "QWEN2.5_1.5B",
+    "Qwen/Qwen2.5-7B": "QWEN2.5_7B",
+    "Qwen/Qwen2.5-32B": "QWEN2.5_32B",
+    "Qwen/Qwen2.5-72B": "QWEN2.5_72B",
+    # Qwen 3 Models
+    "Qwen/Qwen3-0.6B": "QWEN3_0.6B",
+    "Qwen/Qwen3-1.7B": "QWEN3_1.7B",
+    "Qwen/Qwen3-8B": "QWEN3_8B",
+    "Qwen/Qwen3-32B": "QWEN3_32B",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct": "QWEN3_235B",
+    "Qwen/Qwen3-Coder-480B-A35B-Instruct": "QWEN3_480B",
+    # GPT-OSS Models
+    "openai/gpt-oss-120b": "GPT_OSS_120B",
+    "openai/gpt-oss-20b": "GPT_OSS_20B",
+    # NVIDIA Nemotron
+    "nvidia/Llama-3_3-Nemotron-Super-49B-v1": "Nemotron_super_v1.1",
+}
 
 """
 Supported systems (GPU types)
@@ -135,6 +167,18 @@ SupportedSystems = {"h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"}
 Model family for model definition
 """
 ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS"}
+ARCHITECTURE_TO_MODEL_FAMILY = {
+    "LlamaForCausalLM": "LLAMA",
+    "Qwen2ForCausalLM": "LLAMA",
+    "Qwen3ForCausalLM": "LLAMA",
+    "DeepSeekForCausalLM": "DEEPSEEK",
+    "DeepseekV3ForCausalLM": "DEEPSEEK",
+    "NemotronForCausalLM": "NEMOTRONNAS",
+    "DeciLMForCausalLM": "NEMOTRONNAS",
+    "MixtralForCausalLM": "MOE",
+    "Qwen3MoeForCausalLM": "MOE",
+    "GptOssForCausalLM": "MOE",
+}
 
 """
 All reduce strategy for trtllm custom allreduce

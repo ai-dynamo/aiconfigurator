@@ -33,14 +33,20 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
 
 
 def _add_default_mode_arguments(parser):
-    parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--model",
         choices=common.SupportedModels.keys(),
         type=str,
-        required=True,
         help="Model name.",
     )
+    group.add_argument(
+        "--hf_id",
+        choices=common.SupportedHFModels.keys(),
+        type=str,
+        help="HuggingFace model ID. e.g. Qwen/Qwen2.5-7B",
+    )
+    parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")
     parser.add_argument(
         "--system", choices=common.SupportedSystems, type=str, required=True, help="Default system name (GPU type)."
     )
@@ -107,7 +113,7 @@ def configure_parser(parser):
 def _build_default_task_configs(args) -> dict[str, TaskConfig]:
     decode_system = args.decode_system or args.system
     common_kwargs: dict[str, Any] = {
-        "model_name": args.model,
+        "model_name": args.model or args.hf_id,
         "system_name": args.system,
         "backend_name": args.backend,
         "backend_version": args.backend_version,

@@ -26,9 +26,12 @@ class TestCLIArgumentParsing:
         required_actions = [action for action in default_parser._actions if getattr(action, "required", False)]
         required_args = [action.dest for action in required_actions]
 
-        assert "model" in required_args
         assert "total_gpus" in required_args
         assert "system" in required_args
+
+        assert len(default_parser._mutually_exclusive_groups) == 1
+        assert "model" in [action.dest for action in default_parser._mutually_exclusive_groups[0]._group_actions]
+        assert "hf_id" in [action.dest for action in default_parser._mutually_exclusive_groups[0]._group_actions]
 
     def test_exp_mode_required_args(self, cli_parser):
         """Test that exp mode requires the yaml_path argument."""
@@ -52,6 +55,7 @@ class TestCLIArgumentParsing:
         "param_name,expected_choices",
         [
             ("model", list(common.SupportedModels.keys())),
+            ("hf_id", list(common.SupportedHFModels.keys())),
             ("backend", [backend.value for backend in common.BackendName]),
         ],
     )
@@ -169,3 +173,36 @@ class TestCLIArgumentParsing:
             ]
         )
         assert args_with_decode.decode_system == "gb200_sxm"
+
+    def test_hf_id_as_alternative_to_model(self, cli_parser):
+        """Test that --hf_id can be used instead of --model."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--hf_id",
+                "Qwen/Qwen2.5-7B",
+                "--total_gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+            ]
+        )
+        assert args.hf_id == "Qwen/Qwen2.5-7B"
+        assert args.model is None
+
+    def test_model_and_hf_id_are_mutually_exclusive(self, cli_parser):
+        """Test that --model and --hf_id cannot be used together."""
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model",
+                    "QWEN3_32B",
+                    "--hf_id",
+                    "Qwen/Qwen2.5-7B",
+                    "--total_gpus",
+                    "8",
+                    "--system",
+                    "h200_sxm",
+                ]
+            )
