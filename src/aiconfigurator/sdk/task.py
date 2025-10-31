@@ -421,10 +421,14 @@ class TaskConfigFactory:
             kvcache_quant_mode = "fp8"
             fmha_quant_mode = "fp8"
         elif sm_version >= 89:
-            gemm_quant_mode = "fp8_block"
-            moe_quant_mode = "fp8_block"
-            kvcache_quant_mode = "fp8"
-            fmha_quant_mode = "fp8"
+            gemm_quant_mode = "fp8"
+            moe_quant_mode = "fp8"
+            # gemm_quant_mode = "fp8_block"
+            # moe_quant_mode = "fp8_block"
+            kvcache_quant_mode = "float16"
+            fmha_quant_mode = "float16"
+            # kvcache_quant_mode = "fp8"
+            # fmha_quant_mode = "fp8"
         else:
             gemm_quant_mode = "float16"
             moe_quant_mode = "float16"

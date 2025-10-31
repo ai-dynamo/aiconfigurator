@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import os
+
 import torch
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
@@ -52,9 +54,10 @@ def run_attention_torch(
     torch.cuda.set_device(device)
 
     dtype = torch.float16
-    model = "Qwen/Qwen2.5-0.5B-Instruct"
+    model = os.path.join(os.path.dirname(__file__), "fake_hf_model")
 
     # TODO: add more backends
+    # backend_name = _Backend.FLASHINFER
     backend_name = _Backend.FLASH_ATTN
 
     # Fast FlexAttention needs to run with block_size=128

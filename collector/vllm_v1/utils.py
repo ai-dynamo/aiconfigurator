@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 from typing import Union
 
-import pytest
 import torch
 from vllm.config import (
     CacheConfig,
@@ -137,7 +136,7 @@ def get_attention_backend(backend_name: _Backend):
         backend_class = resolve_obj_by_qualname(backend_class_name)
         return backend_class.get_builder_cls(), backend_class.get_impl_cls()
     except ImportError as e:
-        pytest.skip(f"{backend_name} not available: {e}")
+        raise ValueError(f"{backend_name} not available: {e}") from e
 
 
 def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> FullAttentionSpec:
