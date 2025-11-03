@@ -6,8 +6,9 @@ import pkg_resources
 import torch
 import torch.nn.functional as F
 from deep_gemm import get_col_major_tma_aligned_tensor
-from helper import log_perf
 from sgl_kernel import fp8_scaled_mm, int8_scaled_mm, sgl_per_tensor_quant_fp8
+
+from helper import log_perf
 
 
 def get_gemm_test_cases():
@@ -65,9 +66,7 @@ def get_gemm_test_cases():
                 for k in sorted(nk_list + nk_list_ext, reverse=True):
                     if n * k == 65536 * 65536:
                         continue
-                    if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (
-                        n < 128 or k < 128
-                    ):
+                    if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
                         continue
                     test_cases.append([gemm_type, x, n, k, "gemm_perf.txt"])
 
@@ -131,12 +130,8 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
         fp8_info = torch.finfo(torch.float8_e4m3fn)
         fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
-        a_fp32 = (
-            (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp8_max
-        )
-        b_fp32 = (
-            (torch.rand(N, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp8_max
-        )
+        a_fp32 = (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp8_max
+        b_fp32 = (torch.rand(N, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp8_max
 
         if gemm_type == "fp8_block":
             a_fp8 = a_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
@@ -155,9 +150,7 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
             repeat_n = 5
 
             def gemm_op():
-                return fp8_gemm_deepgemm(
-                    a_fp8, scale_a_col_major, b_fp8, scale_b, M, N, K
-                )
+                return fp8_gemm_deepgemm(a_fp8, scale_a_col_major, b_fp8, scale_b, M, N, K)
         else:
 
             def sglang_scaled_fp8_quant(
@@ -165,14 +158,10 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
                 scale: torch.Tensor | None = None,
             ) -> tuple[torch.Tensor, torch.Tensor]:
                 fp8_type_: torch.dtype = torch.float8_e4m3fn
-                output = torch.empty_like(
-                    input_tensor, device=input_tensor.device, dtype=fp8_type_
-                )
+                output = torch.empty_like(input_tensor, device=input_tensor.device, dtype=fp8_type_)
                 is_static = True
                 if scale is None:
-                    scale = torch.zeros(
-                        1, device=input_tensor.device, dtype=torch.float32
-                    )
+                    scale = torch.zeros(1, device=input_tensor.device, dtype=torch.float32)
                     is_static = False
                 sgl_per_tensor_quant_fp8(input_tensor, output, scale, is_static)
 
@@ -187,22 +176,16 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
             repeat_n = 5
 
             def gemm_op():
-                return fp8_scaled_mm(
-                    a_fp8, b_fp8, scale_a_fp8, scale_b_fp8, torch.bfloat16
-                )
+                return fp8_scaled_mm(a_fp8, b_fp8, scale_a_fp8, scale_b_fp8, torch.bfloat16)
 
     elif gemm_type == "float16":
         fp16_info = torch.finfo(torch.float16)
         fp16_max, fp16_min = fp16_info.max, fp16_info.min
 
-        a_fp32 = (
-            (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
-        )
+        a_fp32 = (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
         a_fp16 = a_fp32.clamp(min=fp16_min, max=fp16_max).to(torch.float16)
 
-        b_fp32 = (
-            (torch.rand(N, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
-        )
+        b_fp32 = (torch.rand(N, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
         b_fp16 = b_fp32.clamp(min=fp16_min, max=fp16_max).to(torch.float16)
 
         repeat_n = 5
@@ -216,15 +199,11 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
         fp16_max, fp16_min = fp16_info.max, fp16_info.min
 
         # Create activation tensor (fp16)
-        a_fp32 = (
-            (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
-        )
+        a_fp32 = (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
         a_fp16 = a_fp32.clamp(min=fp16_min, max=fp16_max).to(torch.float16)
 
         # Create weight tensor (int8 with per-channel scaling)
-        b_fp32 = (
-            (torch.rand(N, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
-        )
+        b_fp32 = (torch.rand(N, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
         b_fp16 = b_fp32.clamp(min=fp16_min, max=fp16_max).to(torch.float16)
 
         # Quantize weight to int8 with per-channel (per-row) scaling
@@ -252,14 +231,10 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
         fp16_max, fp16_min = fp16_info.max, fp16_info.min
 
         # Use torch.nn.Linear instead of undefined ColumnParallerLinear
-        linear = torch.nn.Linear(
-            in_features=K, out_features=N, bias=False, device="cuda"
-        )
+        linear = torch.nn.Linear(in_features=K, out_features=N, bias=False, device="cuda")
         quantize_(linear, int4_weight_only(group_size=128), filter_fn=None)
 
-        a_fp32 = (
-            (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
-        )
+        a_fp32 = (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
         a_fp16 = a_fp32.clamp(min=fp16_min, max=fp16_max).to(torch.float16)
 
         repeat_n = 5
@@ -294,9 +269,7 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
     latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
 
     log_perf(
-        item_list=[
-            {"gemm_dtype": gemm_type, "m": M, "n": N, "k": K, "latency": latency}
-        ],
+        item_list=[{"gemm_dtype": gemm_type, "m": M, "n": N, "k": K, "latency": latency}],
         framework="SGLang",
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
