@@ -59,14 +59,14 @@ class TestHFModelSupport:
     """Test HuggingFace model ID support."""
 
     def test_supported_hf_models_exists(self):
-        """Test that SupportedHFModels dict exists and has content."""
-        assert hasattr(common, "SupportedHFModels")
-        assert isinstance(common.SupportedHFModels, set)
-        assert len(common.SupportedHFModels) > 0
+        """Test that CachedHFModels dict exists and has content."""
+        assert hasattr(common, "CachedHFModels")
+        assert isinstance(common.CachedHFModels, set)
+        assert len(common.CachedHFModels) > 0
 
     def test_hf_models_map_to_valid_model_configs(self):
         """Test that all HF model IDs map to valid model names in SupportedModels."""
-        for hf_id in common.SupportedHFModels:
+        for hf_id in common.CachedHFModels:
             config = get_model_config_from_hf_id(hf_id)
             assert config[0] in common.ModelFamily
 

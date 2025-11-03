@@ -55,7 +55,7 @@ class TestCLIArgumentParsing:
         "param_name,expected_choices",
         [
             ("model", list(common.SupportedModels.keys())),
-            ("hf_id", list(common.SupportedHFModels)),
+            ("hf_id", list(common.CachedHFModels)),
             ("backend", [backend.value for backend in common.BackendName]),
         ],
     )

@@ -20,6 +20,7 @@ from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_tpot_constraint,
 )
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.sdk.utils import validate_hf_model
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +43,7 @@ def _add_default_mode_arguments(parser):
     )
     group.add_argument(
         "--hf_id",
-        choices=common.SupportedHFModels,
-        type=str,
+        type=validate_hf_model,
         help="HuggingFace model ID. e.g. Qwen/Qwen2.5-7B",
     )
     parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")

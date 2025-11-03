@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
 import importlib.resources as pkg_resources
 import json
 import logging
@@ -9,7 +10,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-from aiconfigurator.sdk.common import ARCHITECTURE_TO_MODEL_FAMILY, SupportedHFModels
+from aiconfigurator.sdk.common import ARCHITECTURE_TO_MODEL_FAMILY, CachedHFModels
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,14 @@ def safe_mkdir(target_path: str, exist_ok: bool = True) -> Path:
         raise ValueError(f"Failed to create directory: {e}") from e
 
 
+class HuggingFaceDownloadError(Exception):
+    """
+    Exception raised when a HuggingFace config.json file cannot be downloaded.
+    """
+
+    pass
+
+
 def _download_hf_config(hf_id: str) -> dict:
     """
     Download a HuggingFace config.json file from the HuggingFace API.
@@ -131,7 +140,7 @@ def _download_hf_config(hf_id: str) -> dict:
         dict: HuggingFace config.json dictionary
 
     Raises:
-        RuntimeError: If the HuggingFace API returns an error
+        HuggingFaceDownloadError: If the HuggingFace API returns an error
     """
     url = f"https://huggingface.co/{hf_id}/raw/main/config.json"
 
@@ -151,7 +160,7 @@ def _download_hf_config(hf_id: str) -> dict:
             return json.load(response)
     except urllib.error.HTTPError as e:
         # Provide detailed error for any HTTP error code
-        raise RuntimeError(
+        raise HuggingFaceDownloadError(
             f"HuggingFace returned HTTP error {e.code}: {e.reason}. "
             f"URL: {url}. Check your authentication token in {token_path} if using a gated model."
         ) from e
@@ -170,9 +179,15 @@ def _parse_hf_config_json(config: dict) -> list:
         list: Model configuration parameters
 
     Raises:
-        KeyError: If a required field is missing from the config
+        ValueError: If a required field is missing from the config or the architecture is not supported
     """
-    model_family = ARCHITECTURE_TO_MODEL_FAMILY[config["architectures"][0]]
+    try:
+        model_family = ARCHITECTURE_TO_MODEL_FAMILY[config["architectures"][0]]
+    except KeyError as e:
+        raise ValueError(
+            f"The model's architecture {config['architectures'][0]} is not supported. "
+            f"Supported architectures: {', '.join(ARCHITECTURE_TO_MODEL_FAMILY.keys())}"
+        ) from e
     layers = config["num_hidden_layers"]
     n_kv = config["num_key_value_heads"]
     hidden_size = config["hidden_size"]
@@ -184,6 +199,24 @@ def _parse_hf_config_json(config: dict) -> list:
     topk = config.get("num_experts_per_tok", 0)
     num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
     moe_inter_size = config.get("moe_intermediate_size", 0)
+    logger.info(
+        (
+            "Model architecture: model_family=%s, layers=%s, n=%s, n_kv=%s, d=%s, hidden_size=%s, "
+            "inter_size=%s, vocab=%s, context=%s, topk=%s, num_experts=%s, moe_inter_size=%s"
+        ),
+        model_family,
+        layers,
+        n,
+        n_kv,
+        d,
+        hidden_size,
+        inter_size,
+        vocab,
+        context,
+        topk,
+        num_experts,
+        moe_inter_size,
+    )
     return [
         model_family,
         layers,
@@ -212,9 +245,12 @@ def load_pre_downloaded_hf_config(hf_id: str) -> list:
     """
     Load a pre-downloaded HuggingFace config.json file from the model_configs directory.
     """
-    if hf_id not in SupportedHFModels:
+    if hf_id not in CachedHFModels:
         raise ValueError(f"HuggingFace model {hf_id} is not cached in model_configs directory.")
-    with open(get_model_config_path() / f"{hf_id.replace('/', '--')}_config.json") as f:
+    config_path = get_model_config_path() / f"{hf_id.replace('/', '--')}_config.json"
+    if not config_path.exists():
+        raise ValueError(f"HuggingFace model {hf_id} is not cached in model_configs directory.")
+    with open(config_path) as f:
         config = json.load(f)
         return _parse_hf_config_json(config)
 
@@ -228,9 +264,24 @@ def get_model_config_from_hf_id(hf_id: str) -> list:
         config = _download_hf_config(hf_id)
         logger.info(f"Fetched config.json for {hf_id} from HuggingFace.")
         return _parse_hf_config_json(config)
-    except Exception as e:
+    except HuggingFaceDownloadError:
         logger.info(
-            f"Failed to download from HuggingFace using user's HF token saved in ~/.cache/huggingface/token, "
-            f"trying to use cached config: {e}"
+            "Failed to download from HuggingFace using user's HF token saved in ~/.cache/huggingface/token, "
+            "trying to use cached config."
         )
         return load_pre_downloaded_hf_config(hf_id)
+
+
+def validate_hf_model(hf_id: str) -> str:
+    """Validate that the HuggingFace model ID is supported."""
+    if hf_id in CachedHFModels:
+        return hf_id
+    try:
+        logger.info(f"{hf_id}'s config.json is not cached, downloading from HuggingFace using user's HF token.")
+        config = _download_hf_config(hf_id)
+        _parse_hf_config_json(config)
+        return hf_id
+    except HuggingFaceDownloadError as e:
+        raise argparse.ArgumentTypeError(f"Failed to download {hf_id}'s config.json from HuggingFace: {e}") from e
+    except Exception as e:
+        raise argparse.ArgumentTypeError(str(e)) from e

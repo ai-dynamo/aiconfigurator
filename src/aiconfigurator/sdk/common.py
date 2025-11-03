@@ -125,7 +125,7 @@ SupportedModels = {
     "GPT_OSS_120B": ["MOE", 36, 64, 8, 64, 2880, 2880, 201088, 131072, 4, 128, 2880, None],
     "GPT_OSS_20B": ["MOE", 24, 64, 8, 64, 2880, 2880, 201088, 131072, 4, 32, 2880, None],
 }
-SupportedHFModels = {
+CachedHFModels = {
     # Llama 2 Models
     "meta-llama/Llama-2-7b-hf",
     "meta-llama/Llama-2-13b-hf",

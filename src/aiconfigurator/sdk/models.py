@@ -15,12 +15,9 @@ logger = logging.getLogger(__name__)
 
 @cache
 def _get_model_info(model_name: str) -> list:
-    if model_name in common.SupportedHFModels:
-        return get_model_config_from_hf_id(model_name)
-    elif model_name in common.SupportedModels:
+    if model_name in common.SupportedModels:
         return common.SupportedModels[model_name]
-    else:
-        raise ValueError(f"Unsupported model: {model_name}")
+    return get_model_config_from_hf_id(model_name)
 
 
 def get_model(model_name: str, model_config: config.ModelConfig, backend_name: str) -> BaseModel:

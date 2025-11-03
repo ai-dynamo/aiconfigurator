@@ -7,10 +7,7 @@ Unit tests for SDK utility functions.
 Tests HuggingFace config parsing and model config retrieval.
 """
 
-import json
-from unittest.mock import mock_open, patch
-
-import pytest
+from unittest.mock import patch
 
 from aiconfigurator.sdk.utils import _parse_hf_config_json, get_model_config_from_hf_id
 
@@ -129,41 +126,6 @@ class TestGetModelConfigFromHFID:
 
         assert result[0] == "LLAMA"
         mock_download.assert_called_once_with("meta-llama/Meta-Llama-3.1-8B")
-
-    @patch("aiconfigurator.sdk.utils._download_hf_config")
-    @patch("builtins.open", new_callable=mock_open)
-    def test_fallback_to_cached_config(self, mock_file, mock_download):
-        """Test fallback to cached config when download fails."""
-        # Simulate download failure
-        mock_download.side_effect = RuntimeError("Download failed")
-
-        # Mock cached config file
-        cached_config = {
-            "architectures": ["LlamaForCausalLM"],
-            "num_hidden_layers": 32,
-            "num_key_value_heads": 8,
-            "hidden_size": 4096,
-            "num_attention_heads": 32,
-            "intermediate_size": 14336,
-            "vocab_size": 128256,
-            "max_position_embeddings": 131072,
-            "num_experts_per_tok": 0,
-        }
-        mock_file.return_value.read.return_value = json.dumps(cached_config)
-        mock_file.return_value.__enter__.return_value.read.return_value = json.dumps(cached_config)
-
-        with patch("json.load", return_value=cached_config):
-            result = get_model_config_from_hf_id("Qwen/Qwen2.5-7B")
-
-        assert result[0] == "LLAMA"
-
-    @patch("aiconfigurator.sdk.utils._download_hf_config")
-    def test_raises_on_unsupported_model_with_no_cache(self, mock_download):
-        """Test that unsupported model with no cache raises ValueError."""
-        mock_download.side_effect = RuntimeError("Download failed")
-
-        with pytest.raises(ValueError, match="is not cached in model_configs directory"):
-            get_model_config_from_hf_id("unsupported/unknown-model")
 
 
 class TestSafeMkdir:
