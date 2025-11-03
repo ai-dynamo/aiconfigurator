@@ -230,17 +230,23 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
         fp16_info = torch.finfo(torch.float16)
         fp16_max, fp16_min = fp16_info.max, fp16_info.min
 
-        # Use torch.nn.Linear instead of undefined ColumnParallerLinear
-        linear = torch.nn.Linear(in_features=K, out_features=N, bias=False, device="cuda")
+        # Use torch.nn.Linear with bfloat16 dtype (required by TorchAO int4)
+        linear = torch.nn.Linear(
+            in_features=K,
+            out_features=N,
+            bias=False,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
         quantize_(linear, int4_weight_only(group_size=128), filter_fn=None)
 
         a_fp32 = (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
-        a_fp16 = a_fp32.clamp(min=fp16_min, max=fp16_max).to(torch.float16)
+        a_bf16 = a_fp32.clamp(min=fp16_min, max=fp16_max).to(torch.bfloat16)
 
         repeat_n = 5
 
         def gemm_op():
-            return linear(a_fp16)
+            return linear(a_bf16)
 
     num_warmups = 3
     num_runs = 6
