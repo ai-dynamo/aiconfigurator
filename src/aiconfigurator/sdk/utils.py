@@ -202,22 +202,9 @@ def _parse_hf_config_json(config: dict) -> list:
     num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
     moe_inter_size = config.get("moe_intermediate_size", 0)
     logger.info(
-        (
-            "Model architecture: model_family=%s, layers=%s, n=%s, n_kv=%s, d=%s, hidden_size=%s, "
-            "inter_size=%s, vocab=%s, context=%s, topk=%s, num_experts=%s, moe_inter_size=%s"
-        ),
-        model_family,
-        layers,
-        n,
-        n_kv,
-        d,
-        hidden_size,
-        inter_size,
-        vocab,
-        context,
-        topk,
-        num_experts,
-        moe_inter_size,
+        f"Model architecture: model_family={model_family}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "
+        f"hidden_size={hidden_size}, inter_size={inter_size}, vocab={vocab}, context={context}, "
+        f"topk={topk}, num_experts={num_experts}, moe_inter_size={moe_inter_size}"
     )
     return [
         model_family,
