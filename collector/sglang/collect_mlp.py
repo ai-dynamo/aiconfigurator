@@ -26,8 +26,7 @@ DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 
 def get_mlp_prefill_test_cases():
     """Get test cases for MLP prefill phase
-    Returns: list of [quant_type, num_token, hidden_size, intermediate_size,
-                      is_context, num_warmup, num_iterations, perf_filename]
+    Returns: list of [quant_type, num_token, hidden_size, intermediate_size]
     """
     test_cases = []
 
@@ -54,31 +53,17 @@ def get_mlp_prefill_test_cases():
     quant_types = ["fp8_block"]
     hidden_size = 7168
     intermediate_size = 2048
-    num_warmup = 3
-    num_iterations = 10
 
     for quant_type in quant_types:
         for num_token in num_tokens:
-            test_cases.append(
-                [
-                    quant_type,
-                    num_token,
-                    hidden_size,
-                    intermediate_size,
-                    True,
-                    num_warmup,
-                    num_iterations,
-                    "context_mlp_perf.txt",
-                ]
-            )
+            test_cases.append([quant_type, num_token, hidden_size, intermediate_size])
 
     return test_cases
 
 
 def get_mlp_decode_test_cases():
     """Get test cases for MLP decode phase
-    Returns: list of [quant_type, num_token, hidden_size, intermediate_size,
-                      is_context, num_warmup, num_iterations, perf_filename]
+    Returns: list of [quant_type, num_token, hidden_size, intermediate_size]
     """
     test_cases = []
 
@@ -105,23 +90,10 @@ def get_mlp_decode_test_cases():
     quant_types = ["fp8_block"]
     hidden_size = 7168
     intermediate_size = 2048
-    num_warmup = 3
-    num_iterations = 10
 
     for quant_type in quant_types:
         for num_token in num_tokens:
-            test_cases.append(
-                [
-                    quant_type,
-                    num_token,
-                    hidden_size,
-                    intermediate_size,
-                    False,
-                    num_warmup,
-                    num_iterations,
-                    "generation_mlp_perf.txt",
-                ]
-            )
+            test_cases.append([quant_type, num_token, hidden_size, intermediate_size])
 
     return test_cases
 
@@ -176,8 +148,8 @@ def run_mlp_torch(
     is_context,
     num_warmup,
     num_iterations,
-    perf_filename,
-    device="cuda:0",
+    device,
+    output_path,
 ):
     """Run MLP benchmark for both context and generation phases"""
 
@@ -198,7 +170,7 @@ def run_mlp_torch(
             intermediate_size=intermediate_size,
             hidden_act="silu",
             quant_config=quant_config,
-            reduce_results=False,  # Set to False for single-GPU benchmarking (tp_size=1)
+            reduce_results=True,
             prefix="",
             tp_rank=0,
             tp_size=1,
@@ -228,6 +200,7 @@ def run_mlp_torch(
                     times.append(start_event.elapsed_time(end_event))
 
             avg_time = sum(times) / len(times)
+            perf_filename = os.path.join(output_path, "context_mlp_perf.txt")
             kernel_source = "deepseek_v3"
 
             std_time = math.sqrt(sum((t - avg_time) ** 2 for t in times) / len(times))
@@ -256,12 +229,14 @@ def run_mlp_torch(
 
             torch.cuda.synchronize()
             avg_time = start_event.elapsed_time(end_event) / num_iterations
+            perf_filename = os.path.join(output_path, "generation_mlp_perf.txt")
             kernel_source = "deepseek_v3_cuda_graph"
 
             print(f"  {phase} MLP time: {avg_time:.3f} ms")
 
         # Save via log_perf
         try:
+            os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
             device_name = torch.cuda.get_device_name(device)
             version = pkg_resources.get_distribution("sglang").version
             log_perf(
