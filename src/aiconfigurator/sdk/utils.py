@@ -208,6 +208,17 @@ def get_model_config_path():
     return pkg_resources.files("aiconfigurator") / "model_configs"
 
 
+def load_pre_downloaded_hf_config(hf_id: str) -> list:
+    """
+    Load a pre-downloaded HuggingFace config.json file from the model_configs directory.
+    """
+    if hf_id not in SupportedHFModels:
+        raise ValueError(f"HuggingFace model {hf_id} is not cached in model_configs directory.")
+    with open(get_model_config_path() / f"{hf_id.replace('/', '--')}_config.json") as f:
+        config = json.load(f)
+        return _parse_hf_config_json(config)
+
+
 def get_model_config_from_hf_id(hf_id: str) -> list:
     """
     Get model configuration from HuggingFace ID.
@@ -222,8 +233,4 @@ def get_model_config_from_hf_id(hf_id: str) -> list:
             f"Failed to download from HuggingFace using user's HF token saved in ~/.cache/huggingface/token, "
             f"trying to use cached config: {e}"
         )
-        if hf_id not in SupportedHFModels:
-            raise ValueError(f"HuggingFace model {hf_id} is not cached in model_configs directory.") from e
-        config_name = SupportedHFModels[hf_id]
-        with open(get_model_config_path() / f"{config_name}_config.json") as f:
-            return _parse_hf_config_json(json.load(f))
+        return load_pre_downloaded_hf_config(hf_id)

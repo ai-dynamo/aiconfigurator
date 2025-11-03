@@ -42,7 +42,7 @@ def _add_default_mode_arguments(parser):
     )
     group.add_argument(
         "--hf_id",
-        choices=common.SupportedHFModels.keys(),
+        choices=common.SupportedHFModels,
         type=str,
         help="HuggingFace model ID. e.g. Qwen/Qwen2.5-7B",
     )

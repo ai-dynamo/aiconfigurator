@@ -11,6 +11,7 @@ import pytest
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models import check_is_moe, get_model_family
+from aiconfigurator.sdk.utils import get_model_config_from_hf_id
 
 
 class TestSupportedModels:
@@ -60,15 +61,14 @@ class TestHFModelSupport:
     def test_supported_hf_models_exists(self):
         """Test that SupportedHFModels dict exists and has content."""
         assert hasattr(common, "SupportedHFModels")
-        assert isinstance(common.SupportedHFModels, dict)
+        assert isinstance(common.SupportedHFModels, set)
         assert len(common.SupportedHFModels) > 0
 
-    def test_hf_models_map_to_valid_model_names(self):
+    def test_hf_models_map_to_valid_model_configs(self):
         """Test that all HF model IDs map to valid model names in SupportedModels."""
-        for hf_id, model_name in common.SupportedHFModels.items():
-            assert model_name in common.SupportedModels, (
-                f"HF model '{hf_id}' maps to '{model_name}' which is not in SupportedModels"
-            )
+        for hf_id in common.SupportedHFModels:
+            config = get_model_config_from_hf_id(hf_id)
+            assert config[0] in common.ModelFamily
 
     @pytest.mark.parametrize(
         "hf_id,expected_family",
