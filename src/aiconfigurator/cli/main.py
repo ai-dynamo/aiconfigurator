@@ -20,7 +20,7 @@ from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_tpot_constraint,
 )
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-from aiconfigurator.sdk.utils import validate_hf_model
+from aiconfigurator.sdk.utils import get_model_config_from_hf_id
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,16 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
     return common_parser
 
 
+def _validate_hf_model(hf_id: str) -> str:
+    if hf_id in common.CachedHFModels:
+        return hf_id
+    try:
+        get_model_config_from_hf_id(hf_id)
+        return hf_id
+    except Exception as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
+
+
 def _add_default_mode_arguments(parser):
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
@@ -43,7 +53,7 @@ def _add_default_mode_arguments(parser):
     )
     group.add_argument(
         "--hf_id",
-        type=validate_hf_model,
+        type=_validate_hf_model,
         help="HuggingFace model ID. e.g. Qwen/Qwen2.5-7B",
     )
     parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")

@@ -122,10 +122,10 @@ class TestGetModelConfigFromHFID:
         }
         mock_download.return_value = mock_config
 
-        result = get_model_config_from_hf_id("meta-llama/Meta-Llama-3.1-8B")
+        result = get_model_config_from_hf_id("Qwen/Qwen3-32B-FP8")
 
         assert result[0] == "LLAMA"
-        mock_download.assert_called_once_with("meta-llama/Meta-Llama-3.1-8B")
+        mock_download.assert_called_once_with("Qwen/Qwen3-32B-FP8")
 
 
 class TestSafeMkdir:
