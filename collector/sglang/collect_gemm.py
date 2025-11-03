@@ -228,12 +228,15 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
         b_fp16 = b_fp32.clamp(min=fp16_min, max=fp16_max).to(torch.float16)
 
         # Quantize weight to int8 with per-channel (per-row) scaling
+        # Note: b_int8 will be [N, K], then we transpose to [K, N] for column-major
         b_int8, scale_b = per_token_quant_int8(b_fp16)
+        b_int8 = b_int8.t()  # Transpose to column-major format [K, N]
 
         repeat_n = 5
 
         def gemm_op():
             # Dynamically quantize activation, then run int8 GEMM
+            # a_int8: [M, K], b_int8: [K, N] (column-major)
             a_int8, scale_a = per_token_quant_int8(a_fp16)
             return int8_scaled_mm(a_int8, b_int8, scale_a, scale_b, torch.bfloat16)
 
