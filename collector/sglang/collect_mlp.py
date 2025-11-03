@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import argparse
 import math
 import os
 
@@ -22,10 +21,13 @@ from sglang.srt.distributed import (
 from sglang.srt.layers.quantization import Fp8Config
 from sglang.srt.models.deepseek_v2 import DeepseekV2MLP
 
+DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
+
 
 def get_mlp_prefill_test_cases():
     """Get test cases for MLP prefill phase
-    Returns: list of [quant_type, num_token, hidden_size, intermediate_size]
+    Returns: list of [quant_type, num_token, hidden_size, intermediate_size,
+                      is_context, num_warmup, num_iterations, perf_filename]
     """
     test_cases = []
 
@@ -52,17 +54,31 @@ def get_mlp_prefill_test_cases():
     quant_types = ["fp8_block"]
     hidden_size = 7168
     intermediate_size = 2048
+    num_warmup = 3
+    num_iterations = 10
 
     for quant_type in quant_types:
         for num_token in num_tokens:
-            test_cases.append([quant_type, num_token, hidden_size, intermediate_size])
+            test_cases.append(
+                [
+                    quant_type,
+                    num_token,
+                    hidden_size,
+                    intermediate_size,
+                    True,
+                    num_warmup,
+                    num_iterations,
+                    "context_mlp_perf.txt",
+                ]
+            )
 
     return test_cases
 
 
 def get_mlp_decode_test_cases():
     """Get test cases for MLP decode phase
-    Returns: list of [quant_type, num_token, hidden_size, intermediate_size]
+    Returns: list of [quant_type, num_token, hidden_size, intermediate_size,
+                      is_context, num_warmup, num_iterations, perf_filename]
     """
     test_cases = []
 
@@ -89,10 +105,23 @@ def get_mlp_decode_test_cases():
     quant_types = ["fp8_block"]
     hidden_size = 7168
     intermediate_size = 2048
+    num_warmup = 3
+    num_iterations = 10
 
     for quant_type in quant_types:
         for num_token in num_tokens:
-            test_cases.append([quant_type, num_token, hidden_size, intermediate_size])
+            test_cases.append(
+                [
+                    quant_type,
+                    num_token,
+                    hidden_size,
+                    intermediate_size,
+                    False,
+                    num_warmup,
+                    num_iterations,
+                    "generation_mlp_perf.txt",
+                ]
+            )
 
     return test_cases
 
@@ -147,8 +176,8 @@ def run_mlp_torch(
     is_context,
     num_warmup,
     num_iterations,
-    device,
-    output_path,
+    perf_filename,
+    device="cuda:0",
 ):
     """Run MLP benchmark for both context and generation phases"""
 
@@ -169,7 +198,7 @@ def run_mlp_torch(
             intermediate_size=intermediate_size,
             hidden_act="silu",
             quant_config=quant_config,
-            reduce_results=True,
+            reduce_results=False,  # Set to False for single-GPU benchmarking (tp_size=1)
             prefix="",
             tp_rank=0,
             tp_size=1,
@@ -199,7 +228,6 @@ def run_mlp_torch(
                     times.append(start_event.elapsed_time(end_event))
 
             avg_time = sum(times) / len(times)
-            perf_filename = os.path.join(output_path, "context_mlp_perf.txt")
             kernel_source = "deepseek_v3"
 
             std_time = math.sqrt(sum((t - avg_time) ** 2 for t in times) / len(times))
@@ -228,14 +256,12 @@ def run_mlp_torch(
 
             torch.cuda.synchronize()
             avg_time = start_event.elapsed_time(end_event) / num_iterations
-            perf_filename = os.path.join(output_path, "generation_mlp_perf.txt")
             kernel_source = "deepseek_v3_cuda_graph"
 
             print(f"  {phase} MLP time: {avg_time:.3f} ms")
 
         # Save via log_perf
         try:
-            os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
             device_name = torch.cuda.get_device_name(device)
             version = pkg_resources.get_distribution("sglang").version
             log_perf(
@@ -267,42 +293,19 @@ def run_mlp_torch(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Collect MLP benchmarking data for SGLang")
-    parser.add_argument(
-        "--output_path",
-        type=str,
-        default="./",
-        help="Path to save output benchmark results",
-    )
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default="./deepseek-v3",
-        help="Path to the model directory",
-    )
-    parser.add_argument("--hidden_size", type=int, default=7168, help="Hidden size (default: 7168)")
-    parser.add_argument("--intermediate_size", type=int, default=2048, help="Intermediate size (default: 2048)")
-    parser.add_argument("--num_warmup", type=int, default=3, help="Number of warmup iterations (default: 3)")
-    parser.add_argument("--num_iterations", type=int, default=10, help="Number of benchmark iterations (default: 10)")
-    parser.add_argument("--dtype", type=str, default="auto", help="Data type (default: auto)")
-    parser.add_argument("--device", type=str, default="cuda:0", help="Device to use (default: cuda:0)")
-
-    args = parser.parse_args()
-
-    output_path = args.output_path
-    model_path = args.model_path
-    hidden_size = args.hidden_size
-    intermediate_size = args.intermediate_size
-    num_warmup = args.num_warmup
-    num_iterations = args.num_iterations
-    dtype = args.dtype
-    device = args.device
+    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
+    model_path = DEEPSEEK_MODEL_PATH
+    hidden_size = 7168
+    intermediate_size = 2048
+    num_warmup = 3
+    num_iterations = 10
+    dtype = "auto"
+    device = "cuda:0"
 
     cleanup_distributed()
 
     print("Starting SGLang MLP Benchmark")
     print(f"Model path: {model_path}")
-    print(f"Output path: {output_path}")
     print(f"Device: {torch.cuda.get_device_name()}")
 
     prefill_test_cases = get_mlp_prefill_test_cases()

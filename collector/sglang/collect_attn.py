@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import argparse
 import json
 import logging
 import os
+import threading
 
 import numpy as np
 import torch
@@ -23,14 +23,18 @@ from torch.profiler import ProfilerActivity, profile, record_function
 try:
     from helper import log_perf
 except ModuleNotFoundError:
-    import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from helper import log_perf
 import pkg_resources
 
+DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 logger = logging.getLogger(__name__)
+
+# Global cache for model runners to avoid reloading for each test case
+_model_runner_cache = {}
+_cache_lock = threading.Lock()
 
 
 def cleanup_distributed():
@@ -50,7 +54,7 @@ def cleanup_distributed():
 
 def get_attention_prefill_test_cases():
     """Get prefill test cases for attention benchmarking
-    Returns: list of [batch_size, seq_length, attention_backend, head_num, is_prefill]
+    Returns: list of [batch_size, seq_length, attention_backend, head_num, is_context_phase, perf_filename]
     """
     test_cases = []
 
@@ -67,15 +71,24 @@ def get_attention_prefill_test_cases():
                     # Memory limit checks for context
                     if batch_size * seq_length > 1024 * 2048:
                         continue
-                    test_cases.append([batch_size, seq_length, attention_backend, head_num, True])
+                    test_cases.append(
+                        [
+                            batch_size,
+                            seq_length,
+                            attention_backend,
+                            head_num,
+                            True,  # is_context_phase
+                            "context_attention_perf.txt",
+                        ]
+                    )
 
     return test_cases
 
 
 def get_attention_decode_test_cases():
     """
-    Get decode test cases for attention benchmarking with batch_size, seq_length,
-    attention_backend, and head_num
+    Get decode test cases for attention benchmarking
+    Returns: list of [batch_size, seq_length, attention_backend, head_num, is_context_phase, perf_filename]
     """
     test_cases = []
 
@@ -92,9 +105,29 @@ def get_attention_decode_test_cases():
                     # Memory limit checks for generation
                     if batch_size * seq_length > 1024 * 2048:
                         continue
-                    test_cases.append([batch_size, seq_length, attention_backend, head_num, False])
+                    test_cases.append(
+                        [
+                            batch_size,
+                            seq_length,
+                            attention_backend,
+                            head_num,
+                            False,  # is_context_phase
+                            "generation_attention_perf.txt",
+                        ]
+                    )
 
     return test_cases
+
+
+# Aliases for collect.py compatibility
+def get_context_attention_test_cases():
+    """Alias for get_attention_prefill_test_cases"""
+    return get_attention_prefill_test_cases()
+
+
+def get_generation_attention_test_cases():
+    """Alias for get_attention_decode_test_cases"""
+    return get_attention_decode_test_cases()
 
 
 def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype="auto", device="cuda", tp_rank=0):
@@ -149,353 +182,416 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
     return model_runner
 
 
+def get_or_create_model_runner(model_path, attention_backend, head_num, test_layer, dtype, device):
+    """
+    Get a cached model runner or create a new one if not cached.
+    Uses a cache key based on (attention_backend, head_num, device) to reuse expensive model loading.
+
+    Returns:
+        model_runner: The cached or newly created model runner
+    """
+    # Convert device to string for cache key (e.g., "cuda:0" or torch.device)
+    device_str = str(device) if isinstance(device, torch.device) else device
+    cache_key = (attention_backend, head_num, device_str)
+
+    with _cache_lock:
+        if cache_key in _model_runner_cache:
+            print(f"Using cached model runner for backend={attention_backend}, heads={head_num}, device={device_str}")
+            return _model_runner_cache[cache_key]
+
+        # Not in cache, create new model runner
+        print(f"Loading model runner for backend={attention_backend}, heads={head_num}, device={device_str}")
+        model_runner = load_model_runner(model_path, attention_backend, head_num, test_layer, dtype, device, tp_rank=0)
+        _model_runner_cache[cache_key] = model_runner
+        return model_runner
+
+
 def run_attention_torch(
+    batch_size, seq_length, attention_backend, head_num, is_context_phase, perf_filename, device="cuda:0"
+):
+    """
+    Run attention benchmark for a single test case (compatible with collect.py).
+    This function matches TRT-LLM's signature pattern for better compatibility.
+
+    Args:
+        batch_size: Batch size for the test
+        seq_length: Sequence length (context) or step (generation)
+        attention_backend: Backend to use ("flashinfer" or "fa3")
+        head_num: Number of attention heads
+        is_context_phase: True for context/prefill phase, False for generation/decode phase
+        perf_filename: Output filename for performance results
+        device: CUDA device (e.g., "cuda:0")
+    """
+    # Configuration from environment or defaults
+    output_path = os.environ.get(
+        "SGLANG_OUTPUT_PATH", "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
+    )
+    model_path = DEEPSEEK_MODEL_PATH
+    test_layer = int(os.environ.get("SGLANG_TEST_LAYER", "0"))
+    num_warmup = int(os.environ.get("SGLANG_NUM_WARMUP", "3"))
+    num_iterations = int(os.environ.get("SGLANG_NUM_ITERATIONS", "10"))
+    enable_profiler = os.environ.get("SGLANG_ENABLE_PROFILER", "false").lower() == "true"
+    dtype = os.environ.get("SGLANG_DTYPE", "auto")
+
+    # Set the device
+    torch.cuda.set_device(device)
+
+    try:
+        # Get or create cached model runner (much more efficient than loading each time)
+        model_runner = get_or_create_model_runner(model_path, attention_backend, head_num, test_layer, dtype, device)
+
+        # Determine full output file path
+        full_perf_filename = os.path.join(output_path, perf_filename)
+
+        # Run the benchmark for this single test case
+        _run_single_attention_test(
+            model_runner=model_runner,
+            batch_size=batch_size,
+            seq_length=seq_length,
+            attention_backend=attention_backend,
+            head_num=head_num,
+            is_context_phase=is_context_phase,
+            test_layer=test_layer,
+            num_warmup=num_warmup,
+            num_iterations=num_iterations,
+            enable_profiler=enable_profiler,
+            device=device,
+            perf_filename=full_perf_filename,
+        )
+
+    except Exception as e:
+        print(f"Error in run_attention_torch: {e}")
+        import traceback
+
+        traceback.print_exc()
+        raise
+
+
+def _run_single_attention_test(
     model_runner,
-    cases,
+    batch_size,
+    seq_length,
     attention_backend,
     head_num,
+    is_context_phase,
     test_layer,
     num_warmup,
     num_iterations,
     enable_profiler,
     device,
-    output_path,
+    perf_filename,
 ):
-    """Run attention benchmark for both prefill and decode phases"""
+    """Run attention benchmark for a single test case (internal implementation)"""
 
     attention_module = model_runner.model.model.layers[test_layer].self_attn
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
 
-    for test_case in cases:
-        batch_size, seq_length, _, _, is_prefill = test_case
+    if is_context_phase:
+        print(f"\nContext/Prefill: batch_size={batch_size}, seq_length={seq_length}")
 
-        if is_prefill:
-            print(f"\nPrefill: batch_size={batch_size}, seq_length={seq_length}")
-
-            try:
-                model_runner.req_to_token_pool.clear()
-                model_runner.token_to_kv_pool_allocator.clear()
-                reqs = []
-                for i in range(batch_size):
-                    req = Req(
-                        rid=str(i),
-                        origin_input_text="",
-                        origin_input_ids=list(torch.randint(0, 10000, (seq_length,)).tolist()),
-                        sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
-                    )
-                    req.prefix_indices = []
-                    req.fill_ids = req.origin_input_ids
-                    req.extend_input_len = len(req.fill_ids)
-                    req.logprob_start_len = 0
-                    reqs.append(req)
-
-                batch = ScheduleBatch.init_new(
-                    reqs=reqs,
-                    req_to_token_pool=model_runner.req_to_token_pool,
-                    token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
-                    tree_cache=None,
-                    model_config=model_runner.model_config,
-                    enable_overlap=False,
-                    spec_algorithm=SpeculativeAlgorithm.NONE,
-                    enable_custom_logit_processor=False,
+        try:
+            # Create requests
+            reqs = []
+            for i in range(batch_size):
+                req = Req(
+                    rid=str(i),
+                    origin_input_text="",
+                    origin_input_ids=list(torch.randint(0, 10000, (seq_length,)).tolist()),
+                    sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
                 )
-                batch.prepare_for_extend()
-                model_worker_batch = batch.get_model_worker_batch()
-                forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
+                req.prefix_indices = []
+                req.fill_ids = req.origin_input_ids
+                req.extend_input_len = len(req.fill_ids)
+                req.logprob_start_len = 0
+                reqs.append(req)
 
-                model_runner.attn_backend.init_forward_metadata(forward_batch)
+            batch = ScheduleBatch.init_new(
+                reqs=reqs,
+                req_to_token_pool=model_runner.req_to_token_pool,
+                token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+                tree_cache=None,
+                model_config=model_runner.model_config,
+                enable_overlap=False,
+                spec_algorithm=SpeculativeAlgorithm.NONE,
+                enable_custom_logit_processor=False,
+            )
+            batch.prepare_for_extend()
+            model_worker_batch = batch.get_model_worker_batch()
+            forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
 
-                hidden_states = torch.randn(
-                    batch_size * seq_length,
-                    model_runner.model.config.hidden_size,
-                    dtype=torch.bfloat16,
-                    device="cuda",
-                )
-                positions = torch.arange(seq_length, device="cuda").unsqueeze(0).expand(batch_size, -1).flatten()
-                zero_allocator = BumpAllocator(buffer_size=256, dtype=torch.float32, device="cuda")
+            model_runner.attn_backend.init_forward_metadata(forward_batch)
 
-                for _ in range(num_warmup):
-                    with torch.no_grad():
-                        _ = attention_module(
-                            positions=positions,
-                            hidden_states=hidden_states,
-                            forward_batch=forward_batch,
-                            zero_allocator=zero_allocator,
-                        )
+            hidden_states = torch.randn(
+                batch_size * seq_length,
+                model_runner.model.config.hidden_size,
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+            positions = torch.arange(seq_length, device="cuda").unsqueeze(0).expand(batch_size, -1).flatten()
+            zero_allocator = BumpAllocator(buffer_size=256, dtype=torch.float32, device="cuda")
 
-                cuda_times = []
-                for i in range(num_iterations):
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-                    start_event.record()
-                    with torch.no_grad():
-                        _ = attention_module(
-                            positions=positions,
-                            hidden_states=hidden_states,
-                            forward_batch=forward_batch,
-                            zero_allocator=zero_allocator,
-                        )
-                    end_event.record()
-                    torch.cuda.synchronize()
-                    if i > 1:
-                        cuda_times.append(start_event.elapsed_time(end_event))
-
-                # Profiler for detailed performance analysis (optional)
-                if enable_profiler:
-                    profiler_output_dir = "/aiconfigurator/profiler_output"
-                    try:
-                        os.makedirs(profiler_output_dir, exist_ok=True)
-                        profiler_trace_path = os.path.join(
-                            profiler_output_dir,
-                            f"prefill_attention_b{batch_size}_s{seq_length}_layer{test_layer}",
-                        )
-
-                        with profile(
-                            activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
-                            record_shapes=True,
-                            profile_memory=True,
-                            with_stack=True,
-                            schedule=torch.profiler.schedule(wait=1, warmup=1, active=10, repeat=1),
-                        ) as prof:
-                            for iter_idx in range(num_iterations):
-                                with record_function("attention_prefill"), torch.no_grad():
-                                    _ = attention_module(
-                                        positions=positions,
-                                        hidden_states=hidden_states,
-                                        forward_batch=forward_batch,
-                                        zero_allocator=zero_allocator,
-                                    )
-                                torch.cuda.synchronize()
-                                prof.step()
-
-                        prof.export_chrome_trace(f"{profiler_trace_path}.json")
-                        print(f"  Profiler trace saved: {profiler_trace_path}.json")
-
-                    except Exception as e:
-                        print(f"  Warning: Profiler failed: {e!s}")
-
-                avg_time_ms = np.mean(cuda_times)
-                # Save via log_perf
-                try:
-                    perf_filename = os.path.join(output_path, "context_mla_perf.txt")
-                    os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
-                    device_name = torch.cuda.get_device_name(device)
-                    version = pkg_resources.get_distribution("sglang").version
-                    log_perf(
-                        item_list=[
-                            {
-                                "mla_dtype": "fp8_block",
-                                "kv_cache_dtype": "fp8",
-                                "num_heads": head_num,
-                                "batch_size": batch_size,
-                                "isl": seq_length,
-                                "tp_size": 1,
-                                "step": 0,
-                                "latency": avg_time_ms,
-                            }
-                        ],
-                        framework="SGLang",
-                        version=version,
-                        device_name=device_name,
-                        op_name="mla_context",
-                        kernel_source=attention_backend,
-                        perf_filename=perf_filename,
-                    )
-                except Exception as e:
-                    print(f"  Warning: failed to log prefill metrics: {e}")
-
-                print(
-                    f"  Prefill attention time: {avg_time_ms:.3f} ms "
-                    f"(min: {np.min(cuda_times):.3f}, max: {np.max(cuda_times):.3f}, "
-                    f"std: {np.std(cuda_times):.3f})"
-                )
-
-                model_runner.req_to_token_pool.clear()
-                model_runner.token_to_kv_pool_allocator.clear()
-                del hidden_states, positions, forward_batch, batch
-                torch.cuda.empty_cache()
-
-            except Exception as e:
-                print(f"  Prefill test failed: {e!s}")
-                print("  Skipping this configuration...")
-                continue
-
-        else:  # decode phase
-            print(f"\nDecode: batch_size={batch_size}, kv_cache_length={seq_length}")
-
-            try:
-                model_runner.req_to_token_pool.clear()
-                model_runner.token_to_kv_pool_allocator.clear()
-                reqs = []
-                for i in range(batch_size):
-                    req = Req(
-                        rid=str(i),
-                        origin_input_text="",
-                        origin_input_ids=list(torch.randint(0, 10000, (seq_length,)).tolist()),
-                        sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
-                    )
-                    req.prefix_indices = []
-                    req.fill_ids = req.origin_input_ids
-                    req.extend_input_len = len(req.fill_ids)
-                    req.logprob_start_len = 0
-                    req.cached_tokens = 0
-                    req.already_computed = 0
-                    reqs.append(req)
-                batch = ScheduleBatch.init_new(
-                    reqs=reqs,
-                    req_to_token_pool=model_runner.req_to_token_pool,
-                    token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
-                    tree_cache=None,
-                    model_config=model_runner.model_config,
-                    enable_overlap=False,
-                    spec_algorithm=SpeculativeAlgorithm.NONE,
-                    enable_custom_logit_processor=False,
-                )
-                batch.prepare_for_extend()
-                batch.output_ids = seq_length
-                batch.prepare_for_decode()
-                model_worker_batch_decode = batch.get_model_worker_batch()
-                forward_batch_decode = ForwardBatch.init_new(model_worker_batch_decode, model_runner)
-                model_runner.attn_backend.init_forward_metadata(forward_batch_decode)
-                decode_hidden = torch.randn(
-                    batch_size,
-                    model_runner.model.config.hidden_size,
-                    dtype=torch.bfloat16,
-                    device="cuda",
-                )
-                decode_positions = torch.full((batch_size,), seq_length, device="cuda")
-                zero_allocator = BumpAllocator(buffer_size=2048, dtype=torch.float32, device="cuda")
-
-                g = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(g), torch.no_grad():
+            # Warmup
+            for _ in range(num_warmup):
+                with torch.no_grad():
                     _ = attention_module(
-                        positions=decode_positions,
-                        hidden_states=decode_hidden,
-                        forward_batch=forward_batch_decode,
+                        positions=positions,
+                        hidden_states=hidden_states,
+                        forward_batch=forward_batch,
                         zero_allocator=zero_allocator,
                     )
 
-                for _ in range(num_warmup):
-                    g.replay()
-
+            # Benchmark
+            cuda_times = []
+            for i in range(num_iterations):
                 start_event = torch.cuda.Event(enable_timing=True)
                 end_event = torch.cuda.Event(enable_timing=True)
                 start_event.record()
-                for _ in range(num_iterations):
-                    g.replay()
+                with torch.no_grad():
+                    _ = attention_module(
+                        positions=positions,
+                        hidden_states=hidden_states,
+                        forward_batch=forward_batch,
+                        zero_allocator=zero_allocator,
+                    )
                 end_event.record()
                 torch.cuda.synchronize()
+                if i > 1:
+                    cuda_times.append(start_event.elapsed_time(end_event))
 
-                avg_time_ms = start_event.elapsed_time(end_event) / num_iterations
-
-                if enable_profiler:
-                    profiler_output_dir = "/aiconfigurator/profiler_output"
-                    try:
-                        os.makedirs(profiler_output_dir, exist_ok=True)
-                        profiler_trace_path = os.path.join(
-                            profiler_output_dir,
-                            f"decode_attention_b{batch_size}_kv{seq_length}_layer{test_layer}",
-                        )
-
-                        with profile(
-                            activities=[ProfilerActivity.CUDA],
-                            record_shapes=False,
-                            profile_memory=False,
-                            with_stack=False,
-                            schedule=torch.profiler.schedule(wait=1, warmup=1, active=10, repeat=1),
-                        ) as prof:
-                            for iter_idx in range(num_iterations):
-                                with record_function("attention_decode"):
-                                    g.replay()
-                                torch.cuda.synchronize()
-                                prof.step()
-
-                        prof.export_chrome_trace(f"{profiler_trace_path}.json")
-                        print(f"  Profiler trace saved: {profiler_trace_path}.json")
-
-                    except Exception as e:
-                        print(f"  Warning: Profiler failed: {e!s}")
-
-                torch.cuda.empty_cache()
-                # Save via log_perf
+            # Profiler (optional)
+            if enable_profiler:
+                profiler_output_dir = "/aiconfigurator/profiler_output"
                 try:
-                    perf_filename = os.path.join(output_path, "generation_mla_perf.txt")
-                    os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
-                    device_name = torch.cuda.get_device_name(device)
-                    version = pkg_resources.get_distribution("sglang").version
-                    log_perf(
-                        item_list=[
-                            {
-                                "mla_dtype": "fp8_block",
-                                "kv_cache_dtype": "fp8",
-                                "num_heads": head_num,
-                                "batch_size": batch_size,
-                                "isl": seq_length,
-                                "tp_size": 1,
-                                "step": 0,
-                                "latency": avg_time_ms,
-                            }
-                        ],
-                        framework="SGLang",
-                        version=version,
-                        device_name=device_name,
-                        op_name="mla_generation",
-                        kernel_source=attention_backend,
-                        perf_filename=perf_filename,
+                    os.makedirs(profiler_output_dir, exist_ok=True)
+                    profiler_trace_path = os.path.join(
+                        profiler_output_dir,
+                        f"prefill_attention_b{batch_size}_s{seq_length}_layer{test_layer}",
                     )
+
+                    with profile(
+                        activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+                        record_shapes=True,
+                        profile_memory=True,
+                        with_stack=True,
+                        schedule=torch.profiler.schedule(wait=1, warmup=1, active=10, repeat=1),
+                    ) as prof:
+                        for iter_idx in range(num_iterations):
+                            with record_function("attention_prefill"), torch.no_grad():
+                                _ = attention_module(
+                                    positions=positions,
+                                    hidden_states=hidden_states,
+                                    forward_batch=forward_batch,
+                                    zero_allocator=zero_allocator,
+                                )
+                            torch.cuda.synchronize()
+                            prof.step()
+
+                    prof.export_chrome_trace(f"{profiler_trace_path}.json")
+                    print(f"  Profiler trace saved: {profiler_trace_path}.json")
+
                 except Exception as e:
-                    print(f"  Warning: failed to log decode metrics: {e}")
+                    print(f"  Warning: Profiler failed: {e!s}")
 
-                print(f"  Decode attention time: {avg_time_ms:.3f} ms")
+            avg_time_ms = np.mean(cuda_times)
 
-                model_runner.req_to_token_pool.clear()
-                model_runner.token_to_kv_pool_allocator.clear()
-                del decode_hidden, decode_positions, forward_batch_decode, batch
-                torch.cuda.empty_cache()
-
+            # Save performance results
+            try:
+                os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                device_name = torch.cuda.get_device_name(device)
+                version = pkg_resources.get_distribution("sglang").version
+                log_perf(
+                    item_list=[
+                        {
+                            "attention_backend": attention_backend,
+                            "num_heads": head_num,
+                            "batch_size": batch_size,
+                            "isl": seq_length,
+                            "tp_size": 1,
+                            "step": 0,
+                            "latency": avg_time_ms,
+                        }
+                    ],
+                    framework="SGLang",
+                    version=version,
+                    device_name=device_name,
+                    op_name="context_attention",
+                    kernel_source=attention_backend,
+                    perf_filename=perf_filename,
+                )
             except Exception as e:
-                print(f"  Decode test failed: {e!s}")
-                print("  Skipping this configuration...")
-                continue
+                print(f"  Warning: failed to log context metrics: {e}")
+
+            print(
+                f"  Context attention time: {avg_time_ms:.3f} ms "
+                f"(min: {np.min(cuda_times):.3f}, max: {np.max(cuda_times):.3f}, "
+                f"std: {np.std(cuda_times):.3f})"
+            )
+
+            # Cleanup
+            model_runner.req_to_token_pool.clear()
+            model_runner.token_to_kv_pool_allocator.clear()
+            del hidden_states, positions, forward_batch, batch
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            print(f"  Context test failed: {e!s}")
+            raise
+
+    else:  # decode/generation phase
+        print(f"\nGeneration/Decode: batch_size={batch_size}, kv_cache_length={seq_length}")
+
+        try:
+            # Create requests
+            reqs = []
+            for i in range(batch_size):
+                req = Req(
+                    rid=str(i),
+                    origin_input_text="",
+                    origin_input_ids=list(torch.randint(0, 10000, (seq_length,)).tolist()),
+                    sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
+                )
+                req.prefix_indices = []
+                req.fill_ids = req.origin_input_ids
+                req.extend_input_len = len(req.fill_ids)
+                req.logprob_start_len = 0
+                req.cached_tokens = 0
+                req.already_computed = 0
+                reqs.append(req)
+
+            batch = ScheduleBatch.init_new(
+                reqs=reqs,
+                req_to_token_pool=model_runner.req_to_token_pool,
+                token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+                tree_cache=None,
+                model_config=model_runner.model_config,
+                enable_overlap=False,
+                spec_algorithm=SpeculativeAlgorithm.NONE,
+                enable_custom_logit_processor=False,
+            )
+            batch.prepare_for_extend()
+            batch.output_ids = seq_length
+            batch.prepare_for_decode()
+            model_worker_batch_decode = batch.get_model_worker_batch()
+            forward_batch_decode = ForwardBatch.init_new(model_worker_batch_decode, model_runner)
+            model_runner.attn_backend.init_forward_metadata(forward_batch_decode)
+
+            decode_hidden = torch.randn(
+                batch_size,
+                model_runner.model.config.hidden_size,
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+            decode_positions = torch.full((batch_size,), seq_length, device="cuda")
+            zero_allocator = BumpAllocator(buffer_size=2048, dtype=torch.float32, device="cuda")
+
+            # Capture CUDA graph
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g), torch.no_grad():
+                _ = attention_module(
+                    positions=decode_positions,
+                    hidden_states=decode_hidden,
+                    forward_batch=forward_batch_decode,
+                    zero_allocator=zero_allocator,
+                )
+
+            # Warmup
+            for _ in range(num_warmup):
+                g.replay()
+
+            # Benchmark
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            for _ in range(num_iterations):
+                g.replay()
+            end_event.record()
+            torch.cuda.synchronize()
+
+            avg_time_ms = start_event.elapsed_time(end_event) / num_iterations
+
+            # Profiler (optional)
+            if enable_profiler:
+                profiler_output_dir = "/aiconfigurator/profiler_output"
+                try:
+                    os.makedirs(profiler_output_dir, exist_ok=True)
+                    profiler_trace_path = os.path.join(
+                        profiler_output_dir,
+                        f"decode_attention_b{batch_size}_kv{seq_length}_layer{test_layer}",
+                    )
+
+                    with profile(
+                        activities=[ProfilerActivity.CUDA],
+                        record_shapes=False,
+                        profile_memory=False,
+                        with_stack=False,
+                        schedule=torch.profiler.schedule(wait=1, warmup=1, active=10, repeat=1),
+                    ) as prof:
+                        for iter_idx in range(num_iterations):
+                            with record_function("attention_decode"):
+                                g.replay()
+                            torch.cuda.synchronize()
+                            prof.step()
+
+                    prof.export_chrome_trace(f"{profiler_trace_path}.json")
+                    print(f"  Profiler trace saved: {profiler_trace_path}.json")
+
+                except Exception as e:
+                    print(f"  Warning: Profiler failed: {e!s}")
+
+            # Save performance results
+            try:
+                os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                device_name = torch.cuda.get_device_name(device)
+                version = pkg_resources.get_distribution("sglang").version
+                log_perf(
+                    item_list=[
+                        {
+                            "attention_backend": attention_backend,
+                            "num_heads": head_num,
+                            "batch_size": batch_size,
+                            "isl": 1,  # For generation, ISL is 1
+                            "tp_size": 1,
+                            "step": seq_length,  # Step is the KV cache length
+                            "latency": avg_time_ms,
+                        }
+                    ],
+                    framework="SGLang",
+                    version=version,
+                    device_name=device_name,
+                    op_name="generation_attention",
+                    kernel_source=attention_backend,
+                    perf_filename=perf_filename,
+                )
+            except Exception as e:
+                print(f"  Warning: failed to log generation metrics: {e}")
+
+            print(f"  Generation attention time: {avg_time_ms:.3f} ms")
+
+            # Cleanup
+            model_runner.req_to_token_pool.clear()
+            model_runner.token_to_kv_pool_allocator.clear()
+            del decode_hidden, decode_positions, forward_batch_decode, batch
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            print(f"  Generation test failed: {e!s}")
+            raise
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Collect attention benchmarking data for SGLang")
-    parser.add_argument(
-        "--output_path",
-        type=str,
-        default="./",
-        help="Path to save output benchmark results",
-    )
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default="./deepseek-v3",
-        help="Path to the model directory",
-    )
-    parser.add_argument("--test_layer", type=int, default=0, help="Layer to test (default: 0)")
-    parser.add_argument("--num_warmup", type=int, default=3, help="Number of warmup iterations (default: 3)")
-    parser.add_argument("--num_iterations", type=int, default=10, help="Number of benchmark iterations (default: 10)")
-    parser.add_argument("--dtype", type=str, default="auto", help="Data type (default: auto)")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to use (default: cuda)")
-    parser.add_argument("--enable_profiler", action="store_true", help="Enable torch profiler for detailed analysis")
-
-    args = parser.parse_args()
-
-    output_path = args.output_path
-    model_path = args.model_path
-    test_layer = args.test_layer
-    num_warmup = args.num_warmup
-    num_iterations = args.num_iterations
-    dtype = args.dtype
-    device = args.device
-    enable_profiler = args.enable_profiler
+    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
+    model_path = DEEPSEEK_MODEL_PATH
+    test_layer = 0
+    num_warmup = 3
+    num_iterations = 10
+    dtype = "auto"
+    device = "cuda"
+    enable_profiler = False
 
     cleanup_distributed()
 
     print(f"Loading model from {model_path}...")
-    print(f"Output path: {output_path}")
     print("\nTip: To test with dummy weights and limited layers, use:")
     print("  SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 python collect_attn.py")
 
@@ -504,40 +600,44 @@ if __name__ == "__main__":
     decode_test_cases = get_attention_decode_test_cases()
     test_cases = prefill_test_cases + decode_test_cases
 
+    # Group test cases by (attention_backend, head_num) for efficiency
     grouped_cases = {}
     for test_case in test_cases:
-        batch_size, seq_length, attention_backend, head_num, is_prefill = test_case
+        batch_size, seq_length, attention_backend, head_num, is_context, perf_filename = test_case
         key = (attention_backend, head_num)
         if key not in grouped_cases:
             grouped_cases[key] = []
         grouped_cases[key].append(test_case)
 
+    # Process each group
     for (attention_backend, head_num), cases in grouped_cases.items():
         print(f"\n{'=' * 60}")
         print(f"TESTING: Attention Backend={attention_backend}, Head Num={head_num}")
         print(f"Test cases: {len(cases)}")
         print(f"{'=' * 60}")
-        cleanup_distributed()
 
-        torch.cuda.empty_cache()
-        model_runner = load_model_runner(model_path, attention_backend, head_num, test_layer, dtype, device)
+        # Load model runner once for the entire group
+        model_runner = get_or_create_model_runner(model_path, attention_backend, head_num, test_layer, dtype, device)
 
-        run_attention_torch(
-            model_runner,
-            cases,
-            attention_backend,
-            head_num,
-            test_layer,
-            num_warmup,
-            num_iterations,
-            enable_profiler,
-            device,
-            output_path,
-        )
+        # Run all test cases in the group
+        for test_case in cases:
+            batch_size, seq_length, _, _, is_context, perf_filename = test_case
+            full_perf_filename = os.path.join(output_path, perf_filename)
 
-        del model_runner
-        cleanup_distributed()
-        torch.cuda.empty_cache()
+            _run_single_attention_test(
+                model_runner=model_runner,
+                batch_size=batch_size,
+                seq_length=seq_length,
+                attention_backend=attention_backend,
+                head_num=head_num,
+                is_context_phase=is_context,
+                test_layer=test_layer,
+                num_warmup=num_warmup,
+                num_iterations=num_iterations,
+                enable_profiler=enable_profiler,
+                device=device,
+                perf_filename=full_perf_filename,
+            )
 
     print("\n" + "=" * 50)
     print("ALL TESTS COMPLETED")
