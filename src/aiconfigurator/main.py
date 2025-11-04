@@ -9,8 +9,9 @@ from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.eval.main import configure_parser as configure_eval_parser
 from aiconfigurator.eval.main import main as eval_main
-from aiconfigurator.webapp.main import configure_parser as configure_webapp_parser
-from aiconfigurator.webapp.main import main as webapp_main
+
+# from aiconfigurator.webapp.main import configure_parser as configure_webapp_parser
+# from aiconfigurator.webapp.main import main as webapp_main
 
 
 def _run_cli(extra_args: list[str]) -> None:
@@ -20,11 +21,11 @@ def _run_cli(extra_args: list[str]) -> None:
     cli_main(cli_args)
 
 
-def _run_webapp(extra_args: list[str]) -> None:
-    webapp_parser = argparse.ArgumentParser(description="Dynamo AIConfigurator web interface")
-    configure_webapp_parser(webapp_parser)
-    webapp_args = webapp_parser.parse_args(extra_args)
-    webapp_main(webapp_args)
+# def _run_webapp(extra_args: list[str]) -> None:
+#     webapp_parser = argparse.ArgumentParser(description="Dynamo AIConfigurator web interface")
+#     configure_webapp_parser(webapp_parser)
+#     webapp_args = webapp_parser.parse_args(extra_args)
+#     webapp_main(webapp_args)
 
 
 def _run_eval(extra_args: list[str]) -> None:
@@ -47,8 +48,8 @@ def main(argv: list[str] | None = None) -> None:
     cli_parser.set_defaults(handler=_run_cli)
 
     # Webapp subcommand
-    webapp_parser = subparsers.add_parser("webapp", help="Run Web interface", add_help=False)
-    webapp_parser.set_defaults(handler=_run_webapp)
+    # webapp_parser = subparsers.add_parser("webapp", help="Run Web interface", add_help=False)
+    # webapp_parser.set_defaults(handler=_run_webapp)
 
     # Eval subcommand
     eval_parser = subparsers.add_parser(
