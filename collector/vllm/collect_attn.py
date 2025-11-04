@@ -9,7 +9,8 @@ from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.version import __version__ as vllm_version
-from vllm_v1.utils import (
+
+from collector.vllm.utils import (
     BatchSpec,
     _Backend,
     create_and_prepopulate_kv_cache,
@@ -19,7 +20,6 @@ from vllm_v1.utils import (
     get_attention_backend,
     resolve_obj_by_qualname,
 )
-
 from helper import get_sm_version, log_perf
 
 

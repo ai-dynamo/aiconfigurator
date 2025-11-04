@@ -352,7 +352,7 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "vllm",
             "type": "gemm",
-            "module": "vllm_v1.collect_gemm",
+            "module": "collector.vllm.collect_gemm",
             "get_func": "get_gemm_test_cases",
             "run_func": "run_gemm",
         },
@@ -360,14 +360,14 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "vllm",
             "type": "attention_context",
-            "module": "vllm_v1.collect_attn",
+            "module": "collector.vllm.collect_attn",
             "get_func": "get_context_attention_test_cases",
             "run_func": "run_attention_torch",
         },
         {
             "name": "vllm",
             "type": "attention_generation",
-            "module": "vllm_v1.collect_attn",
+            "module": "collector.vllm.collect_attn",
             "get_func": "get_generation_attention_test_cases",
             "run_func": "run_attention_torch",
         },
@@ -405,14 +405,14 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "trtllm",
             "type": "gemm_trt",
-            "module": "trtllm.collect_gemm_trt",
+            "module": "collector.trtllm.collect_gemm_trt",
             "get_func": "get_gemm_test_cases",
             "run_func": "run_gemm",
         },
         {
             "name": "trtllm",
             "type": "gemm",
-            "module": "trtllm.collect_gemm",
+            "module": "collector.trtllm.collect_gemm",
             "get_func": "get_gemm_test_cases",
             "run_func": "run_gemm",
         },
@@ -420,7 +420,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "trtllm",
             "type": "mla_context",
-            "module": "trtllm.collect_mla",
+            "module": "collector.trtllm.collect_mla",
             "get_func": "get_context_mla_test_cases",
             "run_func": "run_mla",
             "version_handler": lambda v: "trtllm.collect_mla_1_1rc2" if v.startswith("1.1") else "trtllm.collect_mla",
@@ -428,7 +428,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "trtllm",
             "type": "mla_generation",
-            "module": "trtllm.collect_mla",
+            "module": "collector.trtllm.collect_mla",
             "get_func": "get_generation_mla_test_cases",
             "run_func": "run_mla",
             "version_handler": lambda v: "trtllm.collect_mla_1_1rc2" if v.startswith("1.1") else "trtllm.collect_mla",
@@ -437,14 +437,14 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "trtllm",
             "type": "attention_context",
-            "module": "trtllm.collect_attn",
+            "module": "collector.trtllm.collect_attn",
             "get_func": "get_context_attention_test_cases",
             "run_func": "run_attention_torch",
         },
         {
             "name": "trtllm",
             "type": "attention_generation",
-            "module": "trtllm.collect_attn",
+            "module": "collector.trtllm.collect_attn",
             "get_func": "get_generation_attention_test_cases",
             "run_func": "run_attention_torch",
         },
@@ -452,14 +452,14 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "trtllm",
             "type": "mla_bmm_gen_pre",
-            "module": "trtllm.collect_mla_bmm",
+            "module": "collector.trtllm.collect_mla_bmm",
             "get_func": "get_mla_gen_pre_test_cases",
             "run_func": "run_mla_gen_pre",
         },
         {
             "name": "trtllm",
             "type": "mla_bmm_gen_post",
-            "module": "trtllm.collect_mla_bmm",
+            "module": "collector.trtllm.collect_mla_bmm",
             "get_func": "get_mla_gen_post_test_cases",
             "run_func": "run_mla_gen_post",
         },
@@ -470,11 +470,11 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             "module": None,  # Will be determined based on version
             "get_func": "get_moe_test_cases",
             "run_func": "run_moe_torch",
-            "version_handler": lambda v: "trtllm.collect_moe_pre_0_20"
+            "version_handler": lambda v: "collector.trtllm.collect_moe_pre_0_20"
             if v.startswith("0.20.0")
-            else "trtllm.collect_moe_pre_1_0"
+            else "collector.trtllm.collect_moe_pre_1_0"
             if v.startswith(("0.21.0", "1.0.0"))
-            else "trtllm.collect_moe"
+            else "collector.trtllm.collect_moe"
             if v.startswith("1.1.0")
             else None,
         },
@@ -577,4 +577,8 @@ def main():
 
 
 if __name__ == "__main__":
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     main()

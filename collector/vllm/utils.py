@@ -1,6 +1,8 @@
-# Taken from vllm/tests/v1/attention/utils.py
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Modifications copyright (C) 2025 NVIDIA CORPORATION & AFFILIATES.
 
-"""Utility functions for attention-related v1 tests."""
+# Modified from https://github.com/vllm-project/vllm/blob/v0.11.0/tests/v1/attention/utils.py
 
 from dataclasses import dataclass
 from typing import Union
@@ -139,13 +141,13 @@ def get_attention_backend(backend_name: _Backend):
         raise ValueError(f"{backend_name} not available: {e}") from e
 
 
-def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> FullAttentionSpec:
+def create_standard_kv_cache_spec(vllm_config: VllmConfig, use_fp8_kv_cache: bool = False) -> FullAttentionSpec:
     """Create a FullAttentionSpec from ModelParams only."""
     return FullAttentionSpec(
         block_size=vllm_config.cache_config.block_size,
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(vllm_config.parallel_config),
         head_size=vllm_config.model_config.get_head_size(),
-        dtype=vllm_config.model_config.dtype,
+        dtype=current_platform.fp8_dtype() if use_fp8_kv_cache else vllm_config.model_config.dtype,
         sliding_window=vllm_config.model_config.get_sliding_window(),
     )
 
