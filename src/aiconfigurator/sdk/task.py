@@ -392,6 +392,7 @@ class TaskConfigFactory:
         database = get_database(system=system, backend=backend, version=version)
         defaults = TaskConfigFactory._get_quant_mode(
             model_name=model_name,
+            backend=backend,
             database=database,
             use_specific_quant_mode=preferred_mode,
         )
@@ -404,6 +405,7 @@ class TaskConfigFactory:
     @staticmethod
     def _get_quant_mode(
         model_name: str,
+        backend: str,
         database: PerfDatabase,
         use_specific_quant_mode: str | None = None,
     ) -> tuple[str, str, str, str, str]:
@@ -415,20 +417,23 @@ class TaskConfigFactory:
 
         sm_version = database.system_spec["gpu"]["sm_version"]
 
+        if backend == "vllm":
+            fp8_gemm_quant = "fp8"
+            fp8_fhma_quant = "float16"
+        else:
+            fp8_gemm_quant = "fp8_block"
+            fp8_fhma_quant = "fp8"
+
         if sm_version >= 100:
             gemm_quant_mode = "nvfp4"
             moe_quant_mode = "nvfp4"
             kvcache_quant_mode = "fp8"
-            fmha_quant_mode = "fp8"
+            fmha_quant_mode = fp8_fhma_quant
         elif sm_version >= 89:
-            gemm_quant_mode = "fp8"
-            moe_quant_mode = "fp8"
-            # gemm_quant_mode = "fp8_block"
-            # moe_quant_mode = "fp8_block"
-            kvcache_quant_mode = "float16"
-            fmha_quant_mode = "float16"
-            # kvcache_quant_mode = "fp8"
-            # fmha_quant_mode = "fp8"
+            gemm_quant_mode = fp8_gemm_quant
+            moe_quant_mode = fp8_gemm_quant
+            fmha_quant_mode = fp8_fhma_quant
+            kvcache_quant_mode = "fp8"
         else:
             gemm_quant_mode = "float16"
             moe_quant_mode = "float16"

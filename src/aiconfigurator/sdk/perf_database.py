@@ -327,8 +327,9 @@ def load_gemm_data(gemm_file):
         k = int(k)
         latency = float(latency)
 
+        # vllm gemm has some awq and gptq data, discard it.
         if quant_mode in ["awq", "gptq"]:
-            continue  # TODO: add awq?
+            continue
 
         quant_mode = common.GEMMQuantMode[quant_mode]
 
@@ -1109,23 +1110,9 @@ class PerfDatabase:
             self._generation_attention_data = load_generation_attention_data(
                 os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
             )
-
-            # TODO: use real data for vllm
             self._custom_allreduce_data = load_custom_allreduce_data(
                 os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
-            # self._moe_data, self._moe_low_latency_data = load_moe_data(
-            #     os.path.join(data_dir, common.PerfDataFilename.moe.value)
-            # )
-            # self._context_mla_data = load_context_mla_data(
-            #     os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
-            # )
-            # self._generation_mla_data = load_generation_mla_data(
-            #     os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
-            # )
-            # self._nccl_data = load_nccl_data(nccl_data_dir)
-            # self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
-
         else:  # TRTLLM
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1427,6 +1414,7 @@ class PerfDatabase:
                             sqrt_y_value=True,
                         )
         elif backend == "vllm":
+            # vllm has no mla data yet
             pass
         else:  # TRTLLM
             for quant_mode in self._context_mla_data:
@@ -1509,6 +1497,7 @@ class PerfDatabase:
                         target_z_list=target_z_list,
                     )
         elif backend == "vllm":
+            # vllm has no mla data yet
             pass
         else:  # TRTLLM
             for kv_cache_dtype in self._generation_mla_data:
@@ -1591,8 +1580,11 @@ class PerfDatabase:
                 "moe": [key.name for key in self._moe_data],
             }
         elif self.backend == "vllm":
-            # TODO
-            self.supported_quant_mode = {}
+            self.supported_quant_mode = {
+                "gemm": [key.name for key in self._gemm_data],
+                "context_attention": [key.name for key in self._context_attention_data],
+                "generation_attention": [key.name for key in self._generation_attention_data],
+            }
 
     def is_inter_node(self, num_gpus: int) -> bool:
         """
