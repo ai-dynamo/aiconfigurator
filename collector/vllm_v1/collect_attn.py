@@ -17,6 +17,7 @@ from vllm_v1.utils import (
     create_standard_kv_cache_spec,
     create_vllm_config,
     get_attention_backend,
+    resolve_obj_by_qualname,
 )
 
 from helper import get_sm_version, log_perf
@@ -46,7 +47,6 @@ def run_attention_torch(
     num_kv_heads,  # keep same as num_heads for MHA
     head_dim,
     use_fp8_kv_cache,
-    use_fp8_context_fmha,  # FIXME: unused
     is_context_phase,
     perf_filename,
     device="cuda:0",
@@ -55,16 +55,21 @@ def run_attention_torch(
 
     dtype = torch.float16
     model = os.path.join(os.path.dirname(__file__), "fake_hf_model")
+    block_size = 64
 
-    # TODO: add more backends
-    # backend_name = _Backend.FLASHINFER
-    backend_name = _Backend.FLASH_ATTN
-
-    # Fast FlexAttention needs to run with block_size=128
-    if backend_name == _Backend.FLEX_ATTENTION and is_torch_equal_or_newer("2.9.0.dev0"):
-        block_size = 128
-    else:
-        block_size = 64
+    # Let vllm choose the backend.
+    backend = current_platform.get_attn_backend_cls(
+        None,
+        head_dim,
+        dtype,
+        kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+        block_size=block_size,
+        use_v1=True,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+    )
+    backend_name = _Backend[resolve_obj_by_qualname(backend).get_name()]
 
     if is_context_phase:
         batch_spec = BatchSpec(
@@ -79,11 +84,14 @@ def run_attention_torch(
 
     current_platform.seed_everything(42)
     vllm_config = create_vllm_config(
-        model_name=model, max_model_len=max(batch_spec.seq_lens), block_size=block_size, num_gpu_blocks=8192
+        model_name=model,
+        max_model_len=max(batch_spec.seq_lens),
+        block_size=block_size,
+        num_gpu_blocks=8192,
+        max_num_seqs=batch_size,
     )
 
-    # FIXME: should be fp8 kv cache?
-    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache)
 
     # Generate data and compute SDPA reference output
     all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
@@ -203,6 +211,10 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
+    if use_fp8_kv_cache:
+        query_vllm = query_vllm.to(current_platform.fp8_dtype())
+        output = output.to(torch.bfloat16)
+
     def run():
         impl.forward(
             mock_layer,
@@ -269,7 +281,6 @@ def run_attention_torch(
 
 
 def get_context_attention_test_cases(if_unit_test=False):
-    has_fp8_kv_cache = get_sm_version() > 86
     test_cases = []
 
     if not if_unit_test:
@@ -302,6 +313,10 @@ def get_context_attention_test_cases(if_unit_test=False):
         n_list = [4]
         n_kv_list = [0]
 
+    kv_cache_dtype_list = [False]
+    if get_sm_version() > 86:
+        kv_cache_dtype_list.append(True)
+
     # DEBUG
     # print(f"b_list: {b_list}, s_list: {s_list}, n_list: {n_list}, n_kv_list: {n_kv_list}")
     for n in sorted(n_list, reverse=True):
@@ -322,20 +337,8 @@ def get_context_attention_test_cases(if_unit_test=False):
                             continue
                     if b * s * num_kv_heads * 128 * 2 >= 2147483647:
                         continue
-                    test_cases.append(
-                        [
-                            b,
-                            s,
-                            n,
-                            num_kv_heads,
-                            128,
-                            False,
-                            False,
-                            True,
-                            "context_attention_perf.txt",
-                        ]
-                    )
-                    if has_fp8_kv_cache:
+
+                    for is_fp8_kv_cache in kv_cache_dtype_list:
                         test_cases.append(
                             [
                                 b,
@@ -343,32 +346,16 @@ def get_context_attention_test_cases(if_unit_test=False):
                                 n,
                                 num_kv_heads,
                                 128,
-                                True,
-                                False,
+                                is_fp8_kv_cache,
                                 True,
                                 "context_attention_perf.txt",
                             ]
                         )
-                        # flashattention impl does not support fp8 context fmha
-                        # test_cases.append(
-                        #     [
-                        #         b,
-                        #         s,
-                        #         n,
-                        #         num_kv_heads,
-                        #         128,
-                        #         True,
-                        #         True,
-                        #         True,
-                        #         "context_attention_perf.txt",
-                        #     ]
-                        # )
 
     return test_cases
 
 
 def get_generation_attention_test_cases():
-    has_fp8_kv_cache = get_sm_version() > 86
     test_cases = []
 
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
@@ -395,6 +382,10 @@ def get_generation_attention_test_cases():
         131072,
     ]
     n_kv_list = [1, 2, 4, 8]
+
+    kv_cache_dtype_list = [False]
+    if get_sm_version() > 86:
+        kv_cache_dtype_list.append(True)
 
     max_bsn = 8192 * 1024
     for n in sorted(n_list, reverse=True):
@@ -424,8 +415,7 @@ def get_generation_attention_test_cases():
                 if n_kv > n or n % n_kv != 0:
                     continue
                 for s in target_s_list:
-                    test_cases.append([b, s, n, n_kv, 128, False, False, False, "generation_attention_perf.txt"])
-                    if has_fp8_kv_cache:
+                    for is_fp8_kv_cache in kv_cache_dtype_list:
                         test_cases.append(
                             [
                                 b,
@@ -433,8 +423,7 @@ def get_generation_attention_test_cases():
                                 n,
                                 n_kv,
                                 128,
-                                True,
-                                False,
+                                is_fp8_kv_cache,
                                 False,
                                 "generation_attention_perf.txt",
                             ]
