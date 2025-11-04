@@ -1878,7 +1878,7 @@ class PerfDatabase:
     def query_context_attention(
         self,
         b: int,
-        s: int,
+        s: int,  # s is the seq len to be computed, full_s = s + prefix
         prefix: int,
         n: int,
         n_kv: int,

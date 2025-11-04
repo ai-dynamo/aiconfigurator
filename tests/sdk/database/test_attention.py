@@ -13,7 +13,8 @@ class TestContextAttention:
 
     def test_query_context_attention_sol_mode(self, comprehensive_perf_db):
         """Test SOL mode calculation for context attention."""
-        b, s, prefix, n, n_kv = 2, 64, 0, 16, 8
+        b, full_s, prefix, n, n_kv = 2, 64, 0, 16, 8
+        s = full_s - prefix
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
@@ -22,8 +23,10 @@ class TestContextAttention:
         )
 
         # Calculate expected SOL result
-        ops = 2 * b * (s * s - prefix * prefix) * n * 128 * 2 / 2  # 2 for fma, 2 for q*k^t+*v, 2 for causality
-        mem_bytes = 2 * b * (n * (s - prefix) * 128 + 2 * n_kv * s * 128 + n * (s - prefix) * 128)
+        ops = (
+            2 * b * (full_s * full_s - prefix * prefix) * n * 128 * 2 / 2
+        )  # 2 for fma, 2 for q*k^t+*v, 2 for causality
+        mem_bytes = 2 * b * (n * s * 128 + 2 * n_kv * full_s * 128 + n * s * 128)
 
         sol_math = (
             ops / comprehensive_perf_db.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
@@ -35,7 +38,8 @@ class TestContextAttention:
 
     def test_query_context_attention_sol_full_mode(self, comprehensive_perf_db):
         """Test SOL_FULL mode returns tuple with math and memory components."""
-        b, s, prefix, n, n_kv = 1, 32, 0, 8, 4
+        b, full_s, prefix, n, n_kv = 1, 32, 0, 8, 4
+        s = full_s - prefix
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
@@ -49,7 +53,8 @@ class TestContextAttention:
 
     def test_query_context_attention_non_sol_mode_mha(self, comprehensive_perf_db):
         """Test non-SOL mode with MHA (n_kv == n)."""
-        b, s, prefix, n = 2, 32, 0, 16
+        b, full_s, prefix, n = 2, 32, 0, 16
+        s = full_s - prefix
         n_kv = n  # MHA case
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
@@ -66,7 +71,8 @@ class TestContextAttention:
 
     def test_query_context_attention_non_sol_mode_xqa(self, comprehensive_perf_db):
         """Test non-SOL mode with XQA (n_kv < n)."""
-        b, s, prefix, n, n_kv = 2, 32, 0, 16, 4
+        b, full_s, prefix, n, n_kv = 2, 32, 0, 16, 4
+        s = full_s - prefix
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
