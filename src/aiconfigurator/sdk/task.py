@@ -696,6 +696,15 @@ class TaskConfig:
         else:
             raise ValueError(f"Invalid serving mode: {serving_mode}")
 
+        self.validate()
+
+    def validate(self):
+        """
+        Check that the task can be run by AIC.
+        """
+        if check_is_moe(self.model_name) and self.backend_name == "vllm":
+            raise NotImplementedError("AIConfigurator does not yet support MOE models for VLLM backend.")
+
     def pretty(self) -> str:
         def _convert(obj: Any) -> Any:
             if isinstance(obj, DefaultMunch):
