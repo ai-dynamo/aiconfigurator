@@ -3,6 +3,7 @@
 
 import argparse
 import importlib.util
+import logging
 import sys
 
 from aiconfigurator import __version__
@@ -10,6 +11,9 @@ from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.eval.main import configure_parser as configure_eval_parser
 from aiconfigurator.eval.main import main as eval_main
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 
 def is_package_installed(package_name):
@@ -27,7 +31,7 @@ if is_package_installed("gradio"):
         webapp_args = webapp_parser.parse_args(extra_args)
         webapp_main(webapp_args)
 else:
-    print("Gradio not installed, you can install it with pip3 install .[webapp]")
+    logger.warning("Gradio not installed, you can install it with pip3 install .[webapp]")
 
 
 def _run_cli(extra_args: list[str]) -> None:
