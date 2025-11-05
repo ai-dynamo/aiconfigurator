@@ -4,18 +4,26 @@
 from __future__ import annotations
 
 import logging
+from functools import cache
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.utils import get_model_config_from_hf_id
 
 logger = logging.getLogger(__name__)
+
+
+@cache
+def _get_model_info(model_name: str) -> list:
+    if model_name in common.SupportedModels:
+        return common.SupportedModels[model_name]
+    return get_model_config_from_hf_id(model_name)
 
 
 def get_model(model_name: str, model_config: config.ModelConfig, backend_name: str) -> BaseModel:
     """
     Get model.
     """
-    assert model_name in common.SupportedModels, f"unsupport model {model_name}"
     (
         model_family,
         layers,
@@ -30,7 +38,7 @@ def get_model(model_name: str, model_config: config.ModelConfig, backend_name: s
         num_experts,
         moe_inter_size,
         extra_params,
-    ) = common.SupportedModels[model_name]
+    ) = _get_model_info(model_name)
     assert model_family in common.ModelFamily, "model is not in ModelFamily(GPT, LLAMA, MOE, DEEPSEEK, NEMOTRONNAS)"
 
     if model_config.overwrite_num_layers > 0:
@@ -140,23 +148,7 @@ def get_model_family(model_name: str) -> str:
     """
     Get model family.
     """
-    assert model_name in common.SupportedModels, f"unsupport model {model_name}"
-    (
-        model_family,
-        layers,
-        n,
-        n_kv,
-        d,
-        hidden,
-        inter,
-        vocab,
-        context,
-        topk,
-        num_experts,
-        moe_inter_size,
-        extra_params,
-    ) = common.SupportedModels[model_name]
-    return model_family
+    return _get_model_info(model_name)[0]
 
 
 def check_is_moe(model_name: str) -> bool:
@@ -1367,7 +1359,6 @@ class DisaggDeepSeekModel(BaseModel):
                     h,
                     self._moe_inter_size,
                     moe_quant_mode,
-                    is_context=False,
                 )
             ]
         )
