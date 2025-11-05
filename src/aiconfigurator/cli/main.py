@@ -121,7 +121,7 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
     task_configs: dict[str, TaskConfig] = {}
 
     # Validate backend compatibility with aggregated serving mode
-    if args.backend in [common.BackendName.sglang.value, common.BackendName.vllm.value]:
+    if args.backend in [common.BackendName.vllm.value]:
         logger.warning(
             "Backend '%s' is not supported with serving_mode 'agg'. Only 'disagg' mode will be configured.",
             args.backend,
@@ -236,7 +236,7 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             backend_version = exp_config.get("backend_version")
 
         # Validate backend compatibility with serving mode
-        if serving_mode == "agg" and backend_name in [common.BackendName.sglang.value, common.BackendName.vllm.value]:
+        if serving_mode == "agg" and backend_name in [common.BackendName.vllm.value]:
             logger.error(
                 "Experiment '%s': serving_mode 'agg' is not supported with backend '%s'. "
                 "Please either use serving_mode 'disagg' or switch to backend 'trtllm'.",
