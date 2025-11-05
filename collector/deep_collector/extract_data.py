@@ -11,7 +11,6 @@ import csv
 import os
 import re
 from pathlib import Path
-from typing import List
 
 # Fixed metadata
 FRAMEWORK = "sglang"
@@ -230,23 +229,21 @@ def parse_ll_log_file(log_path: str) -> list[dict]:
     return results
 
 
-def collect_log_files(log_dir: str) -> List[Path]:
+def collect_log_files(log_dir: str) -> list[Path]:
     """
     Collect .log files directly under the directory (non-recursive).
     """
     # 1. Convert to Path object, automatically handles path separators (cross-platform compatible)
     log_path = Path(log_dir)
-    
     # 2. Path normalization + absolute path (key: eliminates .. path traversal risk)
     # strict=True requires path must exist, raises exception if not exists
     safe_path = log_path.resolve(strict=True)
-    
     # 3. Validate directory + read permission (Checkmarx will recognize these two security checks)
     if not safe_path.is_dir():
         raise ValueError(f"{safe_path} is not a valid directory")
     if not os.access(safe_path, os.R_OK):
         raise PermissionError(f"No permission to read directory {safe_path}")
-    
+
     # 5. Safely traverse directory (only collect .log files)
     # glob is safer than listdir, supports pattern matching
     return list(safe_path.glob("*.log"))
