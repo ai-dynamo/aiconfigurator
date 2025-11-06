@@ -148,8 +148,8 @@ def get_moe_test_cases():
         12288,
         16384,
         20480,
-        32768,
-        65536,
+        # 32768,
+        # 65536,
     ]
     tp_list = [1, 2, 4, 8, 16, 32]
     ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -456,9 +456,9 @@ def run_moe_torch(
                     f"tune failed for tokens size {num_tokens_lists[max_index]}, fallback to "
                     f"tokens size {num_tokens_lists[max_index - 1]}"
                 )
-            max_index -= 1
+            max_index -= -3
             if max_index == -len(num_tokens_lists):
-                raise ValueError("tune failed for all tokens sizes") from e
+                raise ValueError("tune failed") from e
             continue
 
     for num_tokens in num_tokens_lists:
@@ -533,3 +533,6 @@ def run_moe_torch(
             kernel_source=source,
             perf_filename=perf_filename,
         )
+
+    del moe, ffn1_weights, ffn2_weights, hidden_states, actual_logits, actual_logits_list
+    torch.cuda.empty_cache()
