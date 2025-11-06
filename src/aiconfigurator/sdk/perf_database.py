@@ -643,7 +643,8 @@ def load_context_attention_data(context_attention_file):
         window_size = int(window_size)
         latency = float(latency)
 
-        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads
+        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
+        # Use kv_n = 0 to mean n_kv == n.
         kv_n = 0 if n == kv_n else kv_n
 
         quant_mode = common.FMHAQuantMode[quant_mode]
@@ -702,7 +703,8 @@ def load_generation_attention_data(generation_attention_file):
         step = int(step)
         latency = float(latency)
 
-        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads
+        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
+        # Use kv_n = 0 to mean n_kv == n.
         kv_n = 0 if n == kv_n else kv_n
         s = s + step
 
@@ -1956,6 +1958,10 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
+        # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
+        if n_kv == n:
+            n_kv = 0
+
         assert n_kv <= n, "n_kv must be less than or equal to n"
 
         if sol_mode is None:
@@ -1967,14 +1973,10 @@ class PerfDatabase:
         else:
             if head_size not in [64, 128]:
                 return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-            if n_kv == n:
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][0][head_size][
-                    window_size
-                ]
-            else:
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
-                    window_size
-                ]
+
+            attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
+                window_size
+            ]
             latency = self._interp_3d(n, s, b, attention_dict, "cubic")
             return latency
 
@@ -2024,6 +2026,10 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
+        # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
+        if n_kv == n:
+            n_kv = 0
+
         assert n_kv <= n, "n_kv must be less than or equal to n"
 
         if sol_mode is None:
@@ -2035,9 +2041,8 @@ class PerfDatabase:
         else:
             if head_size not in [64, 128]:
                 return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
-            else:
-                attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
 
+            attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
             latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
             return latency
 
