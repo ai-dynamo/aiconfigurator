@@ -113,7 +113,8 @@ class TRTLLMBackend(BaseBackend):
                         non_attention_latency += latency
 
                 # second pass to get ctx attn, split full isl over
-                # num_steps(=np.ceil(isl/ctx_tokens)), average the ctx attn latency
+                # num_steps(=np.ceil(isl/ctx_tokens))
+                # average the ctx attn latency with num_steps to get the ctx_attention_latency
                 num_tokens = isl
                 batch_size = np.ceil(ctx_tokens / isl)
                 summary = self.run_static(

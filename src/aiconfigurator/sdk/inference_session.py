@@ -534,11 +534,10 @@ class DisaggInferenceSession:
             rate_matching_decode_degradation_factor: float,
         ) -> InferenceSummary:
             """
-            Find the best result under constraints with diversity
+            Find the best result under constraints
             """
 
-            # 1. different from find_best_result_under_constraints, we need to find the best result
-            #    with diversity for decode. diversity means we should categorize the decode summary
+            # 1. we categorize the decode summary
             #    df into different categories based on parallelism (we can use the parallel key in
             #    the df). do the rate matching and sort the result by category - throughput.
             # 2. for prefill, follow two rules: high throughput, if at same level, choose the one
@@ -621,10 +620,10 @@ class DisaggInferenceSession:
                     )
                     disagg_summary_df_list.append(category_df)
                 else:
-                    logger.debug(f"No matched result for decode parallel {parallel_value} under diversity constraints.")
+                    logger.debug(f"No matched result for decode parallel {parallel_value}.")
 
             if not disagg_summary_df_list:
-                logger.debug("No disagg summary found after applying diversity constraints.")
+                logger.debug("No disagg summary found after applying constraints.")
                 return None
 
             disagg_summary_df = pd.concat(disagg_summary_df_list, ignore_index=True)
