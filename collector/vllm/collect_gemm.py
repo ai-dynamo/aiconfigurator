@@ -12,9 +12,7 @@ from vllm.distributed.parallel_state import ensure_model_parallel_initialized
 from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.version import __version__ as vllm_version
 
 from helper import get_sm_version, log_perf
@@ -78,7 +76,7 @@ def get_gemm_test_cases(is_unit_test=False):
     ]
     nk_list_ext = [16384, 65536]  # for coverage and interp purpose
 
-    gemm_list = ["float16", "awq", "gptq"]
+    gemm_list = ["float16"]
     if get_sm_version() > 86:
         gemm_list += ["fp8"]
         # gemm_list += ["fp8_block"] # TODO: broken
@@ -103,7 +101,7 @@ def get_gemm_test_cases(is_unit_test=False):
                         continue
                     if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
                         continue
-                    test_cases.append([gemm_type, x, n, k, "gemm_perf_vllm.txt"])
+                    test_cases.append([gemm_type, x, n, k, "gemm_perf.txt"])
     return test_cases
 
 
@@ -129,10 +127,6 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
             activation_scheme="dynamic",
             weight_block_size=[128, 128],
         )
-    elif gemm_type == "awq":
-        qc = AWQConfig(weight_bits=4, group_size=128, zero_point=True, modules_to_not_convert=None)
-    elif gemm_type == "gptq":
-        qc = GPTQConfig(weight_bits=8, group_size=128, desc_act=False, lm_head_quantized=False, dynamic={})
     else:
         qc = None
 
