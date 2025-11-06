@@ -1907,7 +1907,7 @@ class PerfDatabase:
             Get the sol time, sol math and sol mem
             """
             full_s = s + prefix
-            if w > 0 and s > w:
+            if w > 0 and full_s > w:
                 # Sliding window attention
                 # Each position attends to at most w previous positions
                 ops = 2 * b * (full_s - prefix) * w * n * h * 2
