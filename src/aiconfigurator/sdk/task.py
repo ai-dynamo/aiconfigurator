@@ -444,6 +444,7 @@ class TaskConfigFactory:
         sm_version = database.system_spec["gpu"]["sm_version"]
 
         if backend == "vllm":
+            # TODO: collect fp8_block quant mode data for vllm
             fp8_gemm_quant = "fp8"
             fp8_fhma_quant = "float16"
         else:
