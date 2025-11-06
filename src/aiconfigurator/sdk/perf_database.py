@@ -17,7 +17,8 @@ from scipy import interpolate
 
 from aiconfigurator.sdk import common
 
-databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+# Cache for databases, key is (system, backend, version, wide_ep)
+databases_cache = {}
 logger = logging.getLogger(__name__)
 
 
@@ -160,7 +161,7 @@ def get_latest_database_version(
 
 
 def get_database(
-    system: str, backend: str, version: str, systems_dir: str = get_system_config_path()
+    system: str, backend: str, version: str, systems_dir: str = get_system_config_path(), wide_ep: bool = False
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version
@@ -170,31 +171,38 @@ def get_database(
         backend (str): the backend name
         version (str): the version name
         systems_dir (str): the systems directory
+        wide_ep (bool): whether to load wide_ep data (for sglang MoE models)
 
     Returns:
         PerfDatabase: the database for the given system, backend and version
     """
+    # Include wide_ep in the cache key for sglang backend
+    cache_key = (system, backend, version, wide_ep if backend == "sglang" else False)
     try:
-        database = databases_cache[system][backend][version]
-    except KeyError:
-        logger.info(f"loading {system=}, {backend=}, {version=}")
-        if os.path.exists(os.path.join(systems_dir, system + ".yaml")):
-            with open(os.path.join(systems_dir, system + ".yaml")) as f:
-                system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-            data_path = os.path.join(systems_dir, system_spec["data_dir"], backend, version)
-            if os.path.exists(data_path):
-                try:
-                    database = PerfDatabase(system, backend, version, systems_dir)
-                    databases_cache[system][backend][version] = database
-                except Exception:
-                    logger.exception(f"failed to load {system=}, {backend=}, {version=}")
-                    database = None
-            else:
-                logger.exception(f"data path {data_path} not found")
+        database = databases_cache.get(cache_key)
+        if database is not None:
+            return database
+    except (KeyError, AttributeError):
+        pass
+
+    logger.info(f"loading {system=}, {backend=}, {version=}, {wide_ep=}")
+    if os.path.exists(os.path.join(systems_dir, system + ".yaml")):
+        with open(os.path.join(systems_dir, system + ".yaml")) as f:
+            system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+        data_path = os.path.join(systems_dir, system_spec["data_dir"], backend, version)
+        if os.path.exists(data_path):
+            try:
+                database = PerfDatabase(system, backend, version, systems_dir, wide_ep=wide_ep)
+                databases_cache[cache_key] = database
+            except Exception:
+                logger.exception(f"failed to load {system=}, {backend=}, {version=}, {wide_ep=}")
                 database = None
         else:
-            logger.exception(f"system yaml {os.path.join(systems_dir, system + '.yaml')} not found")
+            logger.exception(f"data path {data_path} not found")
             database = None
+    else:
+        logger.exception(f"system yaml {os.path.join(systems_dir, system + '.yaml')} not found")
+        database = None
 
     return database
 
@@ -430,7 +438,7 @@ def load_moe_data(moe_file):
 
 def load_sglang_mlp_data(mlp_file):
     """
-    Load the SGLang MLP data from context_mlp_perf.txt and generation_mlp_perf.txt
+    Load the SGLang MLP data from context_deepep_mlp_perf.txt and generation_deepep_mlp_perf.txt
     """
     data_dir = os.path.dirname(mlp_file)
     prefill_mlp_file = os.path.join(data_dir, common.PerfDataFilename.context_mlp.value)
@@ -594,6 +602,106 @@ def load_sglang_moe_data(moe_file):
         logger.warning(f"Generation MoE file not found: {generation_moe_file}")
 
     return moe_default_data, moe_low_latency_data
+
+
+def load_sglang_context_moe_data(context_moe_file):
+    """
+    Load the SGLang context MoE data from context_moe_perf.txt
+    """
+    if not os.path.exists(context_moe_file):
+        logger.warning(f"Context MoE data file {context_moe_file} not found.")
+        return None
+
+    context_moe_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
+                )
+            )
+        )
+    )
+
+    logger.info(f"Loading context MoE data from: {context_moe_file}")
+    with open(context_moe_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # Parse the CSV format with num_tokens instead of batch_size and input_len
+            quant_mode = row["moe_dtype"]
+            num_tokens = int(row["num_tokens"])
+            hidden_size = int(row["hidden_size"])
+            inter_size = int(row["inter_size"])
+            topk = int(row["topk"])
+            num_experts = int(row["num_experts"])
+            moe_tp_size = int(row["moe_tp_size"])
+            moe_ep_size = int(row["moe_ep_size"])
+            distribution = row["distribution"]
+            latency = float(row["latency"])
+            quant_mode = common.MoEQuantMode[quant_mode]
+
+            # Store the data, overwriting any previous entry with the same key
+            context_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                moe_ep_size
+            ][num_tokens] = latency
+            logger.debug(
+                f"Loaded context MoE data: {quant_mode}, {distribution}, {topk}, "
+                f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
+                f"{moe_ep_size}, {num_tokens} -> {latency}"
+            )
+
+    return context_moe_data
+
+
+def load_sglang_generation_moe_data(generation_moe_file):
+    """
+    Load the SGLang generation MoE data from generation_moe_perf.txt
+    """
+    if not os.path.exists(generation_moe_file):
+        logger.warning(f"Generation MoE data file {generation_moe_file} not found.")
+        return None
+
+    generation_moe_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
+                )
+            )
+        )
+    )
+
+    logger.info(f"Loading generation MoE data from: {generation_moe_file}")
+    with open(generation_moe_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # Parse the CSV format with num_tokens instead of batch_size and input_len
+            quant_mode = row["moe_dtype"]
+            num_tokens = int(row["num_tokens"])
+            hidden_size = int(row["hidden_size"])
+            inter_size = int(row["inter_size"])
+            topk = int(row["topk"])
+            num_experts = int(row["num_experts"])
+            moe_tp_size = int(row["moe_tp_size"])
+            moe_ep_size = int(row["moe_ep_size"])
+            distribution = row["distribution"]
+            latency = float(row["latency"])
+            quant_mode = common.MoEQuantMode[quant_mode]
+
+            # Store the data, overwriting any previous entry with the same key
+            generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                moe_ep_size
+            ][num_tokens] = latency
+            logger.debug(
+                f"Loaded generation MoE data: {quant_mode}, {distribution}, {topk}, "
+                f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
+                f"{moe_ep_size}, {num_tokens} -> {latency}"
+            )
+
+    return generation_moe_data
 
 
 def load_context_attention_data(context_attention_file):
@@ -1054,13 +1162,23 @@ class PerfDatabase:
         query_moe: query the moe data
     """
 
-    def __init__(self, system: str, backend: str, version: str, systems_dir: str = "./systems") -> None:
+    def __init__(
+        self, system: str, backend: str, version: str, systems_dir: str = "./systems", wide_ep: bool = False
+    ) -> None:
         """
         Initialize the perf database
+
+        Args:
+            system: system name
+            backend: backend name
+            version: version name
+            systems_dir: systems directory
+            wide_ep: whether to load wide_ep data (for sglang MoE models)
         """
         self.system = system
         self.backend = backend
         self.version = version
+        self.wide_ep = wide_ep
         with open(os.path.join(systems_dir, system + ".yaml")) as f:
             self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
         self._default_sol_mode = common.SOLMode.NON_SOL  # non sol
@@ -1086,15 +1204,30 @@ class PerfDatabase:
             self._custom_allreduce_data = load_custom_allreduce_data(
                 os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
-            self._moe_data, self._generation_moe_data = load_sglang_moe_data(
+            self._moe_data, self._moe_low_latency_data = load_sglang_moe_data(
                 os.path.join(data_dir, common.PerfDataFilename.context_moe.value)
             )
-            self._context_mla_data = load_sglang_context_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
+            self._context_moe_data = load_sglang_context_moe_data(
+                os.path.join(data_dir, common.PerfDataFilename.context_moe.value)
             )
-            self._generation_mla_data = load_sglang_generation_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
+            self._generation_moe_data = load_sglang_generation_moe_data(
+                os.path.join(data_dir, common.PerfDataFilename.generation_moe.value)
             )
+            # Load appropriate MLA data based on wide_ep mode
+            if wide_ep:
+                self._context_mla_data = load_sglang_context_mla_data(
+                    os.path.join(data_dir, common.PerfDataFilename.context_mla_wideep.value)
+                )
+                self._generation_mla_data = load_sglang_generation_mla_data(
+                    os.path.join(data_dir, common.PerfDataFilename.generation_mla_wideep.value)
+                )
+            else:
+                self._context_mla_data = load_sglang_context_mla_data(
+                    os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
+                )
+                self._generation_mla_data = load_sglang_generation_mla_data(
+                    os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
+                )
             self._context_mlp_data, self._generation_mlp_data = load_sglang_mlp_data(
                 os.path.join(data_dir, common.PerfDataFilename.context_mlp.value)
             )
@@ -2494,22 +2627,20 @@ class PerfDatabase:
             if self.backend == common.BackendName.sglang.value:
                 # Set default moe_backend if not specified
                 if moe_backend is None:
-                    moe_backend = "deepep_moe"
+                    moe_data = self._moe_data
 
                 if moe_backend == "deepep_moe":
                     if is_context:
-                        moe_data = self._moe_data
+                        moe_data = self._context_moe_data
                     else:
                         moe_data = self._generation_moe_data
 
-                    moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][
-                        moe_tp_size
-                    ][moe_ep_size]
-                    num_left, num_right = self._nearest_1d_point_helper(
-                        num_tokens, list(moe_dict.keys()), inner_only=False
-                    )
-                    lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
-                    return lat
+                moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][
+                    moe_tp_size
+                ][moe_ep_size]
+                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
+                lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
+                return lat
             elif self.backend == common.BackendName.trtllm.value:
                 # aligned with trtllm, kernel source selection.
                 if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:

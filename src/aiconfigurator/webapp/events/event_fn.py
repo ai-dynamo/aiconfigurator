@@ -254,6 +254,7 @@ class EventFn:
         dp_size,
         moe_tp_size,
         moe_ep_size,
+        moe_backend,
         gemm_quant_mode,
         kvcache_quant_mode,
         fmha_quant_mode,
@@ -301,6 +302,8 @@ class EventFn:
                     dp_list=[dp_size],
                     is_moe=is_moe,
                     backend=common.BackendName(backend_name),
+                    moe_backend=moe_backend,
+                    model_family=models.get_model_family(model_name),
                 )
                 for parallel_config in parallel_config_list:
                     tp, pp, dp, moe_tp, moe_ep = parallel_config
@@ -358,6 +361,7 @@ class EventFn:
         dp_size,
         moe_tp_size,
         moe_ep_size,
+        moe_backend,
         gemm_quant_mode,
         kvcache_quant_mode,
         fmha_quant_mode,
@@ -406,6 +410,8 @@ class EventFn:
                     dp_list=dp_size,
                     is_moe=is_moe,
                     backend=common.BackendName(backend_name),
+                    moe_backend=moe_backend,
+                    model_family=models.get_model_family(model_name),
                 )
                 for parallel_config in parallel_config_list:
                     tp, pp, dp, moe_tp, moe_ep = parallel_config
@@ -487,6 +493,7 @@ class EventFn:
         prefill_dp_size,
         prefill_moe_tp_size,
         prefill_moe_ep_size,
+        prefill_moe_backend,
         prefill_gemm_quant_mode,
         prefill_kvcache_quant_mode,
         prefill_fmha_quant_mode,
@@ -504,6 +511,7 @@ class EventFn:
         decode_dp_size,
         decode_moe_tp_size,
         decode_moe_ep_size,
+        decode_moe_backend,
         decode_gemm_quant_mode,
         decode_kvcache_quant_mode,
         decode_fmha_quant_mode,
@@ -582,6 +590,8 @@ class EventFn:
                     dp_list=prefill_dp_size,
                     is_moe=is_moe,
                     backend=common.BackendName(prefill_backend_name),
+                    moe_backend=prefill_moe_backend,
+                    model_family=models.get_model_family(model_name),
                 )
                 decode_parallel_config_list = pareto_analysis.enumerate_parallel_config(
                     num_gpu_list=decode_num_gpus,
@@ -592,6 +602,8 @@ class EventFn:
                     dp_list=decode_dp_size,
                     is_moe=is_moe,
                     backend=common.BackendName(decode_backend_name),
+                    moe_backend=decode_moe_backend,
+                    model_family=models.get_model_family(model_name),
                 )
 
                 for prefill_parallel_config in prefill_parallel_config_list:

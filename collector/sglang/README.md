@@ -170,8 +170,8 @@ The script automatically tests the following configurations for both prefill and
 
 ### Output
 Results are saved to:
-- `context_mlp_perf.txt`: Prefill phase performance data
-- `generation_mlp_perf.txt`: Decode phase performance data
+- `context_deepep_mlp_perf.txt`: Prefill phase performance data
+- `generation_deepep_mlp_perf.txt`: Decode phase performance data
 
 Output format:
 ```

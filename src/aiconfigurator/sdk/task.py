@@ -207,7 +207,24 @@ class TaskConfigFactory:
                 worker_config["pp_list"] = [1]
                 worker_config["dp_list"] = [8, 16, 32] if ctx.total_gpus >= 32 else [8]
                 worker_config["moe_ep_list"] = [8, 16, 32] if ctx.total_gpus >= 32 else [8]
+            elif ctx.backend_name == "sglang" and ctx.enable_wide_ep:
+                # sglang + MoE + wide_ep: wide_ep currently only works with disagg, but keep for consistency
+                worker_config["num_gpu_per_worker"] = [8, 16, 32]
+                worker_config["tp_list"] = [1, 2, 4, 8]
+                worker_config["pp_list"] = [1]
+                worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
+                worker_config["moe_tp_list"] = [1]
+                worker_config["moe_ep_list"] = [8, 16, 32]
+            elif ctx.backend_name == "sglang":
+                # sglang + MoE (non-wide_ep)
+                worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
+                worker_config["tp_list"] = [1, 2, 4, 8]
+                worker_config["pp_list"] = [1]
+                worker_config["dp_list"] = [1, 2, 4, 8]
+                worker_config["moe_tp_list"] = [1, 2, 4, 8]
+                worker_config["moe_ep_list"] = [1]
             elif ctx.enable_wide_ep:
+                # trtllm + wide_ep (keep previous logic)
                 worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32]
                 worker_config["tp_list"] = [1, 2, 4, 8]
                 worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
@@ -275,7 +292,38 @@ class TaskConfigFactory:
                 decode_worker_config["pp_list"] = [1]
                 decode_worker_config["dp_list"] = moe_ep_options
                 decode_worker_config["moe_ep_list"] = moe_ep_options
+            elif ctx.backend_name == "sglang" and ctx.enable_wide_ep:
+                # sglang + MoE + wide_ep + disagg
+                prefill_worker_config["num_gpu_per_worker"] = [8, 16, 32]
+                prefill_worker_config["tp_list"] = [1, 2, 4, 8]
+                prefill_worker_config["pp_list"] = [1]
+                prefill_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
+                prefill_worker_config["moe_tp_list"] = [1]
+                prefill_worker_config["moe_ep_list"] = [8, 16, 32]
+
+                decode_worker_config["num_gpu_per_worker"] = [8, 16, 32, 64]
+                decode_worker_config["tp_list"] = [1, 2, 4, 8]
+                decode_worker_config["pp_list"] = [1]
+                decode_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
+                decode_worker_config["moe_tp_list"] = [1]
+                decode_worker_config["moe_ep_list"] = [8, 16, 32, 64]
+            elif ctx.backend_name == "sglang":
+                # sglang + MoE (non-wide_ep)
+                prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
+                prefill_worker_config["tp_list"] = [1, 2, 4, 8]
+                prefill_worker_config["pp_list"] = [1]
+                prefill_worker_config["dp_list"] = [1, 2, 4, 8]
+                prefill_worker_config["moe_tp_list"] = [1, 2, 4, 8]
+                prefill_worker_config["moe_ep_list"] = [1]
+
+                decode_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
+                decode_worker_config["tp_list"] = [1, 2, 4, 8]
+                decode_worker_config["pp_list"] = [1]
+                decode_worker_config["dp_list"] = [1, 2, 4, 8]
+                decode_worker_config["moe_tp_list"] = [1, 2, 4, 8]
+                decode_worker_config["moe_ep_list"] = [1]
             elif ctx.enable_wide_ep:
+                # trtllm + wide_ep (keep previous logic)
                 prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
                 prefill_worker_config["tp_list"] = [1, 2, 4, 8]
                 prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16] if should_enable_pp else [1]
@@ -353,6 +401,7 @@ class TaskConfigFactory:
             backend=worker_config.backend_name,
             version=worker_config.backend_version,
             preferred_mode=ctx.use_specific_quant_mode,
+            wide_ep=ctx.enable_wide_ep and ctx.backend_name == "sglang",
         )
 
     @classmethod
@@ -382,6 +431,7 @@ class TaskConfigFactory:
             backend=prefill_cfg.backend_name,
             version=prefill_cfg.backend_version,
             preferred_mode=ctx.use_specific_quant_mode,
+            wide_ep=ctx.enable_wide_ep and ctx.backend_name == "sglang",
         )
 
         cls._apply_quant_modes(
@@ -391,6 +441,7 @@ class TaskConfigFactory:
             backend=decode_cfg.backend_name,
             version=decode_cfg.backend_version,
             preferred_mode=ctx.use_specific_quant_mode,
+            wide_ep=ctx.enable_wide_ep and ctx.backend_name == "sglang",
         )
 
     @staticmethod
@@ -401,6 +452,7 @@ class TaskConfigFactory:
         backend: str,
         version: str,
         preferred_mode: str | None,
+        wide_ep: bool = False,
     ) -> None:
         quant_keys = [
             "gemm_quant_mode",
@@ -415,7 +467,7 @@ class TaskConfigFactory:
         if all(value is not None and isinstance(value, str) for value in existing.values()):
             return
 
-        database = get_database(system=system, backend=backend, version=version)
+        database = get_database(system=system, backend=backend, version=version, wide_ep=wide_ep)
         defaults = TaskConfigFactory._get_quant_mode(
             model_name=model_name,
             database=database,
@@ -823,11 +875,13 @@ class TaskRunner:
         )
         logger.info("Task %s: Setting up database", task_config.task_name)
         try:
+            wide_ep = task_config.enable_wide_ep and task_config.backend_name == "sglang"
             database = copy.deepcopy(
                 get_database(
                     system=task_config.worker_config.system_name,
                     backend=task_config.worker_config.backend_name,
                     version=task_config.worker_config.backend_version,
+                    wide_ep=wide_ep,
                 )
             )
         except Exception:  # pragma: no cover
@@ -844,6 +898,7 @@ class TaskRunner:
             kvcache_quant_mode=task_config.worker_config.kvcache_quant_mode,
             fmha_quant_mode=task_config.worker_config.fmha_quant_mode,
             moe_quant_mode=task_config.worker_config.moe_quant_mode,
+            moe_backend=task_config.worker_config.moe_backend,
             comm_quant_mode=task_config.worker_config.comm_quant_mode,
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
@@ -861,6 +916,8 @@ class TaskRunner:
                 moe_ep_list=task_config.worker_config.moe_ep_list,
                 is_moe=check_is_moe(task_config.model_name),
                 backend=common.BackendName(task_config.worker_config.backend_name),
+                moe_backend=task_config.worker_config.moe_backend,
+                model_family=task_config.worker_config.model_family,
             )
         except Exception:  # pragma: no cover
             logger.exception(
@@ -897,11 +954,13 @@ class TaskRunner:
 
         logger.info("Task %s: Setting up prefill database", task_config.task_name)
         try:
+            wide_ep = task_config.enable_wide_ep and task_config.backend_name == "sglang"
             prefill_database = copy.deepcopy(
                 get_database(
                     system=task_config.prefill_worker_config.system_name,
                     backend=task_config.prefill_worker_config.backend_name,
                     version=task_config.prefill_worker_config.backend_version,
+                    wide_ep=wide_ep,
                 )
             )
         except Exception:  # pragma: no cover
@@ -936,6 +995,8 @@ class TaskRunner:
                 moe_ep_list=task_config.prefill_worker_config.moe_ep_list,
                 is_moe=check_is_moe(task_config.model_name),
                 backend=common.BackendName(task_config.prefill_worker_config.backend_name),
+                moe_backend=task_config.prefill_worker_config.moe_backend,
+                model_family=task_config.prefill_worker_config.model_family,
             )
         except Exception:  # pragma: no cover
             logger.exception(
@@ -948,11 +1009,13 @@ class TaskRunner:
 
         logger.info("Task %s: Setting up decode database", task_config.task_name)
         try:
+            wide_ep = task_config.enable_wide_ep and task_config.backend_name == "sglang"
             decode_database = copy.deepcopy(
                 get_database(
                     system=task_config.decode_worker_config.system_name,
                     backend=task_config.decode_worker_config.backend_name,
                     version=task_config.decode_worker_config.backend_version,
+                    wide_ep=wide_ep,
                 )
             )
         except Exception:  # pragma: no cover
@@ -987,6 +1050,8 @@ class TaskRunner:
                 moe_ep_list=task_config.decode_worker_config.moe_ep_list,
                 is_moe=check_is_moe(task_config.model_name),
                 backend=common.BackendName(task_config.decode_worker_config.backend_name),
+                moe_backend=task_config.decode_worker_config.moe_backend,
+                model_family=task_config.decode_worker_config.model_family,
             )
         except Exception:  # pragma: no cover
             logger.exception(

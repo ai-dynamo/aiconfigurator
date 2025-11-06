@@ -157,7 +157,7 @@ class MoE(Operation):
         self._attention_dp_size = attention_dp_size
         self._workload_distribution = workload_distribution
         self._is_context = is_context
-        self._moe_backend = kwargs.get("moe_backend", "deepep_moe")
+        self._moe_backend = kwargs.get("moe_backend")
         self._weights = (
             self._hidden_size
             * self._inter_size
@@ -227,7 +227,7 @@ class MoEDispatch(Operation):
         self.num_gpus = self._moe_ep_size * self._moe_tp_size
         self._attention_tp_size = moe_tp_size * moe_ep_size // self._attention_dp_size
         self._sms = kwargs.get("sms", 12)
-        self._moe_backend = kwargs.get("moe_backend", "deepep_moe")
+        self._moe_backend = kwargs.get("moe_backend")
         self._node_num = kwargs.get("node_num", 1)
         self._is_context = kwargs.get("is_context", True)
 
