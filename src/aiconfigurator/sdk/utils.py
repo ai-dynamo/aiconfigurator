@@ -1,9 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.resources as pkg_resources
+import json
+import logging
 import re
 import tempfile
+import urllib.request
 from pathlib import Path
+
+from aiconfigurator.sdk.common import ARCHITECTURE_TO_MODEL_FAMILY, CachedHFModels
+
+logger = logging.getLogger(__name__)
 
 
 def safe_mkdir(target_path: str, exist_ok: bool = True) -> Path:
@@ -110,3 +118,143 @@ def safe_mkdir(target_path: str, exist_ok: bool = True) -> Path:
         if isinstance(e, ValueError):
             raise
         raise ValueError(f"Failed to create directory: {e}") from e
+
+
+class HuggingFaceDownloadError(Exception):
+    """
+    Exception raised when a HuggingFace config.json file cannot be downloaded.
+    """
+
+    pass
+
+
+def _download_hf_config(hf_id: str) -> dict:
+    """
+    Download a HuggingFace config.json file from the HuggingFace API.
+
+    Args:
+        hf_id: HuggingFace model ID
+
+    Returns:
+        dict: HuggingFace config.json dictionary
+
+    Raises:
+        HuggingFaceDownloadError: If the HuggingFace API returns an error
+    """
+    url = f"https://huggingface.co/{hf_id}/raw/main/config.json"
+
+    # Load token from ~/.cache/huggingface/token, if available
+    token_path = Path.home() / ".cache" / "huggingface" / "token"
+    hf_token = None
+    if token_path.exists():
+        with open(token_path) as f:
+            hf_token = f.read().strip()
+    headers = {}
+    if hf_token:
+        headers["Authorization"] = f"Bearer {hf_token}"
+
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as e:
+        # Provide detailed error for any HTTP error code
+        raise HuggingFaceDownloadError(
+            f"Failed to download {hf_id}'s config.json from HuggingFace: "
+            f"HuggingFace returned HTTP error {e.code}: {e.reason}. "
+            f"URL: {url}. Check your authentication token in {token_path} if using a gated model."
+        ) from e
+    except Exception as e:
+        raise HuggingFaceDownloadError(f"Failed to download {hf_id}'s config.json from HuggingFace: {e}") from e
+
+
+def _parse_hf_config_json(config: dict) -> list:
+    """
+    Convert a HuggingFace config.json dictionary into a list of model configuration parameters:
+    [model_family, l, n, n_kv, d, hidden_size, inter_size, vocab, context, topk,
+    num_experts, moe_inter_size, extra_params]
+
+    Args:
+        config: HuggingFace config.json dictionary
+
+    Returns:
+        list: Model configuration parameters
+
+    Raises:
+        ValueError: If a required field is missing from the config or the architecture is not supported
+    """
+    try:
+        model_family = ARCHITECTURE_TO_MODEL_FAMILY[config["architectures"][0]]
+    except KeyError as e:
+        raise ValueError(
+            f"The model's architecture {config['architectures'][0]} is not supported. "
+            f"Supported architectures: {', '.join(ARCHITECTURE_TO_MODEL_FAMILY.keys())}"
+        ) from e
+    layers = config["num_hidden_layers"]
+    n_kv = config["num_key_value_heads"]
+    hidden_size = config["hidden_size"]
+    n = config["num_attention_heads"]
+    inter_size = config["intermediate_size"]
+    d = config.get("head_dim", hidden_size // n)
+    vocab = config["vocab_size"]
+    context = config["max_position_embeddings"]
+    topk = config.get("num_experts_per_tok", 0)
+    num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
+    moe_inter_size = config.get("moe_intermediate_size", 0)
+    logger.info(
+        f"Model architecture: model_family={model_family}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "
+        f"hidden_size={hidden_size}, inter_size={inter_size}, vocab={vocab}, context={context}, "
+        f"topk={topk}, num_experts={num_experts}, moe_inter_size={moe_inter_size}"
+    )
+    return [
+        model_family,
+        layers,
+        n,
+        n_kv,
+        d,
+        hidden_size,
+        inter_size,
+        vocab,
+        context,
+        topk,
+        num_experts,
+        moe_inter_size,
+        None,
+    ]
+
+
+def _get_model_config_path():
+    """
+    Get the model config path
+    """
+    return pkg_resources.files("aiconfigurator") / "model_configs"
+
+
+def _load_pre_downloaded_hf_config(hf_id: str) -> dict:
+    config_path = _get_model_config_path() / f"{hf_id.replace('/', '--')}_config.json"
+    if not config_path.exists():
+        raise ValueError(f"HuggingFace model {hf_id} is not cached in model_configs directory.")
+    with open(config_path) as f:
+        return json.load(f)
+
+
+def get_model_config_from_hf_id(hf_id: str) -> list:
+    """
+    Get model configuration from HuggingFace ID.
+    First try to load the config from model_configs directory, if failed, try to download the config from HuggingFace.
+
+    Args:
+        hf_id: HuggingFace model ID
+
+    Returns:
+        list: Model configuration parameters
+
+    Raises:
+        ValueError: If the HuggingFace model is not cached in model_configs directory
+        HuggingFaceDownloadError: If the HuggingFace API returns an error
+    """
+    if hf_id in CachedHFModels:
+        config = _load_pre_downloaded_hf_config(hf_id)
+    else:
+        config = _download_hf_config(hf_id)
+    return _parse_hf_config_json(config)
