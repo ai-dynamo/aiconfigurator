@@ -161,7 +161,7 @@ def get_latest_database_version(
 
 
 def get_database(
-    system: str, backend: str, version: str, systems_dir: str = get_system_config_path(), wide_ep: bool = False
+    system: str, backend: str, version: str, systems_dir: str = get_system_config_path()
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version
@@ -171,38 +171,29 @@ def get_database(
         backend (str): the backend name
         version (str): the version name
         systems_dir (str): the systems directory
-        wide_ep (bool): whether to load wide_ep data (for sglang MoE models)
 
     Returns:
         PerfDatabase: the database for the given system, backend and version
     """
-    # Include wide_ep in the cache key for sglang backend
-    cache_key = (system, backend, version, wide_ep if backend == "sglang" else False)
     try:
-        database = databases_cache.get(cache_key)
-        if database is not None:
-            return database
-    except (KeyError, AttributeError):
-        pass
-
-    logger.info(f"loading {system=}, {backend=}, {version=}, {wide_ep=}")
-    if os.path.exists(os.path.join(systems_dir, system + ".yaml")):
-        with open(os.path.join(systems_dir, system + ".yaml")) as f:
-            system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-        data_path = os.path.join(systems_dir, system_spec["data_dir"], backend, version)
-        if os.path.exists(data_path):
-            try:
-                database = PerfDatabase(system, backend, version, systems_dir, wide_ep=wide_ep)
-                databases_cache[cache_key] = database
-            except Exception:
-                logger.exception(f"failed to load {system=}, {backend=}, {version=}, {wide_ep=}")
-                database = None
+        database = databases_cache[system][backend][version]
+    except KeyError:
+        logger.info(f"loading {system=}, {backend=}, {version=}")
+        if os.path.exists(os.path.join(systems_dir, system + ".yaml")):
+            with open(os.path.join(systems_dir, system + ".yaml")) as f:
+                system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+            data_path = os.path.join(systems_dir, system_spec["data_dir"], backend, version)
+            if os.path.exists(data_path):
+                try:
+                    database = PerfDatabase(system, backend, version, systems_dir)
+                    databases_cache[system][backend][version] = database
+                except Exception:
+                    logger.exception(f"failed to load {system=}, {backend=}, {version=}")
+                    database = None
+            else:
+                logger.exception(f"data path {data_path} not found")
         else:
-            logger.exception(f"data path {data_path} not found")
-            database = None
-    else:
-        logger.exception(f"system yaml {os.path.join(systems_dir, system + '.yaml')} not found")
-        database = None
+            logger.exception(f"system yaml {os.path.join(systems_dir, system + '.yaml')} not found")
 
     return database
 
@@ -1497,7 +1488,9 @@ class PerfDatabase:
             for kernel_source in self._context_ds_mla_data:
                 for quant_mode in self._context_ds_mla_data[kernel_source]:
                     for kv_cache_dtype in self._context_ds_mla_data[kernel_source][quant_mode]:
-                        num_heads_list = list(self._context_ds_mla_data[kernel_source][quant_mode][kv_cache_dtype].keys())
+                        num_heads_list = list(
+                            self._context_ds_mla_data[kernel_source][quant_mode][kv_cache_dtype].keys()
+                        )
                         data_dict = self._context_ds_mla_data[kernel_source][quant_mode][kv_cache_dtype]
                         target_x_list = num_heads_list  # to reuse x dim
                         # currently, support max seq to 1M.
@@ -1663,22 +1656,24 @@ class PerfDatabase:
         # level
         # We need to collect quant_modes from the nested structure
         if self.backend == "sglang":
-            context_mla_modes = set()
-            for kernel_source in self._context_mla_data:
-                for quant_mode in self._context_mla_data[kernel_source]:
-                    context_mla_modes.add(quant_mode.name)
+            context_ds_mla_modes = set()
+            for kernel_source in self._context_ds_mla_data:
+                for quant_mode in self._context_ds_mla_data[kernel_source]:
+                    context_ds_mla_modes.add(quant_mode.name)
 
-            generation_mla_modes = set()
-            for kernel_source in self._generation_mla_data:
-                for kv_cache_dtype in self._generation_mla_data[kernel_source]:
-                    generation_mla_modes.add(kv_cache_dtype.name)
+            generation_ds_mla_modes = set()
+            for kernel_source in self._generation_ds_mla_data:
+                for kv_cache_dtype in self._generation_ds_mla_data[kernel_source]:
+                    generation_ds_mla_modes.add(kv_cache_dtype.name)
 
             self.supported_quant_mode = {
                 "gemm": [key.name for key in self._moe_data],
-                "context_attention": list(context_mla_modes),
-                "generation_attention": list(generation_mla_modes),
-                "context_mla": list(context_mla_modes),
-                "generation_mla": list(generation_mla_modes),
+                "context_attention": [key.name for key in self._context_attention_data],
+                "generation_attention": [key.name for key in self._generation_attention_data],
+                "context_mla": [key.name for key in self._context_mla_data],
+                "generation_mla": [key.name for key in self._generation_mla_data],
+                "context_ds_mla": list(context_ds_mla_modes),
+                "generation_ds_mla": list(generation_ds_mla_modes),
                 "mla_bmm": [key.name for key in self._mla_bmm_data],
                 "nccl": [key.name for key in self._nccl_data],
                 "moe": [key.name for key in self._moe_data],

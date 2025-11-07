@@ -452,7 +452,6 @@ class TaskConfigFactory:
         backend: str,
         version: str,
         preferred_mode: str | None,
-        wide_ep: bool = False,
     ) -> None:
         quant_keys = [
             "gemm_quant_mode",
@@ -467,7 +466,7 @@ class TaskConfigFactory:
         if all(value is not None and isinstance(value, str) for value in existing.values()):
             return
 
-        database = get_database(system=system, backend=backend, version=version, wide_ep=wide_ep)
+        database = get_database(system=system, backend=backend, version=version)
         defaults = TaskConfigFactory._get_quant_mode(
             model_name=model_name,
             database=database,
@@ -875,13 +874,11 @@ class TaskRunner:
         )
         logger.info("Task %s: Setting up database", task_config.task_name)
         try:
-            wide_ep = task_config.enable_wide_ep and task_config.backend_name == "sglang"
             database = copy.deepcopy(
                 get_database(
                     system=task_config.worker_config.system_name,
                     backend=task_config.worker_config.backend_name,
                     version=task_config.worker_config.backend_version,
-                    wide_ep=wide_ep,
                 )
             )
         except Exception:  # pragma: no cover
@@ -954,13 +951,11 @@ class TaskRunner:
 
         logger.info("Task %s: Setting up prefill database", task_config.task_name)
         try:
-            wide_ep = task_config.enable_wide_ep and task_config.backend_name == "sglang"
             prefill_database = copy.deepcopy(
                 get_database(
                     system=task_config.prefill_worker_config.system_name,
                     backend=task_config.prefill_worker_config.backend_name,
                     version=task_config.prefill_worker_config.backend_version,
-                    wide_ep=wide_ep,
                 )
             )
         except Exception:  # pragma: no cover
@@ -1009,13 +1004,11 @@ class TaskRunner:
 
         logger.info("Task %s: Setting up decode database", task_config.task_name)
         try:
-            wide_ep = task_config.enable_wide_ep and task_config.backend_name == "sglang"
             decode_database = copy.deepcopy(
                 get_database(
                     system=task_config.decode_worker_config.system_name,
                     backend=task_config.decode_worker_config.backend_name,
                     version=task_config.decode_worker_config.backend_version,
-                    wide_ep=wide_ep,
                 )
             )
         except Exception:  # pragma: no cover
