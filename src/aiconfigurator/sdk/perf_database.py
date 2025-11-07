@@ -1121,6 +1121,7 @@ class PerfDatabase:
             self._custom_allreduce_data = load_custom_allreduce_data(
                 os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
+            self._nccl_data = load_nccl_data(nccl_data_dir)
         else:  # TRTLLM
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(

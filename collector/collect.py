@@ -325,6 +325,8 @@ def collect_ops(
                 }
             )
 
+    return all_errors
+
 
 def collect_sglang(num_processes: int, ops: list[str] | None = None):
     """Collect performance data for SGLang with enhanced error tracking"""
