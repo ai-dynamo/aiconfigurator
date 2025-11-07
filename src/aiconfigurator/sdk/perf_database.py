@@ -17,8 +17,7 @@ from scipy import interpolate
 
 from aiconfigurator.sdk import common
 
-# Cache for databases, key is (system, backend, version, wide_ep)
-databases_cache = {}
+databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 
@@ -192,8 +191,10 @@ def get_database(
                     database = None
             else:
                 logger.exception(f"data path {data_path} not found")
+                database = None
         else:
             logger.exception(f"system yaml {os.path.join(systems_dir, system + '.yaml')} not found")
+            database = None
 
     return database
 
@@ -1153,23 +1154,13 @@ class PerfDatabase:
         query_moe: query the moe data
     """
 
-    def __init__(
-        self, system: str, backend: str, version: str, systems_dir: str = "./systems", wide_ep: bool = False
-    ) -> None:
+    def __init__(self, system: str, backend: str, version: str, systems_dir: str = "./systems") -> None:
         """
         Initialize the perf database
-
-        Args:
-            system: system name
-            backend: backend name
-            version: version name
-            systems_dir: systems directory
-            wide_ep: whether to load wide_ep data (for sglang MoE models)
         """
         self.system = system
         self.backend = backend
         self.version = version
-        self.wide_ep = wide_ep
         with open(os.path.join(systems_dir, system + ".yaml")) as f:
             self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
         self._default_sol_mode = common.SOLMode.NON_SOL  # non sol

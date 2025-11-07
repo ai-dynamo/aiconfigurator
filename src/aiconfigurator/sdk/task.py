@@ -401,7 +401,6 @@ class TaskConfigFactory:
             backend=worker_config.backend_name,
             version=worker_config.backend_version,
             preferred_mode=ctx.use_specific_quant_mode,
-            wide_ep=ctx.enable_wide_ep and ctx.backend_name == "sglang",
         )
 
     @classmethod
@@ -431,7 +430,6 @@ class TaskConfigFactory:
             backend=prefill_cfg.backend_name,
             version=prefill_cfg.backend_version,
             preferred_mode=ctx.use_specific_quant_mode,
-            wide_ep=ctx.enable_wide_ep and ctx.backend_name == "sglang",
         )
 
         cls._apply_quant_modes(
@@ -441,7 +439,6 @@ class TaskConfigFactory:
             backend=decode_cfg.backend_name,
             version=decode_cfg.backend_version,
             preferred_mode=ctx.use_specific_quant_mode,
-            wide_ep=ctx.enable_wide_ep and ctx.backend_name == "sglang",
         )
 
     @staticmethod
