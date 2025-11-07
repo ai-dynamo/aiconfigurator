@@ -41,7 +41,8 @@ Prepare a clean env with the target framework and nccl lib installed.
 
 # Collect comm data
 ```bash
-sh collect_comm.sh
+collect_comm.sh #all_reduce data will be collected using default trtllm backend
+collect_comm.sh --all_reduce_backend vllm #all_reduce data will be collected using vllm backend
 ```
 Today we only collect intra-node comm. This script will collect custom allreduce data for trtllm within a node.
 It will also collect nccl allreudce, all_gather, all2all, reduce_scatter using nccl.
