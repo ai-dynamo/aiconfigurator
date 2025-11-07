@@ -420,7 +420,7 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
 
 def collect_vllm(num_processes: int, ops: list[str] | None = None):
     """
-    Collect performance data for VLLM v1.
+    Collect performance data for VLLM 
     """
 
     try:
@@ -434,7 +434,7 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
 
     collections = [
         # GEMM collections
-        # vllm v1 GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
+        # vllm GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
         {
             "name": "vllm",
             "type": "gemm",
@@ -456,6 +456,13 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
             "module": "collector.vllm.collect_attn",
             "get_func": "get_generation_attention_test_cases",
             "run_func": "run_attention_torch",
+        },
+        {
+            "name": "vllm",
+            "type": "moe",
+            "module": "collector.vllm.collect_moe",
+            "get_func": "get_moe_test_cases",
+            "run_func": "run_moe_torch",
         },
     ]
 
