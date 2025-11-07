@@ -340,6 +340,6 @@ if __name__ == "__main__":
     print("MLP BENCHMARK COMPLETED")
     print("=" * 50)
     print("Output files saved to:")
-    print(f"  - Context results: {os.path.join(output_path, 'context_deepep_mlp_perf.txt')}")
-    print(f"  - Generation results: {os.path.join(output_path, 'generation_deepep_mlp_perf.txt')}")
+    print(f"  - Context results: {os.path.join(output_path, 'context_ds_mlp_perf.txt')}")
+    print(f"  - Generation results: {os.path.join(output_path, 'generation_ds_mlp_perf.txt')}")
     print("=" * 50)

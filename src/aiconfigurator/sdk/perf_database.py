@@ -438,11 +438,11 @@ def load_moe_data(moe_file):
 
 def load_sglang_mlp_data(mlp_file):
     """
-    Load the SGLang MLP data from context_deepep_mlp_perf.txt and generation_deepep_mlp_perf.txt
+    Load the SGLang MLP data from context_ds_mlp_perf.txt and generation_ds_mlp_perf.txt
     """
     data_dir = os.path.dirname(mlp_file)
-    prefill_mlp_file = os.path.join(data_dir, common.PerfDataFilename.context_mlp.value)
-    generation_mlp_file = os.path.join(data_dir, common.PerfDataFilename.generation_mlp.value)
+    prefill_mlp_file = os.path.join(data_dir, common.PerfDataFilename.context_ds_mlp.value)
+    generation_mlp_file = os.path.join(data_dir, common.PerfDataFilename.generation_ds_mlp.value)
 
     context_mlp_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     generation_mlp_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
@@ -1213,22 +1213,19 @@ class PerfDatabase:
             self._generation_moe_data = load_sglang_generation_moe_data(
                 os.path.join(data_dir, common.PerfDataFilename.generation_moe.value)
             )
-            # Load appropriate MLA data based on wide_ep mode
-            if wide_ep:
-                self._context_mla_data = load_sglang_context_mla_data(
-                    os.path.join(data_dir, common.PerfDataFilename.context_mla_wideep.value)
-                )
-                self._generation_mla_data = load_sglang_generation_mla_data(
-                    os.path.join(data_dir, common.PerfDataFilename.generation_mla_wideep.value)
-                )
-            else:
-                self._context_mla_data = load_sglang_context_mla_data(
-                    os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
-                )
-                self._generation_mla_data = load_sglang_generation_mla_data(
-                    os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
-                )
-            self._context_mlp_data, self._generation_mlp_data = load_sglang_mlp_data(
+            self._context_mla_data = load_context_mla_data(
+                os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
+            )
+            self._generation_mla_data = load_generation_mla_data(
+                os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
+            )
+            self._context_ds_mla_data = load_sglang_context_mla_data(
+                os.path.join(data_dir, common.PerfDataFilename.context_ds_mla.value)
+            )
+            self._generation_ds_mla_data = load_sglang_generation_mla_data(
+                os.path.join(data_dir, common.PerfDataFilename.generation_mla_wideep.value)
+            )
+            self._context_ds_mlp_data, self._generation_ds_mlp_data = load_sglang_mlp_data(
                 os.path.join(data_dir, common.PerfDataFilename.context_mlp.value)
             )
             self._deepep_normal_data = load_deepep_normal_data(
@@ -1493,15 +1490,15 @@ class PerfDatabase:
             )
 
         # mla
-        # For sglang backend, context_mla_data structure is
+        # For sglang backend, context_ds_mla_data is
         # [kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
         # For other backends, it's [quant_mode][kv_cache_dtype][num_heads][s][b]
         if backend == "sglang":
-            for kernel_source in self._context_mla_data:
-                for quant_mode in self._context_mla_data[kernel_source]:
-                    for kv_cache_dtype in self._context_mla_data[kernel_source][quant_mode]:
-                        num_heads_list = list(self._context_mla_data[kernel_source][quant_mode][kv_cache_dtype].keys())
-                        data_dict = self._context_mla_data[kernel_source][quant_mode][kv_cache_dtype]
+            for kernel_source in self._context_ds_mla_data:
+                for quant_mode in self._context_ds_mla_data[kernel_source]:
+                    for kv_cache_dtype in self._context_ds_mla_data[kernel_source][quant_mode]:
+                        num_heads_list = list(self._context_ds_mla_data[kernel_source][quant_mode][kv_cache_dtype].keys())
+                        data_dict = self._context_ds_mla_data[kernel_source][quant_mode][kv_cache_dtype]
                         target_x_list = num_heads_list  # to reuse x dim
                         # currently, support max seq to 1M.
                         # Because all the system is linear for now.
@@ -1537,40 +1534,40 @@ class PerfDatabase:
                             target_z_list=target_z_list,
                             sqrt_y_value=True,
                         )
-        else:
-            for quant_mode in self._context_mla_data:
-                for kv_cache_dtype in self._context_mla_data[quant_mode]:
-                    num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
-                    data_dict = self._context_mla_data[quant_mode][kv_cache_dtype]
-                    target_x_list = num_heads_list  # to reuse x dim
-                    # currently, support max seq to 1M. Because all the system is linear for now.
-                    # it will be difficult to do square interpolation.
-                    # Use more points to do the approximation
-                    target_y_list = (
-                        [16, 32, 64, 128, 256, 512, 1024, 2048]
-                        + [4096 + i * 2048 for i in range(14)]
-                        + [32768 + 16384 * i for i in range(6)]
-                        + [131072 + 32768 * i for i in range(12)]
-                        + [524288 + 65536 * i for i in range(9)]
-                    )  # s
-                    target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]  # b
 
-                    self._extrapolate_data_grid(
-                        data_dict=data_dict,  # tpsize,sb
-                        target_x_list=target_x_list,
-                        target_y_list=target_y_list,
-                        target_z_list=target_z_list,
-                        sqrt_y_value=True,
-                    )
+        for quant_mode in self._context_mla_data:
+            for kv_cache_dtype in self._context_mla_data[quant_mode]:
+                num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
+                data_dict = self._context_mla_data[quant_mode][kv_cache_dtype]
+                target_x_list = num_heads_list  # to reuse x dim
+                # currently, support max seq to 1M. Because all the system is linear for now.
+                # it will be difficult to do square interpolation.
+                # Use more points to do the approximation
+                target_y_list = (
+                    [16, 32, 64, 128, 256, 512, 1024, 2048]
+                    + [4096 + i * 2048 for i in range(14)]
+                    + [32768 + 16384 * i for i in range(6)]
+                    + [131072 + 32768 * i for i in range(12)]
+                    + [524288 + 65536 * i for i in range(9)]
+                )  # s
+                target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]  # b
 
-        # For sglang backend, generation_mla_data structure is
+                self._extrapolate_data_grid(
+                    data_dict=data_dict,  # tpsize,sb
+                    target_x_list=target_x_list,
+                    target_y_list=target_y_list,
+                    target_z_list=target_z_list,
+                    sqrt_y_value=True,
+                )
+
+        # For sglang backend, generation_ds_mla_data structure is
         # [kernel_source][kv_cache_dtype][num_heads][b][s]
         # For other backends, it's [kv_cache_dtype][num_heads][b][s]
         if backend == "sglang":
-            for kernel_source in self._generation_mla_data:
-                for kv_cache_dtype in self._generation_mla_data[kernel_source]:
-                    tp_list = list(self._generation_mla_data[kernel_source][kv_cache_dtype].keys())
-                    data_dict = self._generation_mla_data[kernel_source][kv_cache_dtype]
+            for kernel_source in self._generation_ds_mla_data:
+                for kv_cache_dtype in self._generation_ds_mla_data[kernel_source]:
+                    tp_list = list(self._generation_ds_mla_data[kernel_source][kv_cache_dtype].keys())
+                    data_dict = self._generation_ds_mla_data[kernel_source][kv_cache_dtype]
                     target_x_list = tp_list  # n
                     target_y_list = [
                         1,
@@ -1617,41 +1614,41 @@ class PerfDatabase:
                         target_y_list=target_y_list,
                         target_z_list=target_z_list,
                     )
-        else:
-            for kv_cache_dtype in self._generation_mla_data:
-                tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
-                data_dict = self._generation_mla_data[kv_cache_dtype]
-                target_x_list = tp_list  # n
-                target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]  # b
-                target_z_list = [
-                    1,
-                    2,
-                    4,
-                    8,
-                    16,
-                    32,
-                    64,
-                    128,
-                    256,
-                    512,
-                    1024,
-                    2048,
-                    4096,
-                    8192,
-                    16384,
-                    32768,
-                    65536,
-                    131072,
-                    262144,
-                    2097152 * 8,
-                ]  # s
 
-                self._extrapolate_data_grid(
-                    data_dict=data_dict,  # tpsize, bs
-                    target_x_list=target_x_list,
-                    target_y_list=target_y_list,
-                    target_z_list=target_z_list,
-                )
+        for kv_cache_dtype in self._generation_mla_data:
+            tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
+            data_dict = self._generation_mla_data[kv_cache_dtype]
+            target_x_list = tp_list  # n
+            target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]  # b
+            target_z_list = [
+                1,
+                2,
+                4,
+                8,
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                2048,
+                4096,
+                8192,
+                16384,
+                32768,
+                65536,
+                131072,
+                262144,
+                2097152 * 8,
+            ]  # s
+
+            self._extrapolate_data_grid(
+                data_dict=data_dict,  # tpsize, bs
+                target_x_list=target_x_list,
+                target_y_list=target_y_list,
+                target_z_list=target_z_list,
+            )
 
         # post-correction
         self._correct_data()
