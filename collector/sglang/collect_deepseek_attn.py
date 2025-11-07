@@ -278,7 +278,7 @@ def run_attention_torch(
                 avg_time_ms = np.mean(cuda_times)
                 # Save via log_perf
                 try:
-                    perf_filename = os.path.join(output_path, "context_mla_perf.txt")
+                    perf_filename = os.path.join(output_path, "context_ds_mla_perf.txt")
                     os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                     device_name = torch.cuda.get_device_name(device)
                     version = pkg_resources.get_distribution("sglang").version
@@ -420,7 +420,7 @@ def run_attention_torch(
                 torch.cuda.empty_cache()
                 # Save via log_perf
                 try:
-                    perf_filename = os.path.join(output_path, "generation_mla_perf.txt")
+                    perf_filename = os.path.join(output_path, "generation_ds_mla_perf.txt")
                     os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                     device_name = torch.cuda.get_device_name(device)
                     version = pkg_resources.get_distribution("sglang").version

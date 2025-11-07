@@ -200,7 +200,7 @@ def run_mlp_torch(
                     times.append(start_event.elapsed_time(end_event))
 
             avg_time = sum(times) / len(times)
-            perf_filename = os.path.join(output_path, "context_deepep_mlp_perf.txt")
+            perf_filename = os.path.join(output_path, "context_ds_mlp_perf.txt")
             kernel_source = "deepseek_v3"
 
             std_time = math.sqrt(sum((t - avg_time) ** 2 for t in times) / len(times))
@@ -229,7 +229,7 @@ def run_mlp_torch(
 
             torch.cuda.synchronize()
             avg_time = start_event.elapsed_time(end_event) / num_iterations
-            perf_filename = os.path.join(output_path, "generation_deepep_mlp_perf.txt")
+            perf_filename = os.path.join(output_path, "generation_ds_mlp_perf.txt")
             kernel_source = "deepseek_v3_cuda_graph"
 
             print(f"  {phase} MLP time: {avg_time:.3f} ms")
