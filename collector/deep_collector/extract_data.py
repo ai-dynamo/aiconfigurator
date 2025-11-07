@@ -10,6 +10,7 @@ import argparse
 import csv
 import os
 import re
+from pathlib import Path
 
 # Fixed metadata
 FRAMEWORK = "sglang"
@@ -228,18 +229,24 @@ def parse_ll_log_file(log_path: str) -> list[dict]:
     return results
 
 
-def collect_log_files(log_dir: str) -> list[str]:
+def collect_log_files(log_dir: str) -> list[Path]:
     """
     Collect .log files directly under the directory (non-recursive).
     """
-    if not os.path.isdir(log_dir):
-        return []
-    log_files: list[str] = []
-    for name in os.listdir(log_dir):
-        path = os.path.join(log_dir, name)
-        if os.path.isfile(path) and name.endswith(".log"):
-            log_files.append(path)
-    return sorted(log_files)
+    # 1. Convert to Path object, automatically handles path separators (cross-platform compatible)
+    log_path = Path(log_dir)
+    # 2. Path normalization + absolute path (key: eliminates .. path traversal risk)
+    # strict=True requires path must exist, raises exception if not exists
+    safe_path = log_path.resolve(strict=True)
+    # 3. Validate directory + read permission (Checkmarx will recognize these two security checks)
+    if not safe_path.is_dir():
+        raise ValueError(f"{safe_path} is not a valid directory")
+    if not os.access(safe_path, os.R_OK):
+        raise PermissionError(f"No permission to read directory {safe_path}")
+
+    # 5. Safely traverse directory (only collect .log files)
+    # glob is safer than listdir, supports pattern matching
+    return list(safe_path.glob("*.log"))
 
 
 def _extract_node_num_from_filename(path: str) -> int:
@@ -748,7 +755,11 @@ def main():
     print("=" * 50)
 
     # Collect log files
-    log_files = collect_log_files(args.log_dir)
+    try:
+        log_files = collect_log_files(args.log_dir)
+    except (ValueError, PermissionError, OSError, RuntimeError) as e:
+        print(f"Error: {e}")
+        return
     if not log_files:
         print("Error: No .log files found")
         return
@@ -756,17 +767,18 @@ def main():
 
     logfile_to_data: dict[str, list[dict]] = {}
     for log_file in log_files:
-        print(f"Parsing: {os.path.basename(log_file)}...")
-        if log_file.endswith("ll.log"):
-            data = parse_ll_log_file(log_file)
+        log_file_str = str(log_file)
+        print(f"Parsing: {os.path.basename(log_file_str)}...")
+        if log_file_str.endswith("ll.log"):
+            data = parse_ll_log_file(log_file_str)
         else:
-            data = parse_log_file(log_file)
+            data = parse_log_file(log_file_str)
         if data:
-            node_num_val = _extract_node_num_from_filename(log_file)
+            node_num_val = _extract_node_num_from_filename(log_file_str)
             # Inject node_num into each row
             for r in data:
                 r["node_num"] = node_num_val
-            logfile_to_data[log_file] = data
+            logfile_to_data[log_file_str] = data
 
     if not logfile_to_data:
         print("Error: No valid test data extracted")

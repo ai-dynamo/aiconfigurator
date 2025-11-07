@@ -11,7 +11,7 @@ from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.inference_summary import InferenceSummary
-from aiconfigurator.sdk.models import BaseModel, get_model_family
+from aiconfigurator.sdk.models import BaseModel
 from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
@@ -431,19 +431,19 @@ class TRTLLMBackend(BaseBackend):
         # FIXME: the measurement is done based on trt workflow and traditional moe.
         #        needs to study the new model again. Expecially fine-grained moe will introduce
         #        more act/workspace memory.
-        if get_model_family(model.model_name) == "GPT":
+        if model.model_family == "GPT":
             c_dict = {1: 10, 2: 6, 4: 5, 8: 5}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
-        elif get_model_family(model.model_name) == "LLAMA":
+        elif model.model_family == "LLAMA":
             c_dict = {1: 11, 2: 6.5, 4: 5, 8: 5}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
-        elif get_model_family(model.model_name) == "MOE":
+        elif model.model_family == "MOE":
             c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
-        elif get_model_family(model.model_name) == "DEEPSEEK":
+        elif model.model_family == "DEEPSEEK":
             c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             # moe workspace, 128 for block scale, float for 4bytes
@@ -472,7 +472,7 @@ class TRTLLMBackend(BaseBackend):
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
         # ==== this above section is backend specific ====
 
-        if get_model_family(model.model_name) == "DEEPSEEK":
+        if model.model_family == "DEEPSEEK":
             kvcache_per_token = model._num_layers * 576
         else:
             num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size

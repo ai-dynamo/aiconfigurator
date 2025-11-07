@@ -41,20 +41,69 @@ Prepare a clean env with the target framework and nccl lib installed.
 
 # Collect comm data
 ```bash
-sh collect_comm.sh
+collect_comm.sh #all_reduce data will be collected using default trtllm backend
+collect_comm.sh --all_reduce_backend vllm #all_reduce data will be collected using vllm backend
 ```
 Today we only collect intra-node comm. This script will collect custom allreduce data for trtllm within a node.
 It will also collect nccl allreudce, all_gather, all2all, reduce_scatter using nccl.
 The generated file is comm_perf.txt and custom_all_reduce.txt.
 
 # Collect gemm/attention/moe data/etc.
+
+## For TensorRT-LLM
 ```bash
-python3 collect.py
+python3 collect.py --backend trtllm
 ```
 For trtllm, the whole collecting process takes about 30 gpu-hours. On 8-gpu, it takes 3-4 hours.
 Please note that the whole process will report a lot of missing datapoints with errors. But it's okay. Our system is kindof robust to fair amount of missing data.
 Once everything is done, you might see mutliple xxx.txt files under the same folder. Refer to src/aiconfigurator/systems/ folder to prepare the database including 
 how many files are needed accordingly.
+
+## For SGLang
+
+SGLang requires a **hybrid collection approach**:
+
+### 1. Run unified collectors (GEMM, MLA, MoE, Normal Attention)
+```bash
+python3 collect.py --backend sglang
+```
+This collects data for:
+- GEMM operations (FP8, FP16, INT8, INT4)
+- MLA (Multi-head Latent Attention) for context and generation
+- MLA BMM (Batch Matrix Multiplication) operations
+- MoE (Mixture of Experts) operations
+- Normal attention operations
+
+### 2. Run DeepSeek-specific collectors independently
+Some SGLang collectors are **DeepSeek model-specific** and must be run separately:
+```bash
+cd sglang/
+# Set model and output paths
+export MODEL_PATH=/path/to/deepseek-v3
+export OUTPUT_PATH=/path/to/output
+
+# Run DeepSeek-specific attention collector
+SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 \
+  python collect_attn.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH
+
+# Run DeepSeek MLP collector
+python collect_mlp.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH
+
+# Run DeepSeek DeepEP MoE collector (requires 2+ GPUs)
+python collect_deepep_moe.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH \
+  --tp_size 2 --ep_size 2 --num_experts 256
+```
+See `sglang/README.md` for detailed documentation on these collectors.
+
+### 3. Run DeepEP collector for distributed MoE data
+For **DeepSeek V3** models with DeepEP MoE, collect distributed performance data:
+```bash
+# Follow instructions in deep_collector/README.md
+# This requires multi-node setup for inter-node communication profiling
+```
+See `deep_collector/README.md` for complete multi-node setup instructions.
+
+**Note**: SGLang collection requires more manual steps than TensorRT-LLM due to DeepSeek-specific operators and distributed MoE configurations.
 
 # Test
 Rebuild and install the new aiconfigurator. Please make sure you have your new system definition file prepared. It's src/aiconfigurator/systems/xxx.yaml
@@ -67,4 +116,4 @@ of the GPU system and kernel optimization.
 aiconfigurator 0.1.0  
 trtllm: 0.20.0, 1.0.0rc3 on Hopper GPUs  
 vllm: NA  
-sglang: NA  
+sglang: 0.5.1.post1 on Hopper GPUs
