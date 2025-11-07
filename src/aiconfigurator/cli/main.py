@@ -81,8 +81,8 @@ def _add_default_mode_arguments(parser):
     )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
-    parser.add_argument("--ttft", type=float, default=float("inf"), help="Time to first token in ms.")
-    parser.add_argument("--tpot", type=float, default=float("inf"), help="Time per output token in ms.")
+    parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms.")
+    parser.add_argument("--tpot", type=float, default=30.0, help="Time per output token in ms.")
 
 
 def _add_experiments_mode_arguments(parser):
@@ -311,7 +311,9 @@ def _execute_task_configs(
                 results[exp_name] = task_result
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_frontier_df))
             else:
-                logger.warning("Experiment %s returned no results.", exp_name)
+                logger.warning(
+                    "Experiment %s returned no results. The TTFT and TPOT constraints may need to be relaxed.", exp_name
+                )
         except Exception:
             logger.exception("Error running experiment %s", exp_name)
 

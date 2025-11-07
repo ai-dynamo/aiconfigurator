@@ -733,20 +733,6 @@ class TaskConfig:
         if check_is_moe(self.model_name) and self.backend_name == "vllm":
             raise NotImplementedError("AIConfigurator does not yet support MOE models for VLLM backend.")
 
-        if (
-            self.backend_name == "trtllm"
-            and self.system_name == "l40s"
-            and self.model_name
-            in [
-                "DEEPSEEK_V3",
-                "LLAMA3.1_405B",
-                "QWEN3_480B",
-            ]
-        ):
-            raise NotImplementedError(
-                f"AIConfigurator does not yet support {self.model_name} + {self.system_name} + {self.backend_name}"
-            )
-
     def pretty(self) -> str:
         def _convert(obj: Any) -> Any:
             if isinstance(obj, DefaultMunch):
