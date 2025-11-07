@@ -1121,6 +1121,7 @@ class PerfDatabase:
             self._custom_allreduce_data = load_custom_allreduce_data(
                 os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
+            self._nccl_data = load_nccl_data(nccl_data_dir)
         else:  # TRTLLM
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1958,10 +1959,6 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
-        if n_kv == n:
-            n_kv = 0
-
         assert n_kv <= n, "n_kv must be less than or equal to n"
 
         if sol_mode is None:
@@ -1973,6 +1970,10 @@ class PerfDatabase:
         else:
             if head_size not in [64, 128]:
                 return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+
+            # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
+            if n_kv == n:
+                n_kv = 0
 
             attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
                 window_size
@@ -2026,10 +2027,6 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
-        if n_kv == n:
-            n_kv = 0
-
         assert n_kv <= n, "n_kv must be less than or equal to n"
 
         if sol_mode is None:
@@ -2041,6 +2038,10 @@ class PerfDatabase:
         else:
             if head_size not in [64, 128]:
                 return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
+
+            # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
+            if n_kv == n:
+                n_kv = 0
 
             attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
             latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
