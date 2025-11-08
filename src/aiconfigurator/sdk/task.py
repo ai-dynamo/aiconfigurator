@@ -54,7 +54,7 @@ class TaskContext:
     backend_name: str
     backend_version: str | None
     use_specific_quant_mode: str | None
-    enable_wide_ep: bool
+    enable_wideep: bool
     isl: int
     osl: int
     ttft: float
@@ -207,8 +207,8 @@ class TaskConfigFactory:
                 worker_config["pp_list"] = [1]
                 worker_config["dp_list"] = [8, 16, 32] if ctx.total_gpus >= 32 else [8]
                 worker_config["moe_ep_list"] = [8, 16, 32] if ctx.total_gpus >= 32 else [8]
-            elif ctx.backend_name == "sglang" and ctx.enable_wide_ep:
-                # sglang + MoE + wide_ep: wide_ep currently only works with disagg, but keep for consistency
+            elif ctx.backend_name == "sglang" and ctx.enable_wideep:
+                # sglang + MoE + wideep: wideep currently only works with disagg, but keep for consistency
                 worker_config["num_gpu_per_worker"] = [8, 16, 32]
                 worker_config["tp_list"] = [1, 2, 4, 8]
                 worker_config["pp_list"] = [1]
@@ -216,15 +216,15 @@ class TaskConfigFactory:
                 worker_config["moe_tp_list"] = [1]
                 worker_config["moe_ep_list"] = [8, 16, 32]
             elif ctx.backend_name == "sglang":
-                # sglang + MoE (non-wide_ep)
+                # sglang + MoE (non-wideep)
                 worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
                 worker_config["tp_list"] = [1, 2, 4, 8]
                 worker_config["pp_list"] = [1]
                 worker_config["dp_list"] = [1, 2, 4, 8]
                 worker_config["moe_tp_list"] = [1, 2, 4, 8]
                 worker_config["moe_ep_list"] = [1]
-            elif ctx.enable_wide_ep:
-                # trtllm + wide_ep (keep previous logic)
+            elif ctx.enable_wideep:
+                # trtllm + wideep (keep previous logic)
                 worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32]
                 worker_config["tp_list"] = [1, 2, 4, 8]
                 worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
@@ -292,8 +292,8 @@ class TaskConfigFactory:
                 decode_worker_config["pp_list"] = [1]
                 decode_worker_config["dp_list"] = moe_ep_options
                 decode_worker_config["moe_ep_list"] = moe_ep_options
-            elif ctx.backend_name == "sglang" and ctx.enable_wide_ep:
-                # sglang + MoE + wide_ep + disagg
+            elif ctx.backend_name == "sglang" and ctx.enable_wideep:
+                # sglang + MoE + wideep + disagg
                 prefill_worker_config["num_gpu_per_worker"] = [8, 16, 32]
                 prefill_worker_config["tp_list"] = [1, 2, 4, 8]
                 prefill_worker_config["pp_list"] = [1]
@@ -308,7 +308,7 @@ class TaskConfigFactory:
                 decode_worker_config["moe_tp_list"] = [1]
                 decode_worker_config["moe_ep_list"] = [8, 16, 32, 64]
             elif ctx.backend_name == "sglang":
-                # sglang + MoE (non-wide_ep)
+                # sglang + MoE (non-wideep)
                 prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
                 prefill_worker_config["tp_list"] = [1, 2, 4, 8]
                 prefill_worker_config["pp_list"] = [1]
@@ -322,8 +322,8 @@ class TaskConfigFactory:
                 decode_worker_config["dp_list"] = [1, 2, 4, 8]
                 decode_worker_config["moe_tp_list"] = [1, 2, 4, 8]
                 decode_worker_config["moe_ep_list"] = [1]
-            elif ctx.enable_wide_ep:
-                # trtllm + wide_ep (keep previous logic)
+            elif ctx.enable_wideep:
+                # trtllm + wideep (keep previous logic)
                 prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
                 prefill_worker_config["tp_list"] = [1, 2, 4, 8]
                 prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16] if should_enable_pp else [1]
@@ -363,7 +363,7 @@ class TaskConfigFactory:
             "max_decode_worker": 32,
         }
 
-        if ctx.enable_wide_ep:
+        if ctx.enable_wideep:
             replica_config["num_gpu_per_replica"] = None
             replica_config["max_gpu_per_replica"] = 512
 
@@ -658,7 +658,7 @@ class TaskConfig:
         osl: int = 1000,
         ttft: float = 1000,
         tpot: float = 50,
-        enable_wide_ep: bool = False,
+        enable_wideep: bool = False,
         total_gpus: int | None = None,
         profiles: list[str] | None = None,
         yaml_config: dict | None = None,
@@ -691,7 +691,7 @@ class TaskConfig:
             backend_name=backend_name,
             backend_version=backend_version,
             use_specific_quant_mode=use_specific_quant_mode,
-            enable_wide_ep=enable_wide_ep,
+            enable_wideep=enable_wideep,
             isl=isl,
             osl=osl,
             ttft=ttft,
@@ -711,7 +711,7 @@ class TaskConfig:
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
         self.use_specific_quant_mode = use_specific_quant_mode
-        self.enable_wide_ep = enable_wide_ep
+        self.enable_wideep = enable_wideep
         self.total_gpus = total_gpus
         self.yaml_mode = yaml_mode
         self.yaml_patch = yaml_patch
@@ -869,14 +869,8 @@ class TaskConfig:
         if isinstance(worker_cfg.comm_quant_mode, str):
             worker_cfg.comm_quant_mode = common.CommQuantMode[worker_cfg.comm_quant_mode]
 
-        if isinstance(worker_config, dict):
-            worker_config.update(worker_cfg)
-        else:
-            worker_config.gemm_quant_mode = worker_cfg.gemm_quant_mode
-            worker_config.moe_quant_mode = worker_cfg.moe_quant_mode
-            worker_config.kvcache_quant_mode = worker_cfg.kvcache_quant_mode
-            worker_config.fmha_quant_mode = worker_cfg.fmha_quant_mode
-            worker_config.comm_quant_mode = worker_cfg.comm_quant_mode
+        worker_config.update(worker_cfg)
+
 
 
 class TaskRunner:

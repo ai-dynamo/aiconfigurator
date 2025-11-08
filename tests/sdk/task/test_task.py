@@ -215,12 +215,12 @@ def test_taskconfig_disagg_total_gpus_with_patch():
     assert cfg.replica_config.max_gpu_per_replica == 32
 
 
-def test_taskconfig_disagg_wide_ep_expands_lists():
+def test_taskconfig_disagg_wideep_expands_lists():
     task = TaskConfig(
         serving_mode="disagg",
         model_name="DEEPSEEK_V3",
         system_name="gb200_sxm",
-        enable_wide_ep=True,
+        enable_wideep=True,
     )
     cfg = task.config
 
@@ -269,18 +269,18 @@ def test_taskrunner_runs_agg_and_disagg():
 
 def test_sglang_moe_configs():
     """Test sglang MoE configurations for different scenarios."""
-    # Test 1: sglang + MoE + wide_ep + disagg
-    task_wide_ep = TaskConfig(
+    # Test 1: sglang + MoE + wideep + disagg
+    task_wideep = TaskConfig(
         serving_mode="disagg",
         model_name="DEEPSEEK_V3",
         system_name="h200_sxm",
         backend_name="sglang",
-        enable_wide_ep=True,
+        enable_wideep=True,
         total_gpus=64,
     )
 
-    prefill_cfg = task_wide_ep.config.prefill_worker_config
-    decode_cfg = task_wide_ep.config.decode_worker_config
+    prefill_cfg = task_wideep.config.prefill_worker_config
+    decode_cfg = task_wideep.config.decode_worker_config
 
     # Verify prefill config
     assert prefill_cfg.num_gpu_per_worker == [8, 16, 32], f"Expected [8, 16, 32], got {prefill_cfg.num_gpu_per_worker}"
@@ -302,18 +302,18 @@ def test_sglang_moe_configs():
     assert decode_cfg.moe_tp_list == [1], f"Expected [1], got {decode_cfg.moe_tp_list}"
     assert decode_cfg.moe_ep_list == [8, 16, 32, 64], f"Expected [8, 16, 32, 64], got {decode_cfg.moe_ep_list}"
 
-    # Test 2: sglang + MoE (non-wide_ep) + disagg
-    task_no_wide_ep = TaskConfig(
+    # Test 2: sglang + MoE (non-wideep) + disagg
+    task_no_wideep = TaskConfig(
         serving_mode="disagg",
         model_name="DEEPSEEK_V3",
         system_name="h200_sxm",
         backend_name="sglang",
-        enable_wide_ep=False,
+        enable_wideep=False,
         total_gpus=8,
     )
 
-    prefill_cfg2 = task_no_wide_ep.config.prefill_worker_config
-    decode_cfg2 = task_no_wide_ep.config.decode_worker_config
+    prefill_cfg2 = task_no_wideep.config.prefill_worker_config
+    decode_cfg2 = task_no_wideep.config.decode_worker_config
 
     # Verify prefill config
     assert prefill_cfg2.num_gpu_per_worker == [1, 2, 4, 8], (
@@ -333,20 +333,20 @@ def test_sglang_moe_configs():
     assert decode_cfg2.moe_tp_list == [1, 2, 4, 8], f"Expected [1, 2, 4, 8], got {decode_cfg2.moe_tp_list}"
     assert decode_cfg2.moe_ep_list == [1], f"Expected [1], got {decode_cfg2.moe_ep_list}"
 
-    # Test 3: trtllm + MoE + wide_ep (should use previous logic)
-    task_trtllm_wide_ep = TaskConfig(
+    # Test 3: trtllm + MoE + wideep (should use previous logic)
+    task_trtllm_wideep = TaskConfig(
         serving_mode="disagg",
         model_name="DEEPSEEK_V3",
         system_name="h200_sxm",
         backend_name="trtllm",
-        enable_wide_ep=True,
+        enable_wideep=True,
         total_gpus=64,
     )
 
-    prefill_cfg3 = task_trtllm_wide_ep.config.prefill_worker_config
-    decode_cfg3 = task_trtllm_wide_ep.config.decode_worker_config
+    prefill_cfg3 = task_trtllm_wideep.config.prefill_worker_config
+    decode_cfg3 = task_trtllm_wideep.config.decode_worker_config
 
-    # Verify trtllm uses previous wide_ep logic
+    # Verify trtllm uses previous wideep logic
     assert prefill_cfg3.num_gpu_per_worker == [1, 2, 4, 8, 16], (
         f"Expected [1, 2, 4, 8, 16], got {prefill_cfg3.num_gpu_per_worker}"
     )

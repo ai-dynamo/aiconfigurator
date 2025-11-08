@@ -26,9 +26,11 @@ class ModelConfig:
     nextn: int = 0  # at most mtp5
     nextn_accept_rates: list = None
     overwrite_num_layers: int = 0
+    # model builder falvors
     sms: int = 20
     moe_backend: str = None
-    attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3'
+    attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3', for sglang wideep only
+    enable_wideep: bool = False
 
 
 @dataclass

@@ -159,7 +159,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "osl",
     "ttft",
     "tpot",
-    "enable_wide_ep",
+    "enable_wideep",
     "total_gpus",
     "use_specific_quant_mode",
 }
@@ -268,8 +268,8 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             if numeric_key in exp_config:
                 task_kwargs[numeric_key] = exp_config[numeric_key]
 
-        if "enable_wide_ep" in exp_config:
-            task_kwargs["enable_wide_ep"] = exp_config["enable_wide_ep"]
+        if "enable_wideep" in exp_config:
+            task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
         if "use_specific_quant_mode" in exp_config:
             task_kwargs["use_specific_quant_mode"] = exp_config["use_specific_quant_mode"]
 

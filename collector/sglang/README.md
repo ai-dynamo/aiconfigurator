@@ -64,8 +64,8 @@ The script automatically tests the following configuration combinations:
 
 ### Output
 Results are saved to:
-- `context_mla_perf.txt`: Prefill phase performance data
-- `generation_mla_perf.txt`: Decode phase performance data
+- `wideep_context_mla_perf.txt`: Prefill phase performance data
+- `wideep_generation_mla_perf.txt`: Decode phase performance data
 
 Output format:
 ```
@@ -131,8 +131,8 @@ The actual `moe_ep_size` is automatically calculated based on the relationship b
 
 ### Output
 Results are saved to:
-- `context_moe_perf.txt`: Prefill phase performance data
-- `generation_moe_perf.txt`: Decode phase performance data
+- `wideep_context_moe_perf.txt`: Prefill phase performance data
+- `wideep_generation_moe_perf.txt`: Decode phase performance data
 
 Output format:
 ```
@@ -170,8 +170,8 @@ The script automatically tests the following configurations for both prefill and
 
 ### Output
 Results are saved to:
-- `context_ds_mlp_perf.txt`: Prefill phase performance data
-- `generation_ds_mlp_perf.txt`: Decode phase performance data
+- `wideep_context_mlp_perf.txt`: Prefill phase performance data
+- `wideep_generation_mlp_perf.txt`: Decode phase performance data
 
 Output format:
 ```

@@ -171,7 +171,7 @@ exp_disagg_full:
   osl: 1000 # output sequence length, optional, default to 1000
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
   tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
-  enable_wide_ep: false # enable wide ep for prefill/decode, optional, default to false
+  enable_wideep: false # enable wide ep for prefill/decode, optional, default to false
   profiles: [] # some inherit presets for easier patch, optional
   config: # all optional, used to patch default values
     nextn: 1 # mtp 1
@@ -221,7 +221,7 @@ This section is very long, let's go through the basic setting quickly
     - `mode`: patch means the `config` session below will do patch to default config while replace will overwrite everything. Typically, no need to modify  
     - `serving_mode`: defines agg or disagg of this exp  
     - `model_name`, `total_gpus`, `backend_name`, `backend_version`, `isl`, `osl`, `ttft`, `tpot` defines the same things as in `default` mode  
-    - `enable_wide_ep`: will trigger wide-ep for fined-grained moe model  
+    - `enable_wideep`: will trigger wide-ep for fined-grained moe model  
     - `profiles`: some inherit patch, we current have 'fp8_default', 'float16_default', 'nvfp4_default' to force the precision of a worker.  
     - `config`: the most important part. It defines `nextn` for MTP; It also defines the agg_/prefill_/decode_worker's quantization, and parallelism search space; It also defines more about how we search for the disagg replica and do correction for better performance alignment. We'll go through it in [Advanced Tuning](advanced_tuning.md). Typically, the only thing here for you to modify, perhaps, is the quantization of the worker.
 
@@ -233,7 +233,7 @@ exp_disagg_simplified:
   model_name: "DEEPSEEK_V3"
   total_gpus: 512
   system_name: "gb200_sxm"
-  enable_wide_ep: true # enable wide ep for prefill/decode, default to false, optional
+  enable_wideep: true # enable wide ep for prefill/decode, default to false, optional
   config: # patch below default values
     nextn: 2 # mtp 1
     nextn_accept_rates: [0.85,0.3,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.

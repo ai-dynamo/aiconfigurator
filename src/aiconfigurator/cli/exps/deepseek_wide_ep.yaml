@@ -3,16 +3,16 @@
 
 # define your experiments here, the order will determine the execution order.
 exps:
-  - gb200_wide_ep_agg
-  - gb200_wide_ep_disagg
+  - gb200_wideep_agg
+  - gb200_wideep_disagg
 
-gb200_wide_ep_agg:
+gb200_wideep_agg:
   mode: "patch"
   serving_mode: "agg"
   model_name: "DEEPSEEK_V3"
   total_gpus: 512
   system_name: "gb200_sxm"
-  enable_wide_ep: true # enable wide ep for prefill/decode
+  enable_wideep: true # enable wide ep for prefill/decode
   isl: 4000 # input sequence length
   osl: 1000 # output sequence length
   ttft: 300.0  # Target TTFT in ms
@@ -21,13 +21,13 @@ gb200_wide_ep_agg:
     nextn: 1 # mtp 1
     nextn_accept_rates: [0.85,0.3,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
     
-gb200_wide_ep_disagg:
+gb200_wideep_disagg:
   mode: "patch"
   serving_mode: "disagg"
   model_name: "DEEPSEEK_V3"
   total_gpus: 512
   system_name: "gb200_sxm"
-  enable_wide_ep: true # enable wide ep for prefill/decode
+  enable_wideep: true # enable wide ep for prefill/decode
   isl: 4000 # input sequence length
   osl: 1000 # output sequence length
   ttft: 300.0  # Target TTFT in ms

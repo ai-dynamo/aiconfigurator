@@ -27,7 +27,7 @@ exp_agg_full:
   osl: 1000 # output sequence length, optional, default to 1000
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
   tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
-  enable_wide_ep: false # enable wide ep for prefill/decode, optional, default to false
+  enable_wideep: false # enable wide ep for prefill/decode, optional, default to false
   profiles: [] # some inherit presets for easier patch, optional
   config: # all optional, used to patch default values
     nextn: 1 # mtp 1
@@ -59,7 +59,7 @@ exp_disagg_full:
   osl: 1000 # output sequence length, optional, default to 1000
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
   tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
-  enable_wide_ep: false # enable wide ep for prefill/decode, optional, default to false
+  enable_wideep: false # enable wide ep for prefill/decode, optional, default to false
   profiles: [] # some inherit presets for easier patch, optional
   config: # all optional, used to patch default values
     nextn: 1 # mtp 1

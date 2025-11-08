@@ -357,7 +357,7 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
         {
             "name": "sglang",
             "type": "gemm",
-            "module": "sglang.collect_gemm",
+            "module": "collector.sglang.collect_gemm",
             "get_func": "get_gemm_test_cases",
             "run_func": "run_gemm",
         },
@@ -365,14 +365,14 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
         {
             "name": "sglang",
             "type": "mla_context",
-            "module": "sglang.collect_mla",
+            "module": "collector.sglang.collect_mla",
             "get_func": "get_context_mla_test_cases",
             "run_func": "run_mla",
         },
         {
             "name": "sglang",
             "type": "mla_generation",
-            "module": "sglang.collect_mla",
+            "module": "collector.sglang.collect_mla",
             "get_func": "get_generation_mla_test_cases",
             "run_func": "run_mla",
         },
@@ -380,14 +380,14 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
         {
             "name": "sglang",
             "type": "mla_bmm_gen_pre",
-            "module": "sglang.collect_mla_bmm",
+            "module": "collector.sglang.collect_mla_bmm",
             "get_func": "get_mla_gen_pre_test_cases",
             "run_func": "run_mla_gen_pre",
         },
         {
             "name": "sglang",
             "type": "mla_bmm_gen_post",
-            "module": "sglang.collect_mla_bmm",
+            "module": "collector.sglang.collect_mla_bmm",
             "get_func": "get_mla_gen_post_test_cases",
             "run_func": "run_mla_gen_post",
         },
@@ -395,7 +395,7 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
         {
             "name": "sglang",
             "type": "moe",
-            "module": "sglang.collect_moe",
+            "module": "collector.sglang.collect_moe",
             "get_func": "get_moe_test_cases",
             "run_func": "run_moe_torch",
         },
@@ -403,14 +403,14 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
         {
             "name": "sglang",
             "type": "attention_context",
-            "module": "sglang.collect_normal_attn",
+            "module": "collector.sglang.collect_normal_attn",
             "get_func": "get_context_attention_test_cases",
             "run_func": "run_attention_torch",
         },
         {
             "name": "sglang",
             "type": "attention_generation",
-            "module": "sglang.collect_normal_attn",
+            "module": "collector.sglang.collect_normal_attn",
             "get_func": "get_generation_attention_test_cases",
             "run_func": "run_attention_torch",
         },
