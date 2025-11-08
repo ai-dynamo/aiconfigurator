@@ -86,8 +86,8 @@ class TestCLIArgumentParsing:
         assert args.isl == 4000
         assert args.osl == 1000
         assert args.save_dir is None
-        assert args.ttft == 1000.0
-        assert args.tpot == 20.0
+        assert args.ttft == 2000.0
+        assert args.tpot == 30.0
 
     def test_debug_mode_flag(self, cli_parser):
         """Test that debug mode can be enabled."""
