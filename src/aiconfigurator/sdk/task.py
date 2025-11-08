@@ -466,6 +466,7 @@ class TaskConfigFactory:
         database = get_database(system=system, backend=backend, version=version)
         defaults = TaskConfigFactory._get_quant_mode(
             model_name=model_name,
+            backend=backend,
             database=database,
             use_specific_quant_mode=preferred_mode,
         )
@@ -478,6 +479,7 @@ class TaskConfigFactory:
     @staticmethod
     def _get_quant_mode(
         model_name: str,
+        backend: str,
         database: PerfDatabase,
         use_specific_quant_mode: str | None = None,
     ) -> tuple[str, str, str, str, str]:
@@ -489,16 +491,24 @@ class TaskConfigFactory:
 
         sm_version = database.system_spec["gpu"]["sm_version"]
 
+        if backend == "vllm":
+            # TODO: collect fp8_block quant mode data for vllm
+            fp8_gemm_quant = "fp8"
+            fp8_fhma_quant = "float16"
+        else:
+            fp8_gemm_quant = "fp8_block"
+            fp8_fhma_quant = "fp8"
+
         if sm_version >= 100:
             gemm_quant_mode = "nvfp4"
             moe_quant_mode = "nvfp4"
             kvcache_quant_mode = "fp8"
-            fmha_quant_mode = "fp8"
+            fmha_quant_mode = fp8_fhma_quant
         elif sm_version >= 89:
-            gemm_quant_mode = "fp8_block"
-            moe_quant_mode = "fp8_block"
+            gemm_quant_mode = fp8_gemm_quant
+            moe_quant_mode = fp8_gemm_quant
+            fmha_quant_mode = fp8_fhma_quant
             kvcache_quant_mode = "fp8"
-            fmha_quant_mode = "fp8"
         else:
             gemm_quant_mode = "float16"
             moe_quant_mode = "float16"
@@ -761,6 +771,15 @@ class TaskConfig:
             )
         else:
             raise ValueError(f"Invalid serving mode: {serving_mode}")
+
+        self.validate()
+
+    def validate(self):
+        """
+        Check that the task can be run by AIC.
+        """
+        if check_is_moe(self.model_name) and self.backend_name == "vllm":
+            raise NotImplementedError("AIConfigurator does not yet support MOE models for VLLM backend.")
 
     def pretty(self) -> str:
         def _convert(obj: Any) -> Any:

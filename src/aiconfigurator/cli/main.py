@@ -81,8 +81,8 @@ def _add_default_mode_arguments(parser):
     )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
-    parser.add_argument("--ttft", type=float, default=1000.0, help="Time to first token in ms.")
-    parser.add_argument("--tpot", type=float, default=20.0, help="Time per output token in ms.")
+    parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms.")
+    parser.add_argument("--tpot", type=float, default=30.0, help="Time per output token in ms.")
 
 
 def _add_experiments_mode_arguments(parser):
@@ -135,16 +135,8 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
     }
 
     task_configs: dict[str, TaskConfig] = {}
-
-    # Validate backend compatibility with aggregated serving mode
-    if args.backend in [common.BackendName.sglang.value, common.BackendName.vllm.value]:
-        logger.warning(
-            "Backend '%s' is not supported with serving_mode 'agg'. Only 'disagg' mode will be configured.",
-            args.backend,
-        )
-    else:
-        agg_task = TaskConfig(serving_mode="agg", **common_kwargs)
-        task_configs["agg"] = agg_task
+    agg_task = TaskConfig(serving_mode="agg", **common_kwargs)
+    task_configs["agg"] = agg_task
 
     disagg_kwargs = dict(common_kwargs)
     disagg_kwargs["decode_system_name"] = decode_system
@@ -251,16 +243,6 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
             backend_version = exp_config.get("backend_version")
 
-        # Validate backend compatibility with serving mode
-        if serving_mode == "agg" and backend_name in [common.BackendName.sglang.value, common.BackendName.vllm.value]:
-            logger.error(
-                "Experiment '%s': serving_mode 'agg' is not supported with backend '%s'. "
-                "Please either use serving_mode 'disagg' or switch to backend 'trtllm'.",
-                exp_name,
-                backend_name,
-            )
-            raise SystemExit(1)
-
         total_gpus = exp_config.get("total_gpus")
         if total_gpus is None:
             logger.warning("Skipping experiment '%s': total_gpus not provided in YAML.", exp_name)
@@ -329,7 +311,9 @@ def _execute_task_configs(
                 results[exp_name] = task_result
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_frontier_df))
             else:
-                logger.warning("Experiment %s returned no results.", exp_name)
+                logger.warning(
+                    "Experiment %s returned no results. The TTFT and TPOT constraints may need to be relaxed.", exp_name
+                )
         except Exception:
             logger.exception("Error running experiment %s", exp_name)
 

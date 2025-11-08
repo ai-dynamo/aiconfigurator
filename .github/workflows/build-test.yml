@@ -32,6 +32,7 @@ jobs:
             tests/cli/e2e_validation/test_e2e_sweep.py::TestE2ESweep::test_e2e_configuration_sweep[trtllm-5000-10-4000-1000-8-h200_sxm-model_QWEN3_32B] \
             tests/cli/e2e_validation/test_e2e_sweep.py::TestE2ESweep::test_e2e_configuration_sweep[sglang-5000-10-4000-1000-8-h100_sxm-model_QWEN3_32B] \
             tests/cli/e2e_validation/test_e2e_sweep.py::TestE2ESweep::test_e2e_configuration_sweep[sglang-5000-10-4000-1000-8-h200_sxm-model_QWEN3_32B] \
+            tests/cli/e2e_validation/test_e2e_sweep.py::TestE2ESweep::test_e2e_configuration_sweep[vllm-5000-10-4000-1000-8-h100_sxm-model_QWEN3_32B] \
             tests/sdk \
             -v --tb=short --maxfail=1 --timeout=600 \
             -n 4 \

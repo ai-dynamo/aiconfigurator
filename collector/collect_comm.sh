@@ -65,7 +65,7 @@ elif [[ "$all_reduce_backend" == "vllm" ]]; then
     for n in "${num_gpus_allreduce[@]}"; do
         echo "Running VLLM AllReduce benchmark with $n GPUs"
         torchrun --nproc_per_node=$n collect_all_reduce.py --backend vllm \
-            --perf_filename "custom_allreduce_perf.txt"
+            --perf-filename "custom_allreduce_perf.txt"
     done
 fi
 

@@ -327,6 +327,10 @@ def load_gemm_data(gemm_file):
         k = int(k)
         latency = float(latency)
 
+        # vllm gemm has some awq and gptq data, discard it.
+        if quant_mode in ["awq", "gptq"]:
+            continue
+
         quant_mode = common.GEMMQuantMode[quant_mode]
 
         try:
@@ -739,7 +743,8 @@ def load_context_attention_data(context_attention_file):
         window_size = int(window_size)
         latency = float(latency)
 
-        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads
+        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
+        # Use kv_n = 0 to mean n_kv == n.
         kv_n = 0 if n == kv_n else kv_n
 
         quant_mode = common.FMHAQuantMode[quant_mode]
@@ -798,7 +803,8 @@ def load_generation_attention_data(generation_attention_file):
         step = int(step)
         latency = float(latency)
 
-        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads
+        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
+        # Use kv_n = 0 to mean n_kv == n.
         kv_n = 0 if n == kv_n else kv_n
         s = s + step
 
@@ -1216,7 +1222,19 @@ class PerfDatabase:
             self._deepep_ll_data = load_deepep_ll_data(os.path.join(data_dir, common.PerfDataFilename.deepep_ll.value))
             self._nccl_data = load_nccl_data(nccl_data_dir)
             self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
-        else:
+        elif backend == "vllm":
+            self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
+            self._context_attention_data = load_context_attention_data(
+                os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
+            )
+            self._generation_attention_data = load_generation_attention_data(
+                os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
+            )
+            self._custom_allreduce_data = load_custom_allreduce_data(
+                os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
+            )
+            self._nccl_data = load_nccl_data(nccl_data_dir)
+        else:  # TRTLLM
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
                 os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
@@ -1518,23 +1536,26 @@ class PerfDatabase:
                             target_z_list=target_z_list,
                             sqrt_y_value=True,
                         )
-
-        for quant_mode in self._context_mla_data:
-            for kv_cache_dtype in self._context_mla_data[quant_mode]:
-                num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
-                data_dict = self._context_mla_data[quant_mode][kv_cache_dtype]
-                target_x_list = num_heads_list  # to reuse x dim
-                # currently, support max seq to 1M. Because all the system is linear for now.
-                # it will be difficult to do square interpolation.
-                # Use more points to do the approximation
-                target_y_list = (
-                    [16, 32, 64, 128, 256, 512, 1024, 2048]
-                    + [4096 + i * 2048 for i in range(14)]
-                    + [32768 + 16384 * i for i in range(6)]
-                    + [131072 + 32768 * i for i in range(12)]
-                    + [524288 + 65536 * i for i in range(9)]
-                )  # s
-                target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]  # b
+        elif backend == "vllm":
+            # vllm has no mla data yet
+            pass
+        else:  # TRTLLM
+            for quant_mode in self._context_mla_data:
+                for kv_cache_dtype in self._context_mla_data[quant_mode]:
+                    num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
+                    data_dict = self._context_mla_data[quant_mode][kv_cache_dtype]
+                    target_x_list = num_heads_list  # to reuse x dim
+                    # currently, support max seq to 1M. Because all the system is linear for now.
+                    # it will be difficult to do square interpolation.
+                    # Use more points to do the approximation
+                    target_y_list = (
+                        [16, 32, 64, 128, 256, 512, 1024, 2048]
+                        + [4096 + i * 2048 for i in range(14)]
+                        + [32768 + 16384 * i for i in range(6)]
+                        + [131072 + 32768 * i for i in range(12)]
+                        + [524288 + 65536 * i for i in range(9)]
+                    )  # s
+                    target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]  # b
 
                 self._extrapolate_data_grid(
                     data_dict=data_dict,  # tpsize,sb
@@ -1598,34 +1619,37 @@ class PerfDatabase:
                         target_y_list=target_y_list,
                         target_z_list=target_z_list,
                     )
-
-        for kv_cache_dtype in self._generation_mla_data:
-            tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
-            data_dict = self._generation_mla_data[kv_cache_dtype]
-            target_x_list = tp_list  # n
-            target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]  # b
-            target_z_list = [
-                1,
-                2,
-                4,
-                8,
-                16,
-                32,
-                64,
-                128,
-                256,
-                512,
-                1024,
-                2048,
-                4096,
-                8192,
-                16384,
-                32768,
-                65536,
-                131072,
-                262144,
-                2097152 * 8,
-            ]  # s
+        elif backend == "vllm":
+            # vllm has no mla data yet
+            pass
+        else:  # TRTLLM
+            for kv_cache_dtype in self._generation_mla_data:
+                tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
+                data_dict = self._generation_mla_data[kv_cache_dtype]
+                target_x_list = tp_list  # n
+                target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]  # b
+                target_z_list = [
+                    1,
+                    2,
+                    4,
+                    8,
+                    16,
+                    32,
+                    64,
+                    128,
+                    256,
+                    512,
+                    1024,
+                    2048,
+                    4096,
+                    8192,
+                    16384,
+                    32768,
+                    65536,
+                    131072,
+                    262144,
+                    2097152 * 8,
+                ]  # s
 
             self._extrapolate_data_grid(
                 data_dict=data_dict,  # tpsize, bs
@@ -1681,7 +1705,11 @@ class PerfDatabase:
                 "moe": [key.name for key in self._moe_data],
             }
         elif self.backend == "vllm":
-            self.supported_quant_mode = {}
+            self.supported_quant_mode = {
+                "gemm": [key.name for key in self._gemm_data],
+                "context_attention": [key.name for key in self._context_attention_data],
+                "generation_attention": [key.name for key in self._generation_attention_data],
+            }
 
     def is_inter_node(self, num_gpus: int) -> bool:
         """
@@ -2058,14 +2086,14 @@ class PerfDatabase:
         else:
             if head_size not in [64, 128]:
                 return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+
+            # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
             if n_kv == n:
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][0][head_size][
-                    window_size
-                ]
-            else:
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
-                    window_size
-                ]
+                n_kv = 0
+
+            attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
+                window_size
+            ]
             latency = self._interp_3d(n, s, b, attention_dict, "cubic")
             return latency
 
@@ -2126,9 +2154,12 @@ class PerfDatabase:
         else:
             if head_size not in [64, 128]:
                 return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
-            else:
-                attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
 
+            # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
+            if n_kv == n:
+                n_kv = 0
+
+            attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
             latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
             return latency
 

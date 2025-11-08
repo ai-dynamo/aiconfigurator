@@ -161,7 +161,7 @@ CachedHFModels = {
 """
 Supported systems (GPU types)
 """
-SupportedSystems = {"h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"}
+SupportedSystems = {"h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm", "l40s"}
 
 """
 Model family for model definition

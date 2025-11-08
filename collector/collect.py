@@ -282,10 +282,54 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     return errors
 
 
-def collect_sglang(num_processes: int, ops: list[str] | None = None):
-    """Collect performance data for SGLang with enhanced error tracking"""
+def collect_ops(
+    num_processes: int,
+    collections: list[dict],
+    ops: list[str] | None = None,
+    framework_version: str | None = None,
+) -> list[dict]:
     all_errors = []
 
+    for collection in collections:
+        if ops and (collection["type"] not in ops):
+            continue
+        try:
+            # Handle version-specific modules
+            if "version_handler" in collection:
+                module_name = collection["version_handler"](framework_version)
+                if not module_name:
+                    logger.warning(
+                        f"Skipping {collection['name']}.{collection['type']} - unsupported version {framework_version}",
+                    )
+                    continue
+            else:
+                module_name = collection["module"]
+
+            get_module = __import__(module_name, fromlist=[collection["get_func"]])
+            run_module = __import__(module_name, fromlist=[collection["run_func"]])
+
+            get_func = getattr(get_module, collection["get_func"])
+            run_func = getattr(run_module, collection["run_func"])
+
+            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
+            all_errors.extend(errors)
+
+        except Exception as e:
+            logger.exception(f"Failed to process {collection['name']}.{collection['type']}")
+            all_errors.append(
+                {
+                    "module": f"{collection['name']}.{collection['type']}",
+                    "error_type": "ImportError",
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+
+    return all_errors
+
+
+def collect_sglang(num_processes: int, ops: list[str] | None = None):
+    """Collect performance data for SGLang with enhanced error tracking"""
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
 
     try:
@@ -371,41 +415,16 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
             "run_func": "run_attention_torch",
         },
     ]
+    all_errors = collect_ops(num_processes, collections, ops, version)
 
-    for collection in collections:
-        if ops and (collection["type"] not in ops):
-            continue
-        try:
-            module_name = collection["module"]
-
-            get_module = __import__(module_name, fromlist=[collection["get_func"]])
-            run_module = __import__(module_name, fromlist=[collection["run_func"]])
-
-            get_func = getattr(get_module, collection["get_func"])
-            run_func = getattr(run_module, collection["run_func"])
-
-            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
-            all_errors.extend(errors)
-
-        except Exception as e:
-            logger.exception(f"Failed to process {collection['name']}.{collection['type']}")
-            all_errors.append(
-                {
-                    "module": f"{collection['name']}.{collection['type']}",
-                    "error_type": "ImportError",
-                    "error_message": str(e),
-                    "traceback": traceback.format_exc(),
-                }
-            )
-
-    # Generate summary report
     generate_collection_summary(all_errors, "sglang", version)
 
 
-def collect_vllm(num_processes: int):
+def collect_vllm(num_processes: int, ops: list[str] | None = None):
     """
     Collect performance data for VLLM v1.
     """
+
     try:
         from vllm.version import __version__ as vllm_version
 
@@ -415,34 +434,40 @@ def collect_vllm(num_processes: int):
         logger.exception("VLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
         return
 
-    # supported vllm v1 GEMM collection wich supports fp16,fp8,fp8_block_wise,awq and gptq
-    try:
-        import vllm_v1.collect_gemm
+    collections = [
+        # GEMM collections
+        # vllm v1 GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
+        {
+            "name": "vllm",
+            "type": "gemm",
+            "module": "collector.vllm.collect_gemm",
+            "get_func": "get_gemm_test_cases",
+            "run_func": "run_gemm",
+        },
+        # Attention collections - separate entries for context and generation
+        {
+            "name": "vllm",
+            "type": "attention_context",
+            "module": "collector.vllm.collect_attn",
+            "get_func": "get_context_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+        {
+            "name": "vllm",
+            "type": "attention_generation",
+            "module": "collector.vllm.collect_attn",
+            "get_func": "get_generation_attention_test_cases",
+            "run_func": "run_attention_torch",
+        },
+    ]
 
-        test_cases = vllm_v1.collect_gemm.get_gemm_test_cases(is_unit_test=False)
-        parallel_run(test_cases, vllm_v1.collect_gemm.run_gemm, num_processes)
-        logger.info(f"collected gemm_vllm test cases for VLLM {version}")
-    except:
-        logger.warning("cannot collect gemm_vllm test cases, skipping...")
+    all_errors = collect_ops(num_processes, collections, ops, version)
 
-    # supported vllm v1 atten collection which supports fp16(auto) and fp8 kv cache. flashatten
-    # impl for prefill and flashinfer impl for decode.
-    try:
-        import vllm_v1.collect_attn
-
-        test_cases = vllm_v1.collect_attn.get_context_attention_test_cases(if_unit_test=False)
-        parallel_run(test_cases, vllm_v1.collect_attn.run_attention_torch, num_processes)
-        logger.info(f"collected context attention test cases for VLLM {version}")
-        test_cases = vllm_v1.collect_attn.get_generation_attention_test_cases()
-        parallel_run(test_cases, vllm_v1.collect_attn.run_attention_torch, num_processes)
-        logger.info(f"collected generation attention test cases for VLLM {version}")
-    except:
-        logger.warning("cannot collect VLLM attention test cases, skipping...")
+    generate_collection_summary(all_errors, "vllm", version)
 
 
 def collect_trtllm(num_processes: int, ops: list[str] | None = None):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
-    all_errors = []
 
     os.environ["TLLM_LOG_LEVEL"] = "ERROR"
     os.environ["TRTLLM_DG_ENABLED"] = "1"
@@ -468,14 +493,14 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "trtllm",
             "type": "gemm_trt",
-            "module": "trtllm.collect_gemm_trt",
+            "module": "collector.trtllm.collect_gemm_trt",
             "get_func": "get_gemm_test_cases",
             "run_func": "run_gemm",
         },
         {
             "name": "trtllm",
             "type": "gemm",
-            "module": "trtllm.collect_gemm",
+            "module": "collector.trtllm.collect_gemm",
             "get_func": "get_gemm_test_cases",
             "run_func": "run_gemm",
         },
@@ -483,7 +508,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "trtllm",
             "type": "mla_context",
-            "module": "trtllm.collect_mla",
+            "module": "collector.trtllm.collect_mla",
             "get_func": "get_context_mla_test_cases",
             "run_func": "run_mla",
             "version_handler": lambda v: "trtllm.collect_mla_1_1rc2" if v.startswith("1.1") else "trtllm.collect_mla",
@@ -491,7 +516,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "trtllm",
             "type": "mla_generation",
-            "module": "trtllm.collect_mla",
+            "module": "collector.trtllm.collect_mla",
             "get_func": "get_generation_mla_test_cases",
             "run_func": "run_mla",
             "version_handler": lambda v: "trtllm.collect_mla_1_1rc2" if v.startswith("1.1") else "trtllm.collect_mla",
@@ -500,14 +525,14 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "trtllm",
             "type": "attention_context",
-            "module": "trtllm.collect_attn",
+            "module": "collector.trtllm.collect_attn",
             "get_func": "get_context_attention_test_cases",
             "run_func": "run_attention_torch",
         },
         {
             "name": "trtllm",
             "type": "attention_generation",
-            "module": "trtllm.collect_attn",
+            "module": "collector.trtllm.collect_attn",
             "get_func": "get_generation_attention_test_cases",
             "run_func": "run_attention_torch",
         },
@@ -515,14 +540,14 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         {
             "name": "trtllm",
             "type": "mla_bmm_gen_pre",
-            "module": "trtllm.collect_mla_bmm",
+            "module": "collector.trtllm.collect_mla_bmm",
             "get_func": "get_mla_gen_pre_test_cases",
             "run_func": "run_mla_gen_pre",
         },
         {
             "name": "trtllm",
             "type": "mla_bmm_gen_post",
-            "module": "trtllm.collect_mla_bmm",
+            "module": "collector.trtllm.collect_mla_bmm",
             "get_func": "get_mla_gen_post_test_cases",
             "run_func": "run_mla_gen_post",
         },
@@ -533,50 +558,17 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             "module": None,  # Will be determined based on version
             "get_func": "get_moe_test_cases",
             "run_func": "run_moe_torch",
-            "version_handler": lambda v: "trtllm.collect_moe_pre_0_20"
+            "version_handler": lambda v: "collector.trtllm.collect_moe_pre_0_20"
             if v.startswith("0.20.0")
-            else "trtllm.collect_moe_pre_1_0"
+            else "collector.trtllm.collect_moe_pre_1_0"
             if v.startswith(("0.21.0", "1.0.0"))
-            else "trtllm.collect_moe"
+            else "collector.trtllm.collect_moe"
             if v.startswith("1.1.0")
             else None,
         },
     ]
 
-    for collection in collections:
-        if ops and (collection["type"] not in ops):
-            continue
-        try:
-            # Handle version-specific modules
-            if "version_handler" in collection:
-                module_name = collection["version_handler"](version)
-                if not module_name:
-                    logger.warning(
-                        f"Skipping {collection['name']}.{collection['type']} - unsupported version {version}",
-                    )
-                    continue
-            else:
-                module_name = collection["module"]
-
-            get_module = __import__(module_name, fromlist=[collection["get_func"]])
-            run_module = __import__(module_name, fromlist=[collection["run_func"]])
-
-            get_func = getattr(get_module, collection["get_func"])
-            run_func = getattr(run_module, collection["run_func"])
-
-            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
-            all_errors.extend(errors)
-
-        except Exception as e:
-            logger.exception(f"Failed to process {collection['name']}.{collection['type']}")
-            all_errors.append(
-                {
-                    "module": f"{collection['name']}.{collection['type']}",
-                    "error_type": "ImportError",
-                    "error_message": str(e),
-                    "traceback": traceback.format_exc(),
-                }
-            )
+    all_errors = collect_ops(num_processes, collections, ops, version)
 
     # Generate summary report
     generate_collection_summary(all_errors, "trtllm", version)
@@ -670,8 +662,12 @@ def main():
     elif args.backend == "sglang":
         collect_sglang(num_processes, ops)
     elif args.backend == "vllm":
-        collect_vllm(num_processes)
+        collect_vllm(num_processes, ops)
 
 
 if __name__ == "__main__":
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     main()
