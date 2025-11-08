@@ -1143,8 +1143,6 @@ class PerfDatabase:
             self._wideep_deepep_ll_data = load_wideep_deepep_ll_data(
                 os.path.join(data_dir, common.PerfDataFilename.wideep_deepep_ll.value)
             )
-
-
         elif backend == "vllm":
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1184,7 +1182,7 @@ class PerfDatabase:
         self._correct_data()
 
         # regular context attention
-        if self._context_attention_data is not None:
+        if getattr(self, "_context_attention_data", None) is not None:
             for quant_mode in self._context_attention_data:
                 for kv_cache_dtype in self._context_attention_data[quant_mode]:
                     for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype]:
@@ -1261,7 +1259,7 @@ class PerfDatabase:
                                 )
 
         # regular generation attention
-        if self._generation_attention_data is not None:
+        if getattr(self, "_generation_attention_data", None) is not None:
             for kv_cache_dtype in self._generation_attention_data:
                 for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
                     for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
@@ -1347,7 +1345,7 @@ class PerfDatabase:
                             )
 
         # regular gemm
-        if self._gemm_data is not None:
+        if getattr(self, "_gemm_data", None) is not None:
             for quant_mode, data_dict in self._gemm_data.items():
                 target_x_list = [
                     1,
@@ -1426,7 +1424,7 @@ class PerfDatabase:
 
         # mla
         # wideep context mla
-        if self._wideep_context_mla_data is not None:
+        if getattr(self, "_wideep_context_mla_data", None) is not None:
             for kernel_source in self._wideep_context_mla_data:
                 for quant_mode in self._wideep_context_mla_data[kernel_source]:
                     for kv_cache_dtype in self._wideep_context_mla_data[kernel_source][quant_mode]:
@@ -1471,7 +1469,7 @@ class PerfDatabase:
                         )
 
         # regular context mla
-        if self._context_mla_data is not None:
+        if getattr(self, "_context_mla_data", None) is not None:
             for quant_mode in self._context_mla_data:
                 for kv_cache_dtype in self._context_mla_data[quant_mode]:
                     num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
@@ -1498,7 +1496,7 @@ class PerfDatabase:
                 )
 
         # wideep generation mla
-        if self._wideep_generation_mla_data is not None:
+        if getattr(self, "_wideep_generation_mla_data", None) is not None:
             for kernel_source in self._wideep_generation_mla_data:
                 for kv_cache_dtype in self._wideep_generation_mla_data[kernel_source]:
                     tp_list = list(self._wideep_generation_mla_data[kernel_source][kv_cache_dtype].keys())
@@ -1551,7 +1549,7 @@ class PerfDatabase:
                     )
 
         # regular generation mla
-        if self._generation_mla_data is not None:
+        if getattr(self, "_generation_mla_data", None) is not None:
             for kv_cache_dtype in self._generation_mla_data:
                 tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
                 data_dict = self._generation_mla_data[kv_cache_dtype]

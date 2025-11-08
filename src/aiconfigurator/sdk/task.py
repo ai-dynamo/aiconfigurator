@@ -301,10 +301,7 @@ class TaskConfigFactory:
                     decode_worker_config["moe_tp_list"] = [1]
                     decode_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32, 64]
                 else:
-                    if ctx.system_name == "gb200_sxm":
-                        parallel_config_list = [1, 2, 4, 8, 16]
-                    else:
-                        parallel_config_list = [1, 2, 4, 8]
+                    parallel_config_list = [1, 2, 4, 8]
 
                     prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
                     prefill_worker_config["tp_list"] = parallel_config_list
@@ -336,10 +333,7 @@ class TaskConfigFactory:
                     decode_worker_config["moe_tp_list"] = [1]
                     decode_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32, 64]
                 else:
-                    if ctx.system_name == "gb200_sxm":
-                        parallel_config_list = [1, 2, 4, 8, 16]
-                    else:
-                        parallel_config_list = [1, 2, 4, 8]
+                    parallel_config_list = [1, 2, 4, 8]
 
                     prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
                     prefill_worker_config["tp_list"] = parallel_config_list
@@ -695,6 +689,7 @@ class TaskConfig:
         3. Apply the yaml patch if any
         4. Finalize the config (Do type conversion and logging)
         Add those necessary args to allow users to use args standalone without yaml file.
+        TODO: To refactor this part to unify the final config
 
         Args:
             serving_mode: The serving mode of the task.
@@ -872,6 +867,8 @@ class TaskConfig:
         )
 
         printable["enable_wideep"] = self.enable_wideep
+        printable["moe_backend"] = self.config.moe_backend
+        printable["attention_backend"] = self.config.attention_backend
 
         base_config = _convert(getattr(self.config, "yaml_patch", getattr(self, "yaml_patch", {})))
         printable["profiles"] = self.profiles
