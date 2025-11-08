@@ -222,12 +222,12 @@ class TaskConfigFactory:
             elif ctx.backend_name == "sglang":
                 if ctx.enable_wideep:
                     # sglang + wideep (keep previous logic)
-                    worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32, 64]
+                    worker_config["num_gpu_per_worker"] = [8, 16, 32, 64]
                     worker_config["tp_list"] = [1, 2, 4, 8]
                     worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
                     worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
                     worker_config["moe_tp_list"] = [1]
-                    worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32, 64]
+                    worker_config["moe_ep_list"] = [8, 16, 32, 64]
                 else:
                     worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
                     worker_config["tp_list"] = [1, 2, 4, 8]
@@ -319,19 +319,19 @@ class TaskConfigFactory:
             elif ctx.backend_name == "sglang":
                 if ctx.enable_wideep:
                     # sglang + wideep (keep previous logic)
-                    prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32]
+                    prefill_worker_config["num_gpu_per_worker"] = [8, 16, 32]
                     prefill_worker_config["tp_list"] = [1, 2, 4, 8]
                     prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
                     prefill_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32]
                     prefill_worker_config["moe_tp_list"] = [1]
-                    prefill_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32]
+                    prefill_worker_config["moe_ep_list"] = [8, 16, 32]
 
-                    decode_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32, 64]
+                    decode_worker_config["num_gpu_per_worker"] = [8, 16, 32, 64]
                     decode_worker_config["tp_list"] = [1, 2, 4, 8]
                     decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
                     decode_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
                     decode_worker_config["moe_tp_list"] = [1]
-                    decode_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32, 64]
+                    decode_worker_config["moe_ep_list"] = [8, 16, 32, 64]
                 else:
                     parallel_config_list = [1, 2, 4, 8]
 

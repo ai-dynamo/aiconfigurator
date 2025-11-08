@@ -48,7 +48,7 @@ def patch_all_loaders_and_yaml(request, monkeypatch):
                 "mem_empirical_constant_latency": 1.0,
             },
             "node": {
-                # Used by query_allreduce, query_nccl, query_p2p:
+                # Used by query_custom_allreduce, query_nccl, query_p2p:
                 "inter_node_bw": 100.0,
                 "intra_node_bw": 100.0,
                 "num_gpus_per_node": 8,

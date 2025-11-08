@@ -31,9 +31,9 @@ def test_query_gemm_exact_match(perf_db):
     assert sol_value > 0, f"Expected positive SOL value, got {sol_value}"
 
 
-def test_query_allreduce_sol_mode_calculation(perf_db):
+def test_query_custom_allreduce_sol_mode_calculation(perf_db):
     """
-    When sol_mode == SOL, query_allreduce uses get_sol:
+    When sol_mode == SOL, query_custom_allreduce uses get_sol:
         sol_time = 2 * size * 2 / tp_size * (tp_size - 1) / p2pBW * 1000
     We set p2pBW = perf_db.system_spec['node']['inter_node_bw'] = 100.0
     For tp_size=2, size=1024, that becomes:
@@ -47,22 +47,22 @@ def test_query_allreduce_sol_mode_calculation(perf_db):
     tp_size = 2
     quant_mode = "float16"  # for SOL branch we ignore the custom allreduce dict
 
-    sol_time = perf_db.query_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.SOL)
+    sol_time = perf_db.query_custom_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.SOL)
 
     expected = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
     assert math.isclose(sol_time, expected), f"SOL-mode allreduce mismatch: expected {expected}, got {sol_time}"
 
 
-def test_query_allreduce_sol_full_returns_full_tuple(perf_db):
+def test_query_custom_allreduce_sol_full_returns_full_tuple(perf_db):
     """
-    When sol_mode == SOL_FULL, query_allreduce returns the full tuple (time, 0, 0) from get_sol.
+    When sol_mode == SOL_FULL, query_custom_allreduce returns the full tuple (time, 0, 0) from get_sol.
     Using the same numbers as above: (20480.0, 0, 0).
     """
     size = 1024
     tp_size = 2
     quant_mode = "float16"
 
-    result = perf_db.query_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.SOL_FULL)
+    result = perf_db.query_custom_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.SOL_FULL)
     # The get_sol function returns: (sol_time, 0, 0)
     sol_time = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
     expected = (sol_time, 0, 0)
@@ -71,7 +71,7 @@ def test_query_allreduce_sol_full_returns_full_tuple(perf_db):
     assert math.isclose(result[0], expected[0]) and result[1] == expected[1] and result[2] == expected[2]
 
 
-def test_query_allreduce_non_sol_mode_uses_custom_latency(perf_db):
+def test_query_custom_allreduce_non_sol_mode_uses_custom_latency(perf_db):
     """
     When sol_mode is neither SOL nor SOL_FULL (e.g. SOLMode.NONE), the code picks:
         comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)]['AUTO']
@@ -86,7 +86,7 @@ def test_query_allreduce_non_sol_mode_uses_custom_latency(perf_db):
     quant_mode = "float16"
 
     # Use a “non-SOL” mode to force fallback into the custom-data path
-    custom_latency = perf_db.query_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.NON_SOL)
+    custom_latency = perf_db.query_custom_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.NON_SOL)
     assert math.isclose(custom_latency, 5.0), f"Expected custom-allreduce latency 5.0, got {custom_latency}"
 
 

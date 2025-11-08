@@ -74,31 +74,31 @@ class TestNcclEdgeCases:
 
 @pytest.mark.patch_loader_and_yaml
 class TestAllreduceEdgeCases:
-    """Test edge cases for query_allreduce method."""
+    """Test edge cases for query_custom_allreduce method."""
 
-    def test_query_allreduce_single_gpu(self, comprehensive_perf_db):
+    def test_query_custom_allreduce_single_gpu(self, comprehensive_perf_db):
         """Test allreduce with single GPU returns 0."""
         # SOL mode
-        result_sol = comprehensive_perf_db.query_allreduce(
+        result_sol = comprehensive_perf_db.query_custom_allreduce(
             common.CommQuantMode.half, 1, 1024, sol_mode=common.SOLMode.SOL
         )
         assert result_sol == 0.0
 
         # Non-SOL mode
-        result_non_sol = comprehensive_perf_db.query_allreduce(
+        result_non_sol = comprehensive_perf_db.query_custom_allreduce(
             common.CommQuantMode.half, 1, 1024, sol_mode=common.SOLMode.NON_SOL
         )
         assert result_non_sol == 0.0
 
-    def test_query_allreduce_large_tp_scaling(self, comprehensive_perf_db):
+    def test_query_custom_allreduce_large_tp_scaling(self, comprehensive_perf_db):
         """Test allreduce with TP > 8 applies scaling factor."""
         # Get baseline with TP=8
-        baseline = comprehensive_perf_db.query_allreduce(
+        baseline = comprehensive_perf_db.query_custom_allreduce(
             common.CommQuantMode.half, 8, 2048, sol_mode=common.SOLMode.NON_SOL
         )
 
         # Test with TP=16
-        result = comprehensive_perf_db.query_allreduce(
+        result = comprehensive_perf_db.query_custom_allreduce(
             common.CommQuantMode.half, 16, 2048, sol_mode=common.SOLMode.NON_SOL
         )
 
@@ -110,10 +110,10 @@ class TestAllreduceEdgeCases:
         expected = baseline_unscaled * expected_scaling
         assert math.isclose(result, expected, rel_tol=1e-6)
 
-    def test_query_allreduce_extrapolation(self, comprehensive_perf_db):
+    def test_query_custom_allreduce_extrapolation(self, comprehensive_perf_db):
         """Test allreduce with message size requiring extrapolation."""
         # Use a size not in our test data
-        result = comprehensive_perf_db.query_allreduce(
+        result = comprehensive_perf_db.query_custom_allreduce(
             common.CommQuantMode.half,
             4,
             3000,  # 3000 is between 2048 and 4096
@@ -122,10 +122,10 @@ class TestAllreduceEdgeCases:
         assert result > 0
 
         # Should be between the two surrounding values
-        lower = comprehensive_perf_db.query_allreduce(
+        lower = comprehensive_perf_db.query_custom_allreduce(
             common.CommQuantMode.half, 4, 2048, sol_mode=common.SOLMode.NON_SOL
         )
-        upper = comprehensive_perf_db.query_allreduce(
+        upper = comprehensive_perf_db.query_custom_allreduce(
             common.CommQuantMode.half, 4, 4096, sol_mode=common.SOLMode.NON_SOL
         )
         assert lower < result < upper
