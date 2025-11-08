@@ -69,6 +69,8 @@ exp_disagg_full:
   config: # all optional, used to patch default values
     nextn: 1 # mtp 1
     nextn_accept_rates: [0.85,0,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
+    moe_backend: None # moe backend for SGLang wide ep, optional, default to None
+    attention_backend: "flashinfer" # attention backend for SGLang wide ep, optional, default to flashinfer
     # each prefill worker config
     prefill_worker_config:
       gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16

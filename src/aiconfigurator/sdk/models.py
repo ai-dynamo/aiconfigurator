@@ -371,10 +371,10 @@ class GPTModel(BaseModel):
         )
 
         # when tp_size=0, the comm part will be 0
-        self.context_ops.append(ops.AllReduce("context_ar_1", self._num_layers, h, tp_size))
-        self.context_ops.append(ops.AllReduce("context_ar_2", self._num_layers, h, tp_size))
-        self.generation_ops.append(ops.AllReduce("generation_ar_1", self._num_layers, h, tp_size))
-        self.generation_ops.append(ops.AllReduce("generation_ar_2", self._num_layers, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp_size))
+        self.generation_ops.append(ops.CustomAllReduce("generation_ar_1", self._num_layers, h, tp_size))
+        self.generation_ops.append(ops.CustomAllReduce("generation_ar_2", self._num_layers, h, tp_size))
 
         # pp
         pp_scale_factor = pp_size - 1
@@ -520,10 +520,10 @@ class LLAMAModel(BaseModel):
         )
 
         # when tp_message_size=0, the comm part will be 0
-        self.context_ops.append(ops.AllReduce("context_ar_1", self._num_layers, h, tp_size))
-        self.context_ops.append(ops.AllReduce("context_ar_2", self._num_layers, h, tp_size))
-        self.generation_ops.append(ops.AllReduce("generation_ar_1", self._num_layers, h, tp_size))
-        self.generation_ops.append(ops.AllReduce("generation_ar_2", self._num_layers, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp_size))
+        self.generation_ops.append(ops.CustomAllReduce("generation_ar_1", self._num_layers, h, tp_size))
+        self.generation_ops.append(ops.CustomAllReduce("generation_ar_2", self._num_layers, h, tp_size))
 
         # pp
         pp_scale_factor = pp_size - 1
@@ -825,10 +825,10 @@ class MOEModel(BaseModel):
         )
 
         # # # when tp_size=0, the comm part will be 0
-        # self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
-        # self.context_ops.append(ops.AllReduce('context_ar_2', self._num_layers, h, tp_size))
-        # self.generation_ops.append(ops.AllReduce('generation_ar_1', self._num_layers, h, tp_size))
-        # self.generation_ops.append(ops.AllReduce('generation_ar_2', self._num_layers, h, tp_size))
+        # self.context_ops.append(ops.CustomAllReduce('context_ar_1', self._num_layers, h, tp_size))
+        # self.context_ops.append(ops.CustomAllReduce('context_ar_2', self._num_layers, h, tp_size))
+        # self.generation_ops.append(ops.CustomAllReduce('generation_ar_1', self._num_layers, h, tp_size))
+        # self.generation_ops.append(ops.CustomAllReduce('generation_ar_2', self._num_layers, h, tp_size))
 
         # pp
         pp_scale_factor = pp_size - 1
@@ -1218,13 +1218,13 @@ class DeepSeekModel(BaseModel):
         )
 
         # when tp_size=0, the comm part will be 0
-        # self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
-        # self.context_ops.append(ops.AllReduce('context_ar_2', self._num_layers, h, tp_size))
+        # self.context_ops.append(ops.CustomAllReduce('context_ar_1', self._num_layers, h, tp_size))
+        # self.context_ops.append(ops.CustomAllReduce('context_ar_2', self._num_layers, h, tp_size))
         # self.generation_ops.append(
-        #     ops.AllReduce('generation_ar_1', self._num_layers*self._mtp_scale_factor, h, tp_size)
+        #     ops.CustomAllReduce('generation_ar_1', self._num_layers*self._mtp_scale_factor, h, tp_size)
         # )
         # self.generation_ops.append(
-        #     ops.AllReduce('generation_ar_2', self._num_layers*self._mtp_scale_factor, h, tp_size)
+        #     ops.CustomAllReduce('generation_ar_2', self._num_layers*self._mtp_scale_factor, h, tp_size)
         # )
 
         # pp
@@ -1530,7 +1530,7 @@ class NemotronNas(BaseModel):
                                 self._num_heads * self._head_size // tp_size,
                                 gemm_quant_mode,
                             ),
-                            ops.AllReduce("context_ar_1", count, h, tp_size),
+                            ops.CustomAllReduce("context_ar_1", count, h, tp_size),
                         ]
                     )
                 if not b.ffn_no_op:
@@ -1559,7 +1559,7 @@ class NemotronNas(BaseModel):
                                 inter_size // tp_size,
                                 gemm_quant_mode,
                             ),
-                            ops.AllReduce("context_ar_2", count, h, tp_size),
+                            ops.CustomAllReduce("context_ar_2", count, h, tp_size),
                         ]
                     )
             self._context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
@@ -1649,7 +1649,7 @@ class NemotronNas(BaseModel):
                                 self._num_heads * self._head_size // tp_size,
                                 gemm_quant_mode,
                             ),
-                            ops.AllReduce("generation_ar_1", count, h, tp_size),
+                            ops.CustomAllReduce("generation_ar_1", count, h, tp_size),
                         ]
                     )
                 if not b.ffn_no_op:
@@ -1678,7 +1678,7 @@ class NemotronNas(BaseModel):
                                 inter_size // tp_size,
                                 gemm_quant_mode,
                             ),
-                            ops.AllReduce("generation_ar_2", count, h, tp_size),
+                            ops.CustomAllReduce("generation_ar_2", count, h, tp_size),
                         ]
                     )
             self._generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor, h, pp_size))

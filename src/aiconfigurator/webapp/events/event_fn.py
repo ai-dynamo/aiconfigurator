@@ -167,6 +167,7 @@ class EventFn:
         comm_quant_mode,
         nextn,
         nextn_accept_rates,
+        enable_wideep,
         mode,
         record_df,
     ):
@@ -197,6 +198,7 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
                 )
                 runtime_config = config.RuntimeConfig(batch_size=batch_size, isl=isl, osl=osl)
 
@@ -254,7 +256,6 @@ class EventFn:
         dp_size,
         moe_tp_size,
         moe_ep_size,
-        moe_backend,
         gemm_quant_mode,
         kvcache_quant_mode,
         fmha_quant_mode,
@@ -262,6 +263,7 @@ class EventFn:
         comm_quant_mode,
         nextn,
         nextn_accept_rates,
+        enable_wideep,
     ):
         traceback_log = ""
         stdout_buffer = StringIO()
@@ -289,6 +291,7 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
                 )
                 runtime_config = config.RuntimeConfig(isl=isl, osl=osl, ttft=ttft, tpot=tpot)
 
@@ -302,8 +305,7 @@ class EventFn:
                     dp_list=[dp_size],
                     is_moe=is_moe,
                     backend=common.BackendName(backend_name),
-                    moe_backend=moe_backend,
-                    model_family=models.get_model_family(model_name),
+                    enable_wideep=enable_wideep,
                 )
                 for parallel_config in parallel_config_list:
                     tp, pp, dp, moe_tp, moe_ep = parallel_config
@@ -361,7 +363,6 @@ class EventFn:
         dp_size,
         moe_tp_size,
         moe_ep_size,
-        moe_backend,
         gemm_quant_mode,
         kvcache_quant_mode,
         fmha_quant_mode,
@@ -369,6 +370,7 @@ class EventFn:
         comm_quant_mode,
         nextn,
         nextn_accept_rates,
+        enable_wideep,
     ):
         is_error = False
         traceback_log = ""
@@ -392,6 +394,7 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
                 )
                 runtime_config = config.RuntimeConfig(
                     isl=isl,
@@ -410,8 +413,7 @@ class EventFn:
                     dp_list=dp_size,
                     is_moe=is_moe,
                     backend=common.BackendName(backend_name),
-                    moe_backend=moe_backend,
-                    model_family=models.get_model_family(model_name),
+                    enable_wideep=enable_wideep,
                 )
                 for parallel_config in parallel_config_list:
                     tp, pp, dp, moe_tp, moe_ep = parallel_config
@@ -482,6 +484,7 @@ class EventFn:
         ttft,
         nextn,
         nextn_accept_rates,
+        enable_wideep,
         prefill_system_name,
         prefill_backend_name,
         prefill_version,
@@ -493,7 +496,6 @@ class EventFn:
         prefill_dp_size,
         prefill_moe_tp_size,
         prefill_moe_ep_size,
-        prefill_moe_backend,
         prefill_gemm_quant_mode,
         prefill_kvcache_quant_mode,
         prefill_fmha_quant_mode,
@@ -511,7 +513,6 @@ class EventFn:
         decode_dp_size,
         decode_moe_tp_size,
         decode_moe_ep_size,
-        decode_moe_backend,
         decode_gemm_quant_mode,
         decode_kvcache_quant_mode,
         decode_fmha_quant_mode,
@@ -557,6 +558,7 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
                 )
                 decode_model_config = config.ModelConfig(
                     tp_size=decode_tp_size,
@@ -571,6 +573,7 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
                 )
                 runtime_config = config.RuntimeConfig(
                     isl=isl,
@@ -590,8 +593,7 @@ class EventFn:
                     dp_list=prefill_dp_size,
                     is_moe=is_moe,
                     backend=common.BackendName(prefill_backend_name),
-                    moe_backend=prefill_moe_backend,
-                    model_family=models.get_model_family(model_name),
+                    enable_wideep=enable_wideep,
                 )
                 decode_parallel_config_list = pareto_analysis.enumerate_parallel_config(
                     num_gpu_list=decode_num_gpus,
@@ -602,8 +604,7 @@ class EventFn:
                     dp_list=decode_dp_size,
                     is_moe=is_moe,
                     backend=common.BackendName(decode_backend_name),
-                    moe_backend=decode_moe_backend,
-                    model_family=models.get_model_family(model_name),
+                    enable_wideep=enable_wideep,
                 )
 
                 for prefill_parallel_config in prefill_parallel_config_list:
@@ -711,6 +712,7 @@ class EventFn:
         tpot,
         nextn,
         nextn_accept_rates,
+        enable_wideep,
         prefill_system_name,
         prefill_backend_name,
         prefill_version,
@@ -818,6 +820,7 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
                 )
                 decode_model_config = config.ModelConfig(
                     tp_size=decode_tp_size,
@@ -832,6 +835,7 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
                 )
 
                 prefill_max_num_tokens = 16384

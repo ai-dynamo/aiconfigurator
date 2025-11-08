@@ -83,6 +83,7 @@ def post_sla(
             dp_list=[1],
             is_moe=is_moe,
             backend=common.BackendName(backend),
+            enable_wideep=False,
         )
 
         concurrency_list_default = [

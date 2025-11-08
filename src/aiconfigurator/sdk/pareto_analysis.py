@@ -29,8 +29,7 @@ def enumerate_parallel_config(
     moe_ep_list: list[int] = [1],
     is_moe: bool = False,
     backend: common.BackendName = common.BackendName.trtllm,
-    moe_backend: str = None,
-    model_family: str = None,
+    enable_wideep: bool = False,
 ) -> list[list[int]]:
     """
     Enumerate parallel configurations based on parallel list.
@@ -47,10 +46,6 @@ def enumerate_parallel_config(
         is_moe: whether to use moe
         backend: backend name enum. Important for moe parallel enumeration as different backends
             have different moe parallel support.
-        moe_backend: moe backend name (e.g., "WIDEEP", "CUTLASS", etc.). Used for filtering
-            configurations based on backend-specific constraints.
-        model_family: model family name (e.g., "MOE", "DEEPSEEK"). Used for filtering
-            configurations based on model-specific constraints.
     Returns:
         parallel_config_list: list of parallel configurations
     """
@@ -63,23 +58,19 @@ def enumerate_parallel_config(
                         for moe_ep in moe_ep_list:
                             if dp * tp * pp in num_gpu_list and dp * tp == moe_tp * moe_ep:  # check num gpu and width
                                 # backend specific filters
+                                # trtllm
                                 if (
                                     backend == common.BackendName.trtllm and dp > 1 and tp > 1
                                 ):  # trtllm as trtllm don't supports attn tp > 1
                                     continue
-                                elif backend == common.BackendName.sglang and moe_tp > 1:
-                                    # sglang doesn't support moe tp and moe ep > 1 at the same time
-                                    # for now
-                                    continue
-
-                                # moe_backend and model_family specific filters
-                                # Exclude ep > 1 for MoE models if wideep is not enabled
-                                if model_family == "MOE" and moe_backend != "WIDEEP" and moe_ep > 1:
-                                    continue
-                                # Exclude etp (moe_tp) > 1 for DeepSeek models if wideep is enabled
-                                if model_family == "DEEPSEEK" and moe_backend == "WIDEEP" and moe_tp > 1:
-                                    continue
-
+                                # sglang
+                                elif backend == common.BackendName.sglang:
+                                    if enable_wideep and moe_tp > 1: # wideep only has ep
+                                        continue
+                                    elif not enable_wideep and moe_ep > 1: # non-wideep only has tp
+                                        continue
+                                elif backend == common.BackendName.vllm:
+                                    pass # TODO
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
             else:
                 if tp * pp in num_gpu_list:
