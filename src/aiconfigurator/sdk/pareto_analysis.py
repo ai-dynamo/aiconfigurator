@@ -65,12 +65,12 @@ def enumerate_parallel_config(
                                     continue
                                 # sglang
                                 elif backend == common.BackendName.sglang:
-                                    if enable_wideep and moe_tp > 1: # wideep only has ep
-                                        continue
-                                    elif not enable_wideep and moe_ep > 1: # non-wideep only has tp
+                                    if (enable_wideep and moe_tp > 1) or (
+                                        not enable_wideep and moe_ep > 1
+                                    ):  # wideep only has ep
                                         continue
                                 elif backend == common.BackendName.vllm:
-                                    pass # TODO
+                                    pass  # TODO
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
             else:
                 if tp * pp in num_gpu_list:

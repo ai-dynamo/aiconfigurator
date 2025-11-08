@@ -687,12 +687,10 @@ def load_wideep_mlp_data(wideep_context_mlp_file, wideep_generation_mlp_file):
     Load the SGLang MLP data from context_ds_mlp_perf.txt and generation_ds_mlp_perf.txt
     """
 
-    print(wideep_context_mlp_file, wideep_generation_mlp_file, type(wideep_context_mlp_file), type(wideep_generation_mlp_file))
-
     if not os.path.exists(wideep_context_mlp_file) or not os.path.exists(wideep_generation_mlp_file):
         logger.warning(
-                f"SGLang wideep MLP data files {wideep_context_mlp_file} and {wideep_generation_mlp_file} not found."
-            )
+            f"SGLang wideep MLP data files {wideep_context_mlp_file} and {wideep_generation_mlp_file} not found."
+        )
         return None, None
 
     wideep_context_mlp_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
@@ -840,9 +838,9 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
             quant_mode = common.MoEQuantMode[quant_mode]
 
             # Store the data, overwriting any previous entry with the same key
-            wideep_generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-                moe_ep_size
-            ][num_tokens] = latency
+            wideep_generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][
+                moe_tp_size
+            ][moe_ep_size][num_tokens] = latency
             logger.debug(
                 f"Loaded SGLang wideep generation MoE data: {quant_mode}, {distribution}, {topk}, "
                 f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
@@ -901,6 +899,7 @@ def load_wideep_context_mla_data(wideep_context_mla_file):
             wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b] = latency
 
     return wideep_context_mla_data
+
 
 def load_wideep_generation_mla_data(wideep_generation_mla_file):
     """
@@ -982,9 +981,9 @@ def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
         # -> timing data
         if num_token in wideep_deepep_ll_data[node_num][hidden_size][num_topk][num_experts]:
             logger.debug(
-                    f"value conflict in SGLang wideep deepep LL operation data: "
-                    f"{hidden_size} {num_topk} {num_experts} {num_token}"
-                )
+                f"value conflict in SGLang wideep deepep LL operation data: "
+                f"{hidden_size} {num_topk} {num_experts} {num_token}"
+            )
         else:
             wideep_deepep_ll_data[node_num][hidden_size][num_topk][num_experts][num_token] = lat
 
@@ -1135,7 +1134,7 @@ class PerfDatabase:
             )
             self._wideep_context_mlp_data, self._wideep_generation_mlp_data = load_wideep_mlp_data(
                 os.path.join(data_dir, common.PerfDataFilename.wideep_context_mlp.value),
-                os.path.join(data_dir, common.PerfDataFilename.wideep_generation_mlp.value)
+                os.path.join(data_dir, common.PerfDataFilename.wideep_generation_mlp.value),
             )
             self._wideep_deepep_normal_data = load_wideep_deepep_normal_data(
                 os.path.join(data_dir, common.PerfDataFilename.wideep_deepep_normal.value)
@@ -2748,9 +2747,9 @@ class PerfDatabase:
                         for window_size in self._generation_attention_data[quant_mode][n_kv][head_size]:
                             for n in self._generation_attention_data[quant_mode][n_kv][head_size][window_size]:
                                 for b in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n]:
-                                    for s in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][
-                                        b
-                                    ]:
+                                    for s in self._generation_attention_data[quant_mode][n_kv][head_size][window_size][
+                                        n
+                                    ][b]:
                                         if n_kv == 0:
                                             n_kv_local = n
                                         else:
@@ -2767,18 +2766,18 @@ class PerfDatabase:
                                         )
                                         if (
                                             sol
-                                            > self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][
-                                                b
-                                            ][s]
+                                            > self._generation_attention_data[quant_mode][n_kv][head_size][window_size][
+                                                n
+                                            ][b][s]
                                         ):
                                             logger.debug(
                                                 f"generation attention quant {quant_mode} n{n} "
                                                 f"n_kv{n_kv_local} b{b} s{s}: sol {window_size} > "
                                                 f"perf_db {sol}"
                                             )
-                                            self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][b][
-                                                s
-                                            ] = sol
+                                            self._generation_attention_data[quant_mode][n_kv][head_size][window_size][
+                                                n
+                                            ][b][s] = sol
 
     def query_wideep_mlp(
         self,

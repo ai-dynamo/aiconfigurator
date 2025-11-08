@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from aiconfigurator.sdk import common
-from aiconfigurator.sdk.perf_database import PerfDatabase
 import logging
 
+from aiconfigurator.sdk import common
+from aiconfigurator.sdk.perf_database import PerfDatabase
+
 logger = logging.getLogger(__name__)
+
 
 class Operation:
     """
@@ -253,7 +255,9 @@ class MoEDispatch(Operation):
                                 common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
                             )
                         else:
-                            comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                            comm_latency = database.query_custom_allreduce(
+                                common.CommQuantMode.half, self.num_gpus, volume
+                            )
                     elif self._attention_dp_size > 1:
                         if self._enable_fp4_all2all:
                             # Calculate all2all communication volume for nvfp4 all2all operation
@@ -304,7 +308,9 @@ class MoEDispatch(Operation):
                                 common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
                             )
                         else:
-                            comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                            comm_latency = database.query_custom_allreduce(
+                                common.CommQuantMode.half, self.num_gpus, volume
+                            )
                     elif self._attention_dp_size > 1:
                         if self._enable_fp4_all2all:
                             # to do: nvfp4 all2all
@@ -355,8 +361,8 @@ class MoEDispatch(Operation):
             raise NotImplementedError("Need to implement MoE dispatch for vllm")
         elif database.backend == common.BackendName.sglang.value:  # sglang
             assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
-                    "We don't enable the path for SGLang to support TP>1 and DP>1 for attn simultaneously"
-                )
+                "We don't enable the path for SGLang to support TP>1 and DP>1 for attn simultaneously"
+            )
             if self._moe_backend == "deepep_moe":
                 logger.debug("MoEDispatch: In SGLang DeepEP execution path")
                 if self._is_context:

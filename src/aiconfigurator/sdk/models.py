@@ -5,11 +5,10 @@ from __future__ import annotations
 
 import logging
 from functools import cache
-from typing import Any
+
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.utils import get_model_config_from_hf_id
-
 
 logger = logging.getLogger(__name__)
 

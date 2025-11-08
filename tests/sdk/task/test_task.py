@@ -285,9 +285,7 @@ def test_sglang_moe_configs():
     # Verify prefill config
     assert prefill_cfg.num_gpu_per_worker == [8, 16, 32], f"Expected [8, 16, 32], got {prefill_cfg.num_gpu_per_worker}"
     assert prefill_cfg.tp_list == [1, 2, 4, 8], f"Expected [1, 2, 4, 8], got {prefill_cfg.tp_list}"
-    assert prefill_cfg.dp_list == [1, 2, 4, 8, 16, 32], (
-        f"Expected [1, 2, 4, 8, 16, 32], got {prefill_cfg.dp_list}"
-    )
+    assert prefill_cfg.dp_list == [1, 2, 4, 8, 16, 32], f"Expected [1, 2, 4, 8, 16, 32], got {prefill_cfg.dp_list}"
     assert prefill_cfg.moe_tp_list == [1], f"Expected [1], got {prefill_cfg.moe_tp_list}"
     assert prefill_cfg.moe_ep_list == [8, 16, 32], f"Expected [8, 16, 32], got {prefill_cfg.moe_ep_list}"
 
@@ -350,7 +348,9 @@ def test_sglang_moe_configs():
     assert prefill_cfg3.num_gpu_per_worker == [1, 2, 4, 8, 16, 32], (
         f"Expected [1, 2, 4, 8, 16, 32], got {prefill_cfg3.num_gpu_per_worker}"
     )
-    assert prefill_cfg3.moe_ep_list == [1, 2, 4, 8, 16, 32], f"Expected [1, 2, 4, 8, 16, 32], got {prefill_cfg3.moe_ep_list}"
+    assert prefill_cfg3.moe_ep_list == [1, 2, 4, 8, 16, 32], (
+        f"Expected [1, 2, 4, 8, 16, 32], got {prefill_cfg3.moe_ep_list}"
+    )
     assert decode_cfg3.num_gpu_per_worker == [1, 2, 4, 8, 16, 32, 64], (
         f"Expected [1, 2, 4, 8, 16, 32, 64], got {decode_cfg3.num_gpu_per_worker}"
     )

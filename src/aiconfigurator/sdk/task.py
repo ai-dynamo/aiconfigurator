@@ -178,13 +178,13 @@ class TaskConfigFactory:
                 "tpot": ctx.tpot,
             },
             "enable_wideep": ctx.enable_wideep,
-            "moe_backend": None, # sglang wideep only
-            "attention_backend": "flashinfer", # sglang wideep only
+            "moe_backend": None,  # sglang wideep only
+            "attention_backend": "flashinfer",  # sglang wideep only
         }
 
     @staticmethod
     def _agg_defaults_layer(ctx: TaskContext) -> dict:
-        should_enable_pp = False # FIXME: need to improve pp alignment and then enable
+        should_enable_pp = False  # FIXME: need to improve pp alignment and then enable
         worker_config = {
             "system_name": ctx.system_name,
             "backend_name": ctx.backend_name,
@@ -930,7 +930,6 @@ class TaskConfig:
         worker_config.update(worker_cfg)
 
 
-
 class TaskRunner:
     def run_agg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
         logger.info("Task %s: Setting up runtime config", task_config.task_name)
@@ -966,8 +965,8 @@ class TaskRunner:
             comm_quant_mode=task_config.worker_config.comm_quant_mode,
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
-            moe_backend=task_config.moe_backend, # sglang wideep only
-            attention_backend=task_config.attention_backend, # sglang wideep only
+            moe_backend=task_config.moe_backend,  # sglang wideep only
+            attention_backend=task_config.attention_backend,  # sglang wideep only
             enable_wideep=task_config.enable_wideep,
         )
         logger.info("Task %s: Enumerating parallel config", task_config.task_name)
@@ -1044,8 +1043,8 @@ class TaskRunner:
             comm_quant_mode=task_config.prefill_worker_config.comm_quant_mode,
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
-            moe_backend=task_config.moe_backend, # sglang wideep only
-            attention_backend=task_config.attention_backend, # sglang wideep only
+            moe_backend=task_config.moe_backend,  # sglang wideep only
+            attention_backend=task_config.attention_backend,  # sglang wideep only
             enable_wideep=task_config.enable_wideep,
         )
 
@@ -1099,8 +1098,8 @@ class TaskRunner:
             comm_quant_mode=task_config.decode_worker_config.comm_quant_mode,
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
-            moe_backend=task_config.moe_backend, # sglang wideep only
-            attention_backend=task_config.attention_backend, # sglang wideep only
+            moe_backend=task_config.moe_backend,  # sglang wideep only
+            attention_backend=task_config.attention_backend,  # sglang wideep only
             enable_wideep=task_config.enable_wideep,
         )
 
