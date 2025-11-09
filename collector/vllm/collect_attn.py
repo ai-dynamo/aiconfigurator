@@ -304,7 +304,7 @@ def get_context_attention_test_cases(if_unit_test=False):
             16384,
             262144,
         ]
-        n_list = [4, 8, 12, 16, 24, 32, 40, 48, 64]
+        n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
         n_kv_list = [0, 1, 2, 4, 8]
         # n_kv_list = [64]
     else:
@@ -360,7 +360,7 @@ def get_generation_attention_test_cases():
 
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
     # b_list_xqa = [1,2,4,8,16,32,64,128,256,512,1024,2048]
-    n_list = [4, 8, 12, 16, 24, 32, 40, 48, 64]
+    n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
     # n_list_xqa = [4,8,16,32,64,128]
     s_list = [
         2,

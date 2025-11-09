@@ -14,9 +14,9 @@ The collected performance data can be used for performance modeling, scheduling 
 
 ## Overview
 
-- **collect_deepseek_attn.py**: Collects performance data for DeepSeek Attention (MLA) operators
-- **collect_deepep_moe.py**: Collects performance data for DeepSeek MoE operators
-- **collect_deepseek_mlp.py**: Collects performance data for Shared Expert (MLP) operators
+- **collect_wideep_attn.py**: Collects performance data for DeepSeek Attention (MLA) operators
+- **collect_wideep_deepep_moe.py**: Collects performance data for DeepSeek MoE operators
+- **collect_wideep_mlp.py**: Collects performance data for Shared Expert (MLP) operators
 
 ## Requirements
 
@@ -34,7 +34,7 @@ output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0
 ```
 
 
-## 1. Attention Operator Collection (collect_deepseek_attn.py)
+## 1. Attention Operator Collection (collect_wideep_attn.py)
 
 ### Features
 - Tests different attention backends (flashinfer, fa3)
@@ -47,7 +47,7 @@ output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0
 #### Basic Run with dummy weight
 ```bash
 export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python collect_deepseek_attn.py
+python collect_wideep_attn.py
 ```
 #### Environment Variables
 - `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model 
@@ -72,7 +72,7 @@ Output format:
 framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,tp_size,step,latency
 ```
 
-## 2. MoE Operator Collection (collect_deepep_moe.py)
+## 2. MoE Operator Collection (collect_wideep_deepep_moe.py)
 
 ### Features
 - Tests DeepEP MoE operator performance
@@ -85,7 +85,7 @@ framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_head
 #### Basic Run
 ```bash
 export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python collect_deepep_moe.py
+python collect_wideep_deepep_moe.py
 ```
 
 #### Environment Variables
@@ -139,7 +139,7 @@ Output format:
 framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency
 ```
 
-## 3. MLP Operator Collection (collect_deepseek_mlp.py)
+## 3. MLP Operator Collection (collect_wideep_mlp.py)
 
 ### Features
 - Tests DeepSeek V2/V3 MLP operator performance
@@ -151,7 +151,7 @@ framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,
 #### Basic Run
 ```bash
 export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python collect_deepseek_mlp.py
+python collect_wideep_mlp.py
 ```
 
 #### Environment Variables
