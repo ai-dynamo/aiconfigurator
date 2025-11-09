@@ -16,11 +16,11 @@ def _get_exp_yaml_files():
 EXP_YAMLS_TO_TEST = _get_exp_yaml_files()
 
 
-class TestModelSystemCombinations:
-    """Test aiconfigurator CLI with various model/system combinations."""
+class TestExps:
+    """Test aiconfigurator CLI with various exps."""
 
     @pytest.mark.parametrize("exp_yaml", EXP_YAMLS_TO_TEST)
-    def test_model_system_combination(
+    def test_exps(
         self,
         exp_yaml,
     ):
