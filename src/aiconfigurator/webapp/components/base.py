@@ -171,8 +171,9 @@ def create_model_misc_config(app_config):
         with gr.Row():
             nextn = gr.Dropdown(choices=[0, 1, 2, 3, 4, 5], value=0, label="nextn", interactive=True)
             nextn_accept_rates = gr.Textbox(value="0.85,0.2,0.0,0.0,0.0", label="nextn accept rates", interactive=True)
+            enable_wideep = gr.Checkbox(label="enable wideep", value=False, interactive=True)
 
-    return {"nextn": nextn, "nextn_accept_rates": nextn_accept_rates}
+    return {"nextn": nextn, "nextn_accept_rates": nextn_accept_rates, "enable_wideep": enable_wideep}
 
 
 def create_runtime_config(app_config, with_sla=False):

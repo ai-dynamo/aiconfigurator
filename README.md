@@ -41,6 +41,9 @@ python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.9 or lat
 
 # 4. Install aiconfigurator
 pip3 install .
+
+# 5. Install aiconfigurator with webapp support
+pip3 install .[webapp]
 ```
 
 ### Build with Docker

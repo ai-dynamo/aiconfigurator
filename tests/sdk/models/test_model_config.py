@@ -10,7 +10,8 @@ Tests model validation, supported models, and model-specific configurations.
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.models import check_is_moe
+from aiconfigurator.sdk.models import check_is_moe, get_model_family
+from aiconfigurator.sdk.utils import get_model_config_from_hf_id
 
 
 class TestSupportedModels:
@@ -52,6 +53,50 @@ class TestSupportedModels:
         if model_name in common.SupportedModels:
             is_moe = check_is_moe(model_name)
             assert is_moe == is_moe_expected
+
+
+class TestHFModelSupport:
+    """Test HuggingFace model ID support."""
+
+    def test_supported_hf_models_exists(self):
+        """Test that CachedHFModels dict exists and has content."""
+        assert hasattr(common, "CachedHFModels")
+        assert isinstance(common.CachedHFModels, set)
+        assert len(common.CachedHFModels) > 0
+
+    def test_hf_models_map_to_valid_model_configs(self):
+        """Test that all HF model IDs map to valid model names in SupportedModels."""
+        for hf_id in common.CachedHFModels:
+            config = get_model_config_from_hf_id(hf_id)
+            assert config[0] in common.ModelFamily
+
+    @pytest.mark.parametrize(
+        "hf_id,expected_family",
+        [
+            ("Qwen/Qwen2.5-7B", "LLAMA"),
+            ("meta-llama/Meta-Llama-3.1-8B", "LLAMA"),
+            ("deepseek-ai/DeepSeek-V3", "DEEPSEEK"),
+            ("mistralai/Mixtral-8x7B-v0.1", "MOE"),
+        ],
+    )
+    def test_hf_id_resolves_to_correct_model_family(self, hf_id, expected_family):
+        """Test that HF IDs resolve to the correct model family."""
+        family = get_model_family(hf_id)
+        assert family == expected_family
+
+    @pytest.mark.parametrize(
+        "hf_id,is_moe_expected",
+        [
+            ("Qwen/Qwen2.5-7B", False),
+            ("meta-llama/Meta-Llama-3.1-8B", False),
+            ("deepseek-ai/DeepSeek-V3", True),
+            ("mistralai/Mixtral-8x7B-v0.1", True),
+        ],
+    )
+    def test_hf_id_moe_detection(self, hf_id, is_moe_expected):
+        """Test that MoE models are correctly identified via HF ID."""
+        is_moe = check_is_moe(hf_id)
+        assert is_moe == is_moe_expected
 
 
 class TestBackendConfiguration:

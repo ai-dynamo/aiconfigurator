@@ -20,6 +20,7 @@ from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_tpot_constraint,
 )
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.sdk.utils import get_model_config_from_hf_id
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +33,30 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
     return common_parser
 
 
+def _validate_hf_model(hf_id: str) -> str:
+    if hf_id in common.CachedHFModels:
+        return hf_id
+    try:
+        get_model_config_from_hf_id(hf_id)
+        return hf_id
+    except Exception as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
+
+
 def _add_default_mode_arguments(parser):
-    parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--model",
         choices=common.SupportedModels.keys(),
         type=str,
-        required=True,
         help="Model name.",
     )
+    group.add_argument(
+        "--hf_id",
+        type=_validate_hf_model,
+        help="HuggingFace model ID. e.g. Qwen/Qwen2.5-7B",
+    )
+    parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")
     parser.add_argument(
         "--system", choices=common.SupportedSystems, type=str, required=True, help="Default system name (GPU type)."
     )
@@ -65,8 +81,8 @@ def _add_default_mode_arguments(parser):
     )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
-    parser.add_argument("--ttft", type=float, default=1000.0, help="Time to first token in ms.")
-    parser.add_argument("--tpot", type=float, default=20.0, help="Time per output token in ms.")
+    parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms.")
+    parser.add_argument("--tpot", type=float, default=30.0, help="Time per output token in ms.")
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
 
 
@@ -108,7 +124,7 @@ def configure_parser(parser):
 def _build_default_task_configs(args) -> dict[str, TaskConfig]:
     decode_system = args.decode_system or args.system
     common_kwargs: dict[str, Any] = {
-        "model_name": args.model,
+        "model_name": args.model or args.hf_id,
         "system_name": args.system,
         "backend_name": args.backend,
         "backend_version": args.backend_version,
@@ -120,13 +136,16 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
         "prefix": args.prefix,
     }
 
+    task_configs: dict[str, TaskConfig] = {}
     agg_task = TaskConfig(serving_mode="agg", **common_kwargs)
+    task_configs["agg"] = agg_task
 
     disagg_kwargs = dict(common_kwargs)
     disagg_kwargs["decode_system_name"] = decode_system
     disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
+    task_configs["disagg"] = disagg_task
 
-    return {"disagg": disagg_task, "agg": agg_task}
+    return task_configs
 
 
 _EXPERIMENT_RESERVED_KEYS = {
@@ -142,7 +161,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "osl",
     "ttft",
     "tpot",
-    "enable_wide_ep",
+    "enable_wideep",
     "total_gpus",
     "use_specific_quant_mode",
 }
@@ -251,8 +270,8 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             if numeric_key in exp_config:
                 task_kwargs[numeric_key] = exp_config[numeric_key]
 
-        if "enable_wide_ep" in exp_config:
-            task_kwargs["enable_wide_ep"] = exp_config["enable_wide_ep"]
+        if "enable_wideep" in exp_config:
+            task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
         if "use_specific_quant_mode" in exp_config:
             task_kwargs["use_specific_quant_mode"] = exp_config["use_specific_quant_mode"]
 
@@ -294,7 +313,9 @@ def _execute_task_configs(
                 results[exp_name] = task_result
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_frontier_df))
             else:
-                logger.warning("Experiment %s returned no results.", exp_name)
+                logger.warning(
+                    "Experiment %s returned no results. The TTFT and TPOT constraints may need to be relaxed.", exp_name
+                )
         except Exception:
             logger.exception("Error running experiment %s", exp_name)
 

@@ -168,6 +168,7 @@ class EventFn:
         comm_quant_mode,
         nextn,
         nextn_accept_rates,
+        enable_wideep,
         mode,
         record_df,
     ):
@@ -198,6 +199,9 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
+                    moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
+                    attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
                 runtime_config = config.RuntimeConfig(batch_size=batch_size, isl=isl, osl=osl, prefix=prefix)
 
@@ -263,6 +267,7 @@ class EventFn:
         comm_quant_mode,
         nextn,
         nextn_accept_rates,
+        enable_wideep,
     ):
         traceback_log = ""
         stdout_buffer = StringIO()
@@ -290,6 +295,9 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
+                    moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
+                    attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
                 runtime_config = config.RuntimeConfig(isl=isl, osl=osl, prefix=prefix, ttft=ttft, tpot=tpot)
 
@@ -303,6 +311,7 @@ class EventFn:
                     dp_list=[dp_size],
                     is_moe=is_moe,
                     backend=common.BackendName(backend_name),
+                    enable_wideep=enable_wideep,
                 )
                 for parallel_config in parallel_config_list:
                     tp, pp, dp, moe_tp, moe_ep = parallel_config
@@ -368,6 +377,7 @@ class EventFn:
         comm_quant_mode,
         nextn,
         nextn_accept_rates,
+        enable_wideep,
     ):
         is_error = False
         traceback_log = ""
@@ -391,6 +401,9 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
+                    moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
+                    attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
                 runtime_config = config.RuntimeConfig(
                     isl=isl,
@@ -410,6 +423,7 @@ class EventFn:
                     dp_list=dp_size,
                     is_moe=is_moe,
                     backend=common.BackendName(backend_name),
+                    enable_wideep=enable_wideep,
                 )
                 for parallel_config in parallel_config_list:
                     tp, pp, dp, moe_tp, moe_ep = parallel_config
@@ -481,6 +495,7 @@ class EventFn:
         ttft,
         nextn,
         nextn_accept_rates,
+        enable_wideep,
         prefill_system_name,
         prefill_backend_name,
         prefill_version,
@@ -554,6 +569,9 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
+                    moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
+                    attention_backend="flashinfer" if (enable_wideep and prefill_backend_name == "sglang") else None,
                 )
                 decode_model_config = config.ModelConfig(
                     tp_size=decode_tp_size,
@@ -568,6 +586,9 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
+                    moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
+                    attention_backend="flashinfer" if (enable_wideep and decode_backend_name == "sglang") else None,
                 )
                 runtime_config = config.RuntimeConfig(
                     isl=isl,
@@ -588,6 +609,7 @@ class EventFn:
                     dp_list=prefill_dp_size,
                     is_moe=is_moe,
                     backend=common.BackendName(prefill_backend_name),
+                    enable_wideep=enable_wideep,
                 )
                 decode_parallel_config_list = pareto_analysis.enumerate_parallel_config(
                     num_gpu_list=decode_num_gpus,
@@ -598,6 +620,7 @@ class EventFn:
                     dp_list=decode_dp_size,
                     is_moe=is_moe,
                     backend=common.BackendName(decode_backend_name),
+                    enable_wideep=enable_wideep,
                 )
 
                 for prefill_parallel_config in prefill_parallel_config_list:
@@ -706,6 +729,7 @@ class EventFn:
         tpot,
         nextn,
         nextn_accept_rates,
+        enable_wideep,
         prefill_system_name,
         prefill_backend_name,
         prefill_version,
@@ -813,6 +837,9 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
+                    moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
+                    attention_backend="flashinfer" if (enable_wideep and prefill_backend_name == "sglang") else None,
                 )
                 decode_model_config = config.ModelConfig(
                     tp_size=decode_tp_size,
@@ -827,6 +854,9 @@ class EventFn:
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
+                    enable_wideep=enable_wideep,
+                    moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
+                    attention_backend="flashinfer" if (enable_wideep and decode_backend_name == "sglang") else None,
                 )
 
                 prefill_max_num_tokens = 16384
@@ -1062,7 +1092,7 @@ class EventFn:
     # common functions
     # system change func and event
     @staticmethod
-    def update_quant_mode_choices(model_name, system_name, backend_name, version):
+    def update_quant_mode_choices(model_name, system_name, backend_name, version, enable_wideep):
         if version is None:
             return (
                 gr.update(choices=[], value=None, interactive=True),
@@ -1071,28 +1101,67 @@ class EventFn:
                 gr.update(choices=[], value=None, interactive=True),
             )
         database_dict = get_all_databases()
-        gemm_quant_mode_choices = sorted(database_dict[system_name][backend_name][version].supported_quant_mode["gemm"])
+        supported_quant_mode = database_dict[system_name][backend_name][version].supported_quant_mode
+
+        if get_model_family(model_name) != "DEEPSEEK":
+            gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
+            kvcache_quant_mode_choices = sorted(supported_quant_mode["generation_attention"])
+            fmha_quant_mode_choices = sorted(supported_quant_mode["context_attention"])
+            moe_quant_mode_choices = sorted(supported_quant_mode["moe"])
+        else:
+            if backend_name == "sglang":
+                if enable_wideep:
+                    gemm_quant_mode_choices = sorted(supported_quant_mode["wideep_context_mlp"])
+                    kvcache_quant_mode_choices = sorted(supported_quant_mode["wideep_generation_mla"])
+                    fmha_quant_mode_choices = sorted(supported_quant_mode["wideep_context_mla"])
+                    moe_quant_mode_choices = sorted(supported_quant_mode["wideep_context_mlp"])
+                else:
+                    gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
+                    kvcache_quant_mode_choices = sorted(supported_quant_mode["generation_mla"])
+                    fmha_quant_mode_choices = sorted(supported_quant_mode["context_mla"])
+                    moe_quant_mode_choices = sorted(supported_quant_mode["moe"])
+            else:
+                gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
+                kvcache_quant_mode_choices = sorted(supported_quant_mode["generation_mla"])
+                fmha_quant_mode_choices = sorted(supported_quant_mode["context_mla"])
+                moe_quant_mode_choices = sorted(supported_quant_mode["moe"])
+
+        gemm_quant_mode_choices = (
+            gemm_quant_mode_choices if len(gemm_quant_mode_choices) > 0 else [common.GEMMQuantMode.float16.name]
+        )
         kvcache_quant_mode_choices = (
-            sorted(database_dict[system_name][backend_name][version].supported_quant_mode["generation_attention"])
-            if get_model_family(model_name) != "DEEPSEEK"
-            else sorted(database_dict[system_name][backend_name][version].supported_quant_mode["generation_mla"])
+            kvcache_quant_mode_choices
+            if len(kvcache_quant_mode_choices) > 0
+            else [common.KVCacheQuantMode.float16.name]
         )
         fmha_quant_mode_choices = (
-            sorted(database_dict[system_name][backend_name][version].supported_quant_mode["context_attention"])
-            if get_model_family(model_name) != "DEEPSEEK"
-            else sorted(database_dict[system_name][backend_name][version].supported_quant_mode["context_mla"])
+            fmha_quant_mode_choices if len(fmha_quant_mode_choices) > 0 else [common.FMHAQuantMode.float16.name]
         )
-        moe_quant_mode_choices = sorted(database_dict[system_name][backend_name][version].supported_quant_mode["moe"])
+        moe_quant_mode_choices = (
+            moe_quant_mode_choices if len(moe_quant_mode_choices) > 0 else [common.MoEQuantMode.float16.name]
+        )
 
         return (
-            gr.update(choices=gemm_quant_mode_choices, value=gemm_quant_mode_choices[0], interactive=True),
+            gr.update(
+                choices=gemm_quant_mode_choices,
+                value=gemm_quant_mode_choices[0],
+                interactive=True,
+            ),
             gr.update(
                 choices=kvcache_quant_mode_choices,
                 value=kvcache_quant_mode_choices[0],
                 interactive=True,
             ),
-            gr.update(choices=fmha_quant_mode_choices, value=fmha_quant_mode_choices[0], interactive=True),
-            gr.update(choices=moe_quant_mode_choices, value=moe_quant_mode_choices[0], interactive=True),
+            gr.update(
+                choices=fmha_quant_mode_choices,
+                value=fmha_quant_mode_choices[0],
+                interactive=True,
+            ),
+            gr.update(
+                choices=moe_quant_mode_choices,
+                value=moe_quant_mode_choices[0],
+                interactive=True,
+            ),
         )
 
     @staticmethod
@@ -1115,10 +1184,11 @@ class EventFn:
 
     @staticmethod
     def update_model_related_components(model_name):
-        # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size
+        # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
         if models.get_model_family(model_name) == "DEEPSEEK":
             return (
                 gr.update(value=0, visible=True),
+                gr.update(visible=True),
                 gr.update(visible=True),
                 gr.update(visible=True),
                 gr.update(visible=True),
@@ -1133,10 +1203,12 @@ class EventFn:
                 gr.update(visible=True),
                 gr.update(visible=True),
                 gr.update(visible=True),
+                gr.update(visible=True),
             )
         else:
             return (
                 gr.update(value=0, visible=False),
+                gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),

@@ -31,6 +31,7 @@ class EventHandler:
                 components["model_quant_components"]["comm_quant_mode"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
                 components["mode"],
                 components["record_df"],
             ],
@@ -56,6 +57,7 @@ class EventHandler:
             components["model_name_components"],
             components["model_system_components"],
             components["model_quant_components"],
+            components["model_misc_config_components"],
         )
         EventHandler.setup_model_name_events(
             components["model_name_components"],
@@ -91,6 +93,7 @@ class EventHandler:
                 components["model_quant_components"]["comm_quant_mode"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
             ],
             outputs=[components["result_df"], components["debugging_box"]],
         )
@@ -104,6 +107,7 @@ class EventHandler:
             components["model_name_components"],
             components["model_system_components"],
             components["model_quant_components"],
+            components["model_misc_config_components"],
         )
         EventHandler.setup_model_name_events(
             components["model_name_components"],
@@ -139,6 +143,7 @@ class EventHandler:
                 components["model_quant_components"]["comm_quant_mode"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
             ],
             outputs=[
                 components["result_df"],
@@ -157,6 +162,7 @@ class EventHandler:
             components["model_name_components"],
             components["model_system_components"],
             components["model_quant_components"],
+            components["model_misc_config_components"],
         )
         EventHandler.setup_model_name_events(
             components["model_name_components"],
@@ -177,6 +183,7 @@ class EventHandler:
                 components["runtime_config_components"]["ttft"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
                 components["prefill_model_system_components"]["system"],  # prefill
                 components["prefill_model_system_components"]["backend"],
                 components["prefill_model_system_components"]["version"],
@@ -235,11 +242,13 @@ class EventHandler:
             components["model_name_components"],
             components["prefill_model_system_components"],
             components["prefill_model_quant_components"],
+            components["model_misc_config_components"],
         )
         EventHandler.setup_common_events(
             components["model_name_components"],
             components["decode_model_system_components"],
             components["decode_model_quant_components"],
+            components["model_misc_config_components"],
         )
         EventHandler.setup_model_name_events(
             components["model_name_components"],
@@ -267,6 +276,7 @@ class EventHandler:
                 components["runtime_config_components"]["tpot"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
                 components["prefill_model_system_components"]["system"],  # prefill
                 components["prefill_model_system_components"]["backend"],
                 components["prefill_model_system_components"]["version"],
@@ -313,11 +323,13 @@ class EventHandler:
             components["model_name_components"],
             components["prefill_model_system_components"],
             components["prefill_model_quant_components"],
+            components["model_misc_config_components"],
         )
         EventHandler.setup_common_events(
             components["model_name_components"],
             components["decode_model_system_components"],
             components["decode_model_quant_components"],
+            components["model_misc_config_components"],
         )
         EventHandler.setup_model_name_events(
             components["model_name_components"],
@@ -360,7 +372,12 @@ class EventHandler:
 
     # common events
     @staticmethod
-    def setup_common_events(model_name_components, model_system_components, model_quant_components):
+    def setup_common_events(
+        model_name_components,
+        model_system_components,
+        model_quant_components,
+        model_misc_config_components,
+    ):
         model_name_components["model_name"].change(
             fn=EventFn.update_system_value,
             inputs=[model_name_components["model_name"]],
@@ -386,6 +403,24 @@ class EventHandler:
                 model_system_components["system"],
                 model_system_components["backend"],
                 model_system_components["version"],
+                model_misc_config_components["enable_wideep"],
+            ],
+            outputs=[
+                model_quant_components["gemm_quant_mode"],
+                model_quant_components["kvcache_quant_mode"],
+                model_quant_components["fmha_quant_mode"],
+                model_quant_components["moe_quant_mode"],
+            ],
+        )
+
+        model_misc_config_components["enable_wideep"].change(
+            fn=EventFn.update_quant_mode_choices,
+            inputs=[
+                model_name_components["model_name"],
+                model_system_components["system"],
+                model_system_components["backend"],
+                model_system_components["version"],
+                model_misc_config_components["enable_wideep"],
             ],
             outputs=[
                 model_quant_components["gemm_quant_mode"],
@@ -408,6 +443,7 @@ class EventHandler:
             outputs=[
                 model_misc_config_components["nextn"],
                 model_misc_config_components["nextn_accept_rates"],
+                model_misc_config_components["enable_wideep"],
                 model_quant_components["moe_quant_mode"],
                 model_parallel_components["moe_tp_size"],
                 model_parallel_components["moe_ep_size"],

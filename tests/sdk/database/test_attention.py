@@ -147,6 +147,21 @@ class TestGenerationAttention:
         assert isinstance(result, float)
         assert result > 0
 
+    def test_query_generation_attention_non_sol_mode_mha(self, comprehensive_perf_db):
+        """Test non-SOL mode with MHA (n_kv == n)."""
+        b, s, n = 2, 64, 16
+        n_kv = n  # MHA case
+        kv_cache_quant_mode = common.KVCacheQuantMode.float16
+
+        result = comprehensive_perf_db.query_generation_attention(
+            b, s, n, n_kv, kv_cache_quant_mode, sol_mode=common.SOLMode.NON_SOL
+        )
+
+        # Should use n_kv=0 for MHA
+        expected = comprehensive_perf_db._generation_attention_data[kv_cache_quant_mode][0][128][0][n][b][s]
+
+        assert math.isclose(result, expected, rel_tol=1e-6)
+
     def test_query_generation_attention_edge_cases(self, comprehensive_perf_db):
         """Test edge cases like s=1."""
         # When s=1, there's no KV cache to load from previous steps

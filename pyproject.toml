@@ -3,7 +3,7 @@
 
 [project]
 name = "aiconfigurator"
-version = "0.3.0"
+version = "0.4.0"
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
@@ -43,7 +43,6 @@ requires-python = ">=3.9"
 dependencies = [
     "uv",
     "fastapi>=0.115.12",
-    "gradio==5.47.1",
     "jinja2>=3.1.0",
     "matplotlib>=3.9.4",
     "numpy~=1.26.4",
@@ -74,6 +73,9 @@ dev = [
     "pytest-timeout>=2.3.1",
     "pytest-xdist==3.8.0"
 ]
+webapp = [
+    "gradio==5.47.1"
+]
 
 [project.urls]
 GitHub = "https://github.com/ai-dynamo/aiconfigurator"
@@ -89,7 +91,7 @@ aiconfigurator = "aiconfigurator.main:main"
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
 "aiconfigurator.generator" = ["*.yaml", "templates/**/*.j2"]
-"aiconfigurator" = ["systems/*.yaml", "systems/**/*.txt"]
+"aiconfigurator" = ["systems/*.yaml", "systems/**/*.txt", "model_configs/*.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
