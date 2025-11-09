@@ -21,7 +21,7 @@ exp_agg_full:
   osl: 1000 # output sequence length, optional, default to 1000
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
   tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
-  enable_wide_ep: false # enable wide ep for prefill/decode, optional, default to false
+  enable_wideep: false # enable wide ep for prefill/decode, optional, default to false
   profiles: [] # some inherit presets for easier patch, optional
   config: # all optional, used to patch default values
     nextn: 1 # mtp 1
@@ -64,11 +64,13 @@ exp_disagg_full:
   osl: 1000 # output sequence length, optional, default to 1000
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
   tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
-  enable_wide_ep: false # enable wide ep for prefill/decode, optional, default to false
+  enable_wideep: false # enable wide ep for prefill/decode, optional, default to false
   profiles: [] # some inherit presets for easier patch, optional
   config: # all optional, used to patch default values
     nextn: 1 # mtp 1
     nextn_accept_rates: [0.85,0,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
+    moe_backend: None # moe backend for SGLang wide ep, optional, default to None
+    attention_backend: "flashinfer" # attention backend for SGLang wide ep, optional, default to flashinfer
     # each prefill worker config
     prefill_worker_config:
       gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
@@ -117,7 +119,7 @@ exp_disagg_simplified:
   model_name: "DEEPSEEK_V3"
   total_gpus: 512
   system_name: "gb200_sxm"
-  enable_wide_ep: true # enable wide ep for prefill/decode, default to false, optional
+  enable_wideep: false # enable wide ep for prefill/decode, default to false, optional
   config: # patch below default values
     nextn: 2 # mtp 1
     nextn_accept_rates: [0.85,0.3,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.

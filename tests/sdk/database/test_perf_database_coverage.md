@@ -32,7 +32,7 @@ Tests for all data loading functions:
 ### 3. **test_perf_database.py**
 Basic query method tests:
 - `query_gemm()` - Exact match test
-- `query_allreduce()` - SOL, SOL_FULL, and non-SOL modes
+- `query_custom_allreduce()` - SOL, SOL_FULL, and non-SOL modes
 - `query_nccl()` - SOL mode for different operations
 - `query_p2p()` - SOL mode
 - System spec loading verification
@@ -138,7 +138,7 @@ Edge cases and additional coverage:
    - `query_generation_attention()` ✓
    - `query_context_mla()` ✓
    - `query_generation_mla()` ✓
-   - `query_allreduce()` ✓
+   - `query_custom_allreduce()` ✓
    - `query_nccl()` ✓
    - `query_moe()` ✓
    - `query_mla_bmm()` ✓

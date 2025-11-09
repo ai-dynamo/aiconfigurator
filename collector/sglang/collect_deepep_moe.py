@@ -389,7 +389,7 @@ def benchmark_moe_layer_prefill(
                 num_tokens_log = num_token * moe_ep_size
                 device_name = torch.cuda.get_device_name(server_args.device)
                 version = pkg_resources.get_distribution("sglang").version
-                perf_filename = os.path.join(output_path, "context_moe_perf.txt")
+                perf_filename = os.path.join(output_path, "wideep_context_moe_perf.txt")
                 os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                 log_perf(
                     item_list=[
@@ -620,7 +620,7 @@ def benchmark_moe_layer_decode(
                 device_name = torch.cuda.get_device_name(server_args.device)
                 version = pkg_resources.get_distribution("sglang").version
                 distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
-                perf_filename = os.path.join(output_path, "generation_moe_perf.txt")
+                perf_filename = os.path.join(output_path, "wideep_generation_moe_perf.txt")
                 os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                 log_perf(
                     item_list=[

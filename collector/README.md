@@ -64,6 +64,7 @@ how many files are needed accordingly.
 SGLang requires a **hybrid collection approach**:
 
 ### 1. Run unified collectors (GEMM, MLA, MoE, Normal Attention)
+Suggest to start from lmsysorg docker image. Say, for 0.5.1.post1, we can use lmsysorg/sglang:v0.5.1.post1-cu126
 ```bash
 python3 collect.py --backend sglang
 ```

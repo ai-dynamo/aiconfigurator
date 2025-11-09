@@ -30,6 +30,7 @@ class EventHandler:
                 components["model_quant_components"]["comm_quant_mode"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
                 components["mode"],
                 components["record_df"],
             ],
@@ -89,6 +90,7 @@ class EventHandler:
                 components["model_quant_components"]["comm_quant_mode"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
             ],
             outputs=[components["result_df"], components["debugging_box"]],
         )
@@ -136,6 +138,7 @@ class EventHandler:
                 components["model_quant_components"]["comm_quant_mode"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
             ],
             outputs=[
                 components["result_df"],
@@ -173,6 +176,7 @@ class EventHandler:
                 components["runtime_config_components"]["ttft"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
                 components["prefill_model_system_components"]["system"],  # prefill
                 components["prefill_model_system_components"]["backend"],
                 components["prefill_model_system_components"]["version"],
@@ -262,6 +266,7 @@ class EventHandler:
                 components["runtime_config_components"]["tpot"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
                 components["prefill_model_system_components"]["system"],  # prefill
                 components["prefill_model_system_components"]["backend"],
                 components["prefill_model_system_components"]["version"],
@@ -403,6 +408,7 @@ class EventHandler:
             outputs=[
                 model_misc_config_components["nextn"],
                 model_misc_config_components["nextn_accept_rates"],
+                model_misc_config_components["enable_wideep"],
                 model_quant_components["moe_quant_mode"],
                 model_parallel_components["moe_tp_size"],
                 model_parallel_components["moe_ep_size"],

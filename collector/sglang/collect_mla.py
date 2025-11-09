@@ -9,7 +9,7 @@ import torch
 import triton
 from einops import rearrange
 
-# pip install flashinfer-python
+# pip install flashinfer-python, flash_mla
 from flash_mla import flash_mla_with_kvcache, get_mla_metadata
 from sgl_kernel.flash_attn import flash_attn_varlen_func as flash_attn_varlen_func_v3
 from triton.testing import do_bench

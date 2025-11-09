@@ -20,7 +20,11 @@ def _get_model_info(model_name: str) -> list:
     return get_model_config_from_hf_id(model_name)
 
 
-def get_model(model_name: str, model_config: config.ModelConfig, backend_name: str) -> BaseModel:
+def get_model(
+    model_name: str,
+    model_config: config.ModelConfig,
+    backend_name: str,
+) -> BaseModel:
     """
     Get model.
     """
@@ -73,6 +77,7 @@ def get_model(model_name: str, model_config: config.ModelConfig, backend_name: s
             model_config,
         )
     elif model_family == "MOE":
+        # currently we don't support wideep for sglang moe models (other than DS V3)
         model = MOEModel(
             topk,
             num_experts,
@@ -90,8 +95,9 @@ def get_model(model_name: str, model_config: config.ModelConfig, backend_name: s
             model_config,
         )
     elif model_family == "DEEPSEEK":
-        if backend_name == "sglang":
-            model = DisaggDeepSeekModel(
+        if backend_name == "sglang" and model_config.enable_wideep:
+            logger.debug(f"WideEP is enabled for model {model_name} with backend {backend_name}")
+            model = WideEPDeepSeekModel(
                 topk,
                 num_experts,
                 moe_inter_size,
@@ -108,6 +114,7 @@ def get_model(model_name: str, model_config: config.ModelConfig, backend_name: s
                 model_config,
             )
         else:
+            logger.debug(f"WideEP is not enabled for model {model_name} with backend {backend_name}")
             model = DeepSeekModel(
                 topk,
                 num_experts,
@@ -363,10 +370,10 @@ class GPTModel(BaseModel):
         )
 
         # when tp_size=0, the comm part will be 0
-        self.context_ops.append(ops.AllReduce("context_ar_1", self._num_layers, h, tp_size))
-        self.context_ops.append(ops.AllReduce("context_ar_2", self._num_layers, h, tp_size))
-        self.generation_ops.append(ops.AllReduce("generation_ar_1", self._num_layers, h, tp_size))
-        self.generation_ops.append(ops.AllReduce("generation_ar_2", self._num_layers, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp_size))
+        self.generation_ops.append(ops.CustomAllReduce("generation_ar_1", self._num_layers, h, tp_size))
+        self.generation_ops.append(ops.CustomAllReduce("generation_ar_2", self._num_layers, h, tp_size))
 
         # pp
         pp_scale_factor = pp_size - 1
@@ -512,10 +519,10 @@ class LLAMAModel(BaseModel):
         )
 
         # when tp_message_size=0, the comm part will be 0
-        self.context_ops.append(ops.AllReduce("context_ar_1", self._num_layers, h, tp_size))
-        self.context_ops.append(ops.AllReduce("context_ar_2", self._num_layers, h, tp_size))
-        self.generation_ops.append(ops.AllReduce("generation_ar_1", self._num_layers, h, tp_size))
-        self.generation_ops.append(ops.AllReduce("generation_ar_2", self._num_layers, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp_size))
+        self.context_ops.append(ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp_size))
+        self.generation_ops.append(ops.CustomAllReduce("generation_ar_1", self._num_layers, h, tp_size))
+        self.generation_ops.append(ops.CustomAllReduce("generation_ar_2", self._num_layers, h, tp_size))
 
         # pp
         pp_scale_factor = pp_size - 1
@@ -817,10 +824,10 @@ class MOEModel(BaseModel):
         )
 
         # # # when tp_size=0, the comm part will be 0
-        # self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
-        # self.context_ops.append(ops.AllReduce('context_ar_2', self._num_layers, h, tp_size))
-        # self.generation_ops.append(ops.AllReduce('generation_ar_1', self._num_layers, h, tp_size))
-        # self.generation_ops.append(ops.AllReduce('generation_ar_2', self._num_layers, h, tp_size))
+        # self.context_ops.append(ops.CustomAllReduce('context_ar_1', self._num_layers, h, tp_size))
+        # self.context_ops.append(ops.CustomAllReduce('context_ar_2', self._num_layers, h, tp_size))
+        # self.generation_ops.append(ops.CustomAllReduce('generation_ar_1', self._num_layers, h, tp_size))
+        # self.generation_ops.append(ops.CustomAllReduce('generation_ar_2', self._num_layers, h, tp_size))
 
         # pp
         pp_scale_factor = pp_size - 1
@@ -1210,13 +1217,13 @@ class DeepSeekModel(BaseModel):
         )
 
         # when tp_size=0, the comm part will be 0
-        # self.context_ops.append(ops.AllReduce('context_ar_1', self._num_layers, h, tp_size))
-        # self.context_ops.append(ops.AllReduce('context_ar_2', self._num_layers, h, tp_size))
+        # self.context_ops.append(ops.CustomAllReduce('context_ar_1', self._num_layers, h, tp_size))
+        # self.context_ops.append(ops.CustomAllReduce('context_ar_2', self._num_layers, h, tp_size))
         # self.generation_ops.append(
-        #     ops.AllReduce('generation_ar_1', self._num_layers*self._mtp_scale_factor, h, tp_size)
+        #     ops.CustomAllReduce('generation_ar_1', self._num_layers*self._mtp_scale_factor, h, tp_size)
         # )
         # self.generation_ops.append(
-        #     ops.AllReduce('generation_ar_2', self._num_layers*self._mtp_scale_factor, h, tp_size)
+        #     ops.CustomAllReduce('generation_ar_2', self._num_layers*self._mtp_scale_factor, h, tp_size)
         # )
 
         # pp
@@ -1228,7 +1235,7 @@ class DeepSeekModel(BaseModel):
         # a lot of quantization ops
 
 
-class DisaggDeepSeekModel(BaseModel):
+class WideEPDeepSeekModel(BaseModel):
     """
     DeepSeek V3/R1 disaggregated model for SGLang backend.
     """
@@ -1264,13 +1271,11 @@ class DisaggDeepSeekModel(BaseModel):
         workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
 
         sms = self.config.sms
-        gpu_per_node = 8
-        node_num = moe_ep_size // gpu_per_node
 
         # context mla attention
         self.context_ops.extend(
             [
-                ops.ContextMLASglang(
+                ops.WideEPContextMLA(
                     "context_attention",
                     self._num_layers,
                     tp_size,
@@ -1284,7 +1289,7 @@ class DisaggDeepSeekModel(BaseModel):
         # shared expert
         self.context_ops.extend(
             [
-                ops.MLP(
+                ops.WideEPMLP(
                     "context_shared_expert",
                     self._num_layers,
                     h,
@@ -1308,7 +1313,6 @@ class DisaggDeepSeekModel(BaseModel):
                     attention_dp_size,
                     True,
                     sms=sms,
-                    node_num=node_num,
                     moe_backend=moe_backend,
                     is_context=True,
                 )
@@ -1339,7 +1343,7 @@ class DisaggDeepSeekModel(BaseModel):
         # generation mla attention
         self.generation_ops.extend(
             [
-                ops.GenerationMLASglang(
+                ops.WideEPGenerationMLA(
                     "generation_attention",
                     self._num_layers * self._mtp_scale_factor,
                     tp_size,
@@ -1353,7 +1357,7 @@ class DisaggDeepSeekModel(BaseModel):
         # shared expert
         self.generation_ops.extend(
             [
-                ops.MLP(
+                ops.WideEPMLP(
                     "generation_shared_expert",
                     self._num_layers * self._mtp_scale_factor,
                     h,
@@ -1377,7 +1381,6 @@ class DisaggDeepSeekModel(BaseModel):
                     attention_dp_size,
                     True,
                     sms=sms,
-                    node_num=node_num,
                     moe_backend=moe_backend,
                     is_context=False,
                 )
@@ -1526,7 +1529,7 @@ class NemotronNas(BaseModel):
                                 self._num_heads * self._head_size // tp_size,
                                 gemm_quant_mode,
                             ),
-                            ops.AllReduce("context_ar_1", count, h, tp_size),
+                            ops.CustomAllReduce("context_ar_1", count, h, tp_size),
                         ]
                     )
                 if not b.ffn_no_op:
@@ -1555,7 +1558,7 @@ class NemotronNas(BaseModel):
                                 inter_size // tp_size,
                                 gemm_quant_mode,
                             ),
-                            ops.AllReduce("context_ar_2", count, h, tp_size),
+                            ops.CustomAllReduce("context_ar_2", count, h, tp_size),
                         ]
                     )
             self._context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
@@ -1645,7 +1648,7 @@ class NemotronNas(BaseModel):
                                 self._num_heads * self._head_size // tp_size,
                                 gemm_quant_mode,
                             ),
-                            ops.AllReduce("generation_ar_1", count, h, tp_size),
+                            ops.CustomAllReduce("generation_ar_1", count, h, tp_size),
                         ]
                     )
                 if not b.ffn_no_op:
@@ -1674,7 +1677,7 @@ class NemotronNas(BaseModel):
                                 inter_size // tp_size,
                                 gemm_quant_mode,
                             ),
-                            ops.AllReduce("generation_ar_2", count, h, tp_size),
+                            ops.CustomAllReduce("generation_ar_2", count, h, tp_size),
                         ]
                     )
             self._generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor, h, pp_size))

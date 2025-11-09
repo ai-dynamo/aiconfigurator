@@ -357,13 +357,15 @@ class PerfDataFilename(Enum):
     generation_mla = "generation_mla_perf.txt"
     mla_bmm = "mla_bmm_perf.txt"
     moe = "moe_perf.txt"
-    context_moe = "context_moe_perf.txt"
-    generation_moe = "generation_moe_perf.txt"
-    context_mlp = "context_mlp_perf.txt"
-    generation_mlp = "generation_mlp_perf.txt"
     custom_allreduce = "custom_allreduce_perf.txt"
-    deepep_normal = "deepep_normal_perf.txt"
-    deepep_ll = "deepep_ll_perf.txt"
+    wideep_context_mla = "wideep_context_mla_perf.txt"
+    wideep_generation_mla = "wideep_generation_mla_perf.txt"
+    wideep_context_moe = "wideep_context_moe_perf.txt"
+    wideep_generation_moe = "wideep_generation_moe_perf.txt"
+    wideep_context_mlp = "wideep_context_mlp_perf.txt"
+    wideep_generation_mlp = "wideep_generation_mlp_perf.txt"
+    wideep_deepep_normal = "wideep_deepep_normal_perf.txt"
+    wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

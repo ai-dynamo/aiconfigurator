@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
+
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import PerfDatabase
+
+logger = logging.getLogger(__name__)
 
 
 class Operation:
@@ -21,9 +25,9 @@ class Operation:
         raise NotImplementedError
 
 
-class AllReduce(Operation):
+class CustomAllReduce(Operation):
     """
-    AllReduce operation. Now it's mapped to only trtllm custom allreduce.
+    Custom AllReduce operation.
     """
 
     def __init__(self, name: str, scale_factor: float, h: int, tp_size: int) -> None:
@@ -38,7 +42,7 @@ class AllReduce(Operation):
         # count, not size in bytes
         size = kwargs.get("x") * self._h
 
-        return database.query_allreduce(common.CommQuantMode.half, self._tp_size, size) * self._scale_factor
+        return database.query_custom_allreduce(common.CommQuantMode.half, self._tp_size, size) * self._scale_factor
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -157,7 +161,7 @@ class MoE(Operation):
         self._attention_dp_size = attention_dp_size
         self._workload_distribution = workload_distribution
         self._is_context = is_context
-        self._moe_backend = kwargs.get("moe_backend", "deepep_moe")
+        self._moe_backend = kwargs.get("moe_backend")
         self._weights = (
             self._hidden_size
             * self._inter_size
@@ -227,8 +231,7 @@ class MoEDispatch(Operation):
         self.num_gpus = self._moe_ep_size * self._moe_tp_size
         self._attention_tp_size = moe_tp_size * moe_ep_size // self._attention_dp_size
         self._sms = kwargs.get("sms", 12)
-        self._moe_backend = kwargs.get("moe_backend", "deepep_moe")
-        self._node_num = kwargs.get("node_num", 1)
+        self._moe_backend = kwargs.get("moe_backend")
         self._is_context = kwargs.get("is_context", True)
 
     def query(self, database: PerfDatabase, **kwargs):
@@ -236,12 +239,14 @@ class MoEDispatch(Operation):
         volume = num_tokens * self._hidden_size
         _sm_version = database.system_spec["gpu"]["sm_version"]
         _num_gpus_per_node = database.system_spec["node"]["num_gpus_per_node"]
+        _node_num = self.num_gpus / _num_gpus_per_node
 
         if database.backend == common.BackendName.trtllm.value:
             assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
                 "trtllm does not support TP>1 and DP>1 for attn simultaneously"
             )
             if _sm_version == 100:
+                logger.debug("MoEDispatch: In trtllm SM100 execution path")
                 if self._pre_dispatch:
                     if self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
@@ -250,7 +255,9 @@ class MoEDispatch(Operation):
                                 common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
                             )
                         else:
-                            comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                            comm_latency = database.query_custom_allreduce(
+                                common.CommQuantMode.half, self.num_gpus, volume
+                            )
                     elif self._attention_dp_size > 1:
                         if self._enable_fp4_all2all:
                             # Calculate all2all communication volume for nvfp4 all2all operation
@@ -301,7 +308,9 @@ class MoEDispatch(Operation):
                                 common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
                             )
                         else:
-                            comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                            comm_latency = database.query_custom_allreduce(
+                                common.CommQuantMode.half, self.num_gpus, volume
+                            )
                     elif self._attention_dp_size > 1:
                         if self._enable_fp4_all2all:
                             # to do: nvfp4 all2all
@@ -321,10 +330,11 @@ class MoEDispatch(Operation):
                     else:
                         comm_latency = 0
             else:  # sm < 100 or > 100 (for now)
+                logger.debug("MoEDispatch: In trtllm SM<100 or >100 execution path")
                 if self._pre_dispatch:
                     if self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
-                        comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                        comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
                     elif self._attention_dp_size > 1:
                         comm_latency = database.query_nccl(
                             common.CommQuantMode.half,
@@ -337,7 +347,7 @@ class MoEDispatch(Operation):
                 else:
                     if self._attention_tp_size > 1:  # tp>1, use allreduce
                         # to do: custom allreduce
-                        comm_latency = database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                        comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
                     elif self._attention_dp_size > 1:
                         comm_latency = database.query_nccl(
                             common.CommQuantMode.half,
@@ -349,11 +359,15 @@ class MoEDispatch(Operation):
                         comm_latency = 0
         elif database.backend == common.BackendName.vllm.value:
             raise NotImplementedError("Need to implement MoE dispatch for vllm")
-        else:  # sglang
+        elif database.backend == common.BackendName.sglang.value:  # sglang
+            assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
+                "We don't enable the path for SGLang to support TP>1 and DP>1 for attn simultaneously"
+            )
             if self._moe_backend == "deepep_moe":
+                logger.debug("MoEDispatch: In SGLang DeepEP execution path")
                 if self._is_context:
-                    comm_latency = database.query_deepep_normal(
-                        node_num=self._node_num,
+                    comm_latency = database.query_wideep_deepep_normal(
+                        node_num=_node_num,
                         num_tokens=num_tokens,
                         num_experts=self._num_experts,
                         topk=self._topk,
@@ -361,15 +375,44 @@ class MoEDispatch(Operation):
                         sms=self._sms,
                     )
                 else:
-                    comm_latency = database.query_deepep_ll(
-                        node_num=self._node_num,
+                    comm_latency = database.query_wideep_deepep_ll(
+                        node_num=_node_num,
                         num_tokens=num_tokens,
                         num_experts=self._num_experts,
                         topk=self._topk,
                         hidden_size=self._hidden_size,
                     )
             else:
-                raise NotImplementedError(f"MoE backend {self._moe_backend} not implemented")
+                logger.debug("MoEDispatch: In SGLang non-DeepEP execution path")
+                if self._pre_dispatch:
+                    if self._attention_tp_size > 1:  # tp>1, use allreduce
+                        # to do: custom allreduce
+                        comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                    elif self._attention_dp_size > 1:
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half,
+                            self.num_gpus,
+                            "all_gather",
+                            volume * self._attention_dp_size,
+                        )
+                    else:
+                        comm_latency = 0
+                else:
+                    if self._attention_tp_size > 1:  # tp>1, use allreduce
+                        # to do: custom allreduce
+                        comm_latency = database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                    elif self._attention_dp_size > 1:
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half,
+                            self.num_gpus,
+                            "reduce_scatter",
+                            volume * self._attention_dp_size,
+                        )
+                    else:
+                        comm_latency = 0
+        else:  # other backends
+            raise NotImplementedError(f"MoEDispatch: Not implemented for backend {database.backend}")
+
         return comm_latency * self._scale_factor
 
     def get_weights(self, **kwargs):
@@ -675,9 +718,9 @@ class ElementWise(Operation):
         return self._weights * self._scale_factor
 
 
-class MLP(Operation):
+class WideEPMLP(Operation):
     """
-    MLP operation for DeepSeek model's shared expert.
+    WideEP MLP operation.
     This handles the gate, ffn1, and ffn2 operations in a single class.
     """
 
@@ -703,7 +746,7 @@ class MLP(Operation):
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
         return (
-            database.query_mlp(x, self._hidden_size, self._intermediate_size, quant_mode, self.is_context)
+            database.query_wideep_mlp(x, self._hidden_size, self._intermediate_size, quant_mode, self.is_context)
             * self._scale_factor
         )
 
@@ -711,9 +754,9 @@ class MLP(Operation):
         return self._weights * self._scale_factor
 
 
-class GenerationMLASglang(Operation):
+class WideEPGenerationMLA(Operation):
     """
-    Generation MLA operation for SGLang backend.
+    WideEP Generation MLA operation.
     This handles the MLA operations in generation/decoding mode.
     """
 
@@ -738,7 +781,7 @@ class GenerationMLASglang(Operation):
         s = kwargs.get("s")
 
         return (
-            database.query_generation_mla_sglang(
+            database.query_wideep_generation_mla(
                 batch_size,
                 s,
                 self._tp_size,
@@ -753,9 +796,9 @@ class GenerationMLASglang(Operation):
         return self._weights * self._scale_factor
 
 
-class ContextMLASglang(Operation):
+class WideEPContextMLA(Operation):
     """
-    Context MLA operation for SGLang backend.
+    WideEP Context MLA operation.
     This handles the MLA operations in context/prefill mode.
     """
 
@@ -780,7 +823,7 @@ class ContextMLASglang(Operation):
         isl = kwargs.get("s")
 
         return (
-            database.query_context_mla_sglang(
+            database.query_wideep_context_mla(
                 batch_size,
                 isl,
                 self._tp_size,
