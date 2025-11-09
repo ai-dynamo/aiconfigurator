@@ -770,7 +770,7 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
         )
     )
 
-    logger.info(f"Loading SGLang wideep context MoE data from: {wideep_context_moe_file}")
+    logger.debug(f"Loading SGLang wideep context MoE data from: {wideep_context_moe_file}")
     with open(wideep_context_moe_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -820,7 +820,7 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
         )
     )
 
-    logger.info(f"Loading SGLang wideep generation MoE data from: {wideep_generation_moe_file}")
+    logger.debug(f"Loading SGLang wideep generation MoE data from: {wideep_generation_moe_file}")
     with open(wideep_generation_moe_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -1154,6 +1154,10 @@ class PerfDatabase:
                 os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
             self._nccl_data = load_nccl_data(nccl_data_dir)
+            self._mla_bmm_data = None
+            self._moe_data, self._moe_low_latency_data = None, None
+            self._context_mla_data = None
+            self._generation_mla_data = None
         else:  # TRTLLM
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1181,7 +1185,7 @@ class PerfDatabase:
         self._correct_data()
 
         # regular context attention
-        if getattr(self, "_context_attention_data", None) is not None:
+        if self._context_attention_data is not None:
             for quant_mode in self._context_attention_data:
                 for kv_cache_dtype in self._context_attention_data[quant_mode]:
                     for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype]:
@@ -1258,7 +1262,7 @@ class PerfDatabase:
                                 )
 
         # regular generation attention
-        if getattr(self, "_generation_attention_data", None) is not None:
+        if self._generation_attention_data is not None:
             for kv_cache_dtype in self._generation_attention_data:
                 for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
                     for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
@@ -1344,7 +1348,7 @@ class PerfDatabase:
                             )
 
         # regular gemm
-        if getattr(self, "_gemm_data", None) is not None:
+        if self._gemm_data is not None:
             for quant_mode, data_dict in self._gemm_data.items():
                 target_x_list = [
                     1,
@@ -1468,7 +1472,7 @@ class PerfDatabase:
                         )
 
         # regular context mla
-        if getattr(self, "_context_mla_data", None) is not None:
+        if self._context_mla_data is not None:
             for quant_mode in self._context_mla_data:
                 for kv_cache_dtype in self._context_mla_data[quant_mode]:
                     num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
@@ -1548,7 +1552,7 @@ class PerfDatabase:
                     )
 
         # regular generation mla
-        if getattr(self, "_generation_mla_data", None) is not None:
+        if self._generation_mla_data is not None:
             for kv_cache_dtype in self._generation_mla_data:
                 tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
                 data_dict = self._generation_mla_data[kv_cache_dtype]
@@ -1639,11 +1643,16 @@ class PerfDatabase:
                 "nccl": [key.name for key in self._nccl_data],
                 "moe": [key.name for key in self._moe_data],
             }
-        elif self.backend == "vllm":
+        elif self.backend == "vllm":  # TODO: add support for moe and deepseek
             self.supported_quant_mode = {
                 "gemm": [key.name for key in self._gemm_data],
                 "context_attention": [key.name for key in self._context_attention_data],
                 "generation_attention": [key.name for key in self._generation_attention_data],
+                "nccl": [key.name for key in self._nccl_data],
+                "context_mla": [],
+                "generation_mla": [],
+                "mla_bmm": [],
+                "moe": [],
             }
 
     def is_inter_node(self, num_gpus: int) -> bool:
@@ -2574,15 +2583,14 @@ class PerfDatabase:
             )
         else:
             if self.backend == common.BackendName.sglang.value:
-                # Set default moe_backend if not specified
-                if moe_backend is None:
-                    moe_data = self._moe_data
-
+                # deepep_moe is for sglang wideep only
                 if moe_backend == "deepep_moe":
                     if is_context:
                         moe_data = self._wideep_context_moe_data
                     else:
                         moe_data = self._wideep_generation_moe_data
+                else:
+                    moe_data = self._moe_data
 
                 moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][
                     moe_tp_size
