@@ -47,7 +47,7 @@ def enumerate_parallel_config(
         is_moe: whether to use moe
         backend: backend name enum. Important for moe parallel enumeration as different backends
             have different moe parallel support.
-        moe_backend: moe backend name (e.g., "WIDEEP", "CUTLASS", etc.). Used for filtering
+        moe_backend: moe backend name (e.g., "WIDEEP", "CUTLASS", "deepep_moe",etc.). Used for filtering
             configurations based on backend-specific constraints.
         model_family: model family name (e.g., "MOE", "DEEPSEEK"). Used for filtering
             configurations based on model-specific constraints.

@@ -215,6 +215,7 @@ class TaskConfigFactory:
                 worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
                 worker_config["moe_tp_list"] = [1]
                 worker_config["moe_ep_list"] = [8, 16, 32]
+                worker_config["enable_wide_ep"] = True
             elif ctx.backend_name == "sglang":
                 # sglang + MoE (non-wide_ep)
                 worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
@@ -230,7 +231,7 @@ class TaskConfigFactory:
                 worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
                 worker_config["dp_list"] = [1, 2, 4, 8, 16, 32]
                 worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32]
-
+                worker_config["enable_wide_ep"] = True
         return {
             "is_moe": ctx.is_moe,
             "worker_config": worker_config,
@@ -300,6 +301,7 @@ class TaskConfigFactory:
                 prefill_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
                 prefill_worker_config["moe_tp_list"] = [1]
                 prefill_worker_config["moe_ep_list"] = [8, 16, 32]
+                prefill_worker_config["enable_wide_ep"] = True
 
                 decode_worker_config["num_gpu_per_worker"] = [8, 16, 32, 64]
                 decode_worker_config["tp_list"] = [1, 2, 4, 8]
@@ -307,6 +309,7 @@ class TaskConfigFactory:
                 decode_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
                 decode_worker_config["moe_tp_list"] = [1]
                 decode_worker_config["moe_ep_list"] = [8, 16, 32, 64]
+                decode_worker_config["enable_wide_ep"] = True
             elif ctx.backend_name == "sglang":
                 # sglang + MoE (non-wide_ep)
                 prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
@@ -329,12 +332,14 @@ class TaskConfigFactory:
                 prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16] if should_enable_pp else [1]
                 prefill_worker_config["dp_list"] = [1, 2, 4]
                 prefill_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16]
+                prefill_worker_config["enable_wide_ep"] = True
 
                 decode_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32, 64]
                 decode_worker_config["tp_list"] = [1, 2, 4, 8]
                 decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
                 decode_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
                 decode_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32, 64]
+                decode_worker_config["enable_wide_ep"] = True
 
         replica_config = {
             "num_gpu_per_replica": [
@@ -887,6 +892,11 @@ class TaskRunner:
             )
             return None
         logger.info("Task %s: Setting up model config", task_config.task_name)
+        if task_config.backend_name == "sglang":
+            if task_config.enable_wide_ep:
+                moe_backend = "WIDEEP"
+            else:
+                moe_backend = None
         model_config = config.ModelConfig(
             gemm_quant_mode=task_config.worker_config.gemm_quant_mode,
             kvcache_quant_mode=task_config.worker_config.kvcache_quant_mode,
