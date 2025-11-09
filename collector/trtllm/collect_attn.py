@@ -19,7 +19,63 @@ from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
-from helper import get_sm_version, log_perf
+from helper import (
+    get_dtype_size,
+    get_gpu_specs_from_device,
+    get_sm_version,
+    log_perf,
+    measure_kernel_power,
+)
+
+
+def is_context_attention_compute_bound(b, s, num_heads, num_key_value_heads, d, dtype, kv_cache_dtype, device_name):
+    """
+    Determine if context (prefill) attention is compute-bound with Grouped-Query Attention.
+
+    Args:
+        b: Batch size
+        s: Sequence length (input)
+        num_heads: Number of query heads (H_q)
+        num_key_value_heads: Number of key/value heads (H_kv)
+        d: Head dimension
+        dtype: Activation dtype
+        kv_cache_dtype: KV cache dtype
+        device_name: GPU device name
+
+    Returns:
+        True if compute-bound, False if memory-bound
+    """
+    gpu_specs = get_gpu_specs_from_device(device_name)
+    dtype_size = get_dtype_size(dtype)
+    kv_dtype_size = get_dtype_size(kv_cache_dtype)
+
+    # Hardware intensity
+    if "fp8" in dtype.lower():
+        hardware_tflops = gpu_specs["fp8_tflops"]
+    else:
+        hardware_tflops = gpu_specs["float16_tflops"]
+
+    hardware_intensity = (hardware_tflops * 1e12) / (gpu_specs["mem_bw_gbs"] * 1e9)
+
+    # GQA Attention FLOPs: 4 * b * num_heads * s * s * d
+    total_flops = 4 * b * num_heads * s * s * d
+
+    # Memory movement for GQA
+    memory_bytes = (
+        dtype_size * b * s * num_heads * d  # Q read (all query heads)
+        + kv_dtype_size * b * s * num_key_value_heads * d  # K read (KV heads)
+        + kv_dtype_size * b * s * num_key_value_heads * d  # V read (KV heads)
+        + dtype_size * b * s * num_heads * d  # Output write (all query heads)
+    )
+
+    arithmetic_intensity = total_flops / memory_bytes
+
+    return arithmetic_intensity > hardware_intensity
+
+
+def is_generation_attention_compute_bound():
+    """Generation (decode) attention is ALWAYS memory-bound"""
+    return False
 
 
 def run_attention_torch(
@@ -34,10 +90,36 @@ def run_attention_torch(
     is_context_phase,
     perf_filename,
     device="cuda:0",
+    zeus_monitor=None,
+    power_limit=None,
+    measure_power=False,
+    kernel_power_measurement_duration=3.0,
 ):
+    """
+    Run attention benchmark with optional power measurement.
+
+    Args:
+        batch_size: Batch size
+        input_len: Input sequence length
+        num_heads: Number of query heads
+        num_key_value_heads: Number of key/value heads for GQA
+        head_dim: Head dimension
+        attention_window_size: Attention window size
+        use_fp8_kv_cache: Use FP8 for KV cache
+        use_fp8_context_fmha: Use FP8 for context FMHA
+        is_context_phase: True for context/prefill, False for generation/decode
+        perf_filename: Output CSV filename
+        device: CUDA device
+        zeus_monitor: ZeusMonitor instance (optional)
+        power_limit: GPU power limit in Watts (optional)
+        measure_power: Whether to measure power consumption
+        kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
+    """
     device = torch.device(device)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
+
+    device_name = torch.cuda.get_device_name(device)
 
     # if XQA JIT is enabled, the context phase will also trigger XQA prepare which causes the error
     # with specifc q/kv head and seq setting.
@@ -214,55 +296,69 @@ def run_attention_torch(
             attention_sinks=sinks,
             out_scale=out_scale,
         )
-    # warmup
-    for i in range(warming_up):
-        g.replay()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(test_ite):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / test_ite
+    # Determine dtype strings for compute-bound check
+    kv_cache_dtype_str = "fp8" if use_fp8_kv_cache else "float16"
+    dtype_str = "fp8" if use_fp8_context_fmha else "float16"
 
-    # write result
+    # Determine if compute-bound
     if is_context_phase:
+        compute_bound = is_context_attention_compute_bound(
+            batch_size, input_len, num_heads, num_key_value_heads, head_dim, dtype_str, kv_cache_dtype_str, device_name
+        )
         isl = input_len
         step = 0
         op_name = "context_attention"
     else:
+        compute_bound = is_generation_attention_compute_bound()
         isl = 1
         step = input_len
         op_name = "generation_attention"
-    kv_cache_dtype_str = "float16"
-    if use_fp8_kv_cache:
-        kv_cache_dtype_str = "fp8"
-    if use_fp8_context_fmha:
-        dtype_str = "fp8"
+
+    # Benchmarking
+    if measure_power and zeus_monitor is not None and not compute_bound:
+        latency, power = measure_kernel_power(zeus_monitor, g.replay, warming_up, kernel_power_measurement_duration)
     else:
-        dtype_str = "float16"
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        for _ in range(warming_up):
+            g.replay()
+        torch.cuda.synchronize()
+
+        start_event.record()
+        for _ in range(test_ite):
+            g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
+
+        latency = start_event.elapsed_time(end_event) / test_ite
+        power = power_limit or None
+
+    # Build result item
+    item = {
+        "batch_size": batch_size,
+        "isl": isl,
+        "num_heads": num_heads,
+        "num_key_value_heads": num_key_value_heads,
+        "head_dim": head_dim,
+        "window_size": attention_window_size,
+        "beam_width": 1,
+        "attn_dtype": dtype_str,
+        "kv_cache_dtype": kv_cache_dtype_str,
+        "step": step,
+        "latency": latency,
+    }
+
+    if power is not None:
+        item["power_limit"] = power_limit
+        item["power"] = power
+        item["compute_bound"] = int(compute_bound)
 
     log_perf(
-        item_list=[
-            {
-                "batch_size": batch_size,
-                "isl": isl,
-                "num_heads": num_heads,
-                "num_key_value_heads": num_key_value_heads,
-                "head_dim": head_dim,
-                "window_size": attention_window_size,
-                "beam_width": 1,
-                "attn_dtype": dtype_str,
-                "kv_cache_dtype": kv_cache_dtype_str,
-                "step": step,
-                "latency": latency,
-            }
-        ],
+        item_list=[item],
         framework="TRTLLM",
         version=tensorrt_llm.__version__,
-        device_name=torch.cuda.get_device_name(device),
+        device_name=device_name,
         op_name=op_name,
         kernel_source="torch_flow",
         perf_filename=perf_filename,
