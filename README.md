@@ -258,22 +258,20 @@ To estimate performance, we take the following steps:
   - MOE
   - QWEN
   - DEEPSEEK_V3
+  - Support using huggingface model id if falls into these model family and not MoE models.
 - Operations:
   - Attention
     - MHA/GQA (FP8, FP16)
     - MLA (FP8, FP16)
   - KV Cache (FP16, FP8, INT8)
   - GEMM (FP16, FP8, FP8-Block, FP8-OOTB, SQ, INT8 WO, INT4 WO, NVFP4)
-  - AllReduce (FP16)
+  - CustomAllReduce (FP16)
   - Embedding
   - P2P
   - ElementWise
   - NCCL (all_reduce, all_gather, all-to-all, reduce_scatter)
   - MoE (FP16, FP8, FP8-Block, W4A-FP8, INT4 WO, NVFP4)
   - MLA BMM (FP16, FP8)
-- TRTLLM Versions
-  - 0.20.0
-  - 1.0.0rc3
 - Parallel modes:
   - Tensor-parallel
   - Pipeline-parallel
@@ -284,6 +282,10 @@ To estimate performance, we take the following steps:
   - Aggregated serving (continuous batching)
   - Disaggregated serving
   - MTP (for DEEPSEEK)
+- Backends:
+  - TRTLLM (regular)
+  - SGLang (WideEP and regular)
+  - vLLM (regular with dense models; Non-moe support for now)
 
 ### Data Collection
 
@@ -296,8 +298,8 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 | System | Framework(Version) | Status |
 |--------|-------------------|--------|
-| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
-| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
+| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.1.post1), vLLM(0.11.0) | ✅ |
+| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.1.post1), vLLM(0.11.0) | ✅ |
 | b200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | gb200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | a100_sxm | TRTLLM(1.0.0) | ✅ |
@@ -316,7 +318,8 @@ Adding a new model will require modifying the source code and perhaps collecting
 
 ## Known Issues
 
-1. MoE memory estimation for the `trtllm` backend needs to consider workspace.
+1. Memory estimation for the backends needs to be studied more.
 2. Results can be overly optimistic in the low-speed, high-throughput region.
+3. SGLang and vLLM support is the initial version, needs more alignment in future.
 
 > **Note**: The results are not final or absolute. They can be inaccurate due to modeling gaps or indicate performance improvement opportunities. The tool aims to align with the framework's current implementation and to provide configuration suggestions. Verify results in real benchmarks with the generated configurations and perform follow-up tuning.
