@@ -302,6 +302,8 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 |--------|-------------------|--------|
 | h100_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
 | h200_sxm | TRTLLM(0.20.0, 1.0.0rc3) | ✅ |
+| h20_3e | TRTLLM(1.0.0) | ✅ |
+| A100 | TRTLLM(1.0.0) | ✅ |
 | b200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | gb200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | a100_sxm | TRTLLM(1.0.0) | ✅ |
