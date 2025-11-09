@@ -73,7 +73,7 @@ class E2ETestRunner:
             "basic": {
                 "models": ["QWEN3_32B"],
                 "systems": ["h200_sxm"],
-                "gpu_configs": [8],
+                "gpu_configs": [32],
                 "isl_osl_prefix_combinations": [(4000, 1000, 0)],
                 "tpot_values": [10],
                 "maxfail": 1,
@@ -81,7 +81,7 @@ class E2ETestRunner:
             "model": {
                 "models": ["QWEN3_32B", "LLAMA3.1_8B", "DEEPSEEK_V3"],
                 "systems": ["h200_sxm"],
-                "gpu_configs": [8],
+                "gpu_configs": [32],
                 "isl_osl_prefix_combinations": [(4000, 1000, 0)],
                 "tpot_values": [10],
                 "maxfail": 3,
@@ -89,7 +89,7 @@ class E2ETestRunner:
             "system": {
                 "models": ["QWEN3_32B"],
                 "systems": ["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"],
-                "gpu_configs": [8],
+                "gpu_configs": [32],
                 "isl_osl_prefix_combinations": [(4000, 1000, 0)],
                 "tpot_values": [10],
                 "maxfail": 4,
@@ -97,7 +97,7 @@ class E2ETestRunner:
             "comprehensive": {
                 "models": ["QWEN3_32B", "LLAMA3.1_8B", "DEEPSEEK_V3"],
                 "systems": ["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"],
-                "gpu_configs": [8, 32],
+                "gpu_configs": [32, 512],
                 "isl_osl_prefix_combinations": [(4000, 1000, 0), (4000, 1000, 2000), (1000, 2, 0)],
                 "tpot_values": [10, 30],
                 "maxfail": 5,
@@ -259,7 +259,7 @@ Examples:
         choices=["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"],
         help="Systems to test",
     )
-    parser.add_argument("--gpu-configs", nargs="+", type=int, choices=[8, 512], help="GPU configurations")
+    parser.add_argument("--gpu-configs", nargs="+", type=int, choices=[32, 512], help="GPU configurations")
     parser.add_argument("--isl-osl-prefix", nargs="+", help="ISL,OSL,PREFIX combinations (format: 4000,1000,0)")
     parser.add_argument("--tpot", nargs="+", type=int, choices=[10, 100], help="TPOT values")
 

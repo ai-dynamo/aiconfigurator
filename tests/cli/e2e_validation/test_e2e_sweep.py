@@ -26,11 +26,10 @@ from aiconfigurator.sdk.perf_database import get_latest_database_version
 
 _SUPPORTED_MODELS = [model for model in common.SupportedModels if model not in ["QWEN3_480B", "KIMI_K2"]]
 _SUPPORTED_SYSTEMS = ["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm", "l40s"]
-_SUPPORTED_GPU_CONFIGS = [8, 512]
+_SUPPORTED_GPU_CONFIGS = [32, 512]
 _SUPPORTED_ISL_OSL_PREFIX_COMBINATIONS = [(4000, 1000, 0), (4000, 1000, 2000), (1000, 2, 0), (32, 1000, 0)]
 _SUPPORTED_TTFT_TPOT_COMBINATIONS = [(5000, 10), (5000, 100)]
 _EXCLUDED_MODEL_SYSTEM_PAIRS = {
-    ("DEEPSEEK_V3", "h100_sxm"),
     ("DEEPSEEK_V3", "a100_sxm"),
     ("DEEPSEEK_V3", "l40s"),
     ("QWEN3_235B", "l40s"),
