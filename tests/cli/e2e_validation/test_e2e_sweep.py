@@ -368,13 +368,6 @@ class TestE2ESweep:
         if not version:
             pytest.skip(f"No latest version found for {system=}, {backend=}")
 
-        if total_gpus == 8:
-            # Skip DEEPSEEK_V3 with 8 GPUs due to missing node_num=0 performance data
-            if backend == "sglang" and model_name == "DEEPSEEK_V3":
-                pytest.skip(f"Skipping DEEPSEEK_V3 with {total_gpus} GPUs (missing intra-node perf data)")
-            elif model_name == "LLAMA3.1_405B":
-                pytest.skip(f"Skipping LLAMA3.1_405B with {total_gpus} GPUs since it is too large for 8 GPUs")
-
         error_log["test_summary"]["total_combinations"] += 1
 
         # Create unique test case identifier
