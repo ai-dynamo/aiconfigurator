@@ -105,6 +105,38 @@ See `deep_collector/README.md` for complete multi-node setup instructions.
 
 **Note**: SGLang collection requires more manual steps than TensorRT-LLM due to DeepSeek-specific operators and distributed MoE configurations.
 
+## Kernel Power Profiling
+
+The collector can measure kernel power consumption during benchmarking, which is used for power-aware configuration generation.
+
+```bash
+python collector/collect.py --measure-power --power-limits 700 500 300 --kernel-power-measurement-duration 3
+```
+
+### Current Support
+
+- TensorRT-LLM backend GEMM and attention kernels
+- NCCL kernels
+
+### How It Works
+
+- Calculate arithmetic intensity for each kernel configuration
+- **Memory-bound kernels**: Measures actual power over a default 3-second window (duration configured with `--kernel-power-measurement-duration`)
+- **Compute-bound kernels**: Power assumed to be equal power limit (power not measured)
+
+NVML power/energy counters only update once 100 ms, which is significantly longer than most kernels. Thus, kernels are run repeatedly for `--kernel-power-measurement-duration` seconds for power measurement.
+
+### Requirements
+
+- Zeus (`pip install zeus`) for measurement & GPU power limit control
+- Setting power limits requires root access. Easiest way is to run in a Docker container run with `--cap-add SYS_ADMIN`.
+
+### Relevant Columns in Result CSV
+
+- `power_limit`: Current GPU power limit (W)
+- `power`: The kernel's power consumption (W)
+- `compute_bound`: Whether kernel is compute-bound (1) or memory-bound (0)
+
 # Test
 Rebuild and install the new aiconfigurator. Please make sure you have your new system definition file prepared. It's src/aiconfigurator/systems/xxx.yaml
 

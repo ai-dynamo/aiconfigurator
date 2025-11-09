@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass
 import fcntl
+import importlib.resources as pkg_resources
 import json
 import logging
 import multiprocessing as mp
@@ -16,6 +18,9 @@ except:
     pass
 from datetime import datetime
 from pathlib import Path
+
+import torch
+import yaml
 
 
 def setup_signal_handlers(worker_id, error_queue=None):
@@ -264,3 +269,118 @@ def log_perf(
             f.write(header_prefix + "\n")
 
         f.write(content_prefix + "\n")
+
+
+# ============================================================================
+# Power Measurement Utilities
+# ============================================================================
+
+DTYPE_SIZES = {
+    "float16": 2,
+    "fp16": 2,
+    "bfloat16": 2,
+    "bf16": 2,
+    "fp8": 1,
+    "fp8_block": 1,
+    "int8": 1,
+    "int4": 0.5,
+}
+
+
+def get_dtype_size(dtype: str) -> float:
+    """Get size in bytes for a dtype"""
+    dtype_lower = dtype.lower()
+    if dtype_lower not in DTYPE_SIZES:
+        raise ValueError(f"Unknown dtype: {dtype}")
+    return DTYPE_SIZES[dtype_lower]
+
+
+def get_gpu_specs_from_device(device_name: str) -> dict:
+    """Load GPU specifications from system YAML files.
+
+    Dictionary keys are float16_tflops, fp8_tflops, int8_tflops, mem_bw_gbs, power_max.
+    Keys follow system YAML files, except for power_max (which is just 'power' in YAML).
+    """
+    # Map device name to system file
+    device_upper = device_name.upper()
+    if "H100" in device_upper:
+        system_file = "h100_sxm.yaml"
+    elif "H200" in device_upper:
+        system_file = "h200_sxm.yaml"
+    elif "A100" in device_upper:
+        system_file = "a100_sxm.yaml"
+    elif "B200" in device_upper:
+        system_file = "b200_sxm.yaml"
+    elif "GB200" in device_upper:
+        system_file = "gb200_sxm.yaml"
+    else:
+        raise ValueError(f"Unsupported GPU: {device_name}")
+
+    # Load system YAML
+    systems_dir = pkg_resources.files("aiconfigurator") / "systems"
+    yaml_path = systems_dir / system_file
+
+    with open(yaml_path) as f:
+        system_spec = yaml.safe_load(f)
+
+    gpu = system_spec["gpu"]
+
+    return {
+        "float16_tflops": gpu["float16_tc_flops"] / 1e12,  # Convert to TFLOPS
+        "fp8_tflops": gpu.get("fp8_tc_flops", gpu["float16_tc_flops"]) / 1e12,
+        "int8_tflops": gpu["int8_tc_flops"] / 1e12,
+        "mem_bw_gbs": gpu["mem_bw"] / 1e9,  # Convert to GB/s
+        "power_max": gpu["power"],  # Watts
+    }
+
+
+def measure_kernel_power(
+    zeus_monitor,
+    kernel_fn,
+    num_warmum_iters,
+    target_duration_sec,
+) -> tuple[float, float]:
+    """
+    Measure power for a memory-bound kernel by running for target_duration.
+
+    Args:
+        zeus_monitor: ZeusMonitor instance
+        kernel_fn: Kernel invocation function
+        num_warmum_iters: Number of warmup iterations
+        target_duration_sec: Target duration for measurement (seconds)
+
+    Returns:
+        (latency_ms, power_watts)
+    """
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    # Warmup
+    start_event.record()
+    for _ in range(num_warmum_iters):
+        kernel_fn()
+    end_event.record()
+    torch.cuda.synchronize()
+
+    # Calculate #iterations needed for target duration
+    expected_kernel_latency = start_event.elapsed_time(end_event) / 1000  # seconds
+    num_benchmark_iters = max(1, int(target_duration_sec / expected_kernel_latency))
+
+    zeus_monitor.begin_window("kernel_benchmark", sync_execution=False)
+
+    start_event.record()
+    for _ in range(num_benchmark_iters):
+        kernel_fn()
+    end_event.record()
+    torch.cuda.synchronize()
+
+    measurement = zeus_monitor.end_window("kernel_benchmark", sync_execution=False)
+
+    # Calculate metrics
+    total_time_ms = start_event.elapsed_time(end_event)
+    avg_latency_ms = total_time_ms / num_benchmark_iters
+
+    total_energy_j = measurement.total_energy
+    avg_power_watts = total_energy_j / (total_time_ms / 1000)  # J / seconds
+
+    return avg_latency_ms, avg_power_watts

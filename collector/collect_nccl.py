@@ -9,7 +9,25 @@ import torch
 from helper import log_perf
 
 
-def nccl_benchmark(dtype: str, nccl_op: str = "all_gather", test_range: str = "10,10000000,1000", num_gpus: int = 8):
+def nccl_benchmark(
+    dtype: str,
+    nccl_op: str = "all_gather",
+    test_range: str = "10,10000000,1000",
+    num_gpus: int = 8,
+    zeus_monitor=None,
+    measure_power=False,
+):
+    """
+    Run NCCL benchmark with optional power measurement.
+
+    Args:
+        dtype: Data type ('half' or 'int8')
+        nccl_op: NCCL operation type
+        test_range: Size range (min,max,ratio)
+        num_gpus: Number of GPUs
+        zeus_monitor: ZeusMonitor instance (optional)
+        measure_power: Whether to measure power consumption
+    """
     nccl_test_bin = ""
     if nccl_op == "all_gather":
         nccl_test_bin = "all_gather_perf"
@@ -30,7 +48,13 @@ def nccl_benchmark(dtype: str, nccl_op: str = "all_gather", test_range: str = "1
     bytes_per_element = 2 if dtype == "half" else 1
 
     while size < max_size:
-        inner_loop = 100 if size <= 16777216 else 60
+        if size <= 1048576:
+            inner_loop = 1000
+        elif size <= 16777216:
+            inner_loop = 500
+        else:
+            inner_loop = 100
+
         cmd_args = [
             nccl_test_bin,
             "-b",
@@ -50,23 +74,38 @@ def nccl_benchmark(dtype: str, nccl_op: str = "all_gather", test_range: str = "1
             "-c",
             "0",
         ]
-        result = subprocess.run(cmd_args, capture_output=True, text=True)
+
+        # Power measurement for communication operations
+        if measure_power and zeus_monitor is not None:
+            zeus_monitor.begin_window("nccl", sync_execution=False)
+            result = subprocess.run(cmd_args, capture_output=True, text=True)
+            measurement = zeus_monitor.end_window("nccl", sync_execution=False)
+            power = sum(measurement.gpu_energy[i] for i in range(num_gpus)) / measurement.time
+        else:
+            result = subprocess.run(cmd_args, capture_output=True, text=True)
+            power = None
+
         print_lines = result.stdout.split("\n")
         for index_line in range(len(print_lines)):
             if "time" in print_lines[index_line]:
                 break
         latency = float(print_lines[index_line + 2].split()[5]) * 1e-3  # us to ms
 
-        print(nccl_test_bin, f"{size=}, {latency=}")
+        # Build result item
+        item = {
+            "nccl_dtype": dtype,
+            "num_gpus": num_gpus,
+            "message_size": size // bytes_per_element,
+            "latency": latency,
+        }
+
+        if power is not None:
+            item["power"] = power
+            item["compute_bound"] = 0  # Communication is always memory/bandwidth-bound
+
+        print(nccl_test_bin, f"{size=}, {latency=}, {power=}")
         log_perf(
-            item_list=[
-                {
-                    "nccl_dtype": dtype,
-                    "num_gpus": num_gpus,
-                    "message_size": size // bytes_per_element,
-                    "latency": latency,
-                }
-            ],
+            item_list=[item],
             framework="TRTLLM",
             version=nccl_version,
             device_name=torch.cuda.get_device_name(),
@@ -95,6 +134,17 @@ if __name__ == "__main__":
         help="min_size,max_size,multiplicative_ratio",
     )
     parser.add_argument("--num_gpus", "-n", default=8, type=int)
+    parser.add_argument(
+        "--measure_power",
+        action="store_true",
+        default=False,
+        help="Enable power measurement during NCCL benchmark",
+    )
     args = parser.parse_args()
 
-    nccl_benchmark(args.dtype, args.nccl_op, args.range, args.num_gpus)
+    zeus_monitor = None
+    if args.measure_power:
+        from zeus.monitor import ZeusMonitor
+        zeus_monitor = ZeusMonitor(gpu_indices=list(range(args.num_gpus)))
+
+    nccl_benchmark(args.dtype, args.nccl_op, args.range, args.num_gpus, zeus_monitor)
