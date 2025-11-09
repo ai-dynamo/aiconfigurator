@@ -88,6 +88,7 @@ class TestCLIArgumentParsing:
         assert args.save_dir is None
         assert args.ttft == 2000.0
         assert args.tpot == 30.0
+        assert args.prefix == 0
 
     def test_debug_mode_flag(self, cli_parser):
         """Test that debug mode can be enabled."""
@@ -131,6 +132,7 @@ class TestCLIArgumentParsing:
             ("osl", "2048", int),
             ("ttft", "300.0", float),
             ("tpot", "10.0", float),
+            ("prefix", "128", int),
         ],
     )
     def test_optional_parameters(self, cli_parser, optional_param, value, expected_type):

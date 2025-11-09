@@ -18,6 +18,7 @@ class EventHandler:
                 components["runtime_config_components"]["batch_size"],
                 components["runtime_config_components"]["isl"],
                 components["runtime_config_components"]["osl"],
+                components["runtime_config_components"]["prefix"],
                 components["model_parallel_components"]["tp_size"],
                 components["model_parallel_components"]["pp_size"],
                 components["model_parallel_components"]["dp_size"],
@@ -77,6 +78,7 @@ class EventHandler:
                 components["model_system_components"]["sol_mode"],
                 components["runtime_config_components"]["isl"],
                 components["runtime_config_components"]["osl"],
+                components["runtime_config_components"]["prefix"],
                 components["runtime_config_components"]["ttft"],
                 components["runtime_config_components"]["tpot"],
                 components["model_parallel_components"]["tp_size"],
@@ -126,6 +128,7 @@ class EventHandler:
                 components["model_system_components"]["sol_mode"],
                 components["runtime_config_components"]["isl"],
                 components["runtime_config_components"]["osl"],
+                components["runtime_config_components"]["prefix"],
                 components["runtime_config_components"]["ttft"],
                 components["model_parallel_components"]["num_gpus"],
                 components["model_parallel_components"]["tp_size"],
@@ -176,6 +179,7 @@ class EventHandler:
                 components["model_name_components"]["model_name"],  # model
                 components["runtime_config_components"]["isl"],  # runtime
                 components["runtime_config_components"]["osl"],
+                components["runtime_config_components"]["prefix"],
                 components["runtime_config_components"]["ttft"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
@@ -267,6 +271,7 @@ class EventHandler:
                 components["model_name_components"]["model_name"],  # model
                 components["runtime_config_components"]["isl"],  # runtime
                 components["runtime_config_components"]["osl"],
+                components["runtime_config_components"]["prefix"],
                 components["runtime_config_components"]["ttft"],
                 components["runtime_config_components"]["tpot"],
                 components["model_misc_config_components"]["nextn"],

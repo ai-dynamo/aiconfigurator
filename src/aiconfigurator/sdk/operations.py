@@ -497,10 +497,12 @@ class ContextAttention(Operation):
     def query(self, database: PerfDatabase, **kwargs):
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")
+        prefix = kwargs.get("prefix")
         return (
             database.query_context_attention(
                 batch_size,
                 isl,
+                prefix,
                 self._n,
                 self._n_kv,
                 self._kvcache_quant_mode,
@@ -584,9 +586,15 @@ class ContextMLA(Operation):
     def query(self, database: PerfDatabase, **kwargs):
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")
+        prefix = kwargs.get("prefix")
         return (
             database.query_context_mla(
-                batch_size, isl, self._num_heads, self._kvcache_quant_mode, self._fmha_quant_mode
+                b=batch_size,
+                s=isl,
+                prefix=prefix,
+                num_heads=self._num_heads,
+                kvcache_quant_mode=self._kvcache_quant_mode,
+                fmha_quant_mode=self._fmha_quant_mode,
             )
             * self._scale_factor
         )
@@ -821,15 +829,16 @@ class WideEPContextMLA(Operation):
     def query(self, database: PerfDatabase, **kwargs):
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")
-
+        prefix = kwargs.get("prefix")
         return (
             database.query_wideep_context_mla(
-                batch_size,
-                isl,
-                self._tp_size,
-                self._kvcache_quant_mode,
-                self._fmha_quant_mode,
-                self._attn_backend,
+                b=batch_size,
+                s=isl,
+                prefix=prefix,
+                tp_size=self._tp_size,
+                kvcache_quant_mode=self._kvcache_quant_mode,
+                fmha_quant_mode=self._fmha_quant_mode,
+                attention_backend=self._attn_backend,
             )
             * self._scale_factor
         )

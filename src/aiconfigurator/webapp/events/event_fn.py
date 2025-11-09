@@ -155,6 +155,7 @@ class EventFn:
         batch_size,
         isl,
         osl,
+        prefix,
         tp_size,
         pp_size,
         dp_size,
@@ -202,7 +203,7 @@ class EventFn:
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
-                runtime_config = config.RuntimeConfig(batch_size=batch_size, isl=isl, osl=osl)
+                runtime_config = config.RuntimeConfig(batch_size=batch_size, isl=isl, osl=osl, prefix=prefix)
 
                 model = get_model(model_name, model_config, backend_name)
                 stride = (osl + 8 - 1) // 8  # run at most 8 steps
@@ -251,6 +252,7 @@ class EventFn:
         sol_mode,
         isl,
         osl,
+        prefix,
         ttft,
         tpot,
         tp_size,
@@ -297,7 +299,7 @@ class EventFn:
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
-                runtime_config = config.RuntimeConfig(isl=isl, osl=osl, ttft=ttft, tpot=tpot)
+                runtime_config = config.RuntimeConfig(isl=isl, osl=osl, prefix=prefix, ttft=ttft, tpot=tpot)
 
                 is_moe = check_is_moe(model_name)
                 parallel_config_list = pareto_analysis.enumerate_parallel_config(
@@ -360,6 +362,7 @@ class EventFn:
         sol_mode,
         isl,
         osl,
+        prefix,
         ttft,
         num_gpus,
         tp_size,
@@ -405,6 +408,7 @@ class EventFn:
                 runtime_config = config.RuntimeConfig(
                     isl=isl,
                     osl=osl,
+                    prefix=prefix,
                     ttft=ttft,
                     tpot=list(range(2, 20, 1)) + list(range(20, 300, 5)),
                 )
@@ -452,7 +456,7 @@ class EventFn:
                         "more GPUs."
                     )
                 title = (
-                    f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_ttft"
+                    f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}_ttft"
                     f"{runtime_config.ttft}_{system_name}_{backend_name}_{version}_"
                     f"{model_config.gemm_quant_mode}_{model_config.kvcache_quant_mode}_"
                     f"{model_config.fmha_quant_mode}_{model_config.moe_quant_mode}_"
@@ -487,6 +491,7 @@ class EventFn:
         model_name,
         isl,
         osl,
+        prefix,
         ttft,
         nextn,
         nextn_accept_rates,
@@ -588,6 +593,7 @@ class EventFn:
                 runtime_config = config.RuntimeConfig(
                     isl=isl,
                     osl=osl,
+                    prefix=prefix,
                     ttft=ttft,
                     tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
                 )
@@ -681,7 +687,7 @@ class EventFn:
                         "memory size. Try to set a larger ttft limit and use more GPUs."
                     )
                 title = (
-                    f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_ttft"
+                    f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}_ttft"
                     f"{runtime_config.ttft}_prefill_{prefill_system_name}_{prefill_backend_name}_"
                     f"{prefill_version}_{prefill_sol_mode}_{prefill_gemm_quant_mode}_"
                     f"{prefill_kvcache_quant_mode}_{prefill_fmha_quant_mode}_{prefill_moe_quant_mode}_"
@@ -718,6 +724,7 @@ class EventFn:
         model_name,
         isl,
         osl,
+        prefix,
         ttft,
         tpot,
         nextn,
@@ -869,7 +876,7 @@ class EventFn:
                 for b in range(1, (prefill_max_num_tokens + isl - 1) // isl + 1 + 1):
                     prefill_summary = prefill_session.run_static(
                         mode="static_ctx",
-                        runtime_config=config.RuntimeConfig(batch_size=b, isl=isl, osl=osl),
+                        runtime_config=config.RuntimeConfig(batch_size=b, isl=isl, osl=osl, prefix=prefix),
                     )
                     prefill_results_df = pd.concat(
                         [prefill_results_df, prefill_summary.get_summary_df()], ignore_index=True
@@ -878,7 +885,7 @@ class EventFn:
                         prefill_target_bs = b * prefill_dp_size  # global_bs
                 prefill_results_df = prefill_results_df.reset_index(drop=True).reset_index()
                 title = (
-                    f"{model_name}_isl{isl}_osl{osl}_prefill_{prefill_system_name}_"
+                    f"{model_name}_isl{isl}_osl{osl}_prefix{prefix}_prefill_{prefill_system_name}_"
                     f"{prefill_backend_name}_{prefill_version}_{prefill_sol_mode}_"
                     f"{prefill_gemm_quant_mode}_{prefill_kvcache_quant_mode}_"
                     f"{prefill_fmha_quant_mode}_{prefill_moe_quant_mode}_{prefill_comm_quant_mode}_"

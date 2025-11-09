@@ -56,6 +56,7 @@ class TaskContext:
     use_specific_quant_mode: str | None
     isl: int
     osl: int
+    prefix: int
     ttft: float
     tpot: float
     enable_wideep: bool
@@ -174,6 +175,7 @@ class TaskConfigFactory:
             "runtime_config": {
                 "isl": ctx.isl,
                 "osl": ctx.osl,
+                "prefix": ctx.prefix,
                 "ttft": ctx.ttft,
                 "tpot": ctx.tpot,
             },
@@ -642,6 +644,7 @@ def task_config_to_generator_config(task_config: TaskConfig, result_df: pd.DataF
         "is_moe": task_config.config.is_moe,
         "isl": task_config.config.runtime_config.isl,
         "osl": task_config.config.runtime_config.osl,
+        "prefix": task_config.config.runtime_config.prefix,
     }
 
     if task_config.serving_mode == "agg":
@@ -673,6 +676,7 @@ class TaskConfig:
         use_specific_quant_mode: str | None = None,
         isl: int = 4000,
         osl: int = 1000,
+        prefix: int = 0,
         ttft: float = 1000,
         tpot: float = 50,
         enable_wideep: bool = False,
@@ -745,6 +749,7 @@ class TaskConfig:
             use_specific_quant_mode=use_specific_quant_mode,
             isl=isl,
             osl=osl,
+            prefix=prefix,
             ttft=ttft,
             tpot=tpot,
             enable_wideep=enable_wideep,
@@ -788,11 +793,11 @@ class TaskConfig:
 
         self.task_name = (
             (
-                f"{serving_mode}_{model_name}_{system_name}_{decode_system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{ttft}_{tpot}"
+                f"{serving_mode}_{model_name}_{system_name}_{decode_system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{prefix}_{ttft}_{tpot}"
             )
             if serving_mode == "disagg"
             else (
-                f"{serving_mode}_{model_name}_{system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{ttft}_{tpot}"
+                f"{serving_mode}_{model_name}_{system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{prefix}_{ttft}_{tpot}"
             )
         )
         self.config.task_name = self.task_name
@@ -863,7 +868,11 @@ class TaskConfig:
 
         runtime_dict = _convert(self.config.runtime_config)
         printable.update(
-            {k: runtime_dict.get(k) for k in ("isl", "osl", "ttft", "tpot") if runtime_dict.get(k) is not None}
+            {
+                k: runtime_dict.get(k)
+                for k in ("isl", "osl", "prefix", "ttft", "tpot")
+                if runtime_dict.get(k) is not None
+            }
         )
 
         printable["enable_wideep"] = self.enable_wideep
@@ -936,6 +945,7 @@ class TaskRunner:
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
             osl=task_config.runtime_config.osl,
+            prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
         )
@@ -1013,6 +1023,7 @@ class TaskRunner:
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
             osl=task_config.runtime_config.osl,
+            prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
         )
@@ -1193,6 +1204,7 @@ if __name__ == "__main__":
         tpot=20,
         isl=4000,
         osl=500,
+        prefix=0,
         total_gpus=8,
     )
     task_runner = TaskRunner()
@@ -1211,6 +1223,7 @@ if __name__ == "__main__":
         tpot=20,
         isl=4000,
         osl=500,
+        prefix=0,
         total_gpus=16,
         profiles=["fp8_default"],
         yaml_config={

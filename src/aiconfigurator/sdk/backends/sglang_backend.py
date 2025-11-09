@@ -35,10 +35,11 @@ class SGLANGBackend(BaseBackend):
         self, model: BaseModel, database: PerfDatabase, runtime_config: RuntimeConfig, **kwargs
     ) -> InferenceSummary:
         """
-        Run the agg inference for SGLANG backend.
+        Run the agg inference. TODO: add SGLang's own implementation
         """
         isl = runtime_config.isl
         osl = runtime_config.osl
+        prefix = runtime_config.prefix
         b = runtime_config.batch_size
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
@@ -81,6 +82,7 @@ class SGLANGBackend(BaseBackend):
                 num_genonly_tokens = 1
                 num_mix_steps_for_tpot_calc = 0
 
+            # FIXME, fix for DS. DS has different ops for attn in ctx and gen.
             def _get_mix_step_latency(
                 model: BaseModel,
                 database: PerfDatabase,
@@ -88,28 +90,34 @@ class SGLANGBackend(BaseBackend):
                 gen_tokens: int,
                 isl: int,
                 osl: int,
+                prefix: int,
             ) -> float:
                 num_tokens = ctx_tokens + gen_tokens
+                # treat this as a combined single batch inference, extract non-attention latency
                 summary = self.run_static(
                     model,
                     database,
-                    RuntimeConfig(batch_size=1, beam_width=1, isl=num_tokens, osl=1),
+                    # num tokens for gemm needs to be adjusted for prefix, depends on the avg prefix len per request
+                    RuntimeConfig(
+                        batch_size=1, beam_width=1, isl=num_tokens, osl=1, prefix=prefix * np.floor(ctx_tokens / isl)
+                    ),
                     mode="static_ctx",
                 )
                 latency_dict = summary.get_context_latency_dict()
                 non_attention_latency = 0.0
-                # TODO, fix for DS. DS has different ops for attn in ctx and gen.
                 for layer_name, latency in latency_dict.items():
                     if layer_name != "context_attention":
                         non_attention_latency += latency
 
                 # second pass to get ctx attn, split full isl over
-                # num_steps(=np.ceil(isl/ctx_tokens)), average the ctx attn latency
+                # num_steps(=np.ceil(isl/ctx_tokens))
+                # average the ctx attn latency with num_steps to get the ctx_attention_latency
                 num_tokens = isl
+                batch_size = np.ceil(ctx_tokens / isl)
                 summary = self.run_static(
                     model,
                     database,
-                    RuntimeConfig(batch_size=1, beam_width=1, isl=num_tokens, osl=1),
+                    RuntimeConfig(batch_size=batch_size, beam_width=1, isl=num_tokens, osl=1, prefix=prefix),
                     mode="static_ctx",
                 )
                 latency_dict = summary.get_context_latency_dict()
@@ -150,11 +158,13 @@ class SGLANGBackend(BaseBackend):
 
                 return genonly_step_latency
 
-            mix_step_latency = _get_mix_step_latency(model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl)
+            mix_step_latency = _get_mix_step_latency(
+                model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl, prefix
+            )
             genonly_step_latency = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
 
             ttft = mix_step_latency * np.ceil(isl / ctx_tokens)
-            # correction for ttft in sglang agg mode, assume we have requests 10x of concurrency
+            # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency
             # (batch size here) to mitigate the impact of first round latency
             # assume we need to increase x of requests when concurrency gets larger.
             # thus capped to 4 to make it reasonable.
@@ -226,6 +236,7 @@ class SGLANGBackend(BaseBackend):
                         model.model_name,
                         isl,
                         osl,
+                        prefix,
                         concurrency,
                         request_rate,
                         b,
@@ -275,7 +286,7 @@ class SGLANGBackend(BaseBackend):
         self, model: BaseModel, database: PerfDatabase, runtime_config: RuntimeConfig, **kwargs
     ) -> InferenceSummary:
         """
-        Find the best agg result under constraints for SGLANG backend.
+        Find the best agg result under constraints.
 
         Args:
             model: the model to be tested
@@ -294,7 +305,7 @@ class SGLANGBackend(BaseBackend):
         osl = runtime_config.osl
         ttft = runtime_config.ttft
         tpot = runtime_config.tpot
-
+        prefix = runtime_config.prefix
         top_k = kwargs.get("top_k", 1)
         max_batch_size = kwargs.get("max_batch_size", 512)
         ctx_stride = kwargs.get("ctx_stride", 512)
@@ -380,7 +391,7 @@ class SGLANGBackend(BaseBackend):
                 summary = self.run_agg(
                     model=model,
                     database=database,
-                    runtime_config=RuntimeConfig(batch_size=b, isl=isl, osl=osl),
+                    runtime_config=RuntimeConfig(batch_size=b, isl=isl, osl=osl, prefix=prefix),
                     ctx_tokens=ctx_tokens,
                 )
 

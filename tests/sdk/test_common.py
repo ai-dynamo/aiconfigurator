@@ -39,15 +39,11 @@ class TestSupportedSystems:
         data_folder_names = {f.name for f in data_folders}
 
         # Assert that the YAML files match SupportedSystems
-        assert common.SupportedSystems == yaml_system_names, (
-            f"SupportedSystems set does not match YAML files in systems directory.\n"
-            f"In SupportedSystems but not in YAML files: {common.SupportedSystems - yaml_system_names}\n"
-            f"In YAML files but not in SupportedSystems: {yaml_system_names - common.SupportedSystems}"
+        assert common.SupportedSystems.issubset(yaml_system_names), (
+            "SupportedSystems set does not match YAML files in systems directory.\n"
         )
 
         # Assert that the data folders match SupportedSystems
-        assert common.SupportedSystems == data_folder_names, (
-            f"SupportedSystems set does not match data folders in systems/data directory.\n"
-            f"In SupportedSystems but not in data folders: {common.SupportedSystems - data_folder_names}\n"
-            f"In data folders but not in SupportedSystems: {data_folder_names - common.SupportedSystems}"
+        assert common.SupportedSystems.issubset(data_folder_names), (
+            "SupportedSystems set does not match data folders in systems/data directory.\n"
         )

@@ -72,7 +72,7 @@ Refer to [CLI User Guide](docs/cli_user_guide.md)
 
 An example here, 
 ```bash
-aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --isl 4000 --osl 500 --ttft 300 --tpot 10
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --isl 4000 --osl 500 --prefix 500 --ttft 300 --tpot 10
 ```
 
 ```text
@@ -83,41 +83,41 @@ aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm -
   Input Configuration & SLA Target:
     Model: QWEN3_32B (is_moe: False)
     Total GPUs: 32
-    Best Experiment Chosen: disagg at 812.92 tokens/s/gpu (1.70x better)
+    Best Experiment Chosen: disagg at 804.83 tokens/s/gpu (disagg 1.64x better)
   ----------------------------------------------------------------------------
   Overall Best Configuration:
-    - Best Throughput: 812.92 tokens/s/gpu
-    - User Throughput: 120.23 tokens/s/user
-    - TTFT: 276.76ms
-    - TPOT: 8.32ms
+    - Best Throughput: 804.83 tokens/s/gpu
+    - User Throughput: 109.13 tokens/s/user
+    - TTFT: 486.53ms
+    - TPOT: 9.16ms
   ----------------------------------------------------------------------------
   Pareto Frontier:
                QWEN3_32B Pareto Frontier: tokens/s/gpu vs tokens/s/user         
       ┌────────────────────────────────────────────────────────────────────────┐
-1600.0┤ •• disagg                                                              │
+1400.0┤ •• disagg                                                              │
       │ ff agg                                                                 │
       │ xx disagg best                                                         │
       │                                                                        │
-1333.3┤   f                                                                    │
-      │   ff                                                                   │
-      │     ff    •                                                            │
-      │       f   ••••••••                                                     │
-1066.7┤        f         ••                                                    │
-      │         fff       ••••••••                                             │
-      │            f              ••                                           │
-      │            f                ••••                                       │
- 800.0┤            fffff                •••x                                   │
-      │                 fff                 ••                                 │
-      │                   fff                •                                 │
-      │                     fffff             ••                               │
- 533.3┤                         ffff            ••                             │
-      │                             ffff          ••                           │
-      │                                 fffffff     •••••                      │
-      │                                        ffffff    ••                    │
- 266.7┤                                              fffff •••••••••           │
-      │                                                   ffffffffff           │
-      │                                                             f          │
-      │                                                                        │
+1166.7┤          •                                                             │
+      │           •••••••                                                      │
+      │                  •                                                     │
+      │                   ••••••                                               │
+ 933.3┤                         •                                              │
+      │                         •                                              │
+      │                         •••••••x                                       │
+      │                                 •                                      │
+ 700.0┤                                 •                                      │
+      │        f                         •                                     │
+      │         ffff                      •                                    │
+      │             ffffffffffffffff       ••                                  │
+ 466.7┤                             fffffff  •••                               │
+      │                                    fff  •••                            │
+      │                                       ffff•                            │
+      │                                           ffffffff                     │
+ 233.3┤                                                  fffffff               │
+      │                                                      •••fffff          │
+      │                                                         ••• fff        │
+      │                                                               f        │
    0.0┤                                                                        │
       └┬─────────────────┬─────────────────┬────────────────┬─────────────────┬┘
        0                60                120              180              240 
@@ -131,35 +131,31 @@ tokens/s/gpu                         tokens/s/user
                gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; tp * pp for dense models (underlined numbers are the actual values in math)
 
 disagg Top Configurations: (Sorted by tokens/s/gpu)
-+------+--------------+---------------+--------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
-| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | concurrency | total_gpus(used) | replicas |  gpus/replica  | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
-+------+--------------+---------------+--------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
-|  1   |    812.92    |     120.23    | 276.76 |  240(=60x4) |   32 (32=4x8)    |    4     |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   60  |
-|  2   |    750.55    |     125.26    | 276.76 |  208(=52x4) |   32 (32=4x8)    |    4     |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   52  |
-|  3   |    651.19    |     128.44    | 276.76 |  176(=44x4) |   32 (32=4x8)    |    4     |  8 (=4x1+1x4)  |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   44  |
-|  4   |    593.79    |     122.69    | 276.76 | 168(=168x1) |   32 (24=1x24)   |    1     | 24 (=12x1+3x4) |     12     |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    4 (=4x1)    |    tp4pp1   |   56  |
-|  5   |    530.57    |     127.90    | 276.76 | 144(=144x1) |   32 (24=1x24)   |    1     | 24 (=12x1+3x4) |     12     |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    4 (=4x1)    |    tp4pp1   |   48  |
-+------+--------------+---------------+--------+-------------+------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
++------+--------------+---------------+--------+--------------+-------------------+----------+---------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | concurrency  | total_gpus (used) | replicas |  gpus/replica | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
++------+--------------+---------------+--------+--------------+-------------------+----------+---------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+|  1   |    804.83    |     109.13    | 486.53 | 256 (=64x4)  |    32 (32=4x8)    |    4     |  8 (=4x1+1x4) |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   64  |
+|  2   |    416.25    |     102.85    | 486.53 | 144 (=144x1) |    32 (24=1x24)   |    1     | 24 (=8x1+8x2) |     8      |    1 (=1x1)    |    tp1pp1   |   1   |     8      |    2 (=2x1)    |    tp2pp1   |   18  |
+|  3   |    416.25    |     118.53    | 486.53 | 128 (=128x1) |    32 (24=1x24)   |    1     | 24 (=8x1+2x8) |     8      |    1 (=1x1)    |    tp1pp1   |   1   |     2      |    8 (=8x1)    |    tp8pp1   |   64  |
++------+--------------+---------------+--------+--------------+-------------------+----------+---------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
 
 agg Top Configurations: (Sorted by tokens/s/gpu)
-+------+--------------+---------------+--------+-------------+------------------+----------+--------------+-------------+----------+----+
-| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | concurrency | total_gpus(used) | replicas | gpus/replica | gpus/worker | parallel | bs |
-+------+--------------+---------------+--------+-------------+------------------+----------+--------------+-------------+----------+----+
-|  1   |    478.57    |     107.58    | 197.85 |  160(=20x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 20 |
-|  2   |    429.39    |     122.54    | 197.57 |  128(=16x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 16 |
-|  3   |    398.29    |     131.04    | 197.41 |  112(=14x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 14 |
-|  4   |    377.31    |     133.32    | 190.10 |  104(=13x8) |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 13 |
-|  5   |    339.51    |     143.14    | 189.94 |  88(=11x8)  |   32 (32=8x4)    |    8     |      4       |   4 (=4x1)  |  tp4pp1  | 11 |
-+------+--------------+---------------+--------+-------------+------------------+----------+--------------+-------------+----------+----+
++------+--------------+---------------+--------+-------------+-------------------+----------+--------------+-------------+----------+----+
+| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | concurrency | total_gpus (used) | replicas | gpus/replica | gpus/worker | parallel | bs |
++------+--------------+---------------+--------+-------------+-------------------+----------+--------------+-------------+----------+----+
+|  1   |    491.03    |     103.66    | 272.50 | 160 (=20x8) |    32 (32=8x4)    |    8     |      4       |  4 (=4x1x1) |  tp4pp1  | 20 |
+|  2   |    359.06    |     106.77    | 226.94 | 112 (=28x4) |    32 (32=4x8)    |    4     |      8       |  8 (=8x1x1) |  tp8pp1  | 28 |
+|  3   |    180.64    |     129.41    | 295.45 |  48 (=3x16) |    32 (32=16x2)   |    16    |      2       |  2 (=2x1x1) |  tp2pp1  | 3  |
++------+--------------+---------------+--------+-------------+-------------------+----------+--------------+-------------+----------+----+
 ********************************************************************************
-INFO 2025-10-03 14:49:15,439 main.py:293] All experiments completed in 30.82 seconds
+INFO 2025-10-25 23:40:24,396 main.py:340] All experiments completed in 13.90 seconds
 ```
 
-These results indicate that deploying Qwen3-32B on h200_sxm in FP8 can achieve **1.70x** higher tokens/s/gpu for disaggregated versus aggregated deployment **under the SLA targets TTFT ≤ 300 ms and TPOT ≤ 10 ms**, with ISL:OSL of 4000:500.
+These results indicate that deploying Qwen3-32B on h200_sxm in FP8 can achieve **1.64x** higher tokens/s/gpu for disaggregated versus aggregated deployment **under the SLA targets TTFT ≤ 300 ms and TPOT ≤ 10 ms**, with ISL:OSL of 4000:500 (with prefix len: 500).
 Try different ISL:OSL values and SLA limits to fit your use case, for example:
 
 ```bash
-aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200 --prefix 500
 ```
 
 You will get different results.

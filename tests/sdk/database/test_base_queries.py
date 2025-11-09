@@ -90,20 +90,19 @@ def test_query_custom_allreduce_non_sol_mode_uses_custom_latency(perf_db):
     assert math.isclose(custom_latency, 5.0), f"Expected custom-allreduce latency 5.0, got {custom_latency}"
 
 
-@pytest.mark.skip("TODO: fix comm SOL calculations")
 def test_query_nccl_sol_mode_all_gather(perf_db):
     """
     For query_nccl(..., sol_mode=SOL) and operation='all_gather':
         if dtype == CommQuantMode.half → type_bytes = 2
-        sol_time = message_size*(num_gpus-1)*type_bytes / p2pBW * 1000
+        sol_time = message_size * (num_gpus - 1) * type_bytes / num_gpus / p2pBW * 1000
     We set p2pBW = perf_db.system_spec['node']['inter_node_bw'] = 100.0
     Let num_gpus=4, message_size=512, dtype=half → type_bytes=2
     Then:
-        sol_time = 512 * (4-1) * 2 / 100.0 * 1000
-                 = 512 * 3 * 2 / 100.0 * 1000
-                 = (3072 / 100.0) * 1000
-                 = 30.72 * 1000
-                 = 30720.0
+        sol_time = 512 * 3 * 2 / 4 / 100.0 * 1000
+                 = (3072 / 4 / 100.0) * 1000
+                 = (768 / 100.0) * 1000
+                 = 7.68 * 1000
+                 = 7680.0
     """
     dtype = common.CommQuantMode.half
     num_gpus = 4
@@ -111,25 +110,33 @@ def test_query_nccl_sol_mode_all_gather(perf_db):
     message_size = 512
 
     sol_time = perf_db.query_nccl(dtype, num_gpus, operation, message_size, sol_mode=common.SOLMode.SOL)
-    expected = (message_size * (num_gpus - 1) * 2 / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
+    expected = (
+        dtype.value.memory
+        * message_size
+        * (num_gpus - 1)
+        / num_gpus
+        / perf_db.system_spec["node"]["inter_node_bw"]
+        * 1000
+    )
 
     assert math.isclose(sol_time, expected), f"Expected {expected}, got {sol_time}"
 
 
-@pytest.mark.skip("TODO: fix comm SOL calculations")
 @pytest.mark.parametrize("operation", ["alltoall", "reduce_scatter"])
 def test_query_nccl_sol_mode_alltoall_and_reduce_scatter(perf_db, operation):
     """
     The code for 'alltoall' and 'reduce_scatter' in get_sol is identical:
-        sol_time = 2 * message_size * type_bytes / p2pBW * 1000
+        sol_time = message_size * (num_gpus - 1) * type_bytes / num_gpus / p2pBW * 1000
     Using dtype = CommQuantMode.int8 makes type_bytes=1.
-    Let message_size = 1000, type_bytes=1, p2pBW=100.0:
-        sol_time = 2 * 1000 * 1 / 100.0 * 1000 = (2000 / 100.0)*1000 = 20*1000 = 20000.0
+    Let message_size = 1000, type_bytes=1, num_gpus=8, p2pBW=100.0:
+        sol_time = 1000 * 7 / 8 / 100.0 * 1000 = (875 / 100.0) * 1000 = 8.75 * 1000 = 8750.0
     """
     dtype = common.CommQuantMode.int8  # type_bytes = 1 for int8
     num_gpus = 8  # num_gpus only matters for 'all_gather'
     sol_time = perf_db.query_nccl(dtype, num_gpus, operation, 1000, sol_mode=common.SOLMode.SOL)
-    expected = (2 * 1000 * 1 / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
+    expected = (
+        dtype.value.memory * 1000 * (num_gpus - 1) / num_gpus / perf_db.system_spec["node"]["inter_node_bw"] * 1000
+    )
     assert math.isclose(sol_time, expected), f"Expected {expected} for op {operation}, got {sol_time}"
 
 
