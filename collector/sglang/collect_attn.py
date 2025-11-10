@@ -23,7 +23,7 @@ def get_context_attention_test_cases():
     test_cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     s_list = [16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 262144]
-    n_list = [4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
+    n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
     n_kv_list = [0, 1, 2, 4, 8]
     for n in sorted(n_list, reverse=True):
         for s in sorted(s_list, reverse=True):
@@ -74,8 +74,8 @@ def get_generation_attention_test_cases():
     # the i-th token to record. 1 for context phase. mapping to osl definition
     s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
     # full n {4, 5, 7, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 56, 72, 96}
-    n_list = [4, 8, 12, 16, 24, 32, 40, 48, 64]
-    n_list_xqa = [4, 8, 16, 32, 64, 96, 128]
+    n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
+    n_list_xqa = [1, 2, 4, 8, 16, 32, 64, 96, 128]
     n_kv_list = [1, 2, 4, 8]
 
     # MHA
@@ -193,14 +193,7 @@ def run_attention_torch(
         k_cache, v_cache = [x.detach().to(kvtype).requires_grad_() for x in [k_cache, v_cache]]
         k, v, cache_seqlens = None, None, None
 
-    def float16attn_fp8kvcache(q, k_cache, v_cache, k, v, **kwargs):
-        k_cache = k_cache.to(torch.bfloat16)
-        v_cache = v_cache.to(torch.bfloat16)
-        k = None if k is None else k.to(torch.bfloat16)
-        v = None if v is None else v.to(torch.bfloat16)
-        flash_attn_func_v3(q, k_cache, v_cache, k, v, **kwargs)
-
-    if use_fp8_context_fmha:
+    if use_fp8_context_fmha or use_fp8_kv_cache:
         q = q.to(kvtype)
         m1 = time_fwd(
             flash_attn_func_v3,
@@ -210,19 +203,7 @@ def run_attention_torch(
             k,
             v,
             cache_seqlens=cache_seqlens,
-            repeats=10,
-            verbose=True,
-            desc="Fav3",
-        )
-    elif use_fp8_kv_cache:
-        m1 = time_fwd(
-            float16attn_fp8kvcache,
-            q,
-            k_cache,
-            v_cache,
-            k,
-            v,
-            cache_seqlens=cache_seqlens,
+            causal=True,
             repeats=10,
             verbose=True,
             desc="Fav3",
@@ -236,6 +217,7 @@ def run_attention_torch(
             k,
             v,
             cache_seqlens=cache_seqlens,
+            causal=True,
             repeats=10,
             verbose=True,
             desc="Fav3",

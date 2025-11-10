@@ -85,13 +85,13 @@ export OUTPUT_PATH=/path/to/output
 
 # Run DeepSeek-specific attention collector
 SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 \
-  python collect_attn.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH
+  python collect_wideep_attn.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH
 
 # Run DeepSeek MLP collector
-python collect_mlp.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH
+python collect_wideep_mlp.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH
 
 # Run DeepSeek DeepEP MoE collector (requires 2+ GPUs)
-python collect_deepep_moe.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH \
+python collect_wideep_deepep_moe.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH \
   --tp_size 2 --ep_size 2 --num_experts 256
 ```
 See `sglang/README.md` for detailed documentation on these collectors.

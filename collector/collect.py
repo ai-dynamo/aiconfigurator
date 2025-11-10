@@ -403,14 +403,14 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
         {
             "name": "sglang",
             "type": "attention_context",
-            "module": "collector.sglang.collect_normal_attn",
+            "module": "collector.sglang.collect_attn",
             "get_func": "get_context_attention_test_cases",
             "run_func": "run_attention_torch",
         },
         {
             "name": "sglang",
             "type": "attention_generation",
-            "module": "collector.sglang.collect_normal_attn",
+            "module": "collector.sglang.collect_attn",
             "get_func": "get_generation_attention_test_cases",
             "run_func": "run_attention_torch",
         },

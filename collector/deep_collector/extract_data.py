@@ -738,13 +738,13 @@ def main():
     )
     parser.add_argument(
         "--output-normal",
-        default="./deepep_normal_perf.txt",
-        help="normal output TXT file path (default: ./deepep_normal_perf.txt)",
+        default="./wideep_deepep_normal_perf.txt",
+        help="normal output TXT file path (default: ./wideep_deepep_normal_perf.txt)",
     )
     parser.add_argument(
         "--output-ll",
-        default="./deepep_ll_perf.txt",
-        help="ll output TXT file path (default: ./deepep_ll_perf.txt)",
+        default="./wideep_deepep_ll_perf.txt",
+        help="ll output TXT file path (default: ./wideep_deepep_ll_perf.txt)",
     )
     args = parser.parse_args()
 
