@@ -130,8 +130,8 @@ def worker(
 
             zeus_monitor = ZeusMonitor(gpu_indices=[device_id])
             worker_logger.info(f"Zeus power monitoring enabled on device {device_id}")
-        except Exception as e:
-            worker_logger.exception(f"Failed to initialize Zeus")
+        except Exception:
+            worker_logger.exception("Failed to initialize Zeus")
             raise  # Fail if power measurement requested but Zeus unavailable
 
     # Process tasks
@@ -158,6 +158,7 @@ def worker(
             if power_limit is not None:
                 try:
                     from zeus.device import get_gpus
+
                     get_gpus().set_power_management_limit(device_id, power_limit)
                     worker_logger.debug(f"Set power limit to {power_limit}W on device {device_id}")
                 except Exception as e:
@@ -298,7 +299,7 @@ def parallel_run(
     for _ in range(len(processes)):
         queue.put(None)
 
-    # Calculate total work: tasks × power_limits
+    # Calculate total work: tasks x power_limits
     num_power_limits = len(power_limits) if power_limits else 1
     total_work = len(tasks) * num_power_limits
 
@@ -785,7 +786,10 @@ def main():
         "--kernel-power-measurement-duration",
         type=float,
         default=DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION,
-        help=f"Target duration for memory-bound kernel power measurement (seconds). Default: {DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION}",
+        help=(
+            "Target duration for memory-bound kernel power measurement (seconds). "
+            f"Default: {DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION}"
+        ),
     )
     args = parser.parse_args()
     ops = args.ops
