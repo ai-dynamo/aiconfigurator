@@ -57,15 +57,15 @@ def is_context_attention_compute_bound(b, s, num_heads, num_key_value_heads, d, 
 
     hardware_intensity = (hardware_tflops * 1e12) / (gpu_specs["mem_bw_gbs"] * 1e9)
 
-    # GQA Attention FLOPs: 4 * b * num_heads * s * s * d
+    # GQA Attention FLOPs
     total_flops = 4 * b * num_heads * s * s * d
 
-    # Memory movement for GQA
+    # GQA Attention Memory Movement
     memory_bytes = (
-        dtype_size * b * s * num_heads * d  # Q read (all query heads)
-        + kv_dtype_size * b * s * num_key_value_heads * d  # K read (KV heads)
-        + kv_dtype_size * b * s * num_key_value_heads * d  # V read (KV heads)
-        + dtype_size * b * s * num_heads * d  # Output write (all query heads)
+        dtype_size * b * s * num_heads * d                     # Q read (all query heads)
+        + kv_dtype_size * b * s * num_key_value_heads * d * 2  # K read and write (KV heads)
+        + kv_dtype_size * b * s * num_key_value_heads * d * 2  # V read and write (KV heads)
+        + dtype_size * b * s * num_heads * d                   # Output write
     )
 
     arithmetic_intensity = total_flops / memory_bytes
