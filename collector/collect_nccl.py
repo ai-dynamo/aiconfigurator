@@ -145,6 +145,7 @@ if __name__ == "__main__":
     zeus_monitor = None
     if args.measure_power:
         from zeus.monitor import ZeusMonitor
+
         zeus_monitor = ZeusMonitor(gpu_indices=list(range(args.num_gpus)))
 
     nccl_benchmark(args.dtype, args.nccl_op, args.range, args.num_gpus, zeus_monitor)

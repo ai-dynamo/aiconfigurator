@@ -91,7 +91,7 @@ def is_gemm_compute_bound(m, n, k, dtype, device_name):
     Determine if a GEMM operation is compute-bound.
 
     Args:
-        m, n, k: GEMM dimensions (C = A @ B, A is m×k, B is k×n)
+        m, n, k: GEMM dimensions (C = A @ B, A is mxk, B is kxn)
         dtype: Data type (e.g., 'float16', 'fp8')
         device_name: GPU device name
 

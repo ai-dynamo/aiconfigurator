@@ -62,10 +62,10 @@ def is_context_attention_compute_bound(b, s, num_heads, num_key_value_heads, d, 
 
     # GQA Attention Memory Movement
     memory_bytes = (
-        dtype_size * b * s * num_heads * d                     # Q read (all query heads)
+        dtype_size * b * s * num_heads * d  # Q read (all query heads)
         + kv_dtype_size * b * s * num_key_value_heads * d * 2  # K read and write (KV heads)
         + kv_dtype_size * b * s * num_key_value_heads * d * 2  # V read and write (KV heads)
-        + dtype_size * b * s * num_heads * d                   # Output write
+        + dtype_size * b * s * num_heads * d  # Output write
     )
 
     arithmetic_intensity = total_flops / memory_bytes
