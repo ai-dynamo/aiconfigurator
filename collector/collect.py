@@ -134,10 +134,6 @@ def worker(
             worker_logger.exception(f"Failed to initialize Zeus")
             raise  # Fail if power measurement requested but Zeus unavailable
 
-    # Ensure power_limits is a list
-    if power_limits is None:
-        power_limits = [None]
-
     # Process tasks
     while True:
         task_info = queue.get()
@@ -154,14 +150,15 @@ def worker(
             task_id = create_test_case_id(task, "unknown", module_name)
 
         # Sweep power limits
-        for power_limit in power_limits:
+        for power_limit in power_limits or [None]:
             with lock:
                 progress_value.value += 1
 
             # Set power limit if specified
             if power_limit is not None:
                 try:
-                    set_gpu_power_limit(device_id, power_limit)
+                    from zeus.device import get_gpus
+                    get_gpus().set_power_management_limit(device_id, power_limit)
                     worker_logger.debug(f"Set power limit to {power_limit}W on device {device_id}")
                 except Exception as e:
                     worker_logger.warning(f"Failed to set power limit: {e}")
@@ -793,17 +790,6 @@ def main():
     args = parser.parse_args()
     ops = args.ops
 
-    # Parse power limits
-    if args.power_limits:
-        power_limits = args.power_limits
-    elif args.measure_power:
-        # Get max GPU power limit if measure_power enabled but no limits specified
-        from helper import get_current_power_limit
-
-        power_limits = [get_current_power_limit(0)]
-    else:
-        power_limits = None
-
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
         logger = setup_logging(scope=args.ops if ops else ["all"], debug=args.debug)
@@ -820,13 +806,17 @@ def main():
         collect_trtllm(
             num_processes,
             ops,
-            power_limits=power_limits,
+            power_limits=args.power_limits,
             measure_power=args.measure_power,
             kernel_power_measurement_duration=args.kernel_power_measurement_duration,
         )
     elif args.backend == "sglang":
+        if args.power_limits or args.measure_power:
+            raise ValueError("Power measurement is only supported for the 'trtllm' backend")
         collect_sglang(num_processes, ops)
     elif args.backend == "vllm":
+        if args.power_limits or args.measure_power:
+            raise ValueError("Power measurement is only supported for the 'trtllm' backend")
         collect_vllm(num_processes, ops)
 
 

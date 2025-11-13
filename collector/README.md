@@ -110,13 +110,20 @@ See `deep_collector/README.md` for complete multi-node setup instructions.
 The collector can measure kernel power consumption during benchmarking, which is used for power-aware configuration generation.
 
 ```bash
-python collector/collect.py --measure-power --power-limits 700 500 300 --kernel-power-measurement-duration 3
+python collector/collect.py \
+  --backend trtllm \
+  --ops gemm attention_context attention_generation \
+  --measure-power \
+  --power-limits 700 500 300 \
+  --kernel-power-measurement-duration 3
+
+bash collector/collect_comm.sh --measure_power
 ```
 
 ### Current Support
 
-- TensorRT-LLM backend GEMM and attention kernels
-- NCCL kernels
+- TensorRT-LLM backend: GEMM and attention kernels
+- NCCL kernels (`collect_NCCL.py`)
 
 ### How It Works
 
