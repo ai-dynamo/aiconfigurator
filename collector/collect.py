@@ -40,7 +40,7 @@ from datetime import datetime
 import torch
 from tqdm import tqdm
 
-from helper import create_test_case_id, save_error_report, set_gpu_power_limit, setup_logging, setup_signal_handlers
+from helper import create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
 
 logger = None
 

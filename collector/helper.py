@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
 import fcntl
 import importlib.resources as pkg_resources
 import json
@@ -13,7 +12,7 @@ import sys
 import traceback
 
 try:
-    from cuda import cuda
+    import cuda.bindings.driver as cuda
 except:
     pass
 from datetime import datetime
