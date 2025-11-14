@@ -4,7 +4,10 @@
 import tensorrt as trt
 import tensorrt_llm
 import torch
-from cuda import cudart
+try:
+    from cuda import cudart
+except:
+    from cuda.bindings import runtime as cudart
 from polygraphy.backend.trt import CreateConfig, EngineFromNetwork, TrtRunner
 from tensorrt_llm import Tensor
 from tensorrt_llm._utils import str_dtype_to_torch

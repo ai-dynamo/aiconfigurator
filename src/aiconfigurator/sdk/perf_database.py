@@ -2452,12 +2452,12 @@ class PerfDatabase:
             total_tokens = num_tokens * topk
             ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size  # ffn1, ffn2, gate
             mem_bytes = quant_mode.value.memory * (
-                total_tokens * hidden_size * 3  # input+output
-                + total_tokens
+                total_tokens//moe_ep_size * hidden_size * 2  # input+output
+                + total_tokens//moe_ep_size
                 * inter_size
                 * 3
                 // moe_tp_size  # intermediate, assume ffn1/gate all need to write results.
-                + hidden_size * inter_size * 3 // moe_tp_size * min(num_experts // moe_ep_size, total_tokens)
+                + hidden_size * inter_size * 3 // moe_tp_size * min(num_experts // moe_ep_size, total_tokens//moe_ep_size)
             )
             sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000

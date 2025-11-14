@@ -5,7 +5,10 @@
 import os
 
 import torch
-from cuda import cudart
+try:
+    from cuda import cudart
+except:
+    from cuda.bindings import runtime as cudart
 from tensorrt_llm import Mapping
 from tensorrt_llm._torch.distributed import (
     AllReduce,

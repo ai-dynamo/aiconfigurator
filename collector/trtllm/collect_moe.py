@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import glob
+import json
 import math
 import os
 
@@ -20,8 +22,40 @@ from helper import get_sm_version, log_perf
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 
-def balanced_logits(num_tokens, num_experts, topk):
-    h_selected_experts = -torch.ones([num_tokens, topk])
+def cleanup_empty_json_files(directory="moe_tune_path"):
+    if not os.path.exists(directory):
+        return
+    
+    json_files = glob.glob(os.path.join(directory, "*.json"))
+    deleted_count = 0
+    
+    for file_path in json_files:
+        try:
+            if os.path.getsize(file_path) == 0:
+                os.remove(file_path)
+                deleted_count += 1
+                print(f"Deleted empty file: {file_path}")
+            else:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                    if not data:
+                        os.remove(file_path)
+                        deleted_count += 1
+                        print(f"Deleted empty JSON content: {file_path}")
+        except (OSError, json.JSONDecodeError) as e:
+            try:
+                os.remove(file_path)
+                deleted_count += 1
+                print(f"Deleted invalid file: {file_path} (Error: {e})")
+            except OSError:
+                pass
+    
+    if deleted_count > 0:
+        print(f"Total deleted {deleted_count} invalid JSON files from {directory}")
+
+
+def balanced_logits(num_tokens, num_experts, topk, device):
+    h_selected_experts = -torch.ones([num_tokens, topk]).to(torch.device(device))
     stride = math.ceil(num_experts / topk)
 
     for token_i in range(num_tokens):
@@ -42,11 +76,11 @@ def sample_power_law(size, alpha, xmin, xmax):
     return inv_cdf
 
 
-def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
+def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha, device):
     if num_tokens * topk > num_experts:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
+        num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8).to(torch.device(device))
     else:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
+        num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2).to(torch.device(device))
 
     target_sum = num_tokens * topk
 
@@ -85,8 +119,8 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
             stride=num_experts // ep,
             padding=0,
             bias=False,
-        )
-        conv1d_weights = torch.tensor([1 for _ in range(num_experts // ep)])
+        ).to(torch.device(device))
+        conv1d_weights = torch.tensor([1 for _ in range(num_experts // ep)]).to(torch.device(device))
         conv1d.weight.copy_(conv1d_weights)
 
     res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
@@ -110,7 +144,7 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
     for expert_id in num_tokens_per_expert_sorted_index_lists:
         expert_assignments.extend([expert_id] * num_tokens_per_expert[expert_id])
 
-    expert_assignments = torch.tensor(expert_assignments, dtype=torch.long)
+    expert_assignments = torch.tensor(expert_assignments, dtype=torch.long).to(torch.device(device))
     h_selected_experts = expert_assignments.reshape(topk, num_tokens).T
 
     expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
@@ -148,13 +182,14 @@ def get_moe_test_cases():
         12288,
         16384,
         20480,
-        # 32768,
-        # 65536,
+        32768,
+        65536,
     ]
     tp_list = [1, 2, 4, 8, 16, 32]
     ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     num_gpu_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    alpha_list = [1.01, 1.2]
+    alpha_list = [0.0, 1.01, 1.2] # 0.0 for balanced distribution
+    # alpha_list = [1.01, 1.2]
     # hidden_size,inter_s,topk,num_expert, gated act
     # [15360,30720,2,16],# GPT-MOE-1.8T
     # [15360,3840,16,128],# GPT-MOE-1.8T-FineGrained
@@ -246,23 +281,6 @@ def get_moe_test_cases():
                                             power_law_alpha,
                                         ]
                                     )
-                                    # test_cases.append(
-                                    #     [
-                                    #         moe_type,
-                                    #         num_tokens,
-                                    #         hs,
-                                    #         inter_s,
-                                    #         topk,
-                                    #         num_experts,
-                                    #         tp,
-                                    #         ep,
-                                    #         True,
-                                    #         model_name,
-                                    #         "moe_perf.txt",
-                                    #         "balanced",
-                                    #         0,
-                                    #     ]
-                                    # )
 
                         for power_law_alpha in alpha_list:
                             test_cases.append(
@@ -282,23 +300,6 @@ def get_moe_test_cases():
                                     power_law_alpha,
                                 ]
                             )
-                        # test_cases.append(
-                        #     [
-                        #         moe_type,
-                        #         num_tokens,
-                        #         hs,
-                        #         inter_s,
-                        #         topk,
-                        #         num_experts,
-                        #         tp,
-                        #         ep,
-                        #         False,
-                        #         model_name,
-                        #         "moe_perf.txt",
-                        #         "balanced",
-                        #         0,
-                        #     ]
-                        # )
     return test_cases
 
 
@@ -318,8 +319,6 @@ def run_moe_torch(
     power_law_alpha=0.0,
     device="cuda:0",
 ):
-    torch.cuda.set_device(device)
-    torch.set_default_device(device)
 
     # moe type support float16, fp8_qdq, fp8_block, w4a8, nvfp4(not implemented yet)
     dtype = torch.bfloat16
@@ -340,6 +339,9 @@ def run_moe_torch(
     elif moe_type == "w4a16_mxfp4":
         quant_algo = QuantAlgo.W4A16_MXFP4
         quant_group_size = 32
+
+    if power_law_alpha - 0.0 < 1e-6:
+        distributed = "balanced"
 
     quant_config = QuantConfig(
         quant_algo=quant_algo,
@@ -369,9 +371,9 @@ def run_moe_torch(
     if model_name in ["GPT_OSS_120B", "GPT_OSS_20B"]:
         # use triton backend for best performance on Hopper
         model_config.moe_backend = "triton"
-        swiglu_alpha = torch.tensor([1.702] * (num_experts // moe_ep_size), dtype=torch.float32).cuda()
-        swiglu_beta = torch.tensor([1.0] * (num_experts // moe_ep_size), dtype=torch.float32).cuda()
-        swiglu_limit = torch.tensor([7.0] * (num_experts // moe_ep_size), dtype=torch.float32).cuda()
+        swiglu_alpha = torch.tensor([1.702] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
+        swiglu_beta = torch.tensor([1.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
+        swiglu_limit = torch.tensor([7.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
         if 86 < get_sm_version() < 100:
             model_config.moe_backend = "triton"
         else:
@@ -416,65 +418,53 @@ def run_moe_torch(
         swiglu_beta=swiglu_beta,
         swiglu_limit=swiglu_limit,
     )
+    moe.to(torch.device(device))
 
-    ffn1_weights = Parameter(
-        torch.randn(moe.w3_w1_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(
-            dtype=moe.w3_w1_weight.dtype
-        ),
-        requires_grad=False,
-    )
-    ffn2_weights = Parameter(
-        torch.randn(moe.w2_weight.shape, dtype=torch.bfloat16, device=torch.device(device)).to(
-            dtype=moe.w2_weight.dtype
-        ),
-        requires_grad=False,
+    hidden_states_max_tokens = (
+        torch.randn([num_tokens_lists[-1], hidden_size]).bfloat16().to(torch.device(device))
     )
 
-    moe.w3_w1_weight = ffn1_weights
-    moe.w2_weight = ffn2_weights
+    logits_max_tokens = (
+        balanced_logits(num_tokens_lists[-1], num_experts, topk, torch.device(device)).to(router_logits_dtype)
+    )
 
-    max_index = -1
-    while True:
+    # dty run
+    torch.cuda.synchronize()
+    moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
+    torch.cuda.synchronize()
+
+    cleanup_empty_json_files("moe_tune_path")
+    cache_path = "moe_tune_path/{}_{}_{}_{}".format(moe_type, hidden_size, inter_size//moe_tp_size, num_experts//moe_ep_size)
+    existing_files = glob.glob(f"{cache_path}*")
+    cache_loaded = False
+    if existing_files:
+        json_path = existing_files[0]
         try:
-            hidden_states_max_tokens = (
-                torch.randn([num_tokens_lists[max_index], hidden_size]).bfloat16().to(torch.device(device))
-            )
-            logits_max_tokens = (
-                torch.randn([num_tokens_lists[max_index], num_experts]).to(router_logits_dtype).to(torch.device(device))
-            )
-            torch.cuda.synchronize()
-            AutoTuner.get().clear_cache()
-            with torch.inference_mode(), autotune():
-                moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
-            torch.cuda.synchronize()
-            if aic_debug == 1:
-                print(f"tune success for tokens size {num_tokens_lists[max_index]}")
-            break
-        except Exception as e:
-            if aic_debug == 1:
-                print(
-                    f"tune failed for tokens size {num_tokens_lists[max_index]}, fallback to "
-                    f"tokens size {num_tokens_lists[max_index - 1]}"
-                )
-            max_index -= -3
-            if max_index == -len(num_tokens_lists):
-                raise ValueError("tune failed") from e
-            continue
+            AutoTuner.get().profiling_cache.load_cache(json_path)
+            cache_loaded = True
+            print(f"Loaded profiling cache from {json_path}")
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if not cache_loaded:
+        torch.cuda.synchronize()
+
+        with torch.inference_mode(), autotune(cache_path=cache_path, rank=torch.device(device).index):
+            moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
+        torch.cuda.synchronize()
 
     for num_tokens in num_tokens_lists:
         hidden_states = torch.randn([num_tokens, hidden_size]).bfloat16().to(torch.device(device))
-
         num_iter = 5 if distributed == "power_law" else 1
         if distributed == "power_law":
             actual_logits_list = [
-                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha)
+                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha, torch.device(device))
                 .to(router_logits_dtype)
-                .to(torch.device(device))
                 for _ in range(num_iter)
             ]
         elif distributed == "balanced":
             actual_logits = (
-                balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype).to(torch.device(device))
+                balanced_logits(num_tokens, num_experts, topk, torch.device(device)).to(router_logits_dtype)
             )
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
@@ -534,5 +524,5 @@ def run_moe_torch(
             perf_filename=perf_filename,
         )
 
-    del moe, ffn1_weights, ffn2_weights, hidden_states, actual_logits, actual_logits_list
+    del moe, hidden_states, actual_logits
     torch.cuda.empty_cache()

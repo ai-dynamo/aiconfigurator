@@ -26,7 +26,10 @@ import torch
 
 # isort: on
 import tensorrt_llm as tllm
-from cuda import cudart
+try:
+    from cuda import cudart
+except:
+    from cuda.bindings import runtime as cudart
 from tensorrt_llm import Mapping
 from tensorrt_llm._torch.distributed import AllReduce, AllReduceFusionOp
 from tensorrt_llm._torch.distributed import AllReduceParams as TorchAllReduceParams

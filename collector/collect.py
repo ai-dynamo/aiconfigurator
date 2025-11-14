@@ -267,7 +267,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     # Wait for processes
     for p in processes:
         if "moe" in func.__name__:
-            p.join(timeout=2000)
+            p.join(timeout=500) # tune + 30 tokens cases
         else:
             p.join(timeout=10)
         if p.is_alive():
