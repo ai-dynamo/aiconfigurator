@@ -232,21 +232,45 @@ def parse_ll_log_file(log_path: str) -> list[dict]:
 def collect_log_files(log_dir: str) -> list[Path]:
     """
     Collect .log files directly under the directory (non-recursive).
+    Security: Prevents path traversal and symlink attacks.
     """
     # 1. Convert to Path object, automatically handles path separators (cross-platform compatible)
     log_path = Path(log_dir)
-    # 2. Path normalization + absolute path (key: eliminates .. path traversal risk)
+
+    # 2. Path normalization + absolute path (eliminates .. path traversal risk)
     # strict=True requires path must exist, raises exception if not exists
-    safe_path = log_path.resolve(strict=True)
-    # 3. Validate directory + read permission (Checkmarx will recognize these two security checks)
+    try:
+        safe_path = log_path.resolve(strict=True)
+    except (OSError, RuntimeError) as e:
+        raise ValueError(f"Invalid path: {log_dir}") from e
+
+    # 3. Security check: reject symlinks to prevent symlink-based path traversal
+    # Check the original input path before resolution
+    if log_path.exists() and log_path.is_symlink():
+        raise ValueError(f"Symlinks are not allowed for security reasons: {log_dir}")
+
+    # 4. Validate directory
     if not safe_path.is_dir():
         raise ValueError(f"{safe_path} is not a valid directory")
-    if not os.access(safe_path, os.R_OK):
-        raise PermissionError(f"No permission to read directory {safe_path}")
 
-    # 5. Safely traverse directory (only collect .log files)
-    # glob is safer than listdir, supports pattern matching
-    return list(safe_path.glob("*.log"))
+    # 5. Test read permission by attempting to list directory
+    # This avoids os.access() which has TOCTOU (Time-of-Check-Time-of-Use) issues
+    try:
+        # Test if we can actually read the directory
+        next(safe_path.iterdir(), None)
+    except PermissionError as e:
+        raise PermissionError(f"No permission to read directory {safe_path}") from e
+
+    # 6. Safely collect .log files (exclude symlinks for security)
+    log_files = []
+    for log_file in safe_path.glob("*.log"):
+        # Skip symlinked files
+        if log_file.is_symlink():
+            print(f"Warning: Skipping symlink file: {log_file.name}")
+            continue
+        log_files.append(log_file)
+
+    return log_files
 
 
 def _extract_node_num_from_filename(path: str) -> int:
