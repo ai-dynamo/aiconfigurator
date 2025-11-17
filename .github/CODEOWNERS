@@ -26,13 +26,13 @@
 /src/aiconfigurator/eval @Ethan-ES @tianhaox
 
 # webapp
-/src/aiconfigurator/webapp @tianhaox @Arsene12358
+/src/aiconfigurator/webapp @tianhaox @xueh-nv
 
 # systems & data files
 /src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen
 
 # model configs
-/src/aiconfigurator/model_configs @simone-chen
+/src/aiconfigurator/model_configs @simone-chen @Arsene12358
 
 # generator
 /src/aiconfigurator/generator @Ethan-ES @tianhaox
@@ -41,12 +41,12 @@
 /collector/ @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358
 /collector/deep_collector @xutizhou @AichenF
 /collector/sglang @xutizhou @AichenF
-/collector/slurm_comm_collector @YijiaZhao
+/collector/slurm_comm_collector @YijiaZhao @Arsene12358
 /collector/trtllm @Arsene12358 @YijiaZhao
 /collector/vllm @jasonqinzhou @ilyasher @davilu-nvidia
 /collector/collect_all_reduce.py @Arsene12358 @YijiaZhao
-/collector/collect_comm.sh @Arsene12358
-/collector/collect_nccl.py @YijiaZhao
+/collector/collect_comm.sh @Arsene12358 @YijiaZhao
+/collector/collect_nccl.py @YijiaZhao @Arsene12358
 /collector/collect.py @Arsene12358 @YijiaZhao
 /collector/helper.py @Arsene12358 @YijiaZhao @xutizhou @AichenF
 /collector/README.md @Arsene12358 @YijiaZhao
