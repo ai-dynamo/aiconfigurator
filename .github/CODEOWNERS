@@ -7,7 +7,7 @@
 /src/aiconfigurator/sdk/backends/factory.py @tianhaox @jasonqinzhou
 /src/aiconfigurator/sdk/backends/sglang_backend.py @xutizhou @AichenF @jasonqinzhou
 /src/aiconfigurator/sdk/backends/trtllm_backend.py @tianhaox @jasonqinzhou @ilyasher
-/src/aiconfigurator/sdk/backends/vllm_backend.py @jasonqinzhou @ilyasher
+/src/aiconfigurator/sdk/backends/vllm_backend.py @jasonqinzhou @ilyasher @davilu-nvidia
 /src/aiconfigurator/sdk/common.py @Arsene12358 @simone-chen @xutizhou @AichenF @jasonqinzhou
 /src/aiconfigurator/sdk/config.py @YijiaZhao @tianhaox
 /src/aiconfigurator/sdk/inference_session.py @tianhaox @xutizhou @AichenF
@@ -26,7 +26,7 @@
 /src/aiconfigurator/eval @Ethan-ES @tianhaox
 
 # webapp
-/src/aiconfigurator/webapp @xueh-nv @tianhaox
+/src/aiconfigurator/webapp @tianhaox @Arsene12358
 
 # systems & data files
 /src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen
@@ -43,7 +43,7 @@
 /collector/sglang @xutizhou @AichenF
 /collector/slurm_comm_collector @YijiaZhao
 /collector/trtllm @Arsene12358 @YijiaZhao
-/collector/vllm @jasonqinzhou @ilyasher
+/collector/vllm @jasonqinzhou @ilyasher @davilu-nvidia
 /collector/collect_all_reduce.py @Arsene12358 @YijiaZhao
 /collector/collect_comm.sh @Arsene12358
 /collector/collect_nccl.py @YijiaZhao
@@ -56,7 +56,7 @@
 /docs/add_a_new_model.md @Arsene12358 @tianhaox
 /docs/advanced_tunning.md @tianhaox @jasonqinzhou
 /docs/cli_user_guide.md @tianhaox @jasonqinzhou
-/docs/dynamo_deployment_guide.md @Ethan-ES @davilu
+/docs/dynamo_deployment_guide.md @Ethan-ES @davilu-nvidia
 
 # docker
 /docker @jasonqinzhou @anish-shanbhag @ilyasher @saturley-hall
