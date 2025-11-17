@@ -1,0 +1,85 @@
+# See https://help.github.com/articles/about-codeowners/
+# for more info about CODEOWNERS file
+
+# aic sdk
+/src @tianhaox @jasonqinzhou
+/src/aiconfigurator/sdk/backends/base_backend.py @tianhaox @Arsene12358
+/src/aiconfigurator/sdk/backends/factory.py @tianhaox @jasonqinzhou
+/src/aiconfigurator/sdk/backends/sglang_backend.py @xutizhou @AichenF @jasonqinzhou
+/src/aiconfigurator/sdk/backends/trtllm_backend.py @tianhaox @jasonqinzhou @ilyasher
+/src/aiconfigurator/sdk/backends/vllm_backend.py @jasonqinzhou @ilyasher
+/src/aiconfigurator/sdk/common.py @Arsene12358 @simone-chen @xutizhou @AichenF @jasonqinzhou
+/src/aiconfigurator/sdk/config.py @YijiaZhao @tianhaox
+/src/aiconfigurator/sdk/inference_session.py @tianhaox @xutizhou @AichenF
+/src/aiconfigurator/sdk/inference_summary.py @tianhaox @jasonqinzhou
+/src/aiconfigurator/sdk/models.py @Arsene12358 @simone-chen @xutizhou @AichenF @YijiaZhao
+/src/aiconfigurator/sdk/operations.py @Arsene12358 @xutizhou @AichenF @YijiaZhao
+/src/aiconfigurator/sdk/pareto_analysis.py @xutizhou @AichenF @Arsene12358
+/src/aiconfigurator/sdk/perf_database.py @Arsene12358 @YijiaZhao @ilyasher @xutizhou @AichenF
+/src/aiconfigurator/sdk/task.py @tianhaox @jasonqinzhou @ilyasher
+/src/aiconfigurator/sdk/utils.py @tianhaox @jasonqinzhou @simone-chen
+
+# cli
+/src/aiconfigurator/cli @Ethan-ES @tianhaox
+
+# eval
+/src/aiconfigurator/eval @Ethan-ES @tianhaox
+
+# webapp
+/src/aiconfigurator/webapp @xueh-nv @tianhaox
+
+# systems & data files
+/src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen
+
+# model configs
+/src/aiconfigurator/model_configs @simone-chen
+
+# generator
+/src/aiconfigurator/generator @Ethan-ES @tianhaox
+
+# collector
+/collector/ @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358
+/collector/deep_collector @xutizhou @AichenF
+/collector/sglang @xutizhou @AichenF
+/collector/slurm_comm_collector @YijiaZhao
+/collector/trtllm @Arsene12358 @YijiaZhao
+/collector/vllm @jasonqinzhou @ilyasher
+/collector/collect_all_reduce.py @Arsene12358 @YijiaZhao
+/collector/collect_comm.sh @Arsene12358
+/collector/collect_nccl.py @YijiaZhao
+/collector/collect.py @Arsene12358 @YijiaZhao
+/collector/helper.py @Arsene12358 @YijiaZhao @xutizhou @AichenF
+/collector/README.md @Arsene12358 @YijiaZhao
+
+# docs
+/docs @tianhaox @jasonqinzhou
+/docs/add_a_new_model.md @Arsene12358 @tianhaox
+/docs/advanced_tunning.md @tianhaox @jasonqinzhou
+/docs/cli_user_guide.md @tianhaox @jasonqinzhou
+/docs/dynamo_deployment_guide.md @Ethan-ES @davilu
+
+# docker
+/docker @jasonqinzhou @anish-shanbhag @ilyasher @saturley-hall
+
+# tests
+/tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @saturley-hall
+
+# tools
+/tools/automation @tianhaox @Ethan-ES
+/tools/sanity_check @tianhaox @YijiaZhao
+/tools/simple_sdk_demo @tianhaox @jasonqinzhou
+
+# misc
+/ATTRIBUTIONS.md @saturley-hall
+/CODE_OF_CONDUCT.md @saturley-hall
+/CONTRIBUTING.md @saturley-hall
+/DEVELOPMENT.md @saturley-hall @anish-shanbhag
+/LICENSE @saturley-hall
+/pyproject.toml @tianhaox @jasonqinzhou @saturley-hall @Arsene12358
+/pytest.ini @saturley-hall
+/README.md @tianhaox @jasonqinzhou @Arsene12358
+/SECURITY.md @saturley-hall
+/.pre-commit-config.yaml @saturley-hall
+
+# CI/CD and workflows
+/.github/workflows @saturley-hall @tianhaox
