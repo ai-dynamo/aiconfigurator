@@ -1,0 +1,67 @@
+name: Random Review Assignment
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/CODEOWNERS
+          sparse-checkout-cone-mode: false
+      
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            // Get already requested reviewers
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number
+            });
+            
+            const existingReviewers = pullRequest.requested_reviewers.map(r => r.login);
+            console.log(`Already assigned: ${existingReviewers.join(', ')}`);
+            
+            // Parse CODEOWNERS for all @mentions
+            const content = fs.readFileSync('.github/CODEOWNERS', 'utf8');
+            const mentions = content.match(/@[\w-]+/g) || [];
+            const allReviewers = [...new Set(mentions.map(m => m.substring(1)))];
+            
+            // Filter out PR author and already assigned reviewers
+            const author = context.payload.pull_request.user.login;
+            const eligible = allReviewers.filter(r => 
+              r !== author && !existingReviewers.includes(r)
+            );
+            
+            // Pick one additional reviewer
+            const needToAdd = 1;
+            
+            if (needToAdd > 0 && eligible.length > 0) {
+              // Randomly select only the additional reviewers needed
+              const selected = eligible
+                .sort(() => Math.random() - 0.5)
+                .slice(0, Math.min(needToAdd, eligible.length));
+              
+              await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                reviewers: selected
+              });
+              
+              console.log(`Added ${selected.join(', ')} to reach ${targetTotal} total reviewers`);
+            } else {
+              console.log(`Already have ${existingReviewers.length} reviewers, no need to add more`);
+            }
