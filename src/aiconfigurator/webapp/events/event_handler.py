@@ -372,12 +372,8 @@ class EventHandler:
 
     # common events
     @staticmethod
-    def setup_common_events(
-        model_name_components,
-        model_system_components,
-        model_quant_components,
-        model_misc_config_components,
-    ):
+    def setup_system_events(model_name_components, model_system_components):
+        """Setup events for system/backend/version dropdowns - reusable across tabs"""
         model_name_components["model_name"].change(
             fn=EventFn.update_system_value,
             inputs=[model_name_components["model_name"]],
@@ -395,6 +391,15 @@ class EventHandler:
             inputs=[model_system_components["system"], model_system_components["backend"]],
             outputs=[model_system_components["version"]],
         )
+
+    @staticmethod
+    def setup_common_events(
+        model_name_components,
+        model_system_components,
+        model_quant_components,
+        model_misc_config_components,
+    ):
+        EventHandler.setup_system_events(model_name_components, model_system_components)
 
         model_system_components["version"].change(
             fn=EventFn.update_quant_mode_choices,
@@ -449,4 +454,11 @@ class EventHandler:
                 model_parallel_components["moe_ep_size"],
                 model_parallel_components["dp_size"],
             ],
+        )
+
+    @staticmethod
+    def setup_profiling_events(components):
+        EventHandler.setup_system_events(
+            components["model_name_components"],
+            components["model_system_components"],
         )

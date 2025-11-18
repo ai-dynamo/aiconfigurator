@@ -4,6 +4,7 @@
 import argparse
 import logging
 from collections import defaultdict
+from pathlib import Path
 
 import gradio as gr
 
@@ -13,6 +14,7 @@ from aiconfigurator.webapp.components.agg_tab import create_agg_tab
 from aiconfigurator.webapp.components.disagg_pareto_tab import create_disagg_pareto_tab
 from aiconfigurator.webapp.components.disagg_pd_ratio_tab import create_disagg_pd_ratio_tab
 from aiconfigurator.webapp.components.pareto_comparison_tab import create_pareto_comparison_tab
+from aiconfigurator.webapp.components.profiling.create_profiling_tab import create_profiling_tab
 from aiconfigurator.webapp.components.readme_tab import create_readme_tab
 from aiconfigurator.webapp.components.static_tab import create_static_tab
 from aiconfigurator.webapp.events.event_handler import EventHandler
@@ -28,6 +30,22 @@ def configure_parser(parser):
     parser.add_argument("--enable_disagg_pd_ratio", action="store_true", help="Enable Disagg PD Ratio tab")
     parser.add_argument("--debug", help="Debug mode", action="store_true")
     parser.add_argument("--experimental", help="enable experimental features", action="store_true")
+
+
+def load_profiling_javascript():
+    """
+    Load custom JavaScript for profiling plot interactivity.
+
+    Returns:
+        str or None: JavaScript code wrapped in Gradio format, or None if file not found
+    """
+    webapp_dir = Path(__file__).parent
+    utils_js_path = webapp_dir / "components" / "profiling" / "utils.js"
+
+    if utils_js_path.exists():
+        with open(utils_js_path) as f:
+            return f"()=>{{{f.read()}}}"
+    return None
 
 
 def main(args):
@@ -54,6 +72,9 @@ def main(args):
             datefmt="%m-%d %H:%M:%S",
         )
 
+    # Load custom JavaScript for profiling plot interactivity
+    custom_js = load_profiling_javascript()
+
     with gr.Blocks(
         css="""
         .config-column {
@@ -63,7 +84,8 @@ def main(args):
         .config-column:last-child {
             border-right: none;
         }
-    """
+    """,
+        js=custom_js,
     ) as demo:
         pareto_results_state = gr.State(defaultdict())
 
@@ -99,6 +121,7 @@ def main(args):
             if app_config["enable_disagg_pd_ratio"]:
                 disagg_pd_ratio_components = create_disagg_pd_ratio_tab(app_config)
             pareto_comparison_components = create_pareto_comparison_tab(app_config)
+            profiling_components = create_profiling_tab(app_config)
 
         # setup events
         EventHandler.setup_static_events(static_components)
@@ -123,6 +146,7 @@ def main(args):
         if app_config["enable_disagg_pd_ratio"]:
             EventHandler.setup_disagg_pd_ratio_events(disagg_pd_ratio_components)
         EventHandler.setup_pareto_comparison_events(pareto_comparison_components, pareto_results_state)
+        EventHandler.setup_profiling_events(profiling_components)
 
         demo.launch(server_name=args.server_name, server_port=args.server_port)
 
