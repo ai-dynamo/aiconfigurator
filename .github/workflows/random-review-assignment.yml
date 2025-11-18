@@ -34,10 +34,30 @@ jobs:
             const existingReviewers = pullRequest.requested_reviewers.map(r => r.login);
             console.log(`Already assigned: ${existingReviewers.join(', ')}`);
             
-            // Parse CODEOWNERS for all @mentions
+            // Parse CODEOWNERS for all @mentions (both users and teams)
             const content = fs.readFileSync('.github/CODEOWNERS', 'utf8');
-            const mentions = content.match(/@[\w-]+/g) || [];
-            const allReviewers = [...new Set(mentions.map(m => m.substring(1)))];
+            const userMentions = content.match(/@[\w-]+(?!\/)/g) || [];
+            const teamMentions = content.match(/@[\w-]+\/[\w-]+/g) || [];
+            
+            let allReviewers = [...new Set(userMentions.map(m => m.substring(1)))];
+            
+            // Expand team mentions to get individual members
+            for (const teamMention of [...new Set(teamMentions)]) {
+              const [org, team] = teamMention.substring(1).split('/');
+              try {
+                const { data: members } = await github.rest.teams.listMembersInOrg({
+                  org: org,
+                  team_slug: team,
+                  per_page: 100
+                });
+                allReviewers.push(...members.map(m => m.login));
+              } catch (error) {
+                console.log(`Warning: Could not fetch team ${teamMention}: ${error.message}`);
+              }
+            }
+            
+            // Remove duplicates
+            allReviewers = [...new Set(allReviewers)];
             
             // Filter out PR author and already assigned reviewers
             const author = context.payload.pull_request.user.login;
@@ -61,7 +81,7 @@ jobs:
                 reviewers: selected
               });
               
-              console.log(`Added ${selected.join(', ')} to reach ${targetTotal} total reviewers`);
+              console.log(`✅ Added reviewer: ${selected[0]}`);
             } else {
-              console.log(`Already have ${existingReviewers.length} reviewers, no need to add more`);
+              console.log(`⚠️ No eligible reviewers available to add`);
             }

@@ -82,4 +82,4 @@
 /.pre-commit-config.yaml @saturley-hall
 
 # CI/CD and workflows
-/.github/workflows @saturley-hall @tianhaox
+/.github/workflows @saturley-hall @tianhaox @jasonqinzhou
