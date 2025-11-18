@@ -27,8 +27,9 @@ Let's run `aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system
     Best Experiment Chosen: disagg at 913.82 tokens/s/gpu (1.43x better)
   ----------------------------------------------------------------------------
   Overall Best Configuration:
-    - Best Throughput: 913.82 tokens/s/gpu
-    - User Throughput: 123.92 tokens/s/user
+    - Best Throughput: 29,242.24 tokens/s
+    - Per-GPU Throughput: 913.82 tokens/s/gpu
+    - Per-User Throughput: 123.92 tokens/s/user
     - TTFT: 202.65ms
     - TPOT: 8.07ms
 ```

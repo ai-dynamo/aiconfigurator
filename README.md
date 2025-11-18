@@ -86,8 +86,9 @@ aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm -
     Best Experiment Chosen: disagg at 804.83 tokens/s/gpu (disagg 1.64x better)
   ----------------------------------------------------------------------------
   Overall Best Configuration:
-    - Best Throughput: 804.83 tokens/s/gpu
-    - User Throughput: 109.13 tokens/s/user
+    - Best Throughput: 25,754.50 tokens/s
+    - Per-GPU Throughput: 804.83 tokens/s/gpu
+    - Per-User Throughput: 109.13 tokens/s/user
     - TTFT: 486.53ms
     - TPOT: 9.16ms
   ----------------------------------------------------------------------------
