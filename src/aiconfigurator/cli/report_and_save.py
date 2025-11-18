@@ -233,10 +233,11 @@ def log_final_summary(
     best_config_df = best_configs[chosen_exp]
     best_throughput = best_throughputs[chosen_exp]
 
-    summary_box.append(f"    - Best Throughput: {best_throughput:.2f} tokens/s/gpu")
+    summary_box.append(f"    - Best Throughput: {best_throughput * task_configs[chosen_exp].total_gpus:,.2f} tokens/s")
+    summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
     if not best_config_df.empty:
         best_conf_details = best_config_df.iloc[0]
-        summary_box.append(f"    - User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
+        summary_box.append(f"    - Per-User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
     summary_box.append("  " + "-" * 76)
