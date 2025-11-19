@@ -1,6 +1,9 @@
 # See https://help.github.com/articles/about-codeowners/
 # for more info about CODEOWNERS file
 
+# Default ownership for entire repository
+* @ai-dynamo/contributors-aiconfigurator
+
 # aic sdk
 /src @tianhaox @jasonqinzhou
 /src/aiconfigurator/sdk/backends/base_backend.py @tianhaox @Arsene12358
