@@ -79,13 +79,8 @@ class BaseBackend(ABC):
             batch_size = batch_size * (model._nextn + 1)
 
             generation_latency_dict = defaultdict(float)
-            cached_latency_dict = None
-            for i in range(osl - 1):
-                if i % stride != 0:
-                    for key, value in cached_latency_dict.items():
-                        generation_latency_dict[key] += value
-                    continue
 
+            for i in range(0, osl - 1, stride):
                 latency_dict = defaultdict(float)
                 for op in model.generation_ops:
                     latency = op.query(
@@ -96,10 +91,12 @@ class BaseBackend(ABC):
                         s=isl + i + 1,
                     )
                     latency_dict[op._name] += latency
-                cached_latency_dict = latency_dict
 
-                for key, value in latency_dict.items():
-                    generation_latency_dict[key] += value
+                # usually stride, but might be less at the end
+                repeat_count = min(stride, osl - 1 - i)
+
+                for op, latency in latency_dict.items():
+                    generation_latency_dict[op] += latency * repeat_count
 
             return generation_latency_dict
 
