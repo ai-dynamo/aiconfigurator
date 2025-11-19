@@ -49,6 +49,9 @@ class InferenceSummary:
         # summary dataframe
         self._summary_df = None
 
+        # cached result dict for efficient batch operations
+        self._result_dict = None
+
     def set_memory_and_check_oom(self, memory_dict: dict, mem_capacity: int) -> None:
         """
         Set memory and check oom.
@@ -151,3 +154,22 @@ class InferenceSummary:
         if self._summary_df is None:
             logger.warning("WARNING: summary df is not set")
         return self._summary_df
+
+    def set_result_dict(self, result_dict: dict) -> None:
+        """
+        Set the cached result dict for efficient batch operations.
+        """
+        self._result_dict = result_dict
+
+    def get_result_dict(self) -> dict | None:
+        """
+        Get the result as a dict. Returns cached dict if available,
+        otherwise extracts from the first row of the summary DataFrame.
+        """
+        if self._result_dict is not None:
+            return self._result_dict
+
+        # Fallback: create from DataFrame if not cached
+        if self._summary_df is not None and len(self._summary_df) > 0:
+            return self._summary_df.iloc[0].to_dict()
+        return None
