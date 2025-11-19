@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -79,11 +78,12 @@ class BaseBackend(ABC):
             # mtp/speculative decoding correction
             batch_size = batch_size * (model._nextn + 1)
 
-            latencies = []
+            generation_latency_dict = defaultdict(float)
             cached_latency_dict = None
             for i in range(osl - 1):
                 if i % stride != 0:
-                    latencies.append(copy.deepcopy(cached_latency_dict))
+                    for key, value in cached_latency_dict.items():
+                        generation_latency_dict[key] += value
                     continue
 
                 latency_dict = defaultdict(float)
@@ -98,14 +98,8 @@ class BaseBackend(ABC):
                     latency_dict[op._name] += latency
                 cached_latency_dict = latency_dict
 
-                latencies.append(latency_dict)
-
-            generation_latency_dict = {}
-            if len(latencies) > 0:
-                for key in latencies[0]:
-                    generation_latency_dict[key] = 0.0
-                    for latency_dict in latencies:
-                        generation_latency_dict[key] += latency_dict[key]
+                for key, value in latency_dict.items():
+                    generation_latency_dict[key] += value
 
             return generation_latency_dict
 
