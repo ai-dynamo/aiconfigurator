@@ -11,9 +11,7 @@ import os
 from collections import defaultdict
 from typing import Optional
 
-import numpy as np
 import yaml
-from scipy import interpolate
 
 from aiconfigurator.sdk import common
 
@@ -1819,47 +1817,61 @@ class PerfDatabase:
         """
         Interpolate the 3d data using linear interpolation
         """
-        points_list = []
-        values_list = []
+        # Find bounding cube corners
         x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
-        for i in [x_left, x_right]:
-            y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
-            for j in [y_left, y_right]:
-                z_left, z_right = self._nearest_1d_point_helper(z, list(data[i][j].keys()))
-                points_list.append([i, j, z_left])
-                points_list.append([i, j, z_right])
-                values_list.append(data[i][j][z_left])
-                values_list.append(data[i][j][z_right])
+        y_left, y_right = self._nearest_1d_point_helper(y, list(data[x_left].keys()))
+        z_left, z_right = self._nearest_1d_point_helper(z, list(data[x_left][y_left].keys()))
 
-        return self._validate(
-            interpolate.griddata(np.array(points_list), np.array(values_list), (x, y, z), method="linear")
-        )
+        # Get 8 corner values of the cube
+        c000 = data[x_left][y_left][z_left]
+        c001 = data[x_left][y_left][z_right]
+        c010 = data[x_left][y_right][z_left]
+        c011 = data[x_left][y_right][z_right]
+        c100 = data[x_right][y_left][z_left]
+        c101 = data[x_right][y_left][z_right]
+        c110 = data[x_right][y_right][z_left]
+        c111 = data[x_right][y_right][z_right]
+
+        # Normalize coordinates to [0,1]
+        xd = (x - x_left) / (x_right - x_left) if x_right != x_left else 0.0
+        yd = (y - y_left) / (y_right - y_left) if y_right != y_left else 0.0
+        zd = (z - z_left) / (z_right - z_left) if z_right != z_left else 0.0
+
+        # First interpolate along x
+        c00 = c000 * (1 - xd) + c100 * xd
+        c01 = c001 * (1 - xd) + c101 * xd
+        c10 = c010 * (1 - xd) + c110 * xd
+        c11 = c011 * (1 - xd) + c111 * xd
+
+        # Then interpolate along y
+        c0 = c00 * (1 - yd) + c10 * yd
+        c1 = c01 * (1 - yd) + c11 * yd
+
+        # Finally interpolate along z
+        result = c0 * (1 - zd) + c1 * zd
+
+        return self._validate(result)
 
     def _interp_2d_linear(self, x: int, y: int, data: dict) -> float:
         """
-        Interpolate the 3d data using linear interpolation
+        Interpolate the 2d data using linear interpolation
         """
-        points_list = []
-        values_list = []
+        # Find bounding rectangle corners
         x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
-        for i in [x_left, x_right]:
-            y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
-            for j in [y_left, y_right]:
-                points_list.append([i, j])
-                values_list.append(data[i][j])
+        y_left, y_right = self._nearest_1d_point_helper(y, list(data[x_left].keys()))
 
-        return self._validate(
-            interpolate.griddata(np.array(points_list), np.array(values_list), (x, y), method="linear")
-        )
+        return self._validate(self._bilinear_interpolation([x_left, x_right], [y_left, y_right], x, y, data))
 
-    def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str) -> float:
+    def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str = "bilinear") -> float:
         """
         Interpolate the 3d data using the given method
         """
         if method == "linear":
             return self._interp_3d_linear(x, y, z, data)
+        elif method == "bilinear":
+            return self._interp_2d_1d(x, y, z, data)
         else:
-            return self._interp_2d_1d(x, y, z, data, method)
+            raise NotImplementedError(f"Invalid method: {method}")
 
     def _bilinear_interpolation(self, x_list: list[int], y_list: list[int], x: int, y: int, data: dict) -> float:
         """
@@ -1880,35 +1892,21 @@ class PerfDatabase:
         interpolated_value = (f_x1_y1 + f_x1_y2 + f_x2_y1 + f_x2_y2) / total_weight
         return interpolated_value
 
-    def _interp_2d_1d(self, x: int, y: int, z: int, data: dict, method="bilinear") -> float:
+    def _interp_2d_1d(self, x: int, y: int, z: int, data: dict) -> float:
         """
-        Interpolate the 3d data using the given method, 2d after 1d.
+        Interpolate the 3d data using bilinear interpolation on 2d slices, then 1d interpolation.
         """
         x_values = []
         x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
 
         for i in [x_left, x_right]:
-            points_list = []
-            values_list = []
             y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
-            for j in [y_left, y_right]:
-                z_left, z_right = self._nearest_1d_point_helper(z, list(data[i][j].keys()))
-                points_list.append([j, z_left])
-                points_list.append([j, z_right])
-                values_list.append(data[i][j][z_left])
-                values_list.append(data[i][j][z_right])
-            if method == "cubic":
-                x_values.append(
-                    self._validate(
-                        interpolate.griddata(np.array(points_list), np.array(values_list), (y, z), method="cubic")
-                    )
-                )
-            elif method == "bilinear":
-                x_values.append(
-                    self._validate(self._bilinear_interpolation([y_left, y_right], [z_left, z_right], y, z, data[i]))
-                )
-            else:
-                raise NotImplementedError
+            z_left, z_right = self._nearest_1d_point_helper(z, list(data[i][y_left].keys()))
+
+            # Use bilinear interpolation on the 2D (y,z) slice
+            x_values.append(
+                self._validate(self._bilinear_interpolation([y_left, y_right], [z_left, z_right], y, z, data[i]))
+            )
 
         return self._validate(self._interp_1d([x_left, x_right], x_values, x))
 
@@ -1966,7 +1964,7 @@ class PerfDatabase:
         elif sol_mode == common.SOLMode.SOL_FULL:
             return get_sol(m, n, k, quant_mode)
         else:
-            result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
+            result = self._interp_3d(m, n, k, self._gemm_data[quant_mode])
             return result
 
     def query_context_attention(
@@ -2040,7 +2038,7 @@ class PerfDatabase:
             attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
                 window_size
             ]
-            latency = self._interp_3d(n, full_s, b, attention_dict, "cubic") * prefix_correction
+            latency = self._interp_3d(n, full_s, b, attention_dict) * prefix_correction
             return latency
 
     def query_generation_attention(
@@ -2106,7 +2104,7 @@ class PerfDatabase:
                 n_kv = 0
 
             attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
-            latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
+            latency = self._interp_3d(n, b, s, attention_dict)
             return latency
 
     def query_context_mla(
@@ -2155,7 +2153,7 @@ class PerfDatabase:
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
             mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
-            latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
+            latency = self._interp_3d(num_heads, full_s, b, mla_dict) * prefix_correction
             return latency
 
     def query_generation_mla(
@@ -2195,7 +2193,7 @@ class PerfDatabase:
             return get_sol(b, s, num_heads, kvcache_quant_mode)
         else:
             mla_dict = self._generation_mla_data[kvcache_quant_mode]
-            latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            latency = self._interp_3d(num_heads, b, s, mla_dict)
             return latency
 
     def query_wideep_generation_mla(
@@ -2297,7 +2295,7 @@ class PerfDatabase:
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
             mla_dict = attn_data[kvcache_quant_mode]
-            latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            latency = self._interp_3d(num_heads, b, s, mla_dict)
             return latency
 
     def query_wideep_context_mla(
@@ -2396,7 +2394,7 @@ class PerfDatabase:
             mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
             full_s = s + prefix
             prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
+            latency = self._interp_3d(num_heads, full_s, b, mla_dict) * prefix_correction
             return latency
 
     # to simplify, we no longer support allreduce_strategy

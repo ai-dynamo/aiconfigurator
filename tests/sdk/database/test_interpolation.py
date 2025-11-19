@@ -143,16 +143,8 @@ class TestInterpolationMethods:
                     data[x][y][z] = x * 0.1 + y * 0.2 + z * 0.3
 
         # Test bilinear method
-        result_bilinear = comprehensive_perf_db._interp_2d_1d(15, 35, 55, data, method="bilinear")
-        assert result_bilinear > 0
-
-        # Test cubic method (if scipy is available)
-        result_cubic = comprehensive_perf_db._interp_2d_1d(15, 35, 55, data, method="cubic")
-        assert result_cubic > 0
-
-        # Invalid method should raise error
-        with pytest.raises(NotImplementedError):
-            comprehensive_perf_db._interp_2d_1d(15, 35, 55, data, method="invalid")
+        result = comprehensive_perf_db._interp_2d_1d(15, 35, 55, data)
+        assert result > 0
 
     def test_interp_3d(self, comprehensive_perf_db):
         """Test general 3D interpolation dispatcher."""
@@ -166,9 +158,9 @@ class TestInterpolationMethods:
         result_linear = comprehensive_perf_db._interp_3d(15, 35, 55, data, "linear")
         assert result_linear > 0
 
-        # Test fallback to 2D-1D
-        result_bilinear = comprehensive_perf_db._interp_3d(15, 35, 55, data, "bilinear")
-        assert result_bilinear > 0
+        # Test default 2D-1D bilinear interpolation
+        result = comprehensive_perf_db._interp_3d(15, 35, 55, data)
+        assert result > 0
 
 
 class TestExtrapolateDataGrid:

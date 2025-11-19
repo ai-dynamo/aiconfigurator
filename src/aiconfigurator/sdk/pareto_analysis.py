@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotext
-from scipy.interpolate import interp1d
 
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.backends.factory import get_backend
@@ -442,11 +441,7 @@ def interpolate_throughput_at_tpot(df: pd.DataFrame | None, target_tpot: float) 
     # Sort by tokens/s/user for interpolation
     df_sorted = df_filtered.sort_values(by="tokens/s/user")
 
-    # Create interpolation functions
-    # If target_tpot is outside the range, interp1d will extrapolate or error depending on
-    # fill_value
-    # Using fill_value="extrapolate" can be risky.
-    # It's often better to clamp to the nearest value if outside the range.
+    # Check bounds
     min_tps_user, max_tps_user = df_sorted["tokens/s/user"].min(), df_sorted["tokens/s/user"].max()
 
     if target_tps_user < min_tps_user:
@@ -454,14 +449,9 @@ def interpolate_throughput_at_tpot(df: pd.DataFrame | None, target_tpot: float) 
     if target_tps_user > max_tps_user:
         return 0.0  # cannot meet the target tps_user
 
-    interp_func = interp1d(
-        df_sorted["tokens/s/user"],
-        df_sorted["tokens/s/gpu"],
-        kind="linear",
-        fill_value="extrapolate",
+    interpolated_throughput = float(
+        np.interp(target_tps_user, df_sorted["tokens/s/user"].values, df_sorted["tokens/s/gpu"].values)
     )
-
-    interpolated_throughput = float(interp_func(target_tps_user))
     return max(0.0, interpolated_throughput)  # Ensure non-negative throughput
 
 

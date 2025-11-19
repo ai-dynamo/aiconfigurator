@@ -53,7 +53,6 @@ dependencies = [
     "prettytable>=3.16.0",
     "pydantic~=2.11.4",
     "pyyaml>=6.0",
-    "scipy>=1.13.1",
     "uvicorn>=0.34.2",
     "bokeh",
     "nvidia-ml-py",

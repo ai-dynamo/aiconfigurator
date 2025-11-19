@@ -91,7 +91,7 @@ Tests for interpolation helper methods:
   - `_interp_1d()` - linear interpolation
   - `_bilinear_interpolation()` - 2D interpolation
   - `_interp_3d_linear()` - 3D linear interpolation
-  - `_interp_2d_1d()` - bilinear/cubic methods
+  - `_interp_2d_1d()` - bilinear interpolation
   - `_interp_3d()` - dispatcher method
 - **TestExtrapolateDataGrid**:
   - Basic extrapolation functionality
