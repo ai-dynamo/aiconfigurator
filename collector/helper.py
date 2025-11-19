@@ -294,28 +294,41 @@ def get_dtype_size(dtype: str) -> float:
     return DTYPE_SIZES[dtype_lower]
 
 
+def _get_system_file_for_device(device_name: str) -> str:
+    """Map GPU device name to system YAML filename.
+    
+    Args:
+        device_name: GPU device name
+        
+    Returns:
+        System YAML filename
+        
+    Raises:
+        ValueError: If GPU is not supported
+    """
+    device_upper = device_name.upper()
+    gpu_mappings = {
+        "H200": "h200_sxm.yaml",
+        "H100": "h100_sxm.yaml",
+        "A100": "a100_sxm.yaml",
+        "GB200": "gb200_sxm.yaml",  # Check GB200 before B200
+        "B200": "b200_sxm.yaml",
+    }
+    
+    for prefix, filename in gpu_mappings.items():
+        if prefix in device_upper:
+            return filename
+    
+    raise ValueError(f"Unsupported GPU: {device_name}")
+
+
 def get_gpu_specs_from_device(device_name: str) -> dict:
     """Load GPU specifications from system YAML files.
 
     Dictionary keys are float16_tflops, fp8_tflops, int8_tflops, mem_bw_gbs, power_max.
     Keys follow system YAML files, except for power_max (which is just 'power' in YAML).
     """
-    # Map device name to system file
-    device_upper = device_name.upper()
-    if "H100" in device_upper:
-        system_file = "h100_sxm.yaml"
-    elif "H200" in device_upper:
-        system_file = "h200_sxm.yaml"
-    elif "A100" in device_upper:
-        system_file = "a100_sxm.yaml"
-    elif "B200" in device_upper:
-        system_file = "b200_sxm.yaml"
-    elif "GB200" in device_upper:
-        system_file = "gb200_sxm.yaml"
-    else:
-        raise ValueError(f"Unsupported GPU: {device_name}")
-
-    # Load system YAML
+    system_file = _get_system_file_for_device(device_name)
     systems_dir = pkg_resources.files("aiconfigurator") / "systems"
     yaml_path = systems_dir / system_file
 
@@ -394,20 +407,7 @@ def get_system_spec_from_device(device_name: str) -> dict:
     Returns:
         Full system_spec dict with 'gpu' key
     """
-    device_upper = device_name.upper()
-    if "H100" in device_upper:
-        system_file = "h100_sxm.yaml"
-    elif "H200" in device_upper:
-        system_file = "h200_sxm.yaml"
-    elif "A100" in device_upper:
-        system_file = "a100_sxm.yaml"
-    elif "B200" in device_upper:
-        system_file = "b200_sxm.yaml"
-    elif "GB200" in device_upper:
-        system_file = "gb200_sxm.yaml"
-    else:
-        raise ValueError(f"Unsupported GPU: {device_name}")
-
+    system_file = _get_system_file_for_device(device_name)
     systems_dir = pkg_resources.files("aiconfigurator") / "systems"
     yaml_path = systems_dir / system_file
 
