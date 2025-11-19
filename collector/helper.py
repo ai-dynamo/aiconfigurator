@@ -334,7 +334,7 @@ def get_gpu_specs_from_device(device_name: str) -> dict:
 
 
 def measure_kernel_power(
-    zeus_monitor,
+    power_monitor,
     kernel_fn,
     num_warmum_iters,
     target_duration_sec,
@@ -343,7 +343,7 @@ def measure_kernel_power(
     Measure power for a memory-bound kernel by running for target_duration.
 
     Args:
-        zeus_monitor: ZeusMonitor instance
+        power_monitor: NVMLPowerMonitor instance
         kernel_fn: Kernel invocation function
         num_warmum_iters: Number of warmup iterations
         target_duration_sec: Target duration for measurement (seconds)
@@ -365,7 +365,7 @@ def measure_kernel_power(
     expected_kernel_latency = start_event.elapsed_time(end_event) / 1000  # seconds
     num_benchmark_iters = max(1, int(target_duration_sec / expected_kernel_latency))
 
-    zeus_monitor.begin_window("kernel_benchmark", sync_execution=False)
+    power_monitor.begin_window("kernel_benchmark", sync_execution=False)
 
     start_event.record()
     for _ in range(num_benchmark_iters):
@@ -373,7 +373,7 @@ def measure_kernel_power(
     end_event.record()
     torch.cuda.synchronize()
 
-    measurement = zeus_monitor.end_window("kernel_benchmark", sync_execution=False)
+    measurement = power_monitor.end_window("kernel_benchmark", sync_execution=False)
 
     # Calculate metrics
     total_time_ms = start_event.elapsed_time(end_event)

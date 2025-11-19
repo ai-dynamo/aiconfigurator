@@ -14,7 +14,7 @@ def nccl_benchmark(
     nccl_op: str = "all_gather",
     test_range: str = "10,10000000,1000",
     num_gpus: int = 8,
-    zeus_monitor=None,
+    power_monitor=None,
     measure_power=False,
 ):
     """
@@ -25,7 +25,7 @@ def nccl_benchmark(
         nccl_op: NCCL operation type
         test_range: Size range (min,max,ratio)
         num_gpus: Number of GPUs
-        zeus_monitor: ZeusMonitor instance (optional)
+        power_monitor: NVMLPowerMonitor instance (optional)
         measure_power: Whether to measure power consumption
     """
     nccl_test_bin = ""
@@ -76,10 +76,10 @@ def nccl_benchmark(
         ]
 
         # Power measurement for communication operations
-        if measure_power and zeus_monitor is not None:
-            zeus_monitor.begin_window("nccl", sync_execution=False)
+        if measure_power and power_monitor is not None:
+            power_monitor.begin_window("nccl", sync_execution=False)
             result = subprocess.run(cmd_args, capture_output=True, text=True)
-            measurement = zeus_monitor.end_window("nccl", sync_execution=False)
+            measurement = power_monitor.end_window("nccl", sync_execution=False)
             power = sum(measurement.gpu_energy[i] for i in range(num_gpus)) / measurement.time
         else:
             result = subprocess.run(cmd_args, capture_output=True, text=True)
@@ -142,10 +142,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    zeus_monitor = None
+    power_monitor = None
     if args.measure_power:
-        from zeus.monitor import ZeusMonitor
+        from nvml_power_monitor import NVMLPowerMonitor
 
-        zeus_monitor = ZeusMonitor(gpu_indices=list(range(args.num_gpus)))
+        power_monitor = NVMLPowerMonitor(gpu_indices=list(range(args.num_gpus)))
 
-    nccl_benchmark(args.dtype, args.nccl_op, args.range, args.num_gpus, zeus_monitor)
+    nccl_benchmark(args.dtype, args.nccl_op, args.range, args.num_gpus, power_monitor, args.measure_power)

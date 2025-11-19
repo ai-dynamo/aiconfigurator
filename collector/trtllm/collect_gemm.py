@@ -125,7 +125,7 @@ def run_gemm(
     k,
     perf_filename,
     device="cuda:0",
-    zeus_monitor=None,
+    power_monitor=None,
     power_limit=None,
     measure_power=False,
     kernel_power_measurement_duration=3.0,
@@ -138,7 +138,7 @@ def run_gemm(
         m, n, k: Matrix dimensions
         perf_filename: Output CSV filename
         device: CUDA device
-        zeus_monitor: ZeusMonitor instance (optional)
+        power_monitor: NVMLPowerMonitor instance (optional)
         power_limit: GPU power limit in Watts (optional)
         measure_power: Whether to measure power consumption
         kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
@@ -225,8 +225,8 @@ def run_gemm(
     compute_bound = is_gemm_compute_bound(m, n, k, gemm_type, device_name)
 
     # Benchmarking
-    if measure_power and zeus_monitor is not None and not compute_bound:
-        latency, power = measure_kernel_power(zeus_monitor, g.replay, num_warmups, kernel_power_measurement_duration)
+    if measure_power and power_monitor is not None and not compute_bound:
+        latency, power = measure_kernel_power(power_monitor, g.replay, num_warmups, kernel_power_measurement_duration)
         latency /= len(op_list)
     else:
         start_event = torch.cuda.Event(enable_timing=True)

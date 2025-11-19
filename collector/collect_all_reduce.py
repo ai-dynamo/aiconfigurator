@@ -74,7 +74,7 @@ def import_trtllm():
 
 
 def benchmark_trtllm_allreduce(
-    dtype: str, test_range: str, world_size: int, rank: int, use_slurm: bool, perf_filename: str
+    dtype: str, test_range: str, world_size: int, rank: int, use_slurm: bool, perf_filename: str, measure_power: bool = False
 ):
     """Benchmark TensorRT-LLM AllReduce implementation"""
     trtllm_mods = import_trtllm()
@@ -91,6 +91,20 @@ def benchmark_trtllm_allreduce(
     torch.cuda.set_device(local_rank)
     trtllm_mods["cudart"].cudaSetDevice(local_rank)
     mapping = trtllm_mods["Mapping"](world_size=world_size, rank=rank, gpus_per_node=gpus_per_node, tp_size=world_size)
+
+    # Initialize NVML power monitor if power measurement is enabled
+    power_monitor = None
+    if measure_power:
+        try:
+            from nvml_power_monitor import NVMLPowerMonitor
+
+            power_monitor = NVMLPowerMonitor(gpu_indices=[local_rank])
+            if rank == 0:
+                print(f"NVML power monitoring enabled on all ranks")
+        except Exception as e:
+            if rank == 0:
+                print(f"Warning: Failed to initialize NVML power monitor: {e}")
+            raise  # Fail if power measurement requested but NVML unavailable
 
     # Parse test range
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
@@ -140,30 +154,61 @@ def benchmark_trtllm_allreduce(
             g.replay()
         torch.cuda.synchronize()
 
-        start_event.record()
-        for i in range(num_runs):
-            g.replay()
-        end_event.record()
-        torch.cuda.synchronize()
+        # Power measurement for AllReduce operations
+        if measure_power and power_monitor is not None:
+            power_monitor.begin_window("allreduce", sync_execution=True)
+            start_event.record()
+            for i in range(num_runs):
+                g.replay()
+            end_event.record()
+            measurement = power_monitor.end_window("allreduce", sync_execution=True)
+            torch.cuda.synchronize()
+            # Calculate average power across this rank
+            power_rank = measurement.gpu_energy[local_rank] / measurement.time
+        else:
+            start_event.record()
+            for i in range(num_runs):
+                g.replay()
+            end_event.record()
+            torch.cuda.synchronize()
+            power_rank = None
 
         latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
 
+        # Collect power data from all ranks if measuring
+        if measure_power and power_rank is not None:
+            # Gather power from all ranks to rank 0
+            power_list = [None] * world_size if rank == 0 else None
+            torch.distributed.all_gather_object(power_list if rank == 0 else [], power_rank)
+            if rank == 0:
+                # Average power across all GPUs
+                avg_power = sum(power_list) / len(power_list)
+            else:
+                avg_power = None
+        else:
+            avg_power = None
+
         if rank == 0 and local_rank == 0:
-            print(f"[TensorRT-LLM] Size: {size}, Latency: {latency:.4f} ms")
+            print(f"[TensorRT-LLM] Size: {size}, Latency: {latency:.4f} ms" + (f", Power: {avg_power:.2f} W" if avg_power is not None else ""))
 
             # Get TensorRT-LLM version
             trtllm_version = tllm.__version__ if hasattr(tllm, "__version__") else "unknown"
 
+            # Build result item
+            item = {
+                "allreduce_dtype": dtype,
+                "num_gpus": world_size,
+                "message_size": size,
+                "latency": latency,
+                "implementation": "trtllm",
+            }
+            
+            if avg_power is not None:
+                item["power"] = avg_power
+                item["compute_bound"] = 0  # Communication is always memory/bandwidth-bound
+
             log_perf(
-                item_list=[
-                    {
-                        "allreduce_dtype": dtype,
-                        "num_gpus": world_size,
-                        "message_size": size,
-                        "latency": latency,
-                        "implementation": "trtllm",
-                    }
-                ],
+                item_list=[item],
                 framework="TRTLLM",
                 version=trtllm_version,
                 device_name=torch.cuda.get_device_name(),
@@ -244,10 +289,24 @@ def setup_vllm_distributed(world_size, rank, use_slurm):
 
 
 def benchmark_vllm_allreduce(
-    dtype: str, test_range: str, world_size: int, rank: int, use_slurm: bool, perf_filename: str
+    dtype: str, test_range: str, world_size: int, rank: int, use_slurm: bool, perf_filename: str, measure_power: bool = False
 ):
     """Benchmark vLLM custom AllReduce backend"""
     vllm_mods, local_rank = setup_vllm_distributed(world_size, rank, use_slurm)
+
+    # Initialize NVML power monitor if power measurement is enabled
+    power_monitor = None
+    if measure_power:
+        try:
+            from nvml_power_monitor import NVMLPowerMonitor
+
+            power_monitor = NVMLPowerMonitor(gpu_indices=[local_rank])
+            if rank == 0:
+                print(f"NVML power monitoring enabled on all ranks")
+        except Exception as e:
+            if rank == 0:
+                print(f"Warning: Failed to initialize NVML power monitor: {e}")
+            raise  # Fail if power measurement requested but NVML unavailable
 
     # Parse test range
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
@@ -303,11 +362,23 @@ def benchmark_vllm_allreduce(
                     graph.replay()
                 torch.cuda.synchronize()
 
-                start_event.record()
-                for i in range(num_runs):
-                    graph.replay()
-                end_event.record()
-                torch.cuda.synchronize()
+                # Power measurement for graph mode
+                if measure_power and power_monitor is not None:
+                    power_monitor.begin_window("allreduce_graph", sync_execution=True)
+                    start_event.record()
+                    for i in range(num_runs):
+                        graph.replay()
+                    end_event.record()
+                    measurement = power_monitor.end_window("allreduce_graph", sync_execution=True)
+                    torch.cuda.synchronize()
+                    power_rank = measurement.gpu_energy[local_rank] / measurement.time
+                else:
+                    start_event.record()
+                    for i in range(num_runs):
+                        graph.replay()
+                    end_event.record()
+                    torch.cuda.synchronize()
+                    power_rank = None
 
             else:
                 # Eager mode
@@ -324,17 +395,43 @@ def benchmark_vllm_allreduce(
                 start_event = torch.cuda.Event(enable_timing=True)
                 end_event = torch.cuda.Event(enable_timing=True)
 
-                start_event.record()
-                for _ in range(num_runs):
-                    for _ in range(repeat_n):
-                        _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
-                end_event.record()
-                torch.cuda.synchronize()
+                # Power measurement for eager mode
+                if measure_power and power_monitor is not None:
+                    power_monitor.begin_window("allreduce_eager", sync_execution=True)
+                    start_event.record()
+                    for _ in range(num_runs):
+                        for _ in range(repeat_n):
+                            _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
+                    end_event.record()
+                    measurement = power_monitor.end_window("allreduce_eager", sync_execution=True)
+                    torch.cuda.synchronize()
+                    power_rank = measurement.gpu_energy[local_rank] / measurement.time
+                else:
+                    start_event.record()
+                    for _ in range(num_runs):
+                        for _ in range(repeat_n):
+                            _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
+                    end_event.record()
+                    torch.cuda.synchronize()
+                    power_rank = None
 
             latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
 
+            # Collect power data from all ranks if measuring
+            if measure_power and power_rank is not None:
+                # Gather power from all ranks to rank 0
+                power_list = [None] * world_size if rank == 0 else None
+                torch.distributed.all_gather_object(power_list if rank == 0 else [], power_rank)
+                if rank == 0:
+                    # Average power across all GPUs
+                    avg_power = sum(power_list) / len(power_list)
+                else:
+                    avg_power = None
+            else:
+                avg_power = None
+
             if rank == 0:
-                print(f"[vLLM-{mode_str}] Size: {size}, Latency: {latency:.4f} ms")
+                print(f"[vLLM-{mode_str}] Size: {size}, Latency: {latency:.4f} ms" + (f", Power: {avg_power:.2f} W" if avg_power is not None else ""))
 
                 # Get vLLM version
                 try:
@@ -344,16 +441,21 @@ def benchmark_vllm_allreduce(
                 except:
                     vllm_version = "unknown"
 
+                # Build result item
+                item = {
+                    "allreduce_dtype": dtype,
+                    "num_gpus": world_size,
+                    "message_size": size,
+                    "latency": latency,
+                    "backend": f"vllm_{mode_str}",
+                }
+
+                if avg_power is not None:
+                    item["power"] = avg_power
+                    item["compute_bound"] = 0  # Communication is always memory/bandwidth-bound
+
                 log_perf(
-                    item_list=[
-                        {
-                            "allreduce_dtype": dtype,
-                            "num_gpus": world_size,
-                            "message_size": size,
-                            "latency": latency,
-                            "backend": f"vllm_{mode_str}",
-                        }
-                    ],
+                    item_list=[item],
                     framework="vLLM",
                     version=vllm_version,
                     device_name=torch.cuda.get_device_name(),
@@ -376,9 +478,10 @@ def allreduce_benchmark(
     perf_filename: str = "custom_allreduce_perf.txt",
     world_size: Optional[int] = None,
     rank: Optional[int] = None,
+    measure_power: bool = False,
 ):
     """
-    CUDA Graph based AllReduce benchmark method supporting multiple backends
+    CUDA Graph based AllReduce benchmark method supporting multiple backends with optional power measurement
     """
     # Setup distributed environment based on backend
     if backend == "trtllm":
@@ -396,7 +499,7 @@ def allreduce_benchmark(
         if world_size == 1:
             raise RuntimeError("Benchmark must run with world_size > 1")
 
-        benchmark_trtllm_allreduce(dtype, test_range, world_size, rank, use_slurm, perf_filename)
+        benchmark_trtllm_allreduce(dtype, test_range, world_size, rank, use_slurm, perf_filename, measure_power)
 
     elif backend == "vllm":
         if use_slurm:
@@ -418,7 +521,7 @@ def allreduce_benchmark(
         if world_size == 1:
             raise RuntimeError("Benchmark must run with world_size > 1")
 
-        benchmark_vllm_allreduce(dtype, test_range, world_size, rank, use_slurm, perf_filename)
+        benchmark_vllm_allreduce(dtype, test_range, world_size, rank, use_slurm, perf_filename, measure_power)
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -445,9 +548,22 @@ if __name__ == "__main__":
     # Additional arguments for vLLM when not using MPI/SLURM
     parser.add_argument("--world-size", default=8, type=int, help="World size for distributed setup (vLLM)")
     parser.add_argument("--rank", default=0, type=int, help="Rank for distributed setup (vLLM)")
+    parser.add_argument(
+        "--measure_power",
+        action="store_true",
+        default=False,
+        help="Enable power measurement during AllReduce benchmark",
+    )
 
     args = parser.parse_args()
 
     allreduce_benchmark(
-        args.backend, args.dtype, args.range, args.use_slurm, args.perf_filename, args.world_size, args.rank
+        args.backend,
+        args.dtype,
+        args.range,
+        args.use_slurm,
+        args.perf_filename,
+        args.world_size,
+        args.rank,
+        args.measure_power,
     )

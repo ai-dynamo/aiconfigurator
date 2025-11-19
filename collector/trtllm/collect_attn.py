@@ -90,7 +90,7 @@ def run_attention_torch(
     is_context_phase,
     perf_filename,
     device="cuda:0",
-    zeus_monitor=None,
+    power_monitor=None,
     power_limit=None,
     measure_power=False,
     kernel_power_measurement_duration=3.0,
@@ -110,7 +110,7 @@ def run_attention_torch(
         is_context_phase: True for context/prefill, False for generation/decode
         perf_filename: Output CSV filename
         device: CUDA device
-        zeus_monitor: ZeusMonitor instance (optional)
+        power_monitor: NVMLPowerMonitor instance (optional)
         power_limit: GPU power limit in Watts (optional)
         measure_power: Whether to measure power consumption
         kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
@@ -316,8 +316,8 @@ def run_attention_torch(
         op_name = "generation_attention"
 
     # Benchmarking
-    if measure_power and zeus_monitor is not None and not compute_bound:
-        latency, power = measure_kernel_power(zeus_monitor, g.replay, warming_up, kernel_power_measurement_duration)
+    if measure_power and power_monitor is not None and not compute_bound:
+        latency, power = measure_kernel_power(power_monitor, g.replay, warming_up, kernel_power_measurement_duration)
     else:
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)

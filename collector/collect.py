@@ -122,17 +122,17 @@ def worker(
     torch.cuda.set_device(device_id)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
-    # Initialize Zeus monitor if power measurement is enabled
-    zeus_monitor = None
+    # Initialize NVML power monitor if power measurement is enabled
+    power_monitor = None
     if measure_power:
         try:
-            from zeus.monitor import ZeusMonitor
+            from nvml_power_monitor import NVMLPowerMonitor
 
-            zeus_monitor = ZeusMonitor(gpu_indices=[device_id])
-            worker_logger.info(f"Zeus power monitoring enabled on device {device_id}")
+            power_monitor = NVMLPowerMonitor(gpu_indices=[device_id])
+            worker_logger.info(f"NVML power monitoring enabled on device {device_id}")
         except Exception:
-            worker_logger.exception("Failed to initialize Zeus")
-            raise  # Fail if power measurement requested but Zeus unavailable
+            worker_logger.exception("Failed to initialize NVML power monitor")
+            raise  # Fail if power measurement requested but NVML unavailable
 
     # Process tasks
     while True:
@@ -157,9 +157,9 @@ def worker(
             # Set power limit if specified
             if power_limit is not None:
                 try:
-                    from zeus.device import get_gpus
+                    from nvml_power_monitor import set_power_management_limit
 
-                    get_gpus().set_power_management_limit(device_id, power_limit)
+                    set_power_management_limit(device_id, power_limit)
                     worker_logger.debug(f"Set power limit to {power_limit}W on device {device_id}")
                 except Exception as e:
                     worker_logger.warning(f"Failed to set power limit: {e}")
@@ -169,7 +169,7 @@ def worker(
                 func(
                     *task,
                     device,
-                    zeus_monitor=zeus_monitor,
+                    power_monitor=power_monitor,
                     power_limit=power_limit,
                     measure_power=measure_power,
                     kernel_power_measurement_duration=kernel_power_measurement_duration,

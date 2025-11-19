@@ -63,14 +63,14 @@ if [[ "$all_reduce_backend" == "trtllm" ]]; then
     for n in "${num_gpus_allreduce[@]}"; do
         echo "Running TRTLLM AllReduce benchmark with $n GPUs using CUDA Graph method"
         mpirun -n "$n" --allow-run-as-root python3 collect_all_reduce.py \
-            --perf-filename "custom_allreduce_perf.txt"
+            --perf-filename "custom_allreduce_perf.txt" ${measure_power:+--measure_power}
     done
 elif [[ "$all_reduce_backend" == "vllm" ]]; then
     # VLLM allreduce implementation
     for n in "${num_gpus_allreduce[@]}"; do
         echo "Running VLLM AllReduce benchmark with $n GPUs"
         torchrun --nproc_per_node=$n collect_all_reduce.py --backend vllm \
-            --perf-filename "custom_allreduce_perf.txt"
+            --perf-filename "custom_allreduce_perf.txt" ${measure_power:+--measure_power}
     done
 fi
 

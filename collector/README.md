@@ -135,7 +135,7 @@ NVML power/energy counters only update once 100 ms, which is significantly longe
 
 ### Requirements
 
-- Zeus (`pip install zeus`) for measurement & GPU power limit control
+- pynvml (`pip install nvidia-ml-py`, already included in aiconfigurator dependencies) for measurement & GPU power limit control
 - Setting power limits requires root access. Easiest way is to run in a Docker container run with `--cap-add SYS_ADMIN`.
 
 ### Relevant Columns in Result CSV
