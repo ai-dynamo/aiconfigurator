@@ -134,6 +134,16 @@ def worker(
             worker_logger.exception("Failed to initialize NVML power monitor")
             raise  # Fail if power measurement requested but NVML unavailable
 
+    # Get default power limit if measuring power but no limits specified
+    default_power_limit = None
+    if measure_power and not power_limits:
+        try:
+            from nvml_power_monitor import get_power_management_limit
+            default_power_limit = get_power_management_limit(device_id)
+            worker_logger.info(f"Auto-detected power limit: {default_power_limit}W on device {device_id}")
+        except Exception as e:
+            worker_logger.warning(f"Could not get power limit, power data will not be recorded: {e}")
+
     # Process tasks
     while True:
         task_info = queue.get()
@@ -150,7 +160,7 @@ def worker(
             task_id = create_test_case_id(task, "unknown", module_name)
 
         # Sweep power limits
-        for power_limit in power_limits or [None]:
+        for power_limit in power_limits or [default_power_limit]:
             with lock:
                 progress_value.value += 1
 

@@ -1878,6 +1878,71 @@ class PerfDatabase:
         """
         return self._default_sol_mode
 
+    def is_gemm_compute_bound(
+        self,
+        m: int,
+        n: int,
+        k: int,
+        quant_mode: common.GEMMQuantMode,
+    ) -> bool:
+        """
+        Determine if a GEMM operation is compute-bound.
+
+        Args:
+            m, n, k: GEMM dimensions (C = A @ B, A is mxk, B is kxn)
+            quant_mode: GEMM quantization mode
+        
+        Returns:
+            True if compute-bound, False if memory-bound
+        """
+        sol_time, sol_math, sol_mem = self.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.SOL_FULL)
+        return sol_math > sol_mem
+
+    def is_context_attention_compute_bound(
+        self,
+        b: int,
+        s: int,
+        n: int,
+        n_kv: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+        window_size: int = 0,
+        head_size: int = 128,
+    ) -> bool:
+        """
+        Determine if context (prefill) attention is compute-bound.
+
+        Args:
+            b: Batch size
+            s: Sequence length (input)
+            n: Number of query heads
+            n_kv: Number of key/value heads for GQA
+            kvcache_quant_mode: KV cache quantization mode
+            fmha_quant_mode: FMHA quantization mode
+            window_size: Attention window size (0 for no sliding window)
+            head_size: Head dimension
+        
+        Returns:
+            True if compute-bound, False if memory-bound
+        """
+        sol_time, sol_math, sol_mem = self.query_context_attention(
+            b, s, n, n_kv, kvcache_quant_mode, fmha_quant_mode,
+            sol_mode=common.SOLMode.SOL_FULL,
+            window_size=window_size,
+            head_size=head_size
+        )
+        return sol_math > sol_mem
+
+    def is_generation_attention_compute_bound(self) -> bool:
+        """
+        Determine if generation (decode) attention is compute-bound.
+        Generation attention is ALWAYS memory-bound.
+        
+        Returns:
+            False (always memory-bound)
+        """
+        return False
+
     def query_gemm(
         self,
         m: int,

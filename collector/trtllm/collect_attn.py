@@ -23,59 +23,13 @@ from helper import (
     get_dtype_size,
     get_gpu_specs_from_device,
     get_sm_version,
+    is_context_attention_compute_bound_collector,
+    is_generation_attention_compute_bound_collector,
     log_perf,
     measure_kernel_power,
 )
 
 
-def is_context_attention_compute_bound(b, s, num_heads, num_key_value_heads, d, dtype, kv_cache_dtype, device_name):
-    """
-    Determine if context (prefill) attention is compute-bound with Grouped-Query Attention.
-
-    Args:
-        b: Batch size
-        s: Sequence length (input)
-        num_heads: Number of query heads (H_q)
-        num_key_value_heads: Number of key/value heads (H_kv)
-        d: Head dimension
-        dtype: Activation dtype
-        kv_cache_dtype: KV cache dtype
-        device_name: GPU device name
-
-    Returns:
-        True if compute-bound, False if memory-bound
-    """
-    gpu_specs = get_gpu_specs_from_device(device_name)
-    dtype_size = get_dtype_size(dtype)
-    kv_dtype_size = get_dtype_size(kv_cache_dtype)
-
-    # Hardware intensity
-    if "fp8" in dtype.lower():
-        hardware_tflops = gpu_specs["fp8_tflops"]
-    else:
-        hardware_tflops = gpu_specs["float16_tflops"]
-
-    hardware_intensity = (hardware_tflops * 1e12) / (gpu_specs["mem_bw_gbs"] * 1e9)
-
-    # GQA Attention FLOPs
-    total_flops = 4 * b * num_heads * s * s * d
-
-    # GQA Attention Memory Movement
-    memory_bytes = (
-        dtype_size * b * s * num_heads * d  # Q read (all query heads)
-        + kv_dtype_size * b * s * num_key_value_heads * d * 2  # K read and write (KV heads)
-        + kv_dtype_size * b * s * num_key_value_heads * d * 2  # V read and write (KV heads)
-        + dtype_size * b * s * num_heads * d  # Output write
-    )
-
-    arithmetic_intensity = total_flops / memory_bytes
-
-    return arithmetic_intensity > hardware_intensity
-
-
-def is_generation_attention_compute_bound():
-    """Generation (decode) attention is ALWAYS memory-bound"""
-    return False
 
 
 def run_attention_torch(
@@ -303,14 +257,24 @@ def run_attention_torch(
 
     # Determine if compute-bound
     if is_context_phase:
-        compute_bound = is_context_attention_compute_bound(
-            batch_size, input_len, num_heads, num_key_value_heads, head_dim, dtype_str, kv_cache_dtype_str, device_name
+        compute_bound = is_context_attention_compute_bound_collector(
+            batch_size,
+            input_len,
+            num_heads,
+            num_key_value_heads,
+            head_dim,
+            dtype_str,
+            kv_cache_dtype_str,
+            use_fp8_kv_cache,
+            use_fp8_context_fmha,
+            device_name,
+            attention_window_size,
         )
         isl = input_len
         step = 0
         op_name = "context_attention"
     else:
-        compute_bound = is_generation_attention_compute_bound()
+        compute_bound = is_generation_attention_compute_bound_collector()
         isl = 1
         step = input_len
         op_name = "generation_attention"

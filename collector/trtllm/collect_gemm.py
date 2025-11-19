@@ -12,6 +12,7 @@ from helper import (
     get_dtype_size,
     get_gpu_specs_from_device,
     get_sm_version,
+    is_gemm_compute_bound_collector,
     log_perf,
     measure_kernel_power,
 )
@@ -86,36 +87,6 @@ def get_gemm_test_cases():
     return test_cases
 
 
-def is_gemm_compute_bound(m, n, k, dtype, device_name):
-    """
-    Determine if a GEMM operation is compute-bound.
-
-    Args:
-        m, n, k: GEMM dimensions (C = A @ B, A is mxk, B is kxn)
-        dtype: Data type (e.g., 'float16', 'fp8')
-        device_name: GPU device name
-
-    Returns:
-        True if compute-bound, False if memory-bound
-    """
-    gpu_specs = get_gpu_specs_from_device(device_name)
-    dtype_size = get_dtype_size(dtype)
-
-    # Hardware intensity (FLOPs per byte)
-    if "fp8" in dtype.lower():
-        hardware_tflops = gpu_specs["fp8_tflops"]
-    else:
-        hardware_tflops = gpu_specs["float16_tflops"]
-
-    hardware_intensity = (hardware_tflops * 1e12) / (gpu_specs["mem_bw_gbs"] * 1e9)
-
-    # GEMM arithmetic intensity
-    total_flops = 2 * m * n * k
-    memory_bytes = dtype_size * (m * k + k * n + m * n)
-    arithmetic_intensity = total_flops / memory_bytes
-
-    # Compute-bound if arithmetic intensity > hardware intensity
-    return arithmetic_intensity > hardware_intensity
 
 
 def run_gemm(
@@ -222,7 +193,7 @@ def run_gemm(
             op.forward(x)
 
     # Determine if compute-bound
-    compute_bound = is_gemm_compute_bound(m, n, k, gemm_type, device_name)
+    compute_bound = is_gemm_compute_bound_collector(m, n, k, gemm_type, device_name)
 
     # Benchmarking
     if measure_power and power_monitor is not None and not compute_bound:

@@ -383,3 +383,164 @@ def measure_kernel_power(
     avg_power_watts = total_energy_j / (total_time_ms / 1000)  # J / seconds
 
     return avg_latency_ms, avg_power_watts
+
+
+def get_system_spec_from_device(device_name: str) -> dict:
+    """Load full system spec from device name.
+    
+    Args:
+        device_name: GPU device name
+        
+    Returns:
+        Full system_spec dict with 'gpu' key
+    """
+    device_upper = device_name.upper()
+    if "H100" in device_upper:
+        system_file = "h100_sxm.yaml"
+    elif "H200" in device_upper:
+        system_file = "h200_sxm.yaml"
+    elif "A100" in device_upper:
+        system_file = "a100_sxm.yaml"
+    elif "B200" in device_upper:
+        system_file = "b200_sxm.yaml"
+    elif "GB200" in device_upper:
+        system_file = "gb200_sxm.yaml"
+    else:
+        raise ValueError(f"Unsupported GPU: {device_name}")
+
+    systems_dir = pkg_resources.files("aiconfigurator") / "systems"
+    yaml_path = systems_dir / system_file
+
+    with open(yaml_path) as f:
+        system_spec = yaml.safe_load(f)
+
+    return system_spec
+
+
+def _get_gemm_quant_mode(dtype_str: str):
+    """Map dtype string to GEMMQuantMode enum."""
+    from aiconfigurator.sdk import common
+    
+    dtype_map = {
+        "float16": common.GEMMQuantMode.float16,
+        "fp8": common.GEMMQuantMode.fp8,
+        "fp8_block": common.GEMMQuantMode.fp8_block,
+        "nvfp4": common.GEMMQuantMode.nvfp4,
+    }
+    
+    if dtype_str not in dtype_map:
+        raise ValueError(f"Unsupported dtype: {dtype_str}")
+    
+    return dtype_map[dtype_str]
+
+
+def _get_kvcache_quant_mode(dtype_str: str, use_fp8_kv_cache: bool):
+    """Map dtype and fp8 flag to KVCacheQuantMode enum."""
+    from aiconfigurator.sdk import common
+    
+    if use_fp8_kv_cache or "fp8" in dtype_str.lower():
+        return common.KVCacheQuantMode.fp8
+    else:
+        return common.KVCacheQuantMode.float16
+
+
+def _get_fmha_quant_mode(dtype_str: str, use_fp8_context_fmha: bool):
+    """Map dtype and fp8 flag to FMHAQuantMode enum."""
+    from aiconfigurator.sdk import common
+    
+    if use_fp8_context_fmha or "fp8" in dtype_str.lower():
+        return common.FMHAQuantMode.fp8
+    else:
+        return common.FMHAQuantMode.float16
+
+
+def is_gemm_compute_bound_collector(m: int, n: int, k: int, dtype: str, device_name: str) -> bool:
+    """
+    Determine if a GEMM operation is compute-bound.
+    Wrapper for use in collectors.
+    
+    Args:
+        m, n, k: GEMM dimensions (C = A @ B, A is mxk, B is kxn)
+        dtype: Data type (e.g., 'float16', 'fp8')
+        device_name: GPU device name
+    
+    Returns:
+        True if compute-bound, False if memory-bound
+    """
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+    
+    system_spec = get_system_spec_from_device(device_name)
+    quant_mode = _get_gemm_quant_mode(dtype)
+    
+    # Create minimal PerfDatabase instance just to call query_gemm with SOL_FULL
+    db = PerfDatabase.__new__(PerfDatabase)
+    db.system_spec = system_spec
+    
+    sol_time, sol_math, sol_mem = db.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.SOL_FULL)
+    return sol_math > sol_mem
+
+
+def is_context_attention_compute_bound_collector(
+    b: int,
+    s: int,
+    num_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+    dtype: str,
+    kv_cache_dtype: str,
+    use_fp8_kv_cache: bool,
+    use_fp8_context_fmha: bool,
+    device_name: str,
+    attention_window_size: int = 0,
+) -> bool:
+    """
+    Determine if context (prefill) attention is compute-bound.
+    Wrapper for use in collectors.
+    
+    Args:
+        b: Batch size
+        s: Sequence length (input)
+        num_heads: Number of query heads (H_q)
+        num_key_value_heads: Number of key/value heads (H_kv)
+        head_dim: Head dimension
+        dtype: Activation dtype
+        kv_cache_dtype: KV cache dtype
+        use_fp8_kv_cache: Whether using FP8 for KV cache
+        use_fp8_context_fmha: Whether using FP8 for context FMHA
+        device_name: GPU device name
+        attention_window_size: Attention window size
+    
+    Returns:
+        True if compute-bound, False if memory-bound
+    """
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+    
+    system_spec = get_system_spec_from_device(device_name)
+    kvcache_quant_mode = _get_kvcache_quant_mode(kv_cache_dtype, use_fp8_kv_cache)
+    fmha_quant_mode = _get_fmha_quant_mode(dtype, use_fp8_context_fmha)
+    
+    # Create minimal PerfDatabase instance just to call query_context_attention with SOL_FULL
+    db = PerfDatabase.__new__(PerfDatabase)
+    db.system_spec = system_spec
+    
+    sol_time, sol_math, sol_mem = db.query_context_attention(
+        b, s, num_heads, num_key_value_heads,
+        kvcache_quant_mode, fmha_quant_mode,
+        sol_mode=common.SOLMode.SOL_FULL,
+        window_size=attention_window_size,
+        head_size=head_dim
+    )
+    return sol_math > sol_mem
+
+
+def is_generation_attention_compute_bound_collector() -> bool:
+    """
+    Determine if generation (decode) attention is compute-bound.
+    Generation attention is ALWAYS memory-bound.
+    
+    Returns:
+        False (always memory-bound)
+    """
+    return False
