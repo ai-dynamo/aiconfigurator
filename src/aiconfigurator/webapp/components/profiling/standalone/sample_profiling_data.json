@@ -1,0 +1,325 @@
+{
+    "settings": {
+        "allow_confirm_datapoint": true,
+        "hide_show_config": true
+    },
+    "prefill": {
+        "chart": {
+            "labels": [
+                "2 GPUs",
+                "4 GPUs",
+                "8 GPUs"
+            ],
+            "datasets": [
+                {
+                    "label": "Prefill Performance",
+                    "data": [
+                        {
+                            "x": 150.5,
+                            "y": 2500.3,
+                            "gpu": 2,
+                            "tableIdx": 0,
+                            "gpuLabel": "2 GPUs"
+                        },
+                        {
+                            "x": 85.2,
+                            "y": 4800.7,
+                            "gpu": 4,
+                            "tableIdx": 1,
+                            "gpuLabel": "4 GPUs"
+                        },
+                        {
+                            "x": 52.1,
+                            "y": 7200.4,
+                            "gpu": 8,
+                            "tableIdx": 2,
+                            "gpuLabel": "8 GPUs"
+                        }
+                    ],
+                    "backgroundColor": "#1f77b4",
+                    "borderColor": "#1f77b4"
+                }
+            ],
+            "target_line": {
+                "value": 100.0,
+                "label": "Target TTFT: 100 ms"
+            },
+            "axes": {
+                "x": {
+                    "title": "Time to First Token (ms)",
+                    "min": 0
+                },
+                "y": {
+                    "title": "Prefill Throughput per GPU (tokens/s/GPU)",
+                    "min": 0
+                }
+            }
+        },
+        "table": {
+            "columns": [
+                "GPUs",
+                "TTFT (ms)",
+                "Throughput (tokens/s/GPU)",
+                "Action"
+            ],
+            "data": [
+                [
+                    2,
+                    150.5,
+                    2500.3,
+                    "config_yaml_data_here"
+                ],
+                [
+                    4,
+                    85.2,
+                    4800.7,
+                    "config_yaml_data_here"
+                ],
+                [
+                    8,
+                    52.1,
+                    7200.4,
+                    "config_yaml_data_here"
+                ]
+            ]
+        }
+    },
+    "decode": {
+        "chart": {
+            "datasets": [
+                {
+                    "label": "2 GPUs",
+                    "data": [
+                        {
+                            "x": 25.5,
+                            "y": 1200.0,
+                            "tableIdx": 0
+                        },
+                        {
+                            "x": 35.2,
+                            "y": 2100.0,
+                            "tableIdx": 1
+                        },
+                        {
+                            "x": 45.8,
+                            "y": 2800.0,
+                            "tableIdx": 2
+                        }
+                    ],
+                    "backgroundColor": "#1f77b4",
+                    "borderColor": "#1f77b4"
+                },
+                {
+                    "label": "4 GPUs",
+                    "data": [
+                        {
+                            "x": 18.3,
+                            "y": 2200.0,
+                            "tableIdx": 3
+                        },
+                        {
+                            "x": 28.1,
+                            "y": 3800.0,
+                            "tableIdx": 4
+                        },
+                        {
+                            "x": 38.5,
+                            "y": 4900.0,
+                            "tableIdx": 5
+                        }
+                    ],
+                    "backgroundColor": "#ff7f0e",
+                    "borderColor": "#ff7f0e"
+                }
+            ],
+            "target_line": {
+                "value": 30.0,
+                "label": "Target ITL: 30 ms"
+            },
+            "axes": {
+                "x": {
+                    "title": "Inter Token Latency (ms)",
+                    "min": 0
+                },
+                "y": {
+                    "title": "Decode Throughput per GPU (tokens/s/GPU)",
+                    "min": 0
+                }
+            }
+        },
+        "table": {
+            "columns": [
+                "GPUs",
+                "ITL (ms)",
+                "Throughput (tokens/s/GPU)",
+                "Action"
+            ],
+            "data": [
+                [
+                    2,
+                    25.5,
+                    1200.0,
+                    "config_yaml_data_here"
+                ],
+                [
+                    2,
+                    35.2,
+                    2100.0,
+                    "config_yaml_data_here"
+                ],
+                [
+                    2,
+                    45.8,
+                    2800.0,
+                    "config_yaml_data_here"
+                ],
+                [
+                    4,
+                    18.3,
+                    2200.0,
+                    "config_yaml_data_here"
+                ],
+                [
+                    4,
+                    28.1,
+                    3800.0,
+                    "config_yaml_data_here"
+                ],
+                [
+                    4,
+                    38.5,
+                    4900.0,
+                    "config_yaml_data_here"
+                ]
+            ]
+        }
+    },
+    "cost": {
+        "chart": {
+            "datasets": [
+                {
+                    "label": "TTFT: 150.50ms",
+                    "data": [
+                        {
+                            "x": 500,
+                            "y": 12.5,
+                            "tableIdx": 0
+                        },
+                        {
+                            "x": 750,
+                            "y": 18.2,
+                            "tableIdx": 1
+                        },
+                        {
+                            "x": 1000,
+                            "y": 24.8,
+                            "tableIdx": 2
+                        }
+                    ],
+                    "backgroundColor": "#1f77b4",
+                    "borderColor": "#1f77b4"
+                },
+                {
+                    "label": "TTFT: 85.20ms",
+                    "data": [
+                        {
+                            "x": 500,
+                            "y": 14.1,
+                            "tableIdx": 3
+                        },
+                        {
+                            "x": 750,
+                            "y": 20.5,
+                            "tableIdx": 4
+                        },
+                        {
+                            "x": 1000,
+                            "y": 27.9,
+                            "tableIdx": 5
+                        }
+                    ],
+                    "backgroundColor": "#ff7f0e",
+                    "borderColor": "#ff7f0e"
+                }
+            ],
+            "axes": {
+                "x": {
+                    "title": "Tokens per User",
+                    "min": 0
+                },
+                "y": {
+                    "title": "Cost ($)",
+                    "min": 0
+                }
+            },
+            "title": "Cost Per 1000 i4000o1000 requests"
+        },
+        "table": {
+            "columns": [
+                "TTFT (ms)",
+                "Prefill Thpt (tokens/s/GPU)",
+                "ITL (ms)",
+                "Decode Thpt (tokens/s/GPU)",
+                "Tokens/User",
+                "Cost ($)",
+                "Action"
+            ],
+            "data": [
+                [
+                    150.5,
+                    2500.3,
+                    25.5,
+                    1200.0,
+                    500,
+                    12.5,
+                    "config_yaml_data_here"
+                ],
+                [
+                    150.5,
+                    2500.3,
+                    35.2,
+                    2100.0,
+                    750,
+                    18.2,
+                    "config_yaml_data_here"
+                ],
+                [
+                    150.5,
+                    2500.3,
+                    45.8,
+                    2800.0,
+                    1000,
+                    24.8,
+                    "config_yaml_data_here"
+                ],
+                [
+                    85.2,
+                    4800.7,
+                    25.5,
+                    1200.0,
+                    500,
+                    14.1,
+                    "config_yaml_data_here"
+                ],
+                [
+                    85.2,
+                    4800.7,
+                    35.2,
+                    2100.0,
+                    750,
+                    20.5,
+                    "config_yaml_data_here"
+                ],
+                [
+                    85.2,
+                    4800.7,
+                    45.8,
+                    2800.0,
+                    1000,
+                    27.9,
+                    "config_yaml_data_here"
+                ]
+            ]
+        }
+    }
+}

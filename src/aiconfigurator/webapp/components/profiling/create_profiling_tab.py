@@ -50,39 +50,30 @@ def _load_profiling_css():
         return f"<style>\n{f.read()}\n</style>"
 
 
-def create_profiling_tab(app_config):
-    with gr.Tab("Profiling") as profiling_tab:
-        # Hidden input and button for selection callback (visible=True but hidden via CSS)
-        selection_input = gr.Textbox(value="", visible=True, elem_id="profiling_selection_input", container=False)
-        selection_button = gr.Button("Submit Selection", visible=True, elem_id="profiling_selection_button")
+def create_profiling_ui_components():
+    """
+    Create hidden UI components for profiling (selection input/button, JSON data).
 
-        # Hidden component for JSON data
-        json_data = gr.Textbox(value="", visible=False, elem_id="profiling_json_data")
+    Returns:
+        dict: Dictionary with selection_input, selection_button, and json_data components
+    """
+    selection_input = gr.Textbox(value="", visible=True, elem_id="profiling_selection_input", container=False)
+    selection_button = gr.Button("Submit Selection", visible=True, elem_id="profiling_selection_button")
+    json_data = gr.Textbox(value="", visible=False, elem_id="profiling_json_data")
 
-        # Inject CSS and modal
-        gr.HTML(_load_profiling_css())
-        gr.HTML(CONFIG_MODAL_HTML)
+    return {
+        "selection_input": selection_input,
+        "selection_button": selection_button,
+        "json_data": json_data,
+    }
 
-        with gr.Accordion("Introduction"):
-            introduction = gr.Markdown(
-                label="introduction",
-                value=r"""Generates profiling data for the model.""",
-            )
-        with gr.Accordion("Setup Your Profiling Job"):
-            model_name_components = create_model_name_config(app_config)
-            model_system_components = create_system_config(app_config, gpu_config=True)
-            runtime_config_components = create_runtime_config(
-                app_config, with_sla=True, max_context_length=True, prefix_length=False
-            )
-            generate_btn = gr.Button("Generate Profiling Job", variant="primary")
-            status = gr.Textbox(
-                label="Status",
-                value="Ready to generate profiling plots",
-                interactive=False,
-                show_label=False,
-                lines=5,
-            )
 
+def create_performance_results_section():
+    """
+    Create the Performance Results section with all tabs (Prefill, Decode, Cost).
+
+    This section contains the interactive charts and tables for profiling results.
+    """
     with gr.Accordion("Performance Results"):
         gr.Markdown(PLOT_INTERACTION_INSTRUCTIONS)
 
@@ -101,19 +92,81 @@ def create_profiling_tab(app_config):
             gr.Markdown("#### Data Points")
             gr.HTML('<div id="cost_table_wrapper"></div>')
 
-    # Load JavaScript when profiling tab is selected
-    profiling_tab.select(fn=None, js=_load_profiling_javascript())
 
-    components = {
+def create_setup_section(app_config):
+    """
+    Create the Setup Your Profiling Job section.
+
+    Args:
+        app_config: Application configuration
+
+    Returns:
+        dict: Dictionary with all setup components
+    """
+    with gr.Accordion("Introduction"):
+        introduction = gr.Markdown(
+            label="introduction",
+            value=r"""Generates profiling data for the model.""",
+        )
+
+    with gr.Accordion("Setup Your Profiling Job"):
+        model_name_components = create_model_name_config(app_config)
+        model_system_components = create_system_config(app_config, gpu_config=True)
+        runtime_config_components = create_runtime_config(
+            app_config, with_sla=True, max_context_length=True, prefix_length=False
+        )
+        generate_btn = gr.Button("Generate Profiling Job", variant="primary")
+        status = gr.Textbox(
+            label="Status",
+            value="Ready to generate profiling plots",
+            interactive=False,
+            show_label=False,
+            lines=5,
+        )
+
+    return {
         "introduction": introduction,
         "model_name_components": model_name_components,
         "model_system_components": model_system_components,
         "runtime_config_components": runtime_config_components,
         "generate_btn": generate_btn,
         "status": status,
-        "json_data": json_data,
-        "selection_input": selection_input,
-        "selection_button": selection_button,
     }
+
+
+def inject_profiling_assets():
+    """Inject CSS and modal HTML for profiling visualization."""
+    gr.HTML(_load_profiling_css())
+    gr.HTML(CONFIG_MODAL_HTML)
+
+
+def create_profiling_tab(app_config):
+    """
+    Create the full profiling tab with setup and results sections.
+
+    Args:
+        app_config: Application configuration
+
+    Returns:
+        dict: Dictionary with all profiling components
+    """
+    with gr.Tab("Profiling") as profiling_tab:
+        # Create hidden UI components
+        ui_components = create_profiling_ui_components()
+
+        # Inject CSS and modal
+        inject_profiling_assets()
+
+        # Create setup section
+        setup_components = create_setup_section(app_config)
+
+    # Create performance results section (outside the tab to be at accordion level)
+    create_performance_results_section()
+
+    # Load JavaScript when profiling tab is selected
+    profiling_tab.select(fn=None, js=_load_profiling_javascript())
+
+    # Combine all components
+    components = {**setup_components, **ui_components}
     setup_profiling_events(components)
     return components
