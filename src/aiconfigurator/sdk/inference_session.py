@@ -180,81 +180,81 @@ class DisaggInferenceSession:
 
     def _get_disagg_summary_dict(
         self,
-        prefill_summary_df: pd.DataFrame,
+        prefill_summary_dict: dict,
         prefill_num_worker: int,
-        decode_summary_df: pd.DataFrame,
+        decode_summary_dict: dict,
         decode_num_worker: int,
     ) -> dict:
         """
-        Get the disagg summary as a dict based on prefill and decode summary df.
+        Get the disagg summary as a dict based on prefill and decode summary dicts.
         The summary dict is used for efficient batch operations.
         """
         seq_s = min(
-            prefill_summary_df["seq/s"] * prefill_num_worker * self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
-            decode_summary_df["seq/s"] * decode_num_worker * self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
+            prefill_summary_dict["seq/s"] * prefill_num_worker * self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
+            decode_summary_dict["seq/s"] * decode_num_worker * self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
         )
-        prefill_gpus = prefill_summary_df["pp"] * prefill_summary_df["tp"] * prefill_summary_df["dp"]
-        decode_gpus = decode_summary_df["pp"] * decode_summary_df["tp"] * decode_summary_df["dp"]
+        prefill_gpus = prefill_summary_dict["pp"] * prefill_summary_dict["tp"] * prefill_summary_dict["dp"]
+        decode_gpus = decode_summary_dict["pp"] * decode_summary_dict["tp"] * decode_summary_dict["dp"]
         seq_s_gpu = seq_s / (prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker)
 
-        tokens_s = seq_s * prefill_summary_df["osl"]
+        tokens_s = seq_s * prefill_summary_dict["osl"]
         tokens_s_gpu = tokens_s / (prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker)
         num_total_gpus = prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker
 
         return {
-            "model": prefill_summary_df["model"],
-            "isl": prefill_summary_df["isl"],
-            "osl": prefill_summary_df["osl"],
-            "prefix": prefill_summary_df["prefix"],
+            "model": prefill_summary_dict["model"],
+            "isl": prefill_summary_dict["isl"],
+            "osl": prefill_summary_dict["osl"],
+            "prefix": prefill_summary_dict["prefix"],
             # This is not exact matching. You can use this concurrency to benchmark the system.
-            "concurrency": decode_summary_df["concurrency"] * decode_num_worker,
+            "concurrency": decode_summary_dict["concurrency"] * decode_num_worker,
             "request_rate": seq_s,
-            "(p)bs": prefill_summary_df["bs"],
-            "(p)global_bs": prefill_summary_df["global_bs"],
+            "(p)bs": prefill_summary_dict["bs"],
+            "(p)global_bs": prefill_summary_dict["global_bs"],
             "(p)workers": prefill_num_worker,
-            "(d)bs": decode_summary_df["bs"],
-            "(d)global_bs": decode_summary_df["global_bs"],
+            "(d)bs": decode_summary_dict["bs"],
+            "(d)global_bs": decode_summary_dict["global_bs"],
             "(d)workers": decode_num_worker,
-            "ttft": prefill_summary_df["ttft"],
-            "tpot": decode_summary_df["tpot"],
+            "ttft": prefill_summary_dict["ttft"],
+            "tpot": decode_summary_dict["tpot"],
             "seq/s": seq_s,
             "seq/s/gpu": seq_s_gpu,
             "tokens/s": tokens_s,
             "tokens/s/gpu": tokens_s_gpu,
-            "tokens/s/user": decode_summary_df["tokens/s/user"],
-            "(p)seq/s/worker": prefill_summary_df["seq/s"],
-            "(d)seq/s/worker": decode_summary_df["seq/s"],
+            "tokens/s/user": decode_summary_dict["tokens/s/user"],
+            "(p)seq/s/worker": prefill_summary_dict["seq/s"],
+            "(d)seq/s/worker": decode_summary_dict["seq/s"],
             "num_total_gpus": num_total_gpus,
-            "(p)tp": prefill_summary_df["tp"],
-            "(p)pp": prefill_summary_df["pp"],
-            "(p)dp": prefill_summary_df["dp"],
-            "(p)moe_tp": prefill_summary_df["moe_tp"],
-            "(p)moe_ep": prefill_summary_df["moe_ep"],
-            "(p)parallel": prefill_summary_df["parallel"],
-            "(p)gemm": prefill_summary_df["gemm"],
-            "(p)kvcache": prefill_summary_df["kvcache"],
-            "(p)fmha": prefill_summary_df["fmha"],
-            "(p)moe": prefill_summary_df["moe"],
-            "(p)comm": prefill_summary_df["comm"],
-            "(p)memory": prefill_summary_df["memory"],
-            "(p)backend": prefill_summary_df["backend"],
-            "(p)version": prefill_summary_df["version"],
-            "(p)system": prefill_summary_df["system"],
-            "(d)tp": decode_summary_df["tp"],
-            "(d)pp": decode_summary_df["pp"],
-            "(d)dp": decode_summary_df["dp"],
-            "(d)moe_tp": decode_summary_df["moe_tp"],
-            "(d)moe_ep": decode_summary_df["moe_ep"],
-            "(d)parallel": decode_summary_df["parallel"],
-            "(d)gemm": decode_summary_df["gemm"],
-            "(d)kvcache": decode_summary_df["kvcache"],
-            "(d)fmha": decode_summary_df["fmha"],
-            "(d)moe": decode_summary_df["moe"],
-            "(d)comm": decode_summary_df["comm"],
-            "(d)memory": decode_summary_df["memory"],
-            "(d)backend": decode_summary_df["backend"],
-            "(d)version": decode_summary_df["version"],
-            "(d)system": decode_summary_df["system"],
+            "(p)tp": prefill_summary_dict["tp"],
+            "(p)pp": prefill_summary_dict["pp"],
+            "(p)dp": prefill_summary_dict["dp"],
+            "(p)moe_tp": prefill_summary_dict["moe_tp"],
+            "(p)moe_ep": prefill_summary_dict["moe_ep"],
+            "(p)parallel": prefill_summary_dict["parallel"],
+            "(p)gemm": prefill_summary_dict["gemm"],
+            "(p)kvcache": prefill_summary_dict["kvcache"],
+            "(p)fmha": prefill_summary_dict["fmha"],
+            "(p)moe": prefill_summary_dict["moe"],
+            "(p)comm": prefill_summary_dict["comm"],
+            "(p)memory": prefill_summary_dict["memory"],
+            "(p)backend": prefill_summary_dict["backend"],
+            "(p)version": prefill_summary_dict["version"],
+            "(p)system": prefill_summary_dict["system"],
+            "(d)tp": decode_summary_dict["tp"],
+            "(d)pp": decode_summary_dict["pp"],
+            "(d)dp": decode_summary_dict["dp"],
+            "(d)moe_tp": decode_summary_dict["moe_tp"],
+            "(d)moe_ep": decode_summary_dict["moe_ep"],
+            "(d)parallel": decode_summary_dict["parallel"],
+            "(d)gemm": decode_summary_dict["gemm"],
+            "(d)kvcache": decode_summary_dict["kvcache"],
+            "(d)fmha": decode_summary_dict["fmha"],
+            "(d)moe": decode_summary_dict["moe"],
+            "(d)comm": decode_summary_dict["comm"],
+            "(d)memory": decode_summary_dict["memory"],
+            "(d)backend": decode_summary_dict["backend"],
+            "(d)version": decode_summary_dict["version"],
+            "(d)system": decode_summary_dict["system"],
         }
 
     def _get_disagg_summary_df(
@@ -267,9 +267,10 @@ class DisaggInferenceSession:
         """
         Get the disagg summary df based on prefill and decode summary df
         """
-        summary_dict = self._get_disagg_summary_dict(
-            prefill_summary_df, prefill_num_worker, decode_summary_df, decode_num_worker
-        )
+        prefill_dict = prefill_summary_df.iloc[0].to_dict()
+        decode_dict = decode_summary_df.iloc[0].to_dict()
+
+        summary_dict = self._get_disagg_summary_dict(prefill_dict, prefill_num_worker, decode_dict, decode_num_worker)
         return pd.DataFrame([summary_dict], columns=common.ColumnsDisagg).round(3)
 
     def run_disagg(
@@ -541,17 +542,21 @@ class DisaggInferenceSession:
                 return None
 
             disagg_summary_df_list: list[pd.DataFrame] = []
+            prefill_candidates_list = prefill_candidates.to_dict("records")
+
             for parallel_value, parallel_group in decode_candidates.groupby("parallel"):
                 parallel_group_sorted = (
                     parallel_group.sort_values(by=["seq/s/gpu"], ascending=[False])
                     .reset_index(drop=True)
                     .head(MAX_DECODE_WORKERS_PER_CATEGORY)
                 )
+
+                decode_workers_list = parallel_group_sorted.to_dict("records")
                 category_results: list[dict] = []
-                for _, decode_worker in parallel_group_sorted.iterrows():
+                for decode_worker in decode_workers_list:
                     decode_throughput = float(decode_worker["seq/s"])
                     decode_gpus = decode_worker["num_total_gpus"]
-                    for _, prefill_worker in prefill_candidates.iterrows():
+                    for prefill_worker in prefill_candidates_list:
                         prefill_throughput = float(prefill_worker["seq/s"])
                         prefill_gpus = prefill_worker["num_total_gpus"]
                         prefill_num_worker, decode_num_worker = _match_workers(
