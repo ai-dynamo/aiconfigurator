@@ -541,7 +541,7 @@ class DisaggInferenceSession:
                 logger.debug(f"No decode worker candidates found for tpot {tpot}ms.")
                 return None
 
-            disagg_summary_df_list: list[pd.DataFrame] = []
+            all_category_results: list[dict] = []
             prefill_candidates_list = prefill_candidates.to_dict("records")
 
             for parallel_value, parallel_group in decode_candidates.groupby("parallel"):
@@ -579,22 +579,17 @@ class DisaggInferenceSession:
                         category_results.append(disagg_dict)
 
                 if category_results:
-                    category_df = pd.DataFrame(category_results, columns=common.ColumnsDisagg).round(3)
                     # only return the best one for each category
-                    category_df = (
-                        category_df.sort_values(by=["tokens/s/gpu", "num_total_gpus"], ascending=[False, True])
-                        .head(1)
-                        .reset_index(drop=True)
-                    )
-                    disagg_summary_df_list.append(category_df)
+                    best_result = max(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]))
+                    all_category_results.append(best_result)
                 else:
                     logger.debug(f"No matched result for decode parallel {parallel_value}.")
 
-            if not disagg_summary_df_list:
+            if not all_category_results:
                 logger.debug("No disagg summary found after applying constraints.")
                 return None
 
-            disagg_summary_df = pd.concat(disagg_summary_df_list, ignore_index=True)
+            disagg_summary_df = pd.DataFrame(all_category_results, columns=common.ColumnsDisagg).round(3)
             disagg_summary_df = (
                 disagg_summary_df.sort_values(by=["tokens/s/gpu"], ascending=[False])
                 .head(return_top_k)
