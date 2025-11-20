@@ -130,24 +130,27 @@ window.selectDatapoint = function(rowIndex, plotType) {
     });
     
     if (input && button) {
-        // Fill the input with JSON data
-        input.value = JSON.stringify(selectionData);
+        // Ask user to confirm selection
+        const confirmed = confirm('Do you want to select this datapoint?');
         
-        // Trigger input change event
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        
-        // Try multiple ways to click the button
-        button.click();  // Standard click
-        
-        // Also try dispatching click event
-        button.dispatchEvent(new MouseEvent('click', {
-            bubbles: true,
-            cancelable: true,
-            view: window
-        }));
-
-        alert('Datapoint selected');
+        if (confirmed) {
+            // Fill the input with JSON data
+            input.value = JSON.stringify(selectionData);
+            
+            // Trigger input change event
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            
+            // Try multiple ways to click the button
+            button.click();  // Standard click
+            
+            // Also try dispatching click event
+            button.dispatchEvent(new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                view: window
+            }));
+        }
     } else {
         console.error('[Profiling] Hidden input or button not found');
     }
