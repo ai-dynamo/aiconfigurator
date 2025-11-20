@@ -4,7 +4,6 @@
 import argparse
 import logging
 from collections import defaultdict
-from pathlib import Path
 
 import gradio as gr
 
@@ -32,22 +31,6 @@ def configure_parser(parser):
     parser.add_argument("--experimental", help="enable experimental features", action="store_true")
 
 
-def load_profiling_javascript():
-    """
-    Load custom JavaScript for profiling plot interactivity.
-
-    Returns:
-        str or None: JavaScript code wrapped in Gradio format, or None if file not found
-    """
-    webapp_dir = Path(__file__).parent
-    utils_js_path = webapp_dir / "components" / "profiling" / "utils.js"
-
-    if utils_js_path.exists():
-        with open(utils_js_path) as f:
-            return f"()=>{{{f.read()}}}"
-    return None
-
-
 def main(args):
     """
     Main function for the WebApp.
@@ -72,9 +55,6 @@ def main(args):
             datefmt="%m-%d %H:%M:%S",
         )
 
-    # Load custom JavaScript for profiling plot interactivity
-    custom_js = load_profiling_javascript()
-
     with gr.Blocks(
         css="""
         .config-column {
@@ -84,8 +64,7 @@ def main(args):
         .config-column:last-child {
             border-right: none;
         }
-    """,
-        js=custom_js,
+    """
     ) as demo:
         pareto_results_state = gr.State(defaultdict())
 
