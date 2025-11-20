@@ -3,30 +3,34 @@ PLOTLY_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b
 
 # Plot interaction instructions
 PLOT_INTERACTION_INSTRUCTIONS = """
-**How to interact with plots:**
-- **Hover** over points to see detailed information
-- **Click** points to select them (click again to deselect)
-- **Multiple selection**: Click multiple points with shift key or select tools from the top right corner to compare specific configurations
-- The table below each plot will filter to show only selected points, or all points if none are selected
+How to interact with plots:
+
+Hover over chart points to see detailed information and highlight the corresponding table row
+
+Click chart points to jump to the corresponding row in the table
+
+Hover over table rows to highlight the corresponding chart point
+
+Use the "Show Config" button in the table to view configuration details if presents
 """
 
 # Tab descriptions
 PREFILL_TAB_DESCRIPTION = """
 **Prefill Performance**: Interactive plot showing the relationship between Time to First Token (TTFT)
-and throughput per GPU for different GPU counts. **Click points to select/deselect** (multi-select enabled).
-Table shows selected points, or all points if none selected.
+and throughput per GPU for different GPU counts. Hover over points to see details and highlight table rows.
+Click points to jump to the corresponding row in the table.
 """
 
 DECODE_TAB_DESCRIPTION = """
 **Decode Performance**: Interactive plot showing the relationship between Inter Token Latency (ITL)
-and throughput per GPU for different GPU counts. **Click points to select/deselect** (multi-select enabled).
-Table shows selected points, or all points if none selected.
+and throughput per GPU for different GPU counts. Hover over points to see details and highlight table rows.
+Click points to jump to the corresponding row in the table.
 """
 
 COST_TAB_DESCRIPTION = """
 **Cost Analysis**: Interactive plot showing the cost per 1000 requests under different SLA configurations.
-Lower curves represent better cost efficiency for the same throughput. **Click points to select/deselect** (multi-select enabled).
-Table shows selected points, or all points if none selected.
+Lower curves represent better cost efficiency for the same throughput. Hover over points to see details and highlight table rows.
+Click points to jump to the corresponding row in the table.
 """
 
 # Table headers for different performance metrics
