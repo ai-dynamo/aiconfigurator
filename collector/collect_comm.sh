@@ -17,18 +17,23 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
+        --measure_power)
+            measure_power=1
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [--all_reduce_backend trtllm|vllm]"
+            echo "Usage: $0 [--all_reduce_backend trtllm|vllm] [--measure_power]"
             echo ""
             echo "Options:"
             echo "  --all_reduce_backend  Backend for AllReduce benchmark (default: trtllm)"
             echo "                        Choices: trtllm, vllm"
-            echo "  -h, --help           Show this help message and exit"
+            echo "  --measure_power       Measure power consumption if given"
+            echo "  -h, --help            Show this help message and exit"
             exit 0
             ;;
         *)
             echo "Error: Unknown option $1"
-            echo "Usage: $0 [--all_reduce_backend trtllm|vllm]"
+            echo "Usage: $0 [--all_reduce_backend trtllm|vllm] [--measure_power]"
             exit 1
             ;;
     esac
@@ -45,7 +50,7 @@ dtypes=("half" "int8")
 for n in "${num_gpus_nccl[@]}"; do
     for op in "${nccl_ops[@]}"; do
         for dtype in "${dtypes[@]}"; do
-            python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype"
+            python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype" ${measure_power:+--measure_power}
         done
     done
 done
@@ -58,14 +63,14 @@ if [[ "$all_reduce_backend" == "trtllm" ]]; then
     for n in "${num_gpus_allreduce[@]}"; do
         echo "Running TRTLLM AllReduce benchmark with $n GPUs using CUDA Graph method"
         mpirun -n "$n" --allow-run-as-root python3 collect_all_reduce.py \
-            --perf-filename "custom_allreduce_perf.txt"
+            --perf-filename "custom_allreduce_perf.txt" ${measure_power:+--measure_power}
     done
 elif [[ "$all_reduce_backend" == "vllm" ]]; then
     # VLLM allreduce implementation
     for n in "${num_gpus_allreduce[@]}"; do
         echo "Running VLLM AllReduce benchmark with $n GPUs"
         torchrun --nproc_per_node=$n collect_all_reduce.py --backend vllm \
-            --perf-filename "custom_allreduce_perf.txt"
+            --perf-filename "custom_allreduce_perf.txt" ${measure_power:+--measure_power}
     done
 fi
 

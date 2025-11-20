@@ -44,9 +44,21 @@ from helper import create_test_case_id, save_error_report, setup_logging, setup_
 
 logger = None
 
+# Power measurement defaults
+DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION = 3.0  # seconds
 
-def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes):
-    """Safely collect module with comprehensive error handling"""
+
+def collect_module_safe(
+    module_name,
+    test_type,
+    get_test_cases_func,
+    run_func,
+    num_processes,
+    power_limits=None,
+    measure_power=False,
+    kernel_power_measurement_duration=DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION,
+):
+    """Safely collect module with comprehensive error handling and optional power measurement"""
     full_name = f"{module_name}.{test_type}"
     logger.info(f"Starting collection: {full_name}")
 
@@ -55,7 +67,15 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         test_cases = get_test_cases_func()
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
         # Run collection
-        errors = parallel_run(test_cases, run_func, num_processes, full_name)
+        errors = parallel_run(
+            test_cases,
+            run_func,
+            num_processes,
+            full_name,
+            power_limits=power_limits,
+            measure_power=measure_power,
+            kernel_power_measurement_duration=kernel_power_measurement_duration,
+        )
 
         return errors
 
@@ -71,9 +91,26 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         ]
 
 
-def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, module_name="unknown"):
-    """worker with automatic logging setup"""
+def worker(
+    queue,
+    device_id: int,
+    func,
+    progress_value,
+    lock,
+    error_queue=None,
+    module_name="unknown",
+    power_limits=None,
+    measure_power=False,
+    kernel_power_measurement_duration=DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION,
+):
+    """
+    Worker with optional power measurement and power limit sweep.
 
+    Args:
+        power_limits: List of power limits to sweep (watts)
+        measure_power: Whether to measure power consumption
+        kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
+    """
     # Setup logging for this worker - reads config from environment automatically
     worker_logger = setup_logging(worker_id=device_id)
 
@@ -84,6 +121,28 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     device = torch.device(f"cuda:{device_id}")
     torch.cuda.set_device(device_id)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
+
+    # Initialize NVML power monitor if power measurement is enabled
+    power_monitor = None
+    if measure_power:
+        try:
+            from nvml_power_monitor import NVMLPowerMonitor
+
+            power_monitor = NVMLPowerMonitor(gpu_indices=[device_id])
+            worker_logger.info(f"NVML power monitoring enabled on device {device_id}")
+        except Exception:
+            worker_logger.exception("Failed to initialize NVML power monitor")
+            raise  # Fail if power measurement requested but NVML unavailable
+
+    # Get default power limit if measuring power but no limits specified
+    default_power_limit = None
+    if measure_power and not power_limits:
+        try:
+            from nvml_power_monitor import get_power_management_limit
+            default_power_limit = get_power_management_limit(device_id)
+            worker_logger.info(f"Auto-detected power limit: {default_power_limit}W on device {device_id}")
+        except Exception as e:
+            worker_logger.warning(f"Could not get power limit, power data will not be recorded: {e}")
 
     # Process tasks
     while True:
@@ -100,37 +159,76 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             task = task_info
             task_id = create_test_case_id(task, "unknown", module_name)
 
-        with lock:
-            progress_value.value += 1
+        # Sweep power limits
+        for power_limit in power_limits or [default_power_limit]:
+            with lock:
+                progress_value.value += 1
 
-        try:
-            worker_logger.debug(f"Starting task {task_id}")
-            func(*task, device)
-            worker_logger.debug(f"Completed task {task_id}")
-        except Exception as e:
-            error_info = {
-                "module": module_name,
-                "device_id": device_id,
-                "task_id": task_id,
-                "task_params": str(task),
-                "error_type": type(e).__name__,
-                "error_message": str(e),
-                "traceback": traceback.format_exc(),
-                "timestamp": datetime.now().isoformat(),
-            }
+            # Set power limit if specified
+            if power_limit is not None:
+                try:
+                    from nvml_power_monitor import set_power_management_limit
 
-            if error_queue:
-                error_queue.put(error_info)
+                    set_power_management_limit(device_id, power_limit)
+                    worker_logger.debug(f"Set power limit to {power_limit}W on device {device_id}")
+                except Exception as e:
+                    worker_logger.warning(f"Failed to set power limit: {e}")
 
-            worker_logger.exception(f"Task {task_id} failed")
+            try:
+                worker_logger.debug(f"Starting task {task_id}" + (f" at {power_limit}W" if power_limit else ""))
+                func(
+                    *task,
+                    device,
+                    power_monitor=power_monitor,
+                    power_limit=power_limit,
+                    measure_power=measure_power,
+                    kernel_power_measurement_duration=kernel_power_measurement_duration,
+                )
+                worker_logger.debug(f"Completed task {task_id}" + (f" at {power_limit}W" if power_limit else ""))
+            except Exception as e:
+                error_info = {
+                    "module": module_name,
+                    "device_id": device_id,
+                    "task_id": task_id,
+                    "power_limit": power_limit,
+                    "task_params": str(task),
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc(),
+                    "timestamp": datetime.now().isoformat(),
+                }
 
-            # Force flush logs
-            for handler in worker_logger.handlers:
-                handler.flush()
+                if error_queue:
+                    error_queue.put(error_info)
+
+                worker_logger.exception(f"Task {task_id} failed" + (f" at {power_limit}W" if power_limit else ""))
+
+                # Force flush logs
+                for handler in worker_logger.handlers:
+                    handler.flush()
 
 
-def parallel_run(tasks, func, num_processes, module_name="unknown"):
-    """parallel runner with error collection"""
+def parallel_run(
+    tasks,
+    func,
+    num_processes,
+    module_name="unknown",
+    power_limits=None,
+    measure_power=False,
+    kernel_power_measurement_duration=DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION,
+):
+    """
+    Parallel runner with error collection and optional power measurement.
+
+    Args:
+        tasks: List of tasks to run
+        func: Function to execute for each task
+        num_processes: Number of worker processes
+        module_name: Name of module being collected
+        power_limits: List of power limits to sweep (watts)
+        measure_power: Whether to measure power consumption
+        kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
+    """
     queue = mp.Queue()
     error_queue = mp.Queue()
     processes = []
@@ -144,7 +242,18 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     def start_process(device_id):
         p = mp.Process(
             target=worker,
-            args=(queue, device_id, func, progress_value, lock, error_queue, module_name),
+            args=(
+                queue,
+                device_id,
+                func,
+                progress_value,
+                lock,
+                error_queue,
+                module_name,
+                power_limits,
+                measure_power,
+                kernel_power_measurement_duration,
+            ),
         )
         p.start()
         logger.info(f"Started worker process {p.pid} on device {device_id}")
@@ -200,14 +309,18 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     for _ in range(len(processes)):
         queue.put(None)
 
+    # Calculate total work: tasks x power_limits
+    num_power_limits = len(power_limits) if power_limits else 1
+    total_work = len(tasks) * num_power_limits
+
     # Monitor progress with error collection
     errors = []
-    with tqdm(total=len(tasks), desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
+    with tqdm(total=total_work, desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
         last_progress = 0
         stall_count = 0
         last_error_count = 0
 
-        while progress_value.value < len(tasks):
+        while progress_value.value < total_work:
             # Drain errors
             while not error_queue.empty():
                 error = error_queue.get()
@@ -223,7 +336,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             if progress_value.value == last_progress:
                 stall_count += 1
                 if stall_count > 30:
-                    logger.warning(f"Progress stalled at {progress_value.value}/{len(tasks)}")
+                    logger.warning(f"Progress stalled at {progress_value.value}/{total_work}")
             else:
                 stall_count = 0
                 last_progress = progress_value.value
@@ -287,6 +400,9 @@ def collect_ops(
     collections: list[dict],
     ops: list[str] | None = None,
     framework_version: str | None = None,
+    power_limits=None,
+    measure_power=False,
+    kernel_power_measurement_duration=DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION,
 ) -> list[dict]:
     all_errors = []
 
@@ -311,7 +427,16 @@ def collect_ops(
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
 
-            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
+            errors = collect_module_safe(
+                collection["name"],
+                collection["type"],
+                get_func,
+                run_func,
+                num_processes,
+                power_limits=power_limits,
+                measure_power=measure_power,
+                kernel_power_measurement_duration=kernel_power_measurement_duration,
+            )
             all_errors.extend(errors)
 
         except Exception as e:
@@ -466,8 +591,14 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
     generate_collection_summary(all_errors, "vllm", version)
 
 
-def collect_trtllm(num_processes: int, ops: list[str] | None = None):
-    """Collect performance data for TensorRT LLM with enhanced error tracking"""
+def collect_trtllm(
+    num_processes: int,
+    ops: list[str] | None = None,
+    power_limits=None,
+    measure_power=False,
+    kernel_power_measurement_duration=DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION,
+):
+    """Collect performance data for TensorRT LLM with enhanced error tracking and optional power measurement"""
 
     os.environ["TLLM_LOG_LEVEL"] = "ERROR"
     os.environ["TRTLLM_DG_ENABLED"] = "1"
@@ -568,7 +699,15 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         },
     ]
 
-    all_errors = collect_ops(num_processes, collections, ops, version)
+    all_errors = collect_ops(
+        num_processes,
+        collections,
+        ops,
+        version,
+        power_limits=power_limits,
+        measure_power=measure_power,
+        kernel_power_measurement_duration=kernel_power_measurement_duration,
+    )
 
     # Generate summary report
     generate_collection_summary(all_errors, "trtllm", version)
@@ -642,6 +781,26 @@ def main():
         "Available ops vary by backend - see backend-specific collectors for details.",
         default=None,
     )
+    parser.add_argument(
+        "--measure-power",
+        action="store_true",
+        help="Enable kernel power measurement (default: off)",
+    )
+    parser.add_argument(
+        "--power-limits",
+        nargs="+",
+        type=int,
+        help="Power limits in watts (e.g., 700 500 300). If not specified, uses max power limit only.",
+    )
+    parser.add_argument(
+        "--kernel-power-measurement-duration",
+        type=float,
+        default=DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION,
+        help=(
+            "Target duration for memory-bound kernel power measurement (seconds). "
+            f"Default: {DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION}"
+        ),
+    )
     args = parser.parse_args()
     ops = args.ops
 
@@ -658,10 +817,20 @@ def main():
     mp.set_start_method("spawn")
 
     if args.backend == "trtllm":
-        collect_trtllm(num_processes, ops)
+        collect_trtllm(
+            num_processes,
+            ops,
+            power_limits=args.power_limits,
+            measure_power=args.measure_power,
+            kernel_power_measurement_duration=args.kernel_power_measurement_duration,
+        )
     elif args.backend == "sglang":
+        if args.power_limits or args.measure_power:
+            raise ValueError("Power measurement is only supported for the 'trtllm' backend")
         collect_sglang(num_processes, ops)
     elif args.backend == "vllm":
+        if args.power_limits or args.measure_power:
+            raise ValueError("Power measurement is only supported for the 'trtllm' backend")
         collect_vllm(num_processes, ops)
 
 
