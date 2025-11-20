@@ -20,16 +20,12 @@ from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
 from helper import (
-    get_dtype_size,
-    get_gpu_specs_from_device,
     get_sm_version,
     is_context_attention_compute_bound_collector,
     is_generation_attention_compute_bound_collector,
     log_perf,
     measure_kernel_power,
 )
-
-
 
 
 def run_attention_torch(

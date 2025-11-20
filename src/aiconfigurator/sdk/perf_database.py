@@ -1891,7 +1891,7 @@ class PerfDatabase:
         Args:
             m, n, k: GEMM dimensions (C = A @ B, A is mxk, B is kxn)
             quant_mode: GEMM quantization mode
-        
+
         Returns:
             True if compute-bound, False if memory-bound
         """
@@ -1921,7 +1921,7 @@ class PerfDatabase:
             fmha_quant_mode: FMHA quantization mode
             window_size: Attention window size (0 for no sliding window)
             head_size: Head dimension
-        
+
         Returns:
             True if compute-bound, False if memory-bound
         """
@@ -1937,7 +1937,7 @@ class PerfDatabase:
         """
         Determine if generation (decode) attention is compute-bound.
         Generation attention is ALWAYS memory-bound.
-        
+
         Returns:
             False (always memory-bound)
         """
@@ -1953,6 +1953,13 @@ class PerfDatabase:
     ) -> float:
         """
         Query the gemm data
+
+        Args:
+            m, n, k: GEMM dimensions (C = A @ B, A is mxk, B is kxn)
+            quant_mode: GEMM quantization mode
+
+        Returns:
+            True if compute-bound, False if memory-bound
         """
 
         def get_sol(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> tuple[float, float, float]:
@@ -1988,6 +1995,20 @@ class PerfDatabase:
     ) -> float:
         """
         Query the context attention data
+
+        Args:
+            b: Batch size
+            s: Sequence length
+            n: Number of heads
+            n_kv: Number of key-value heads
+            kvcache_quant_mode: KV cache quantization mode
+            fmha_quant_mode: FMHA quantization mode
+            sol_mode: Speed of light mode
+            window_size: Attention window size (0 for no sliding window)
+            head_size: Head dimension
+
+        Returns:
+            True if compute-bound, False if memory-bound
         """
 
         def get_sol(

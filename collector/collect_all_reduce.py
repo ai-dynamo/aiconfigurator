@@ -74,7 +74,13 @@ def import_trtllm():
 
 
 def benchmark_trtllm_allreduce(
-    dtype: str, test_range: str, world_size: int, rank: int, use_slurm: bool, perf_filename: str, measure_power: bool = False
+    dtype: str,
+    test_range: str,
+    world_size: int,
+    rank: int,
+    use_slurm: bool,
+    perf_filename: str,
+    measure_power: bool = False,
 ):
     """Benchmark TensorRT-LLM AllReduce implementation"""
     trtllm_mods = import_trtllm()
@@ -100,7 +106,7 @@ def benchmark_trtllm_allreduce(
 
             power_monitor = NVMLPowerMonitor(gpu_indices=[local_rank])
             if rank == 0:
-                print(f"NVML power monitoring enabled on all ranks")
+                print("NVML power monitoring enabled on all ranks")
         except Exception as e:
             if rank == 0:
                 print(f"Warning: Failed to initialize NVML power monitor: {e}")
@@ -189,7 +195,8 @@ def benchmark_trtllm_allreduce(
             avg_power = None
 
         if rank == 0 and local_rank == 0:
-            print(f"[TensorRT-LLM] Size: {size}, Latency: {latency:.4f} ms" + (f", Power: {avg_power:.2f} W" if avg_power is not None else ""))
+            power_str = f", Power: {avg_power:.2f} W" if avg_power is not None else ""
+            print(f"[TensorRT-LLM] Size: {size}, Latency: {latency:.4f} ms{power_str}")
 
             # Get TensorRT-LLM version
             trtllm_version = tllm.__version__ if hasattr(tllm, "__version__") else "unknown"
@@ -202,7 +209,7 @@ def benchmark_trtllm_allreduce(
                 "latency": latency,
                 "implementation": "trtllm",
             }
-            
+
             if avg_power is not None:
                 item["power"] = avg_power
                 item["compute_bound"] = 0  # Communication is always memory/bandwidth-bound
@@ -289,7 +296,13 @@ def setup_vllm_distributed(world_size, rank, use_slurm):
 
 
 def benchmark_vllm_allreduce(
-    dtype: str, test_range: str, world_size: int, rank: int, use_slurm: bool, perf_filename: str, measure_power: bool = False
+    dtype: str,
+    test_range: str,
+    world_size: int,
+    rank: int,
+    use_slurm: bool,
+    perf_filename: str,
+    measure_power: bool = False,
 ):
     """Benchmark vLLM custom AllReduce backend"""
     vllm_mods, local_rank = setup_vllm_distributed(world_size, rank, use_slurm)
@@ -302,7 +315,7 @@ def benchmark_vllm_allreduce(
 
             power_monitor = NVMLPowerMonitor(gpu_indices=[local_rank])
             if rank == 0:
-                print(f"NVML power monitoring enabled on all ranks")
+                print("NVML power monitoring enabled on all ranks")
         except Exception as e:
             if rank == 0:
                 print(f"Warning: Failed to initialize NVML power monitor: {e}")
@@ -431,7 +444,8 @@ def benchmark_vllm_allreduce(
                 avg_power = None
 
             if rank == 0:
-                print(f"[vLLM-{mode_str}] Size: {size}, Latency: {latency:.4f} ms" + (f", Power: {avg_power:.2f} W" if avg_power is not None else ""))
+                power_str = f", Power: {avg_power:.2f} W" if avg_power is not None else ""
+                print(f"[vLLM-{mode_str}] Size: {size}, Latency: {latency:.4f} ms{power_str}")
 
                 # Get vLLM version
                 try:

@@ -9,8 +9,6 @@ from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
 from helper import (
-    get_dtype_size,
-    get_gpu_specs_from_device,
     get_sm_version,
     is_gemm_compute_bound_collector,
     log_perf,
