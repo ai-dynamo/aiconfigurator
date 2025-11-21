@@ -26,6 +26,107 @@ from tensorrt_llm.sampling_params import SamplingParams
 from helper import log_perf
 
 
+def get_context_mla_test_cases():
+    dtype_list = [tensorrt_llm.bindings.DataType.BF16, tensorrt_llm.bindings.DataType.FP8]
+    test_cases = []
+    n_list = [128]
+    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    s_list = [
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        1536,
+        2048,
+        3072,
+        4096,
+        6144,
+        8192,
+        10240,
+        12288,
+        16384,
+    ]
+    for n in n_list:
+        for b in b_list:
+            for s in s_list:  # [2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072]:
+                for dtype in dtype_list:
+                    for tp_size in [1, 2, 4, 8, 16, 32, 64, 128]:
+                        if b * s > 32768:
+                            continue
+                        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size,
+                        #  tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
+                        test_cases.append(
+                            [
+                                s,
+                                b,
+                                1,
+                                dtype,
+                                n,
+                                tp_size,
+                                tp_size,
+                                64,
+                                10,
+                                6,
+                                True,
+                                "context_mla_perf.txt",
+                            ]
+                        )
+    return test_cases
+
+
+def get_generation_mla_test_cases():
+    dtype_list = [tensorrt_llm.bindings.DataType.BF16, tensorrt_llm.bindings.DataType.FP8]
+    test_cases = []
+    n_list = [128]
+    for n in n_list:
+        for b in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]:
+            for s in [
+                2,
+                4,
+                8,
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                2048,
+                4096,
+                8192,
+                16384,
+                32768,
+                65536,
+                131072,
+            ]:  # [target token s] is equivalent to [in: s-1, step=1]
+                for dtype in dtype_list:
+                    for tp_size in [1, 2, 4, 8, 16, 32, 64, 128]:
+                        if b * s > 1024 * 4096 * 2 * 2:
+                            continue
+                        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size,
+                        #  tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
+                        test_cases.append(
+                            [
+                                s - 1,
+                                b,
+                                1,
+                                dtype,
+                                n,
+                                tp_size,
+                                tp_size,
+                                64,
+                                10,
+                                6,
+                                False,
+                                "generation_mla_perf.txt",
+                            ]
+                        )
+    return test_cases
+
+
 # Copied from transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -122,6 +223,9 @@ def run_mla(
     kv_cache_tokens_per_block = tokens_per_block
     # device = torch.device('cuda')
     dtype = scenario.dtype
+
+    assert num_heads % tp_size == 0, "num_heads != N * tp_size"
+    num_heads = num_heads // tp_size
     num_kv_heads = num_heads
 
     context_sequence_lengths = [input_len for _ in range(batch_size)]

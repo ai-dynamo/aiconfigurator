@@ -13,7 +13,7 @@ import traceback
 try:
     from cuda import cuda
 except:
-    pass
+    from cuda.bindings import driver as cuda
 from datetime import datetime
 from pathlib import Path
 
