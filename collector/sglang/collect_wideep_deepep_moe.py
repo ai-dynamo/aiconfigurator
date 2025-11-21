@@ -8,6 +8,7 @@ import os
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.entrypoints.engine import _set_envs_and_config
 from sglang.srt.layers.moe.token_dispatcher.deepep import (
@@ -34,6 +35,8 @@ except ModuleNotFoundError:
 import pkg_resources
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
+
+aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 
 def get_moe_prefill_test_cases(rank):
@@ -86,6 +89,82 @@ def sample_power_law(size, alpha, xmin, xmax):
     u = torch.rand(size)
     inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (1 / (1 - alpha))
     return inv_cdf
+
+
+def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
+    if num_tokens * topk > num_experts:
+        num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
+    else:
+        num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
+
+    target_sum = num_tokens * topk
+
+    original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
+
+    target_distribution = original_distribution * target_sum
+
+    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
+
+    current_sum = num_tokens_per_expert.sum().item()
+    delta = target_sum - current_sum
+    if delta != 0:
+        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
+
+        if delta > 0:
+            for i in range(delta):
+                expert_idx = sorted_indices[i % len(sorted_indices)]
+                num_tokens_per_expert[expert_idx] += 1
+        else:
+            for i in range(-delta):
+                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
+                if num_tokens_per_expert[expert_idx] > 0:
+                    num_tokens_per_expert[expert_idx] -= 1
+                else:
+                    num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -= 1
+
+    if len(num_tokens_per_expert) > 1:
+        sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
+        assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
+
+    with torch.no_grad():
+        conv1d = torch.nn.Conv1d(
+            in_channels=1,
+            out_channels=1,
+            kernel_size=num_experts // ep,
+            stride=num_experts // ep,
+            padding=0,
+            bias=False,
+        )
+        conv1d_weights = torch.tensor([1 for _ in range(num_experts // ep)])
+        conv1d.weight.copy_(conv1d_weights)
+
+    res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
+    max_ep_idx = torch.argmax(res).item()
+
+    if max_ep_idx != 0:
+        ep_group_size = num_experts // ep
+        num_tokens_per_expert_reshaped = num_tokens_per_expert.view(ep, ep_group_size)
+        num_tokens_per_expert_reshaped[0], num_tokens_per_expert_reshaped[max_ep_idx] = (
+            num_tokens_per_expert_reshaped[max_ep_idx].clone(),
+            num_tokens_per_expert_reshaped[0].clone(),
+        )
+        num_tokens_per_expert = num_tokens_per_expert_reshaped.view(-1)
+
+    if aic_debug == 2:
+        print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
+
+    _, num_tokens_per_expert_sorted_index = torch.sort(num_tokens_per_expert, descending=True)
+    expert_assignments = []
+    num_tokens_per_expert_sorted_index_lists = num_tokens_per_expert_sorted_index.tolist()
+    for expert_id in num_tokens_per_expert_sorted_index_lists:
+        expert_assignments.extend([expert_id] * num_tokens_per_expert[expert_id])
+
+    expert_assignments = torch.tensor(expert_assignments, dtype=torch.long)
+    h_selected_experts = expert_assignments.reshape(topk, num_tokens).T
+
+    expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
+    router_logits = F.softmax(expert_map.bfloat16(), dim=1)
+    return router_logits
 
 
 # NOTE: power_law_logits_v4 was copied from aiconfigurator/collector/trtllm/collect_moe.py and
