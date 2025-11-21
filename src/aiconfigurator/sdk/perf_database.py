@@ -1490,14 +1490,13 @@ class PerfDatabase:
                     )  # s
                     target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]  # b
 
-                self._extrapolate_data_grid(
-                    data_dict=data_dict,  # tpsize,sb
-                    target_x_list=target_x_list,
-                    target_y_list=target_y_list,
-                    target_z_list=target_z_list,
-                    sqrt_y_value=True,
-                )
-
+                    self._extrapolate_data_grid(
+                        data_dict=data_dict,  # tpsize,sb
+                        target_x_list=target_x_list,
+                        target_y_list=target_y_list,
+                        target_z_list=target_z_list,
+                        sqrt_y_value=True,
+                    )
         # wideep generation mla
         if getattr(self, "_wideep_generation_mla_data", None) is not None:
             for kernel_source in self._wideep_generation_mla_data:
@@ -1581,12 +1580,12 @@ class PerfDatabase:
                     2097152 * 8,
                 ]  # s
 
-            self._extrapolate_data_grid(
-                data_dict=data_dict,  # tpsize, bs
-                target_x_list=target_x_list,
-                target_y_list=target_y_list,
-                target_z_list=target_z_list,
-            )
+                self._extrapolate_data_grid(
+                    data_dict=data_dict,  # tpsize, bs
+                    target_x_list=target_x_list,
+                    target_y_list=target_y_list,
+                    target_z_list=target_z_list,
+                )
 
         # post-correction
         self._correct_data()

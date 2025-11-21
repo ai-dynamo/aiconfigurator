@@ -20,8 +20,10 @@ from helper import get_sm_version, log_perf
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
+moe_tune_path = os.path.dirname(os.path.abspath(__file__))
 
-def cleanup_empty_json_files(directory="/tmp/moe_tune_path"):
+
+def cleanup_empty_json_files(directory):
     if not os.path.exists(directory):
         return
 
@@ -466,9 +468,9 @@ def run_moe_torch(
     torch.cuda.synchronize()
 
     if moe_type != "w4a16_mxfp4":
-        cleanup_empty_json_files("/tmp/moe_tune_path")
+        cleanup_empty_json_files(moe_tune_path)
         cache_path = (
-            f"/tmp/moe_tune_path/{moe_type}_{hidden_size}_{inter_size // moe_tp_size}_{num_experts // moe_ep_size}"
+            f"{moe_tune_path}/{moe_type}_{hidden_size}_{inter_size // moe_tp_size}_{num_experts // moe_ep_size}"
         )
         existing_files = glob.glob(f"{cache_path}*")
         cache_loaded = False
