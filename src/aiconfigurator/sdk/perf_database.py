@@ -348,7 +348,7 @@ def load_moe_data(moe_file):
     """
     if not os.path.exists(moe_file):
         logger.warning(f"MOE data file {moe_file} not found.")
-        return None
+        return None, None
 
     moe_default_data = defaultdict(
         lambda: defaultdict(
