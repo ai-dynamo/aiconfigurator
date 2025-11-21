@@ -8,7 +8,6 @@ import os
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.entrypoints.engine import _set_envs_and_config
 from sglang.srt.layers.moe.token_dispatcher.deepep import (
@@ -40,16 +39,31 @@ aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 
 def get_moe_prefill_test_cases(rank):
-    """Get test cases for MoE prefill phase"""
+    """Get test cases for MoE prefill phase including distribution and alpha.
+
+    Returns a list of dicts with keys: 'num_tokens', 'distributed', 'power_law_alpha'.
+    For uniform distribution, 'power_law_alpha' is None.
+    """
     test_cases = []
     num_tokens = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    power_law_alphas = [0.6, 0.8, 1.02, 1.2]
 
     for num_token in sorted(num_tokens):
         if num_token * 8 < 128:
             continue
         if num_token * rank > 256 * 2048:
             continue
-        test_cases.append(num_token)
+        # Uniform
+        test_cases.append({"num_tokens": num_token, "distributed": "uniform", "power_law_alpha": None})
+        # Power-law variants
+        for alpha in power_law_alphas:
+            test_cases.append(
+                {
+                    "num_tokens": num_token,
+                    "distributed": "power_law",
+                    "power_law_alpha": alpha,
+                }
+            )
 
     return test_cases
 
@@ -153,6 +167,10 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
     if aic_debug == 2:
         print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
 
+    if num_experts % ep == 0:
+        tokens_per_rank = num_tokens_per_expert.view(ep, -1).sum(dim=1)
+        print(f"Tokens per rank (ep={ep}): {tokens_per_rank.tolist()}")
+
     _, num_tokens_per_expert_sorted_index = torch.sort(num_tokens_per_expert, descending=True)
     expert_assignments = []
     num_tokens_per_expert_sorted_index_lists = num_tokens_per_expert_sorted_index.tolist()
@@ -162,9 +180,25 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
     expert_assignments = torch.tensor(expert_assignments, dtype=torch.long)
     h_selected_experts = expert_assignments.reshape(topk, num_tokens).T
 
-    expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
-    router_logits = F.softmax(expert_map.bfloat16(), dim=1)
-    return router_logits
+    # New logic: return topk_idx, topk_weights, num_recv_tokens_per_expert
+    num_local_experts = num_experts // ep
+    topk_idx = h_selected_experts.clone()
+    topk_weights = torch.full_like(topk_idx, 0.1, dtype=torch.float32)
+
+    # Mask experts not in rank 0
+    mask = topk_idx >= num_local_experts
+    topk_idx[mask] = 0
+    topk_weights[mask] = 0.0
+
+    # num_recv for rank 0 experts
+    num_recv_tokens_per_expert = num_tokens_per_expert[:num_local_experts]
+    num_recv_tokens_per_expert = (num_recv_tokens_per_expert + 127) // 128 * 128
+
+    print(f"topk_idx.shape: {topk_idx.shape}")
+    print(f"topk_weights.shape: {topk_weights.shape}")
+    print(f"num_recv_tokens_per_expert.shape: {num_recv_tokens_per_expert.shape}")
+
+    return topk_idx, topk_weights, num_recv_tokens_per_expert
 
 
 # NOTE: power_law_logits_v4 was copied from aiconfigurator/collector/trtllm/collect_moe.py and
@@ -283,7 +317,17 @@ def benchmark_moe_layer_prefill(
     """Benchmark MoE layer in prefill phase"""
     num_local_experts = num_experts // ep_size
 
-    for num_token in prefill_test_cases:
+    for case in prefill_test_cases:
+        # Backward compatible: old format was just an int
+        if isinstance(case, dict):
+            num_token = case["num_tokens"]
+            distributed = case.get("distributed", "uniform")
+            power_law_alpha = case.get("power_law_alpha", 0.8) if distributed == "power_law" else None
+        else:
+            num_token = int(case)
+            distributed = "uniform"
+            power_law_alpha = None
+
         model_runner.req_to_token_pool.clear()
         model_runner.token_to_kv_pool_allocator.clear()
 
@@ -306,88 +350,69 @@ def benchmark_moe_layer_prefill(
             device=hidden_states_per_token_iter.device,
             dtype=torch.float32,
         )
-
-        tokens_per_local_expert = int(num_token * 8 * num_rank // 256)
-        print(f"tokens_per_local_expert: {tokens_per_local_expert}")
-        if tokens_per_local_expert > 0:
-            num_recv = [tokens_per_local_expert] * num_local_experts
-        else:
-            continue
+        print(f"num_token: {num_token}")
+        print(f"num_rank: {num_rank}")
+        print(f"distributed: {distributed}")
+        print(f"power_law_alpha: {power_law_alpha}")
 
         num_tokens_iter = hidden_states_per_token_iter.shape[0]
-        topk_idx_iter = torch.full((num_tokens_iter, 8), -1, device=device, dtype=torch.int32)
+        topk = 8
+        topk_idx_iter = torch.full((num_tokens_iter, topk), -1, device=device, dtype=torch.int32)
+        topk_weights_iter = torch.zeros((num_tokens_iter, topk), device=device, dtype=torch.float32)
 
-        total_valid_positions = sum(num_recv)
+        if distributed == "uniform":
+            tokens_per_local_expert = int(num_token * topk * num_rank // 256)
+            rank_print(f"tokens_per_local_expert: {tokens_per_local_expert}")
+            if tokens_per_local_expert <= 0:
+                continue
+            num_recv = [tokens_per_local_expert] * num_local_experts
 
-        expert_indices_list = []
-        for expert_id in range(num_local_experts):
-            expert_indices_list.extend([expert_id] * tokens_per_local_expert)
+            total_valid_positions = sum(num_recv)
+            expert_indices_list = []
+            for expert_id in range(num_local_experts):
+                expert_indices_list.extend([expert_id] * tokens_per_local_expert)
 
-        expert_indices_tensor = torch.tensor(expert_indices_list, device=device, dtype=torch.int32)
-        shuffled_indices = torch.randperm(len(expert_indices_tensor), device=device)
-        expert_indices_tensor = expert_indices_tensor[shuffled_indices]
+            expert_indices_tensor = torch.tensor(expert_indices_list, device=device, dtype=torch.int32)
+            shuffled_indices = torch.randperm(len(expert_indices_tensor), device=device)
+            expert_indices_tensor = expert_indices_tensor[shuffled_indices]
 
-        positions_per_row = total_valid_positions // num_tokens_iter
-        extra_positions = total_valid_positions % num_tokens_iter
+            positions_per_row = total_valid_positions // num_tokens_iter
+            extra_positions = total_valid_positions % num_tokens_iter
 
-        valid_positions_count = 0
-        for i in range(num_tokens_iter):
-            current_row_positions = positions_per_row + (1 if i < extra_positions else 0)
+            valid_positions_count = 0
+            for i in range(num_tokens_iter):
+                current_row_positions = positions_per_row + (1 if i < extra_positions else 0)
+                for j in range(current_row_positions):
+                    if valid_positions_count < total_valid_positions:
+                        topk_idx_iter[i, j % topk] = expert_indices_tensor[valid_positions_count]
+                        valid_positions_count += 1
+                    else:
+                        break
 
-            for j in range(current_row_positions):
-                if valid_positions_count < total_valid_positions:
-                    topk_idx_iter[i, j] = expert_indices_tensor[valid_positions_count]
-                    valid_positions_count += 1
-                else:
-                    break
+            # Uniform weights across used columns
+            for i in range(num_tokens_iter):
+                used_mask = topk_idx_iter[i] != -1
+                if used_mask.any():
+                    topk_weights_iter[i, used_mask] = 1.0 / ep_size / (topk // ep_size)
 
-            if valid_positions_count >= total_valid_positions:
-                break
+        elif distributed == "power_law":
+            # Use v3 to generate router logits for local experts, then take per-token top-k
+            topk_idx_iter, topk_weights_iter, num_recv_tensor = power_law_logits_v3(
+                num_tokens_iter,
+                num_local_experts * num_rank,
+                topk,
+                num_rank,
+                power_law_alpha if power_law_alpha is not None else 0.8,
+            )
+            topk_idx_iter = topk_idx_iter.to(device).to(torch.int32)
+            topk_weights_iter = topk_weights_iter.to(device)
+            num_recv = num_recv_tensor.tolist()
 
-        topk_idx_shuffled = topk_idx_iter.clone()
+        else:
+            raise ValueError(f"Unsupported distributed mode: {distributed}")
 
-        non_negative_counts_per_row = (topk_idx_iter != -1).sum(dim=1)
-
-        all_non_negative_values = []
-        for i in range(num_tokens_iter):
-            for j in range(8):
-                if topk_idx_iter[i, j] != -1:
-                    all_non_negative_values.append(topk_idx_iter[i, j])
-
-        shuffled_values = torch.tensor(all_non_negative_values, device=device)[
-            torch.randperm(len(all_non_negative_values), device=device)
-        ]
-
-        target_per_col = len(all_non_negative_values) // 8
-        extra_per_col = len(all_non_negative_values) % 8
-
-        topk_idx_shuffled.fill_(-1)
-
-        value_idx = 0
-        for col in range(8):
-            target_count = target_per_col + (1 if col < extra_per_col else 0)
-            positions_filled = 0
-
-            for row in range(num_tokens_iter):
-                if positions_filled < target_count and value_idx < len(shuffled_values):
-                    current_row_count = (topk_idx_shuffled[row, :] != -1).sum().item()
-                    original_row_count = non_negative_counts_per_row[row].item()
-
-                    if current_row_count < original_row_count:
-                        topk_idx_shuffled[row, col] = shuffled_values[value_idx]
-                        positions_filled += 1
-                        value_idx += 1
-                elif positions_filled >= target_count:
-                    break
-
-        topk_idx_iter = topk_idx_shuffled
-
-        topk_weights_iter = torch.zeros(num_tokens_iter, 8, device=device, dtype=torch.float32)
-        for i in range(num_tokens_iter):
-            valid_count = (topk_idx_iter[i] != -1).sum().item()
-            if valid_count > 0:
-                weight_value = 1.0 / ep_size / (8 // ep_size)
-                topk_weights_iter[i, topk_idx_iter[i] != -1] = weight_value
+        # Safety clamp for weights
+        topk_weights_iter = torch.nan_to_num(topk_weights_iter, nan=0.0, posinf=0.0, neginf=0.0)
 
         dispatch_output = DeepEPNormalOutput(
             hidden_states=(hidden_states_fp8_tensor_iter, scale_tensor_iter),
@@ -470,6 +495,7 @@ def benchmark_moe_layer_prefill(
                 version = pkg_resources.get_distribution("sglang").version
                 perf_filename = os.path.join(output_path, "wideep_context_moe_perf.txt")
                 os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
                 log_perf(
                     item_list=[
                         {
@@ -481,7 +507,7 @@ def benchmark_moe_layer_prefill(
                             "num_experts": 256,
                             "moe_tp_size": moe_tp_size,
                             "moe_ep_size": moe_ep_size,
-                            "distribution": "uniform",
+                            "distribution": distribution_str,
                             "latency": avg_latency_ms,
                         }
                     ],
