@@ -84,6 +84,7 @@ def agg_pareto(
     backend_name: str,
     model_config: config.ModelConfig,
     parallel_config_list: list[list[int]],
+    measure_power: bool = False,
 ) -> pd.DataFrame:
     """
     Find Pareto front for agg.
@@ -98,6 +99,7 @@ def agg_pareto(
         backend_name: name of the backend
         model_config: model config
         parallel_config_list: list of parallel configurations
+        measure_power: whether to measure power consumption, default is False
 
     Returns:
         results_df: dataframe of the results
@@ -136,6 +138,7 @@ def agg_pareto(
                     top_k=10,
                     max_batch_size=512,
                     ctx_stride=512,
+                    measure_power=measure_power,
                 )
                 result_df = summary.get_summary_df()
                 if len(result_df) == 0:

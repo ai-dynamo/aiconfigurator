@@ -19,6 +19,8 @@ class InferenceSummary:
         memory: memory breakdown
         context_latency_dict: latency breakdown for context
         generation_latency_dict: latency breakdown for generation
+        context_power_dict: power breakdown for context
+        generation_power_dict: power breakdown for generation
         summary_df: summary dataframe
 
     Methods:
@@ -26,10 +28,15 @@ class InferenceSummary:
         set_oom: set oom
         set_context_latency_dict: set context latency dict
         set_generation_latency_dict: set generation latency dict
+        set_context_power_dict: set context power dict
+        set_generation_power_dict: set generation power dict
         get_context_latency_dict: get context latency dict
         get_generation_latency_dict: get generation latency dict
+        get_context_power_dict: get context power dict
+        get_generation_power_dict: get generation power dict
         check_oom: check oom
         get_static_info: get static info for static mode print
+        get_power_info: get power info for power analysis
         set_summary_df: set summary dataframe
         get_summary_df: get summary dataframe
     """
@@ -44,6 +51,8 @@ class InferenceSummary:
         self._memory = {}
         self._context_latency_dict = {}
         self._generation_latency_dict = {}
+        self._context_power_dict = {}
+        self._generation_power_dict = {}
         self._is_oom = None
 
         # summary dataframe
@@ -74,6 +83,18 @@ class InferenceSummary:
         """
         self._generation_latency_dict = generation_latency_dict
 
+    def set_context_power_dict(self, context_power_dict: dict) -> None:
+        """
+        Set context power dict.
+        """
+        self._context_power_dict = context_power_dict
+
+    def set_generation_power_dict(self, generation_power_dict: dict) -> None:
+        """
+        Set generation power dict.
+        """
+        self._generation_power_dict = generation_power_dict
+
     def get_context_latency_dict(self) -> dict:
         """
         Get context latency dict.
@@ -85,6 +106,18 @@ class InferenceSummary:
         Get generation latency dict.
         """
         return self._generation_latency_dict
+
+    def get_context_power_dict(self) -> dict:
+        """
+        Get context power dict.
+        """
+        return self._context_power_dict
+
+    def get_generation_power_dict(self) -> dict:
+        """
+        Get generation power dict.
+        """
+        return self._generation_power_dict
 
     def check_oom(self) -> bool:
         """
@@ -137,6 +170,73 @@ class InferenceSummary:
             mem_info += f"{item:29} {memory_usage:>8.3f} GiB\n"
 
         return perf_info, mem_info, context_info, generation_info
+
+    def get_context_power_total(self) -> float:
+        """
+        Get total context power in Watts.
+        
+        Returns:
+            Total context power in Watts, or 0.0 if no power data.
+        """
+        if not self._context_power_dict:
+            return 0.0
+        return sum(self._context_power_dict.values())
+
+    def get_generation_power_total(self) -> float:
+        """
+        Get total generation power in Watts.
+        
+        Returns:
+            Total generation power in Watts, or 0.0 if no power data.
+        """
+        if not self._generation_power_dict:
+            return 0.0
+        return sum(self._generation_power_dict.values())
+
+    def get_total_power(self) -> float:
+        """
+        Get total power (context + generation) in Watts.
+        
+        Returns:
+            Total power in Watts, or 0.0 if no power data.
+        """
+        return self.get_context_power_total() + self.get_generation_power_total()
+
+    def get_power_info(self) -> tuple[str, str] | None:
+        """
+        Get power info if power data is available.
+        
+        Returns:
+            Tuple of (context_power_string, generation_power_string) or None if no power data.
+        """
+        if not self._context_power_dict and not self._generation_power_dict:
+            return None
+
+        def get_power_and_breakdown_percentage_string_helper(metrics: dict) -> tuple[float, str]:
+            breakdown_string = ""
+            total_power = 0
+            for op, op_power in metrics.items():
+                total_power += op_power
+
+            if total_power == 0:
+                return 0.0, "No power data available\n"
+
+            breakdown_string += f"total                      ({total_power:>10.3f} W)\n"
+            for op, op_power in metrics.items():
+                breakdown_string += f"{op:<25}   {op_power:>10.3f} W {int(op_power / total_power * 100):>5}%\n"
+            return total_power, breakdown_string
+
+        context_power, context_power_string = get_power_and_breakdown_percentage_string_helper(
+            self._context_power_dict
+        )
+        generation_power, generation_power_string = get_power_and_breakdown_percentage_string_helper(
+            self._generation_power_dict
+        )
+
+        context_info = "Context Power breakdown:\n" + context_power_string
+        generation_info = "Generation Power breakdown:\n" + generation_power_string
+
+        return context_info, generation_info
 
     def set_summary_df(self, summary_df: pd.DataFrame) -> None:
         """

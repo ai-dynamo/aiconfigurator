@@ -17,6 +17,14 @@ class Operation:
     def query(self, database: PerfDatabase, **kwargs):
         raise NotImplementedError
 
+    def query_power(self, database: PerfDatabase, **kwargs) -> float | None:
+        """
+        Query power consumption for this operation.
+        Returns power in Watts, or None if power data not available.
+        Default implementation returns None (no power support).
+        """
+        return None
+
     def get_weights(self, **kwargs):
         raise NotImplementedError
 
@@ -39,6 +47,16 @@ class AllReduce(Operation):
         size = kwargs.get("x") * self._h
 
         return database.query_allreduce(common.CommQuantMode.half, self._tp_size, size) * self._scale_factor
+
+    def query_power(self, database: PerfDatabase, **kwargs) -> float | None:
+        """Query power consumption for allreduce operation."""
+        if self._tp_size == 1:
+            return 0.0
+        size = kwargs.get("x") * self._h
+        power = database.query_allreduce_power(common.CommQuantMode.half, self._tp_size, size)
+        if power is not None:
+            return power * self._scale_factor
+        return None
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -98,6 +116,14 @@ class NCCL(Operation):
             database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size) * self._scale_factor
         )
 
+    def query_power(self, database: PerfDatabase, **kwargs) -> float | None:
+        """Query power consumption for NCCL operation."""
+        message_size = kwargs.get("x") * self._num_elements_per_token
+        power = database.query_nccl_power(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
+        if power is not None:
+            return power * self._scale_factor
+        return None
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 
@@ -120,6 +146,17 @@ class GEMM(Operation):
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
         return database.query_gemm(x, self._n, self._k, quant_mode) * self._scale_factor
+
+    def query_power(self, database: PerfDatabase, **kwargs) -> float | None:
+        """Query power consumption for GEMM operation."""
+        x = kwargs.get("x")
+        overwrite_quant_mode = kwargs.get("quant_mode")
+        quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
+
+        power = database.query_gemm_power(x, self._n, self._k, quant_mode)
+        if power is not None:
+            return power * self._scale_factor
+        return None
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -468,6 +505,24 @@ class ContextAttention(Operation):
             * self._scale_factor
         )
 
+    def query_power(self, database: PerfDatabase, **kwargs) -> float | None:
+        """Query power consumption for context attention operation."""
+        batch_size = kwargs.get("batch_size")
+        isl = kwargs.get("s")
+        power = database.query_context_attention_power(
+            batch_size,
+            isl,
+            self._n,
+            self._n_kv,
+            self._kvcache_quant_mode,
+            self._fmha_quant_mode,
+            window_size=self._window_size,
+            head_size=self._head_size,
+        )
+        if power is not None:
+            return power * self._scale_factor
+        return None
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 
@@ -512,6 +567,25 @@ class GenerationAttention(Operation):
             )
             * self._scale_factor
         )
+
+    def query_power(self, database: PerfDatabase, **kwargs) -> float | None:
+        """Query power consumption for generation attention operation."""
+        beam_width = kwargs.get("beam_width")
+        assert beam_width == 1, "only support beam_width=1"
+        batch_size = kwargs.get("batch_size")
+        s = kwargs.get("s")
+        power = database.query_generation_attention_power(
+            batch_size,
+            s,
+            self._n,
+            self._n_kv,
+            self._kv_cache_dtype,
+            window_size=self._window_size,
+            head_size=self._head_size,
+        )
+        if power is not None:
+            return power * self._scale_factor
+        return None
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

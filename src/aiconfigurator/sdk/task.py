@@ -614,6 +614,7 @@ class TaskConfig:
         total_gpus: int | None = None,
         profiles: list[str] | None = None,
         yaml_config: dict | None = None,
+        measure_power: bool = False,
     ) -> None:
         yaml_mode = "patch"
         yaml_patch: dict = {}
@@ -668,6 +669,7 @@ class TaskConfig:
         self.yaml_mode = yaml_mode
         self.yaml_patch = yaml_patch
         self.profiles = list(effective_profiles)
+        self.measure_power = measure_power
 
         if serving_mode == "agg":
             effective_backend_version = self.config.worker_config.backend_version
@@ -857,6 +859,15 @@ class TaskRunner:
                 task_config.worker_config.backend_version,
             )
             return None
+        
+        # Check if power measurement is requested but data is not available
+        if getattr(task_config, "measure_power", False) and database and not database.has_power_data():
+            logger.warning(
+                "Task %s: Power analysis requested (--analyze-power), but power data is not available in the database. "
+                "Power measurements will be skipped. To collect power data, run the collector with --measure-power flag.",
+                task_config.task_name
+            )
+        
         logger.info("Task %s: Setting up model config", task_config.task_name)
         model_config = config.ModelConfig(
             gemm_quant_mode=task_config.worker_config.gemm_quant_mode,
@@ -897,6 +908,7 @@ class TaskRunner:
             backend_name=task_config.worker_config.backend_name,
             model_config=model_config,
             parallel_config_list=parallel_config_list,
+            measure_power=getattr(task_config, "measure_power", False),
         )
         return {
             "pareto_df": result_df,
@@ -931,6 +943,15 @@ class TaskRunner:
                 task_config.prefill_worker_config.backend_version,
             )
             return None
+        
+        # Check if power measurement is requested but data is not available
+        if getattr(task_config, "measure_power", False) and prefill_database and not prefill_database.has_power_data():
+            logger.warning(
+                "Task %s: Power analysis requested (--analyze-power), but power data is not available in the prefill database. "
+                "Power measurements will be skipped. To collect power data, run the collector with --measure-power flag.",
+                task_config.task_name
+            )
+        
         logger.info("Task %s: Setting up prefill model config", task_config.task_name)
         prefill_model_config = config.ModelConfig(
             gemm_quant_mode=task_config.prefill_worker_config.gemm_quant_mode,
@@ -982,6 +1003,15 @@ class TaskRunner:
                 task_config.decode_worker_config.backend_version,
             )
             return None
+        
+        # Check if power measurement is requested but data is not available
+        if getattr(task_config, "measure_power", False) and decode_database and not decode_database.has_power_data():
+            logger.warning(
+                "Task %s: Power analysis requested (--analyze-power), but power data is not available in the decode database. "
+                "Power measurements will be skipped. To collect power data, run the collector with --measure-power flag.",
+                task_config.task_name
+            )
+        
         logger.info("Task %s: Setting up decode model config", task_config.task_name)
         decode_model_config = config.ModelConfig(
             gemm_quant_mode=task_config.decode_worker_config.gemm_quant_mode,

@@ -230,16 +230,29 @@ def get_all_databases(
 # by default float16
 def load_custom_allreduce_data(custom_allreduce_file):
     """
-    Load the custom allreduce data for trtllm
+    Load the custom allreduce data for trtllm (latency and power)
+
+    Returns:
+        tuple: (custom_allreduce_data, custom_allreduce_power_data) or (None, None) if file not found
+            custom_allreduce_data: dict with latency values
+            custom_allreduce_power_data: dict with power values (Watts), None if power column not present
     """
     if not os.path.exists(custom_allreduce_file):
         logger.warning(f"Custom allreduce data file {custom_allreduce_file} not found.")
-        return None
+        return None, None
     custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    custom_allreduce_power_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
 
     with open(custom_allreduce_file) as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    has_power_data = False
+    if rows and "power" in rows[0]:
+        has_power_data = True
+        logger.debug(f"Power data found in {custom_allreduce_file}")
+    else:
+        logger.debug(f"No power column in {custom_allreduce_file}, power data will not be available")
 
     for row in rows:
         dtype, tp_size, message_size, latency = (
@@ -263,21 +276,42 @@ def load_custom_allreduce_data(custom_allreduce_file):
         except KeyError:
             custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = latency
 
-    return custom_allreduce_data
+        # Load power data if available
+        if has_power_data:
+            try:
+                power = float(row["power"])
+                custom_allreduce_power_data[dtype][tp_size][allreduce_strategy][message_size] = power
+            except (KeyError, ValueError) as e:
+                logger.debug(f"Failed to parse power for custom allreduce: {e}")
+
+    return custom_allreduce_data, (custom_allreduce_power_data if has_power_data else None)
 
 
 def load_nccl_data(nccl_file):
     """
-    Load the nccl data
+    Load the nccl data (latency and power)
+
+    Returns:
+        tuple: (nccl_data, nccl_power_data) or (None, None) if file not found
+            nccl_data: dict with latency values
+            nccl_power_data: dict with power values (Watts), None if power column not present
     """
     if not os.path.exists(nccl_file):
         logger.warning(f"NCCL data file {nccl_file} not found.")
-        return None
+        return None, None
     nccl_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    nccl_power_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
 
     with open(nccl_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    has_power_data = False
+    if rows and "power" in rows[0]:
+        has_power_data = True
+        logger.debug(f"Power data found in {nccl_file}")
+    else:
+        logger.debug(f"No power column in {nccl_file}, power data will not be available")
 
     for row in rows:
         dtype, num_gpus, message_size, op_name, latency = (
@@ -298,21 +332,42 @@ def load_nccl_data(nccl_file):
         except KeyError:
             nccl_data[dtype][op_name][num_gpus][message_size] = latency
 
-    return nccl_data
+        # Load power data if available
+        if has_power_data:
+            try:
+                power = float(row["power"])
+                nccl_power_data[dtype][op_name][num_gpus][message_size] = power
+            except (KeyError, ValueError) as e:
+                logger.debug(f"Failed to parse power for nccl: {e}")
+
+    return nccl_data, (nccl_power_data if has_power_data else None)
 
 
 def load_gemm_data(gemm_file):
     """
-    Load the gemm data
+    Load the gemm data (latency and power)
+
+    Returns:
+        tuple: (gemm_data, gemm_power_data) or (None, None) if file not found
+            gemm_data: dict with latency values
+            gemm_power_data: dict with power values (Watts), None if power column not present
     """
     if not os.path.exists(gemm_file):
         logger.warning(f"GEMM data file {gemm_file} not found.")
-        return None
+        return None, None
     gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    gemm_power_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
 
     with open(gemm_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    has_power_data = False
+    if rows and "power" in rows[0]:
+        has_power_data = True
+        logger.debug(f"Power data found in {gemm_file}")
+    else:
+        logger.debug(f"No power column in {gemm_file}, power data will not be available")
 
     for row in rows:
         quant_mode, m, n, k, latency = (
@@ -339,7 +394,15 @@ def load_gemm_data(gemm_file):
         except KeyError:
             gemm_data[quant_mode][m][n][k] = latency
 
-    return gemm_data
+        # Load power data if available
+        if has_power_data:
+            try:
+                power = float(row["power"])
+                gemm_power_data[quant_mode][m][n][k] = power
+            except (KeyError, ValueError) as e:
+                logger.debug(f"Failed to parse power for {quant_mode} {m} {n} {k}: {e}")
+
+    return gemm_data, (gemm_power_data if has_power_data else None)
 
 
 def load_moe_data(moe_file):
@@ -348,7 +411,7 @@ def load_moe_data(moe_file):
     """
     if not os.path.exists(moe_file):
         logger.warning(f"MOE data file {moe_file} not found.")
-        return None
+        return None, None
 
     moe_default_data = defaultdict(
         lambda: defaultdict(
@@ -602,11 +665,16 @@ def load_sglang_moe_data(moe_file):
 
 def load_context_attention_data(context_attention_file):
     """
-    Load the context attention data
+    Load the context attention data (latency and power)
+
+    Returns:
+        tuple: (context_attention_data, context_attention_power_data) or (None, None) if file not found
+            context_attention_data: dict with latency values
+            context_attention_power_data: dict with power values (Watts), None if power column not present
     """
     if not os.path.exists(context_attention_file):
         logger.warning(f"Context attention data file {context_attention_file} not found.")
-        return None
+        return None, None
     context_attention_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(
@@ -616,9 +684,26 @@ def load_context_attention_data(context_attention_file):
             )
         )
     )
+    context_attention_power_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                )
+            )
+        )
+    )
+    
     with open(context_attention_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    has_power_data = False
+    if rows and "power" in rows[0]:
+        has_power_data = True
+        logger.debug(f"Power data found in {context_attention_file}")
+    else:
+        logger.debug(f"No power column in {context_attention_file}, power data will not be available")
 
     for row in rows:
         try:
@@ -659,24 +744,50 @@ def load_context_attention_data(context_attention_file):
         except KeyError:
             context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = latency
 
-    return context_attention_data
+        # Load power data if available
+        if has_power_data:
+            try:
+                power = float(row["power"])
+                context_attention_power_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = power
+            except (KeyError, ValueError) as e:
+                logger.debug(f"Failed to parse power for context attention: {e}")
+
+    return context_attention_data, (context_attention_power_data if has_power_data else None)
 
 
 def load_generation_attention_data(generation_attention_file):
     """
-    Load the generation attention data
+    Load the generation attention data (latency and power)
+
+    Returns:
+        tuple: (generation_attention_data, generation_attention_power_data) or (None, None) if file not found
+            generation_attention_data: dict with latency values
+            generation_attention_power_data: dict with power values (Watts), None if power column not present
     """
     if not os.path.exists(generation_attention_file):
         logger.warning(f"Generation attention data file {generation_attention_file} not found.")
-        return None
+        return None, None
     generation_attention_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
         )
     )
+    generation_attention_power_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+        )
+    )
+    
     with open(generation_attention_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    has_power_data = False
+    if rows and "power" in rows[0]:
+        has_power_data = True
+        logger.debug(f"Power data found in {generation_attention_file}")
+    else:
+        logger.debug(f"No power column in {generation_attention_file}, power data will not be available")
 
     for row in rows:
         try:
@@ -719,7 +830,15 @@ def load_generation_attention_data(generation_attention_file):
         except KeyError:
             generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = latency
 
-    return generation_attention_data
+        # Load power data if available
+        if has_power_data:
+            try:
+                power = float(row["power"])
+                generation_attention_power_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = power
+            except (KeyError, ValueError) as e:
+                logger.debug(f"Failed to parse power for generation attention: {e}")
+
+    return generation_attention_data, (generation_attention_power_data if has_power_data else None)
 
 
 def load_context_mla_data(context_mla_file):
@@ -1036,27 +1155,37 @@ class PerfDatabase:
         version (str): the version name
         system_spec (dict): the system spec
         _default_sol_mode (common.SOLMode): the default sol mode of the database
-        _gemm_data (dict): the gemm data
-        _context_attention_data (dict): the context attention data
-        _generation_attention_data (dict): the generation attention data
-        _custom_allreduce_data (dict): the custom allreduce data
+        _gemm_data (dict): the gemm latency data
+        _gemm_power_data (dict): the gemm power data (Watts), None if not available
+        _context_attention_data (dict): the context attention latency data
+        _context_attention_power_data (dict): the context attention power data (Watts), None if not available
+        _generation_attention_data (dict): the generation attention latency data
+        _generation_attention_power_data (dict): the generation attention power data (Watts), None if not available
+        _custom_allreduce_data (dict): the custom allreduce latency data
+        _custom_allreduce_power_data (dict): the custom allreduce power data (Watts), None if not available
+        _nccl_data (dict): the nccl latency data
+        _nccl_power_data (dict): the nccl power data (Watts), None if not available
         _moe_data (dict): the moe data
         _context_mla_data (dict): the context mla data
         _generation_mla_data (dict): the generation mla data
-        _nccl_data (dict): the nccl data
         _mla_bmm_data (dict): the mla bmm data
 
     Methods:
-        query_gemm: query the gemm data
-        query_context_attention: query the context attention data
-        query_generation_attention: query the generation attention data
+        query_gemm: query the gemm latency data
+        query_gemm_power: query the gemm power data
+        query_context_attention: query the context attention latency data
+        query_context_attention_power: query the context attention power data
+        query_generation_attention: query the generation attention latency data
+        query_generation_attention_power: query the generation attention power data
+        query_allreduce: query the allreduce latency data
+        query_allreduce_power: query the allreduce power data
+        query_nccl: query the nccl latency data
+        query_nccl_power: query the nccl power data
         query_context_mla: query the context mla data
         query_generation_mla: query the generation mla data
-        query_nccl: query the nccl data
         query_mla_bmm: query the mla bmm data
         query_mem_op: query the mem op data
         query_p2p: query the p2p data
-        query_allreduce: query the allreduce data
         query_moe: query the moe data
     """
 
@@ -1070,6 +1199,7 @@ class PerfDatabase:
         with open(os.path.join(systems_dir, system + ".yaml")) as f:
             self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
         self._default_sol_mode = common.SOLMode.NON_SOL  # non sol
+        self._has_power_data = True  # Will be updated after loading data
 
         data_dir = os.path.join(systems_dir, self.system_spec["data_dir"], backend, version)
         nccl_data_dir = os.path.join(
@@ -1082,14 +1212,14 @@ class PerfDatabase:
 
         if backend == "sglang":
             # For SGLang, only load MoE and MLP data and provide empty structures for other data
-            self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
-            self._context_attention_data = load_context_attention_data(
+            self._gemm_data, self._gemm_power_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
+            self._context_attention_data, self._context_attention_power_data = load_context_attention_data(
                 os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
             )
-            self._generation_attention_data = load_generation_attention_data(
+            self._generation_attention_data, self._generation_attention_power_data = load_generation_attention_data(
                 os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
             )
-            self._custom_allreduce_data = load_custom_allreduce_data(
+            self._custom_allreduce_data, self._custom_allreduce_power_data = load_custom_allreduce_data(
                 os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
             self._moe_data, self._generation_moe_data = load_sglang_moe_data(
@@ -1108,29 +1238,29 @@ class PerfDatabase:
                 os.path.join(data_dir, common.PerfDataFilename.deepep_normal.value)
             )
             self._deepep_ll_data = load_deepep_ll_data(os.path.join(data_dir, common.PerfDataFilename.deepep_ll.value))
-            self._nccl_data = load_nccl_data(nccl_data_dir)
+            self._nccl_data, self._nccl_power_data = load_nccl_data(nccl_data_dir)
             self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
         elif backend == "vllm":
-            self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
-            self._context_attention_data = load_context_attention_data(
+            self._gemm_data, self._gemm_power_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
+            self._context_attention_data, self._context_attention_power_data = load_context_attention_data(
                 os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
             )
-            self._generation_attention_data = load_generation_attention_data(
+            self._generation_attention_data, self._generation_attention_power_data = load_generation_attention_data(
                 os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
             )
-            self._custom_allreduce_data = load_custom_allreduce_data(
+            self._custom_allreduce_data, self._custom_allreduce_power_data = load_custom_allreduce_data(
                 os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
-            self._nccl_data = load_nccl_data(nccl_data_dir)
+            self._nccl_data, self._nccl_power_data = load_nccl_data(nccl_data_dir)
         else:  # TRTLLM
-            self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
-            self._context_attention_data = load_context_attention_data(
+            self._gemm_data, self._gemm_power_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
+            self._context_attention_data, self._context_attention_power_data = load_context_attention_data(
                 os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
             )
-            self._generation_attention_data = load_generation_attention_data(
+            self._generation_attention_data, self._generation_attention_power_data = load_generation_attention_data(
                 os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
             )
-            self._custom_allreduce_data = load_custom_allreduce_data(
+            self._custom_allreduce_data, self._custom_allreduce_power_data = load_custom_allreduce_data(
                 os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
             self._moe_data, self._moe_low_latency_data = load_moe_data(
@@ -1142,11 +1272,14 @@ class PerfDatabase:
             self._generation_mla_data = load_generation_mla_data(
                 os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
             )
-            self._nccl_data = load_nccl_data(nccl_data_dir)
+            self._nccl_data, self._nccl_power_data = load_nccl_data(nccl_data_dir)
             self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
 
             # pre-correction
             self._correct_data()
+
+        # Check if power data is available
+        self._has_power_data = self._check_power_data_availability()
 
         for quant_mode in self._context_attention_data:
             for kv_cache_dtype in self._context_attention_data[quant_mode]:
@@ -1219,6 +1352,77 @@ class PerfDatabase:
                                 target_z_list=target_z_list,
                                 sqrt_y_value=True,
                             )
+
+        # Interpolate context attention power data (same grid as latency)
+        if self._context_attention_power_data is not None:
+            for quant_mode in self._context_attention_power_data:
+                for kv_cache_dtype in self._context_attention_power_data[quant_mode]:
+                    for num_kv_heads in self._context_attention_power_data[quant_mode][kv_cache_dtype]:
+                        for head_size in self._context_attention_power_data[quant_mode][kv_cache_dtype][num_kv_heads]:
+                            for window_size in self._context_attention_power_data[quant_mode][kv_cache_dtype][num_kv_heads][
+                                head_size
+                            ]:
+                                data_dict = self._context_attention_power_data[quant_mode][kv_cache_dtype][num_kv_heads][
+                                    head_size
+                                ][window_size]
+                                min_x = min(data_dict.keys())
+                                target_x_list = [
+                                    4,
+                                    5,
+                                    6,
+                                    8,
+                                    9,
+                                    10,
+                                    12,
+                                    14,
+                                    16,
+                                    18,
+                                    20,
+                                    24,
+                                    28,
+                                    32,
+                                    36,
+                                    40,
+                                    48,
+                                    56,
+                                    72,
+                                    96,
+                                    128,
+                                ]  # n
+                                target_y_list = (
+                                    [16, 32, 64, 128, 256, 512, 1024, 2048]
+                                    + [4096 + i * 2048 for i in range(14)]
+                                    + [32768 + 16384 * i for i in range(6)]
+                                    + [131072 + 32768 * i for i in range(12)]
+                                    + [524288 + 65536 * i for i in range(9)]
+                                )  # s
+                                target_z_list = [
+                                    1,
+                                    2,
+                                    4,
+                                    8,
+                                    16,
+                                    32,
+                                    64,
+                                    128,
+                                    256,
+                                    512,
+                                    384,
+                                    1024,
+                                    2048,
+                                ]  # b
+
+                                filtered_x_list = []
+                                for i in target_x_list:
+                                    if i >= min_x:
+                                        filtered_x_list.append(i)
+                                self._extrapolate_data_grid(
+                                    data_dict=data_dict,  # nsb
+                                    target_x_list=filtered_x_list,
+                                    target_y_list=target_y_list,
+                                    target_z_list=target_z_list,
+                                    sqrt_y_value=True,
+                                )
 
         for kv_cache_dtype in self._generation_attention_data:
             for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
@@ -1301,6 +1505,89 @@ class PerfDatabase:
                             target_z_list=target_z_list,
                         )
 
+        # Interpolate generation attention power data (same grid as latency)
+        if self._generation_attention_power_data is not None:
+            for kv_cache_dtype in self._generation_attention_power_data:
+                for num_kv_heads in self._generation_attention_power_data[kv_cache_dtype]:
+                    for head_size in self._generation_attention_power_data[kv_cache_dtype][num_kv_heads]:
+                        for window_size in self._generation_attention_power_data[kv_cache_dtype][num_kv_heads][head_size]:
+                            target_x_list = [
+                                4,
+                                5,
+                                6,
+                                8,
+                                9,
+                                10,
+                                12,
+                                14,
+                                16,
+                                18,
+                                20,
+                                24,
+                                28,
+                                32,
+                                36,
+                                40,
+                                48,
+                                56,
+                                72,
+                                96,
+                                128,
+                            ]  # n
+                            target_y_list = [
+                                1,
+                                2,
+                                4,
+                                8,
+                                16,
+                                32,
+                                64,
+                                128,
+                                256,
+                                384,
+                                512,
+                                1024,
+                                2048,
+                                8192,
+                            ]  # b
+                            target_z_list = [
+                                1,
+                                2,
+                                4,
+                                8,
+                                16,
+                                32,
+                                64,
+                                128,
+                                256,
+                                512,
+                                1024,
+                                2048,
+                                4096,
+                                8192,
+                                16384,
+                                32768,
+                                65536,
+                                131072,
+                                262144,
+                                2097152 * 8,
+                            ]  # s
+                            data_dict = self._generation_attention_power_data[kv_cache_dtype][num_kv_heads][head_size][
+                                window_size
+                            ]
+                            min_x = min(data_dict.keys())
+                            filtered_x_list = []
+                            for i in target_x_list:
+                                if i >= min_x:
+                                    filtered_x_list.append(i)
+
+                            self._extrapolate_data_grid(
+                                data_dict=data_dict,  # nbs
+                                target_x_list=filtered_x_list,
+                                target_y_list=target_y_list,
+                                target_z_list=target_z_list,
+                            )
+
         for quant_mode, data_dict in self._gemm_data.items():
             target_x_list = [
                 1,
@@ -1377,6 +1664,84 @@ class PerfDatabase:
                 target_z_list=target_z_list,
             )
 
+        # Interpolate GEMM power data (same grid as latency)
+        if self._gemm_power_data is not None:
+            for quant_mode, data_dict in self._gemm_power_data.items():
+                target_x_list = [
+                    1,
+                    2,
+                    4,
+                    8,
+                    16,
+                    32,
+                    48,
+                    64,
+                    80,
+                    96,
+                    128,
+                    160,
+                    192,
+                    224,
+                    256,
+                    320,
+                    384,
+                    448,
+                    512,
+                    640,
+                    768,
+                    896,
+                    1024,
+                    2048,
+                    4096,
+                    8192,
+                    16384,
+                    32768,
+                    131072,
+                    524288,
+                    1048576,
+                    2097152 * 8,
+                ]  # num_tokens
+                target_y_list = [
+                    32,
+                    64,
+                    128,
+                    256,
+                    512,
+                    768,
+                    1024,
+                    1536,
+                    2048,
+                    2560,
+                    3072,
+                    3584,
+                    4096,
+                    5120,
+                    6144,
+                    7168,
+                    8192,
+                    10240,
+                    12288,
+                    14336,
+                    16384,
+                    20480,
+                    24576,
+                    28672,
+                    32768,
+                    40960,
+                    49152,
+                    57344,
+                    65536,
+                    131072,
+                    262144,
+                ]  # to fit vocab gemm
+                target_z_list = target_y_list
+                self._extrapolate_data_grid(
+                    data_dict=data_dict,
+                    target_x_list=target_x_list,
+                    target_y_list=target_y_list,
+                    target_z_list=target_z_list,
+                )
+
         # mla
         # For sglang backend, context_mla_data structure is
         # [kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
@@ -1426,56 +1791,97 @@ class PerfDatabase:
             # vllm has no mla data yet
             pass
         else:  # TRTLLM
-            for quant_mode in self._context_mla_data:
-                for kv_cache_dtype in self._context_mla_data[quant_mode]:
-                    num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
-                    data_dict = self._context_mla_data[quant_mode][kv_cache_dtype]
-                    target_x_list = num_heads_list  # to reuse x dim
-                    # currently, support max seq to 1M. Because all the system is linear for now.
-                    # it will be difficult to do square interpolation.
-                    # Use more points to do the approximation
-                    target_y_list = (
-                        [16, 32, 64, 128, 256, 512, 1024, 2048]
-                        + [4096 + i * 2048 for i in range(14)]
-                        + [32768 + 16384 * i for i in range(6)]
-                        + [131072 + 32768 * i for i in range(12)]
-                        + [524288 + 65536 * i for i in range(9)]
-                    )  # s
-                    target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]  # b
+            if self._context_mla_data is not None:
+                for quant_mode in self._context_mla_data:
+                    for kv_cache_dtype in self._context_mla_data[quant_mode]:
+                        num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
+                        data_dict = self._context_mla_data[quant_mode][kv_cache_dtype]
+                        target_x_list = num_heads_list  # to reuse x dim
+                        # currently, support max seq to 1M. Because all the system is linear for now.
+                        # it will be difficult to do square interpolation.
+                        # Use more points to do the approximation
+                        target_y_list = (
+                            [16, 32, 64, 128, 256, 512, 1024, 2048]
+                            + [4096 + i * 2048 for i in range(14)]
+                            + [32768 + 16384 * i for i in range(6)]
+                            + [131072 + 32768 * i for i in range(12)]
+                            + [524288 + 65536 * i for i in range(9)]
+                        )  # s
+                        target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]  # b
 
-                    self._extrapolate_data_grid(
-                        data_dict=data_dict,  # tpsize,sb
-                        target_x_list=target_x_list,
-                        target_y_list=target_y_list,
-                        target_z_list=target_z_list,
-                        sqrt_y_value=True,
-                    )
+                        self._extrapolate_data_grid(
+                            data_dict=data_dict,  # tpsize,sb
+                            target_x_list=target_x_list,
+                            target_y_list=target_y_list,
+                            target_z_list=target_z_list,
+                            sqrt_y_value=True,
+                        )
 
         # For sglang backend, generation_mla_data structure is
         # [kernel_source][kv_cache_dtype][num_heads][b][s]
         # For other backends, it's [kv_cache_dtype][num_heads][b][s]
         if backend == "sglang":
-            for kernel_source in self._generation_mla_data:
-                for kv_cache_dtype in self._generation_mla_data[kernel_source]:
-                    tp_list = list(self._generation_mla_data[kernel_source][kv_cache_dtype].keys())
-                    data_dict = self._generation_mla_data[kernel_source][kv_cache_dtype]
+            if self._generation_mla_data is not None:
+                for kernel_source in self._generation_mla_data:
+                    for kv_cache_dtype in self._generation_mla_data[kernel_source]:
+                        tp_list = list(self._generation_mla_data[kernel_source][kv_cache_dtype].keys())
+                        data_dict = self._generation_mla_data[kernel_source][kv_cache_dtype]
+                        target_x_list = tp_list  # n
+                        target_y_list = [
+                            1,
+                            2,
+                            4,
+                            8,
+                            16,
+                            32,
+                            64,
+                            128,
+                            256,
+                            384,
+                            512,
+                            1024,
+                            2048,
+                            8192,
+                        ]  # b
+                        target_z_list = [
+                            1,
+                            2,
+                            4,
+                            8,
+                            16,
+                            32,
+                            64,
+                            128,
+                            256,
+                            512,
+                            1024,
+                            2048,
+                            4096,
+                            8192,
+                            16384,
+                            32768,
+                            65536,
+                            131072,
+                            262144,
+                            2097152 * 8,
+                        ]  # s
+
+                        self._extrapolate_data_grid(
+                            data_dict=data_dict,  # tpsize, bs
+                            target_x_list=target_x_list,
+                            target_y_list=target_y_list,
+                            target_z_list=target_z_list,
+                        )
+        elif backend == "vllm":
+            # vllm has no mla data yet
+            pass
+        else:  # TRTLLM
+            if self._generation_mla_data is not None:
+                for kv_cache_dtype in self._generation_mla_data:
+                    tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
+                    data_dict = self._generation_mla_data[kv_cache_dtype]
                     target_x_list = tp_list  # n
-                    target_y_list = [
-                        1,
-                        2,
-                        4,
-                        8,
-                        16,
-                        32,
-                        64,
-                        128,
-                        256,
-                        384,
-                        512,
-                        1024,
-                        2048,
-                        8192,
-                    ]  # b
+                    target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]  # b
                     target_z_list = [
                         1,
                         2,
@@ -1505,44 +1911,6 @@ class PerfDatabase:
                         target_y_list=target_y_list,
                         target_z_list=target_z_list,
                     )
-        elif backend == "vllm":
-            # vllm has no mla data yet
-            pass
-        else:  # TRTLLM
-            for kv_cache_dtype in self._generation_mla_data:
-                tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
-                data_dict = self._generation_mla_data[kv_cache_dtype]
-                target_x_list = tp_list  # n
-                target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]  # b
-                target_z_list = [
-                    1,
-                    2,
-                    4,
-                    8,
-                    16,
-                    32,
-                    64,
-                    128,
-                    256,
-                    512,
-                    1024,
-                    2048,
-                    4096,
-                    8192,
-                    16384,
-                    32768,
-                    65536,
-                    131072,
-                    262144,
-                    2097152 * 8,
-                ]  # s
-
-                self._extrapolate_data_grid(
-                    data_dict=data_dict,  # tpsize, bs
-                    target_x_list=target_x_list,
-                    target_y_list=target_y_list,
-                    target_z_list=target_z_list,
-                )
 
         # post-correction
         self._correct_data()
@@ -1558,41 +1926,43 @@ class PerfDatabase:
         # We need to collect quant_modes from the nested structure
         if self.backend == "sglang":
             context_mla_modes = set()
-            for kernel_source in self._context_mla_data:
-                for quant_mode in self._context_mla_data[kernel_source]:
-                    context_mla_modes.add(quant_mode.name)
+            if self._context_mla_data is not None:
+                for kernel_source in self._context_mla_data:
+                    for quant_mode in self._context_mla_data[kernel_source]:
+                        context_mla_modes.add(quant_mode.name)
 
             generation_mla_modes = set()
-            for kernel_source in self._generation_mla_data:
-                for kv_cache_dtype in self._generation_mla_data[kernel_source]:
-                    generation_mla_modes.add(kv_cache_dtype.name)
+            if self._generation_mla_data is not None:
+                for kernel_source in self._generation_mla_data:
+                    for kv_cache_dtype in self._generation_mla_data[kernel_source]:
+                        generation_mla_modes.add(kv_cache_dtype.name)
 
             self.supported_quant_mode = {
-                "gemm": [key.name for key in self._moe_data],
+                "gemm": [key.name for key in self._gemm_data] if self._gemm_data else [],
                 "context_attention": list(context_mla_modes),
                 "generation_attention": list(generation_mla_modes),
                 "context_mla": list(context_mla_modes),
                 "generation_mla": list(generation_mla_modes),
-                "mla_bmm": [key.name for key in self._mla_bmm_data],
-                "nccl": [key.name for key in self._nccl_data],
-                "moe": [key.name for key in self._moe_data],
+                "mla_bmm": [key.name for key in self._mla_bmm_data] if self._mla_bmm_data else [],
+                "nccl": [key.name for key in self._nccl_data] if self._nccl_data else [],
+                "moe": [key.name for key in self._moe_data] if self._moe_data else [],
             }
         elif self.backend == "trtllm":
             self.supported_quant_mode = {
-                "gemm": [key.name for key in self._gemm_data],
-                "context_attention": [key.name for key in self._context_attention_data],
-                "generation_attention": [key.name for key in self._generation_attention_data],
-                "context_mla": [key.name for key in self._context_mla_data],
-                "generation_mla": [key.name for key in self._generation_mla_data],
-                "mla_bmm": [key.name for key in self._mla_bmm_data],
-                "nccl": [key.name for key in self._nccl_data],
-                "moe": [key.name for key in self._moe_data],
+                "gemm": [key.name for key in self._gemm_data] if self._gemm_data else [],
+                "context_attention": [key.name for key in self._context_attention_data] if self._context_attention_data else [],
+                "generation_attention": [key.name for key in self._generation_attention_data] if self._generation_attention_data else [],
+                "context_mla": [key.name for key in self._context_mla_data] if self._context_mla_data else [],
+                "generation_mla": [key.name for key in self._generation_mla_data] if self._generation_mla_data else [],
+                "mla_bmm": [key.name for key in self._mla_bmm_data] if self._mla_bmm_data else [],
+                "nccl": [key.name for key in self._nccl_data] if self._nccl_data else [],
+                "moe": [key.name for key in self._moe_data] if self._moe_data else [],
             }
         elif self.backend == "vllm":
             self.supported_quant_mode = {
-                "gemm": [key.name for key in self._gemm_data],
-                "context_attention": [key.name for key in self._context_attention_data],
-                "generation_attention": [key.name for key in self._generation_attention_data],
+                "gemm": [key.name for key in self._gemm_data] if self._gemm_data else [],
+                "context_attention": [key.name for key in self._context_attention_data] if self._context_attention_data else [],
+                "generation_attention": [key.name for key in self._generation_attention_data] if self._generation_attention_data else [],
             }
 
     def is_inter_node(self, num_gpus: int) -> bool:
@@ -1981,6 +2351,38 @@ class PerfDatabase:
             result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
             return result
 
+    def query_gemm_power(
+        self,
+        m: int,
+        n: int,
+        k: int,
+        quant_mode: common.GEMMQuantMode,
+    ) -> float | None:
+        """
+        Query the gemm power data
+
+        Args:
+            m, n, k: GEMM dimensions (C = A @ B, A is mxk, B is kxn)
+            quant_mode: GEMM quantization mode
+
+        Returns:
+            Power consumption in Watts, or None if power data not available
+        """
+        if self._gemm_power_data is None:
+            logger.debug("GEMM power data not available")
+            return None
+
+        if quant_mode not in self._gemm_power_data:
+            logger.debug(f"GEMM power data not available for {quant_mode}")
+            return None
+
+        try:
+            result = self._interp_3d(m, n, k, self._gemm_power_data[quant_mode], "cubic")
+            return result
+        except Exception as e:
+            logger.debug(f"Failed to query GEMM power: {e}")
+            return None
+
     def query_context_attention(
         self,
         b: int,
@@ -2132,6 +2534,100 @@ class PerfDatabase:
             attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
             latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
             return latency
+
+    def query_context_attention_power(
+        self,
+        b: int,
+        s: int,
+        n: int,
+        n_kv: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+        window_size: int = 0,
+        head_size: int = 128,
+    ) -> float | None:
+        """
+        Query the context attention power data
+
+        Args:
+            b: Batch size
+            s: Sequence length
+            n: Number of heads
+            n_kv: Number of key-value heads
+            kvcache_quant_mode: KV cache quantization mode
+            fmha_quant_mode: FMHA quantization mode
+            window_size: Attention window size (0 for no sliding window)
+            head_size: Head dimension
+
+        Returns:
+            Power consumption in Watts, or None if power data not available
+        """
+        if self._context_attention_power_data is None:
+            logger.debug("Context attention power data not available")
+            return None
+
+        if fmha_quant_mode not in self._context_attention_power_data:
+            logger.debug(f"Context attention power data not available for {fmha_quant_mode}")
+            return None
+
+        try:
+            # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
+            if n_kv == n:
+                n_kv = 0
+
+            attention_dict = self._context_attention_power_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
+                window_size
+            ]
+            power = self._interp_3d(n, s, b, attention_dict, "cubic")
+            return power
+        except Exception as e:
+            logger.debug(f"Failed to query context attention power: {e}")
+            return None
+
+    def query_generation_attention_power(
+        self,
+        b: int,
+        s: int,
+        n: int,
+        n_kv: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        window_size: int = 0,
+        head_size: int = 128,
+    ) -> float | None:
+        """
+        Query the generation attention power data
+
+        Args:
+            b: Batch size
+            s: Sequence length
+            n: Number of heads
+            n_kv: Number of key-value heads
+            kvcache_quant_mode: KV cache quantization mode
+            window_size: Attention window size (0 for no sliding window)
+            head_size: Head dimension
+
+        Returns:
+            Power consumption in Watts, or None if power data not available
+        """
+        if self._generation_attention_power_data is None:
+            logger.debug("Generation attention power data not available")
+            return None
+
+        if kvcache_quant_mode not in self._generation_attention_power_data:
+            logger.debug(f"Generation attention power data not available for {kvcache_quant_mode}")
+            return None
+
+        try:
+            # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
+            if n_kv == n:
+                n_kv = 0
+
+            attention_dict = self._generation_attention_power_data[kvcache_quant_mode][n_kv][head_size][window_size]
+            power = self._interp_3d(n, b, s, attention_dict, "bilinear")
+            return power
+        except Exception as e:
+            logger.debug(f"Failed to query generation attention power: {e}")
+            return None
 
     def query_context_mla(
         self,
@@ -2449,6 +2945,11 @@ class PerfDatabase:
         else:
             if tp_size == 1:
                 return 0.0
+            # Fall back to SOL if custom_allreduce_data is not available
+            if self._custom_allreduce_data is None:
+                logger.debug(f"Custom allreduce data not available, falling back to SOL for tp_size={tp_size}, size={size}")
+                return get_sol(quant_mode, tp_size, size)[0]
+            
             comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
                 "AUTO"
             ]  # use AUTO for allreduce strategy
@@ -2512,6 +3013,10 @@ class PerfDatabase:
         else:
             if num_gpus == 1:
                 return 0.0
+            # Fall back to SOL if nccl_data is not available
+            if self._nccl_data is None:
+                logger.debug(f"NCCL data not available, falling back to SOL for num_gpus={num_gpus}, operation={operation}, message_size={message_size}")
+                return get_sol(dtype, num_gpus, operation, message_size)[0]
 
         max_num_gpus = max(self._nccl_data[dtype][operation].keys())
         nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
@@ -2529,6 +3034,75 @@ class PerfDatabase:
             lat = lat * (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
 
         return lat
+
+    def query_allreduce_power(
+        self,
+        quant_mode: common.CommQuantMode,
+        tp_size: int,
+        size: int,
+    ) -> float | None:
+        """
+        Query the allreduce power data
+
+        Args:
+            quant_mode: Communication quantization mode
+            tp_size: Tensor parallel size
+            size: Message size (element count)
+
+        Returns:
+            Power consumption in Watts, or None if power data not available
+        """
+        if self._custom_allreduce_power_data is None:
+            logger.debug("Custom allreduce power data not available")
+            return None
+
+        if tp_size == 1:
+            return 0.0
+
+        try:
+            comm_dict = self._custom_allreduce_power_data[quant_mode][min(tp_size, 8)]["AUTO"]
+            size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
+            power = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
+            return power
+        except Exception as e:
+            logger.debug(f"Failed to query allreduce power: {e}")
+            return None
+
+    def query_nccl_power(
+        self,
+        dtype: common.CommQuantMode,
+        num_gpus: int,
+        operation: str,
+        message_size: int,
+    ) -> float | None:
+        """
+        Query the nccl power data
+
+        Args:
+            dtype: Communication data type
+            num_gpus: Number of GPUs
+            operation: NCCL operation name (e.g., "all_reduce", "all_gather")
+            message_size: Message size (element count)
+
+        Returns:
+            Power consumption in Watts, or None if power data not available
+        """
+        if self._nccl_power_data is None:
+            logger.debug("NCCL power data not available")
+            return None
+
+        if num_gpus == 1:
+            return 0.0
+
+        try:
+            max_num_gpus = max(self._nccl_power_data[dtype][operation].keys())
+            nccl_dict = self._nccl_power_data[dtype][operation][min(num_gpus, max_num_gpus)]
+            size_left, size_right = self._nearest_1d_point_helper(message_size, list(nccl_dict.keys()), inner_only=False)
+            power = self._interp_1d([size_left, size_right], [nccl_dict[size_left], nccl_dict[size_right]], message_size)
+            return power
+        except Exception as e:
+            logger.debug(f"Failed to query NCCL power: {e}")
+            return None
 
     def query_moe(
         self,
@@ -2824,6 +3398,40 @@ class PerfDatabase:
                                         self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][b][
                                             s
                                         ] = sol
+
+    def _check_power_data_availability(self) -> bool:
+        """
+        Check if power data is available in the database.
+        
+        Returns:
+            bool: True if power data is available, False otherwise
+        """
+        # Check if any of the power data attributes are None
+        if self._gemm_power_data is None:
+            logger.debug("GEMM power data not available")
+            return False
+        if self._context_attention_power_data is None:
+            logger.debug("Context attention power data not available")
+            return False
+        if self._generation_attention_power_data is None:
+            logger.debug("Generation attention power data not available")
+            return False
+        if self._custom_allreduce_power_data is None:
+            logger.debug("Custom allreduce power data not available")
+            return False
+        if self._nccl_power_data is None:
+            logger.debug("NCCL power data not available")
+            return False
+        return True
+    
+    def has_power_data(self) -> bool:
+        """
+        Check if power data is available in the database.
+        
+        Returns:
+            bool: True if power data is available, False otherwise
+        """
+        return self._has_power_data
 
     def query_mlp(
         self,

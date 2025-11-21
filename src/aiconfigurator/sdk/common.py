@@ -222,6 +222,10 @@ ColumnsStatic = [
     "backend",
     "version",
     "system",
+    "context_power",
+    "generation_power",
+    "total_power",
+    "tokens/s/W",
 ]
 
 """
@@ -264,6 +268,10 @@ ColumnsAgg = [
     "backend",
     "version",
     "system",
+    "context_power",
+    "generation_power",
+    "total_power",
+    "tokens/s/W",
 ]
 
 """

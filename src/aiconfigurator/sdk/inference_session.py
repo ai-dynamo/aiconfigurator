@@ -48,6 +48,7 @@ class InferenceSession:
         mode: str,
         stride: int = 32,
         latency_correction_scale: float = 1.0,
+        measure_power: bool = False,
     ) -> InferenceSummary:
         """
         Run static inference
@@ -57,12 +58,13 @@ class InferenceSession:
             mode (str): the mode to run inference, static, static_ctx, static_gen
             stride (int): the stride is used to accelerate the estimation, for a give osl,
                 will only computes the i, i+stride, i+2*stride, ... step, default is 32.
+            measure_power (bool): whether to measure power consumption, default is False.
 
         Returns:
             InferenceSummary: the summary of the inference result
         """
         return self._backend.run_static(
-            self._model, self._database, runtime_config, mode, stride, latency_correction_scale
+            self._model, self._database, runtime_config, mode, stride, latency_correction_scale, measure_power
         )
 
     def run_agg(self, runtime_config: config.RuntimeConfig, **kwargs) -> InferenceSummary:

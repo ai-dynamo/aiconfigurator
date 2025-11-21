@@ -149,11 +149,11 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
 
-    # warm up
+    # timing
     for i in range(num_warmups):
         g.replay()
+    torch.cuda.synchronize()
 
-    # measure
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     start_event.record()
@@ -163,15 +163,15 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
     torch.cuda.synchronize()
     latency = start_event.elapsed_time(end_event) / num_runs
 
+    item = {
+        "bmm_dtype": dtype,
+        "num_tokens": num_tokens,
+        "num_heads": num_heads,
+        "latency": latency,
+    }
+
     log_perf(
-        item_list=[
-            {
-                "bmm_dtype": dtype,
-                "num_tokens": num_tokens,
-                "num_heads": num_heads,
-                "latency": latency,
-            }
-        ],
+        item_list=[item],
         framework="TRTLLM",
         version=tensorrt_llm.__version__,
         device_name=torch.cuda.get_device_name(device),
@@ -239,11 +239,11 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
 
-    # warm up
+    # timing
     for i in range(num_warmups):
         g.replay()
+    torch.cuda.synchronize()
 
-    # measure
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     start_event.record()
@@ -253,15 +253,15 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
     torch.cuda.synchronize()
     latency = start_event.elapsed_time(end_event) / num_runs
 
+    item = {
+        "bmm_dtype": dtype,
+        "num_tokens": num_tokens,
+        "num_heads": num_heads,
+        "latency": latency,
+    }
+
     log_perf(
-        item_list=[
-            {
-                "bmm_dtype": dtype,
-                "num_tokens": num_tokens,
-                "num_heads": num_heads,
-                "latency": latency,
-            }
-        ],
+        item_list=[item],
         framework="TRTLLM",
         version=tensorrt_llm.__version__,
         device_name=torch.cuda.get_device_name(device),

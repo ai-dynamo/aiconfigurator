@@ -64,24 +64,49 @@ def _plot_worker_setup_table(
     is_disagg = "(p)tp" in top_configs.columns
 
     if is_disagg:
-        table.field_names = [
-            "Rank",
-            "\033[1mtokens/s/gpu\033[0m",
-            "tokens/s/user",
-            "TTFT",
-            "concurrency",
-            "total_gpus (used)",
-            "replicas",
-            "gpus/replica",
-            "(p)workers",
-            "(p)gpus/worker",
-            "(p)parallel",
-            "(p)bs",
-            "(d)workers",
-            "(d)gpus/worker",
-            "(d)parallel",
-            "(d)bs",
-        ]
+        # Check if power data is available
+        has_power = 'total_power' in top_configs.columns and top_configs['total_power'].iloc[0] > 0
+        
+        if has_power:
+            table.field_names = [
+                "Rank",
+                "\033[1mtokens/s/gpu\033[0m",
+                "tokens/s/user",
+                "tokens/s/W",
+                "Power(W)",
+                "TTFT",
+                "concurrency",
+                "total_gpus (used)",
+                "replicas",
+                "gpus/replica",
+                "(p)workers",
+                "(p)gpus/worker",
+                "(p)parallel",
+                "(p)bs",
+                "(d)workers",
+                "(d)gpus/worker",
+                "(d)parallel",
+                "(d)bs",
+            ]
+        else:
+            table.field_names = [
+                "Rank",
+                "\033[1mtokens/s/gpu\033[0m",
+                "tokens/s/user",
+                "TTFT",
+                "concurrency",
+                "total_gpus (used)",
+                "replicas",
+                "gpus/replica",
+                "(p)workers",
+                "(p)gpus/worker",
+                "(p)parallel",
+                "(p)bs",
+                "(d)workers",
+                "(d)gpus/worker",
+                "(d)parallel",
+                "(d)bs",
+            ]
         for i, row in enumerate(top_configs.to_dict("records")):
             if is_moe:
                 p_parallel = (
@@ -109,44 +134,92 @@ def _plot_worker_setup_table(
                 d_gpus_worker = (
                     f"{row['(d)pp'] * row['(d)tp']} (=\033[4m{row['(d)tp']}\033[0mx\033[4m{row['(d)pp']}\033[0m)"
                 )
-            table.add_row(
-                [
-                    i + 1,
-                    f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
-                    f"{row['tokens/s/user']:.2f}",
-                    f"{row['ttft']:.2f}",
-                    f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
-                    f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
-                    row["replicas"],
-                    (
-                        f"{row['num_total_gpus']} "
-                        f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
-                        f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
-                    ),
-                    row["(p)workers"],
-                    p_gpus_worker,
-                    p_parallel,
-                    row["(p)bs"],
-                    row["(d)workers"],
-                    d_gpus_worker,
-                    d_parallel,
-                    row["(d)bs"],
-                ]
-            )
+            if has_power:
+                table.add_row(
+                    [
+                        i + 1,
+                        f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
+                        f"{row['tokens/s/user']:.2f}",
+                        f"{row['tokens/s/W']:.2f}",
+                        f"{row['total_power']:.1f}",
+                        f"{row['ttft']:.2f}",
+                        f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
+                        f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
+                        row["replicas"],
+                        (
+                            f"{row['num_total_gpus']} "
+                            f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
+                            f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
+                        ),
+                        row["(p)workers"],
+                        p_gpus_worker,
+                        p_parallel,
+                        row["(p)bs"],
+                        row["(d)workers"],
+                        d_gpus_worker,
+                        d_parallel,
+                        row["(d)bs"],
+                    ]
+                )
+            else:
+                table.add_row(
+                    [
+                        i + 1,
+                        f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
+                        f"{row['tokens/s/user']:.2f}",
+                        f"{row['ttft']:.2f}",
+                        f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
+                        f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
+                        row["replicas"],
+                        (
+                            f"{row['num_total_gpus']} "
+                            f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
+                            f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
+                        ),
+                        row["(p)workers"],
+                        p_gpus_worker,
+                        p_parallel,
+                        row["(p)bs"],
+                        row["(d)workers"],
+                        d_gpus_worker,
+                        d_parallel,
+                        row["(d)bs"],
+                    ]
+                )
     else:  # agg
-        table.field_names = [
-            "Rank",
-            "\033[1mtokens/s/gpu\033[0m",
-            "tokens/s/user",
-            "TTFT",
-            "concurrency",
-            "total_gpus (used)",
-            "replicas",
-            "gpus/replica",
-            "gpus/worker",
-            "parallel",
-            "bs",
-        ]
+        # Check if power data is available
+        has_power = 'total_power' in top_configs.columns and top_configs['total_power'].iloc[0] > 0
+        
+        if has_power:
+            table.field_names = [
+                "Rank",
+                "\033[1mtokens/s/gpu\033[0m",
+                "tokens/s/user",
+                "tokens/s/W",
+                "Power(W)",
+                "TTFT",
+                "concurrency",
+                "total_gpus (used)",
+                "replicas",
+                "gpus/replica",
+                "gpus/worker",
+                "parallel",
+                "bs",
+            ]
+        else:
+            table.field_names = [
+                "Rank",
+                "\033[1mtokens/s/gpu\033[0m",
+                "tokens/s/user",
+                "TTFT",
+                "concurrency",
+                "total_gpus (used)",
+                "replicas",
+                "gpus/replica",
+                "gpus/worker",
+                "parallel",
+                "bs",
+            ]
         for i, row in enumerate(top_configs.to_dict("records")):
             if is_moe:
                 parallel = (
@@ -163,21 +236,41 @@ def _plot_worker_setup_table(
                     f"{row['pp'] * row['tp']} (=\033[4m{row['tp']}\033[0mx\033[4m{row['pp']}"
                     f"\033[0mx\033[4m{row['dp']}\033[0m)"
                 )
-            table.add_row(
-                [
-                    i + 1,
-                    f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
-                    f"{row['tokens/s/user']:.2f}",
-                    f"{row['ttft']:.2f}",
-                    f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
-                    f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
-                    row["replicas"],
-                    row["num_total_gpus"],
-                    gpus_worker,
-                    parallel,
-                    row["bs"],
-                ]
-            )
+            
+            if has_power:
+                table.add_row(
+                    [
+                        i + 1,
+                        f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
+                        f"{row['tokens/s/user']:.2f}",
+                        f"{row['tokens/s/W']:.2f}",
+                        f"{row['total_power']:.1f}",
+                        f"{row['ttft']:.2f}",
+                        f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
+                        f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
+                        row["replicas"],
+                        row["num_total_gpus"],
+                        gpus_worker,
+                        parallel,
+                        row["bs"],
+                    ]
+                )
+            else:
+                table.add_row(
+                    [
+                        i + 1,
+                        f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
+                        f"{row['tokens/s/user']:.2f}",
+                        f"{row['ttft']:.2f}",
+                        f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
+                        f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
+                        row["replicas"],
+                        row["num_total_gpus"],
+                        gpus_worker,
+                        parallel,
+                        row["bs"],
+                    ]
+                )
 
     buf.append(table.get_string())
     return "\n".join(buf)
@@ -239,6 +332,12 @@ def log_final_summary(
         summary_box.append(f"    - User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
+        # Add power information if available
+        if 'total_power' in best_conf_details and best_conf_details['total_power'] > 0:
+            summary_box.append(f"    - Total Power: {best_conf_details['total_power']:.2f}W")
+            summary_box.append(f"    - Context Power: {best_conf_details['context_power']:.2f}W")
+            summary_box.append(f"    - Generation Power: {best_conf_details['generation_power']:.2f}W")
+            summary_box.append(f"    - Power Efficiency: {best_conf_details['tokens/s/W']:.2f} tokens/s/W")
     summary_box.append("  " + "-" * 76)
 
     # ============================= pareto frontier
@@ -347,6 +446,35 @@ def save_results(
                 )
         plt.savefig(os.path.join(safe_result_dir, "pareto_frontier.png"))
         plt.close()
+
+        # Save power efficiency plots if power data is available
+        first_pareto_df = next((df for df in pareto_fronts.values() if not df.empty), None)
+        if first_pareto_df is not None and 'tokens/s/W' in first_pareto_df.columns:
+            # Check if any configuration has power data
+            has_power_data = any(
+                not df.empty and 'total_power' in df.columns and df['total_power'].iloc[0] > 0
+                for df in pareto_fronts.values()
+            )
+            
+            if has_power_data:
+                # Plot tokens/s/W vs tokens/s/user (power efficiency Pareto)
+                fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+                plt.title(f"{first_task_config.model_name} tokens/s/W vs tokens/s/user")
+                for i, (exp_name, pareto_df) in enumerate(pareto_fronts.items()):
+                    if not pareto_df.empty and 'tokens/s/W' in pareto_df.columns:
+                        # Filter out rows with zero power
+                        power_df = pareto_df[pareto_df['total_power'] > 0]
+                        if not power_df.empty:
+                            pareto_analysis.draw_pareto(
+                                power_df,
+                                "tokens/s/user",
+                                "tokens/s/W",
+                                ax,
+                                colors[i % len(colors)],
+                                exp_name,
+                            )
+                plt.savefig(os.path.join(safe_result_dir, "pareto_power_efficiency.png"))
+                plt.close()
 
         # Save each experiment's results in its own subdirectory
         for exp_name, pareto_df in pareto_fronts.items():

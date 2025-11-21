@@ -427,11 +427,11 @@ def _run_attn_for_backend(
                 q_pe=q_pe,
             )
 
-    # warmup
+    # timing
     for i in range(warming_up):
         g.replay()
+    torch.cuda.synchronize()
 
-    # collect
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     start_event.record()
@@ -453,19 +453,19 @@ def _run_attn_for_backend(
     if kv_cache_dtype == tensorrt_llm.bindings.DataType.FP8:
         dtype_str = "fp8"
 
+    item = {
+        "mla_dtype": "float16",
+        "kv_cache_dtype": dtype_str,
+        "num_heads": num_heads,
+        "batch_size": len(context_sequence_lengths),
+        "isl": isl,
+        "tp_size": tp_size,
+        "step": step,
+        "latency": latency,
+    }
+
     log_perf(
-        item_list=[
-            {
-                "mla_dtype": "float16",
-                "kv_cache_dtype": dtype_str,
-                "num_heads": num_heads,
-                "batch_size": len(context_sequence_lengths),
-                "isl": isl,
-                "tp_size": tp_size,
-                "step": step,
-                "latency": latency,
-            }
-        ],
+        item_list=[item],
         framework="TRTLLM",
         version=tensorrt_llm.__version__,
         device_name=torch.cuda.get_device_name(device),

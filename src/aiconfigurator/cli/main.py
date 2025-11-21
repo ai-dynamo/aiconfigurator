@@ -29,6 +29,11 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")
     common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
+    common_parser.add_argument(
+        "--analyze-power",
+        action="store_true",
+        help="Enable power analysis. Requires power data in the database.",
+    )
     add_config_generation_cli(common_parser, default_backend=common.BackendName.trtllm.value)
     return common_parser
 
@@ -132,6 +137,7 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
         "osl": args.osl,
         "ttft": args.ttft,
         "tpot": args.tpot,
+        "measure_power": getattr(args, "analyze_power", False),
     }
 
     task_configs: dict[str, TaskConfig] = {}

@@ -46,6 +46,7 @@ class TRTLLMBackend(BaseBackend):
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
         balance_score = isl * b / ctx_tokens / osl
+        measure_power = kwargs.get("measure_power", False)
 
         try:
             summary = self._agg_cache[isl][osl][b][ctx_tokens]
@@ -91,20 +92,34 @@ class TRTLLMBackend(BaseBackend):
                 gen_tokens: int,
                 isl: int,
                 osl: int,
-            ) -> float:
+            ) -> tuple[float, float]:
+                """
+                Returns: (latency, power) tuple
+                """
                 num_tokens = ctx_tokens + gen_tokens
                 summary = self.run_static(
                     model,
                     database,
                     RuntimeConfig(batch_size=1, beam_width=1, isl=num_tokens, osl=1),
                     mode="static_ctx",
+                    measure_power=measure_power,
                 )
                 latency_dict = summary.get_context_latency_dict()
                 non_attention_latency = 0.0
+                non_attention_power_time = 0.0  # power * time for weighted average
                 # TODO, fix for DS. DS has different ops for attn in ctx and gen.
                 for layer_name, latency in latency_dict.items():
                     if layer_name != "context_attention":
                         non_attention_latency += latency
+                if measure_power:
+                    try:
+                        power_dict = summary.get_context_power_dict()
+                        for layer_name, power in power_dict.items():
+                            if layer_name != "context_attention":
+                                non_attention_power_time += power * latency_dict[layer_name]
+                    except KeyError as e:
+                        logger.debug(f"Context power data not available: {e}. Skipping power measurement.")
+                        non_attention_power_time = 0.0
 
                 # second pass to get ctx attn, split full isl over
                 # num_steps(=np.ceil(isl/ctx_tokens)), average the ctx attn latency
@@ -114,9 +129,18 @@ class TRTLLMBackend(BaseBackend):
                     database,
                     RuntimeConfig(batch_size=1, beam_width=1, isl=num_tokens, osl=1),
                     mode="static_ctx",
+                    measure_power=measure_power,
                 )
                 latency_dict = summary.get_context_latency_dict()
                 ctx_attention_latency = latency_dict["context_attention"] / (np.ceil(isl / ctx_tokens))
+                ctx_attention_power_time = 0.0
+                if measure_power:
+                    try:
+                        power_dict = summary.get_context_power_dict()
+                        ctx_attention_power_time = power_dict["context_attention"] * latency_dict["context_attention"] / (np.ceil(isl / ctx_tokens))
+                    except KeyError as e:
+                        logger.debug(f"Context attention power data not available: {e}. Skipping power measurement.")
+                        ctx_attention_power_time = 0.0
 
                 # third pass to get generation attn. use isl+osl//2 for avg generation attn latency.
                 if gen_tokens > 0:
@@ -126,35 +150,64 @@ class TRTLLMBackend(BaseBackend):
                         database,
                         RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl + osl // 2, osl=2),
                         mode="static_gen",
+                        measure_power=measure_power,
                     )
                     latency_dict = summary.get_generation_latency_dict()
                     gen_attention_latency = latency_dict["generation_attention"]
+                    gen_attention_power_time = 0.0
+                    if measure_power:
+                        try:
+                            power_dict = summary.get_generation_power_dict()
+                            gen_attention_power_time = power_dict["generation_attention"] * latency_dict["generation_attention"]
+                        except KeyError as e:
+                            logger.debug(f"Generation attention power data not available: {e}. Skipping power measurement.")
+                            gen_attention_power_time = 0.0
                 else:
                     gen_attention_latency = 0.0
+                    gen_attention_power_time = 0.0
 
-                return non_attention_latency + ctx_attention_latency + gen_attention_latency
+                total_latency = non_attention_latency + ctx_attention_latency + gen_attention_latency
+                # Time-weighted average power
+                total_power = (non_attention_power_time + ctx_attention_power_time + gen_attention_power_time) / total_latency if total_latency > 0 else 0.0
+                return total_latency, total_power
 
             def _get_genonly_step_latency(
                 model: BaseModel, database: PerfDatabase, gen_tokens: int, isl: int, osl: int
-            ) -> float:
+            ) -> tuple[float, float]:
+                """
+                Returns: (latency, power) tuple
+                """
                 if gen_tokens <= 0:
-                    return 0.0
+                    return 0.0, 0.0
                 num_tokens = gen_tokens
                 summary = self.run_static(
                     model,
                     database,
                     RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl + osl // 2, osl=2),
                     mode="static_gen",
+                    measure_power=measure_power,
                 )
                 latency_dict = summary.get_generation_latency_dict()
                 genonly_step_latency = 0.0
+                genonly_step_power_time = 0.0
                 for layer_name, latency in latency_dict.items():
                     genonly_step_latency += latency
+                
+                if measure_power:
+                    try:
+                        power_dict = summary.get_generation_power_dict()
+                        for layer_name, power in power_dict.items():
+                            genonly_step_power_time += power * latency_dict[layer_name]
+                    except KeyError as e:
+                        logger.debug(f"Generation power data not available: {e}. Skipping power measurement.")
+                        genonly_step_power_time = 0.0
 
-                return genonly_step_latency
+                # Time-weighted average power
+                genonly_step_power = genonly_step_power_time / genonly_step_latency if genonly_step_latency > 0 else 0.0
+                return genonly_step_latency, genonly_step_power
 
-            mix_step_latency = _get_mix_step_latency(model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl)
-            genonly_step_latency = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
+            mix_step_latency, mix_step_power = _get_mix_step_latency(model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl)
+            genonly_step_latency, genonly_step_power = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
 
             ttft = mix_step_latency * np.ceil(isl / ctx_tokens)
             # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency
@@ -222,6 +275,28 @@ class TRTLLMBackend(BaseBackend):
             comm = model.config.comm_quant_mode.name
             mem = memory["total"]
 
+            # Calculate power metrics for agg mode
+            # Power is time-weighted average based on time spent in each phase
+            total_time = num_mix_steps * mix_step_latency + num_genonly_steps * genonly_step_latency
+            if measure_power and total_time > 0:
+                # Time-weighted average power across the workload
+                # mix_step_power and genonly_step_power are already time-weighted averages
+                total_power = (
+                    (num_mix_steps * mix_step_latency * mix_step_power) +
+                    (num_genonly_steps * genonly_step_latency * genonly_step_power)
+                ) / total_time
+                
+                # For reporting, approximate context/generation split
+                context_power = mix_step_power if num_mix_steps > 0 else 0.0
+                generation_power = genonly_step_power if num_genonly_steps > 0 else 0.0
+                
+                tokens_per_watt = tokens_s / total_power if total_power > 0 else 0.0
+            else:
+                context_power = 0.0
+                generation_power = 0.0
+                total_power = 0.0
+                tokens_per_watt = 0.0
+
             result = pd.DataFrame(
                 columns=common.ColumnsAgg,
                 data=[
@@ -262,6 +337,10 @@ class TRTLLMBackend(BaseBackend):
                         database.backend,
                         database.version,
                         database.system,
+                        context_power,
+                        generation_power,
+                        total_power,
+                        tokens_per_watt,
                     ]
                 ],
             ).round(3)
@@ -302,6 +381,7 @@ class TRTLLMBackend(BaseBackend):
         max_batch_size = kwargs.get("max_batch_size", 512)
         ctx_stride = kwargs.get("ctx_stride", 512)
         enable_chunked_prefill = kwargs.get("enable_chunked_prefill", False)
+        measure_power = kwargs.get("measure_power", False)
 
         max_ctx_tokens = max(MAX_NORMAL_CTX_TOKENS, isl * MAX_CTX_TOKENS_MULTIPLE_OF_ISL)
         # if ctx tokens is already larger than 2048, we need to increase ctx_stride for faster
@@ -385,6 +465,7 @@ class TRTLLMBackend(BaseBackend):
                     database=database,
                     runtime_config=RuntimeConfig(batch_size=b, isl=isl, osl=osl),
                     ctx_tokens=ctx_tokens,
+                    measure_power=measure_power,
                 )
 
                 if summary.check_oom():
