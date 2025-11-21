@@ -222,8 +222,10 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             # Stall detection unchanged...
             if progress_value.value == last_progress:
                 stall_count += 1
-                if stall_count > 30:
+                if stall_count > 30 and "moe" not in func.__name__:
                     logger.warning(f"Progress stalled at {progress_value.value}/{len(tasks)}")
+                if stall_count > 900 and "moe" in func.__name__:
+                    logger.warning(f"Moe Progress stalled at {progress_value.value}/{len(tasks)}")
             else:
                 stall_count = 0
                 last_progress = progress_value.value
@@ -264,7 +266,10 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
 
     # Wait for processes
     for p in processes:
-        p.join(timeout=10)
+        if "moe" in func.__name__:
+            p.join(timeout=500)  # tune + 30 tokens cases
+        else:
+            p.join(timeout=10)
         if p.is_alive():
             logger.warning(f"Process {p.pid} did not terminate, forcing...")
             p.terminate()
@@ -511,7 +516,9 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             "module": "collector.trtllm.collect_mla",
             "get_func": "get_context_mla_test_cases",
             "run_func": "run_mla",
-            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2" if v.startswith("1.1") else "trtllm.collect_mla",
+            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2"
+            if v.startswith(("1.1.0", "1.2.0"))
+            else "trtllm.collect_mla",
         },
         {
             "name": "trtllm",
@@ -519,7 +526,9 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             "module": "collector.trtllm.collect_mla",
             "get_func": "get_generation_mla_test_cases",
             "run_func": "run_mla",
-            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2" if v.startswith("1.1") else "trtllm.collect_mla",
+            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2"
+            if v.startswith(("1.1.0", "1.2.0"))
+            else "trtllm.collect_mla",
         },
         # Attention collections - separate entries for context and generation
         {
@@ -563,7 +572,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             else "collector.trtllm.collect_moe_pre_1_0"
             if v.startswith(("0.21.0", "1.0.0"))
             else "collector.trtllm.collect_moe"
-            if v.startswith("1.1.0")
+            if v.startswith(("1.1.0", "1.2.0"))
             else None,
         },
     ]
