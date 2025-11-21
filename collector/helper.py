@@ -10,7 +10,6 @@ import os
 import signal
 import sys
 import traceback
-
 from datetime import datetime
 from pathlib import Path
 
