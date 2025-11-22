@@ -1,14 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import deep_gemm
 import pkg_resources
 import torch
 import torch.nn.functional as F
-from deep_gemm import get_col_major_tma_aligned_tensor
 from sgl_kernel import fp8_scaled_mm, int8_scaled_mm, sgl_per_tensor_quant_fp8
+from sglang.srt.layers.deep_gemm_wrapper import (
+    DEEPGEMM_SCALE_UE8M0,
+    gemm_nt_f8f8bf16,
+)
+from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
 
 from helper import log_perf
+
+compatible_sglang_versions = ["0.5.5.post2", "0.5.5.post3"]
 
 
 def get_gemm_test_cases():
@@ -56,7 +61,7 @@ def get_gemm_test_cases():
         12288,
     ]
     nk_list_ext = [16384, 65536]  # for coverage and interp purpose
-    gemm_list = ["int8_wo", "int4_wo", "fp8_block", "float16", "fp8"]
+    gemm_list = ["int8_wo", "fp8_block", "float16", "fp8"]
 
     test_cases = []
     for gemm_type in gemm_list:
@@ -87,11 +92,15 @@ def fp8_gemm_deepgemm(
     n: int,
     k: int,
 ):
-    """DeepGEMM implementation of FP8 GEMM"""
+    """
+    DeepGEMM implementation of FP8 GEMM
+    It maps to a specific commit for each SGLang release.
+    Check the commit tag in sglang/sgl-kernel/CMakeLists.txt, repo-deepgemm
+    """
     out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
 
     # Run DeepGEMM kernel
-    deep_gemm.gemm_fp8_fp8_bf16_nt((x_fp8, x_scale), (y_fp8, y_scale), out)
+    gemm_nt_f8f8bf16((x_fp8, x_scale), (y_fp8, y_scale), out)
     return out
 
 
@@ -121,7 +130,6 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
         "fp8",
         "float16",
         "int8_wo",
-        "int4_wo",
     ], "not support gemm type"
     torch.cuda.set_device(device)
     M = batch_size  # noqa: N806
@@ -133,23 +141,29 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
         a_fp32 = (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp8_max
         b_fp32 = (torch.rand(N, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp8_max
 
+        # Use bf16 as input source for activation to simulate realistic scenario
+        a_bf16 = a_fp32.to(torch.bfloat16)
+
         if gemm_type == "fp8_block":
-            a_fp8 = a_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+            # Quantize B (weights) outside
             b_fp8 = b_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
-            scale_a_group_shape = (1, 128)
             scale_b_group_shape = (128, 128)
-            scale_a_shape = scale_shape(a_fp8.shape, scale_a_group_shape)
             scale_b_shape = scale_shape(b_fp8.shape, scale_b_group_shape)
-
-            scale_a = torch.randn(scale_a_shape, device="cuda", dtype=torch.float32)
             scale_b = torch.randn(scale_b_shape, device="cuda", dtype=torch.float32)
-
-            scale_a_col_major = get_col_major_tma_aligned_tensor(scale_a.clone())
 
             repeat_n = 5
 
             def gemm_op():
+                # Use the real SGLang kernel to quantize A dynamically
+                # This computes the scale and quantizes A in one fused kernel
+                a_fp8, scale_a_col_major = sglang_per_token_group_quant_fp8(
+                    a_bf16,
+                    group_size=128,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=DEEPGEMM_SCALE_UE8M0,
+                )
                 return fp8_gemm_deepgemm(a_fp8, scale_a_col_major, b_fp8, scale_b, M, N, K)
         else:
 
@@ -165,17 +179,21 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
                     is_static = False
                 sgl_per_tensor_quant_fp8(input_tensor, output, scale, is_static)
 
+                if not is_static:
+                    return output, scale.view(1, 1).expand(input_tensor.shape[0], 1).contiguous()
+
                 return output, scale
 
-            scale_a = torch.randn((M,), device="cuda", dtype=torch.float32)
             scale_b = torch.randn((N,), device="cuda", dtype=torch.float32)
-            a_fp8, scale_a_fp8 = sglang_scaled_fp8_quant(a_fp32, scale_a)
+            # Quantize B (weights) outside
             b_fp8, scale_b_fp8 = sglang_scaled_fp8_quant(b_fp32, scale_b)
             b_fp8 = b_fp8.t()
 
             repeat_n = 5
 
             def gemm_op():
+                # Dynamic quantization for A
+                a_fp8, scale_a_fp8 = sglang_scaled_fp8_quant(a_bf16, scale=None)
                 return fp8_scaled_mm(a_fp8, b_fp8, scale_a_fp8, scale_b_fp8, torch.bfloat16)
 
     elif gemm_type == "float16":
@@ -218,35 +236,8 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
             # a_int8: [M, K], b_int8: [K, N] (column-major)
             a_int8, scale_a = per_token_quant_int8(a_fp16)
             return int8_scaled_mm(a_int8, b_int8, scale_a, scale_b, torch.bfloat16)
-
     else:
-        # int4_wo: Use torchao since SGLang doesn't have native int4 kernel
-        from torchao.quantization import (
-            int4_weight_only,
-            quantize_,
-        )
-
-        # Define fp16 range for tensor initialization
-        fp16_info = torch.finfo(torch.float16)
-        fp16_max, fp16_min = fp16_info.max, fp16_info.min
-
-        # Use torch.nn.Linear with bfloat16 dtype (required by TorchAO int4)
-        linear = torch.nn.Linear(
-            in_features=K,
-            out_features=N,
-            bias=False,
-            device="cuda",
-            dtype=torch.bfloat16,
-        )
-        quantize_(linear, int4_weight_only(group_size=128), filter_fn=None)
-
-        a_fp32 = (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp16_max
-        a_bf16 = a_fp32.clamp(min=fp16_min, max=fp16_max).to(torch.bfloat16)
-
-        repeat_n = 5
-
-        def gemm_op():
-            return linear(a_bf16)
+        raise ValueError(f"Unsupported gemm type: {gemm_type}")
 
     num_warmups = 3
     num_runs = 6
@@ -267,11 +258,18 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
     # Time the graph replay
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
+
+    nvtx_tag = f"{gemm_type}_m{M}_n{N}_k{K}"
+    torch.cuda.nvtx.range_push(nvtx_tag)
+
     start_event.record()
     for i in range(num_runs):
         g.replay()
     end_event.record()
     torch.cuda.synchronize()
+
+    torch.cuda.nvtx.range_pop()
+
     latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
 
     log_perf(
@@ -283,3 +281,14 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
         kernel_source="sglang",
         perf_filename=perf_filename,
     )
+
+
+if __name__ == "__main__":
+    test_cases = []
+    test_cases.append(["fp8_block", 1, 128, 128, "gemm_perf.txt"])
+    test_cases.append(["fp8", 1, 128, 128, "gemm_perf.txt"])
+    test_cases.append(["fp8_block", 256, 1024, 1024, "gemm_perf.txt"])
+    test_cases.append(["fp8", 256, 1024, 1024, "gemm_perf.txt"])
+    for tc in test_cases:
+        print(f"Running test case: {tc}")
+        run_gemm(*tc, "cuda:0")
