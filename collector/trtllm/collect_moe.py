@@ -15,7 +15,7 @@ from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 from torch.nn.parameter import Parameter
 
-from helper import get_sm_version, log_perf
+from helper import get_sm_version, is_moe_compute_bound_collector, log_perf, measure_kernel_power
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
@@ -317,7 +317,15 @@ def run_moe_torch(
     distributed="power_law",
     power_law_alpha=0.0,
     device="cuda:0",
+    power_monitor=None,
+    power_limit=None,
+    measure_power=False,
+    kernel_power_measurement_duration=3.0,
 ):
+    # Use different filename for power measurement runs
+    if measure_power:
+        perf_filename = perf_filename.replace("_perf.txt", "_power.txt")
+    
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
@@ -493,39 +501,63 @@ def run_moe_torch(
                     moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
             else:
                 moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-        # warmup
-        for i in range(num_warmups):
-            g.replay()
 
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
-        for i in range(num_runs):
-            g.replay()
-        end_event.record()
-        torch.cuda.synchronize()
-        latency = start_event.elapsed_time(end_event) / num_runs / num_iter
+        # Determine if compute-bound
+        compute_bound = is_moe_compute_bound_collector(
+            num_tokens, hidden_size, inter_size, topk, num_experts, moe_type, torch.cuda.get_device_name(device)
+        )
+
+        # Benchmarking with optional power measurement
+        if measure_power and power_monitor is not None and not compute_bound:
+            # For power measurement, adjust warmup
+            actual_warmup = num_warmups if distributed != "power_law" else 1
+            latency, power = measure_kernel_power(
+                power_monitor, g.replay, actual_warmup, kernel_power_measurement_duration
+            )
+            # Account for num_iter in latency
+            latency = latency / num_iter
+        else:
+            # Original timing code
+            # warmup
+            for i in range(num_warmups):
+                g.replay()
+
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            for i in range(num_runs):
+                g.replay()
+            end_event.record()
+            torch.cuda.synchronize()
+            latency = start_event.elapsed_time(end_event) / num_runs / num_iter
+            power = power_limit or None
 
         if min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
         else:
             source = "moe_torch_flow"  # cutlass
 
+        item = {
+            "moe_dtype": moe_type,
+            "num_tokens": num_tokens,
+            "hidden_size": hidden_size,
+            "inter_size": inter_size,
+            "topk": topk,
+            "num_experts": num_experts,
+            "moe_tp_size": moe_tp_size,
+            "moe_ep_size": moe_ep_size,
+            "distribution": "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed,
+            "latency": latency,
+        }
+
+        # Add power fields if measured
+        if power is not None:
+            item["power_limit"] = power_limit
+            item["power"] = power
+            item["compute_bound"] = int(compute_bound)
+
         log_perf(
-            item_list=[
-                {
-                    "moe_dtype": moe_type,
-                    "num_tokens": num_tokens,
-                    "hidden_size": hidden_size,
-                    "inter_size": inter_size,
-                    "topk": topk,
-                    "num_experts": num_experts,
-                    "moe_tp_size": moe_tp_size,
-                    "moe_ep_size": moe_ep_size,
-                    "distribution": "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed,
-                    "latency": latency,
-                }
-            ],
+            item_list=[item],
             framework="TRTLLM",
             version=tensorrt_llm.__version__,
             device_name=torch.cuda.get_device_name(device),

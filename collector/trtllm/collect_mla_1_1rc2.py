@@ -23,7 +23,113 @@ from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
 from tensorrt_llm.sampling_params import SamplingParams
 
-from helper import log_perf
+from helper import (
+    is_context_mla_compute_bound_collector,
+    is_generation_mla_compute_bound_collector,
+    log_perf,
+    measure_kernel_power,
+)
+
+
+def get_context_mla_test_cases():
+    dtype_list = [tensorrt_llm.bindings.DataType.FP8, tensorrt_llm.bindings.DataType.BF16]
+    test_cases = []
+    n_list = [64, 128]
+    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    s_list = [
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        1536,
+        2048,
+        3072,
+        4096,
+        6144,
+        8192,
+        10240,
+        12288,
+        16384,
+    ]
+    for n in n_list:
+        for b in b_list:
+            for s in s_list:
+                for dtype in dtype_list:
+                    for tp_size in [1, 2, 4, 8, 16, 32, 64]:
+                        if b * s > 32768:
+                            continue
+                        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size,
+                        #  tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
+                        test_cases.append(
+                            [
+                                s,
+                                b,
+                                1,
+                                dtype,
+                                n,
+                                tp_size,
+                                tp_size,
+                                64,
+                                10,
+                                6,
+                                True,
+                                "context_mla_perf.txt",
+                            ]
+                        )
+    return test_cases
+
+
+def get_generation_mla_test_cases():
+    dtype_list = [tensorrt_llm.bindings.DataType.FP8, tensorrt_llm.bindings.DataType.BF16]
+    test_cases = []
+    n_list = [64, 128]
+    for n in n_list:
+        for b in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]:
+            for s in [
+                2,
+                4,
+                8,
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                2048,
+                4096,
+                8192,
+                16384,
+                32768,
+                65536,
+                131072,
+            ]:
+                for dtype in dtype_list:
+                    for tp_size in [1, 2, 4, 8, 16, 32, 64]:
+                        if b * s > 1024 * 4096 * 2 * 2:
+                            continue
+                        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size,
+                        #  tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
+                        test_cases.append(
+                            [
+                                s - 1,
+                                b,
+                                1,
+                                dtype,
+                                n,
+                                tp_size,
+                                tp_size,
+                                64,
+                                10,
+                                6,
+                                False,
+                                "generation_mla_perf.txt",
+                            ]
+                        )
+    return test_cases
 
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
@@ -95,7 +201,15 @@ def run_mla(
     is_context_phase,
     perf_filename,
     device,
+    power_monitor=None,
+    power_limit=None,
+    measure_power=False,
+    kernel_power_measurement_duration=3.0,
 ):
+    # Use different filename for power measurement runs
+    if measure_power:
+        perf_filename = perf_filename.replace("_perf.txt", "_power.txt")
+    
     scenario = Scenario()
     q_lora_rank = scenario.q_lora_rank
     kv_lora_rank = scenario.kv_lora_rank
@@ -151,6 +265,10 @@ def run_mla(
         test_ite,
         is_context_phase,
         perf_filename,
+        power_monitor=power_monitor,
+        power_limit=power_limit,
+        measure_power=measure_power,
+        kernel_power_measurement_duration=kernel_power_measurement_duration,
     )
 
 
@@ -177,6 +295,10 @@ def _run_attn_for_backend(
     test_ite,
     is_context_phase,
     perf_filename,
+    power_monitor=None,
+    power_limit=None,
+    measure_power=False,
+    kernel_power_measurement_duration=3.0,
 ):
     max_context_sequence_length = max(context_sequence_lengths)
     max_num_contexts = len(context_sequence_lengths)
@@ -427,19 +549,40 @@ def _run_attn_for_backend(
                 q_pe=q_pe,
             )
 
-    # timing
-    for i in range(warming_up):
-        g.replay()
-    torch.cuda.synchronize()
+    # Determine dtype string for compute-bound check
+    dtype_str = "float16"
+    if kv_cache_dtype == tensorrt_llm.bindings.DataType.FP8:
+        dtype_str = "fp8"
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(test_ite):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / test_ite
+    # Get device name for compute-bound check
+    device_name = torch.cuda.get_device_name(device)
+
+    # Determine if compute-bound
+    if is_context_phase:
+        compute_bound = is_context_mla_compute_bound_collector(
+            len(context_sequence_lengths), max_context_sequence_length, num_heads, dtype_str, device_name
+        )
+    else:
+        compute_bound = is_generation_mla_compute_bound_collector()
+
+    # Benchmarking with optional power measurement
+    if measure_power and power_monitor is not None and not compute_bound:
+        latency, power = measure_kernel_power(power_monitor, g.replay, warming_up, kernel_power_measurement_duration)
+    else:
+        # Original timing code
+        for i in range(warming_up):
+            g.replay()
+        torch.cuda.synchronize()
+
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        for i in range(test_ite):
+            g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
+        latency = start_event.elapsed_time(end_event) / test_ite
+        power = power_limit or None
 
     # write result
     if is_context_phase:
@@ -448,10 +591,6 @@ def _run_attn_for_backend(
     else:
         isl = 1
         step = max_context_sequence_length
-
-    dtype_str = "float16"
-    if kv_cache_dtype == tensorrt_llm.bindings.DataType.FP8:
-        dtype_str = "fp8"
 
     item = {
         "mla_dtype": "float16",
@@ -463,6 +602,12 @@ def _run_attn_for_backend(
         "step": step,
         "latency": latency,
     }
+
+    # Add power fields if measured
+    if power is not None:
+        item["power_limit"] = power_limit
+        item["power"] = power
+        item["compute_bound"] = int(compute_bound)
 
     log_perf(
         item_list=[item],

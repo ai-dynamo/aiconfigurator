@@ -17,7 +17,12 @@ from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantConfig
 
-from helper import log_perf
+from helper import (
+    is_context_mla_compute_bound_collector,
+    is_generation_mla_compute_bound_collector,
+    log_perf,
+    measure_kernel_power,
+)
 
 
 def get_context_mla_test_cases():
@@ -135,7 +140,15 @@ def run_mla(
     is_context_phase,
     perf_filename,
     device="cuda:0",
+    power_monitor=None,
+    power_limit=None,
+    measure_power=False,
+    kernel_power_measurement_duration=3.0,
 ):
+    # Use different filename for power measurement runs
+    if measure_power:
+        perf_filename = perf_filename.replace("_perf.txt", "_power.txt")
+    
     device = torch.device(device)
     torch.cuda.set_device(device)
     backend_name = "TRTLLM"
@@ -369,19 +382,37 @@ def run_mla(
                 q_pe=q_pe,
             )
 
-    # timing
-    for i in range(warming_up):
-        g.replay()
-    torch.cuda.synchronize()
+    # Determine dtype string for compute-bound check
+    dtype_str = "float16"
+    if kv_cache_dtype == tensorrt_llm.bindings.DataType.FP8:
+        dtype_str = "fp8"
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(test_ite):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / test_ite
+    # Determine if compute-bound
+    if is_context_phase:
+        compute_bound = is_context_mla_compute_bound_collector(
+            batch_size, input_len, num_heads, dtype_str, torch.cuda.get_device_name(device)
+        )
+    else:
+        compute_bound = is_generation_mla_compute_bound_collector()
+
+    # Benchmarking with optional power measurement
+    if measure_power and power_monitor is not None and not compute_bound:
+        latency, power = measure_kernel_power(power_monitor, g.replay, warming_up, kernel_power_measurement_duration)
+    else:
+        # Original timing code
+        for i in range(warming_up):
+            g.replay()
+        torch.cuda.synchronize()
+
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        for i in range(test_ite):
+            g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
+        latency = start_event.elapsed_time(end_event) / test_ite
+        power = power_limit or None
 
     # write result
     if is_context_phase:
@@ -390,10 +421,6 @@ def run_mla(
     else:
         isl = 1
         step = input_len
-
-    dtype_str = "float16"
-    if kv_cache_dtype == tensorrt_llm.bindings.DataType.FP8:
-        dtype_str = "fp8"
 
     item = {
         "mla_dtype": "float16",
@@ -405,6 +432,12 @@ def run_mla(
         "step": step,
         "latency": latency,
     }
+
+    # Add power fields if measured
+    if power is not None:
+        item["power_limit"] = power_limit
+        item["power"] = power
+        item["compute_bound"] = int(compute_bound)
 
     log_perf(
         item_list=[item],

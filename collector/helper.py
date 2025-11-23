@@ -544,3 +544,99 @@ def is_generation_attention_compute_bound_collector() -> bool:
         False (always memory-bound)
     """
     return False
+
+
+def is_context_mla_compute_bound_collector(
+    b: int,
+    s: int,
+    num_heads: int,
+    kv_cache_dtype_str: str,
+    device_name: str,
+) -> bool:
+    """
+    Determine if context MLA is compute-bound.
+
+    Args:
+        b: Batch size
+        s: Sequence length
+        num_heads: Number of heads
+        kv_cache_dtype_str: KV cache dtype ('fp8' or 'float16')
+        device_name: GPU device name
+
+    Returns:
+        True if compute-bound, False if memory-bound
+    """
+    # Context MLA involves multiple operations:
+    # 1. Q decompression (if needed)
+    # 2. Attention computation
+    # 3. KV compression
+    # For conservative power measurement, assume memory-bound for small batch/seq
+    # Compute-bound for large batch*seq
+
+    # Simple heuristic: compute-bound if batch*seq >= threshold
+    # Threshold depends on dtype and hardware
+    threshold = 4096 if kv_cache_dtype_str == "fp8" else 2048
+    return (b * s) >= threshold
+
+
+def is_generation_mla_compute_bound_collector() -> bool:
+    """
+    Determine if generation MLA is compute-bound.
+    Generation MLA is typically memory-bound (like regular generation attention).
+
+    Returns:
+        False (typically memory-bound)
+    """
+    return False
+
+
+def is_moe_compute_bound_collector(
+    num_tokens: int,
+    hidden_size: int,
+    inter_size: int,
+    topk: int,
+    num_experts: int,
+    moe_type: str,
+    device_name: str,
+) -> bool:
+    """
+    Determine if MoE is compute-bound.
+
+    MoE involves:
+    1. Router computation (usually small)
+    2. Expert GEMMs (dominant cost)
+    3. Final reduction
+
+    Args:
+        num_tokens: Number of tokens
+        hidden_size: Hidden dimension
+        inter_size: Intermediate dimension
+        topk: Top-k experts per token
+        num_experts: Total number of experts
+        moe_type: Quantization type ('float16', 'fp8', etc.)
+        device_name: GPU device name
+
+    Returns:
+        True if compute-bound, False if memory-bound
+    """
+    # MoE is dominated by expert GEMMs
+    # Each token does 2 GEMMs per active expert:
+    #   w3_w1: (1, hidden_size) @ (hidden_size, inter_size*2)
+    #   w2:    (1, inter_size) @ (inter_size, hidden_size)
+
+    # For simplicity, check if the up-projection GEMM is compute-bound
+    # Average effective batch per expert: num_tokens * topk / num_experts
+    effective_m = max(1, (num_tokens * topk) // num_experts)
+
+    # Use existing GEMM checker for up-projection: m=effective_m, n=inter_size*2, k=hidden_size
+    try:
+        return is_gemm_compute_bound_collector(
+            m=effective_m,
+            n=inter_size * 2,  # w3_w1 is fused
+            k=hidden_size,
+            dtype=moe_type,
+            device_name=device_name,
+        )
+    except Exception:
+        # Conservative fallback: assume memory-bound for small tokens, compute-bound for large
+        return num_tokens >= 512

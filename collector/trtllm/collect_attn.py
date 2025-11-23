@@ -65,6 +65,10 @@ def run_attention_torch(
         measure_power: Whether to measure power consumption
         kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
     """
+    # Use different filename for power measurement runs
+    if measure_power:
+        perf_filename = perf_filename.replace("_perf.txt", "_power.txt")
+    
     device = torch.device(device)
     torch.set_default_device(device)
     torch.cuda.set_device(device)

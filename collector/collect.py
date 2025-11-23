@@ -642,7 +642,9 @@ def collect_trtllm(
             "module": "collector.trtllm.collect_mla",
             "get_func": "get_context_mla_test_cases",
             "run_func": "run_mla",
-            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2" if v.startswith("1.1") else "trtllm.collect_mla",
+            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2"
+            if (v.startswith("1.1") or v.startswith("1.2"))
+            else "trtllm.collect_mla",
         },
         {
             "name": "trtllm",
@@ -650,7 +652,9 @@ def collect_trtllm(
             "module": "collector.trtllm.collect_mla",
             "get_func": "get_generation_mla_test_cases",
             "run_func": "run_mla",
-            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2" if v.startswith("1.1") else "trtllm.collect_mla",
+            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2"
+            if (v.startswith("1.1") or v.startswith("1.2"))
+            else "trtllm.collect_mla",
         },
         # Attention collections - separate entries for context and generation
         {
@@ -694,7 +698,7 @@ def collect_trtllm(
             else "collector.trtllm.collect_moe_pre_1_0"
             if v.startswith(("0.21.0", "1.0.0"))
             else "collector.trtllm.collect_moe"
-            if v.startswith("1.1.0")
+            if (v.startswith("1.1") or v.startswith("1.2"))
             else None,
         },
     ]
