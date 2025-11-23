@@ -5,7 +5,7 @@
 import tensorrt_llm
 import torch
 
-from helper import get_sm_version, log_perf
+from helper import get_sm_version, log_perf, measure_kernel_power
 
 
 def get_mla_gen_pre_test_cases():
@@ -91,7 +91,39 @@ def get_mla_gen_post_test_cases():
     return test_cases
 
 
-def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_filename, device="cuda:0"):
+def run_mla_gen_pre(
+    num_tokens,
+    num_heads,
+    dtype,
+    num_warmups,
+    num_runs,
+    perf_filename,
+    device="cuda:0",
+    power_monitor=None,
+    power_limit=None,
+    measure_power=False,
+    kernel_power_measurement_duration=3.0,
+):
+    """
+    Run MLA generation pre-BMM benchmark with optional power measurement.
+
+    Args:
+        num_tokens: Number of tokens
+        num_heads: Number of attention heads
+        dtype: Data type ('float16' or 'fp8')
+        num_warmups: Number of warmup iterations
+        num_runs: Number of benchmark runs
+        perf_filename: Output CSV filename
+        device: CUDA device
+        power_monitor: NVMLPowerMonitor instance (optional)
+        power_limit: GPU power limit in Watts (optional)
+        measure_power: Whether to measure power consumption
+        kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
+    """
+    # Use different filename for power measurement runs
+    if measure_power:
+        perf_filename = perf_filename.replace("_perf.txt", "_power.txt")
+
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
@@ -149,19 +181,30 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
 
-    # timing
-    for i in range(num_warmups):
-        g.replay()
-    torch.cuda.synchronize()
+    # Benchmarking
+    if measure_power and power_monitor is not None:
+        # Use power measurement with extended duration
+        latency, power = measure_kernel_power(
+            power_monitor,
+            g.replay,
+            num_warmups,
+            kernel_power_measurement_duration,
+        )
+    else:
+        # Standard timing
+        for i in range(num_warmups):
+            g.replay()
+        torch.cuda.synchronize()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / num_runs
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        for i in range(num_runs):
+            g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
+        latency = start_event.elapsed_time(end_event) / num_runs
+        power = power_limit or None
 
     item = {
         "bmm_dtype": dtype,
@@ -169,6 +212,10 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
         "num_heads": num_heads,
         "latency": latency,
     }
+
+    if power is not None:
+        item["power_limit"] = power_limit
+        item["power"] = power
 
     log_perf(
         item_list=[item],
@@ -181,7 +228,39 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
     )
 
 
-def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_filename, device="cuda:0"):
+def run_mla_gen_post(
+    num_tokens,
+    num_heads,
+    dtype,
+    num_warmups,
+    num_runs,
+    perf_filename,
+    device="cuda:0",
+    power_monitor=None,
+    power_limit=None,
+    measure_power=False,
+    kernel_power_measurement_duration=3.0,
+):
+    """
+    Run MLA generation post-BMM benchmark with optional power measurement.
+
+    Args:
+        num_tokens: Number of tokens
+        num_heads: Number of attention heads
+        dtype: Data type ('float16' or 'fp8')
+        num_warmups: Number of warmup iterations
+        num_runs: Number of benchmark runs
+        perf_filename: Output CSV filename
+        device: CUDA device
+        power_monitor: NVMLPowerMonitor instance (optional)
+        power_limit: GPU power limit in Watts (optional)
+        measure_power: Whether to measure power consumption
+        kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
+    """
+    # Use different filename for power measurement runs
+    if measure_power:
+        perf_filename = perf_filename.replace("_perf.txt", "_power.txt")
+
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
@@ -239,19 +318,30 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
 
-    # timing
-    for i in range(num_warmups):
-        g.replay()
-    torch.cuda.synchronize()
+    # Benchmarking
+    if measure_power and power_monitor is not None:
+        # Use power measurement with extended duration
+        latency, power = measure_kernel_power(
+            power_monitor,
+            g.replay,
+            num_warmups,
+            kernel_power_measurement_duration,
+        )
+    else:
+        # Standard timing
+        for i in range(num_warmups):
+            g.replay()
+        torch.cuda.synchronize()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / num_runs
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        for i in range(num_runs):
+            g.replay()
+        end_event.record()
+        torch.cuda.synchronize()
+        latency = start_event.elapsed_time(end_event) / num_runs
+        power = power_limit or None
 
     item = {
         "bmm_dtype": dtype,
@@ -259,6 +349,10 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
         "num_heads": num_heads,
         "latency": latency,
     }
+
+    if power is not None:
+        item["power_limit"] = power_limit
+        item["power"] = power
 
     log_perf(
         item_list=[item],

@@ -12,7 +12,7 @@ from tensorrt_llm.layers import Linear
 from tensorrt_llm.quantization.layers import FP8Linear, SmoothQuantLinear, WeightOnlyQuantLinear
 from tensorrt_llm.quantization.mode import QuantMode
 
-from helper import log_perf
+from helper import is_gemm_compute_bound_collector, log_perf, measure_kernel_power
 
 
 def get_gemm_test_cases():
@@ -73,12 +73,24 @@ def get_gemm_test_cases():
 
 
 class GEMMProfiler(trt.IProfiler):
-    def __init__(self, m, n, k, device, perf_filename="gemm_perf.txt", gemm_type="float16"):
+    def __init__(
+        self,
+        m,
+        n,
+        k,
+        device,
+        perf_filename="gemm_perf.txt",
+        gemm_type="float16",
+        power_limit=None,
+        power=None,
+    ):
         trt.IProfiler.__init__(self)
         self._m = m
         self._n = n
         self._k = k
         self._device = device
+        self._power_limit = power_limit
+        self._power = power
         self._target_layers = {
             "float16": "PLUGIN_V2_Gemm_3",
             "sq": "PLUGIN_V2_SmoothQuantGemm_0",
@@ -102,16 +114,20 @@ class GEMMProfiler(trt.IProfiler):
             self._latency = ms
 
     def write_to_file(self):
+        item = {
+            "gemm_dtype": self._gemm_type,
+            "m": self._m,
+            "n": self._n,
+            "k": self._k,
+            "latency": self._latency,
+        }
+
+        if self._power is not None:
+            item["power_limit"] = self._power_limit
+            item["power"] = self._power
+
         log_perf(
-            item_list=[
-                {
-                    "gemm_dtype": self._gemm_type,
-                    "m": self._m,
-                    "n": self._n,
-                    "k": self._k,
-                    "latency": self._latency,
-                }
-            ],
+            item_list=[item],
             framework="TRTLLM",
             version=tensorrt_llm.__version__,
             device_name=torch.cuda.get_device_name(self._device),
@@ -121,7 +137,34 @@ class GEMMProfiler(trt.IProfiler):
         )
 
 
-def run_gemm(gemm_type, use_plugin, m, n, k, device="cuda:0"):
+def run_gemm(
+    gemm_type,
+    use_plugin,
+    m,
+    n,
+    k,
+    device="cuda:0",
+    power_monitor=None,
+    power_limit=None,
+    measure_power=False,
+    kernel_power_measurement_duration=3.0,
+):
+    """
+    Run GEMM TRT benchmark with optional power measurement.
+
+    Args:
+        gemm_type: GEMM quantization type
+        use_plugin: Whether to use TensorRT plugins
+        m, n, k: Matrix dimensions
+        device: CUDA device
+        power_monitor: NVMLPowerMonitor instance (optional)
+        power_limit: GPU power limit in Watts (optional)
+        measure_power: Whether to measure power consumption
+        kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
+    """
+    # Use different filename for power measurement runs
+    perf_filename = "gemm_power.txt" if measure_power else "gemm_perf.txt"
+
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -219,16 +262,77 @@ def run_gemm(gemm_type, use_plugin, m, n, k, device="cuda:0"):
         CreateConfig(fp16=True, int8=use_int8, fp8=use_fp8, precision_constraints="obey", max_aux_streams=0),
     )
 
-    profiler = GEMMProfiler(m=m, n=n, k=k, device=device, perf_filename="gemm_perf.txt", gemm_type=gemm_type)
-    # l2_cache_flusher = L2CacheFlusher()
-    cudart.cudaProfilerStart()
+    # Determine if compute-bound
+    device_name = torch.cuda.get_device_name(device)
+    try:
+        compute_bound = is_gemm_compute_bound_collector(m, n, k, gemm_type, device_name)
+    except ValueError:
+        # If gemm_type not supported by compute-bound detector, assume memory-bound (safe for power measurement)
+        compute_bound = False
+
+    # Prepare data
     x_data = x_data.to(torch.device(device))
-    with TrtRunner(build_engine) as runner:
-        runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
-        if use_fp8 and not use_plugin:  # additional warmup for fp8 OOTB
-            for i in range(4):
+
+    # Dual mode execution
+    if measure_power and power_monitor is not None and not compute_bound:
+        # Power measurement mode
+        cudart.cudaProfilerStart()
+        with TrtRunner(build_engine) as runner:
+            # Warmup
+            runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
+            if use_fp8 and not use_plugin:
+                for i in range(4):
+                    runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
+
+            # Create inference callable for power measurement
+            def infer_fn():
                 runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
-        runner.context.profiler = profiler
-        runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
-    cudart.cudaProfilerStop()
-    profiler.write_to_file()
+
+            # Measure power
+            num_warmups = 2
+            latency, power = measure_kernel_power(
+                power_monitor,
+                infer_fn,
+                num_warmups,
+                kernel_power_measurement_duration,
+            )
+        cudart.cudaProfilerStop()
+
+        # Create profiler with power data and write results
+        profiler = GEMMProfiler(
+            m=m,
+            n=n,
+            k=k,
+            device=device,
+            perf_filename=perf_filename,
+            gemm_type=gemm_type,
+            power_limit=power_limit,
+            power=power,
+        )
+        profiler._latency = latency
+        profiler._layer_name = "power_measured"
+        profiler.write_to_file()
+
+    else:
+        # Standard profiler mode
+        profiler = GEMMProfiler(
+            m=m,
+            n=n,
+            k=k,
+            device=device,
+            perf_filename=perf_filename,
+            gemm_type=gemm_type,
+            power_limit=power_limit if measure_power else None,
+            power=power_limit if measure_power else None,  # For compute-bound, just record limit
+        )
+
+        cudart.cudaProfilerStart()
+        with TrtRunner(build_engine) as runner:
+            runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
+            if use_fp8 and not use_plugin:  # additional warmup for fp8 OOTB
+                for i in range(4):
+                    runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
+            runner.context.profiler = profiler
+            runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
+        cudart.cudaProfilerStop()
+        profiler.write_to_file()
