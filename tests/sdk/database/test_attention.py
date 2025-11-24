@@ -11,7 +11,7 @@ from aiconfigurator.sdk import common
 class TestContextAttention:
     """Test cases for query_context_attention method."""
 
-    def test_query_context_attention_sol_mode(self, comprehensive_perf_db):
+    def test_query_context_attention_database_mode(self, comprehensive_perf_db):
         """Test SOL mode calculation for context attention."""
         b, full_s, prefix, n, n_kv = 2, 64, 0, 16, 8
         s = full_s - prefix
@@ -19,7 +19,7 @@ class TestContextAttention:
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_attention(
-            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.SOL
+            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, database_mode=common.DatabaseMode.SOL
         )
 
         # Calculate expected SOL result
@@ -44,15 +44,15 @@ class TestContextAttention:
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_attention(
-            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.SOL_FULL
+            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, database_mode=common.DatabaseMode.SOL_FULL
         )
 
         assert isinstance(result, tuple)
         assert len(result) == 3
         assert result[0] == max(result[1], result[2])  # sol_time = max(sol_math, sol_mem)
 
-    def test_query_context_attention_non_sol_mode_mha(self, comprehensive_perf_db):
-        """Test non-SOL mode with MHA (n_kv == n)."""
+    def test_query_context_attention_non_database_mode_mha(self, comprehensive_perf_db):
+        """Test SILICON mode with MHA (n_kv == n)."""
         b, full_s, prefix, n = 2, 32, 0, 16
         s = full_s - prefix
         n_kv = n  # MHA case
@@ -60,7 +60,7 @@ class TestContextAttention:
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_attention(
-            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
+            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, database_mode=common.DatabaseMode.SILICON
         )
 
         # Should use data from attention_dict[0] for MHA
@@ -69,15 +69,15 @@ class TestContextAttention:
         ]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
-    def test_query_context_attention_non_sol_mode_xqa(self, comprehensive_perf_db):
-        """Test non-SOL mode with XQA (n_kv < n)."""
+    def test_query_context_attention_non_database_mode_xqa(self, comprehensive_perf_db):
+        """Test SILICON mode with XQA (n_kv < n)."""
         b, full_s, prefix, n, n_kv = 2, 32, 0, 16, 4
         s = full_s - prefix
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_attention(
-            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
+            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, database_mode=common.DatabaseMode.SILICON
         )
 
         # Should use data from attention_dict[n_kv] for XQA
@@ -103,13 +103,13 @@ class TestContextAttention:
 class TestGenerationAttention:
     """Test cases for query_generation_attention method."""
 
-    def test_query_generation_attention_sol_mode(self, comprehensive_perf_db):
+    def test_query_generation_attention_database_mode(self, comprehensive_perf_db):
         """Test SOL mode calculation for generation attention."""
         b, s, n, n_kv = 4, 128, 32, 8
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
 
         result = comprehensive_perf_db.query_generation_attention(
-            b, s, n, n_kv, kv_cache_quant_mode, sol_mode=common.SOLMode.SOL
+            b, s, n, n_kv, kv_cache_quant_mode, database_mode=common.DatabaseMode.SOL
         )
         kv_len = s - 1
         # Calculate expected SOL result
@@ -127,34 +127,34 @@ class TestGenerationAttention:
         kv_cache_quant_mode = common.KVCacheQuantMode.fp8
 
         result = comprehensive_perf_db.query_generation_attention(
-            b, s, n, n_kv, kv_cache_quant_mode, sol_mode=common.SOLMode.SOL_FULL
+            b, s, n, n_kv, kv_cache_quant_mode, database_mode=common.DatabaseMode.SOL_FULL
         )
 
         assert isinstance(result, tuple)
         assert len(result) == 3
         assert all(isinstance(x, (int, float)) for x in result)
 
-    def test_query_generation_attention_non_sol_mode(self, comprehensive_perf_db):
-        """Test non-SOL mode with interpolation."""
+    def test_query_generation_attention_non_database_mode(self, comprehensive_perf_db):
+        """Test SILICON mode with interpolation."""
         b, s, n, n_kv = 2, 64, 16, 8
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
 
         result = comprehensive_perf_db.query_generation_attention(
-            b, s, n, n_kv, kv_cache_quant_mode, sol_mode=common.SOLMode.NON_SOL
+            b, s, n, n_kv, kv_cache_quant_mode, database_mode=common.DatabaseMode.SILICON
         )
 
         # Should use interpolation from generation_attention_data
         assert isinstance(result, float)
         assert result > 0
 
-    def test_query_generation_attention_non_sol_mode_mha(self, comprehensive_perf_db):
-        """Test non-SOL mode with MHA (n_kv == n)."""
+    def test_query_generation_attention_non_database_mode_mha(self, comprehensive_perf_db):
+        """Test SILICON mode with MHA (n_kv == n)."""
         b, s, n = 2, 64, 16
         n_kv = n  # MHA case
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
 
         result = comprehensive_perf_db.query_generation_attention(
-            b, s, n, n_kv, kv_cache_quant_mode, sol_mode=common.SOLMode.NON_SOL
+            b, s, n, n_kv, kv_cache_quant_mode, database_mode=common.DatabaseMode.SILICON
         )
 
         # Should use n_kv=0 for MHA
@@ -166,7 +166,7 @@ class TestGenerationAttention:
         """Test edge cases like s=1."""
         # When s=1, there's no KV cache to load from previous steps
         result = comprehensive_perf_db.query_generation_attention(
-            1, 1, 8, 4, common.KVCacheQuantMode.float16, sol_mode=common.SOLMode.SOL
+            1, 1, 8, 4, common.KVCacheQuantMode.float16, database_mode=common.DatabaseMode.SOL
         )
         assert result > 0
 
@@ -174,14 +174,14 @@ class TestGenerationAttention:
 class TestContextMLA:
     """Test cases for query_context_mla method."""
 
-    def test_query_context_mla_sol_mode(self, comprehensive_perf_db):
+    def test_query_context_mla_database_mode(self, comprehensive_perf_db):
         """Test SOL mode calculation for context MLA."""
         b, s, prefix, num_heads = 2, 64, 0, 32
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_mla(
-            b, s, prefix, num_heads, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.SOL
+            b, s, prefix, num_heads, kv_cache_quant_mode, fmha_quant_mode, database_mode=common.DatabaseMode.SOL
         )
 
         # Calculate expected SOL result
@@ -198,14 +198,14 @@ class TestContextMLA:
 
         assert math.isclose(result, expected, rel_tol=1e-6)
 
-    def test_query_context_mla_non_sol_mode(self, comprehensive_perf_db):
-        """Test non-SOL mode with interpolation."""
+    def test_query_context_mla_non_database_mode(self, comprehensive_perf_db):
+        """Test SILICON mode with interpolation."""
         b, s, prefix, num_heads = 4, 32, 0, 32
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
         fmha_quant_mode = common.FMHAQuantMode.float16
 
         result = comprehensive_perf_db.query_context_mla(
-            b, s, prefix, num_heads, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
+            b, s, prefix, num_heads, kv_cache_quant_mode, fmha_quant_mode, database_mode=common.DatabaseMode.SILICON
         )
 
         # Should use data from context_mla_data
@@ -227,7 +227,7 @@ class TestContextMLA:
                 num_heads,
                 kv_cache_quant_mode,
                 fmha_quant_mode,
-                sol_mode=common.SOLMode.NON_SOL,
+                database_mode=common.DatabaseMode.SILICON,
             )
             results.append(result)
 
@@ -238,13 +238,13 @@ class TestContextMLA:
 class TestGenerationMLA:
     """Test cases for query_generation_mla method."""
 
-    def test_query_generation_mla_sol_mode(self, comprehensive_perf_db):
+    def test_query_generation_mla_database_mode(self, comprehensive_perf_db):
         """Test SOL mode calculation for generation MLA."""
         b, s, num_heads = 4, 128, 32
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
 
         result = comprehensive_perf_db.query_generation_mla(
-            b, s, num_heads, kv_cache_quant_mode, sol_mode=common.SOLMode.SOL
+            b, s, num_heads, kv_cache_quant_mode, database_mode=common.DatabaseMode.SOL
         )
 
         # Calculate expected SOL result
@@ -257,13 +257,13 @@ class TestGenerationMLA:
 
         assert math.isclose(result, expected, rel_tol=1e-6)
 
-    def test_query_generation_mla_non_sol_mode(self, comprehensive_perf_db):
-        """Test non-SOL mode with interpolation."""
+    def test_query_generation_mla_non_database_mode(self, comprehensive_perf_db):
+        """Test SILICON mode with interpolation."""
         b, s, num_heads = 2, 64, 32
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
 
         result = comprehensive_perf_db.query_generation_mla(
-            b, s, num_heads, kv_cache_quant_mode, sol_mode=common.SOLMode.NON_SOL
+            b, s, num_heads, kv_cache_quant_mode, database_mode=common.DatabaseMode.SILICON
         )
 
         # Should use data from generation_mla_data
@@ -273,7 +273,7 @@ class TestGenerationMLA:
     def test_query_generation_mla_sol_full_mode(self, comprehensive_perf_db):
         """Test SOL_FULL mode returns complete tuple."""
         result = comprehensive_perf_db.query_generation_mla(
-            1, 32, 32, common.KVCacheQuantMode.float16, sol_mode=common.SOLMode.SOL_FULL
+            1, 32, 32, common.KVCacheQuantMode.float16, database_mode=common.DatabaseMode.SOL_FULL
         )
 
         assert isinstance(result, tuple)
@@ -281,14 +281,14 @@ class TestGenerationMLA:
         assert result[0] == max(result[1], result[2])
 
 
-def test_default_sol_mode(comprehensive_perf_db):
-    """Test setting and getting default SOL mode."""
-    # Initially should be NON_SOL
-    assert comprehensive_perf_db.get_default_sol_mode() == common.SOLMode.NON_SOL
+def test_default_database_mode(comprehensive_perf_db):
+    """Test setting and getting default database mode."""
+    # Initially should be SILICON
+    assert comprehensive_perf_db.get_default_database_mode() == common.DatabaseMode.SILICON
 
     # Set to SOL mode
-    comprehensive_perf_db.set_default_sol_mode(common.SOLMode.SOL)
-    assert comprehensive_perf_db.get_default_sol_mode() == common.SOLMode.SOL
+    comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.SOL)
+    assert comprehensive_perf_db.get_default_database_mode() == common.DatabaseMode.SOL
 
     # Query should use default mode when not specified
     result = comprehensive_perf_db.query_context_attention(
