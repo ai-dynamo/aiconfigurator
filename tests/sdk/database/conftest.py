@@ -71,7 +71,8 @@ def patch_all_loaders_and_yaml(request, monkeypatch):
                 128: {128: {256: 12.0, 512: 22.0}, 256: {256: 17.0, 512: 27.0}},
             }
         }
-        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data)
+        # Note: loaders now return tuples (data, power_data) for power support
+        monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: (dummy_gemm_data, None))
 
         # 3) Patch load_custom_allreduce_data to return proper structure
         #    Structure: { 'float16': { 2: { 'AUTO': { 1024:  5.0 } } } }
@@ -84,13 +85,13 @@ def patch_all_loaders_and_yaml(request, monkeypatch):
         }
         monkeypatch.setattr(
             "aiconfigurator.sdk.perf_database.load_custom_allreduce_data",
-            lambda path: dummy_custom_allreduce_data,
+            lambda path: (dummy_custom_allreduce_data, None),
         )
 
         # 4) load_moe_data needs to return 2 dicts
         monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_moe_data", lambda path: ({}, {}))
 
-        # 5) For completeness, patch every other loader to return an empty dict
+        # 5) For completeness, patch every other loader to return tuples (data, power_data)
         for loader_name in [
             "load_context_attention_data",
             "load_generation_attention_data",
@@ -99,7 +100,11 @@ def patch_all_loaders_and_yaml(request, monkeypatch):
             "load_mla_bmm_data",
             "load_nccl_data",
         ]:
-            monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: {})
+            # MLA loaders don't have power support yet, so return single dict
+            if "mla" in loader_name.lower():
+                monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: {})
+            else:
+                monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: ({}, None))
 
 
 @pytest.fixture
@@ -252,18 +257,19 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
                     dummy_nccl_data[dtype][operation][num_gpus][msg_size] = 0.001 * msg_size * num_gpus
 
     # Apply all patches
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data)
+    # Note: loaders now return tuples (data, power_data) for power support
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: (dummy_gemm_data, None))
     monkeypatch.setattr(
         "aiconfigurator.sdk.perf_database.load_context_attention_data",
-        lambda path: dummy_context_attention_data,
+        lambda path: (dummy_context_attention_data, None),
     )
     monkeypatch.setattr(
         "aiconfigurator.sdk.perf_database.load_generation_attention_data",
-        lambda path: dummy_generation_attention_data,
+        lambda path: (dummy_generation_attention_data, None),
     )
     monkeypatch.setattr(
         "aiconfigurator.sdk.perf_database.load_custom_allreduce_data",
-        lambda path: dummy_custom_allreduce_data,
+        lambda path: (dummy_custom_allreduce_data, None),
     )
     monkeypatch.setattr(
         "aiconfigurator.sdk.perf_database.load_moe_data",
@@ -278,6 +284,6 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
         lambda path: dummy_generation_mla_data,
     )
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_mla_bmm_data", lambda path: dummy_mla_bmm_data)
-    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_nccl_data", lambda path: dummy_nccl_data)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_nccl_data", lambda path: (dummy_nccl_data, None))
 
     return PerfDatabase("test_system", "trtllm", "v1", str(tmp_path))

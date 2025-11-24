@@ -86,11 +86,14 @@ def benchmark_trtllm_allreduce(
     trtllm_mods = import_trtllm()
     tllm = trtllm_mods["tllm"]
 
+    # Get MPI communicator for power data gathering
+    mpi_comm = trtllm_mods["mpi_comm"]()
+
     if use_slurm:
         gpus_per_node = int(os.environ["SLURM_NTASKS_PER_NODE"])
         local_rank = int(os.environ["SLURM_LOCALID"])
     else:
-        local_comm = trtllm_mods["mpi_comm"]().Split_type(split_type=trtllm_mods["OMPI_COMM_TYPE_HOST"])
+        local_comm = mpi_comm.Split_type(split_type=trtllm_mods["OMPI_COMM_TYPE_HOST"])
         local_rank = local_comm.Get_rank()
         gpus_per_node = local_comm.Get_size()
 
@@ -162,15 +165,38 @@ def benchmark_trtllm_allreduce(
 
         # Power measurement for AllReduce operations
         if measure_power and power_monitor is not None:
+            # Estimate latency to determine how many iterations we need for accurate power measurement
+            start_event.record()
+            g.replay()
+            end_event.record()
+            torch.cuda.synchronize()
+            estimated_latency_sec = start_event.elapsed_time(end_event) / 1000.0 / repeat_n
+            
+            # Target at least 0.5 seconds of measurement for accurate power readings
+            # For large message sizes (>4MB), reduce target to avoid excessive runtime
+            if size > 4194304:  # 4MB
+                target_duration_sec = 0.2
+                max_iterations = 100
+            else:
+                target_duration_sec = 0.5
+                max_iterations = 5000
+            adaptive_num_runs = max(num_runs, min(max_iterations, int(target_duration_sec / estimated_latency_sec)))
+            
             power_monitor.begin_window("allreduce", sync_execution=True)
             start_event.record()
-            for i in range(num_runs):
+            for i in range(adaptive_num_runs):
                 g.replay()
             end_event.record()
             measurement = power_monitor.end_window("allreduce", sync_execution=True)
             torch.cuda.synchronize()
+            
             # Calculate average power across this rank
-            power_rank = measurement.gpu_energy[local_rank] / measurement.time
+            if measurement.time > 0 and measurement.gpu_energy[local_rank] > 0:
+                power_rank = measurement.gpu_energy[local_rank] / measurement.time
+            else:
+                power_rank = None
+            
+            latency = start_event.elapsed_time(end_event) / adaptive_num_runs / repeat_n
         else:
             start_event.record()
             for i in range(num_runs):
@@ -178,16 +204,15 @@ def benchmark_trtllm_allreduce(
             end_event.record()
             torch.cuda.synchronize()
             power_rank = None
-
-        latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
+            latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
 
         # Collect power data from all ranks if measuring
-        if measure_power and power_rank is not None:
-            # Gather power from all ranks to rank 0
-            power_list = [None] * world_size if rank == 0 else None
-            torch.distributed.all_gather_object(power_list if rank == 0 else [], power_rank)
-            if rank == 0:
-                # Average power across all GPUs
+        # IMPORTANT: All ranks must participate in allgather to avoid MPI deadlock
+        if measure_power:
+            # Gather power from all ranks (even if some have None)
+            power_list = mpi_comm.allgather(power_rank)
+            # Average power across all GPUs (only if all ranks have valid data)
+            if all(p is not None for p in power_list):
                 avg_power = sum(power_list) / len(power_list)
             else:
                 avg_power = None
@@ -224,6 +249,11 @@ def benchmark_trtllm_allreduce(
                 perf_filename=perf_filename,
             )
 
+        # Clear CUDA cache and synchronize to prevent memory accumulation
+        del g, op_list, input_tensor
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
         size *= ratio
 
 
@@ -377,14 +407,30 @@ def benchmark_vllm_allreduce(
 
                 # Power measurement for graph mode
                 if measure_power and power_monitor is not None:
+                    # Estimate latency to determine adaptive number of runs
+                    start_event.record()
+                    graph.replay()
+                    end_event.record()
+                    torch.cuda.synchronize()
+                    estimated_latency_sec = start_event.elapsed_time(end_event) / 1000.0 / repeat_n
+                    
+                    # Target at least 0.5 seconds for accurate power measurement
+                    # Cap at 5000 iterations to avoid excessive runtime (max ~2-3 seconds per size)
+                    target_duration_sec = 0.5
+                    adaptive_num_runs = max(num_runs, min(5000, int(target_duration_sec / estimated_latency_sec)))
+                    
                     power_monitor.begin_window("allreduce_graph", sync_execution=True)
                     start_event.record()
-                    for i in range(num_runs):
+                    for i in range(adaptive_num_runs):
                         graph.replay()
                     end_event.record()
                     measurement = power_monitor.end_window("allreduce_graph", sync_execution=True)
                     torch.cuda.synchronize()
-                    power_rank = measurement.gpu_energy[local_rank] / measurement.time
+                    
+                    if measurement.time > 0 and measurement.gpu_energy[local_rank] > 0:
+                        power_rank = measurement.gpu_energy[local_rank] / measurement.time
+                    else:
+                        power_rank = None
                 else:
                     start_event.record()
                     for i in range(num_runs):
@@ -392,6 +438,7 @@ def benchmark_vllm_allreduce(
                     end_event.record()
                     torch.cuda.synchronize()
                     power_rank = None
+                    adaptive_num_runs = num_runs
 
             else:
                 # Eager mode
@@ -410,15 +457,31 @@ def benchmark_vllm_allreduce(
 
                 # Power measurement for eager mode
                 if measure_power and power_monitor is not None:
+                    # Estimate latency for adaptive runs
+                    start_event.record()
+                    _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
+                    end_event.record()
+                    torch.cuda.synchronize()
+                    estimated_latency_sec = start_event.elapsed_time(end_event) / 1000.0
+                    
+                    # Target at least 0.5 seconds for accurate power measurement
+                    # Cap at 5000 iterations to avoid excessive runtime (max ~2-3 seconds per size)
+                    target_duration_sec = 0.5
+                    adaptive_num_runs = max(num_runs, min(5000, int(target_duration_sec / estimated_latency_sec / repeat_n)))
+                    
                     power_monitor.begin_window("allreduce_eager", sync_execution=True)
                     start_event.record()
-                    for _ in range(num_runs):
+                    for _ in range(adaptive_num_runs):
                         for _ in range(repeat_n):
                             _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
                     end_event.record()
                     measurement = power_monitor.end_window("allreduce_eager", sync_execution=True)
                     torch.cuda.synchronize()
-                    power_rank = measurement.gpu_energy[local_rank] / measurement.time
+                    
+                    if measurement.time > 0 and measurement.gpu_energy[local_rank] > 0:
+                        power_rank = measurement.gpu_energy[local_rank] / measurement.time
+                    else:
+                        power_rank = None
                 else:
                     start_event.record()
                     for _ in range(num_runs):
@@ -427,8 +490,9 @@ def benchmark_vllm_allreduce(
                     end_event.record()
                     torch.cuda.synchronize()
                     power_rank = None
+                    adaptive_num_runs = num_runs
 
-            latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
+            latency = start_event.elapsed_time(end_event) / adaptive_num_runs / repeat_n
 
             # Collect power data from all ranks if measuring
             if measure_power and power_rank is not None:
