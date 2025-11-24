@@ -162,9 +162,10 @@ class TestSupportMatrix:
             f"CSV combinations don't match expected combinations.\n"
             f"Missing in CSV: {expected_combinations - actual_combinations}\n"
             f"Extra in CSV: {actual_combinations - expected_combinations}"
+            + "\n\nIf these are intentional improvements, update the committed support_matrix.csv"
+            " with the `tools/generate_support_matrix.py` script and commit the changes."
         )
 
-    @pytest.mark.slow
     def test_no_deprecated_support(self, csv_data, fresh_csv_data):
         """
         Test that all previously supported items are still supported.
@@ -193,9 +194,10 @@ class TestSupportMatrix:
         assert len(deprecated_support) == 0, (
             f"Found {len(deprecated_support)} previously supported configurations that are now failing:\n"
             + "\n".join(f"  - {item}" for item in deprecated_support)
+            + "\n\nIf these are intentional improvements, update the committed support_matrix.csv"
+            " with the `tools/generate_support_matrix.py` script and commit the changes."
         )
 
-    @pytest.mark.slow
     def test_no_undocumented_support(self, csv_data, fresh_csv_data):
         """
         Test that all previously unsupported items are still unsupported.
@@ -227,6 +229,7 @@ class TestSupportMatrix:
             message = (
                 f"Found {len(undocumented_support)} newly supported configurations:\n"
                 + "\n".join(f"  - {item}" for item in undocumented_support)
-                + "\n\nIf these are intentional improvements, update the committed support_matrix.csv."
+                + "\n\nIf these are intentional improvements, update the committed support_matrix.csv"
+                " with the `tools/generate_support_matrix.py` script and commit the changes."
             )
             pytest.fail(message)

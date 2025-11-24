@@ -21,6 +21,7 @@
 /src/aiconfigurator/sdk/perf_database.py @Arsene12358 @YijiaZhao @ilyasher @xutizhou @AichenF
 /src/aiconfigurator/sdk/task.py @tianhaox @jasonqinzhou @ilyasher
 /src/aiconfigurator/sdk/utils.py @tianhaox @jasonqinzhou @simone-chen
+/src/aiconfigurator/sdk/suppport_matrix.py @Harrilee
 
 # cli
 /src/aiconfigurator/cli @Ethan-ES @tianhaox
@@ -71,7 +72,7 @@
 /tools/automation @tianhaox @Ethan-ES
 /tools/sanity_check @tianhaox @YijiaZhao
 /tools/simple_sdk_demo @tianhaox @jasonqinzhou
-
+/tools/generate_support_matrix.py @Harrilee
 # misc
 /ATTRIBUTIONS.md @saturley-hall
 /CODE_OF_CONDUCT.md @saturley-hall
@@ -85,4 +86,4 @@
 /.pre-commit-config.yaml @saturley-hall
 
 # CI/CD and workflows
-/.github/workflows @saturley-hall @tianhaox @jasonqinzhou
+/.github/workflows @saturley-hall @tianhaox @jasonqinzhou @Harrilee

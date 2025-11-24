@@ -1,0 +1,553 @@
+Model,System,Backend,Version,Mode,Status,ErrMsg
+GPT_OSS_120B,a100_sxm,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+GPT_OSS_120B,a100_sxm,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+QWEN2.5_72B,a100_sxm,trtllm,1.0.0,agg,PASS,
+QWEN2.5_72B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+QWEN3_0.6B,a100_sxm,trtllm,1.0.0,agg,PASS,
+QWEN3_0.6B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+QWEN3_8B,a100_sxm,trtllm,1.0.0,agg,PASS,
+QWEN3_8B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+MOE_Mixtral8x22B,a100_sxm,trtllm,1.0.0,agg,PASS,
+MOE_Mixtral8x22B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+GPT_OSS_20B,a100_sxm,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+GPT_OSS_20B,a100_sxm,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+QWEN3_32B,a100_sxm,trtllm,1.0.0,agg,PASS,
+QWEN3_32B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+LLAMA2_70B,a100_sxm,trtllm,1.0.0,agg,PASS,
+LLAMA2_70B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+QWEN3_480B,a100_sxm,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+QWEN3_480B,a100_sxm,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+LLAMA2_7B,a100_sxm,trtllm,1.0.0,agg,PASS,
+LLAMA2_7B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+QWEN2.5_1.5B,a100_sxm,trtllm,1.0.0,agg,PASS,
+QWEN2.5_1.5B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+QWEN3_235B,a100_sxm,trtllm,1.0.0,agg,PASS,
+QWEN3_235B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+DEEPSEEK_V3,a100_sxm,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+DEEPSEEK_V3,a100_sxm,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,a100_sxm,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,a100_sxm,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+LLAMA3.1_70B,a100_sxm,trtllm,1.0.0,agg,PASS,
+LLAMA3.1_70B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+LLAMA3.1_405B,a100_sxm,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+LLAMA3.1_405B,a100_sxm,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+Nemotron_super_v1.1,a100_sxm,trtllm,1.0.0,agg,PASS,
+Nemotron_super_v1.1,a100_sxm,trtllm,1.0.0,disagg,PASS,
+LLAMA3.1_8B,a100_sxm,trtllm,1.0.0,agg,PASS,
+LLAMA3.1_8B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+QWEN3_1.7B,a100_sxm,trtllm,1.0.0,agg,PASS,
+QWEN3_1.7B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+QWEN2.5_32B,a100_sxm,trtllm,1.0.0,agg,PASS,
+QWEN2.5_32B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+LLAMA2_13B,a100_sxm,trtllm,1.0.0,agg,PASS,
+LLAMA2_13B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+MOE_Mixtral8x7B,a100_sxm,trtllm,1.0.0,agg,PASS,
+MOE_Mixtral8x7B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+QWEN2.5_7B,a100_sxm,trtllm,1.0.0,agg,PASS,
+QWEN2.5_7B,a100_sxm,trtllm,1.0.0,disagg,PASS,
+GPT_OSS_120B,h200_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+GPT_OSS_120B,h200_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+QWEN2.5_72B,h200_sxm,vllm,0.11.0,agg,PASS,
+QWEN2.5_72B,h200_sxm,vllm,0.11.0,disagg,PASS,
+QWEN3_0.6B,h200_sxm,vllm,0.11.0,agg,PASS,
+QWEN3_0.6B,h200_sxm,vllm,0.11.0,disagg,PASS,
+QWEN3_8B,h200_sxm,vllm,0.11.0,agg,PASS,
+QWEN3_8B,h200_sxm,vllm,0.11.0,disagg,PASS,
+MOE_Mixtral8x22B,h200_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+MOE_Mixtral8x22B,h200_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+GPT_OSS_20B,h200_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+GPT_OSS_20B,h200_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+QWEN3_32B,h200_sxm,vllm,0.11.0,agg,PASS,
+QWEN3_32B,h200_sxm,vllm,0.11.0,disagg,PASS,
+LLAMA2_70B,h200_sxm,vllm,0.11.0,agg,PASS,
+LLAMA2_70B,h200_sxm,vllm,0.11.0,disagg,PASS,
+QWEN3_480B,h200_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+QWEN3_480B,h200_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+LLAMA2_7B,h200_sxm,vllm,0.11.0,agg,PASS,
+LLAMA2_7B,h200_sxm,vllm,0.11.0,disagg,PASS,
+QWEN2.5_1.5B,h200_sxm,vllm,0.11.0,agg,PASS,
+QWEN2.5_1.5B,h200_sxm,vllm,0.11.0,disagg,PASS,
+QWEN3_235B,h200_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+QWEN3_235B,h200_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+DEEPSEEK_V3,h200_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+DEEPSEEK_V3,h200_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+QWEN3_30B_A3B,h200_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+QWEN3_30B_A3B,h200_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+LLAMA3.1_70B,h200_sxm,vllm,0.11.0,agg,PASS,
+LLAMA3.1_70B,h200_sxm,vllm,0.11.0,disagg,PASS,
+LLAMA3.1_405B,h200_sxm,vllm,0.11.0,agg,PASS,
+LLAMA3.1_405B,h200_sxm,vllm,0.11.0,disagg,PASS,
+Nemotron_super_v1.1,h200_sxm,vllm,0.11.0,agg,PASS,
+Nemotron_super_v1.1,h200_sxm,vllm,0.11.0,disagg,PASS,
+LLAMA3.1_8B,h200_sxm,vllm,0.11.0,agg,PASS,
+LLAMA3.1_8B,h200_sxm,vllm,0.11.0,disagg,PASS,
+QWEN3_1.7B,h200_sxm,vllm,0.11.0,agg,PASS,
+QWEN3_1.7B,h200_sxm,vllm,0.11.0,disagg,PASS,
+QWEN2.5_32B,h200_sxm,vllm,0.11.0,agg,PASS,
+QWEN2.5_32B,h200_sxm,vllm,0.11.0,disagg,PASS,
+LLAMA2_13B,h200_sxm,vllm,0.11.0,agg,PASS,
+LLAMA2_13B,h200_sxm,vllm,0.11.0,disagg,PASS,
+MOE_Mixtral8x7B,h200_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+MOE_Mixtral8x7B,h200_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+QWEN2.5_7B,h200_sxm,vllm,0.11.0,agg,PASS,
+QWEN2.5_7B,h200_sxm,vllm,0.11.0,disagg,PASS,
+GPT_OSS_120B,h200_sxm,sglang,0.5.1.post1,agg,FAIL,Configuration returned no results
+GPT_OSS_120B,h200_sxm,sglang,0.5.1.post1,disagg,FAIL,Configuration returned no results
+QWEN2.5_72B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN2.5_72B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_0.6B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_0.6B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_8B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_8B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+MOE_Mixtral8x22B,h200_sxm,sglang,0.5.1.post1,agg,FAIL,Configuration returned no results
+MOE_Mixtral8x22B,h200_sxm,sglang,0.5.1.post1,disagg,FAIL,Configuration returned no results
+GPT_OSS_20B,h200_sxm,sglang,0.5.1.post1,agg,FAIL,Configuration returned no results
+GPT_OSS_20B,h200_sxm,sglang,0.5.1.post1,disagg,FAIL,Configuration returned no results
+QWEN3_32B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_32B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA2_70B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA2_70B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_480B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_480B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA2_7B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA2_7B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN2.5_1.5B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN2.5_1.5B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_235B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_235B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+DEEPSEEK_V3,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+DEEPSEEK_V3,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_30B_A3B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_30B_A3B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA3.1_70B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA3.1_70B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA3.1_405B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA3.1_405B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+Nemotron_super_v1.1,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+Nemotron_super_v1.1,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA3.1_8B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA3.1_8B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_1.7B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_1.7B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN2.5_32B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN2.5_32B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA2_13B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA2_13B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+MOE_Mixtral8x7B,h200_sxm,sglang,0.5.1.post1,agg,FAIL,Configuration returned no results
+MOE_Mixtral8x7B,h200_sxm,sglang,0.5.1.post1,disagg,FAIL,Configuration returned no results
+QWEN2.5_7B,h200_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN2.5_7B,h200_sxm,sglang,0.5.1.post1,disagg,PASS,
+GPT_OSS_120B,h200_sxm,trtllm,1.0.0rc3,agg,FAIL,Configuration returned no results
+GPT_OSS_120B,h200_sxm,trtllm,1.0.0rc3,disagg,FAIL,Configuration returned no results
+QWEN2.5_72B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN2.5_72B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_0.6B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_0.6B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_8B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_8B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+MOE_Mixtral8x22B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+MOE_Mixtral8x22B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+GPT_OSS_20B,h200_sxm,trtllm,1.0.0rc3,agg,FAIL,Configuration returned no results
+GPT_OSS_20B,h200_sxm,trtllm,1.0.0rc3,disagg,FAIL,Configuration returned no results
+QWEN3_32B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_32B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA2_70B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA2_70B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_480B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_480B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA2_7B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA2_7B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN2.5_1.5B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN2.5_1.5B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_235B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_235B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+DEEPSEEK_V3,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+DEEPSEEK_V3,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_30B_A3B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_30B_A3B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA3.1_70B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA3.1_70B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA3.1_405B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA3.1_405B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+Nemotron_super_v1.1,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+Nemotron_super_v1.1,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA3.1_8B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA3.1_8B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_1.7B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_1.7B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN2.5_32B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN2.5_32B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA2_13B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA2_13B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+MOE_Mixtral8x7B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+MOE_Mixtral8x7B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN2.5_7B,h200_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN2.5_7B,h200_sxm,trtllm,1.0.0rc3,disagg,PASS,
+GPT_OSS_120B,h200_sxm,trtllm,0.20.0,agg,FAIL,Configuration returned no results
+GPT_OSS_120B,h200_sxm,trtllm,0.20.0,disagg,FAIL,Configuration returned no results
+QWEN2.5_72B,h200_sxm,trtllm,0.20.0,agg,PASS,
+QWEN2.5_72B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_0.6B,h200_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_0.6B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_8B,h200_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_8B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+MOE_Mixtral8x22B,h200_sxm,trtllm,0.20.0,agg,PASS,
+MOE_Mixtral8x22B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+GPT_OSS_20B,h200_sxm,trtllm,0.20.0,agg,FAIL,Configuration returned no results
+GPT_OSS_20B,h200_sxm,trtllm,0.20.0,disagg,FAIL,Configuration returned no results
+QWEN3_32B,h200_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_32B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+LLAMA2_70B,h200_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA2_70B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_480B,h200_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_480B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+LLAMA2_7B,h200_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA2_7B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN2.5_1.5B,h200_sxm,trtllm,0.20.0,agg,PASS,
+QWEN2.5_1.5B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_235B,h200_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_235B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+DEEPSEEK_V3,h200_sxm,trtllm,0.20.0,agg,PASS,
+DEEPSEEK_V3,h200_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_30B_A3B,h200_sxm,trtllm,0.20.0,agg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,h200_sxm,trtllm,0.20.0,disagg,FAIL,Configuration returned no results
+LLAMA3.1_70B,h200_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA3.1_70B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+LLAMA3.1_405B,h200_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA3.1_405B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+Nemotron_super_v1.1,h200_sxm,trtllm,0.20.0,agg,PASS,
+Nemotron_super_v1.1,h200_sxm,trtllm,0.20.0,disagg,PASS,
+LLAMA3.1_8B,h200_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA3.1_8B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_1.7B,h200_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_1.7B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN2.5_32B,h200_sxm,trtllm,0.20.0,agg,PASS,
+QWEN2.5_32B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+LLAMA2_13B,h200_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA2_13B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+MOE_Mixtral8x7B,h200_sxm,trtllm,0.20.0,agg,PASS,
+MOE_Mixtral8x7B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN2.5_7B,h200_sxm,trtllm,0.20.0,agg,PASS,
+QWEN2.5_7B,h200_sxm,trtllm,0.20.0,disagg,PASS,
+GPT_OSS_120B,h100_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+GPT_OSS_120B,h100_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+QWEN2.5_72B,h100_sxm,vllm,0.11.0,agg,PASS,
+QWEN2.5_72B,h100_sxm,vllm,0.11.0,disagg,PASS,
+QWEN3_0.6B,h100_sxm,vllm,0.11.0,agg,PASS,
+QWEN3_0.6B,h100_sxm,vllm,0.11.0,disagg,PASS,
+QWEN3_8B,h100_sxm,vllm,0.11.0,agg,PASS,
+QWEN3_8B,h100_sxm,vllm,0.11.0,disagg,PASS,
+MOE_Mixtral8x22B,h100_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+MOE_Mixtral8x22B,h100_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+GPT_OSS_20B,h100_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+GPT_OSS_20B,h100_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+QWEN3_32B,h100_sxm,vllm,0.11.0,agg,PASS,
+QWEN3_32B,h100_sxm,vllm,0.11.0,disagg,PASS,
+LLAMA2_70B,h100_sxm,vllm,0.11.0,agg,PASS,
+LLAMA2_70B,h100_sxm,vllm,0.11.0,disagg,PASS,
+QWEN3_480B,h100_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+QWEN3_480B,h100_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+LLAMA2_7B,h100_sxm,vllm,0.11.0,agg,PASS,
+LLAMA2_7B,h100_sxm,vllm,0.11.0,disagg,PASS,
+QWEN2.5_1.5B,h100_sxm,vllm,0.11.0,agg,PASS,
+QWEN2.5_1.5B,h100_sxm,vllm,0.11.0,disagg,PASS,
+QWEN3_235B,h100_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+QWEN3_235B,h100_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+DEEPSEEK_V3,h100_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+DEEPSEEK_V3,h100_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+QWEN3_30B_A3B,h100_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+QWEN3_30B_A3B,h100_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+LLAMA3.1_70B,h100_sxm,vllm,0.11.0,agg,PASS,
+LLAMA3.1_70B,h100_sxm,vllm,0.11.0,disagg,PASS,
+LLAMA3.1_405B,h100_sxm,vllm,0.11.0,agg,PASS,
+LLAMA3.1_405B,h100_sxm,vllm,0.11.0,disagg,PASS,
+Nemotron_super_v1.1,h100_sxm,vllm,0.11.0,agg,PASS,
+Nemotron_super_v1.1,h100_sxm,vllm,0.11.0,disagg,PASS,
+LLAMA3.1_8B,h100_sxm,vllm,0.11.0,agg,PASS,
+LLAMA3.1_8B,h100_sxm,vllm,0.11.0,disagg,PASS,
+QWEN3_1.7B,h100_sxm,vllm,0.11.0,agg,PASS,
+QWEN3_1.7B,h100_sxm,vllm,0.11.0,disagg,PASS,
+QWEN2.5_32B,h100_sxm,vllm,0.11.0,agg,PASS,
+QWEN2.5_32B,h100_sxm,vllm,0.11.0,disagg,PASS,
+LLAMA2_13B,h100_sxm,vllm,0.11.0,agg,PASS,
+LLAMA2_13B,h100_sxm,vllm,0.11.0,disagg,PASS,
+MOE_Mixtral8x7B,h100_sxm,vllm,0.11.0,agg,FAIL,MoE is not implemented for vllm backend
+MOE_Mixtral8x7B,h100_sxm,vllm,0.11.0,disagg,FAIL,MoE is not implemented for vllm backend
+QWEN2.5_7B,h100_sxm,vllm,0.11.0,agg,PASS,
+QWEN2.5_7B,h100_sxm,vllm,0.11.0,disagg,PASS,
+GPT_OSS_120B,h100_sxm,sglang,0.5.1.post1,agg,FAIL,Configuration returned no results
+GPT_OSS_120B,h100_sxm,sglang,0.5.1.post1,disagg,FAIL,Configuration returned no results
+QWEN2.5_72B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN2.5_72B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_0.6B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_0.6B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_8B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_8B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+MOE_Mixtral8x22B,h100_sxm,sglang,0.5.1.post1,agg,FAIL,Configuration returned no results
+MOE_Mixtral8x22B,h100_sxm,sglang,0.5.1.post1,disagg,FAIL,Configuration returned no results
+GPT_OSS_20B,h100_sxm,sglang,0.5.1.post1,agg,FAIL,Configuration returned no results
+GPT_OSS_20B,h100_sxm,sglang,0.5.1.post1,disagg,FAIL,Configuration returned no results
+QWEN3_32B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_32B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA2_70B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA2_70B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_480B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_480B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA2_7B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA2_7B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN2.5_1.5B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN2.5_1.5B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_235B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_235B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+DEEPSEEK_V3,h100_sxm,sglang,0.5.1.post1,agg,FAIL,Configuration returned no results
+DEEPSEEK_V3,h100_sxm,sglang,0.5.1.post1,disagg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,h100_sxm,sglang,0.5.1.post1,agg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,h100_sxm,sglang,0.5.1.post1,disagg,FAIL,Configuration returned no results
+LLAMA3.1_70B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA3.1_70B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA3.1_405B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA3.1_405B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+Nemotron_super_v1.1,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+Nemotron_super_v1.1,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA3.1_8B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA3.1_8B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN3_1.7B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN3_1.7B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+QWEN2.5_32B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN2.5_32B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+LLAMA2_13B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+LLAMA2_13B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+MOE_Mixtral8x7B,h100_sxm,sglang,0.5.1.post1,agg,FAIL,Configuration returned no results
+MOE_Mixtral8x7B,h100_sxm,sglang,0.5.1.post1,disagg,FAIL,Configuration returned no results
+QWEN2.5_7B,h100_sxm,sglang,0.5.1.post1,agg,PASS,
+QWEN2.5_7B,h100_sxm,sglang,0.5.1.post1,disagg,PASS,
+GPT_OSS_120B,h100_sxm,trtllm,1.0.0rc3,agg,FAIL,Configuration returned no results
+GPT_OSS_120B,h100_sxm,trtllm,1.0.0rc3,disagg,FAIL,Configuration returned no results
+QWEN2.5_72B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN2.5_72B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_0.6B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_0.6B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_8B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_8B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+MOE_Mixtral8x22B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+MOE_Mixtral8x22B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+GPT_OSS_20B,h100_sxm,trtllm,1.0.0rc3,agg,FAIL,Configuration returned no results
+GPT_OSS_20B,h100_sxm,trtllm,1.0.0rc3,disagg,FAIL,Configuration returned no results
+QWEN3_32B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_32B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA2_70B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA2_70B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_480B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_480B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA2_7B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA2_7B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN2.5_1.5B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN2.5_1.5B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_235B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_235B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+DEEPSEEK_V3,h100_sxm,trtllm,1.0.0rc3,agg,FAIL,Configuration returned no results
+DEEPSEEK_V3,h100_sxm,trtllm,1.0.0rc3,disagg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,h100_sxm,trtllm,1.0.0rc3,agg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,h100_sxm,trtllm,1.0.0rc3,disagg,FAIL,Configuration returned no results
+LLAMA3.1_70B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA3.1_70B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA3.1_405B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA3.1_405B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+Nemotron_super_v1.1,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+Nemotron_super_v1.1,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA3.1_8B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA3.1_8B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN3_1.7B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN3_1.7B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN2.5_32B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN2.5_32B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+LLAMA2_13B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+LLAMA2_13B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+MOE_Mixtral8x7B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+MOE_Mixtral8x7B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+QWEN2.5_7B,h100_sxm,trtllm,1.0.0rc3,agg,PASS,
+QWEN2.5_7B,h100_sxm,trtllm,1.0.0rc3,disagg,PASS,
+GPT_OSS_120B,h100_sxm,trtllm,0.20.0,agg,FAIL,Configuration returned no results
+GPT_OSS_120B,h100_sxm,trtllm,0.20.0,disagg,FAIL,Configuration returned no results
+QWEN2.5_72B,h100_sxm,trtllm,0.20.0,agg,PASS,
+QWEN2.5_72B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_0.6B,h100_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_0.6B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_8B,h100_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_8B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+MOE_Mixtral8x22B,h100_sxm,trtllm,0.20.0,agg,PASS,
+MOE_Mixtral8x22B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+GPT_OSS_20B,h100_sxm,trtllm,0.20.0,agg,FAIL,Configuration returned no results
+GPT_OSS_20B,h100_sxm,trtllm,0.20.0,disagg,FAIL,Configuration returned no results
+QWEN3_32B,h100_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_32B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+LLAMA2_70B,h100_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA2_70B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_480B,h100_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_480B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+LLAMA2_7B,h100_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA2_7B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN2.5_1.5B,h100_sxm,trtllm,0.20.0,agg,PASS,
+QWEN2.5_1.5B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_235B,h100_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_235B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+DEEPSEEK_V3,h100_sxm,trtllm,0.20.0,agg,FAIL,Configuration returned no results
+DEEPSEEK_V3,h100_sxm,trtllm,0.20.0,disagg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,h100_sxm,trtllm,0.20.0,agg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,h100_sxm,trtllm,0.20.0,disagg,FAIL,Configuration returned no results
+LLAMA3.1_70B,h100_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA3.1_70B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+LLAMA3.1_405B,h100_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA3.1_405B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+Nemotron_super_v1.1,h100_sxm,trtllm,0.20.0,agg,PASS,
+Nemotron_super_v1.1,h100_sxm,trtllm,0.20.0,disagg,PASS,
+LLAMA3.1_8B,h100_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA3.1_8B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN3_1.7B,h100_sxm,trtllm,0.20.0,agg,PASS,
+QWEN3_1.7B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN2.5_32B,h100_sxm,trtllm,0.20.0,agg,PASS,
+QWEN2.5_32B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+LLAMA2_13B,h100_sxm,trtllm,0.20.0,agg,PASS,
+LLAMA2_13B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+MOE_Mixtral8x7B,h100_sxm,trtllm,0.20.0,agg,PASS,
+MOE_Mixtral8x7B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+QWEN2.5_7B,h100_sxm,trtllm,0.20.0,agg,PASS,
+QWEN2.5_7B,h100_sxm,trtllm,0.20.0,disagg,PASS,
+GPT_OSS_120B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+GPT_OSS_120B,l40s,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+QWEN2.5_72B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+QWEN2.5_72B,l40s,trtllm,1.0.0,disagg,PASS,
+QWEN3_0.6B,l40s,trtllm,1.0.0,agg,PASS,
+QWEN3_0.6B,l40s,trtllm,1.0.0,disagg,PASS,
+QWEN3_8B,l40s,trtllm,1.0.0,agg,PASS,
+QWEN3_8B,l40s,trtllm,1.0.0,disagg,PASS,
+MOE_Mixtral8x22B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+MOE_Mixtral8x22B,l40s,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+GPT_OSS_20B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+GPT_OSS_20B,l40s,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+QWEN3_32B,l40s,trtllm,1.0.0,agg,PASS,
+QWEN3_32B,l40s,trtllm,1.0.0,disagg,PASS,
+LLAMA2_70B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+LLAMA2_70B,l40s,trtllm,1.0.0,disagg,PASS,
+QWEN3_480B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+QWEN3_480B,l40s,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+LLAMA2_7B,l40s,trtllm,1.0.0,agg,PASS,
+LLAMA2_7B,l40s,trtllm,1.0.0,disagg,PASS,
+QWEN2.5_1.5B,l40s,trtllm,1.0.0,agg,PASS,
+QWEN2.5_1.5B,l40s,trtllm,1.0.0,disagg,PASS,
+QWEN3_235B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+QWEN3_235B,l40s,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+DEEPSEEK_V3,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+DEEPSEEK_V3,l40s,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,l40s,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+LLAMA3.1_70B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+LLAMA3.1_70B,l40s,trtllm,1.0.0,disagg,PASS,
+LLAMA3.1_405B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+LLAMA3.1_405B,l40s,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+Nemotron_super_v1.1,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+Nemotron_super_v1.1,l40s,trtllm,1.0.0,disagg,PASS,
+LLAMA3.1_8B,l40s,trtllm,1.0.0,agg,PASS,
+LLAMA3.1_8B,l40s,trtllm,1.0.0,disagg,PASS,
+QWEN3_1.7B,l40s,trtllm,1.0.0,agg,PASS,
+QWEN3_1.7B,l40s,trtllm,1.0.0,disagg,PASS,
+QWEN2.5_32B,l40s,trtllm,1.0.0,agg,PASS,
+QWEN2.5_32B,l40s,trtllm,1.0.0,disagg,PASS,
+LLAMA2_13B,l40s,trtllm,1.0.0,agg,PASS,
+LLAMA2_13B,l40s,trtllm,1.0.0,disagg,PASS,
+MOE_Mixtral8x7B,l40s,trtllm,1.0.0,agg,FAIL,Configuration returned no results
+MOE_Mixtral8x7B,l40s,trtllm,1.0.0,disagg,FAIL,Configuration returned no results
+QWEN2.5_7B,l40s,trtllm,1.0.0,agg,PASS,
+QWEN2.5_7B,l40s,trtllm,1.0.0,disagg,PASS,
+GPT_OSS_120B,b200_sxm,trtllm,1.0.0rc6,agg,FAIL,Configuration returned no results
+GPT_OSS_120B,b200_sxm,trtllm,1.0.0rc6,disagg,FAIL,Configuration returned no results
+QWEN2.5_72B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN2.5_72B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_0.6B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_0.6B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_8B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_8B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+MOE_Mixtral8x22B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+MOE_Mixtral8x22B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+GPT_OSS_20B,b200_sxm,trtllm,1.0.0rc6,agg,FAIL,Configuration returned no results
+GPT_OSS_20B,b200_sxm,trtllm,1.0.0rc6,disagg,FAIL,Configuration returned no results
+QWEN3_32B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_32B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+LLAMA2_70B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA2_70B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_480B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_480B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+LLAMA2_7B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA2_7B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN2.5_1.5B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN2.5_1.5B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_235B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_235B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+DEEPSEEK_V3,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+DEEPSEEK_V3,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_30B_A3B,b200_sxm,trtllm,1.0.0rc6,agg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,b200_sxm,trtllm,1.0.0rc6,disagg,FAIL,Configuration returned no results
+LLAMA3.1_70B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA3.1_70B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+LLAMA3.1_405B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA3.1_405B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+Nemotron_super_v1.1,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+Nemotron_super_v1.1,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+LLAMA3.1_8B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA3.1_8B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_1.7B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_1.7B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN2.5_32B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN2.5_32B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+LLAMA2_13B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA2_13B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+MOE_Mixtral8x7B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+MOE_Mixtral8x7B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN2.5_7B,b200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN2.5_7B,b200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+GPT_OSS_120B,gb200_sxm,trtllm,1.0.0rc6,agg,FAIL,Configuration returned no results
+GPT_OSS_120B,gb200_sxm,trtllm,1.0.0rc6,disagg,FAIL,Configuration returned no results
+QWEN2.5_72B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN2.5_72B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_0.6B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_0.6B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_8B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_8B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+MOE_Mixtral8x22B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+MOE_Mixtral8x22B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+GPT_OSS_20B,gb200_sxm,trtllm,1.0.0rc6,agg,FAIL,Configuration returned no results
+GPT_OSS_20B,gb200_sxm,trtllm,1.0.0rc6,disagg,FAIL,Configuration returned no results
+QWEN3_32B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_32B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+LLAMA2_70B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA2_70B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_480B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_480B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+LLAMA2_7B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA2_7B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN2.5_1.5B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN2.5_1.5B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_235B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_235B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+DEEPSEEK_V3,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+DEEPSEEK_V3,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_30B_A3B,gb200_sxm,trtllm,1.0.0rc6,agg,FAIL,Configuration returned no results
+QWEN3_30B_A3B,gb200_sxm,trtllm,1.0.0rc6,disagg,FAIL,Configuration returned no results
+LLAMA3.1_70B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA3.1_70B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+LLAMA3.1_405B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA3.1_405B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+Nemotron_super_v1.1,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+Nemotron_super_v1.1,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+LLAMA3.1_8B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA3.1_8B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN3_1.7B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN3_1.7B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN2.5_32B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN2.5_32B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+LLAMA2_13B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+LLAMA2_13B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+MOE_Mixtral8x7B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+MOE_Mixtral8x7B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
+QWEN2.5_7B,gb200_sxm,trtllm,1.0.0rc6,agg,PASS,
+QWEN2.5_7B,gb200_sxm,trtllm,1.0.0rc6,disagg,PASS,
