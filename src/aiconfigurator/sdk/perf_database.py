@@ -228,6 +228,46 @@ def get_all_databases(
 
 
 # by default float16
+def _resolve_perf_data_file(data_dir: str, filename: str) -> str:
+    """
+    Resolve the performance data file path, checking for both *_power.txt and *_perf.txt variants.
+    
+    The collector generates different filenames based on whether power measurement is enabled:
+    - With --measure-power: generates *_power.txt files
+    - Without --measure-power: generates *_perf.txt files
+    
+    This function checks for both variants and prefers the *_power.txt version if it exists,
+    since it contains both latency and power data.
+    
+    Args:
+        data_dir: The directory containing the performance data files
+        filename: The base filename (e.g., "gemm_perf.txt")
+    
+    Returns:
+        The resolved file path (either *_power.txt or *_perf.txt)
+    """
+    perf_path = os.path.join(data_dir, filename)
+    
+    # Check if a *_power.txt variant exists
+    if filename.endswith("_perf.txt"):
+        power_filename = filename.replace("_perf.txt", "_power.txt")
+        power_path = os.path.join(data_dir, power_filename)
+        
+        if os.path.exists(power_path):
+            logger.info(f"Loading {power_filename} (with power data)")
+            return power_path
+        elif os.path.exists(perf_path):
+            logger.info(f"Loading {filename} (power data not available, using latency-only file)")
+            return perf_path
+        else:
+            # Neither file exists - return the expected perf path (will be handled by load functions)
+            logger.debug(f"Neither {power_filename} nor {filename} found in {data_dir}")
+            return perf_path
+    
+    # For non-perf files (shouldn't happen with current usage), just return the path
+    return perf_path
+
+
 def load_custom_allreduce_data(custom_allreduce_file):
     """
     Load the custom allreduce data for trtllm (latency and power)
@@ -1212,68 +1252,80 @@ class PerfDatabase:
 
         if backend == "sglang":
             # For SGLang, only load MoE and MLP data and provide empty structures for other data
-            self._gemm_data, self._gemm_power_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
+            self._gemm_data, self._gemm_power_data = load_gemm_data(
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.gemm.value)
+            )
             self._context_attention_data, self._context_attention_power_data = load_context_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.context_attention.value)
             )
             self._generation_attention_data, self._generation_attention_power_data = load_generation_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.generation_attention.value)
             )
             self._custom_allreduce_data, self._custom_allreduce_power_data = load_custom_allreduce_data(
-                os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
             self._moe_data, self._generation_moe_data = load_sglang_moe_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_moe.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.context_moe.value)
             )
             self._context_mla_data = load_sglang_context_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.context_mla.value)
             )
             self._generation_mla_data = load_sglang_generation_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.generation_mla.value)
             )
             self._context_mlp_data, self._generation_mlp_data = load_sglang_mlp_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_mlp.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.context_mlp.value)
             )
             self._deepep_normal_data = load_deepep_normal_data(
-                os.path.join(data_dir, common.PerfDataFilename.deepep_normal.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.deepep_normal.value)
             )
-            self._deepep_ll_data = load_deepep_ll_data(os.path.join(data_dir, common.PerfDataFilename.deepep_ll.value))
+            self._deepep_ll_data = load_deepep_ll_data(
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.deepep_ll.value)
+            )
             self._nccl_data, self._nccl_power_data = load_nccl_data(nccl_data_dir)
-            self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
+            self._mla_bmm_data = load_mla_bmm_data(
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.mla_bmm.value)
+            )
         elif backend == "vllm":
-            self._gemm_data, self._gemm_power_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
+            self._gemm_data, self._gemm_power_data = load_gemm_data(
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.gemm.value)
+            )
             self._context_attention_data, self._context_attention_power_data = load_context_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.context_attention.value)
             )
             self._generation_attention_data, self._generation_attention_power_data = load_generation_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.generation_attention.value)
             )
             self._custom_allreduce_data, self._custom_allreduce_power_data = load_custom_allreduce_data(
-                os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
             self._nccl_data, self._nccl_power_data = load_nccl_data(nccl_data_dir)
         else:  # TRTLLM
-            self._gemm_data, self._gemm_power_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
+            self._gemm_data, self._gemm_power_data = load_gemm_data(
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.gemm.value)
+            )
             self._context_attention_data, self._context_attention_power_data = load_context_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.context_attention.value)
             )
             self._generation_attention_data, self._generation_attention_power_data = load_generation_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.generation_attention.value)
             )
             self._custom_allreduce_data, self._custom_allreduce_power_data = load_custom_allreduce_data(
-                os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
             self._moe_data, self._moe_low_latency_data = load_moe_data(
-                os.path.join(data_dir, common.PerfDataFilename.moe.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.moe.value)
             )
             self._context_mla_data = load_context_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.context_mla.value)
             )
             self._generation_mla_data = load_generation_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.generation_mla.value)
             )
             self._nccl_data, self._nccl_power_data = load_nccl_data(nccl_data_dir)
-            self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
+            self._mla_bmm_data = load_mla_bmm_data(
+                _resolve_perf_data_file(data_dir, common.PerfDataFilename.mla_bmm.value)
+            )
 
             # pre-correction
             self._correct_data()
@@ -3405,8 +3457,12 @@ class PerfDatabase:
         
         Returns:
             bool: True if power data is available, False otherwise
+        
+        Note: Only checks for core operation power data (GEMM, attention).
+              Communication power data (custom_allreduce, NCCL) is optional
+              as it may not be critical for all models/configurations.
         """
-        # Check if any of the power data attributes are None
+        # Check if core computation power data is available
         if self._gemm_power_data is None:
             logger.debug("GEMM power data not available")
             return False
@@ -3416,12 +3472,14 @@ class PerfDatabase:
         if self._generation_attention_power_data is None:
             logger.debug("Generation attention power data not available")
             return False
+        
+        # Communication power data (custom_allreduce, NCCL) is optional
+        # These operations may not be heavily used in all model configurations
         if self._custom_allreduce_power_data is None:
-            logger.debug("Custom allreduce power data not available")
-            return False
+            logger.debug("Custom allreduce power data not available (optional, will be estimated if needed)")
         if self._nccl_power_data is None:
-            logger.debug("NCCL power data not available")
-            return False
+            logger.debug("NCCL power data not available (optional, will be estimated if needed)")
+        
         return True
     
     def has_power_data(self) -> bool:

@@ -834,7 +834,7 @@ class TaskConfig:
 
 
 class TaskRunner:
-    def run_agg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
+    def run_agg(self, task_config: DefaultMunch, measure_power: bool = False) -> dict[str, pd.DataFrame | None]:
         logger.info("Task %s: Setting up runtime config", task_config.task_name)
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
@@ -908,7 +908,7 @@ class TaskRunner:
             backend_name=task_config.worker_config.backend_name,
             model_config=model_config,
             parallel_config_list=parallel_config_list,
-            measure_power=getattr(task_config, "measure_power", False),
+            measure_power=measure_power,
         )
         return {
             "pareto_df": result_df,
@@ -917,7 +917,7 @@ class TaskRunner:
             .reset_index(),
         }
 
-    def run_disagg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
+    def run_disagg(self, task_config: DefaultMunch, measure_power: bool = False) -> dict[str, pd.DataFrame | None]:
         logger.info("Task %s: Setting up runtime config", task_config.task_name)
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
@@ -1067,6 +1067,7 @@ class TaskRunner:
             decode_max_num_tokens=task_config.advanced_tuning_config.decode_max_batch_size,
             prefill_latency_correction_scale=task_config.advanced_tuning_config.prefill_latency_correction_scale,
             decode_latency_correction_scale=task_config.advanced_tuning_config.decode_latency_correction_scale,
+            measure_power=measure_power,
         )
         return {
             "pareto_df": result_df,
@@ -1084,9 +1085,9 @@ class TaskRunner:
         )
         try:
             if serving_mode == "agg":
-                result = self.run_agg(task_config.config)
+                result = self.run_agg(task_config.config, task_config.measure_power)
             elif serving_mode == "disagg":
-                result = self.run_disagg(task_config.config)
+                result = self.run_disagg(task_config.config, task_config.measure_power)
             else:
                 raise ValueError(f"Invalid serving mode: {serving_mode}")
         except Exception:

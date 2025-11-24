@@ -31,7 +31,7 @@ class TRTLLMBackend(BaseBackend):
         self,
     ):
         super().__init__()
-        self._agg_cache = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+        self._agg_cache = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
         self.name = common.BackendName.trtllm
 
     def run_agg(
@@ -49,7 +49,7 @@ class TRTLLMBackend(BaseBackend):
         measure_power = kwargs.get("measure_power", False)
 
         try:
-            summary = self._agg_cache[isl][osl][b][ctx_tokens]
+            summary = self._agg_cache[isl][osl][b][ctx_tokens][measure_power]
         except KeyError:
             # we would like to calculate num_mix_steps and num_genonly_steps based on
             # isl, osl, b, ctx_tokens within osl steps, need to finish all the ctx tokens
@@ -349,7 +349,7 @@ class TRTLLMBackend(BaseBackend):
             summary.set_summary_df(result)
 
             # caching
-            self._agg_cache[isl][osl][b][ctx_tokens] = summary
+            self._agg_cache[isl][osl][b][ctx_tokens][measure_power] = summary
 
         return summary
 

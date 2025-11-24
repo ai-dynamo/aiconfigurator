@@ -104,6 +104,10 @@ def nccl_benchmark(
             item["compute_bound"] = 0  # Communication is always memory/bandwidth-bound
 
         print(nccl_test_bin, f"{size=}, {latency=}, {power=}")
+        
+        # Use different filename for power measurement runs
+        perf_filename = "nccl_power.txt" if measure_power else "nccl_perf.txt"
+        
         log_perf(
             item_list=[item],
             framework="TRTLLM",
@@ -111,7 +115,7 @@ def nccl_benchmark(
             device_name=torch.cuda.get_device_name(),
             op_name=nccl_op,
             kernel_source="NCCL",
-            perf_filename="nccl_perf.txt",
+            perf_filename=perf_filename,
         )
 
         size *= ratio

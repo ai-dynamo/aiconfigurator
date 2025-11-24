@@ -54,9 +54,8 @@ class AllReduce(Operation):
             return 0.0
         size = kwargs.get("x") * self._h
         power = database.query_allreduce_power(common.CommQuantMode.half, self._tp_size, size)
-        if power is not None:
-            return power * self._scale_factor
-        return None
+        # Note: Do NOT scale power by scale_factor - power is instantaneous, not cumulative
+        return power
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -120,9 +119,8 @@ class NCCL(Operation):
         """Query power consumption for NCCL operation."""
         message_size = kwargs.get("x") * self._num_elements_per_token
         power = database.query_nccl_power(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
-        if power is not None:
-            return power * self._scale_factor
-        return None
+        # Note: Do NOT scale power by scale_factor - power is instantaneous, not cumulative
+        return power
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -154,9 +152,8 @@ class GEMM(Operation):
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
         power = database.query_gemm_power(x, self._n, self._k, quant_mode)
-        if power is not None:
-            return power * self._scale_factor
-        return None
+        # Note: Do NOT scale power by scale_factor - power is instantaneous, not cumulative
+        return power
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -519,9 +516,8 @@ class ContextAttention(Operation):
             window_size=self._window_size,
             head_size=self._head_size,
         )
-        if power is not None:
-            return power * self._scale_factor
-        return None
+        # Note: Do NOT scale power by scale_factor - power is instantaneous, not cumulative
+        return power
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -583,9 +579,8 @@ class GenerationAttention(Operation):
             window_size=self._window_size,
             head_size=self._head_size,
         )
-        if power is not None:
-            return power * self._scale_factor
-        return None
+        # Note: Do NOT scale power by scale_factor - power is instantaneous, not cumulative
+        return power
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

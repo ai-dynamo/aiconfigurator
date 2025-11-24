@@ -60,17 +60,29 @@ num_gpus_allreduce=(2 4 8)
 
 if [[ "$all_reduce_backend" == "trtllm" ]]; then
     # TRTLLM allreduce (CUDA Graph based)
+    # Use different filename for power measurement runs
+    allreduce_filename="custom_allreduce_perf.txt"
+    if [[ -n "$measure_power" ]]; then
+        allreduce_filename="custom_allreduce_power.txt"
+    fi
+    
     for n in "${num_gpus_allreduce[@]}"; do
         echo "Running TRTLLM AllReduce benchmark with $n GPUs using CUDA Graph method"
         mpirun -n "$n" --allow-run-as-root python3 collect_all_reduce.py \
-            --perf-filename "custom_allreduce_perf.txt" ${measure_power:+--measure_power}
+            --perf-filename "$allreduce_filename" ${measure_power:+--measure_power}
     done
 elif [[ "$all_reduce_backend" == "vllm" ]]; then
     # VLLM allreduce implementation
+    # Use different filename for power measurement runs
+    allreduce_filename="custom_allreduce_perf.txt"
+    if [[ -n "$measure_power" ]]; then
+        allreduce_filename="custom_allreduce_power.txt"
+    fi
+    
     for n in "${num_gpus_allreduce[@]}"; do
         echo "Running VLLM AllReduce benchmark with $n GPUs"
         torchrun --nproc_per_node=$n collect_all_reduce.py --backend vllm \
-            --perf-filename "custom_allreduce_perf.txt" ${measure_power:+--measure_power}
+            --perf-filename "$allreduce_filename" ${measure_power:+--measure_power}
     done
 fi
 

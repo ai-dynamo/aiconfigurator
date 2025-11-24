@@ -60,9 +60,10 @@ class BaseBackend(ABC):
             measure_power (bool): whether to measure power consumption, default is False.
         """
 
-        def _run_context(batch_size: int, isl: int) -> tuple[dict[str, float], dict[str, float]]:
+        def _run_context(batch_size: int, isl: int) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
             context_latency_dict = defaultdict(float)
-            context_power_dict = defaultdict(float)
+            context_power_time_dict = defaultdict(float)  # Store power * time for each operation
+            context_power_latency_dict = defaultdict(float)  # Store latency of operations with power data
 
             for op in model.context_ops:
                 # query latency and store the latency
@@ -70,31 +71,38 @@ class BaseBackend(ABC):
                 latency = op.query(database, x=x, batch_size=batch_size, beam_width=1, s=isl)
                 context_latency_dict[op._name] += latency
 
-                # query power if enabled
+                # query power if enabled and accumulate power * time
                 if measure_power:
                     power = op.query_power(database, x=x, batch_size=batch_size, beam_width=1, s=isl)
                     if power is not None:
-                        context_power_dict[op._name] += power
+                        # Accumulate power * time (energy) for time-weighted average
+                        context_power_time_dict[op._name] += power * latency
+                        # Track latency of operations with power data
+                        context_power_latency_dict[op._name] += latency
 
-            return context_latency_dict, context_power_dict
+            return context_latency_dict, context_power_time_dict, context_power_latency_dict
 
-        def _run_generation(batch_size: int, beam_width: int, isl: int, osl: int, stride: int) -> tuple[dict[str, float], dict[str, float]]:
+        def _run_generation(batch_size: int, beam_width: int, isl: int, osl: int, stride: int) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
             # mtp/speculative decoding correction
             batch_size = batch_size * (model._nextn + 1)
 
             latencies = []
-            powers = []
+            power_times = []  # Store power * time for each step
+            power_latencies = []  # Store latency of operations with power data
             cached_latency_dict = None
-            cached_power_dict = None
+            cached_power_time_dict = None
+            cached_power_latency_dict = None
             for i in range(osl - 1):
                 if i % stride != 0:
                     latencies.append(copy.deepcopy(cached_latency_dict))
                     if measure_power:
-                        powers.append(copy.deepcopy(cached_power_dict))
+                        power_times.append(copy.deepcopy(cached_power_time_dict))
+                        power_latencies.append(copy.deepcopy(cached_power_latency_dict))
                     continue
 
                 latency_dict = defaultdict(float)
-                power_dict = defaultdict(float)
+                power_time_dict = defaultdict(float)
+                power_latency_dict = defaultdict(float)
                 for op in model.generation_ops:
                     latency = op.query(
                         database,
@@ -105,7 +113,7 @@ class BaseBackend(ABC):
                     )
                     latency_dict[op._name] += latency
 
-                    # query power if enabled
+                    # query power if enabled and accumulate power * time
                     if measure_power:
                         power = op.query_power(
                             database,
@@ -115,34 +123,38 @@ class BaseBackend(ABC):
                             s=isl + i + 1,
                         )
                         if power is not None:
-                            power_dict[op._name] += power
+                            # Accumulate power * time (energy) for time-weighted average
+                            power_time_dict[op._name] += power * latency
+                            # Track latency of operations with power data
+                            power_latency_dict[op._name] += latency
 
                 cached_latency_dict = latency_dict
-                cached_power_dict = power_dict if measure_power else None
+                cached_power_time_dict = power_time_dict if measure_power else None
+                cached_power_latency_dict = power_latency_dict if measure_power else None
 
                 latencies.append(latency_dict)
                 if measure_power:
-                    powers.append(power_dict)
+                    power_times.append(power_time_dict)
+                    power_latencies.append(power_latency_dict)
 
             generation_latency_dict = {}
-            generation_power_dict = {}
+            generation_power_time_dict = {}
+            generation_power_latency_dict = {}
             if len(latencies) > 0:
                 for key in latencies[0]:
                     generation_latency_dict[key] = 0.0
                     for latency_dict in latencies:
                         generation_latency_dict[key] += latency_dict[key]
 
-            if measure_power and len(powers) > 0:
-                for key in powers[0]:
-                    generation_power_dict[key] = 0.0
-                    for power_dict in powers:
-                        generation_power_dict[key] += power_dict[key]
-                # Average power across steps
-                if len(powers) > 0:
-                    for key in generation_power_dict:
-                        generation_power_dict[key] /= len(powers)
+            if measure_power and len(power_times) > 0:
+                for key in power_times[0]:
+                    generation_power_time_dict[key] = 0.0
+                    generation_power_latency_dict[key] = 0.0
+                    for power_time_dict, power_latency_dict in zip(power_times, power_latencies):
+                        generation_power_time_dict[key] += power_time_dict[key]
+                        generation_power_latency_dict[key] += power_latency_dict[key]
 
-            return generation_latency_dict, generation_power_dict
+            return generation_latency_dict, generation_power_time_dict, generation_power_latency_dict
 
         summary = InferenceSummary(runtime_config)
         batch_size, beam_width, isl, osl = (
@@ -153,12 +165,13 @@ class BaseBackend(ABC):
         )
 
         context_latency_dict, generation_latency_dict = {}, {}
-        context_power_dict, generation_power_dict = {}, {}
+        context_power_time_dict, generation_power_time_dict = {}, {}
+        context_power_latency_dict, generation_power_latency_dict = {}, {}
         if mode == "static_ctx":
-            context_latency_dict, context_power_dict = _run_context(batch_size, isl)
+            context_latency_dict, context_power_time_dict, context_power_latency_dict = _run_context(batch_size, isl)
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, 1)
         elif mode == "static_gen":
-            generation_latency_dict, generation_power_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
+            generation_latency_dict, generation_power_time_dict, generation_power_latency_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
             memory = self._get_memory_usage(
                 model,
                 database,
@@ -169,8 +182,8 @@ class BaseBackend(ABC):
                 num_tokens=batch_size * beam_width,
             )  # for gen only, all kvcache is needed.
         else:
-            context_latency_dict, context_power_dict = _run_context(batch_size, isl)
-            generation_latency_dict, generation_power_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
+            context_latency_dict, context_power_time_dict, context_power_latency_dict = _run_context(batch_size, isl)
+            generation_latency_dict, generation_power_time_dict, generation_power_latency_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl)
 
         if latency_correction_scale != 1.0:
@@ -218,20 +231,31 @@ class BaseBackend(ABC):
 
         # Calculate power metrics (time-weighted average)
         # Power is NOT additive like latency - operations run sequentially
-        # Average power = sum(power_i * time_i) / total_time
-        if measure_power and context_latency > 0:
-            context_power = sum(
-                power * context_latency_dict[op] 
-                for op, power in context_power_dict.items()
-            ) / context_latency
+        # Average power = sum(power_i * time_i) / sum(time_i for operations with power data)
+        # Only average over operations that have power data available
+        if measure_power:
+            context_power_energy = sum(context_power_time_dict.values())
+            context_power_total_latency = sum(context_power_latency_dict.values())
+            if context_power_total_latency > 0:
+                context_power = context_power_energy / context_power_total_latency
+            else:
+                # No operations have power data
+                context_power = 0.0
+                if context_latency > 0:
+                    logger.warning(f"No power data available for context phase (latency={context_latency:.2f}ms)")
         else:
             context_power = 0.0
             
-        if measure_power and generation_latency > 0:
-            generation_power = sum(
-                power * generation_latency_dict[op]
-                for op, power in generation_power_dict.items()
-            ) / generation_latency
+        if measure_power:
+            generation_power_energy = sum(generation_power_time_dict.values())
+            generation_power_total_latency = sum(generation_power_latency_dict.values())
+            if generation_power_total_latency > 0:
+                generation_power = generation_power_energy / generation_power_total_latency
+            else:
+                # No operations have power data
+                generation_power = 0.0
+                if generation_latency > 0:
+                    logger.warning(f"No power data available for generation phase (latency={generation_latency:.2f}ms)")
         else:
             generation_power = 0.0
             
@@ -290,6 +314,21 @@ class BaseBackend(ABC):
         summary.set_context_latency_dict(context_latency_dict)
         summary.set_generation_latency_dict(generation_latency_dict)
         if measure_power:
+            # Convert power_time back to average power for each operation
+            context_power_dict = {}
+            for op, power_time in context_power_time_dict.items():
+                if context_latency_dict[op] > 0:
+                    context_power_dict[op] = power_time / context_latency_dict[op]
+                else:
+                    context_power_dict[op] = 0.0
+            
+            generation_power_dict = {}
+            for op, power_time in generation_power_time_dict.items():
+                if generation_latency_dict[op] > 0:
+                    generation_power_dict[op] = power_time / generation_latency_dict[op]
+                else:
+                    generation_power_dict[op] = 0.0
+            
             summary.set_context_power_dict(context_power_dict)
             summary.set_generation_power_dict(generation_power_dict)
         summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])

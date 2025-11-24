@@ -73,7 +73,7 @@ def _plot_worker_setup_table(
                 "\033[1mtokens/s/gpu\033[0m",
                 "tokens/s/user",
                 "tokens/s/W",
-                "Power(W)",
+                "Power/GPU(W)",
                 "TTFT",
                 "concurrency",
                 "total_gpus (used)",
@@ -196,7 +196,7 @@ def _plot_worker_setup_table(
                 "\033[1mtokens/s/gpu\033[0m",
                 "tokens/s/user",
                 "tokens/s/W",
-                "Power(W)",
+                "Power/GPU(W)",
                 "TTFT",
                 "concurrency",
                 "total_gpus (used)",
@@ -334,9 +334,9 @@ def log_final_summary(
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
         # Add power information if available
         if 'total_power' in best_conf_details and best_conf_details['total_power'] > 0:
-            summary_box.append(f"    - Total Power: {best_conf_details['total_power']:.2f}W")
-            summary_box.append(f"    - Context Power: {best_conf_details['context_power']:.2f}W")
-            summary_box.append(f"    - Generation Power: {best_conf_details['generation_power']:.2f}W")
+            summary_box.append(f"    - Total Power per GPU: {best_conf_details['total_power']:.2f}W")
+            summary_box.append(f"    - Context Power per GPU: {best_conf_details['context_power']:.2f}W")
+            summary_box.append(f"    - Generation Power per GPU: {best_conf_details['generation_power']:.2f}W")
             summary_box.append(f"    - Power Efficiency: {best_conf_details['tokens/s/W']:.2f} tokens/s/W")
     summary_box.append("  " + "-" * 76)
 
@@ -375,6 +375,9 @@ def log_final_summary(
     summary_box.append(
         "               gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; "
         "tp * pp for dense models (underlined \033[4mnumbers\033[0m are the actual values in math)"
+    )
+    summary_box.append(
+        "    Note: Power/GPU values are average power per GPU. Total system power = Power/GPU * total_gpus"
     )
 
     # Plot worker setup tables for all experiments
