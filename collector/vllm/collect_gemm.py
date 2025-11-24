@@ -5,6 +5,7 @@ import functools
 import os
 
 import torch
+from common_test_cases import get_gemm_common_test_cases
 from vllm.distributed import (
     init_distributed_environment,
 )
@@ -33,49 +34,7 @@ def setup_distributed(device):
     ensure_model_parallel_initialized(1, 1)
 
 
-def get_gemm_test_cases(is_unit_test=False):
-    x_list = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        384,
-        512,
-        768,
-        1024,
-        2048,
-        4096,
-        8192,
-    ]
-    nk_list = [
-        128,
-        256,
-        512,
-        1024,
-        1536,
-        2048,
-        2560,
-        3072,
-        3584,
-        4096,
-        5120,
-        7168,
-        8192,
-        10240,
-        12288,
-    ]
-    nk_list_ext = [16384, 65536]  # for coverage and interp purpose
-
+def get_gemm_test_cases():
     gemm_list = ["float16"]
     if get_sm_version() > 86:
         gemm_list += ["fp8"]
@@ -84,24 +43,18 @@ def get_gemm_test_cases(is_unit_test=False):
     # if get_sm_version() >= 100:
     #     gemm_list += ["nvfp4"]
 
-    if is_unit_test:
-        x_list = [1, 2, 4, 8]
-        nk_list = [128]
-        nk_list_ext = []
-        gemm_list = ["float16"]
-
     test_cases = []
 
-    for gemm_type in gemm_list:
-        # x_list_orig+add+ext  <==> nk_list+ext
-        for x in sorted(x_list, reverse=True):
-            for n in sorted(nk_list + nk_list_ext, reverse=True):
-                for k in sorted(nk_list + nk_list_ext, reverse=True):
-                    if n * k == 65536 * 65536:
-                        continue
-                    if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
-                        continue
-                    test_cases.append([gemm_type, x, n, k, "gemm_perf.txt"])
+    for gemm_common_testcase in get_gemm_common_test_cases():
+        x = gemm_common_testcase.x
+        n = gemm_common_testcase.n
+        k = gemm_common_testcase.k
+        for gemm_type in gemm_list:
+            if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
+                continue
+
+            test_cases.append([gemm_type, x, n, k, "gemm_perf.txt"])
+
     return test_cases
 
 
