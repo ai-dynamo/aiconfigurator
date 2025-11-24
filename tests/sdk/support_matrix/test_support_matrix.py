@@ -10,7 +10,7 @@ import pytest
 from aiconfigurator.sdk.suppport_matrix import SupportMatrix
 
 SUPPORT_MATRIX_CSV = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
     "src",
     "aiconfigurator",
     "systems",
@@ -18,8 +18,8 @@ SUPPORT_MATRIX_CSV = os.path.join(
 )
 
 GENERATE_SCRIPT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "scripts",
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+    "tools",
     "generate_support_matrix.py",
 )
 
