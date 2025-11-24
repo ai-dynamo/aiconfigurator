@@ -1,6 +1,5 @@
 import csv
 import logging
-import traceback
 
 from tqdm import tqdm
 
@@ -129,19 +128,18 @@ class SupportMatrix:
                     results[mode] = False
                     error_messages[mode] = "Configuration returned no results"
 
-            except Exception:
-                tb_str = traceback.format_exc()
+            except Exception as e:
                 logger.debug(
-                    "Configuration failed: %s, %s, %s, %s, mode=%s - Error:\n%s",
+                    "Configuration failed: %s, %s, %s, %s, mode=%s - Error: %s",
                     model,
                     system,
                     backend,
                     version,
                     mode,
-                    tb_str,
+                    str(e),
                 )
                 results[mode] = False
-                error_messages[mode] = tb_str
+                error_messages[mode] = str(e)
 
         return results, error_messages
 
