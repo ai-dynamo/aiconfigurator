@@ -3,6 +3,7 @@
 
 import csv
 import logging
+import traceback
 
 from tqdm import tqdm
 
@@ -119,7 +120,7 @@ class SupportMatrix:
                 if pareto_frontier_df is not None and not pareto_frontier_df.empty:
                     results[mode] = True
                     error_messages[mode] = None
-                else:
+                else:  # pragma: no cover
                     logger.debug(
                         "Configuration returned no results: %s, %s, %s, %s, mode=%s",
                         model,
@@ -129,7 +130,7 @@ class SupportMatrix:
                         mode,
                     )
                     results[mode] = False
-                    error_messages[mode] = "Configuration returned no results"
+                    error_messages[mode] = "Configuration returned no results, failed to catch traceback"
 
             except Exception as e:
                 logger.debug(
@@ -142,7 +143,7 @@ class SupportMatrix:
                     str(e),
                 )
                 results[mode] = False
-                error_messages[mode] = str(e)
+                error_messages[mode] = traceback.format_exc()
 
         return results, error_messages
 

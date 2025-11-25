@@ -467,6 +467,7 @@ class DisaggInferenceSession:
             Get all worker candidates based on give search space
             """
             summary_df = pd.DataFrame(columns=common.ColumnsStatic)
+            exceptions = []
 
             for parallel_config in parallel_config_list:
                 tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
@@ -516,13 +517,18 @@ class DisaggInferenceSession:
                             )
                         else:  # larger b will always OOM
                             break
-                except Exception:
+                except Exception as e:
                     logger.exception(
                         f"Error getting candidate workers with parallel config: "
                         f"tp={tp_size}, pp={pp_size}, dp={dp_size}, moe_tp={moe_tp_size}, "
                         f"moe_ep={moe_ep_size}; skipping this combination"
                     )
+                    exceptions.append(e)
                     continue
+            if summary_df.empty:
+                raise RuntimeError(
+                    f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
+                ) from exceptions[-1]
             return summary_df
 
         def _find_best_result_under_constraints(
