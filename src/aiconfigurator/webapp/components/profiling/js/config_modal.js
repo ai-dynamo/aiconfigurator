@@ -47,7 +47,7 @@ window.copyConfig = function() {
     }
     
     const text = content.textContent;
-    const copyBtn = document.querySelector('.config-copy-btn');
+    const copyBtn = event.target;
     
     // Use modern Clipboard API
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -57,10 +57,10 @@ window.copyConfig = function() {
                 if (copyBtn) {
                     const originalText = copyBtn.textContent;
                     copyBtn.textContent = 'Copied!';
-                    copyBtn.classList.add('copied');
+                    copyBtn.classList.add('active');
                     setTimeout(() => {
                         copyBtn.textContent = originalText;
-                        copyBtn.classList.remove('copied');
+                        copyBtn.classList.remove('active');
                     }, 2000);
                 }
             })
@@ -70,6 +70,52 @@ window.copyConfig = function() {
             });
     } else {
         fallbackCopy(text, copyBtn);
+    }
+};
+
+/**
+ * Download config as YAML file
+ */
+window.downloadConfig = function() {
+    const content = document.getElementById('configContent');
+    if (!content) {
+        console.error('[Profiling] Config content not found');
+        return;
+    }
+    
+    const text = content.textContent;
+    const downloadBtn = event.target;
+    
+    try {
+        // Create a Blob with the YAML content
+        const blob = new Blob([text], { type: 'text/yaml' });
+        const url = URL.createObjectURL(blob);
+        
+        // Create a temporary anchor element and trigger download
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'config.yaml';
+        document.body.appendChild(a);
+        a.click();
+        
+        // Cleanup
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        console.log('[Profiling] Config downloaded as config.yaml');
+        
+        // Visual feedback
+        if (downloadBtn) {
+            const originalText = downloadBtn.textContent;
+            downloadBtn.textContent = 'Downloaded!';
+            downloadBtn.classList.add('active');
+            setTimeout(() => {
+                downloadBtn.textContent = originalText;
+                downloadBtn.classList.remove('active');
+            }, 2000);
+        }
+    } catch (err) {
+        console.error('[Profiling] Download failed:', err);
     }
 };
 
@@ -89,10 +135,10 @@ function fallbackCopy(text, copyBtn) {
         if (success && copyBtn) {
             const originalText = copyBtn.textContent;
             copyBtn.textContent = 'Copied!';
-            copyBtn.classList.add('copied');
+            copyBtn.classList.add('active');
             setTimeout(() => {
                 copyBtn.textContent = originalText;
-                copyBtn.classList.remove('copied');
+                copyBtn.classList.remove('active');
             }, 2000);
         }
     } catch (err) {
