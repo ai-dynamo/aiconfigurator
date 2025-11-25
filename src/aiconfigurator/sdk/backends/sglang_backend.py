@@ -229,53 +229,50 @@ class SGLANGBackend(BaseBackend):
             comm = model.config.comm_quant_mode.name
             mem = memory["total"]
 
-            result = pd.DataFrame(
-                columns=common.ColumnsAgg,
-                data=[
-                    [
-                        model.model_name,
-                        isl,
-                        osl,
-                        prefix,
-                        concurrency,
-                        request_rate,
-                        b,
-                        b * model.config.attention_dp_size,
-                        ttft,
-                        tpot,
-                        seq_s,
-                        seq_s_gpu,
-                        tokens_s,
-                        tokens_s_gpu,
-                        tokens_s_user,
-                        num_total_gpus,
-                        tp,
-                        pp,
-                        dp,
-                        moe_tp,
-                        moe_ep,
-                        parallel,
-                        gemm,
-                        kvcache,
-                        fmha,
-                        moe,
-                        comm,
-                        mem,
-                        balance_score,
-                        num_ctx_requests,
-                        num_gen_requests,
-                        num_tokens,
-                        ctx_tokens,
-                        num_gen_requests,
-                        database.backend,
-                        database.version,
-                        database.system,
-                    ]
-                ],
-            ).round(3)
+            result_dict = {
+                "model": model.model_name,
+                "isl": isl,
+                "osl": osl,
+                "prefix": prefix,
+                "concurrency": concurrency,
+                "request_rate": request_rate,
+                "bs": b,
+                "global_bs": b * model.config.attention_dp_size,
+                "ttft": ttft,
+                "tpot": tpot,
+                "seq/s": seq_s,
+                "seq/s/gpu": seq_s_gpu,
+                "tokens/s": tokens_s,
+                "tokens/s/gpu": tokens_s_gpu,
+                "tokens/s/user": tokens_s_user,
+                "num_total_gpus": num_total_gpus,
+                "tp": tp,
+                "pp": pp,
+                "dp": dp,
+                "moe_tp": moe_tp,
+                "moe_ep": moe_ep,
+                "parallel": parallel,
+                "gemm": gemm,
+                "kvcache": kvcache,
+                "fmha": fmha,
+                "moe": moe,
+                "comm": comm,
+                "memory": mem,
+                "balance_score": balance_score,
+                "num_ctx_reqs": num_ctx_requests,
+                "num_gen_reqs": num_gen_requests,
+                "num_tokens": num_tokens,
+                "ctx_tokens": ctx_tokens,
+                "gen_tokens": num_gen_requests,
+                "backend": database.backend,
+                "version": database.version,
+                "system": database.system,
+            }
+            result = pd.DataFrame([result_dict], columns=common.ColumnsAgg).round(3)
             summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
             summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])
             summary.set_summary_df(result)
+            summary.set_result_dict(result_dict)
 
             # caching
             self._agg_cache[isl][osl][b][ctx_tokens] = summary
@@ -367,7 +364,7 @@ class SGLANGBackend(BaseBackend):
         ctx_tokens_list.sort()
 
         results_df = pd.DataFrame(columns=common.ColumnsAgg)
-        df_list = []
+        results_dict_list = []
         capped_b = []
         for b in b_list:
             for ctx_tokens in ctx_tokens_list:
@@ -397,11 +394,12 @@ class SGLANGBackend(BaseBackend):
 
                 if summary.check_oom():
                     break  # larger ctx tokens will cause oom
-                if summary.get_summary_df().loc[0, "tpot"] <= tpot and summary.get_summary_df().loc[0, "ttft"] <= ttft:
-                    df_list.append(summary.get_summary_df())
+                result_dict = summary.get_result_dict()
+                if result_dict and result_dict["tpot"] <= tpot and result_dict["ttft"] <= ttft:
+                    results_dict_list.append(result_dict)
 
-        if df_list:
-            results_df = pd.concat(df_list, axis=0, ignore_index=True)
+        if results_dict_list:
+            results_df = pd.DataFrame(results_dict_list, columns=common.ColumnsAgg).round(3)
 
         sorted_results_df = results_df.sort_values(by="seq/s", ascending=False).round(3)
         if top_k > 0:
