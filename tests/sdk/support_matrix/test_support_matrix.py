@@ -4,8 +4,10 @@
 import csv
 import os
 import subprocess
+from collections import defaultdict
 
 import pytest
+from packaging.version import Version
 
 from aiconfigurator.sdk.suppport_matrix import SupportMatrix
 
@@ -233,3 +235,49 @@ class TestSupportMatrix:
                 " with the `tools/generate_support_matrix.py` script and commit the changes."
             )
             pytest.fail(message)
+
+    def test_newer_versions_have_no_narrower_support(self, csv_data):
+        """
+        For each (model, system, backend), get its latest version and second latest version.
+        If the latest version is not supported, the second latest version should also not be supported.
+        """
+        _, data_rows = csv_data
+
+        # Group data by (model, system, backend, mode)
+        # Key: (model, system, backend, mode) -> List of (version, status)
+        grouped_data = defaultdict(list)
+
+        for row in data_rows:
+            model, system, backend, version, mode, status = row[0], row[1], row[2], row[3], row[4], row[5]
+            key = (model, system, backend, mode)
+            grouped_data[key].append((version, status))
+
+        violations = []
+
+        # For each group, check the version constraint
+        for (model, system, backend, mode), version_status_list in grouped_data.items():
+            # Sort by version (descending - latest first)
+            sorted_versions = sorted(version_status_list, key=lambda x: Version(x[0]), reverse=True)
+
+            # Need at least 2 versions to compare
+            if len(sorted_versions) < 2:
+                continue
+
+            latest_version, latest_status = sorted_versions[0]
+            second_latest_version, second_latest_status = sorted_versions[1]
+
+            # If latest is not supported (FAIL), second latest should also not be supported (FAIL)
+            # Using set subtraction: if latest is FAIL, we expect second_latest to be FAIL
+            # Violation: latest is FAIL but second_latest is PASS
+            if latest_status == "FAIL" and second_latest_status == "PASS":
+                violations.append(
+                    f"{model} on {system} with {backend} ({mode}): "
+                    f"Latest version {latest_version} is FAIL, but older version {second_latest_version} is PASS"
+                )
+
+        # Assert no violations found
+        assert len(violations) == 0, (
+            f"Found {len(violations)} cases where newer versions have narrower support than older versions:\n"
+            + "\n".join(f"  - {item}" for item in violations)
+            + "\n\nNewer versions should not have narrower support than older versions."
+        )
