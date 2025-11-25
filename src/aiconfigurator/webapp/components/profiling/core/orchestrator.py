@@ -114,19 +114,13 @@ def generate_profiling_plots(
         profile_num_gpus = generate_gpu_configurations(min_num_gpus_per_engine, max_num_gpus_per_engine)
 
         if not profile_num_gpus:
-            return ("", "❌ No valid GPU configurations to profile")
+            raise ValueError("No valid GPU configurations to profile")
 
         # Profile prefill performance
         prefill_results = profile_prefill_performance(database, backend_instance, model_name, profile_num_gpus, isl)
 
-        if not prefill_results[0]:
-            return ("", "❌ Failed to generate prefill results")
-
         # Profile decode performance
         decode_results = profile_decode_performance(database, backend_instance, model_name, profile_num_gpus, isl, osl)
-
-        if not decode_results:
-            return ("", "❌ Failed to generate decode results")
 
         # Prepare table data
         prefill_table_data = prepare_prefill_table_data(prefill_results, model_name, system, backend, version, isl, osl)
@@ -156,6 +150,28 @@ def generate_profiling_plots(
         return (json_data, status_msg)
 
     except Exception as e:
-        error_msg = f"❌ Error generating plots:\n{e!s}\n\n{traceback.format_exc()}"
-        logger.exception(error_msg)
+        # Log the full error with stack trace to console
+        logger.exception("Error generating profiling plots")
+
+        # Format detailed error message for web UI with stack trace
+        tb = traceback.format_exc()
+
+        # Get the last few lines of traceback for context
+        tb_lines = tb.strip().split("\n")
+
+        # Find the actual error location (last "File" line before the error)
+        error_location = "Unknown location"
+        for i in range(len(tb_lines) - 1, -1, -1):
+            if tb_lines[i].strip().startswith('File "'):
+                error_location = tb_lines[i].strip()
+                break
+
+        error_msg = (
+            f"❌ Error during profiling:\n\n"
+            f"Error Type: {type(e).__name__}\n"
+            f"Error Message: {e!s}\n"
+            f"Location: {error_location}\n\n"
+            f"Full Stack Trace:\n{tb}"
+        )
+
         return ("", error_msg)
