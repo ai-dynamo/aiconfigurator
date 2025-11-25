@@ -358,13 +358,15 @@ class MoEDispatch(Operation):
                     else:
                         comm_latency = 0
         elif database.backend == common.BackendName.vllm.value:
-            assert self._moe_tp_size == 1, "vllm does not support moe_tp_size > 1"
+            assert self._moe_tp_size == 1 or self._moe_ep_size == 1, (
+                "vllm does not support MoE TP and MoE EP at the same time"
+            )
 
             comm_latency = 0
 
             # Add allreduce latency when TP > 1
             if self._attention_tp_size > 1:
-                comm_latency += database.query_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+                comm_latency += database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
 
             if self._attention_dp_size > 1:
                 comm_latency += database.query_nccl(

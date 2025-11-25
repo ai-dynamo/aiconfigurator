@@ -1,251 +1,60 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import math
 import os
 
 import torch
 import torch.nn.functional as F
+from common_test_cases import get_common_moe_test_cases
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
-from helper import get_sm_version, log_perf
-
-# def get_sm_version():
-#     return 86
-
-# def log_perf(*args, **kwargs):
-#     pass
+from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 
-def balanced_logits(num_tokens, num_experts, topk):
-    """Generate balanced distribution router logits"""
-    h_selected_experts = -torch.ones([num_tokens, topk])
-    stride = math.ceil(num_experts / topk)
-
-    for token_i in range(num_tokens):
-        for i in range(topk):
-            if num_tokens >= stride:
-                h_selected_experts[token_i][i] = (token_i + i * stride) % num_experts
-            else:
-                h_selected_experts[token_i][i] = (token_i * stride / num_tokens + i * stride) % num_experts
-
-    expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
-    router_logits = F.softmax(expert_map.half(), dim=1)
-    return router_logits
-
-
-def sample_power_law(size, alpha, xmin, xmax):
-    """Sample from power law distribution"""
-    u = torch.rand(size)
-    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (1 / (1 - alpha))
-    return inv_cdf
-
-
-def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha, return_first_gpu_only=False):
-    """Generate power law distributed router logits (simulating real-world load imbalance scenarios)"""
-    if num_tokens * topk > num_experts:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
-    else:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
-
-    target_sum = num_tokens * topk
-
-    original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
-
-    target_distribution = original_distribution * target_sum
-
-    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
-
-    current_sum = num_tokens_per_expert.sum().item()
-    delta = target_sum - current_sum
-    if delta != 0:
-        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-
-        if delta > 0:
-            for i in range(delta):
-                expert_idx = sorted_indices[i % len(sorted_indices)]
-                num_tokens_per_expert[expert_idx] += 1
-        else:
-            for i in range(-delta):
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
-                if num_tokens_per_expert[expert_idx] > 0:
-                    num_tokens_per_expert[expert_idx] -= 1
-                else:
-                    num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -= 1
-
-    if len(num_tokens_per_expert) > 1:
-        sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
-        assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
-
-    # Ensure the busiest expert group in EP dimension is placed on the first rank
-    with torch.no_grad():
-        conv1d = torch.nn.Conv1d(
-            in_channels=1,
-            out_channels=1,
-            kernel_size=num_experts // ep,
-            stride=num_experts // ep,
-            padding=0,
-            bias=False,
-        )
-        conv1d_weights = torch.tensor([1 for _ in range(num_experts // ep)])
-        conv1d.weight.copy_(conv1d_weights)
-
-    res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
-    max_ep_idx = torch.argmax(res).item()
-
-    if max_ep_idx != 0:
-        ep_group_size = num_experts // ep
-        num_tokens_per_expert_reshaped = num_tokens_per_expert.view(ep, ep_group_size)
-        num_tokens_per_expert_reshaped[0], num_tokens_per_expert_reshaped[max_ep_idx] = (
-            num_tokens_per_expert_reshaped[max_ep_idx].clone(),
-            num_tokens_per_expert_reshaped[0].clone(),
-        )
-        num_tokens_per_expert = num_tokens_per_expert_reshaped.view(-1)
-
-    revised_num_tokens = num_tokens
-    revised_topk = topk
-    if return_first_gpu_only:
-        # Number of experts per GPU
-        ep_group_size = num_experts // ep
-
-        # How many experts will be run on the first GPU.
-        # Can't exceed the number of experts per GPU.
-        revised_topk = min(topk, ep_group_size)
-
-        # Only generate token -> expert assignments for the first GPU.
-        num_tokens_per_expert = num_tokens_per_expert[:ep_group_size]
-
-        # Bump up the total number of tokens on the first GPU
-        # to be a multiple of revised_topk.
-        tokens_on_first_gpu = torch.sum(num_tokens_per_expert).item()
-        num_extra_tokens = (revised_topk - (tokens_on_first_gpu % revised_topk)) % revised_topk
-        for i in range(num_extra_tokens):
-            num_tokens_per_expert[i % len(num_tokens_per_expert)] += 1
-        tokens_on_first_gpu = torch.sum(num_tokens_per_expert).item()
-        assert tokens_on_first_gpu % revised_topk == 0
-
-        # Now revised_num_tokens represents only the tokens on the first GPU.
-        revised_num_tokens = tokens_on_first_gpu // revised_topk
-
-    if aic_debug == 2:
-        print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
-
-    _, num_tokens_per_expert_sorted_index = torch.sort(num_tokens_per_expert, descending=True)
-    expert_assignments = []
-    num_tokens_per_expert_sorted_index_lists = num_tokens_per_expert_sorted_index.tolist()
-    for expert_id in num_tokens_per_expert_sorted_index_lists:
-        expert_assignments.extend([expert_id] * num_tokens_per_expert[expert_id])
-
-    expert_assignments = torch.tensor(expert_assignments, dtype=torch.long)
-    h_selected_experts = expert_assignments.reshape(revised_topk, revised_num_tokens).T
-
-    expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
-    router_logits = F.softmax(expert_map.half(), dim=1)
-    return router_logits
-
-
 def get_moe_test_cases():
     """Generate MoE test cases"""
-    num_tokens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        12288,
-        16384,
-        20480,
-        32768,
-        65536,
-    ]
-    tp_list = [1, 2, 4, 8, 16, 32]
-    ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    num_gpu_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    alpha_list = [1.01, 1.2]
-
-    # Model configurations: [hidden_size, inter_size, topk, num_experts, model_name]
-    model_config_list = [
-        [4096, 14336, 2, 8, "MOE_Mixtral8x7B"],  # mixtral_8x7b
-        [6144, 16384, 2, 8, "MOE_Mixtral8x22B"],  # mixtral_8x22b
-        [7168, 2048, 8, 256, "DEEPSEEK_V3"],  # deepseekv3
-        [2048, 768, 8, 128, "QWEN3_30B_A3B"],  # qwen3-moe, 30b-a3b
-        [4096, 1536, 8, 128, "QWEN3_235B"],  # qwen3-moe, 235b-a22b
-        [6144, 2560, 8, 160, "QWEN3_480B"],  # qwen3-moe, 480b-a35b
-        [7168, 2048, 8, 384, "KIMI_K2"],  # kimi k2
-    ]
 
     # Quantization types supported by vLLM
     moe_list = ["float16"]
-
     if get_sm_version() > 86:
         moe_list += ["fp8"]
 
     test_cases = []
 
-    for num_gpu in num_gpu_list:
+    for common_moe_testcase in get_common_moe_test_cases():
+        if common_moe_testcase.token_expert_distribution != "power_law":
+            continue
+
+        model_name = common_moe_testcase.model_name
+        if model_name in ["GPT_OSS_20B", "GPT_OSS_120B"]:
+            continue
+
+        # vllm does not support TP when EP is enabled.
+        if common_moe_testcase.tp > 1 and common_moe_testcase.ep > 1:
+            continue
+
         for moe_type in moe_list:
-            for model_config in model_config_list:
-                hs, inter_s, topk, num_experts, model_name = model_config
-                for tp in tp_list:
-                    # QWEN3_30B_A3B: exclude tp >= 8 as they are not used in actual deployments
-                    if model_name == "QWEN3_30B_A3B" and tp >= 8:
-                        continue
-                    for ep in ep_list:
-                        if tp * ep != num_gpu:
-                            continue
-                        if ep > num_experts:
-                            continue
-                        if num_experts % ep != 0:
-                            continue
-                        # Ensure inter_s can be divided by tp
-                        if inter_s % tp != 0:
-                            continue
-
-                        # vllm does not support TP when EP is enabled.
-                        if tp > 1 and ep > 1:
-                            continue
-
-                        for power_law_alpha in alpha_list:
-                            test_cases.append(
-                                [
-                                    moe_type,
-                                    num_tokens,
-                                    hs,
-                                    inter_s,
-                                    topk,
-                                    num_experts,
-                                    tp,
-                                    ep,
-                                    model_name,
-                                    "moe_perf.txt",
-                                    "power_law",
-                                    power_law_alpha,
-                                ]
-                            )
+            test_cases.append(
+                [
+                    moe_type,
+                    common_moe_testcase.num_tokens_list,
+                    common_moe_testcase.hidden_size,
+                    common_moe_testcase.inter_size,
+                    common_moe_testcase.topk,
+                    common_moe_testcase.num_experts,
+                    common_moe_testcase.tp,
+                    common_moe_testcase.ep,
+                    common_moe_testcase.model_name,
+                    "moe_perf.txt",
+                    common_moe_testcase.token_expert_distribution,
+                    common_moe_testcase.power_law_alpha,
+                ]
+            )
 
     return test_cases
 
@@ -293,9 +102,6 @@ def run_moe_torch(
     local_num_experts = num_experts // moe_ep_size
     local_inter_size = inter_size // moe_tp_size
 
-    # How many experts will be run on this GPU
-    local_topk = min(topk, local_num_experts)
-
     # Create weight tensors
     # w1: gate + up projection weights [num_experts, 2 * inter_size, hidden_size]
     # w2: down projection weights [num_experts, hidden_size, inter_size]
@@ -313,6 +119,9 @@ def run_moe_torch(
         dtype=torch.float16,
         device=device,
     )
+
+    # Maps global expert index to local expert index.
+    _, expert_map = determine_expert_map(moe_ep_size, 0, num_experts)
 
     if dtype == torch.float8_e4m3fn:
         w1 = w1.to(dtype)
@@ -333,23 +142,25 @@ def run_moe_torch(
             for _ in range(num_iter):
                 logits = (
                     power_law_logits_v3(
-                        num_tokens, num_experts, topk, moe_ep_size, power_law_alpha, return_first_gpu_only=True
+                        num_tokens,
+                        num_experts,
+                        topk,
+                        moe_ep_size,
+                        power_law_alpha,
                     )
                     .half()
                     .to(device)
                 )
-                weights, ids = torch.topk(logits, local_topk, dim=-1)
+                weights, ids = torch.topk(logits, topk, dim=-1)
                 topk_weights_list.append(F.softmax(weights, dim=-1))
                 topk_ids_list.append(ids)
 
             print("actual num_tokens: ", [topk_ids.shape[0] for topk_ids in topk_ids_list])
 
         elif distributed == "balanced":
-            local_num_tokens = math.ceil(num_tokens / moe_ep_size)
-            actual_logits = balanced_logits(local_num_tokens, local_num_experts, local_topk).half().to(device)
-            topk_weights, topk_ids = torch.topk(actual_logits, local_topk, dim=-1)
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).half().to(device)
+            topk_weights, topk_ids = torch.topk(actual_logits, topk, dim=-1)
             topk_weights = F.softmax(topk_weights, dim=-1)
-            print("actual num_tokens: ", actual_logits.shape[0])
 
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
@@ -372,6 +183,8 @@ def run_moe_torch(
                         ti,
                         inplace=True,
                         quant_config=quant_config,
+                        global_num_experts=num_experts,
+                        expert_map=expert_map,
                     )
             else:
                 _ = fused_experts(
@@ -382,6 +195,8 @@ def run_moe_torch(
                     topk_ids,
                     inplace=True,
                     quant_config=quant_config,
+                    global_num_experts=num_experts,
+                    expert_map=expert_map,
                 )
 
         def run_iterations(use_cuda_graph=False):
