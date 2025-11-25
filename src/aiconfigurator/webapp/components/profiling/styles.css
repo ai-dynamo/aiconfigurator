@@ -127,3 +127,8 @@ table td button {
     color: var(--color-accent);
 }
 
+/* Override gradio styles */
+.dataTables_wrapper .dataTables_length select {
+    padding-right: 32px !important;
+    margin-bottom: 8px !important;
+}
