@@ -336,7 +336,6 @@ def collect_ops(
                     "traceback": traceback.format_exc(),
                 }
             )
-    return all_errors
 
     return all_errors
 
