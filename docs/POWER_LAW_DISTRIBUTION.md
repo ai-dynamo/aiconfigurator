@@ -171,27 +171,31 @@ Power-law simulation helps benchmark MoE performance under realistic conditions,
 
 The `alpha` parameter controls the degree of load imbalance:
 
-| Alpha Value | Distribution Type | Use Case |
+| Alpha Value | Distribution Type | Estimated For (by latency matching) |
 |-------------|-------------------|----------|
-| **0.0** | Perfectly balanced | Baseline/ideal scenario |
-| **1.01** | Slight imbalance | Light workload variation |
-| **1.2** | Moderate imbalance | Typical production workload |
-| **> 1.5** | Heavy imbalance | Extreme skew (rare) |
+| **0.0** | Perfectly balanced (theoretical ideal) | Synthetic baseline for benchmarking |
+| **1.01** | Lower imbalance | DeepSeek-V3-R1 on CNNDaily/OpenOrca |
+| **1.2** | Higher imbalance | Qwen3-235B on CNNDaily/OpenOrca，Typical production |
+| **> 1.5** | Very high imbalance | Rare edge cases or models without load balancing |
 
-**Note:** We use perfectly balanced distribution (absolute uniformity) to simulate α=0.0, serving as a "speed of light" reference that represents the theoretical maximum throughput achievable under ideal conditions with zero load imbalance.
+**Important Context:**
+- **α=0.0** represents a theoretical "speed of light" baseline with perfect uniformity—this is an ideal reference point, not achievable in real deployments
+- **α=1.01** was estimated for DeepSeek-V3-R1 by comparing observed latency with benchmark results, suggesting relatively balanced distribution but still significant deviation from α=0.0
+- **α=1.2** was estimated for Qwen3-235B by comparing observed latency with benchmark results, suggesting stronger expert specialization
+- Different models and datasets may exhibit different alpha values; these are reference points, not universal categories
 
 ### Visual Representation
 
 ```
-Alpha = 0.0 (Balanced)
+Alpha = 0.0 (Perfectly Balanced - Theoretical Ideal)
 Experts:  E1   E2   E3   E4   E5   E6   E7   E8
 Load:     ████ ████ ████ ████ ████ ████ ████ ████
 
-Alpha = 1.01 (Slight Imbalance)
+Alpha = 1.01 (Lower Imbalance)
 Experts:  E1   E2   E3   E4   E5   E6   E7   E8
 Load:     █████████ ██████ █████ ████ ███ ███ ██ ██
 
-Alpha = 1.2 (Moderate Imbalance)
+Alpha = 1.2 (Higher Imbalance)
 Experts:  E1   E2   E3   E4   E5   E6   E7   E8
 Load:     ████████████████ ████████ ████ ██ ██ █ █ █
 ```
@@ -225,11 +229,13 @@ The visualization contains six panels demonstrating different aspects of power-l
 
 ### Real-World Model Observations
 
-Analysis of actual MoE model behavior on standard benchmarks reveals different load distribution patterns:
+By comparing actual inference latency against benchmarks with different alpha values, we can estimate the load distribution pattern in production models:
 
 #### Qwen3-235B on CNNDaily and OpenOrca Datasets
 
-**Observed α ≈ 1.2 (Moderate Imbalance)**
+**Estimated α ≈ 1.2 (Higher Imbalance)**
+
+*Method: Observed latency closely matches benchmark results with α=1.2*
 
 - **Characteristics:**
   - Strong expert specialization with clear "hot" experts handling 60-70% of tokens
@@ -254,13 +260,14 @@ Analysis of actual MoE model behavior on standard benchmarks reveals different l
 
 #### DeepSeek-V3-R1 on CNNDaily and OpenOrca Datasets
 
-**Observed α ≈ 1.01 (Slight Imbalance)**
+**Estimated α ≈ 1.01 (Lower Imbalance)**
+
+*Method: Observed latency closely matches benchmark results with α=1.01*
 
 - **Characteristics:**
-  - Well-balanced expert utilization with minimal skew
+  - Latency behavior suggests lower expert load skew relative to α=1.2 patterns
   - Effective auxiliary load balancing during training
-  - More uniform token distribution across 256 experts
-  - Top 20% of experts handle ~30-40% of the workload (closer to uniform)
+  - Behavior consistent with top 20% of experts handling ~30-40% of workload
 
 - **Performance Implications:**
   - Efficient hardware utilization - all experts contribute meaningfully
@@ -280,14 +287,16 @@ Analysis of actual MoE model behavior on standard benchmarks reveals different l
 
 ### Key Takeaways
 
-1. **α=0.0 (Baseline)**: Theoretical best-case for throughput benchmarking
-2. **α=1.01 (DeepSeek-V3-R1)**: Excellent load balancing, near-optimal hardware efficiency
-3. **α=1.2 (Qwen3-235B)**: Realistic production scenario with expert specialization
+1. **α=0.0 (Perfectly Balanced)**: Theoretical ideal - unachievable baseline for comparison
+2. **α=1.01 (Lower Imbalance)**: Estimated for DeepSeek-V3-R1 on CNNDaily/OpenOrca by latency matching
+3. **α=1.2 (Higher Imbalance)**: Estimated for Qwen3-235B on CNNDaily/OpenOrca by latency matching
 
-**Recommendation**: When benchmarking MoE models, test with all three alpha values to understand:
-- **Best case** (α=0.0): Maximum theoretical throughput
-- **Realistic optimized** (α=1.01): Well-tuned model behavior
-- **Realistic typical** (α=1.2): Common production patterns with imbalance
+**Recommendation**: When benchmarking MoE models, test with multiple alpha values to understand performance across different load distribution patterns:
+- **Theoretical limit** (α=0.0): Maximum possible throughput under perfect conditions (reference only)
+- **Lower imbalance** (α=1.01): Representative of models with effective load balancing (still shows notable skew vs. α=0.0)
+- **Higher imbalance** (α=1.2): Representative of models with significant expert specialization
+
+**Note on Methodology**: The alpha values above were estimated by comparing observed inference latency against benchmark results with different alpha values. The appropriate alpha value for your use case depends on your specific model, dataset, and workload characteristics.
 
 ## Key Algorithms
 
@@ -298,30 +307,37 @@ The algorithm uses Conv1D to find the EP group with maximum token load and swaps
 **Process (Example: 16 experts, EP=4):**
 
 ```
-Step 1: Power-law distributed expert loads (sorted descending)
+Step 1: Power-law distributed expert loads (unsorted - in original order)
 ┌────────────────────────────────────────────────────────────────────────┐
 │ Expert:  E0   E1   E2   E3  │ E4   E5   E6   E7  │ E8   E9   E10  E11 │ E12  E13  E14  E15 │
-│ Tokens:  850  620  480  320 │ 280  210  180  140 │ 110  85   70   55  │ 40   30   20   10  │
+│ Tokens:  180  110  210  140 │ 850  620  480  320 │ 70   280  55   40  │ 30   85   20   10  │
 └────────────────────────────────────────────────────────────────────────┘
+         ↑    ↑    ↑    ↑         ↑    ↑    ↑    ↑        ↑    ↑    ↑    ↑        ↑    ↑    ↑    ↑
+         Expert loads follow power-law but are NOT pre-sorted
 
 Step 2: Divide into EP groups (16 experts ÷ 4 EP = 4 experts/group)
     ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
     │   Group 0       │   │   Group 1       │   │   Group 2       │   │   Group 3       │
     │  E0  E1  E2 E3  │   │  E4  E5  E6 E7  │   │  E8  E9 E10 E11 │   │ E12 E13 E14 E15 │
-    │ 850 620 480 320 │   │ 280 210 180 140 │   │ 110  85  70  55 │   │  40  30  20  10 │
+    │ 180 110 210 140 │   │ 850 620 480 320 │   │  70 280  55  40 │   │  30  85  20  10 │
     └─────────────────┘   └─────────────────┘   └─────────────────┘   └─────────────────┘
 
 Step 3: Conv1D sums tokens per group (kernel_size=4, stride=4, weights=1)
            ↓                     ↓                     ↓                     ↓
-    Total: 2270 ★           Total: 810           Total: 320           Total: 100
-         (MAX)
+    Total: 640              Total: 2270 ★          Total: 445           Total: 145
+                                  (MAX)
 
-Step 4: argmax finds Group 0 has maximum load → Already at position 0, no swap
-
-Alternative scenario - if Group 1 had max load:
-    Before swap:  [G0: 2270]  [G1: 810★]  [G2: 320]  [G3: 100]
+Step 4: argmax finds Group 1 has maximum load → Swap to position 0
+    Before swap:  [G0: 640]  [G1: 2270★]  [G2: 445]  [G3: 145]
                       ⇅          ⇅
-    After swap:   [G1: 810★]  [G0: 2270]  [G2: 320]  [G3: 100]
+    After swap:   [G1: 2270★]  [G0: 640]  [G2: 445]  [G3: 145]
+
+    Experts after swap:
+    ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+    │   Group 0       │   │   Group 1       │   │   Group 2       │   │   Group 3       │
+    │  E4  E5  E6 E7  │   │  E0  E1  E2 E3  │   │  E8  E9 E10 E11 │   │ E12 E13 E14 E15 │
+    │ 850 620 480 320 │   │ 180 110 210 140 │   │  70 280  55  40 │   │  30  85  20  10 │
+    └─────────────────┘   └─────────────────┘   └─────────────────┘   └─────────────────┘
 
 Result: Benchmark measures Group 0 with highest token load (2270)
         → Captures worst-case latency (bottleneck performance)
@@ -414,10 +430,10 @@ assignments = expanded.reshape(K, T).transpose()  # Now (T, K)
 
 The `run_moe_torch()` function uses these distributions to benchmark MoE performance with multiple alpha values (0.0, 1.01, 1.2):
 
-- **alpha=0.0** → Uses `balanced_logits()` for baseline (all experts equally utilized)
-- **alpha>0.0** → Uses `power_law_logits_v3()` for realistic scenarios
-  - α=1.01: Slight imbalance, good utilization
-  - α=1.2: Heavy imbalance, potential bottlenecks
+- **alpha=0.0** → Uses `balanced_logits()` for theoretical baseline (perfectly uniform distribution)
+- **alpha>0.0** → Uses `power_law_logits_v3()` for different load distribution patterns
+  - α=1.01: Lower imbalance pattern (observed in DeepSeek-V3-R1 on specific datasets)
+  - α=1.2: Higher imbalance pattern (observed in Qwen3-235B on specific datasets)
 
 ## Debug Mode
 
