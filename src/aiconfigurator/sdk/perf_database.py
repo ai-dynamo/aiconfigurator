@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import functools
 import importlib.resources as pkg_resources
 import logging
 import math
@@ -1937,6 +1938,7 @@ class PerfDatabase:
         """
         return self._default_sol_mode
 
+    @functools.lru_cache(maxsize=32768)
     def query_gemm(
         self,
         m: int,
@@ -1968,6 +1970,7 @@ class PerfDatabase:
             result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
             return result
 
+    @functools.lru_cache(maxsize=32768)
     def query_context_attention(
         self,
         b: int,
@@ -2042,6 +2045,7 @@ class PerfDatabase:
             latency = self._interp_3d(n, full_s, b, attention_dict, "cubic") * prefix_correction
             return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_generation_attention(
         self,
         b: int,
@@ -2112,6 +2116,7 @@ class PerfDatabase:
             latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
             return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_context_mla(
         self,
         b: int,
@@ -2163,6 +2168,7 @@ class PerfDatabase:
             latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
             return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_generation_mla(
         self,
         b: int,
@@ -2207,6 +2213,7 @@ class PerfDatabase:
             latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
             return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_generation_mla(
         self,
         b: int,
@@ -2309,6 +2316,7 @@ class PerfDatabase:
             latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
             return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_context_mla(
         self,
         b: int,
@@ -2409,6 +2417,7 @@ class PerfDatabase:
             return latency
 
     # to simplify, we no longer support allreduce_strategy
+    @functools.lru_cache(maxsize=32768)
     def query_custom_allreduce(
         self,
         quant_mode: common.CommQuantMode,
@@ -2468,6 +2477,7 @@ class PerfDatabase:
                     lat = lat * (tp_size - 1) / tp_size * 8 / 7
             return lat
 
+    @functools.lru_cache(maxsize=32768)
     def query_nccl(
         self,
         dtype: common.CommQuantMode,
@@ -2529,6 +2539,7 @@ class PerfDatabase:
 
         return lat
 
+    @functools.lru_cache(maxsize=32768)
     def query_moe(
         self,
         num_tokens: int,
@@ -2670,6 +2681,7 @@ class PerfDatabase:
             else:
                 raise NotImplementedError(f"backend {self.backend} not supported for moe")
 
+    @functools.lru_cache(maxsize=32768)
     def query_mla_bmm(
         self,
         num_tokens: int,
@@ -2709,6 +2721,7 @@ class PerfDatabase:
             lat = self._interp_1d([num_left, num_right], [mla_bmm_dict[num_left], mla_bmm_dict[num_right]], num_tokens)
             return lat
 
+    @functools.lru_cache(maxsize=32768)
     def query_mem_op(self, mem_bytes: int, sol_mode: common.SOLMode | None = None) -> float:
         """
         Query the mem op data
@@ -2735,6 +2748,7 @@ class PerfDatabase:
             ) * 1000
             return lat
 
+    @functools.lru_cache(maxsize=32768)
     def query_p2p(self, message_bytes: int, sol_mode: common.SOLMode | None = None) -> float:
         """
         Query the p2p data
@@ -2817,6 +2831,7 @@ class PerfDatabase:
                                                 n
                                             ][b][s] = sol
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_mlp(
         self,
         num_tokens: int,
@@ -2865,6 +2880,7 @@ class PerfDatabase:
             lat = self._interp_1d([num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens)
             return lat
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_deepep_ll(
         self,
         node_num: int,
@@ -2894,6 +2910,7 @@ class PerfDatabase:
             lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
             return lat / 1000.0
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_deepep_normal(
         self,
         node_num: int,
