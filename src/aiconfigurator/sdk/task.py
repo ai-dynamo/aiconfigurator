@@ -238,7 +238,12 @@ class TaskConfigFactory:
                     worker_config["moe_tp_list"] = [1, 2, 4, 8]
                     worker_config["moe_ep_list"] = [1]
             elif ctx.backend_name == "vllm":
-                raise NotImplementedError("MoE is not implemented for vllm backend")
+                worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
+                worker_config["tp_list"] = [1, 2, 4, 8]
+                worker_config["pp_list"] = [1, 2, 4, 8] if should_enable_pp else [1]
+                worker_config["dp_list"] = [1, 2, 4, 8]
+                worker_config["moe_tp_list"] = [1, 2, 4, 8]
+                worker_config["moe_ep_list"] = [1, 2, 4, 8]
             else:
                 raise ValueError(f"Invalid backend: {ctx.backend_name}")
 
@@ -351,7 +356,21 @@ class TaskConfigFactory:
                     decode_worker_config["moe_tp_list"] = parallel_config_list
                     decode_worker_config["moe_ep_list"] = [1]
             elif ctx.backend_name == "vllm":
-                raise NotImplementedError("MoE is not implemented for vllm backend")
+                parallel_config_list = [1, 2, 4, 8]
+
+                prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
+                prefill_worker_config["tp_list"] = parallel_config_list
+                prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                prefill_worker_config["dp_list"] = parallel_config_list
+                prefill_worker_config["moe_tp_list"] = parallel_config_list
+                prefill_worker_config["moe_ep_list"] = parallel_config_list
+
+                decode_worker_config["num_gpu_per_worker"] = parallel_config_list
+                decode_worker_config["tp_list"] = parallel_config_list
+                decode_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                decode_worker_config["dp_list"] = parallel_config_list
+                decode_worker_config["moe_tp_list"] = parallel_config_list
+                decode_worker_config["moe_ep_list"] = parallel_config_list
             else:
                 raise ValueError(f"Invalid backend: {ctx.backend_name}")
 

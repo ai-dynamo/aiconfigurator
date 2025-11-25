@@ -69,8 +69,9 @@ def enumerate_parallel_config(
                                         not enable_wideep and moe_ep > 1
                                     ):  # wideep only has ep
                                         continue
-                                elif backend == common.BackendName.vllm:
-                                    pass  # TODO
+                                elif backend == common.BackendName.vllm and moe_tp > 1 and moe_ep > 1:
+                                    continue  # vllm does not support moe_tp > 1 and moe_ep > 1 at the same time
+
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
             else:
                 if tp * pp in num_gpu_list:
