@@ -5,6 +5,7 @@ import csv
 import logging
 import traceback
 
+from packaging.version import Version
 from tqdm import tqdm
 
 from aiconfigurator.sdk import common, perf_database
@@ -144,7 +145,9 @@ class SupportMatrix:
                 )
                 results[mode] = False
                 error_messages[mode] = traceback.format_exc()
-
+            finally:
+                # format error messages to one line with "\n" as separator
+                error_messages[mode] = error_messages[mode].replace("\n", "\\n") if error_messages[mode] else None
         return results, error_messages
 
     def test_support_matrix(self) -> list[tuple[str, str, str, str, str, bool, str | None]]:
@@ -188,6 +191,9 @@ class SupportMatrix:
             # Add separate entries for agg and disagg modes
             for mode in success_dict:
                 results.append((model, system, backend, version, mode, success_dict[mode], error_dict[mode]))
+
+        # Sort results by (model, system, backend, version, mode)
+        results.sort(key=lambda x: (x[0], x[1], x[2], Version(x[3]), x[4]))
 
         # Print results summary
         self._print_results_summary(results)
