@@ -16,6 +16,7 @@ def create_model_name_config(app_config):
             label="model name",
             value="DEEPSEEK_V3",
             interactive=True,
+            required=True,
         )
 
     return {"model_name": model_name}
@@ -33,16 +34,28 @@ def create_system_config(app_config, gpu_config=False):
 
     with gr.Accordion("System config"):
         with gr.Row():
-            system = gr.Dropdown(choices=system_choices, label="System", value=default_system, interactive=True)
-            backend = gr.Dropdown(choices=backend_choices, label="Backend", value=default_backend, interactive=True)
-            version = gr.Dropdown(choices=version_choices, label="Version", value=default_version, interactive=True)
+            system = gr.Dropdown(
+                choices=system_choices, label="System", value=default_system, interactive=True, required=True
+            )
+            backend = gr.Dropdown(
+                choices=backend_choices, label="Backend", value=default_backend, interactive=True, required=True
+            )
+            version = gr.Dropdown(
+                choices=version_choices, label="Version", value=default_version, interactive=True, required=True
+            )
         if gpu_config:
             with gr.Row():
                 gpu_config_components = {
-                    "min_gpu_per_engine": gr.Number(label="Minimum GPUs per engine", value=1, interactive=True),
-                    "max_gpu_per_engine": gr.Number(label="Maximum GPUs per engine", value=4, interactive=True),
-                    "gpus_per_node": gr.Number(label="GPUs per node", value=8, interactive=True),
-                    "gpu_cost_per_hour": gr.Number(label="GPU cost per hour", value="", interactive=True),
+                    "min_gpu_per_engine": gr.Number(
+                        label="Minimum GPUs per engine", value=4, interactive=True, required=True
+                    ),
+                    "max_gpu_per_engine": gr.Number(
+                        label="Maximum GPUs per engine", value=16, interactive=True, required=True
+                    ),
+                    "gpus_per_node": gr.Number(label="GPUs per node", value=8, interactive=True, required=True),
+                    "gpu_cost_per_hour": gr.Number(
+                        label="GPU cost per hour", value="", interactive=True, optional=True
+                    ),
                 }
         else:
             gpu_config_components = {}
@@ -197,20 +210,20 @@ def create_runtime_config(app_config, with_sla=False, max_context_length=False, 
 
     with gr.Accordion("Runtime config"):
         with gr.Row():
-            isl = gr.Number(value=2048, label="input sequence length", interactive=True)
-            osl = gr.Number(value=128, label="output sequence length", interactive=True)
+            isl = gr.Number(value=2048, label="input sequence length", interactive=True, required=True)
+            osl = gr.Number(value=128, label="output sequence length", interactive=True, required=True)
             if prefix_length:
                 prefix = gr.Number(value=0, label="prefix cache length", interactive=True)
             else:
                 prefix = None
             if max_context_length:
-                max_context_length = gr.Number(value=2048, label="max context length", interactive=True)
+                max_context_length = gr.Number(value=2048, label="max context length", interactive=True, required=True)
             else:
                 max_context_length = None
 
             if with_sla:
-                ttft = gr.Number(value=2000, label="first token latency(ms)", interactive=True)
-                tpot = gr.Number(value=50, label="inter token latency(ms)", interactive=True)
+                ttft = gr.Number(value=2000, label="first token latency/ms", interactive=True, optional=True)
+                tpot = gr.Number(value=50, label="inter token latency/ms", interactive=True, optional=True)
                 batch_size = None
             else:
                 batch_size = gr.Number(value=1, label="batch size", interactive=True)
