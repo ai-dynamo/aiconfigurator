@@ -631,7 +631,7 @@ if __name__ == "__main__":
     parser.add_argument("--world-size", default=8, type=int, help="World size for distributed setup (vLLM)")
     parser.add_argument("--rank", default=0, type=int, help="Rank for distributed setup (vLLM)")
     parser.add_argument(
-        "--measure-power",
+        "--measure_power",
         action="store_true",
         default=False,
         help="Enable power measurement during AllReduce benchmark",

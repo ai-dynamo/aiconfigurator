@@ -264,6 +264,10 @@ def disagg_pareto(
     logger.debug(f"decode_num_worker_list: {decode_num_worker_list}, decode_max_num_worker: {decode_max_num_worker}")
     decode_num_worker_list = get_working_list(decode_num_worker_list, decode_max_num_worker)
 
+    # power analysis
+    measure_power = kwargs.get("measure_power", False)
+    logger.debug(f"measure_power: {measure_power}")
+
     summary = disagg_sess.find_best_disagg_result_under_constraints(
         model_name=model_name,
         runtime_config=runtime_config,
@@ -276,6 +280,7 @@ def disagg_pareto(
         decode_max_num_tokens=decode_max_num_tokens,
         decode_num_worker_list=decode_num_worker_list,
         num_gpu_list=num_gpu_list,
+        measure_power=measure_power,
     )
 
     return summary.get_summary_df()

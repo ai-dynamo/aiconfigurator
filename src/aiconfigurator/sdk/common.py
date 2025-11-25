@@ -329,6 +329,10 @@ ColumnsDisagg = [
     "(d)backend",
     "(d)version",
     "(d)system",
+    "context_power",
+    "generation_power",
+    "total_power",
+    "tokens/s/W",
 ]
 
 

@@ -786,18 +786,18 @@ def main():
         default=None,
     )
     parser.add_argument(
-        "--measure-power",
+        "--measure_power",
         action="store_true",
         help="Enable kernel power measurement (default: off)",
     )
     parser.add_argument(
-        "--power-limits",
+        "--power_limits",
         nargs="+",
         type=int,
         help="Power limits in watts (e.g., 700 500 300). If not specified, uses max power limit only.",
     )
     parser.add_argument(
-        "--kernel-power-measurement-duration",
+        "--kernel_power_measurement_duration",
         type=float,
         default=DEFAULT_KERNEL_POWER_MEASUREMENT_DURATION,
         help=(

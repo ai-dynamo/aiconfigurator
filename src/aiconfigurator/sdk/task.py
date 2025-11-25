@@ -863,8 +863,8 @@ class TaskRunner:
         # Check if power measurement is requested but data is not available
         if getattr(task_config, "measure_power", False) and database and not database.has_power_data():
             logger.warning(
-                "Task %s: Power analysis requested (--analyze-power), but power data is not available in the database. "
-                "Power measurements will be skipped. To collect power data, run the collector with --measure-power flag.",
+                "Task %s: Power analysis requested (--measure_power), but power data is not available in the database. "
+                "Power analysis will be skipped. To collect power data, run the collector with --measure_power flag.",
                 task_config.task_name
             )
         
@@ -947,8 +947,8 @@ class TaskRunner:
         # Check if power measurement is requested but data is not available
         if getattr(task_config, "measure_power", False) and prefill_database and not prefill_database.has_power_data():
             logger.warning(
-                "Task %s: Power analysis requested (--analyze-power), but power data is not available in the prefill database. "
-                "Power measurements will be skipped. To collect power data, run the collector with --measure-power flag.",
+                "Task %s: Power analysis requested (--measure_power), but power data is not available in the prefill database. "
+                "Power analysis will be skipped. To collect power data, run the collector with --measure_power flag.",
                 task_config.task_name
             )
         
@@ -1007,8 +1007,8 @@ class TaskRunner:
         # Check if power measurement is requested but data is not available
         if getattr(task_config, "measure_power", False) and decode_database and not decode_database.has_power_data():
             logger.warning(
-                "Task %s: Power analysis requested (--analyze-power), but power data is not available in the decode database. "
-                "Power measurements will be skipped. To collect power data, run the collector with --measure-power flag.",
+                "Task %s: Power analysis requested (--measure_power), but power data is not available in the decode database. "
+                "Power analysis will be skipped. To collect power data, run the collector with --measure_power flag.",
                 task_config.task_name
             )
         

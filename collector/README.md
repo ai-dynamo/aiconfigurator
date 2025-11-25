@@ -113,9 +113,9 @@ The collector can measure kernel power consumption during benchmarking, which is
 python collector/collect.py \
   --backend trtllm \
   --ops gemm attention_context attention_generation \
-  --measure-power \
-  --power-limits 700 500 300 \
-  --kernel-power-measurement-duration 3
+  --measure_power \
+  --power_limits 700 500 300 \
+  --kernel_power_measurement_duration 3
 
 bash collector/collect_comm.sh --measure_power
 ```
@@ -128,10 +128,10 @@ bash collector/collect_comm.sh --measure_power
 ### How It Works
 
 - Calculate arithmetic intensity for each kernel configuration
-- **Memory-bound kernels**: Measures actual power over a default 3-second window (duration configured with `--kernel-power-measurement-duration`)
+- **Memory-bound kernels**: Measures actual power over a default 3-second window (duration configured with `--kernel_power_measurement_duration`)
 - **Compute-bound kernels**: Power assumed to be equal power limit (power not measured)
 
-NVML power/energy counters only update once 100 ms, which is significantly longer than most kernels. Thus, kernels are run repeatedly for `--kernel-power-measurement-duration` seconds for power measurement.
+NVML power/energy counters only update once 100 ms, which is significantly longer than most kernels. Thus, kernels are run repeatedly for `--kernel_power_measurement_duration` seconds for power measurement.
 
 ### Requirements
 

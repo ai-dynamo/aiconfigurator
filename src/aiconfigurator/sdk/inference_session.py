@@ -250,6 +250,31 @@ class DisaggInferenceSession:
         d_version = decode_summary_df["version"]
         d_system = decode_summary_df["system"]
 
+        # Power metrics: combine prefill and decode power
+        # Check if power columns exist in the dataframes
+        if "context_power" in prefill_summary_df and "generation_power" in decode_summary_df:
+            p_context_power = prefill_summary_df["context_power"]
+            d_generation_power = decode_summary_df["generation_power"]
+            
+            # For disaggregated, context power comes from prefill, generation power from decode
+            context_power = p_context_power
+            generation_power = d_generation_power
+            
+            # Calculate total power per GPU as weighted average based on time spent in each phase
+            # TTFT is time for prefill (context), TPOT*osl is time for decode (generation)
+            total_time = ttft + tpot * osl
+            if total_time > 0:
+                total_power = (context_power * ttft + generation_power * tpot * osl) / total_time
+            else:
+                total_power = 0.0
+            
+            tokens_per_watt = tokens_s_gpu / total_power if total_power > 0 else 0.0
+        else:
+            context_power = 0.0
+            generation_power = 0.0
+            total_power = 0.0
+            tokens_per_watt = 0.0
+
         return pd.DataFrame(
             [
                 [
@@ -304,6 +329,10 @@ class DisaggInferenceSession:
                     d_backend,
                     d_version,
                     d_system,
+                    context_power,
+                    generation_power,
+                    total_power,
+                    tokens_per_watt,
                 ]
             ],
             columns=common.ColumnsDisagg,
@@ -374,6 +403,7 @@ class DisaggInferenceSession:
         decode_max_num_tokens: int,
         decode_num_worker_list: list[int],
         num_gpu_list: list[int] | None,
+        measure_power: bool = False,
     ) -> InferenceSummary | None:
         """
         Run disagg with given constraints
@@ -460,6 +490,7 @@ class DisaggInferenceSession:
             runtime_config: config.RuntimeConfig,
             mode: str,
             latency_correction_scale: float = 1.0,
+            measure_power: bool = False,
         ) -> pd.DataFrame:
             """
             Get all worker candidates based on give search space
@@ -505,6 +536,7 @@ class DisaggInferenceSession:
                             mode=mode,
                             runtime_config=overwritten_runtime_config,
                             latency_correction_scale=latency_correction_scale,
+                            measure_power=measure_power,
                         )
                         if not summary.check_oom():
                             summary_df = pd.concat(
@@ -752,6 +784,7 @@ class DisaggInferenceSession:
             runtime_config,
             "static_ctx",
             latency_correction_scale=self._prefill_latency_correction_scale,
+            measure_power=measure_power,
         )
         decode_summary_df = _get_summary_df(
             decode_model_config,
@@ -760,6 +793,7 @@ class DisaggInferenceSession:
             runtime_config,
             "static_gen",
             latency_correction_scale=self._decode_latency_correction_scale,
+            measure_power=measure_power,
         )
         if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:
             logger.debug(f"No prefill or decode workers found for {model_name} with given configs.")
