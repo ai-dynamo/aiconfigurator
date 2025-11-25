@@ -109,15 +109,21 @@ table td button {
     border-top: 1px solid var(--border-color-primary);
     border-radius: 0 0 8px 8px;
     text-align: right;
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
 }
 
+.config-action-btn {
+    cursor: pointer;
+    margin-bottom: 0 !important;  /* override gradio styles */
+}
 
-.config-copy-btn:hover {
+.config-action-btn:hover {
     color: var(--color-accent);
 }
 
-.config-c
-opy-btn.copied {
+.config-action-btn.active {
     color: var(--color-accent);
 }
 

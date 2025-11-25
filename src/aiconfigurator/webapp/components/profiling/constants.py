@@ -70,7 +70,8 @@ CONFIG_MODAL_HTML = """
             <pre id="configContent"></pre>
         </div>
         <div class="config-modal-footer">
-            <button class="config-copy-btn" onclick="copyConfig()">Copy to Clipboard</button>
+            <button class="config-action-btn" onclick="copyConfig()">Copy to Clipboard</button>
+            <button class="config-action-btn" onclick="downloadConfig()">Download</button>
         </div>
     </div>
 </div>
