@@ -167,36 +167,28 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
     if aic_debug == 2:
         print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
 
-    if num_experts % ep == 0:
-        tokens_per_rank = num_tokens_per_expert.view(ep, -1).sum(dim=1)
-        print(f"Tokens per rank (ep={ep}): {tokens_per_rank.tolist()}")
-
     _, num_tokens_per_expert_sorted_index = torch.sort(num_tokens_per_expert, descending=True)
     expert_assignments = []
     num_tokens_per_expert_sorted_index_lists = num_tokens_per_expert_sorted_index.tolist()
     for expert_id in num_tokens_per_expert_sorted_index_lists:
         expert_assignments.extend([expert_id] * num_tokens_per_expert[expert_id])
 
-    expert_assignments = torch.tensor(expert_assignments, dtype=torch.long)
+    expert_assignments = torch.tensor(expert_assignments, dtype=torch.int64)
     h_selected_experts = expert_assignments.reshape(topk, num_tokens).T
 
     # New logic: return topk_idx, topk_weights, num_recv_tokens_per_expert
     num_local_experts = num_experts // ep
-    topk_idx = h_selected_experts.clone()
+    topk_idx = h_selected_experts.clone().contiguous()
     topk_weights = torch.full_like(topk_idx, 0.1, dtype=torch.float32)
 
     # Mask experts not in rank 0
     mask = topk_idx >= num_local_experts
-    topk_idx[mask] = 0
+    topk_idx[mask] = -1
     topk_weights[mask] = 0.0
 
     # num_recv for rank 0 experts
     num_recv_tokens_per_expert = num_tokens_per_expert[:num_local_experts]
     num_recv_tokens_per_expert = (num_recv_tokens_per_expert + 127) // 128 * 128
-
-    print(f"topk_idx.shape: {topk_idx.shape}")
-    print(f"topk_weights.shape: {topk_weights.shape}")
-    print(f"num_recv_tokens_per_expert.shape: {num_recv_tokens_per_expert.shape}")
 
     return topk_idx, topk_weights, num_recv_tokens_per_expert
 
@@ -350,10 +342,6 @@ def benchmark_moe_layer_prefill(
             device=hidden_states_per_token_iter.device,
             dtype=torch.float32,
         )
-        print(f"num_token: {num_token}")
-        print(f"num_rank: {num_rank}")
-        print(f"distributed: {distributed}")
-        print(f"power_law_alpha: {power_law_alpha}")
 
         num_tokens_iter = hidden_states_per_token_iter.shape[0]
         topk = 8
@@ -404,7 +392,7 @@ def benchmark_moe_layer_prefill(
                 num_rank,
                 power_law_alpha if power_law_alpha is not None else 0.8,
             )
-            topk_idx_iter = topk_idx_iter.to(device).to(torch.int32)
+            topk_idx_iter = topk_idx_iter.to(device)
             topk_weights_iter = topk_weights_iter.to(device)
             num_recv = num_recv_tensor.tolist()
 
