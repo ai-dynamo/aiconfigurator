@@ -72,7 +72,7 @@
 /tools/automation @tianhaox @Ethan-ES
 /tools/sanity_check @tianhaox @YijiaZhao
 /tools/simple_sdk_demo @tianhaox @jasonqinzhou
-/tools/generate_support_matrix.py @Harrilee
+/tools/support_matrix/generate_support_matrix.py @Harrilee
 # misc
 /ATTRIBUTIONS.md @saturley-hall
 /CODE_OF_CONDUCT.md @saturley-hall
