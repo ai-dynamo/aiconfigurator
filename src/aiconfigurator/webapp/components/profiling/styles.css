@@ -132,3 +132,15 @@ table td button {
     padding-right: 32px !important;
     margin-bottom: 8px !important;
 }
+
+/* Required/Optional field label styles */
+div.required span:first-child::after {
+    content: " *";
+    color: var(--primary-500);
+    font-weight: bold;
+}
+
+div.optional span:first-child::after {
+    content: " (optional)";
+    color: var(--body-text-color-subdued);
+}
