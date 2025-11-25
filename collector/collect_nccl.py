@@ -101,7 +101,6 @@ def nccl_benchmark(
 
         if power is not None:
             item["power"] = power
-            item["compute_bound"] = 0  # Communication is always memory/bandwidth-bound
 
         print(nccl_test_bin, f"{size=}, {latency=}, {power=}")
         

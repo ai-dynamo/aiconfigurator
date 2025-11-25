@@ -103,13 +103,15 @@ def benchmark_trtllm_allreduce(
 
     # Initialize NVML power monitor if power measurement is enabled
     power_monitor = None
+    power_limit = None
     if measure_power:
         try:
-            from nvml_power_monitor import NVMLPowerMonitor
+            from nvml_power_monitor import NVMLPowerMonitor, get_power_management_limit
 
             power_monitor = NVMLPowerMonitor(gpu_indices=[local_rank])
+            power_limit = get_power_management_limit(local_rank)
             if rank == 0:
-                print("NVML power monitoring enabled on all ranks")
+                print(f"NVML power monitoring enabled on all ranks (Power limit: {power_limit}W)")
         except Exception as e:
             if rank == 0:
                 print(f"Warning: Failed to initialize NVML power monitor: {e}")
@@ -236,8 +238,8 @@ def benchmark_trtllm_allreduce(
             }
 
             if avg_power is not None:
+                item["power_limit"] = power_limit
                 item["power"] = avg_power
-                item["compute_bound"] = 0  # Communication is always memory/bandwidth-bound
 
             log_perf(
                 item_list=[item],
@@ -339,13 +341,15 @@ def benchmark_vllm_allreduce(
 
     # Initialize NVML power monitor if power measurement is enabled
     power_monitor = None
+    power_limit = None
     if measure_power:
         try:
-            from nvml_power_monitor import NVMLPowerMonitor
+            from nvml_power_monitor import NVMLPowerMonitor, get_power_management_limit
 
             power_monitor = NVMLPowerMonitor(gpu_indices=[local_rank])
+            power_limit = get_power_management_limit(local_rank)
             if rank == 0:
-                print("NVML power monitoring enabled on all ranks")
+                print(f"NVML power monitoring enabled on all ranks (Power limit: {power_limit}W)")
         except Exception as e:
             if rank == 0:
                 print(f"Warning: Failed to initialize NVML power monitor: {e}")
@@ -529,8 +533,8 @@ def benchmark_vllm_allreduce(
                 }
 
                 if avg_power is not None:
+                    item["power_limit"] = power_limit
                     item["power"] = avg_power
-                    item["compute_bound"] = 0  # Communication is always memory/bandwidth-bound
 
                 log_perf(
                     item_list=[item],
@@ -627,7 +631,7 @@ if __name__ == "__main__":
     parser.add_argument("--world-size", default=8, type=int, help="World size for distributed setup (vLLM)")
     parser.add_argument("--rank", default=0, type=int, help="Rank for distributed setup (vLLM)")
     parser.add_argument(
-        "--measure_power",
+        "--measure-power",
         action="store_true",
         default=False,
         help="Enable power measurement during AllReduce benchmark",

@@ -607,7 +607,6 @@ def _run_attn_for_backend(
     if power is not None:
         item["power_limit"] = power_limit
         item["power"] = power
-        item["compute_bound"] = int(compute_bound)
 
     log_perf(
         item_list=[item],
