@@ -30,10 +30,9 @@ import sys
 from argparse import ArgumentParser
 from typing import Optional
 
-# isort: off
 import torch
 
-# isort: on
+from helper import log_perf
 
 
 def get_input_shape_and_comm_size(size, token_dim=4096):
@@ -111,8 +110,6 @@ def benchmark_trtllm_allreduce(
     repeat_n = 5
     num_warmups = 3
     num_runs = 20
-
-    from helper import log_perf
 
     size = min_size
     while size < max_size:
@@ -260,8 +257,6 @@ def benchmark_vllm_allreduce(
     repeat_n = 5
     num_warmups = 3
     num_runs = 20
-
-    from helper import log_perf
 
     # Warmup communication
     warmup_tensor = torch.ones(1, dtype=torch_dtype, device="cuda")

@@ -1,7 +1,7 @@
 name: Random Review Assignment
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, ready_for_review]
 
 permissions:
@@ -34,10 +34,14 @@ jobs:
             const existingReviewers = pullRequest.requested_reviewers.map(r => r.login);
             console.log(`Already assigned: ${existingReviewers.join(', ')}`);
             
-            // Parse CODEOWNERS for all @mentions (both users and teams)
+            // Parse CODEOWNERS using simple whitespace splitting (Robust & Fast)
             const content = fs.readFileSync('.github/CODEOWNERS', 'utf8');
-            const userMentions = content.match(/@[\w-]+(?!\/)/g) || [];
-            const teamMentions = content.match(/@[\w-]+\/[\w-]+/g) || [];
+            
+            // Split by any whitespace to get tokens, then grab only those starting with @
+            const tokens = content.split(/\s+/).filter(t => t.startsWith('@'));
+            
+            const userMentions = tokens.filter(t => !t.includes('/'));
+            const teamMentions = tokens.filter(t => t.includes('/'));
             
             let allReviewers = [...new Set(userMentions.map(m => m.substring(1)))];
             

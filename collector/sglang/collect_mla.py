@@ -1,28 +1,108 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import math
 import os
 import random
-from typing import NamedTuple
 
 import pkg_resources
 import torch
-import triton
-from einops import rearrange
+from sglang.srt.configs.model_config import AttentionArch
+from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
+from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool, ReqToTokenPool
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
-# pip install flashinfer-python, flash_mla
-from flash_mla import flash_mla_with_kvcache, get_mla_metadata
-from sgl_kernel.flash_attn import flash_attn_varlen_func as flash_attn_varlen_func_v3
-from triton.testing import do_bench
-
-# cudnn = None
 from helper import log_perf
 
-
-class Timing(NamedTuple):
-    mean: float
-
-
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
+
+KV_LORA_RANK = 512
+QK_NOPE_HEAD_DIM = 128
+QK_ROPE_HEAD_DIM = 64
+MLA_PAGE_SIZE = 64
+MLA_SCALING = 1 / math.sqrt(QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM)
+INT32_MAX = 2**31 - 1
+# Largest kv slot index we can safely touch before the old flashmla kernels overflow
+MAX_KV_LOC = (INT32_MAX // (KV_LORA_RANK + QK_ROPE_HEAD_DIM)) - MLA_PAGE_SIZE
+
+
+class MockModelConfig:
+    def __init__(self, context_len: int = 32768):
+        self.is_encoder_decoder = False
+        self.context_len = context_len
+        self.attention_arch = AttentionArch.MLA
+        self.is_hybrid = False
+        self.attention_chunk_size = None
+
+
+class MockServerArgs:
+    def __init__(self, kv_cache_dtype: torch.dtype, page_size: int):
+        self.enable_lora = False
+        self.enable_deterministic_inference = False
+        self.kv_cache_dtype = "fp8" if kv_cache_dtype == torch.float8_e4m3fn else "float16"
+        self.speculative_eagle_topk = 0
+        self.speculative_num_draft_tokens = 0
+        self.speculative_attention_mode = "prefill"
+        self.prefill_attention_backend = "fa3"
+        self.decode_attention_backend = "fa3"
+        self.page_size = page_size
+        self.device = "cuda"
+
+
+class MockModelRunner:
+    def __init__(self, device: torch.device, kv_cache_dtype: torch.dtype, page_size: int):
+        self.device = device
+        self.kv_cache_dtype = kv_cache_dtype
+        self.page_size = page_size
+        self.req_to_token_pool = None
+        self.token_to_kv_pool = None
+        self.attn_backend = None
+        self.sliding_window_size = None
+        self.is_hybrid = False
+        self.model_config = MockModelConfig()
+        self.server_args = MockServerArgs(kv_cache_dtype, page_size)
+
+
+def create_req_to_token_pool(
+    batch_size: int,
+    total_len: int,
+    page_size: int,
+    torch_device: torch.device,
+    device_str: str,
+) -> tuple[ReqToTokenPool, torch.Tensor]:
+    pool = ReqToTokenPool(
+        size=batch_size,
+        max_context_len=total_len,
+        device=device_str,
+        enable_memory_saver=False,
+    )
+    req_indices = torch.arange(batch_size, dtype=torch.int32, device=torch_device).view(batch_size, 1)
+    token_offsets = torch.arange(total_len, dtype=torch.int32, device=torch_device).view(1, total_len)
+    token_matrix = (req_indices * total_len) + token_offsets + page_size
+    pool.req_to_token[:batch_size, :total_len] = token_matrix
+    return pool, token_matrix.contiguous()
+
+
+def benchmark_layer(layer, forward_batch, q, k, v, q_rope, k_rope):
+    torch.cuda.synchronize()
+    for _ in range(3):
+        layer(q, k, v, forward_batch, q_rope=q_rope, k_rope=k_rope)
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        layer(q, k, v, forward_batch, q_rope=q_rope, k_rope=k_rope)
+    torch.cuda.synchronize()
+
+    num_runs = 20
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    for _ in range(num_runs):
+        graph.replay()
+    end_event.record()
+    torch.cuda.synchronize()
+    return start_event.elapsed_time(end_event) / num_runs
 
 
 def get_context_mla_test_cases():
@@ -55,8 +135,6 @@ def get_context_mla_test_cases():
                     for tp_size in [1, 2, 4, 8, 16, 32, 64]:
                         if b * s > 32768:
                             continue
-                        # (input_len, batch_size, output_len, kv_cache_dtype, world_size, tp_size,
-                        #  tokens_per_block, warming_up, test_ite, is_context_phase)
                         test_cases.append(
                             [
                                 s,
@@ -100,13 +178,15 @@ def get_generation_mla_test_cases():
                 32768,
                 65536,
                 131072,
-            ]:  # [target token s] is equivelant to [in: s-1, step=1]
+            ]:
                 for dtype in dtype_list:
                     for tp_size in [1, 2, 4, 8, 16, 32, 64]:
-                        if b * s > 1024 * 4096 * 2 * 2:
+                        if b * s > 1024 * 4096 * 4:
                             continue
-                        # (input_len, batch_size, output_len, kv_cache_dtype, world_size, tp_size,
-                        #  tokens_per_block, warming_up, test_ite, is_context_phase)
+                        total_len = s
+                        # Guard against hitting int32 limits in the legacy flashmla kernel path.
+                        if (b * total_len) + MLA_PAGE_SIZE > MAX_KV_LOC:
+                            continue
                         test_cases.append(
                             [
                                 s - 1,
@@ -126,126 +206,6 @@ def get_generation_mla_test_cases():
     return test_cases
 
 
-def time_fwd(func, *args, repeats=30, verbose=True, desc="", **kwargs):
-    return Timing(do_bench(lambda: func(*args, **kwargs), warmup=3, rep=repeats) * 1e-3)
-
-
-@torch.inference_mode()
-def run_flash_mla(
-    q,
-    block_table,
-    blocked_k,
-    descale_q,
-    descale_k,
-    max_seqlen_pad,
-    block_size,
-    b,
-    s_q,
-    cache_seqlens,
-    h_q,
-    h_kv,
-    d,
-    dv,
-    causal,
-    dtype,
-):
-    for i in range(b):
-        blocked_k.view(b, max_seqlen_pad, h_kv, d)[i, cache_seqlens[i].item() :] = float("nan")
-    blocked_k[..., :dv]
-
-    tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens, s_q * h_q // h_kv, h_kv)
-
-    def flash_mla():
-        if dtype == torch.bfloat16:
-            return flash_mla_with_kvcache(
-                q,
-                blocked_k,
-                block_table,
-                cache_seqlens,
-                dv,
-                tile_scheduler_metadata,
-                num_splits,
-                causal=causal,
-            )
-        else:
-            return flash_mla_with_kvcache(
-                q,
-                blocked_k,
-                block_table,
-                cache_seqlens,
-                dv,
-                tile_scheduler_metadata,
-                num_splits,
-                causal=causal,
-                descale_q=descale_q,
-                descale_k=descale_k,
-            )
-
-    out_flash, lse_flash = flash_mla()
-    t = triton.testing.do_bench(flash_mla)
-    return out_flash, lse_flash, t
-
-
-def compare_a(target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype, device):
-    # print(
-    #     f"{target}: {b=}, {s_q=}, mean_seqlens={cache_seqlens.float().mean()}, {h_q=}, {h_kv=}, "
-    #     f"{d=}, {dv=}, {causal=}, {dtype=}"
-    # )
-    # torch.set_default_dtype(dtype)
-    torch.set_default_dtype(torch.bfloat16)
-    torch.set_default_device(device)
-    torch.cuda.set_device(device)
-    torch.manual_seed(0)
-    random.seed(0)
-    target_func = run_flash_mla
-
-    max_seqlen = cache_seqlens.max().item()
-    max_seqlen_pad = triton.cdiv(max_seqlen, 256) * 256
-
-    # total_seqlens = cache_seqlens.sum().item()
-    # mean_seqlens = cache_seqlens.float().mean().int().item()
-    # print(f"{total_seqlens=}, {mean_seqlens=}, {max_seqlen=}")
-
-    q = torch.randn(b, s_q, h_q, d).to(dtype)
-    block_size = 64
-    block_table = torch.arange(b * max_seqlen_pad // block_size, dtype=torch.int32).view(
-        b, max_seqlen_pad // block_size
-    )
-    blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d).to(dtype)
-
-    descale_q = torch.ones((1), dtype=torch.float32)
-    descale_k = torch.ones((1), dtype=torch.float32)
-
-    out_b, lse_b, perf_b = target_func(
-        q,
-        block_table,
-        blocked_k,
-        descale_q,
-        descale_k,
-        max_seqlen_pad,
-        block_size,
-        b,
-        s_q,
-        cache_seqlens,
-        h_q,
-        h_kv,
-        d,
-        dv,
-        causal,
-        dtype,
-    )
-
-    # FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
-    # bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (
-    #     torch.finfo(dtype).bits // 8
-    # )
-    # print(
-    #     f"perf {target}: {perf_b:.3f} ms, {FLOPS / 10**9 / perf_b:.0f} TFLOPS, "
-    #     f"{bytes / 10**6 / perf_b:.0f} GB/s"
-    # )
-    return perf_b
-
-
 def run_mla(
     input_len,
     batch_size,
@@ -262,85 +222,141 @@ def run_mla(
     device="cuda:0",
 ):
     torch.cuda.set_device(device)
+    torch_device = torch.device(device)
+    random.seed(0)
+    torch.manual_seed(0)
+    del world_size, tokens_per_block, warming_up, test_ite, output_len
 
-    assert kv_cache_dtype in [
-        torch.bfloat16,
-        torch.float8_e4m3fn,
-    ], "only support torch.bfloat16 (because of flash mla)"
-    assert num_heads % tp_size == 0, "num_heads != N * tp_size"
-    num_heads = int(num_heads / tp_size)
+    assert kv_cache_dtype in [torch.bfloat16, torch.float8_e4m3fn], "Unsupported kv cache dtype"
+    assert num_heads % tp_size == 0, "num_heads must be divisible by tp_size"
+    local_num_heads = num_heads // tp_size
+
+    model_runner = MockModelRunner(torch_device, kv_cache_dtype, MLA_PAGE_SIZE)
+    total_len = input_len if is_context_phase else input_len + 1
+    req_to_token_pool, token_matrix = create_req_to_token_pool(
+        batch_size=batch_size,
+        total_len=total_len,
+        page_size=MLA_PAGE_SIZE,
+        torch_device=torch_device,
+        device_str=str(torch_device),
+    )
+    model_runner.req_to_token_pool = req_to_token_pool
+
+    total_tokens = max(1, batch_size * total_len)
+    kv_cache_size = max(MLA_PAGE_SIZE, math.ceil(total_tokens / MLA_PAGE_SIZE) * MLA_PAGE_SIZE)
+    kv_pool = MLATokenToKVPool(
+        size=kv_cache_size,
+        page_size=MLA_PAGE_SIZE,
+        dtype=kv_cache_dtype,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        layer_num=1,
+        device=str(torch_device),
+        enable_memory_saver=False,
+    )
+    model_runner.token_to_kv_pool = kv_pool
+
+    attn_backend = FlashAttentionBackend(model_runner)
+    layer = RadixAttention(
+        num_heads=local_num_heads,
+        head_dim=KV_LORA_RANK + QK_ROPE_HEAD_DIM,
+        scaling=MLA_SCALING,
+        num_kv_heads=1,
+        layer_id=0,
+        v_head_dim=KV_LORA_RANK,
+    ).to(torch_device)
+
+    req_pool_indices = torch.arange(batch_size, dtype=torch.int32, device=torch_device)
 
     if is_context_phase:
-        seqlen = input_len
-        seqlen_q = input_len
-        headdim = 128 + 64
-        headdim_v = 128
-        q = torch.randn(
-            batch_size,
-            seqlen_q,
-            num_heads,
-            headdim,
-            device=device,
+        seq_lens = torch.full((batch_size,), input_len, dtype=torch.int32, device=torch_device)
+        prefix_lens = torch.zeros_like(seq_lens)
+        q_shape = (batch_size * input_len, local_num_heads, KV_LORA_RANK)
+        q = torch.randn(q_shape, device=torch_device, dtype=torch.bfloat16)
+        q_rope = torch.randn(
+            batch_size * input_len,
+            local_num_heads,
+            QK_ROPE_HEAD_DIM,
+            device=torch_device,
             dtype=torch.bfloat16,
-            requires_grad=True,
         )
-        k = torch.randn(
-            batch_size,
-            seqlen,
-            num_heads,
-            headdim,
-            device=device,
+        k_shape = (batch_size * input_len, 1, KV_LORA_RANK)
+        k = torch.randn(k_shape, device=torch_device, dtype=torch.bfloat16)
+        k_rope = torch.randn(
+            batch_size * input_len,
+            1,
+            QK_ROPE_HEAD_DIM,
+            device=torch_device,
             dtype=torch.bfloat16,
-            requires_grad=True,
         )
-        v = torch.randn(
-            batch_size,
-            seqlen,
-            num_heads,
-            headdim_v,
-            device=device,
-            dtype=torch.bfloat16,
-            requires_grad=True,
-        )
-        q, k, v = [x.detach().to(kv_cache_dtype).requires_grad_() for x in [q, k, v]]
+        v = k  # MLA stores latent cache, so v matches k_nope
 
-        q_unpad, k_unpad, v_unpad = [rearrange(x.detach(), "b s h d -> (b s) h d").requires_grad_() for x in [q, k, v]]
-        cu_seqlens_q = torch.arange(batch_size + 1, device=device, dtype=torch.int32) * seqlen_q
-        cu_seqlens_k = torch.arange(batch_size + 1, device=device, dtype=torch.int32) * seqlen
-
-        m1 = time_fwd(
-            flash_attn_varlen_func_v3,
-            q_unpad,
-            k_unpad,
-            v_unpad,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            seqlen_q,
-            seqlen,
-            causal=True,
-            window_size=(-1, -1),
-            softcap=0.0,
-            num_splits=0,
-            pack_gqa=None,
-            repeats=10,
-            verbose=True,
-            desc="Fav3",
+        forward_batch = ForwardBatch(
+            forward_mode=ForwardMode.EXTEND,
+            batch_size=batch_size,
+            input_ids=torch.zeros(batch_size, input_len, dtype=torch.long, device=torch_device),
+            req_pool_indices=req_pool_indices,
+            seq_lens=seq_lens,
+            out_cache_loc=token_matrix.reshape(-1).to(torch.int32),
+            seq_lens_sum=int(seq_lens.sum().item()),
+            seq_lens_cpu=seq_lens.cpu(),
+            extend_seq_lens=seq_lens,
+            extend_prefix_lens=prefix_lens,
+            extend_seq_lens_cpu=seq_lens.cpu(),
+            extend_prefix_lens_cpu=prefix_lens.cpu(),
+            extend_num_tokens=int(seq_lens.sum().item()),
         )
-        latency = m1.mean * 1e3
     else:
-        latency = compare_a(
-            "flash_mla",
-            batch_size,
-            1,
-            torch.tensor([input_len for _ in range(batch_size)], dtype=torch.int32, device=device),
-            num_heads,
-            1,
-            512 + 64,
-            512,
-            True,
-            kv_cache_dtype,
-            device,
+        history_len = input_len
+        seq_lens = torch.full((batch_size,), history_len + 1, dtype=torch.int32, device=torch_device)
+        forward_batch = ForwardBatch(
+            forward_mode=ForwardMode.DECODE,
+            batch_size=batch_size,
+            input_ids=torch.zeros(batch_size, 1, dtype=torch.long, device=torch_device),
+            req_pool_indices=req_pool_indices,
+            seq_lens=seq_lens,
+            out_cache_loc=token_matrix[:, history_len:].reshape(-1).to(torch.int32),
+            seq_lens_sum=int(seq_lens.sum().item()),
+            seq_lens_cpu=seq_lens.cpu(),
         )
+
+        if history_len > 0:
+            history_loc = token_matrix[:, :history_len].reshape(-1).contiguous()
+            cache_k = torch.randn(
+                history_loc.numel(),
+                1,
+                KV_LORA_RANK,
+                device=torch_device,
+                dtype=torch.bfloat16,
+            )
+            cache_k_rope = torch.randn(
+                history_loc.numel(),
+                1,
+                QK_ROPE_HEAD_DIM,
+                device=torch_device,
+                dtype=torch.bfloat16,
+            )
+            kv_pool.set_mla_kv_buffer(
+                layer,
+                history_loc.to(torch.int64),
+                cache_k,
+                cache_k_rope,
+            )
+
+        q = torch.randn(batch_size, local_num_heads, KV_LORA_RANK, device=torch_device, dtype=torch.bfloat16)
+        q_rope = torch.randn(batch_size, local_num_heads, QK_ROPE_HEAD_DIM, device=torch_device, dtype=torch.bfloat16)
+        k = torch.randn(batch_size, 1, KV_LORA_RANK, device=torch_device, dtype=torch.bfloat16)
+        k_rope = torch.randn(batch_size, 1, QK_ROPE_HEAD_DIM, device=torch_device, dtype=torch.bfloat16)
+        v = k
+        q = q.view(batch_size * 1, local_num_heads, KV_LORA_RANK)
+        q_rope = q_rope.view(batch_size * 1, local_num_heads, QK_ROPE_HEAD_DIM)
+
+    forward_batch.req_to_token_pool = req_to_token_pool
+    forward_batch.token_to_kv_pool = kv_pool
+    forward_batch.attn_backend = attn_backend
+    attn_backend.init_forward_metadata(forward_batch)
+
+    latency = benchmark_layer(layer, forward_batch, q, k, v, q_rope, k_rope)
 
     if is_context_phase:
         isl = input_len
@@ -349,17 +365,13 @@ def run_mla(
         isl = 1
         step = input_len
 
-    if kv_cache_dtype == torch.bfloat16:
-        str_type = "float16"
-    else:
-        str_type = "fp8"
-
+    str_type = "float16" if kv_cache_dtype == torch.bfloat16 else "fp8"
     log_perf(
         item_list=[
             {
                 "mla_dtype": "float16",
                 "kv_cache_dtype": str_type,
-                "num_heads": num_heads,
+                "num_heads": local_num_heads,
                 "batch_size": batch_size,
                 "isl": isl,
                 "tp_size": tp_size,
@@ -371,6 +383,6 @@ def run_mla(
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name=f"mla_{'context' if is_context_phase else 'generation'}",
-        kernel_source="default",
+        kernel_source="flash_attention",
         perf_filename=perf_filename,
     )

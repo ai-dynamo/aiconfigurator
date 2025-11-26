@@ -5,6 +5,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
+import numpy as np
 import pandas as pd
 
 from aiconfigurator.sdk import common
@@ -219,6 +220,76 @@ class BaseBackend(ABC):
         summary.set_summary_df(summary_df)
 
         return summary
+
+    def _get_ctx_tokens_list_for_agg_sweep(
+        self,
+        isl: int,
+        ctx_stride: int,
+        enable_chunked_prefill: bool,
+        max_normal_ctx_tokens: int = 8192,
+        max_ctx_tokens_multiple_of_isl: int = 2,
+        max_ctx_tokens_small_search_steps: int = 16,
+        max_ctx_tokens_search_steps: int = 8,
+    ) -> list[int]:
+        """
+        Generate a list of num_context_tokens to sweep for agg inference.
+
+        Args:
+            isl: Target input sequence length during inference.
+            ctx_stride: Default stride for context_tokens to sweep, ignored if enable_chunked_prefill is True.
+            enable_chunked_prefill: Whether the inference framework will have chunked_prefill enabled.
+            max_normal_ctx_tokens: boundary at which to increase the stride for faster sweeping.
+            max_ctx_tokens_multiple_of_isl: Maximum multiple of isl to consider for ctx tokens.
+            max_ctx_tokens_small_search_steps: Maximum search steps under max_normal_ctx_tokens.
+            max_ctx_tokens_large_search_steps: Maximum search steps over max_normal_ctx_tokens.
+        Returns:
+            Sorted list of num_context_tokens to sweep.
+        """
+
+        # Largest ctx_tokens to consider for sweeping.
+        max_ctx_tokens = max(max_normal_ctx_tokens, isl * max_ctx_tokens_multiple_of_isl)
+
+        # Sweep stride under max_normal_ctx_tokens.
+        ctx_stride = max(ctx_stride, max_normal_ctx_tokens // max_ctx_tokens_small_search_steps)
+
+        # Sweep stride once ctx_tokens is larger than max_normal_ctx_tokens.
+        ctx_stride_large = max(
+            1024,
+            ctx_stride,
+            max_ctx_tokens // max_ctx_tokens_search_steps,
+        )
+
+        if not enable_chunked_prefill:
+            new_ctx_stride = max(isl, ctx_stride)
+            new_ctx_stride_large = int(np.ceil(ctx_stride_large / isl) * isl)
+            logger.debug(
+                f"enable_chunked_prefill is off, override ctx_stride: from {ctx_stride} to {new_ctx_stride}, "
+                f"ctx_stride_large: from {ctx_stride_large} to {new_ctx_stride_large}"
+            )
+            ctx_stride = new_ctx_stride
+            ctx_stride_large = new_ctx_stride_large
+
+        # prepare ctx_tokens_list
+        ctx_tokens_list = []
+        ctx_tokens = 0
+        while True:
+            if ctx_tokens < max_normal_ctx_tokens:
+                ctx_tokens += ctx_stride
+            else:
+                ctx_tokens += ctx_stride_large
+
+            if ctx_tokens > max_ctx_tokens:
+                break
+
+            ctx_tokens_list.append(ctx_tokens)
+
+        # add those just match the multiple of isl
+        for i in range(1, max_ctx_tokens_multiple_of_isl + 1):
+            ctx_tokens = isl * i
+            if ctx_tokens not in ctx_tokens_list:
+                ctx_tokens_list.append(ctx_tokens)
+        ctx_tokens_list.sort()
+        return ctx_tokens_list
 
     @abstractmethod
     def run_agg(
