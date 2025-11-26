@@ -1930,7 +1930,13 @@ class PerfDatabase:
         """
         Set the default sol mode
         """
-        self._default_sol_mode = mode
+        if mode != self._default_sol_mode:
+            # Clear cached query methods since default sol mode affects the results
+            for attr_name in dir(self):
+                attr = getattr(self, attr_name)
+                if hasattr(attr, "cache_clear") and callable(attr):
+                    attr.cache_clear()
+            self._default_sol_mode = mode
 
     def get_default_sol_mode(self) -> common.SOLMode:
         """
