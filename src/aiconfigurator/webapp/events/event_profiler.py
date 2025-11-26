@@ -43,7 +43,7 @@ def setup_profiling_events(components):
     generate_btn = components["generate_btn"]
 
     # Add checkbox for Select button control
-    allow_confirm = gr.Checkbox(value=True, visible=False)
+    allow_confirm = gr.Checkbox(value=False, visible=False)
 
     # Prepare inputs for the generate function
     inputs = [

@@ -80,7 +80,7 @@ def create_standalone_viewer():
 
             ✅ **"Select" button** works - click it to print datapoint to console
 
-            ❌ **"Show Config" button** is hidden per requirements
+            ❌ **"Show Config" button** can be hidden by requirements
             """
         )
 
