@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import functools
 import logging
 import warnings
 
@@ -370,14 +371,15 @@ class DisaggInferenceSession:
                 possible disagg config and perf that matches SLA.
         """
 
+        # minor perf optimization: convert num_gpu_list to a set to speed up lookup
+        num_gpu_set = set[int](num_gpu_list) if num_gpu_list else set()
+
+        @functools.lru_cache(maxsize=8192)
         def _match_workers(
             prefill_throughput: float,
             prefill_gpus: int,
             decode_throughput: float,
             decode_gpus: int,
-            prefill_num_worker_list: list[int],
-            decode_num_worker_list: list[int],
-            num_gpu_list: list[int] | None,
             rate_matching_prefill_degradation_factor: float,
             rate_matching_decode_degradation_factor: float,
         ) -> tuple[int, int]:
@@ -386,12 +388,10 @@ class DisaggInferenceSession:
             """
             prefill_opt_num_worker, decode_opt_num_worker = -1, -1
             throughput_per_gpu_max = 0
-            # minor perf optimization: convert num_gpu_list to a set to speed up lookup
-            num_gpu_set = set(num_gpu_list) if num_gpu_list is not None else None
             for decode_num_worker in decode_num_worker_list:
                 for prefill_num_worker in prefill_num_worker_list:
                     num_gpu = prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker
-                    if num_gpu_set is not None and num_gpu not in num_gpu_set:
+                    if num_gpu not in num_gpu_set:
                         continue
 
                     prefill_throughput_corrected = (
@@ -566,9 +566,6 @@ class DisaggInferenceSession:
                             prefill_gpus=prefill_gpus,
                             decode_throughput=decode_throughput,
                             decode_gpus=decode_gpus,
-                            prefill_num_worker_list=prefill_num_worker_list,
-                            decode_num_worker_list=decode_num_worker_list,
-                            num_gpu_list=num_gpu_list,
                             rate_matching_prefill_degradation_factor=rate_matching_prefill_degradation_factor,
                             rate_matching_decode_degradation_factor=rate_matching_decode_degradation_factor,
                         )
