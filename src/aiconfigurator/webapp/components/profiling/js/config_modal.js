@@ -1,5 +1,6 @@
 /**
  * Configuration modal display and copy functionality.
+ * Modal is injected outside Gradio container to avoid .prose style conflicts.
  */
 
 /**
@@ -22,6 +23,14 @@ window.showConfig = function(button) {
     const content = document.getElementById('configContent');
     if (modal && content) {
         content.textContent = decodedConfig;
+        
+        // Apply highlight.js YAML syntax highlighting
+        if (typeof hljs !== 'undefined' && hljs.highlightAll) {
+            hljs.highlightAll();
+        } else {
+            console.error('[Profiling] Highlight.js not found');
+        }
+        
         modal.style.display = 'block';
     }
 };
@@ -157,4 +166,3 @@ window.addEventListener('click', function(event) {
         window.closeConfigModal();
     }
 });
-

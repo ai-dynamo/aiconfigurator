@@ -17,10 +17,42 @@ const tables = {
 };
 
 /**
+ * Inject config modal directly into document.body (outside Gradio container)
+ * This prevents Gradio's .prose styles from affecting highlight.js
+ */
+function injectConfigModal() {
+    if (document.getElementById('configModal')) {
+        return; // Already injected
+    }
+    
+    const modalHTML = `
+<div id="configModal" class="config-modal">
+    <div class="config-modal-content">
+        <div class="config-modal-header">
+            <h3>Configuration YAML</h3>
+            <button class="config-modal-close" onclick="closeConfigModal()">&times;</button>
+        </div>
+        <div class="config-modal-body">
+            <pre><code id="configContent" class="language-yaml"></code></pre>
+        </div>
+        <div class="config-modal-footer">
+            <button class="config-action-btn" onclick="copyConfig()">Copy to Clipboard</button>
+            <button class="config-action-btn" onclick="downloadConfig()">Download</button>
+        </div>
+    </div>
+</div>`;
+    
+    document.body.insertAdjacentHTML('beforeend', modalHTML);
+}
+
+/**
  * Initialize all visualizations from JSON data
  */
 function initializeVisualizations(jsonData) {
     waitForLibraries(() => {
+        // Inject modal outside Gradio container
+        injectConfigModal();
+        
         const data = typeof jsonData === 'string' ? JSON.parse(jsonData) : jsonData;
         _initializeVisualizationsInternal(data);
     });
