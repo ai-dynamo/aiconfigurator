@@ -93,6 +93,68 @@ def create_performance_results_section():
             gr.HTML('<div id="cost_table_wrapper"></div>')
 
 
+def _setup_button_validation(generate_btn, model_name_components, model_system_components, runtime_config_components):
+    """
+    Setup validation to enable the generate button only when all required fields are filled.
+
+    Args:
+        generate_btn: The generate button component
+        model_name_components: Model name components dictionary
+        model_system_components: System components dictionary
+        runtime_config_components: Runtime config components dictionary
+    """
+
+    def validate_fields(model_name, system, backend, version, min_gpu, max_gpu, gpus_per_node, isl, osl, max_ctx):
+        """Check if all required fields are filled."""
+        # Check dropdowns - all must be selected
+        dropdowns_filled = all([model_name, system, backend, version])
+
+        # Check number fields - must have valid numeric values (not None, not empty string)
+        numbers_filled = all(
+            [
+                min_gpu is not None and min_gpu != "",
+                max_gpu is not None and max_gpu != "",
+                gpus_per_node is not None and gpus_per_node != "",
+                isl is not None and isl != "",
+                osl is not None and osl != "",
+                max_ctx is not None and max_ctx != "",
+            ]
+        )
+
+        return gr.update(interactive=dropdowns_filled and numbers_filled)
+
+    # Get all required components
+    required_inputs = [
+        model_name_components["model_name"],
+        model_system_components["system"],
+        model_system_components["backend"],
+        model_system_components["version"],
+        model_system_components["min_gpu_per_engine"],
+        model_system_components["max_gpu_per_engine"],
+        model_system_components["gpus_per_node"],
+        runtime_config_components["isl"],
+        runtime_config_components["osl"],
+        runtime_config_components["max_context_length"],
+    ]
+
+    # Attach change and blur listeners to all required fields
+    # - change: fires when value changes
+    # - blur: fires when field loses focus (catches clearing fields reliably)
+    for component in required_inputs:
+        component.change(
+            fn=validate_fields,
+            inputs=required_inputs,
+            outputs=generate_btn,
+        )
+        # Also listen to blur event to catch field clearing
+        if hasattr(component, "blur"):
+            component.blur(
+                fn=validate_fields,
+                inputs=required_inputs,
+                outputs=generate_btn,
+            )
+
+
 def create_setup_section(app_config):
     """
     Create the Setup Your Profiling Job section.
@@ -115,7 +177,7 @@ def create_setup_section(app_config):
         runtime_config_components = create_runtime_config(
             app_config, with_sla=True, max_context_length=True, prefix_length=False
         )
-        generate_btn = gr.Button("Generate Profiling Job", variant="primary")
+        generate_btn = gr.Button("Generate Profiling Job", variant="primary", interactive=False)
         status = gr.Textbox(
             label="Status",
             value="Ready to generate profiling plots",
@@ -123,6 +185,14 @@ def create_setup_section(app_config):
             show_label=False,
             lines=5,
         )
+
+    # Setup validation to enable button when all required fields are filled
+    _setup_button_validation(
+        generate_btn,
+        model_name_components,
+        model_system_components,
+        runtime_config_components,
+    )
 
     return {
         "introduction": introduction,
