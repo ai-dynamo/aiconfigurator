@@ -186,7 +186,7 @@ def disagg_pareto(
     """
     Find Pareto front for Disaggregated Inference.
     This is a proxy function calls into
-    DisaggInferenceSession.find_best_disagg_result_under_constraints.
+    DisaggInferenceSession.find_best    _disagg_result_under_constraints.
 
     Args:
         model_name: name of the model
@@ -360,6 +360,9 @@ def draw_pareto_to_string(
     y_max = 0.0
     x_max = 0.0
 
+    x_label = "tokens/s/user"
+    y_label = "tokens/s/gpu_cluster"
+
     for idx, entry in enumerate(series):
         df = entry.get("df")
         if df is None or df.empty:
@@ -368,14 +371,14 @@ def draw_pareto_to_string(
         marker = entry.get("marker") or markers[idx % len(markers)]
         label = entry.get("label") or f"series-{idx + 1}"
         plotext.plot(
-            df["tokens/s/user"],
-            df["tokens/s/gpu"],
+            df[x_label],
+            df[y_label],
             label=label,
             color=color,
             marker=marker,
         )
-        y_max = max(df["tokens/s/gpu"].max(), y_max)
-        x_max = max(df["tokens/s/user"].max(), x_max)
+        y_max = max(df[y_label].max(), y_max)
+        x_max = max(df[x_label].max(), x_max)
 
     if highlight is not None:
         highlight_df = highlight.get("df")
@@ -384,18 +387,18 @@ def draw_pareto_to_string(
             marker = highlight.get("marker") or "x"
             label = highlight.get("label") or "Best"
             plotext.plot(
-                highlight_df["tokens/s/user"],
-                highlight_df["tokens/s/gpu"],
+                highlight_df[x_label],
+                highlight_df[y_label],
                 label=label,
                 color=color,
                 marker=marker,
             )
-            y_max = max(highlight_df["tokens/s/gpu"].max(), y_max)
-            x_max = max(highlight_df["tokens/s/user"].max(), x_max)
+            y_max = max(highlight_df[y_label].max(), y_max)
+            x_max = max(highlight_df[x_label].max(), x_max)
 
     plotext.title(f"{title}: tokens/s/gpu vs tokens/s/user")
-    plotext.xlabel("tokens/s/user")
-    plotext.ylabel("tokens/s/gpu")
+    plotext.xlabel(x_label)
+    plotext.ylabel(y_label)
     plotext.grid(False)
 
     if y_max > 0.0 and x_max > 0.0:

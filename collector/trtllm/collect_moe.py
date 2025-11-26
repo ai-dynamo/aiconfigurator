@@ -3,12 +3,10 @@
 
 import glob
 import json
-import math
 import os
 
 import tensorrt_llm
 import torch
-import torch.nn.functional as F
 from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
@@ -16,7 +14,14 @@ from tensorrt_llm._torch.modules.fused_moe import RenormalizeMoeRoutingMethod, c
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
-from helper import get_sm_version, log_perf
+try:
+    from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+except ModuleNotFoundError:
+    import os
+    import sys
+
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
@@ -53,104 +58,6 @@ def cleanup_empty_json_files(directory):
 
     if deleted_count > 0:
         print(f"Total deleted {deleted_count} invalid JSON files from {directory}")
-
-
-def balanced_logits(num_tokens, num_experts, topk, device):
-    h_selected_experts = -torch.ones([num_tokens, topk]).to(torch.device(device))
-    stride = math.ceil(num_experts / topk)
-
-    for token_i in range(num_tokens):
-        for i in range(topk):
-            if num_tokens >= stride:
-                h_selected_experts[token_i][i] = (token_i + i * stride) % num_experts
-            else:
-                h_selected_experts[token_i][i] = (token_i * stride / num_tokens + i * stride) % num_experts
-
-    expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
-    router_logits = F.softmax(expert_map.bfloat16(), dim=1)
-    return router_logits
-
-
-def sample_power_law(size, alpha, xmin, xmax):
-    u = torch.rand(size)
-    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (1 / (1 - alpha))
-    return inv_cdf
-
-
-def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha, device):
-    if num_tokens * topk > num_experts:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8).to(torch.device(device))
-    else:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2).to(torch.device(device))
-
-    target_sum = num_tokens * topk
-
-    original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
-
-    target_distribution = original_distribution * target_sum
-
-    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
-
-    current_sum = num_tokens_per_expert.sum().item()
-    delta = target_sum - current_sum
-    if delta != 0:
-        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-
-        if delta > 0:
-            for i in range(delta):
-                expert_idx = sorted_indices[i % len(sorted_indices)]
-                num_tokens_per_expert[expert_idx] += 1
-        else:
-            for i in range(-delta):
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
-                if num_tokens_per_expert[expert_idx] > 0:
-                    num_tokens_per_expert[expert_idx] -= 1
-                else:
-                    num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -= 1
-
-    if len(num_tokens_per_expert) > 1:
-        sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
-        assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
-
-    with torch.no_grad():
-        conv1d = torch.nn.Conv1d(
-            in_channels=1,
-            out_channels=1,
-            kernel_size=num_experts // ep,
-            stride=num_experts // ep,
-            padding=0,
-            bias=False,
-        ).to(torch.device(device))
-        conv1d_weights = torch.tensor([1 for _ in range(num_experts // ep)]).to(torch.device(device))
-        conv1d.weight.copy_(conv1d_weights)
-
-    res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
-    max_ep_idx = torch.argmax(res).item()
-
-    if max_ep_idx != 0:
-        ep_group_size = num_experts // ep
-        num_tokens_per_expert_reshaped = num_tokens_per_expert.view(ep, ep_group_size)
-        num_tokens_per_expert_reshaped[0], num_tokens_per_expert_reshaped[max_ep_idx] = (
-            num_tokens_per_expert_reshaped[max_ep_idx].clone(),
-            num_tokens_per_expert_reshaped[0].clone(),
-        )
-        num_tokens_per_expert = num_tokens_per_expert_reshaped.view(-1)
-
-    if aic_debug == 2:
-        print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
-
-    _, num_tokens_per_expert_sorted_index = torch.sort(num_tokens_per_expert, descending=True)
-    expert_assignments = []
-    num_tokens_per_expert_sorted_index_lists = num_tokens_per_expert_sorted_index.tolist()
-    for expert_id in num_tokens_per_expert_sorted_index_lists:
-        expert_assignments.extend([expert_id] * num_tokens_per_expert[expert_id])
-
-    expert_assignments = torch.tensor(expert_assignments, dtype=torch.long).to(torch.device(device))
-    h_selected_experts = expert_assignments.reshape(topk, num_tokens).T
-
-    expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
-    router_logits = F.softmax(expert_map.bfloat16(), dim=1)
-    return router_logits
 
 
 def get_moe_test_cases():
@@ -320,6 +227,10 @@ def run_moe_torch(
     power_law_alpha=0.0,
     device="cuda:0",
 ):
+    device = torch.device(device)
+    torch.cuda.set_device(device)
+    torch.set_default_device(device)
+
     # moe type support float16, fp8_qdq, fp8_block, w4a8, nvfp4(not implemented yet)
     dtype = torch.bfloat16
     quant_group_size = 128
@@ -458,9 +369,7 @@ def run_moe_torch(
 
     hidden_states_max_tokens = torch.randn([num_tokens_lists[-1], hidden_size]).bfloat16().to(torch.device(device))
 
-    logits_max_tokens = balanced_logits(num_tokens_lists[-1], num_experts, topk, torch.device(device)).to(
-        router_logits_dtype
-    )
+    logits_max_tokens = balanced_logits(num_tokens_lists[-1], num_experts, topk).to(router_logits_dtype)
 
     # dty run
     torch.cuda.synchronize()

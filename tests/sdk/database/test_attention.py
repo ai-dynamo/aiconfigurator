@@ -86,6 +86,21 @@ class TestContextAttention:
         ][b]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
+    def test_query_context_attention_non_sol_mode_small_s(self, comprehensive_perf_db):
+        """
+        Test that query context attention works even when s is smaller than what exists
+        in the collected data.
+        """
+        # Testing s = 1, but in comprehensive_perf_db, smallest s is 16.
+        b, s, prefix, n, n_kv = 2, 1, 0, 16, 4
+        kv_cache_quant_mode = common.KVCacheQuantMode.float16
+        fmha_quant_mode = common.FMHAQuantMode.float16
+
+        result = comprehensive_perf_db.query_context_attention(
+            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
+        )
+        assert result > 0
+
     def test_query_context_attention_assertion_error(self, comprehensive_perf_db):
         """Test that n_kv > n raises assertion error."""
         with pytest.raises(AssertionError):
@@ -282,16 +297,29 @@ class TestGenerationMLA:
 
 
 def test_default_sol_mode(comprehensive_perf_db):
-    """Test setting and getting default SOL mode."""
+    """Test setting and getting default SOL mode, and that query cache is cleared when default mode is changed."""
     # Initially should be NON_SOL
     assert comprehensive_perf_db.get_default_sol_mode() == common.SOLMode.NON_SOL
+
+    non_sol_result = comprehensive_perf_db.query_context_attention(
+        1, 32, 0, 8, 4, common.KVCacheQuantMode.float16, common.FMHAQuantMode.float16
+    )
+    assert comprehensive_perf_db.query_context_attention.cache_info().currsize == 1
 
     # Set to SOL mode
     comprehensive_perf_db.set_default_sol_mode(common.SOLMode.SOL)
     assert comprehensive_perf_db.get_default_sol_mode() == common.SOLMode.SOL
+    # Cache should be cleared
+    assert comprehensive_perf_db.query_context_attention.cache_info().currsize == 0
 
     # Query should use default mode when not specified
-    result = comprehensive_perf_db.query_context_attention(
+    sol_result = comprehensive_perf_db.query_context_attention(
         1, 32, 0, 8, 4, common.KVCacheQuantMode.float16, common.FMHAQuantMode.float16
     )
-    assert isinstance(result, float)
+
+    cache_info = comprehensive_perf_db.query_context_attention.cache_info()
+    assert cache_info.misses == 1
+    assert cache_info.hits == 0
+    assert cache_info.currsize == 1
+    assert isinstance(sol_result, float)
+    assert sol_result != non_sol_result

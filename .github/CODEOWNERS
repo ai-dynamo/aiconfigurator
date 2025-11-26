@@ -5,72 +5,72 @@
 * @ai-dynamo/contributors-aiconfigurator
 
 # aic sdk
-/src @tianhaox @jasonqinzhou
-/src/aiconfigurator/sdk/backends/base_backend.py @tianhaox @Arsene12358
-/src/aiconfigurator/sdk/backends/factory.py @tianhaox @jasonqinzhou
-/src/aiconfigurator/sdk/backends/sglang_backend.py @xutizhou @AichenF @jasonqinzhou
-/src/aiconfigurator/sdk/backends/trtllm_backend.py @tianhaox @jasonqinzhou @ilyasher
-/src/aiconfigurator/sdk/backends/vllm_backend.py @jasonqinzhou @ilyasher @davilu-nvidia
-/src/aiconfigurator/sdk/common.py @Arsene12358 @simone-chen @xutizhou @AichenF @jasonqinzhou
-/src/aiconfigurator/sdk/config.py @YijiaZhao @tianhaox
-/src/aiconfigurator/sdk/inference_session.py @tianhaox @xutizhou @AichenF
-/src/aiconfigurator/sdk/inference_summary.py @tianhaox @jasonqinzhou
-/src/aiconfigurator/sdk/models.py @Arsene12358 @simone-chen @xutizhou @AichenF @YijiaZhao
-/src/aiconfigurator/sdk/operations.py @Arsene12358 @xutizhou @AichenF @YijiaZhao
-/src/aiconfigurator/sdk/pareto_analysis.py @xutizhou @AichenF @Arsene12358
-/src/aiconfigurator/sdk/perf_database.py @Arsene12358 @YijiaZhao @ilyasher @xutizhou @AichenF
-/src/aiconfigurator/sdk/task.py @tianhaox @jasonqinzhou @ilyasher
-/src/aiconfigurator/sdk/utils.py @tianhaox @jasonqinzhou @simone-chen
+/src @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/sdk/backends/base_backend.py @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/sdk/backends/factory.py @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/sdk/backends/sglang_backend.py @xutizhou @AichenF @jasonqinzhou @tianhaox @Arsene12358
+/src/aiconfigurator/sdk/backends/trtllm_backend.py @tianhaox @jasonqinzhou @ilyasher @Arsene12358
+/src/aiconfigurator/sdk/backends/vllm_backend.py @jasonqinzhou @ilyasher @davilu-nvidia @Arsene12358 @tianhaox
+/src/aiconfigurator/sdk/common.py @Arsene12358 @simone-chen @xutizhou @AichenF @jasonqinzhou @tianhaox
+/src/aiconfigurator/sdk/config.py @YijiaZhao @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/sdk/inference_session.py @tianhaox @xutizhou @AichenF @Arsene12358 @jasonqinzhou
+/src/aiconfigurator/sdk/inference_summary.py @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/sdk/models.py @Arsene12358 @simone-chen @xutizhou @AichenF @YijiaZhao @tianhaox @jasonqinzhou
+/src/aiconfigurator/sdk/operations.py @xutizhou @AichenF @YijiaZhao @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/sdk/pareto_analysis.py @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/sdk/perf_database.py @Arsene12358 @YijiaZhao @ilyasher @xutizhou @AichenF @tianhaox @jasonqinzhou
+/src/aiconfigurator/sdk/task.py @tianhaox @jasonqinzhou @ilyasher @Arsene12358
+/src/aiconfigurator/sdk/utils.py @tianhaox @jasonqinzhou @simone-chen @Arsene12358
 
 # cli
-/src/aiconfigurator/cli @Ethan-ES @tianhaox
+/src/aiconfigurator/cli @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
 
 # eval
-/src/aiconfigurator/eval @Ethan-ES @tianhaox
+/src/aiconfigurator/eval @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
 
 # webapp
-/src/aiconfigurator/webapp @tianhaox @xueh-nv
+/src/aiconfigurator/webapp @tianhaox @jasonqinzhou @Arsene12358
 
 # systems & data files
-/src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen
+/src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen @Arsene12358
 
 # model configs
-/src/aiconfigurator/model_configs @simone-chen @Arsene12358
+/src/aiconfigurator/model_configs @simone-chen @tianhaox @jasonqinzhou @Arsene12358
 
 # generator
-/src/aiconfigurator/generator @Ethan-ES @tianhaox
+/src/aiconfigurator/generator @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
 
 # collector
 /collector/ @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358
-/collector/deep_collector @xutizhou @AichenF
-/collector/sglang @xutizhou @AichenF
-/collector/slurm_comm_collector @YijiaZhao @Arsene12358
-/collector/trtllm @Arsene12358 @YijiaZhao
-/collector/vllm @jasonqinzhou @ilyasher @davilu-nvidia
-/collector/collect_all_reduce.py @Arsene12358 @YijiaZhao
-/collector/collect_comm.sh @Arsene12358 @YijiaZhao
-/collector/collect_nccl.py @YijiaZhao @Arsene12358
-/collector/collect.py @Arsene12358 @YijiaZhao
-/collector/helper.py @Arsene12358 @YijiaZhao @xutizhou @AichenF
-/collector/README.md @Arsene12358 @YijiaZhao
+/collector/deep_collector @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358
+/collector/sglang @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358 @YijiaZhao @davilu-nvidia
+/collector/slurm_comm_collector @YijiaZhao @Arsene12358 @tianhaox @jasonqinzhou
+/collector/trtllm @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou
+/collector/vllm @jasonqinzhou @ilyasher @davilu-nvidia @tianhaox @Arsene12358
+/collector/collect_all_reduce.py @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou
+/collector/collect_comm.sh @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou
+/collector/collect_nccl.py @YijiaZhao @Arsene12358 @tianhaox @jasonqinzhou
+/collector/collect.py @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou
+/collector/helper.py @Arsene12358 @YijiaZhao @xutizhou @AichenF @tianhaox @jasonqinzhou
+/collector/README.md @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou
 
 # docs
-/docs @tianhaox @jasonqinzhou
-/docs/add_a_new_model.md @Arsene12358 @tianhaox
-/docs/advanced_tunning.md @tianhaox @jasonqinzhou
-/docs/cli_user_guide.md @tianhaox @jasonqinzhou
-/docs/dynamo_deployment_guide.md @Ethan-ES @davilu-nvidia
+/docs @tianhaox @jasonqinzhou @Arsene12358
+/docs/add_a_new_model.md @Arsene12358 @tianhaox @jasonqinzhou
+/docs/advanced_tunning.md @tianhaox @jasonqinzhou @Arsene12358
+/docs/cli_user_guide.md @tianhaox @jasonqinzhou @Arsene12358
+/docs/dynamo_deployment_guide.md @Ethan-ES @davilu-nvidia @tianhaox @jasonqinzhou @Arsene12358
 
 # docker
-/docker @jasonqinzhou @anish-shanbhag @ilyasher @saturley-hall
+/docker @jasonqinzhou @anish-shanbhag @ilyasher @saturley-hall @tianhaox @Arsene12358
 
 # tests
 /tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @saturley-hall
 
 # tools
-/tools/automation @tianhaox @Ethan-ES
-/tools/sanity_check @tianhaox @YijiaZhao
-/tools/simple_sdk_demo @tianhaox @jasonqinzhou
+/tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358
+/tools/sanity_check @tianhaox @YijiaZhao @jasonqinzhou @Arsene12358
+/tools/simple_sdk_demo @tianhaox @jasonqinzhou @Arsene12358
 
 # misc
 /ATTRIBUTIONS.md @saturley-hall
@@ -85,4 +85,4 @@
 /.pre-commit-config.yaml @saturley-hall
 
 # CI/CD and workflows
-/.github/workflows @saturley-hall @tianhaox @jasonqinzhou
+/.github/workflows @saturley-hall @tianhaox @jasonqinzhou @Arsene12358

@@ -1,34 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import math
 
 import tensorrt_llm
 import torch
-import torch.nn.functional as F
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.modules.fused_moe import FusedMoE, RenormalizeMoeRoutingMethod
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 from torch.nn.parameter import Parameter
 
-from helper import get_sm_version, log_perf
+try:
+    from helper import balanced_logits, get_sm_version, log_perf
+except ModuleNotFoundError:
+    import os
+    import sys
 
-
-def balanced_logits(num_tokens, num_experts, topk):
-    h_selected_experts = -torch.ones([num_tokens, topk])
-    stride = math.ceil(num_experts / topk)
-
-    for token_i in range(num_tokens):
-        for i in range(topk):
-            if num_tokens >= stride:
-                h_selected_experts[token_i][i] = (token_i + i * stride) % num_experts
-            else:
-                h_selected_experts[token_i][i] = (token_i * stride / num_tokens + i * stride) % num_experts
-
-    expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
-    router_logits = F.softmax(expert_map.bfloat16(), dim=1)
-    return router_logits
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from helper import balanced_logits, get_sm_version, log_perf
 
 
 def get_moe_test_cases():

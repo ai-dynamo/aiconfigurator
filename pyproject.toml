@@ -146,6 +146,7 @@ ignore = [
     "RUF059",  # unpacked variable is never used
     "UP007",  # require using X | Y for type annotations
     "UP045", # require using X | None for type annotations
+    "B019", # forbid using functools.cache on class methods
 ]
 
 [tool.ruff.lint.isort]
