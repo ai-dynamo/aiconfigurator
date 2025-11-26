@@ -57,22 +57,3 @@ COST_TABLE_HEADERS = [
     "Cost ($)",
     "Action",
 ]
-
-# Modal HTML for config display
-CONFIG_MODAL_HTML = """
-<div id="configModal" class="config-modal">
-    <div class="config-modal-content">
-        <div class="config-modal-header">
-            <h3>Configuration YAML</h3>
-            <button class="config-modal-close" onclick="closeConfigModal()">&times;</button>
-        </div>
-        <div class="config-modal-body">
-            <pre id="configContent"></pre>
-        </div>
-        <div class="config-modal-footer">
-            <button class="config-action-btn" onclick="copyConfig()">Copy to Clipboard</button>
-            <button class="config-action-btn" onclick="downloadConfig()">Download</button>
-        </div>
-    </div>
-</div>
-"""

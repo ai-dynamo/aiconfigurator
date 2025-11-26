@@ -4,7 +4,6 @@ import gradio as gr
 
 from aiconfigurator.webapp.components.base import create_model_name_config, create_runtime_config, create_system_config
 from aiconfigurator.webapp.components.profiling.constants import (
-    CONFIG_MODAL_HTML,
     PLOT_INTERACTION_INSTRUCTIONS,
 )
 from aiconfigurator.webapp.events.event_profiler import setup_profiling_events
@@ -205,9 +204,8 @@ def create_setup_section(app_config):
 
 
 def inject_profiling_assets():
-    """Inject CSS and modal HTML for profiling visualization."""
+    """Inject CSS for profiling visualization. Modal is injected via JS to stay outside Gradio."""
     gr.HTML(_load_profiling_css())
-    gr.HTML(CONFIG_MODAL_HTML)
 
 
 def create_profiling_tab(app_config):

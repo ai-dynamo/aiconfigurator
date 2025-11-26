@@ -11,6 +11,9 @@ import math
 
 import yaml
 
+from aiconfigurator.generator import generate_backend_config
+from aiconfigurator.generator.inputs.schema import DynamoConfig
+
 # Constants
 DECODE_MAX_CONCURRENCY = 1024
 
@@ -26,7 +29,7 @@ def generate_config_yaml(
     batch_size: int = 1,
 ) -> str:
     """
-    Generate a config YAML string for a profiling data point.
+    Generate a k8s_deploy.yaml string for a profiling data point.
 
     Args:
         model_name: Model name (e.g., "QWEN3_32B")
@@ -39,8 +42,9 @@ def generate_config_yaml(
         batch_size: Batch size for the configuration
 
     Returns:
-        YAML string representation of the config
+        YAML string representation of the k8s_deploy.yaml config
     """
+    # Build the generator config (same structure as generator_config.yaml)
     config = {
         "model_name": model_name,
         "system_name": system,
@@ -68,7 +72,32 @@ def generate_config_yaml(
         },
     }
 
-    return yaml.dump(config, sort_keys=False, default_flow_style=False)
+    # Create dynamo config overrides (K8s-specific settings)
+    dynamo_overrides = DynamoConfig(
+        extras={
+            "k8s_namespace": "dynamo",
+            "k8s_image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0",
+            "k8s_model_cache": "pvc:model-cache",
+            "k8s_engine_mode": "inline",
+        }
+    )
+
+    # Generate artifacts using the backend generator
+    artifacts = generate_backend_config.from_runtime(
+        cfg=config,
+        backend=backend,
+        version=version,
+        overrides=dynamo_overrides,
+        save_dir=None,  # Don't save to disk
+    )
+
+    # Extract the k8s_deploy.yaml from the agg mode artifacts
+    if "agg" in artifacts.by_mode and "k8s_deploy.yaml" in artifacts.by_mode["agg"]:
+        k8s_yaml_dict = artifacts.by_mode["agg"]["k8s_deploy.yaml"]
+        # Convert dict to YAML string
+        return yaml.dump(k8s_yaml_dict, sort_keys=False, default_flow_style=False, width=4096)
+    else:
+        raise ValueError("Failed to generate k8s_deploy.yaml from artifacts")
 
 
 def validate_inputs(model_name, system, backend, version):
