@@ -43,7 +43,7 @@
 # collector
 /collector/ @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358
 /collector/deep_collector @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358
-/collector/sglang @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358
+/collector/sglang @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358 @YijiaZhao @davilu-nvidia
 /collector/slurm_comm_collector @YijiaZhao @Arsene12358 @tianhaox @jasonqinzhou
 /collector/trtllm @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou
 /collector/vllm @jasonqinzhou @ilyasher @davilu-nvidia @tianhaox @Arsene12358
