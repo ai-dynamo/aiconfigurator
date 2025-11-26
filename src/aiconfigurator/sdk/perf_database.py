@@ -2463,6 +2463,10 @@ class PerfDatabase:
         else:
             if tp_size == 1:
                 return 0.0
+            if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
+                # on GB200, we only have custom all reduce for up to tp4.
+                return self.query_nccl(quant_mode, tp_size, "all_reduce", size)
+
             comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
                 "AUTO"
             ]  # use AUTO for allreduce strategy

@@ -18,6 +18,7 @@ from aiconfigurator.generator.cli_args import add_config_generation_cli
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_tpot_constraint,
+    get_pareto_front,
 )
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 from aiconfigurator.sdk.utils import get_model_config_from_hf_id
@@ -308,10 +309,9 @@ def _execute_task_configs(
             logger.info("Task config: %s", task_config.pretty())
             task_result = runner.run(task_config)
             pareto_df = task_result["pareto_df"]
-            pareto_frontier_df = task_result["pareto_frontier_df"]
-            if pareto_frontier_df is not None and not pareto_frontier_df.empty:
+            if pareto_df is not None and not pareto_df.empty:
                 results[exp_name] = task_result
-                logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_frontier_df))
+                logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_df))
             else:
                 logger.warning(
                     "Experiment %s returned no results. The TTFT and TPOT constraints may need to be relaxed.", exp_name
@@ -328,9 +328,24 @@ def _execute_task_configs(
     pareto_fronts: dict[str, pd.DataFrame | None] = {}
     for name, task_result in results.items():
         pareto_df = task_result["pareto_df"]
-        pareto_frontier_df = task_result["pareto_frontier_df"]
         target_tpot = task_configs[name].config.runtime_config.tpot
         total_gpus = getattr(task_configs[name], "total_gpus", None) or 0
+
+        # Compute tokens/s/gpu_cluster for pareto_df
+        if pareto_df is not None and not pareto_df.empty:
+            pareto_df["tokens/s/gpu_cluster"] = (
+                pareto_df["tokens/s/gpu"]
+                * (total_gpus // pareto_df["num_total_gpus"])
+                * pareto_df["num_total_gpus"]
+                / total_gpus
+            )
+            # Extract pareto frontier using tokens/s/gpu_cluster
+            pareto_frontier_df = get_pareto_front(pareto_df, "tokens/s/user", "tokens/s/gpu_cluster").reset_index(
+                drop=True
+            )
+        else:
+            pareto_frontier_df = pd.DataFrame()
+
         group_by_key = "(d)parallel" if task_configs[name].serving_mode == "disagg" else "parallel"
         best_config_df = get_best_configs_under_tpot_constraint(  # based on all data points
             total_gpus=total_gpus,

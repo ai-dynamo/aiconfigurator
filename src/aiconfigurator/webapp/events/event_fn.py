@@ -627,7 +627,7 @@ class EventFn:
                     tp, pp, dp, moe_tp, moe_ep = prefill_parallel_config
                     if is_moe:
                         logger.info(
-                            f"enumerated prefill config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {{moe_ep}}"
+                            f"enumerated prefill config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {moe_ep}"
                         )
                     else:
                         logger.info(f"enumerated prefill config: tp {tp} pp {pp}")
@@ -636,7 +636,7 @@ class EventFn:
                     tp, pp, dp, moe_tp, moe_ep = decode_parallel_config
                     if is_moe:
                         logger.info(
-                            f"enumerated decode config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {{moe_ep}}"
+                            f"enumerated decode config: tp {tp} pp {pp} dp {dp} moe_tp {moe_tp} moe_ep {moe_ep}"
                         )
                     else:
                         logger.info(f"enumerated decode config: tp {tp} pp {pp}")
