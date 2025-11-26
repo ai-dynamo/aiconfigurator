@@ -154,9 +154,6 @@ def create_profiling_tab(app_config):
         # Create hidden UI components
         ui_components = create_profiling_ui_components()
 
-        # Inject CSS and modal
-        inject_profiling_assets()
-
         # Create setup section
         setup_components = create_setup_section(app_config)
 
@@ -169,4 +166,8 @@ def create_profiling_tab(app_config):
     # Combine all components
     components = {**setup_components, **ui_components}
     setup_profiling_events(components)
+
+    # Inject CSS and modal
+    inject_profiling_assets()
+
     return components

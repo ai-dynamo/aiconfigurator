@@ -210,6 +210,10 @@ def create_runtime_config(app_config, with_sla=False, max_context_length=False, 
 
     with gr.Accordion("Runtime config"):
         with gr.Row():
+            gr.HTML(
+                "<span style='color: var(--body-text-color-subdued);'>More inputs = more precise profiling results.</span>"
+            )
+        with gr.Row():
             isl = gr.Number(value=2048, label="input sequence length", interactive=True, required=True)
             osl = gr.Number(value=128, label="output sequence length", interactive=True, required=True)
             if prefix_length:
