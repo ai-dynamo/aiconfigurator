@@ -86,6 +86,21 @@ class TestContextAttention:
         ][b]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
+    def test_query_context_attention_non_sol_mode_small_s(self, comprehensive_perf_db):
+        """
+        Test that query context attention works even when s is smaller than what exists
+        in the collected data.
+        """
+        # Testing s = 1, but in comprehensive_perf_db, smallest s is 16.
+        b, s, prefix, n, n_kv = 2, 1, 0, 16, 4
+        kv_cache_quant_mode = common.KVCacheQuantMode.float16
+        fmha_quant_mode = common.FMHAQuantMode.float16
+
+        result = comprehensive_perf_db.query_context_attention(
+            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, sol_mode=common.SOLMode.NON_SOL
+        )
+        assert result > 0
+
     def test_query_context_attention_assertion_error(self, comprehensive_perf_db):
         """Test that n_kv > n raises assertion error."""
         with pytest.raises(AssertionError):

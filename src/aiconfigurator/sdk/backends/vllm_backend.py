@@ -16,10 +16,6 @@ from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
 
-MAX_NORMAL_CTX_TOKENS = 8192
-MAX_CTX_TOKENS_MULTIPLE_OF_ISL = 2
-MAX_CTX_TOKENS_SEARCH_STEPS = 8  # for ctx stride large for faster sweeping
-
 
 class VLLMBackend(BaseBackend):
     """
@@ -310,14 +306,6 @@ class VLLMBackend(BaseBackend):
         ctx_stride = kwargs.get("ctx_stride", 512)
         enable_chunked_prefill = kwargs.get("enable_chunked_prefill", False)
 
-        max_ctx_tokens = max(MAX_NORMAL_CTX_TOKENS, isl * MAX_CTX_TOKENS_MULTIPLE_OF_ISL)
-        # if ctx tokens is already larger than 2048, we need to increase ctx_stride for faster
-        # sweeping
-        ctx_stride_large = max(
-            1024,
-            ctx_stride,
-            max_ctx_tokens // MAX_CTX_TOKENS_SEARCH_STEPS,
-        )
         # when b is larger than 1024, the result is not good as the data collection is not enough
         # to cover this.
         b_list_default = (
@@ -330,15 +318,6 @@ class VLLMBackend(BaseBackend):
             + [1024]
         )
 
-        if not enable_chunked_prefill:
-            logger.debug(
-                f"enable_chunked_prefill is off, override ctx_stride: from {ctx_stride} to {isl}, "
-                f"ctx_stride_large: from {ctx_stride_large} to "
-                f"{np.ceil(ctx_stride_large / isl) * isl}"
-            )
-            ctx_stride = isl
-            ctx_stride_large = np.ceil(ctx_stride_large / isl) * isl
-
         # sweep for batch_size and ctx_tokens
         # ctx_tokens will have a step of ctx_stride. When it's larger than 8192, we will increase
         # the step to ctx_stride_large.
@@ -348,22 +327,7 @@ class VLLMBackend(BaseBackend):
         # during the loop, as b, ctx_tokens and system memory are monotonic, we can break the
         # inner loop when the system is oom.
         b_list = [b for b in b_list_default if b <= max_batch_size]
-        # prepare ctx_tokens_list
-        ctx_tokens_list = []
-        ctx_tokens = 0
-        while True:
-            ctx_tokens = (
-                (ctx_tokens + ctx_stride) if ctx_tokens < MAX_NORMAL_CTX_TOKENS else (ctx_tokens + ctx_stride_large)
-            )
-            if ctx_tokens > max_ctx_tokens:
-                break
-            ctx_tokens_list.append(ctx_tokens)
-        # add those just match the multiple of isl
-        for i in range(1, MAX_CTX_TOKENS_MULTIPLE_OF_ISL + 1):
-            ctx_tokens = isl * i
-            if ctx_tokens not in ctx_tokens_list:
-                ctx_tokens_list.append(ctx_tokens)
-        ctx_tokens_list.sort()
+        ctx_tokens_list = self._get_ctx_tokens_list_for_agg_sweep(isl, ctx_stride, enable_chunked_prefill)
 
         results_df = pd.DataFrame(columns=common.ColumnsAgg)
         results_dict_list = []
