@@ -154,8 +154,6 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
 
             out = torch.empty((M, N), device=device, dtype=torch.bfloat16)
 
-            repeat_n = 5
-
             def gemm_op():
                 # Use the real SGLang kernel to quantize A dynamically
                 # This computes the scale and quantizes A in one fused kernel
@@ -193,8 +191,6 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
             b_fp8, scale_b_fp8 = sglang_scaled_fp8_quant(b_fp32, scale_b)
             b_fp8 = b_fp8.t()
 
-            repeat_n = 5
-
             def gemm_op():
                 # Dynamic quantization for A (per-token by default)
                 scale_a = None
@@ -213,8 +209,6 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
 
         b_fp32 = (torch.rand(N, K, dtype=torch.float32, device=device) - 0.5) * 2 * fp16_max
         b_fp16 = b_fp32.clamp(min=fp16_min, max=fp16_max).to(torch.float16)
-
-        repeat_n = 5
 
         def gemm_op():
             return F.linear(a_fp16, b_fp16, None)
@@ -237,8 +231,6 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
         b_int8, scale_b = per_token_quant_int8(b_fp16)
         b_int8 = b_int8.t()  # Transpose to column-major format [K, N]
 
-        repeat_n = 5
-
         def gemm_op():
             # Dynamically quantize activation, then run int8 GEMM
             # a_int8: [M, K], b_int8: [K, N] (column-major)
@@ -249,6 +241,7 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
 
     num_warmups = 3
     num_runs = 6
+    repeat_n = 5
 
     # Warmup outside of graph capture
     torch.cuda.synchronize()
