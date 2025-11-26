@@ -1226,9 +1226,11 @@ class PerfDatabase:
                                 ]  # n
                                 # currently, support max seq to 1M. Because all the system is linear for
                                 # now. it will be difficult to do square interpolation. Use more points
-                                # to do the approximation
+                                # to do the approximation.
+                                # Note: start from 1 to make sure any small ISL can be interpolated,
+                                # even if the ISL is smaller than what exists in the collected data.
                                 target_y_list = (
-                                    [16, 32, 64, 128, 256, 512, 1024, 2048]
+                                    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
                                     + [4096 + i * 2048 for i in range(14)]
                                     + [32768 + 16384 * i for i in range(6)]
                                     + [131072 + 32768 * i for i in range(12)]
