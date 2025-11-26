@@ -238,12 +238,7 @@ class TaskConfigFactory:
                     worker_config["moe_tp_list"] = [1, 2, 4, 8]
                     worker_config["moe_ep_list"] = [1]
             elif ctx.backend_name == "vllm":
-                worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
-                worker_config["tp_list"] = [1, 2, 4, 8]
-                worker_config["pp_list"] = [1, 2, 4, 8] if should_enable_pp else [1]
-                worker_config["dp_list"] = [1, 2, 4, 8]
-                worker_config["moe_tp_list"] = [1, 2, 4, 8]
-                worker_config["moe_ep_list"] = [1, 2, 4, 8]
+                raise NotImplementedError("MoE is not implemented for vllm backend")
             else:
                 raise ValueError(f"Invalid backend: {ctx.backend_name}")
 
@@ -356,21 +351,7 @@ class TaskConfigFactory:
                     decode_worker_config["moe_tp_list"] = parallel_config_list
                     decode_worker_config["moe_ep_list"] = [1]
             elif ctx.backend_name == "vllm":
-                parallel_config_list = [1, 2, 4, 8]
-
-                prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
-                prefill_worker_config["tp_list"] = parallel_config_list
-                prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
-                prefill_worker_config["dp_list"] = parallel_config_list
-                prefill_worker_config["moe_tp_list"] = parallel_config_list
-                prefill_worker_config["moe_ep_list"] = parallel_config_list
-
-                decode_worker_config["num_gpu_per_worker"] = parallel_config_list
-                decode_worker_config["tp_list"] = parallel_config_list
-                decode_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
-                decode_worker_config["dp_list"] = parallel_config_list
-                decode_worker_config["moe_tp_list"] = parallel_config_list
-                decode_worker_config["moe_ep_list"] = parallel_config_list
+                raise NotImplementedError("MoE is not implemented for vllm backend")
             else:
                 raise ValueError(f"Invalid backend: {ctx.backend_name}")
 
@@ -522,6 +503,7 @@ class TaskConfigFactory:
         use_specific_quant_mode: str | None = None,
     ) -> tuple[str, str, str, str, str]:
         gemm_quant_mode = "fp8_block"
+        moe_quant_mode = "fp8_block"
         kvcache_quant_mode = "fp8"
         fmha_quant_mode = "float16" if model_name in ["DEEPSEEK_V3", "KIMI_K2"] else "fp8"
         comm_quant_mode = "half"
@@ -554,14 +536,13 @@ class TaskConfigFactory:
 
         if model_name in ["DEEPSEEK_V3", "KIMI_K2"]:
             fmha_quant_mode = "float16"
-
         if (
             any(keyword in model_name for keyword in ["MOE_Mixtral", "QWEN2", "LLAMA"])
             and sm_version < 100
             and sm_version >= 89
         ):
-            gemm_quant_mode = fp8_gemm_quant
-            moe_quant_mode = fp8_gemm_quant
+            gemm_quant_mode = "fp8"
+            moe_quant_mode = "fp8"
 
         if use_specific_quant_mode is not None:
             if use_specific_quant_mode != "w4afp8":
@@ -856,8 +837,8 @@ class TaskConfig:
         """
 
         # TODO: add more support matrix based validation
-        if self.backend_name == "vllm" and get_model_family(self.model_name) == "DEEPSEEK":
-            raise NotImplementedError("AIConfigurator does not yet support DEEPSEEK models for VLLM backend.")
+        if check_is_moe(self.model_name) and self.backend_name == "vllm":
+            raise NotImplementedError("AIConfigurator does not yet support MOE models for VLLM backend.")
 
     def pretty(self) -> str:
         def _convert(obj: Any) -> Any:

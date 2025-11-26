@@ -253,7 +253,7 @@ def test_load_moe_data_nonexistent(tmp_path):
     """
     fake_path = tmp_path / "no_moe.csv"
     result = load_moe_data(str(fake_path))
-    assert result == (None, None)
+    assert result is None
 
 
 def test_load_moe_data_basic(tmp_path):
