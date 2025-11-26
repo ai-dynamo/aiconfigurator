@@ -160,8 +160,8 @@ def create_profiling_tab(app_config):
         # Create setup section
         setup_components = create_setup_section(app_config)
 
-    # Create performance results section (outside the tab to be at accordion level)
-    create_performance_results_section()
+        # Create performance results section
+        create_performance_results_section()
 
     # Load JavaScript when profiling tab is selected
     profiling_tab.select(fn=None, js=_load_profiling_javascript())
