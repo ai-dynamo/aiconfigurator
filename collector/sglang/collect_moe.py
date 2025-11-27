@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import itertools
 import os
 from typing import TypedDict
 
@@ -15,12 +16,16 @@ from sglang.srt.layers.moe.topk import TopKConfig, select_experts
 from sglang.srt.utils import is_hip
 
 try:
+    from common_test_cases import get_common_moe_test_cases
+
     from helper import balanced_logits, log_perf, power_law_logits_v3
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from common_test_cases import get_common_moe_test_cases
+
     from helper import balanced_logits, log_perf, power_law_logits_v3
 
 
@@ -28,129 +33,38 @@ _is_hip = is_hip()
 
 
 def get_moe_test_cases():
-    num_tokens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        12288,
-        16384,
-        20480,
-    ]
-    tp_list = [1, 2, 4, 8, 16, 32]
-    ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    num_gpu_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    alpha_list = [1.01, 1.2]
-    # hidden_size,inter_s,topk,num_expert, gated act
-    # [15360,30720,2,16],# GPT-MOE-1.8T
-    # [15360,3840,16,128],# GPT-MOE-1.8T-FineGrained
-    # [3584,2560,8,64],# Qwen2-57B
-    # [2048,1408,4,60], #qwen1.5_moe
-    # [2048,1408,6,64], #deepseekv1_moe
-    # [5120,1536,6,160], #deepseekv2
-    model_config_list = [
-        [4096, 14336, 2, 8, "MOE_Mixtral8x7B"],  # mixtral_8x7b
-        [6144, 16384, 2, 8, "MOE_Mixtral8x22B"],  # mixtral_8x22b
-        [7168, 2048, 8, 256, "DEEPSEEK_V3"],  # deepseekv3, will have 1 shared expert
-        [2048, 768, 8, 128, "QWEN3_30B_A3B"],  # qwen3-moe, 30b-a3b
-        [4096, 1536, 8, 128, "QWEN3_235B"],  # qwen3-moe, 235b-a22b
-        [6144, 2560, 8, 160, "QWEN3_480B"],  # qwen3-moe, 480b-a35b
-        [7168, 2048, 8, 384, "KIMI_K2"],  # kimi k2
-    ]
     moe_list = ["float16", "fp8_block"]
 
     test_cases = []
 
-    for num_gpu in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
-        for moe_type in moe_list:
-            for num_token in num_tokens:
-                for model_config in model_config_list:
-                    hs, inter_s, topk, num_experts, model_name = model_config
-                    for tp in tp_list:
-                        # QWEN3_30B_A3B: exclude tp >= 8 as they are not used for actual deployments
-                        if model_name == "QWEN3_30B_A3B" and tp >= 8:
-                            continue
-                        for ep in ep_list:
-                            if tp * ep != num_gpu:
-                                continue
-                            if ep > num_experts:
-                                continue
-                            # we need to ensure inter_s can be divided by tp.
-                            if inter_s % tp != 0:
-                                continue
-                            for power_law_alpha in alpha_list:
-                                test_cases.append(
-                                    [
-                                        moe_type,
-                                        num_token,
-                                        hs,
-                                        inter_s,
-                                        topk,
-                                        num_experts,
-                                        tp,
-                                        ep,
-                                        False,
-                                        model_name,
-                                        "moe_perf.txt",
-                                        "power_law",
-                                        power_law_alpha,
-                                    ]
-                                )
-                            # test_cases.append(
-                            #     [
-                            #         moe_type,
-                            #         num_token,
-                            #         hs,
-                            #         inter_s,
-                            #         topk,
-                            #         num_experts,
-                            #         tp,
-                            #         ep,
-                            #         False,
-                            #         model_name,
-                            #         "moe_perf.txt",
-                            #         "balanced",
-                            #         0,
-                            #     ]
-                            # )
-                            # test_cases.append(
-                            #     [
-                            #         moe_type,
-                            #         num_token,
-                            #         hs,
-                            #         inter_s,
-                            #         topk,
-                            #         num_experts,
-                            #         tp,
-                            #         ep,
-                            #         False,
-                            #         model_name,
-                            #         "moe_perf.txt",
-                            #         "uniform",
-                            #         0,
-                            #     ]
-                            # )
+    for common_moe_testcase in get_common_moe_test_cases():
+        if common_moe_testcase.token_expert_distribution != "power_law":
+            continue
+
+        model_name = common_moe_testcase.model_name
+        if model_name in ["GPT_OSS_20B", "GPT_OSS_120B"]:
+            continue
+
+        num_tokens_list = [num_tokens for num_tokens in common_moe_testcase.num_tokens_list if num_tokens <= 20480]
+
+        for moe_type, num_tokens in itertools.product(moe_list, num_tokens_list):
+            test_cases.append(
+                [
+                    moe_type,
+                    num_tokens,
+                    common_moe_testcase.hidden_size,
+                    common_moe_testcase.inter_size,
+                    common_moe_testcase.topk,
+                    common_moe_testcase.num_experts,
+                    common_moe_testcase.tp,
+                    common_moe_testcase.ep,
+                    common_moe_testcase.model_name,
+                    "moe_perf.txt",
+                    common_moe_testcase.token_expert_distribution,
+                    common_moe_testcase.power_law_alpha,
+                ]
+            )
+
     return test_cases
 
 
@@ -370,7 +284,6 @@ def run_moe_torch(
     num_experts,
     moe_tp_size,
     moe_ep_size,
-    cutlass_min_latency_mode,
     model_name,
     perf_filename,
     distributed="power_law",

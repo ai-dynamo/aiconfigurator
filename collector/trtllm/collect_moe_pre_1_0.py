@@ -14,73 +14,23 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 from torch.nn.parameter import Parameter
 
 try:
+    from common_test_cases import get_common_moe_test_cases
+
     from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from common_test_cases import get_common_moe_test_cases
+
     from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 
 def get_moe_test_cases():
-    num_tokens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        12288,
-        16384,
-        20480,
-        32768,
-        65536,
-    ]
-    tp_list = [1, 2, 4, 8, 16, 32]
-    ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    num_gpu_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    alpha_list = [1.01, 1.2]
-    # hidden_size,inter_s,topk,num_expert, gated act
-    # [15360,30720,2,16],# GPT-MOE-1.8T
-    # [15360,3840,16,128],# GPT-MOE-1.8T-FineGrained
-    # [3584,2560,8,64],# Qwen2-57B
-    # [2048,1408,4,60], #qwen1.5_moe
-    # [2048,1408,6,64], #deepseekv1_moe
-    # [5120,1536,6,160], #deepseekv2
-    model_config_list = [
-        [4096, 14336, 2, 8, "MOE_Mixtral8x7B"],  # mixtral_8x7b
-        [6144, 16384, 2, 8, "MOE_Mixtral8x22B"],  # mixtral_8x22b
-        [7168, 2048, 8, 256, "DEEPSEEK_V3"],  # deepseekv3, will have 1 shared expert
-        [2048, 768, 8, 128, "QWEN3_30B_A3B"],  # qwen3-moe, 30b-a3b
-        [4096, 1536, 8, 128, "QWEN3_235B"],  # qwen3-moe, 235b-a22b
-        [6144, 2560, 8, 160, "QWEN3_480B"],  # qwen3-moe, 480b-a35b
-        [7168, 2048, 8, 384, "KIMI_K2"],  # kimi k2
-    ]
-
     moe_list = ["float16"]
-
     if get_sm_version() > 86:
         moe_list += ["fp8"]
         if get_sm_version() < 100:
@@ -96,107 +46,57 @@ def get_moe_test_cases():
 
     test_cases = []
 
-    # currently, we support max-throughput for typical quantizations. support min-latency for nvfp4.
-    for num_gpu in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
-        for moe_type in moe_list:
-            for model_config in model_config_list:
-                hs, inter_s, topk, num_experts, model_name = model_config
-                for tp in tp_list:
-                    # QWEN3_30B_A3B: exclude tp >= 8 as they are not used for actual deployments
-                    if model_name == "QWEN3_30B_A3B" and tp >= 8:
-                        continue
-                    for ep in ep_list:
-                        if tp * ep != num_gpu:
-                            continue
-                        if ep > num_experts:
-                            continue
-                        if num_experts % ep != 0:
-                            continue
-                        # we need to ensure inter_s can be divided by tp.
-                        if inter_s % tp != 0:
-                            continue
-                        # w4afp8 requires k shape to be multiple of 128
-                        if moe_type == "w4afp8" and inter_s // tp % 128 != 0:
-                            continue
-                        if moe_type == "nvfp4":
-                            if inter_s // tp % 128 != 0:
-                                continue
-                            # FIXME: recent version only supports SM100 for min-latency mode.
-                            # current support, DS router only support up to 256 experts.
-                            # Renormalize router only support <=128 experts. trtllmgen kernels only
-                            # support renormalize, ds and llama router.
-                            if get_sm_version() == 100 and num_experts <= 256:
-                                for power_law_alpha in alpha_list:
-                                    test_cases.append(
-                                        [
-                                            moe_type,
-                                            num_tokens,
-                                            hs,
-                                            inter_s,
-                                            topk,
-                                            num_experts,
-                                            tp,
-                                            ep,
-                                            True,
-                                            model_name,
-                                            "moe_perf.txt",
-                                            "power_law",
-                                            power_law_alpha,
-                                        ]
-                                    )
-                                # test_cases.append(
-                                #     [
-                                #         moe_type,
-                                #         num_tokens,
-                                #         hs,
-                                #         inter_s,
-                                #         topk,
-                                #         num_experts,
-                                #         tp,
-                                #         ep,
-                                #         True,
-                                #         model_name,
-                                #         "moe_perf.txt",
-                                #         "balanced",
-                                #         0,
-                                #     ]
-                                # )
+    for common_moe_testcase in get_common_moe_test_cases():
+        model_name = common_moe_testcase.model_name
+        inter_s = common_moe_testcase.inter_size
+        moe_tp = common_moe_testcase.tp
 
-                        for power_law_alpha in alpha_list:
-                            test_cases.append(
-                                [
-                                    moe_type,
-                                    num_tokens,
-                                    hs,
-                                    inter_s,
-                                    topk,
-                                    num_experts,
-                                    tp,
-                                    ep,
-                                    False,
-                                    model_name,
-                                    "moe_perf.txt",
-                                    "power_law",
-                                    power_law_alpha,
-                                ]
-                            )
-                        # test_cases.append(
-                        #     [
-                        #         moe_type,
-                        #         num_tokens,
-                        #         hs,
-                        #         inter_s,
-                        #         topk,
-                        #         num_experts,
-                        #         tp,
-                        #         ep,
-                        #         False,
-                        #         model_name,
-                        #         "moe_perf.txt",
-                        #         "balanced",
-                        #         0,
-                        #     ]
-                        # )
+        if common_moe_testcase.token_expert_distribution != "power_law":
+            continue
+
+        for moe_type in moe_list:
+            if model_name in ["GPT_OSS_20B", "GPT_OSS_120B"]:
+                if moe_type != "w4a16_mxfp4":
+                    continue
+            else:
+                if moe_type == "w4a16_mxfp4":
+                    continue
+
+            # w4afp8 requires k shape to be multiple of 128
+            if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
+                continue
+
+            min_latency_mode_options = [False]
+
+            if moe_type == "nvfp4":
+                if inter_s // moe_tp % 128 != 0:
+                    continue
+                # FIXME: recent version only supports SM100 for min-latency mode.
+                # current support, DS router only support up to 256 experts.
+                # Renormalize router only support <=128 experts. trtllmgen kernels only
+                # support renormalize, ds and llama router.
+                if get_sm_version() == 100 and common_moe_testcase.num_experts <= 256:
+                    min_latency_mode_options.append(True)
+
+            for min_latency_mode in min_latency_mode_options:
+                test_cases.append(
+                    [
+                        moe_type,
+                        common_moe_testcase.num_tokens_list,
+                        common_moe_testcase.hidden_size,
+                        common_moe_testcase.inter_size,
+                        common_moe_testcase.topk,
+                        common_moe_testcase.num_experts,
+                        common_moe_testcase.tp,
+                        common_moe_testcase.ep,
+                        min_latency_mode,
+                        common_moe_testcase.model_name,
+                        "moe_perf.txt",
+                        common_moe_testcase.token_expert_distribution,
+                        common_moe_testcase.power_law_alpha,
+                    ]
+                )
+
     return test_cases
 
 
