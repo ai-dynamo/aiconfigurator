@@ -1188,6 +1188,7 @@ class TaskRunner:
                 serving_mode,
             )
             result = None
+            raise
 
         if result is None:
             logger.warning("No result found for %s in %s mode.", task_config.task_name, serving_mode)

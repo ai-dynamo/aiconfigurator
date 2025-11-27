@@ -1,0 +1,30 @@
+name: "Daily Support Matrix Test"
+
+on:
+  schedule:
+    # Run daily at 7 AM PT / 11 PM China / 3 PM UTC
+    - cron: "0 15 * * *"
+  workflow_dispatch: # Allow manual trigger (with no inputs)
+
+jobs:
+  test-support-matrix:
+    name: Test Support Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 480 # 8 hours
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Git LFS Pull
+        run: git lfs pull
+
+      - name: Build test container
+        run: |
+          docker build -f docker/Dockerfile -t aiconfigurator:test --target test .
+
+      - name: Run support matrix tests in container
+        run: |
+          docker run --name aic-support-matrix --env TEST_SUPPORT_MATRIX=true aiconfigurator:test \
+            pytest tests/sdk/support_matrix/test_support_matrix.py -v --tb=short
