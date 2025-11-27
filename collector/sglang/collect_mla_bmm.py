@@ -7,10 +7,15 @@ from sglang.srt.layers.quantization.fp8_kernel import (
     per_tensor_quant_mla_fp8,
 )
 
-from helper import log_perf
+from helper import get_sm_version, log_perf
 
 
 def get_mla_gen_pre_test_cases():
+    # MLA BMM requires SM90+ (Hopper) - skip on SM89 (L40S) and earlier
+    sm_version = get_sm_version()
+    if sm_version < 90:
+        return []
+
     test_cases = []
     gen_num_tokens = [
         1,
@@ -49,6 +54,11 @@ def get_mla_gen_pre_test_cases():
 
 
 def get_mla_gen_post_test_cases():
+    # MLA BMM requires SM90+ (Hopper) - skip on SM89 (L40S) and earlier
+    sm_version = get_sm_version()
+    if sm_version < 90:
+        return []
+
     test_cases = []
     ctx_num_tokens = [
         1,

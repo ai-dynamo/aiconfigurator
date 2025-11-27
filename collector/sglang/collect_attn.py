@@ -5,7 +5,7 @@ from typing import NamedTuple
 
 import torch
 
-from helper import log_perf
+from helper import get_sm_version, log_perf
 
 
 class Timing(NamedTuple):
@@ -25,6 +25,11 @@ def get_context_attention_test_cases():
     s_list = [16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 262144]
     n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
     n_kv_list = [0, 1, 2, 4, 8]
+
+    # Check SM version - FP8 attention requires SM90+
+    sm_version = get_sm_version()
+    skip_fp8 = sm_version < 90
+
     for n in sorted(n_list, reverse=True):
         for s in sorted(s_list, reverse=True):
             for b in sorted(b_list, reverse=True):
@@ -47,14 +52,21 @@ def get_context_attention_test_cases():
                     # in torch flow, int8 kvcache is not supported yet.
                     # fp16 kv cache, fp16 context fmha, is_context_phase
                     test_cases.append([b, s, n, num_kv_heads, 128, False, False, True, "context_attention_perf.txt"])
-                    test_cases.append([b, s, n, num_kv_heads, 128, True, False, True, "context_attention_perf.txt"])
-                    test_cases.append([b, s, n, num_kv_heads, 128, True, True, True, "context_attention_perf.txt"])
+
+                    # FP8 test cases - skip on SM89 (L40S) and earlier
+                    if not skip_fp8:
+                        test_cases.append([b, s, n, num_kv_heads, 128, True, False, True, "context_attention_perf.txt"])
+                        test_cases.append([b, s, n, num_kv_heads, 128, True, True, True, "context_attention_perf.txt"])
 
     return test_cases
 
 
 def get_generation_attention_test_cases():
     test_cases = []
+
+    # Check SM version - FP8 attention requires SM90+
+    sm_version = get_sm_version()
+    skip_fp8 = sm_version < 90
 
     # generation
     b_list = [
@@ -108,7 +120,9 @@ def get_generation_attention_test_cases():
             # fp8 kv cache, fp8 context fmha, is_context_phase
             for s in target_s_list:
                 test_cases.append([b, s, n, n, 128, False, False, False, "generation_attention_perf.txt"])
-                test_cases.append([b, s, n, n, 128, True, False, False, "generation_attention_perf.txt"])
+                # FP8 test cases - skip on SM89 (L40S) and earlier
+                if not skip_fp8:
+                    test_cases.append([b, s, n, n, 128, True, False, False, "generation_attention_perf.txt"])
 
     # XQA
     max_bsn = 8192 * 1024 * 2  # 2*1024*1024*1024/128/2
@@ -143,7 +157,9 @@ def get_generation_attention_test_cases():
                 # fp8 kv cache, fp8 context fmha, is_context_phase
                 for s in target_s_list:
                     test_cases.append([b, s, n, n_kv, 128, False, False, False, "generation_attention_perf.txt"])
-                    test_cases.append([b, s, n, n_kv, 128, True, False, False, "generation_attention_perf.txt"])
+                    # FP8 test cases - skip on SM89 (L40S) and earlier
+                    if not skip_fp8:
+                        test_cases.append([b, s, n, n_kv, 128, True, False, False, "generation_attention_perf.txt"])
     return test_cases
 
 

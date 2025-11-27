@@ -10,12 +10,21 @@ import triton
 from einops import rearrange
 
 # pip install flashinfer-python, flash_mla
-from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+# FlashMLA requires SM90+ (Hopper) - will fail to import on SM89 (L40S)
+try:
+    from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+
+    FLASH_MLA_AVAILABLE = True
+except ImportError:
+    FLASH_MLA_AVAILABLE = False
+    flash_mla_with_kvcache = None
+    get_mla_metadata = None
+
 from sgl_kernel.flash_attn import flash_attn_varlen_func as flash_attn_varlen_func_v3
 from triton.testing import do_bench
 
 # cudnn = None
-from helper import log_perf
+from helper import get_sm_version, log_perf
 
 
 class Timing(NamedTuple):
@@ -26,6 +35,11 @@ DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TR
 
 
 def get_context_mla_test_cases():
+    # FlashMLA requires SM90+ (Hopper) - skip on SM89 (L40S) and earlier
+    sm_version = get_sm_version()
+    if sm_version < 90 or not FLASH_MLA_AVAILABLE:
+        return []
+
     dtype_list = [torch.bfloat16, torch.float8_e4m3fn]
     test_cases = []
     n_list = [64, 128]
@@ -77,6 +91,11 @@ def get_context_mla_test_cases():
 
 
 def get_generation_mla_test_cases():
+    # FlashMLA requires SM90+ (Hopper) - skip on SM89 (L40S) and earlier
+    sm_version = get_sm_version()
+    if sm_version < 90 or not FLASH_MLA_AVAILABLE:
+        return []
+
     dtype_list = [torch.bfloat16, torch.float8_e4m3fn]
     test_cases = []
     n_list = [64, 128]

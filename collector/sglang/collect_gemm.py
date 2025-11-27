@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from deep_gemm import get_col_major_tma_aligned_tensor
 from sgl_kernel import fp8_scaled_mm, int8_scaled_mm, sgl_per_tensor_quant_fp8
 
-from helper import log_perf
+from helper import get_sm_version, log_perf
 
 
 def get_gemm_test_cases():
@@ -56,7 +56,14 @@ def get_gemm_test_cases():
         12288,
     ]
     nk_list_ext = [16384, 65536]  # for coverage and interp purpose
-    gemm_list = ["int8_wo", "int4_wo", "fp8_block", "float16", "fp8"]
+
+    # Check SM version - fp8_block (DeepGEMM) requires SM90+ for TMA support
+    sm_version = get_sm_version()
+    if sm_version < 90:
+        # SM89 (L40S) doesn't have TMA - skip fp8_block
+        gemm_list = ["int8_wo", "int4_wo", "float16", "fp8"]
+    else:
+        gemm_list = ["int8_wo", "int4_wo", "fp8_block", "float16", "fp8"]
 
     test_cases = []
     for gemm_type in gemm_list:

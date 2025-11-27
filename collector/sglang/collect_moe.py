@@ -16,7 +16,7 @@ from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
 from sglang.srt.layers.moe.topk import TopKConfig, select_experts
 from sglang.srt.utils import is_hip
 
-from helper import log_perf
+from helper import get_sm_version, log_perf
 
 _is_hip = is_hip()
 
@@ -72,7 +72,14 @@ def get_moe_test_cases():
         [6144, 2560, 8, 160, "QWEN3_480B"],  # qwen3-moe, 480b-a35b
         [7168, 2048, 8, 384, "KIMI_K2"],  # kimi k2
     ]
-    moe_list = ["float16", "fp8_block"]
+
+    # Check SM version - fp8_block requires SM90+ (shared memory limit on SM89)
+    sm_version = get_sm_version()
+    if sm_version < 90:
+        # SM89 (L40S) has 101KB shared memory, fp8_block kernel needs 147KB
+        moe_list = ["float16"]
+    else:
+        moe_list = ["float16", "fp8_block"]
 
     test_cases = []
 
