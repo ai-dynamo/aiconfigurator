@@ -17,7 +17,7 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import EXIT_CODE_RESTART, balanced_logits, get_sm_version, log_perf, power_law_logits_v3
 except ModuleNotFoundError:
     import os
     import sys
@@ -25,11 +25,11 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import EXIT_CODE_RESTART, balanced_logits, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
-moe_tune_path = os.path.dirname(os.path.abspath(__file__))
+moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
 
 
 def cleanup_empty_json_files(directory):
@@ -153,6 +153,9 @@ def run_moe_torch(
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
+    if aic_debug == 1:
+        print("MOE Allocated GDRAM:", torch.cuda.memory_allocated(device.index) / 1024**2, "MB")
+        print("MOE Reserved GDRAM:", torch.cuda.memory_reserved(device) / 1024**2, "MB")
     # moe type support float16, fp8_qdq, fp8_block, w4a8, nvfp4(not implemented yet)
     dtype = torch.bfloat16
     quant_group_size = 128
@@ -289,14 +292,24 @@ def run_moe_torch(
             weights[f"{expert_id}.w3.bias"] = w3_bias[expert_id]
         moe.load_weights([weights])
 
-    hidden_states_max_tokens = torch.randn([num_tokens_lists[-1], hidden_size]).bfloat16().to(torch.device(device))
-
-    logits_max_tokens = balanced_logits(num_tokens_lists[-1], num_experts, topk).to(router_logits_dtype)
-
     # dty run
     torch.cuda.synchronize()
-    moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
-    torch.cuda.synchronize()
+    max_tokens = num_tokens_lists[-1]
+    for i in range(len(num_tokens_lists)):
+        max_tokens = num_tokens_lists[-i - 1]
+        try:
+            hidden_states_max_tokens = torch.randn([max_tokens, hidden_size]).bfloat16().to(torch.device(device))
+            logits_max_tokens = balanced_logits(max_tokens, num_experts, topk).to(router_logits_dtype)
+            moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
+            torch.cuda.synchronize()
+            if aic_debug == 1:
+                print(f"Successfully dry run for {max_tokens} tokens")
+            break
+        except Exception as e:
+            if i == len(num_tokens_lists) - 1:
+                RuntimeError(f"dry run failed for {max_tokens} tokens: {e}")
+            else:
+                continue
 
     if moe_type != "w4a16_mxfp4":
         cleanup_empty_json_files(moe_tune_path)
@@ -316,22 +329,38 @@ def run_moe_torch(
 
         if not cache_loaded:
             torch.cuda.synchronize()
-            with torch.inference_mode(), autotune(cache_path=cache_path, rank=torch.device(device).index):
-                moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
-            torch.cuda.synchronize()
+            for i in range(len(num_tokens_lists)):
+                max_tokens_for_tuning = num_tokens_lists[-i - 1]
+                if max_tokens_for_tuning > max_tokens:
+                    continue
+                else:
+                    try:
+                        with torch.inference_mode(), autotune(cache_path=cache_path, rank=torch.device(device).index):
+                            moe.forward(
+                                hidden_states_max_tokens[:max_tokens_for_tuning],
+                                logits_max_tokens[:max_tokens_for_tuning],
+                                do_finalize=not min_latency_mode,
+                            )
+                        torch.cuda.synchronize()
+                    except Exception as e:
+                        print(f"tune failed for {max_tokens_for_tuning} tokens: {e}, fallback to samller tokens")
+                        continue
 
+    del hidden_states_max_tokens, logits_max_tokens
+
+    reusable_graph = torch.cuda.CUDAGraph()
     for num_tokens in num_tokens_lists:
+        if num_tokens > max_tokens:
+            continue
         hidden_states = torch.randn([num_tokens, hidden_size]).bfloat16().to(torch.device(device))
         num_iter = 5 if distributed == "power_law" else 1
         if distributed == "power_law":
             actual_logits_list = [
-                power_law_logits_v3(
-                    num_tokens, num_experts, topk, moe_ep_size, power_law_alpha, torch.device(device)
-                ).to(router_logits_dtype)
+                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype)
                 for _ in range(num_iter)
             ]
         elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk, torch.device(device)).to(router_logits_dtype)
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype)
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 
@@ -341,24 +370,42 @@ def run_moe_torch(
             num_warmups = 1
             num_runs = 1
 
-        # capture
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        try:
+            # capture
+            with torch.cuda.graph(reusable_graph):
+                if distributed == "power_law":
+                    for actual_logits in actual_logits_list:
+                        moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+                else:
+                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+            # warmup
+            for i in range(num_warmups):
+                reusable_graph.replay()
+
+            start_event.record()
+            for i in range(num_runs):
+                reusable_graph.replay()
+            end_event.record()
+
+        except Exception as e:
+            print(f"cuda graph failed for {num_tokens} tokens: {e}, fallback to no cuda graph")
             if distributed == "power_law":
                 for actual_logits in actual_logits_list:
                     moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
             else:
-                moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-        # warmup
-        for i in range(num_warmups):
-            g.replay()
+                for i in range(num_warmups):
+                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+            start_event.record()
+            if distributed == "power_law":
+                for actual_logits in actual_logits_list:
+                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+            else:
+                for i in range(num_runs):
+                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+            end_event.record()
 
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
-        for i in range(num_runs):
-            g.replay()
-        end_event.record()
         torch.cuda.synchronize()
         latency = start_event.elapsed_time(end_event) / num_runs / num_iter
 
@@ -389,6 +436,39 @@ def run_moe_torch(
             kernel_source=source,
             perf_filename=perf_filename,
         )
+        if distributed == "power_law":
+            del actual_logits_list
+        else:
+            del actual_logits
 
-    del moe, hidden_states, actual_logits
-    torch.cuda.empty_cache()
+        del hidden_states, start_event, end_event
+
+        try:
+            reusable_graph.reset()
+            torch.cuda.synchronize()
+        except Exception as e:
+            print(f"Warning: Failed to reset CUDA Graph: {e}")
+
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
+    try:
+        reusable_graph.reset()
+        del reusable_graph
+    except Exception as e:
+        print(f"Warning: Failed to delete CUDA Graph: {e}")
+
+    del moe
+    import gc
+
+    for _ in range(5):
+        gc.collect()
+        torch.cuda.empty_cache()
+    AutoTuner.get().clear_cache()
+
+    # Exit the worker process after completing MOE task to ensure complete resource cleanup
+    # This forces OS to reclaim all GPU memory, CUDA context, and other resources
+    import sys
+
+    sys.exit(EXIT_CODE_RESTART)

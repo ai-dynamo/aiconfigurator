@@ -12,6 +12,10 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 from helper import get_sm_version, log_perf
 
 
+def pad_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y
+
+
 def get_gemm_test_cases():
     gemm_list = ["float16"]
     if get_sm_version() > 86:
@@ -88,7 +92,14 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
             w = torch.randn((n, k), dtype=torch.float16, device=torch.device(device))
             w_sf_global = (448 * 6) / w.abs().max().float()
             w_fp4, w_sf_block = torch.ops.trtllm.fp4_quantize(w, w_sf_global, 16, False)
-            w_sf_block_unswizzled = torch.ops.trtllm.nvfp4_block_scale_interleave_reverse(w_sf_block.cpu().view(k, -1))
+            if tensorrt_llm.__version__.startswith(("1.1.0", "1.2.0")):
+                w_sf_block_unswizzled = torch.ops.trtllm.block_scale_interleave_reverse(
+                    w_sf_block.cpu().view(pad_up(n, 128), -1)
+                )
+            else:
+                w_sf_block_unswizzled = torch.ops.trtllm.nvfp4_block_scale_interleave_reverse(
+                    w_sf_block.cpu().view(k, -1)
+                )
             weights = {
                 "weight": w_fp4.cpu(),
                 "weight_scale": w_sf_block_unswizzled.view(torch.float8_e4m3fn),
