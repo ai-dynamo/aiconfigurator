@@ -17,7 +17,7 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import EXIT_CODE_RESTART, balanced_logits, get_sm_version, log_perf, power_law_logits_v3
 except ModuleNotFoundError:
     import os
     import sys
@@ -25,7 +25,7 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import EXIT_CODE_RESTART, balanced_logits, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
@@ -149,8 +149,12 @@ def run_moe_torch(
     power_law_alpha=0.0,
     device="cuda:0",
 ):
+    device = torch.device(device)
+    torch.cuda.set_device(device)
+    torch.set_default_device(device)
+
     if aic_debug == 1:
-        print("MOE Allocated GDRAM:", torch.cuda.memory_allocated(torch.device(device).index) / 1024**2, "MB")
+        print("MOE Allocated GDRAM:", torch.cuda.memory_allocated(device.index) / 1024**2, "MB")
         print("MOE Reserved GDRAM:", torch.cuda.memory_reserved(device) / 1024**2, "MB")
     # moe type support float16, fp8_qdq, fp8_block, w4a8, nvfp4(not implemented yet)
     dtype = torch.bfloat16
@@ -295,9 +299,7 @@ def run_moe_torch(
         max_tokens = num_tokens_lists[-i - 1]
         try:
             hidden_states_max_tokens = torch.randn([max_tokens, hidden_size]).bfloat16().to(torch.device(device))
-            logits_max_tokens = balanced_logits(max_tokens, num_experts, topk, torch.device(device)).to(
-                router_logits_dtype
-            )
+            logits_max_tokens = balanced_logits(max_tokens, num_experts, topk).to(router_logits_dtype)
             moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
             torch.cuda.synchronize()
             if aic_debug == 1:
@@ -354,13 +356,11 @@ def run_moe_torch(
         num_iter = 5 if distributed == "power_law" else 1
         if distributed == "power_law":
             actual_logits_list = [
-                power_law_logits_v3(
-                    num_tokens, num_experts, topk, moe_ep_size, power_law_alpha, torch.device(device)
-                ).to(router_logits_dtype)
+                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype)
                 for _ in range(num_iter)
             ]
         elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk, torch.device(device)).to(router_logits_dtype)
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype)
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 
@@ -466,3 +466,9 @@ def run_moe_torch(
         gc.collect()
         torch.cuda.empty_cache()
     AutoTuner.get().clear_cache()
+
+    # Exit the worker process after completing MOE task to ensure complete resource cleanup
+    # This forces OS to reclaim all GPU memory, CUDA context, and other resources
+    import sys
+
+    sys.exit(EXIT_CODE_RESTART)

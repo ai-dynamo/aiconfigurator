@@ -40,7 +40,7 @@ from datetime import datetime
 import torch
 from tqdm import tqdm
 
-from helper import create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
+from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
 
 logger = None
 
@@ -84,7 +84,6 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     device = torch.device(f"cuda:{device_id}")
     torch.cuda.set_device(device_id)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
-    is_moe = "moe" in module_name.lower()
 
     # Process tasks
     while True:
@@ -129,9 +128,6 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             for handler in worker_logger.handlers:
                 handler.flush()
 
-        if is_moe:  # moe need to break the loop to avoid memory leak
-            break
-
 
 def parallel_run(tasks, func, num_processes, module_name="unknown"):
     """parallel runner with error collection"""
@@ -155,7 +151,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
         return p
 
     def create_process_exit_error(device_id, exit_code):
-        if exit_code in (None, 0):
+        if exit_code in (None, 0, EXIT_CODE_RESTART):
             return None
 
         if exit_code < 0:
@@ -226,8 +222,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             # Stall detection unchanged...
             if progress_value.value == last_progress:
                 stall_count += 1
-                stall_threshold = 30 if "moe" not in func.__name__ else 900
-                if stall_count > stall_threshold:
+                if stall_count > 30:
                     logger.warning(f"Progress stalled at {progress_value.value}/{len(tasks)}")
             else:
                 stall_count = 0
@@ -238,30 +233,18 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
                 if not p.is_alive():
                     exit_code = p.exitcode
                     process_stats[i]["restarts"] += 1
-                    is_moe = "moe" in module_name.lower()
-
-                    # Distinguish between normal exit (MOE task completion) and abnormal exit
-                    if exit_code == 0:
-                        if is_moe:
-                            # MOE task completes and exits normally - this is expected behavior
-                            logger.debug(
-                                f"Process {i} completed MOE task and exited normally "
-                                f"(completed tasks: {process_stats[i]['restarts']})"
-                            )
-                        else:
-                            # Non-MOE tasks should not exit normally (should keep running to process queue)
-                            logger.warning(
-                                f"Process {i} exited unexpectedly with code 0 "
-                                f"(tasks completed: {process_stats[i]['restarts']})"
-                            )
+                    if exit_code == EXIT_CODE_RESTART:
+                        logger.debug(
+                            f"Process {i} completed task and exited normally for release gpu memory"
+                            f"(completed tasks: {process_stats[i]['restarts']})"
+                        )
                     else:
                         logger.warning(
-                            f"Process {i} died abnormally (exit code: {exit_code}, "
+                            f"Process {i} died (exit code: {exit_code}, "
                             f"restarts: {process_stats[i]['restarts']}, "
                             f"errors: {len(process_stats[i]['errors'])})"
                         )
 
-                    # Only abnormal exits are recorded as errors (exit_code != 0)
                     crash_error = create_process_exit_error(i, exit_code)
                     if crash_error:
                         errors.append(crash_error)
@@ -272,9 +255,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
                     if process_stats[i]["restarts"] > 8192:
                         logger.error(f"Process {i} exceeded restart limit, not restarting")
                         continue
-
-                    if is_moe:
-                        time.sleep(2.0)
 
                     processes[i] = start_process(i)
 
@@ -290,8 +270,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
 
     # Wait for processes
     for p in processes:
-        timeout = 500 if "moe" in func.__name__ else 10  # tune + 30 tokens cases for MOE
-        p.join(timeout=timeout)
+        p.join(timeout=10)
         if p.is_alive():
             logger.warning(f"Process {p.pid} did not terminate, forcing...")
             p.terminate()
@@ -500,8 +479,6 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
     os.environ["TRTLLM_DG_ENABLED"] = "1"
     # Suppress flashinfer logging
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
-
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512"
 
     try:
         with (

@@ -18,6 +18,9 @@ except:
 from datetime import datetime
 from pathlib import Path
 
+# Exit codes
+EXIT_CODE_RESTART = 10  # Exit code to indicate restart is needed
+
 
 def setup_signal_handlers(worker_id, error_queue=None):
     """Setup signal handlers to log crashes"""
