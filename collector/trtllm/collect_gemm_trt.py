@@ -9,6 +9,7 @@ try:
     from cuda import cudart
 except:
     from cuda.bindings import runtime as cudart
+from common_test_cases import get_gemm_common_test_cases
 from polygraphy.backend.trt import CreateConfig, EngineFromNetwork, TrtRunner
 from tensorrt_llm import Tensor
 from tensorrt_llm._utils import str_dtype_to_torch
@@ -20,58 +21,16 @@ from helper import log_perf
 
 
 def get_gemm_test_cases():
-    x_list = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        384,
-        512,
-        768,
-        1024,
-        2048,
-        4096,
-        8192,
-    ]
-    nk_list = [
-        128,
-        256,
-        512,
-        1024,
-        1536,
-        2048,
-        2560,
-        3072,
-        3584,
-        4096,
-        5120,
-        7168,
-        8192,
-        10240,
-        12288,
-    ]
-    nk_list_ext = [16384, 65536]  # for coverage and interp purpose
     gemm_list = ["int8_wo", "int4_wo", "sq"]
+    use_plugin = True
+
     test_cases = []
-    for gemm_type in gemm_list:
-        use_plugin = True
-        # x_list_orig+add+ext  <==> nk_list+ext
-        for x in sorted(x_list, reverse=True):
-            for n in sorted(nk_list + nk_list_ext, reverse=True):
-                for k in sorted(nk_list + nk_list_ext, reverse=True):
-                    if n * k == 65536 * 65536:
-                        continue
-                    test_cases.append([gemm_type, use_plugin, x, n, k])
+    for gemm_common_testcase in get_gemm_common_test_cases():
+        x = gemm_common_testcase.x
+        n = gemm_common_testcase.n
+        k = gemm_common_testcase.k
+        for gemm_type in gemm_list:
+            test_cases.append([gemm_type, use_plugin, x, n, k])
 
     return test_cases
 

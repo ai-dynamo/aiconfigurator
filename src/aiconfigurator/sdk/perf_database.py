@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import functools
 import importlib.resources as pkg_resources
 import logging
 import math
@@ -1225,9 +1226,11 @@ class PerfDatabase:
                                 ]  # n
                                 # currently, support max seq to 1M. Because all the system is linear for
                                 # now. it will be difficult to do square interpolation. Use more points
-                                # to do the approximation
+                                # to do the approximation.
+                                # Note: start from 1 to make sure any small ISL can be interpolated,
+                                # even if the ISL is smaller than what exists in the collected data.
                                 target_y_list = (
-                                    [16, 32, 64, 128, 256, 512, 1024, 2048]
+                                    [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
                                     + [4096 + i * 2048 for i in range(14)]
                                     + [32768 + 16384 * i for i in range(6)]
                                     + [131072 + 32768 * i for i in range(12)]
@@ -1929,7 +1932,13 @@ class PerfDatabase:
         """
         Set the default database mode
         """
-        self._default_database_mode = mode
+        if mode != self._default_database_mode:
+            # Clear cached query methods since default database mode affects the results
+            for attr_name in dir(self):
+                attr = getattr(self, attr_name)
+                if hasattr(attr, "cache_clear") and callable(attr):
+                    attr.cache_clear()
+            self._default_database_mode = mode
 
     def get_default_database_mode(self) -> common.DatabaseMode:
         """
@@ -1937,6 +1946,7 @@ class PerfDatabase:
         """
         return self._default_database_mode
 
+    @functools.lru_cache(maxsize=32768)
     def query_gemm(
         self,
         m: int,
@@ -1979,12 +1989,14 @@ class PerfDatabase:
                 result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}, using empirical mode")
                     result = get_empirical(m, n, k, quant_mode)
                 else:
                     logger.exception(f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}")
                     raise
             return result
 
+    @functools.lru_cache(maxsize=32768)
     def query_context_attention(
         self,
         b: int,
@@ -2091,6 +2103,10 @@ class PerfDatabase:
                 latency = self._interp_3d(n, full_s, b, attention_dict, "cubic") * prefix_correction
             except:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, {n_kv=}, "
+                        f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
+                    )
                     latency = get_empirical(
                         b,
                         s,
@@ -2110,6 +2126,7 @@ class PerfDatabase:
                     raise
             return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_generation_attention(
         self,
         b: int,
@@ -2197,6 +2214,10 @@ class PerfDatabase:
                 latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, "
+                        f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, using empirical mode"
+                    )
                     latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
                 else:
                     logger.exception(
@@ -2206,6 +2227,7 @@ class PerfDatabase:
                     raise
             return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_context_mla(
         self,
         b: int,
@@ -2275,6 +2297,10 @@ class PerfDatabase:
                 latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query context mla data for {b=}, {s=}, {prefix=}, {num_heads=}, "
+                        f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
+                    )
                     latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
                 else:
                     logger.exception(
@@ -2284,6 +2310,7 @@ class PerfDatabase:
                     raise
             return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_generation_mla(
         self,
         b: int,
@@ -2344,6 +2371,10 @@ class PerfDatabase:
                 latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query generation mla data for {b=}, {s=}, {num_heads=}, "
+                        f"{kvcache_quant_mode=}, using empirical mode"
+                    )
                     latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
                 else:
                     logger.exception(
@@ -2353,6 +2384,7 @@ class PerfDatabase:
                     raise
             return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_generation_mla(
         self,
         b: int,
@@ -2472,6 +2504,10 @@ class PerfDatabase:
                 latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query wideep generation mla data for {b=}, {s=}, {tp_size=}, "
+                        f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
+                    )
                     latency = get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
                 else:
                     logger.exception(
@@ -2481,6 +2517,7 @@ class PerfDatabase:
                     raise
             return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_context_mla(
         self,
         b: int,
@@ -2598,6 +2635,10 @@ class PerfDatabase:
                 latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query wideep context mla data for {b=}, {s=}, {prefix=}, {tp_size=}, "
+                        f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
+                    )
                     latency = get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
                 else:
                     logger.exception(
@@ -2608,6 +2649,7 @@ class PerfDatabase:
             return latency
 
     # to simplify, we no longer support allreduce_strategy
+    @functools.lru_cache(maxsize=32768)
     def query_custom_allreduce(
         self,
         quant_mode: common.CommQuantMode,
@@ -2658,6 +2700,10 @@ class PerfDatabase:
             try:
                 if tp_size == 1:
                     return 0.0
+                if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
+                    # on GB200, we only have custom all reduce for up to tp4.
+                    return self.query_nccl(quant_mode, tp_size, "all_reduce", size)
+
                 comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
                     "AUTO"
                 ]  # use AUTO for allreduce strategy
@@ -2678,6 +2724,10 @@ class PerfDatabase:
                         lat = lat * (tp_size - 1) / tp_size * 8 / 7
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query custom allreduce data for {quant_mode=}, {tp_size=}, {size=}, \
+                        {database_mode=}, using empirical mode"
+                    )
                     lat = get_empirical(quant_mode, tp_size, size)
                 else:
                     logger.exception(
@@ -2687,6 +2737,7 @@ class PerfDatabase:
                     raise
             return lat
 
+    @functools.lru_cache(maxsize=32768)
     def query_nccl(
         self,
         dtype: common.CommQuantMode,
@@ -2768,6 +2819,10 @@ class PerfDatabase:
                     lat = lat * (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query nccl data for {dtype=}, {num_gpus=}, "
+                        f"{operation=}, {message_size=}, using empirical mode"
+                    )
                     lat = get_empirical(dtype, num_gpus, operation, message_size)
                 else:
                     logger.exception(
@@ -2777,6 +2832,7 @@ class PerfDatabase:
                     raise
             return lat
 
+    @functools.lru_cache(maxsize=32768)
     def query_moe(
         self,
         num_tokens: int,
@@ -2976,6 +3032,11 @@ class PerfDatabase:
                     raise NotImplementedError(f"backend {self.backend} not supported for moe")
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        "Failed to query moe data for "
+                        f"{num_tokens=}, {hidden_size=}, {inter_size=}, {topk=}, {num_experts=}, "
+                        f"{moe_tp_size=}, {moe_ep_size=}, {quant_mode=}, {workload_distribution=}, using empirical mode"
+                    )
                     latency = get_empirical(
                         num_tokens,
                         hidden_size,
@@ -2997,6 +3058,7 @@ class PerfDatabase:
                     raise
                 return latency
 
+    @functools.lru_cache(maxsize=32768)
     def query_mla_bmm(
         self,
         num_tokens: int,
@@ -3060,6 +3122,10 @@ class PerfDatabase:
                 )
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query mla bmm data for {num_tokens=}, {num_heads=}, {quant_mode=}, "
+                        f"{if_pre=}, using empirical mode"
+                    )
                     lat = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
                 else:
                     logger.exception(
@@ -3069,6 +3135,7 @@ class PerfDatabase:
                     raise
             return lat
 
+    @functools.lru_cache(maxsize=32768)
     def query_mem_op(self, mem_bytes: int, database_mode: common.DatabaseMode | None = None) -> float:
         """
         Query the mem op data
@@ -3103,6 +3170,7 @@ class PerfDatabase:
             # hybrid and silicon modes have same logic
             return get_empirical(mem_bytes)
 
+    @functools.lru_cache(maxsize=32768)
     def query_p2p(self, message_bytes: int, database_mode: common.DatabaseMode | None = None) -> float:
         """
         Query the p2p data
@@ -3136,6 +3204,7 @@ class PerfDatabase:
             # hybrid and silicon modes have same logic
             return get_empirical(message_bytes)
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_mlp(
         self,
         num_tokens: int,
@@ -3200,6 +3269,10 @@ class PerfDatabase:
                 lat = self._interp_1d([num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query wideep mlp data for {num_tokens=}, {hidden_size=}, "
+                        f"{intermediate_size=}, {quant_mode=}, using empirical mode"
+                    )
                     lat = get_empirical(num_tokens, hidden_size, intermediate_size, quant_mode)
                 else:
                     logger.exception(
@@ -3209,6 +3282,7 @@ class PerfDatabase:
                     raise
             return lat
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_deepep_ll(
         self,
         node_num: int,
@@ -3244,6 +3318,7 @@ class PerfDatabase:
             lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
             return lat / 1000.0
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_deepep_normal(
         self,
         node_num: int,

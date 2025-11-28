@@ -1,88 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import math
 
 import tensorrt_llm
 import torch
-import torch.nn.functional as F
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.modules.fused_moe import FusedMoE, RenormalizeMoeRoutingMethod
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 from torch.nn.parameter import Parameter
 
-from helper import get_sm_version, log_perf
+try:
+    from common_test_cases import get_common_moe_test_cases
 
+    from helper import balanced_logits, get_sm_version, log_perf
+except ModuleNotFoundError:
+    import os
+    import sys
 
-def balanced_logits(num_tokens, num_experts, topk):
-    h_selected_experts = -torch.ones([num_tokens, topk])
-    stride = math.ceil(num_experts / topk)
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from common_test_cases import get_common_moe_test_cases
 
-    for token_i in range(num_tokens):
-        for i in range(topk):
-            if num_tokens >= stride:
-                h_selected_experts[token_i][i] = (token_i + i * stride) % num_experts
-            else:
-                h_selected_experts[token_i][i] = (token_i * stride / num_tokens + i * stride) % num_experts
-
-    expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
-    router_logits = F.softmax(expert_map.bfloat16(), dim=1)
-    return router_logits
+    from helper import balanced_logits, get_sm_version, log_perf
 
 
 def get_moe_test_cases():
-    num_tokens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        12288,
-        16384,
-        20480,
-    ]
-    tp_list = [1, 2, 4, 8, 16, 32]
-    ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 160, 256]
-    num_gpu_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    # hidden_size,inter_s,topk,num_expert, gated act
-    # [15360,30720,2,16],# GPT-MOE-1.8T
-    # [15360,3840,16,128],# GPT-MOE-1.8T-FineGrained
-    # [3584,2560,8,64],# Qwen2-57B
-    # [2048,1408,4,60], #qwen1.5_moe
-    # [2048,1408,6,64], #deepseekv1_moe
-    # [5120,1536,6,160], #deepseekv2
-    model_config_list = [
-        [4096, 14336, 2, 8],  # mixtral_8x7b
-        [6144, 16384, 2, 8],  # mixtral_8x22b
-        [7168, 2048, 8, 256],  # deepseekv3, will have 1 shared expert
-        [2048, 768, 8, 128],  # qwen3-moe, 30b-a3b
-        [4096, 1536, 8, 128],  # qwen3-moe, 235b-a22b
-        [6144, 2560, 8, 160],  # qwen3-moe, 480b-a35b
-        [7168, 2048, 8, 384],  # kimi k2
-    ]
     moe_list = ["float16"]
-
     if get_sm_version() > 86:
         moe_list += ["fp8"]
         if get_sm_version() < 100:
@@ -93,71 +36,54 @@ def get_moe_test_cases():
 
     test_cases = []
 
-    for num_gpu in num_gpu_list:  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
+    for common_moe_testcase in get_common_moe_test_cases():
+        model_name = common_moe_testcase.model_name
+        inter_s = common_moe_testcase.inter_size
+        moe_tp = common_moe_testcase.tp
+
+        if common_moe_testcase.token_expert_distribution != "balanced":
+            continue
+
         for moe_type in moe_list:
-            for num_token in num_tokens:
-                for model_config in model_config_list:
-                    hs, inter_s, topk, num_experts, model_name = model_config
-                    for tp in tp_list:
-                        # QWEN3_30B_A3B: exclude tp >= 8 as they are not used for actual deployments
-                        if model_name == "QWEN3_30B_A3B" and tp >= 8:
-                            continue
-                        for ep in ep_list:
-                            if tp * ep != num_gpu:
-                                continue
-                            if ep > num_experts:
-                                continue
-                            # we need to ensure inter_s can be divided by tp.
-                            if inter_s % tp != 0:
-                                continue
-                            # w4afp8 requires k shape to be multiple of 128
-                            if moe_type == "w4afp8" and inter_s // tp % 128 != 0:
-                                continue
-                            if moe_type == "nvfp4":
-                                if inter_s // tp % 128 == 0:
-                                    test_cases.append(
-                                        [
-                                            moe_type,
-                                            num_token,
-                                            hs,
-                                            inter_s,
-                                            topk,
-                                            num_experts,
-                                            tp,
-                                            ep,
-                                            True,
-                                            "moe_perf.txt",
-                                        ]
-                                    )
-                                    test_cases.append(
-                                        [
-                                            moe_type,
-                                            num_token,
-                                            hs,
-                                            inter_s,
-                                            topk,
-                                            num_experts,
-                                            tp,
-                                            ep,
-                                            False,
-                                            "moe_perf.txt",
-                                        ]
-                                    )
-                                continue
-                            test_cases.append(
-                                [
-                                    moe_type,
-                                    num_token,
-                                    hs,
-                                    inter_s,
-                                    topk,
-                                    num_experts,
-                                    tp,
-                                    ep,
-                                    False,
-                                    "moe_perf.txt",
-                                ]
-                            )
+            if model_name in ["GPT_OSS_20B", "GPT_OSS_120B"]:
+                if moe_type != "w4a16_mxfp4":
+                    continue
+            else:
+                if moe_type == "w4a16_mxfp4":
+                    continue
+
+            # w4afp8 requires k shape to be multiple of 128
+            if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
+                continue
+
+            min_latency_mode_options = [False]
+
+            if moe_type == "nvfp4":
+                if inter_s // moe_tp % 128 != 0:
+                    continue
+                # FIXME: recent version only supports SM100 for min-latency mode.
+                # current support, DS router only support up to 256 experts.
+                # Renormalize router only support <=128 experts. trtllmgen kernels only
+                # support renormalize, ds and llama router.
+                if get_sm_version() == 100 and common_moe_testcase.num_experts <= 256:
+                    min_latency_mode_options.append(True)
+
+            for min_latency_mode in min_latency_mode_options:
+                test_cases.append(
+                    [
+                        moe_type,
+                        common_moe_testcase.num_tokens_list,
+                        common_moe_testcase.hidden_size,
+                        common_moe_testcase.inter_size,
+                        common_moe_testcase.topk,
+                        common_moe_testcase.num_experts,
+                        common_moe_testcase.tp,
+                        common_moe_testcase.ep,
+                        min_latency_mode,
+                        "moe_perf.txt",
+                    ]
+                )
+
     return test_cases
 
 
