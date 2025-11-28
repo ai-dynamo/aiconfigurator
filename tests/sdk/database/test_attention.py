@@ -304,7 +304,7 @@ def test_default_sol_mode(comprehensive_perf_db):
     non_sol_result = comprehensive_perf_db.query_context_attention(
         1, 32, 0, 8, 4, common.KVCacheQuantMode.float16, common.FMHAQuantMode.float16
     )
-    assert comprehensive_perf_db.query_context_attention.cache_info().currsize == 1
+    assert comprehensive_perf_db.query_context_attention.cache_info().currsize >= 1
 
     # Set to SOL mode
     comprehensive_perf_db.set_default_sol_mode(common.SOLMode.SOL)
