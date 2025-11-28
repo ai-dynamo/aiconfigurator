@@ -248,17 +248,17 @@ aiconfigurator eval \
   --venv-dir "$VENV_PATH" \
   default \
   --model "$MODEL" \
-  --model_path "$model_path_arg" \
-  --served_model_name "$SERVED_MODEL_NAME" \
   --total_gpus "$TOTAL_GPUS" \
   --head_node_ip "$HEAD_NODE_IP" \
-  --prefill_free_gpu_memory_fraction "$PREFILL_FREE_GPU_MEM_FRAC" \
-  --free_gpu_memory_fraction "$FREE_GPU_MEM_FRAC" \
-  --decode_free_gpu_memory_fraction "$DECODE_FREE_GPU_MEM_FRAC" \
   --port "$PORT" \
   --system "$SYSTEM" \
   --backend_version "$VERSION" \
   --generated_config_version "$GENERATED_CONFIG_VERSION" \
+  --generator-set ServiceConfig.model_path="$model_path_arg" \
+  --generator-set ServiceConfig.served_model_name="$SERVED_MODEL_NAME" \
+  --generator-set Workers.prefill.kv_cache_free_gpu_memory_fraction="$PREFILL_FREE_GPU_MEM_FRAC" \
+  --generator-set Workers.decode.kv_cache_free_gpu_memory_fraction="$DECODE_FREE_GPU_MEM_FRAC" \
+  --generator-set Workers.agg.kv_cache_free_gpu_memory_fraction="$FREE_GPU_MEM_FRAC" \
   --isl "$ISL" --osl "$OSL" --ttft "$TTFT" --tpot "$TPOT" \
   --save_dir "$CONTAINER_SAVE_DIR"
 EOF

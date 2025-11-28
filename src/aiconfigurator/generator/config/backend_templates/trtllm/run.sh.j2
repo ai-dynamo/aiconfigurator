@@ -1,0 +1,55 @@
+#!/bin/bash
+set -e
+trap 'echo "Cleaning up..."; kill 0 2>/dev/null || true' EXIT INT TERM
+
+export MODEL_PATH=${MODEL_PATH:-"{{ service.model_path }}"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"{{ service.served_model_name }}"}
+export HEAD_NODE_IP=${HEAD_NODE_IP:-"{{ service.head_node_ip }}"}
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+
+{% set enable_router = k8s.enable_router %}
+
+{% if service.include_frontend %}
+python3 -m dynamo.frontend {% if enable_router %}--router-mode kv {% endif %}--http-port "{{ service.port }}" &
+{% endif %}
+
+{% if k8s.mode == "agg" %}
+CUDA_VISIBLE_DEVICES={{ agg_gpu_offset | default(0) }} python3 -m dynamo.trtllm \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "{{ agg_engine_args }}" \
+  {% if enable_router %}--publish-events-and-metrics {% endif %}&
+wait
+{% else %}
+{% if prefill_workers|int > 0 %}
+PREFILL_GPU={{ prefill_gpu }}
+PREFILL_WORKERS={{ prefill_workers }}
+for ((w=0; w<PREFILL_WORKERS; w++)); do
+  BASE=$(( w * PREFILL_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+PREFILL_GPU-1)))
+  CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.trtllm \
+    --model-path "$MODEL_PATH" \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    --extra-engine-args "{{ prefill_engine_args }}" \
+    --disaggregation-mode prefill \
+    {% if enable_router %}--publish-events-and-metrics{% endif %} &
+done
+{% endif %}
+
+{% if decode_workers|int > 0 %}
+DECODE_GPU={{ decode_gpu }}
+DECODE_WORKERS={{ decode_workers }}
+DECODE_GPU_OFFSET={{ decode_gpu_offset | default(0) }}
+for ((w=0; w<DECODE_WORKERS; w++)); do
+  BASE=$(( DECODE_GPU_OFFSET + w * DECODE_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+DECODE_GPU-1)))
+  CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.trtllm \
+    --model-path "$MODEL_PATH" \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    --extra-engine-args "{{ decode_engine_args }}" \
+    --disaggregation-mode decode &
+done
+{% endif %}
+wait
+{% endif %}

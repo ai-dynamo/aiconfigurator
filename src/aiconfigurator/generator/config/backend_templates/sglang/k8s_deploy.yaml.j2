@@ -1,0 +1,95 @@
+{%- set router_mode = k8s.router_mode | default('') -%}
+{%- set enable_router = k8s.enable_router | default(router_mode == 'kv') -%}
+{%- set is_kv = enable_router -%}
+{%- set runtime_working_dir = working_dir or '/workspace/components/backends/sglang' -%}
+
+{%- macro render_worker(component_name, role, replicas, gpu, cli_args) -%}
+{{ "    " ~ component_name ~ ":" }}
+      dynamoNamespace: {{ name }}
+      envFromSecret: hf-token-secret
+      componentType: worker
+      {% if role %}
+      subComponentType: {{ role }}
+      {% endif %}
+      replicas: {{ replicas | default(1) }}
+      resources:
+        limits:
+          gpu: "{{ gpu }}"
+      extraPodSpec:
+        {% if k8s.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ k8s.k8s_image }}
+          workingDir: {{ runtime_working_dir }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash","-c"]
+          args:
+            - |
+              set -euo pipefail
+              args=(
+                --model-path "{{ service.model_path }}"
+                --served-model-name "{{ service.served_model_name }}"
+                {{ cli_args }}
+              )
+              {% if k8s.mode != 'agg' %}
+              args+=(--host "0.0.0.0")
+              {% endif %}
+              {% if role == 'prefill' %}
+              args+=(--disaggregation-mode prefill)
+              {% elif role == 'decode' %}
+              args+=(--disaggregation-mode decode)
+              {% endif %}
+              exec python3 -m dynamo.sglang "${args[@]}"
+{%- endmacro %}
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ name }}
+  namespace: {{ k8s.k8s_namespace }}
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: {{ name }}
+      componentType: frontend
+      replicas: {{ frontend_replicas | default(1) }}
+      extraPodSpec:
+        {% if k8s.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ k8s.k8s_image }}
+          imagePullPolicy: IfNotPresent
+      {% if is_kv %}
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
+      {% endif %}
+
+    {% if k8s.mode == 'agg' %}
+{{ render_worker(
+    "SGLangWorker",
+    None,
+    agg_workers,
+    agg_gpu,
+    agg_cli_args
+) }}
+    {% else %}
+{{ render_worker(
+    "SGLangPrefillWorker",
+    "prefill",
+    prefill_workers,
+    prefill_gpu,
+    prefill_cli_args
+) }}
+{{ render_worker(
+    "SGLangDecodeWorker",
+    "decode",
+    decode_workers,
+    decode_gpu,
+    decode_cli_args
+) }}
+    {% endif %}

@@ -1,0 +1,9 @@
+{%- set args = [] -%}
+{%- if vllm['tensor-parallel-size'] is defined -%}{%- set _ = args.append('--tensor-parallel-size ' ~ vllm['tensor-parallel-size']) -%}{%- endif -%}
+{%- if vllm['pipeline-parallel-size'] is defined -%}{%- set _ = args.append('--pipeline-parallel-size ' ~ vllm['pipeline-parallel-size']) -%}{%- endif -%}
+{%- if vllm['block-size'] is defined -%}{%- set _ = args.append('--block-size ' ~ vllm['block-size']) -%}{%- endif -%}
+{%- if vllm['kv-cache-dtype'] is defined -%}{%- set _ = args.append('--kv-cache-dtype ' ~ vllm['kv-cache-dtype']) -%}{%- endif -%}
+{%- if vllm['max-model-len'] is defined -%}{%- set _ = args.append('--max-model-len ' ~ vllm['max-model-len']) -%}{%- endif -%}
+{%- if vllm['max-num-seqs'] is defined -%}{%- set _ = args.append('--max-num-seqs ' ~ vllm['max-num-seqs']) -%}{%- endif -%}
+{%- if vllm['enforce-eager'] -%}{%- set _ = args.append('--enforce-eager') -%}{%- endif -%}
+{{ args | join(' ') }}

@@ -14,7 +14,7 @@ import yaml
 
 from aiconfigurator import __version__
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
-from aiconfigurator.generator.cli_args import add_config_generation_cli
+from aiconfigurator.generator.api import add_generator_override_arguments
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_tpot_constraint,
@@ -30,7 +30,7 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")
     common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
-    add_config_generation_cli(common_parser, default_backend=common.BackendName.trtllm.value)
+    add_generator_override_arguments(common_parser)
     return common_parser
 
 

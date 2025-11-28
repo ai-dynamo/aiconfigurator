@@ -1,0 +1,89 @@
+inputs:
+  # Optional per-backend controls:
+  # - "backends": restricts an entry to the listed backend names.
+  # - "backend_defaults": overrides "default" per backend (e.g. trtllm, vllm, sglang).
+  # SlaConfig
+  - key: SlaConfig.isl
+    required: false
+  - key: SlaConfig.osl
+    required: false
+
+  # ServiceConfig (required minimal)
+  - key: ServiceConfig.model_path
+    required: true
+    default: ""
+  - key: ServiceConfig.served_model_name
+    required: true
+    default: ""
+  - key: ServiceConfig.model_name
+    required: false
+    default: "ServiceConfig.served_model_name"
+  - key: ServiceConfig.head_node_ip
+    required: false
+    default: "0.0.0.0"
+  - key: ServiceConfig.port
+    required: false
+    default: 8000
+  - key: ServiceConfig.include_frontend
+    required: false
+    default: true
+  - key: ServiceConfig.dyn_vllm_kv_event_port
+    required: false
+    default: 20081
+    backends: ["vllm"]
+  - key: ServiceConfig.vllm_nixl_side_channel_port
+    required: false
+    default: 20097
+    backends: ["vllm"]
+
+  # DynConfig
+  - key: DynConfig.mode
+    required: false
+    default: "disagg"
+  - key: DynConfig.enable_router
+    required: false
+    default: false
+
+  # K8sConfig
+  - key: K8sConfig.name_prefix
+    required: false
+    default: "dynamo"
+  - key: K8sConfig.k8s_namespace
+    required: false
+    default: "dynamo"
+  - key: K8sConfig.k8s_image
+    required: false
+    default: &default_trtllm_image "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0"
+    backend_defaults:
+      trtllm: *default_trtllm_image
+      vllm: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.0"
+      sglang: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.0"
+  - key: K8sConfig.k8s_image_pull_secret
+    required: false
+    default: ""
+  - key: K8sConfig.k8s_engine_mode
+    required: false
+    default: "inline"
+    backends: ["trtllm"]
+  - key: K8sConfig.k8s_model_cache
+    required: false
+    default: ""
+
+  # Worker config
+  - key: WorkerConfig.prefill_workers
+    required: false
+    default: 1
+  - key: WorkerConfig.decode_workers
+    required: false
+    default: 1
+  - key: WorkerConfig.agg_workers
+    required: false
+    default: 1
+
+  # Runtime additions
+  - key: ModelConfig.is_moe
+    required: false
+    default: false
+  - key: ModelConfig.nextn
+    required: false
+    default: 0

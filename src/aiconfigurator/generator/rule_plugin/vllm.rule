@@ -1,0 +1,9 @@
+prefill max_batch_size = (max_batch_size if max_batch_size else 1)
+decode max_batch_size = (max_batch_size if max_batch_size else 128)
+
+
+agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_parallel_size or 1) * (data_parallel_size or 1)
+
+prefill max_num_tokens = (SlaConfig.isl or 0) + 1500
+decode max_num_tokens = max_batch_size
+agg max_num_tokens = (max_batch_size or 0) + (max_batch_size or 0) + 1500
