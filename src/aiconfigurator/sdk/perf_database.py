@@ -1968,9 +1968,9 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        def get_empirical(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> tuple[float, float, float]:
+        def get_empirical(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> float:
             """
-            Get the hybrid time, hybrid math and hybrid mem
+            Get the empirical time
             """
             sol_time = get_sol(m, n, k, quant_mode)[0]
             scale_factor = 0.8
@@ -2064,7 +2064,7 @@ class PerfDatabase:
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
             """
-            Get the hybrid time
+            Get the empirical time
             """
             latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
             scale_factor = 0.6
@@ -2682,7 +2682,7 @@ class PerfDatabase:
 
         def get_empirical(quant_mode: common.CommQuantMode, tp_size: int, size: int) -> float:
             """
-            Get the hybrid time
+            Get the empirical time
             """
             latency = get_sol(quant_mode, tp_size, size)[0]
             scale_factor = 0.8
@@ -2774,7 +2774,7 @@ class PerfDatabase:
 
         def get_empirical(dtype: common.CommQuantMode, num_gpus: int, operation: str, message_size: int) -> float:
             """
-            Get the hybrid time
+            Get the empirical time
             """
             latency = get_sol(dtype, num_gpus, operation, message_size)[0]
             scale_factor = 0.8
