@@ -151,7 +151,7 @@ class EventFn:
         system_name,
         backend_name,
         version,
-        sol_mode,
+        database_mode,
         batch_size,
         isl,
         osl,
@@ -184,7 +184,7 @@ class EventFn:
             try:
                 database = copy.deepcopy(get_database(system_name, backend_name, version))
                 assert database is not None
-                database.set_default_sol_mode(common.SOLMode(int(sol_mode)))
+                database.set_default_database_mode(common.DatabaseMode[database_mode])
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 model_config = config.ModelConfig(
                     tp_size=tp_size,
@@ -249,7 +249,7 @@ class EventFn:
         system_name,
         backend_name,
         version,
-        sol_mode,
+        database_mode,
         isl,
         osl,
         prefix,
@@ -280,7 +280,7 @@ class EventFn:
             try:
                 database = get_database(system_name, backend_name, version)
                 assert database is not None
-                database.set_default_sol_mode(common.SOLMode(int(sol_mode)))
+                database.set_default_database_mode(common.DatabaseMode[database_mode])
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 model_config = config.ModelConfig(
                     tp_size=tp_size,
@@ -359,7 +359,7 @@ class EventFn:
         system_name,
         backend_name,
         version,
-        sol_mode,
+        database_mode,
         isl,
         osl,
         prefix,
@@ -391,7 +391,7 @@ class EventFn:
             try:
                 database = copy.deepcopy(get_database(system_name, backend_name, version))
                 assert database is not None
-                database.set_default_sol_mode(common.SOLMode(int(sol_mode)))
+                database.set_default_database_mode(common.DatabaseMode[database_mode])
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 model_config = config.ModelConfig(
                     gemm_quant_mode=common.GEMMQuantMode[gemm_quant_mode],
@@ -499,7 +499,7 @@ class EventFn:
         prefill_system_name,
         prefill_backend_name,
         prefill_version,
-        prefill_sol_mode,
+        prefill_database_mode,
         prefill_num_worker,
         prefill_num_gpus,
         prefill_tp_size,
@@ -516,7 +516,7 @@ class EventFn:
         decode_system_name,
         decode_backend_name,
         decode_version,
-        decode_sol_mode,
+        decode_database_mode,
         decode_num_worker,
         decode_num_gpus,
         decode_tp_size,
@@ -553,8 +553,8 @@ class EventFn:
                 decode_database = copy.deepcopy(get_database(decode_system_name, decode_backend_name, decode_version))
                 assert prefill_database is not None
                 assert decode_database is not None
-                prefill_database.set_default_sol_mode(common.SOLMode(int(prefill_sol_mode)))
-                decode_database.set_default_sol_mode(common.SOLMode(int(decode_sol_mode)))
+                prefill_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
+                decode_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 prefill_model_config = config.ModelConfig(
                     tp_size=prefill_tp_size,
@@ -689,10 +689,10 @@ class EventFn:
                 title = (
                     f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}_ttft"
                     f"{runtime_config.ttft}_prefill_{prefill_system_name}_{prefill_backend_name}_"
-                    f"{prefill_version}_{prefill_sol_mode}_{prefill_gemm_quant_mode}_"
+                    f"{prefill_version}_{prefill_database_mode}_{prefill_gemm_quant_mode}_"
                     f"{prefill_kvcache_quant_mode}_{prefill_fmha_quant_mode}_{prefill_moe_quant_mode}_"
                     f"{prefill_comm_quant_mode}_decode_{decode_system_name}_{decode_backend_name}_"
-                    f"{decode_version}_{decode_sol_mode}_{decode_gemm_quant_mode}_"
+                    f"{decode_version}_{decode_database_mode}_{decode_gemm_quant_mode}_"
                     f"{decode_kvcache_quant_mode}_{decode_fmha_quant_mode}_{decode_moe_quant_mode}_"
                     f"{decode_comm_quant_mode}_Disagg_Pareto"
                 )
@@ -733,7 +733,7 @@ class EventFn:
         prefill_system_name,
         prefill_backend_name,
         prefill_version,
-        prefill_sol_mode,
+        prefill_database_mode,
         prefill_tp_size,
         prefill_pp_size,
         prefill_dp_size,
@@ -747,7 +747,7 @@ class EventFn:
         decode_system_name,
         decode_backend_name,
         decode_version,
-        decode_sol_mode,
+        decode_database_mode,
         decode_tp_size,
         decode_pp_size,
         decode_dp_size,
@@ -868,7 +868,7 @@ class EventFn:
                     get_database(prefill_system_name, prefill_backend_name, prefill_version)
                 )
                 assert prefill_database is not None
-                prefill_database.set_default_sol_mode(common.SOLMode(int(prefill_sol_mode)))
+                prefill_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
                 prefill_backend = get_backend(prefill_backend_name)
                 prefill_session = InferenceSession(prefill_model, prefill_database, prefill_backend)
                 prefill_results_df = pd.DataFrame(columns=common.ColumnsStatic)
@@ -886,7 +886,7 @@ class EventFn:
                 prefill_results_df = prefill_results_df.reset_index(drop=True).reset_index()
                 title = (
                     f"{model_name}_isl{isl}_osl{osl}_prefix{prefix}_prefill_{prefill_system_name}_"
-                    f"{prefill_backend_name}_{prefill_version}_{prefill_sol_mode}_"
+                    f"{prefill_backend_name}_{prefill_version}_{prefill_database_mode}_"
                     f"{prefill_gemm_quant_mode}_{prefill_kvcache_quant_mode}_"
                     f"{prefill_fmha_quant_mode}_{prefill_moe_quant_mode}_{prefill_comm_quant_mode}_"
                     "Throughput"
@@ -904,7 +904,7 @@ class EventFn:
                 decode_model = get_model(model_name, decode_model_config, decode_backend_name)
                 decode_database = copy.deepcopy(get_database(decode_system_name, decode_backend_name, decode_version))
                 assert decode_database is not None
-                decode_database.set_default_sol_mode(common.SOLMode(int(decode_sol_mode)))
+                decode_database.set_default_database_mode(common.DatabaseMode[decode_database_mode])
                 decode_backend = get_backend(decode_backend_name)
                 decode_session = InferenceSession(decode_model, decode_database, decode_backend)
                 decode_results_df = pd.DataFrame(columns=common.ColumnsStatic)
@@ -934,7 +934,7 @@ class EventFn:
                 decode_results_df = decode_results_df.reset_index(drop=True).reset_index()
                 title = (
                     f"{model_name}_isl{isl}_osl{osl}_decode_{decode_system_name}_"
-                    f"{decode_backend_name}_{decode_version}_{decode_sol_mode}_"
+                    f"{decode_backend_name}_{decode_version}_{decode_database_mode}_"
                     f"{decode_gemm_quant_mode}_{decode_kvcache_quant_mode}_"
                     f"{decode_fmha_quant_mode}_{decode_moe_quant_mode}_{decode_comm_quant_mode}_"
                     "Throughput"

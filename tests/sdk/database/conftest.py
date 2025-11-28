@@ -44,7 +44,7 @@ def patch_all_loaders_and_yaml(request, monkeypatch):
                 # These two values are used in many "SOL"-mode formulas:
                 "float16_tc_flops": 1_000.0,
                 "mem_bw": 100.0,
-                # For query_nccl NON-SOL branch:
+                # For query_nccl SILICON branch:
                 "mem_empirical_constant_latency": 1.0,
             },
             "node": {

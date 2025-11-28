@@ -14,34 +14,34 @@ from aiconfigurator.sdk.perf_database import PerfDatabase, databases_cache, get_
 class TestNcclEdgeCases:
     """Test edge cases for query_nccl method."""
 
-    def test_query_nccl_non_sol_single_gpu(self, comprehensive_perf_db):
+    def test_query_nccl_silicon_single_gpu(self, comprehensive_perf_db):
         """Test NCCL with single GPU returns 0."""
         result = comprehensive_perf_db.query_nccl(
-            common.CommQuantMode.half, 1, "all_gather", 1024, sol_mode=common.SOLMode.NON_SOL
+            common.CommQuantMode.half, 1, "all_gather", 1024, database_mode=common.DatabaseMode.SILICON
         )
         assert result == 0.0
 
-    def test_query_nccl_non_sol_interpolation(self, comprehensive_perf_db):
-        """Test NCCL non-SOL mode with interpolation."""
+    def test_query_nccl_silicon_interpolation(self, comprehensive_perf_db):
+        """Test NCCL SILICON mode with interpolation."""
         # Use values that exist in our test data
         result = comprehensive_perf_db.query_nccl(
-            common.CommQuantMode.half, 4, "all_gather", 1024, sol_mode=common.SOLMode.NON_SOL
+            common.CommQuantMode.half, 4, "all_gather", 1024, database_mode=common.DatabaseMode.SILICON
         )
 
         # Should use interpolation from nccl_data
         expected = comprehensive_perf_db._nccl_data[common.CommQuantMode.half]["all_gather"][4][1024]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
-    def test_query_nccl_non_sol_large_gpu_count(self, comprehensive_perf_db):
+    def test_query_nccl_silicon_large_gpu_count(self, comprehensive_perf_db):
         """Test NCCL with more than 8 GPUs applies scaling."""
         # First get baseline with 8 GPUs
         baseline = comprehensive_perf_db.query_nccl(
-            common.CommQuantMode.half, 8, "all_gather", 1024, sol_mode=common.SOLMode.NON_SOL
+            common.CommQuantMode.half, 8, "all_gather", 1024, database_mode=common.DatabaseMode.SILICON
         )
 
         # Test with 16 GPUs
         result = comprehensive_perf_db.query_nccl(
-            common.CommQuantMode.half, 16, "all_gather", 1024, sol_mode=common.SOLMode.NON_SOL
+            common.CommQuantMode.half, 16, "all_gather", 1024, database_mode=common.DatabaseMode.SILICON
         )
 
         node_info = comprehensive_perf_db.system_spec["node"]
@@ -57,7 +57,7 @@ class TestNcclEdgeCases:
         """Test NCCL with very small and very large message sizes."""
         # Very small message
         result_small = comprehensive_perf_db.query_nccl(
-            common.CommQuantMode.half, 4, "alltoall", 1, sol_mode=common.SOLMode.NON_SOL
+            common.CommQuantMode.half, 4, "alltoall", 1, database_mode=common.DatabaseMode.SILICON
         )
         assert result_small > 0
 
@@ -67,7 +67,7 @@ class TestNcclEdgeCases:
             4,
             "reduce_scatter",
             1_000_000,
-            sol_mode=common.SOLMode.NON_SOL,
+            database_mode=common.DatabaseMode.SILICON,
         )
         assert result_large > 0
 
@@ -80,26 +80,26 @@ class TestAllreduceEdgeCases:
         """Test allreduce with single GPU returns 0."""
         # SOL mode
         result_sol = comprehensive_perf_db.query_custom_allreduce(
-            common.CommQuantMode.half, 1, 1024, sol_mode=common.SOLMode.SOL
+            common.CommQuantMode.half, 1, 1024, database_mode=common.DatabaseMode.SOL
         )
         assert result_sol == 0.0
 
-        # Non-SOL mode
-        result_non_sol = comprehensive_perf_db.query_custom_allreduce(
-            common.CommQuantMode.half, 1, 1024, sol_mode=common.SOLMode.NON_SOL
+        # SILICON mode
+        result_silicon = comprehensive_perf_db.query_custom_allreduce(
+            common.CommQuantMode.half, 1, 1024, database_mode=common.DatabaseMode.SILICON
         )
-        assert result_non_sol == 0.0
+        assert result_silicon == 0.0
 
     def test_query_custom_allreduce_large_tp_scaling(self, comprehensive_perf_db):
         """Test allreduce with TP > 8 applies scaling factor."""
         # Get baseline with TP=8
         baseline = comprehensive_perf_db.query_custom_allreduce(
-            common.CommQuantMode.half, 8, 2048, sol_mode=common.SOLMode.NON_SOL
+            common.CommQuantMode.half, 8, 2048, database_mode=common.DatabaseMode.SILICON
         )
 
         # Test with TP=16
         result = comprehensive_perf_db.query_custom_allreduce(
-            common.CommQuantMode.half, 16, 2048, sol_mode=common.SOLMode.NON_SOL
+            common.CommQuantMode.half, 16, 2048, database_mode=common.DatabaseMode.SILICON
         )
 
         # Should apply scaling: lat * (tp_size-1)/tp_size * 8/7
@@ -117,16 +117,16 @@ class TestAllreduceEdgeCases:
             common.CommQuantMode.half,
             4,
             3000,  # 3000 is between 2048 and 4096
-            sol_mode=common.SOLMode.NON_SOL,
+            database_mode=common.DatabaseMode.SILICON,
         )
         assert result > 0
 
         # Should be between the two surrounding values
         lower = comprehensive_perf_db.query_custom_allreduce(
-            common.CommQuantMode.half, 4, 2048, sol_mode=common.SOLMode.NON_SOL
+            common.CommQuantMode.half, 4, 2048, database_mode=common.DatabaseMode.SILICON
         )
         upper = comprehensive_perf_db.query_custom_allreduce(
-            common.CommQuantMode.half, 4, 4096, sol_mode=common.SOLMode.NON_SOL
+            common.CommQuantMode.half, 4, 4096, database_mode=common.DatabaseMode.SILICON
         )
         assert lower < result < upper
 
@@ -251,15 +251,19 @@ class TestGemmInterpolation:
             192,
             192,
             quant_mode,  # All values between grid points
-            sol_mode=common.SOLMode.NON_SOL,
+            database_mode=common.DatabaseMode.SILICON,
         )
 
         # Should return a reasonable interpolated value
         assert result > 0
 
         # Should be between surrounding values
-        lower_bound = comprehensive_perf_db.query_gemm(2, 128, 128, quant_mode, sol_mode=common.SOLMode.NON_SOL)
-        upper_bound = comprehensive_perf_db.query_gemm(4, 256, 256, quant_mode, sol_mode=common.SOLMode.NON_SOL)
+        lower_bound = comprehensive_perf_db.query_gemm(
+            2, 128, 128, quant_mode, database_mode=common.DatabaseMode.SILICON
+        )
+        upper_bound = comprehensive_perf_db.query_gemm(
+            4, 256, 256, quant_mode, database_mode=common.DatabaseMode.SILICON
+        )
         assert lower_bound < result < upper_bound
 
     def test_query_gemm_extrapolation(self, comprehensive_perf_db):
@@ -267,13 +271,17 @@ class TestGemmInterpolation:
         quant_mode = common.GEMMQuantMode.fp8
 
         # Query a very large size (beyond our test data)
-        result = comprehensive_perf_db.query_gemm(512, 2048, 2048, quant_mode, sol_mode=common.SOLMode.NON_SOL)
+        result = comprehensive_perf_db.query_gemm(
+            512, 2048, 2048, quant_mode, database_mode=common.DatabaseMode.SILICON
+        )
 
         # Should return a reasonable value
         assert result > 0
 
         # For large sizes, should be larger than smaller sizes
-        smaller = comprehensive_perf_db.query_gemm(256, 1024, 1024, quant_mode, sol_mode=common.SOLMode.NON_SOL)
+        smaller = comprehensive_perf_db.query_gemm(
+            256, 1024, 1024, quant_mode, database_mode=common.DatabaseMode.SILICON
+        )
         assert result > smaller
 
 
@@ -295,7 +303,7 @@ class TestDatabaseCache:
             self.system = args[0]
             self.backend = args[1]
             self.version = args[2]
-            self._default_sol_mode = common.SOLMode.NON_SOL
+            self._default_database_mode = common.DatabaseMode.SILICON
 
         monkeypatch.setattr(PerfDatabase, "__init__", counting_init)
 

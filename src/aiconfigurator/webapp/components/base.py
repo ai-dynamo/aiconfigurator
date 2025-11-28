@@ -36,9 +36,20 @@ def create_system_config(app_config):
         backend = gr.Dropdown(choices=backend_choices, label="Backend", value=default_backend, interactive=True)
         version = gr.Dropdown(choices=version_choices, label="Version", value=default_version, interactive=True)
 
-        sol_mode = gr.Checkbox(label="SOL Mode", value=False, interactive=True, visible=app_config["experimental"])
+        database_mode = gr.Dropdown(
+            choices=[
+                common.DatabaseMode.SILICON.name,
+                common.DatabaseMode.HYBRID.name,
+                common.DatabaseMode.EMPIRICAL.name,
+                common.DatabaseMode.SOL.name,
+            ],
+            label="Database Mode",
+            value=common.DatabaseMode.SILICON.name,
+            interactive=True,
+            visible=app_config["experimental"],
+        )
 
-    return {"system": system, "backend": backend, "version": version, "sol_mode": sol_mode}
+    return {"system": system, "backend": backend, "version": version, "database_mode": database_mode}
 
 
 def create_model_quant_config(app_config):

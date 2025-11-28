@@ -22,18 +22,33 @@ def test_query_gemm_exact_match(perf_db):
     quant_mode = common.GEMMQuantMode.float16  # matches our dummy key
     m, n, k = 64, 128, 256
 
-    observed = perf_db.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.NON_SOL)
+    observed = perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SILICON)
     # The value may have been corrected by _correct_data(), but we can check it's reasonable
     assert observed > 0, f"Expected positive value, got {observed}"
 
     # Also test that SOL mode works
-    sol_value = perf_db.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.SOL)
+    sol_value = perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
     assert sol_value > 0, f"Expected positive SOL value, got {sol_value}"
 
 
-def test_query_custom_allreduce_sol_mode_calculation(perf_db):
+def test_query_gemm_empirical_mode(perf_db):
     """
-    When sol_mode == SOL, query_custom_allreduce uses get_sol:
+    EMPIRICAL mode should return the SOL latency scaled by 1 / 0.8.
+    """
+    quant_mode = common.GEMMQuantMode.float16
+    m, n, k = 64, 128, 256
+
+    sol_value = perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
+    empirical_value = perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.EMPIRICAL)
+
+    assert math.isclose(empirical_value, sol_value / 0.8), (
+        f"EMPIRICAL expected {sol_value / 0.8}, got {empirical_value}"
+    )
+
+
+def test_query_custom_allreduce_database_mode_calculation(perf_db):
+    """
+    When database_mode == SOL, query_custom_allreduce uses get_sol:
         sol_time = 2 * size * 2 / tp_size * (tp_size - 1) / p2pBW * 1000
     We set p2pBW = perf_db.system_spec['node']['inter_node_bw'] = 100.0
     For tp_size=2, size=1024, that becomes:
@@ -47,7 +62,7 @@ def test_query_custom_allreduce_sol_mode_calculation(perf_db):
     tp_size = 2
     quant_mode = "float16"  # for SOL branch we ignore the custom allreduce dict
 
-    sol_time = perf_db.query_custom_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.SOL)
+    sol_time = perf_db.query_custom_allreduce(quant_mode, tp_size, size, database_mode=common.DatabaseMode.SOL)
 
     expected = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
     assert math.isclose(sol_time, expected), f"SOL-mode allreduce mismatch: expected {expected}, got {sol_time}"
@@ -55,14 +70,14 @@ def test_query_custom_allreduce_sol_mode_calculation(perf_db):
 
 def test_query_custom_allreduce_sol_full_returns_full_tuple(perf_db):
     """
-    When sol_mode == SOL_FULL, query_custom_allreduce returns the full tuple (time, 0, 0) from get_sol.
+    When database_mode == SOL_FULL, query_custom_allreduce returns the full tuple (time, 0, 0) from get_sol.
     Using the same numbers as above: (20480.0, 0, 0).
     """
     size = 1024
     tp_size = 2
     quant_mode = "float16"
 
-    result = perf_db.query_custom_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.SOL_FULL)
+    result = perf_db.query_custom_allreduce(quant_mode, tp_size, size, database_mode=common.DatabaseMode.SOL_FULL)
     # The get_sol function returns: (sol_time, 0, 0)
     sol_time = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
     expected = (sol_time, 0, 0)
@@ -71,9 +86,9 @@ def test_query_custom_allreduce_sol_full_returns_full_tuple(perf_db):
     assert math.isclose(result[0], expected[0]) and result[1] == expected[1] and result[2] == expected[2]
 
 
-def test_query_custom_allreduce_non_sol_mode_uses_custom_latency(perf_db):
+def test_query_custom_allreduce_non_database_mode_uses_custom_latency(perf_db):
     """
-    When sol_mode is neither SOL nor SOL_FULL (e.g. SOLMode.NONE), the code picks:
+    When database_mode is neither SOL nor SOL_FULL (e.g. DatabaseMode.NONE), the code picks:
         comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)]['AUTO']
         size_left, size_right = nearest keys enveloping `size`
         lat = interpolate between comm_dict[size_left], comm_dict[size_right]
@@ -85,14 +100,16 @@ def test_query_custom_allreduce_non_sol_mode_uses_custom_latency(perf_db):
     tp_size = 2
     quant_mode = "float16"
 
-    # Use a “non-SOL” mode to force fallback into the custom-data path
-    custom_latency = perf_db.query_custom_allreduce(quant_mode, tp_size, size, sol_mode=common.SOLMode.NON_SOL)
+    # Use a “SILICON” mode to force fallback into the custom-data path
+    custom_latency = perf_db.query_custom_allreduce(
+        quant_mode, tp_size, size, database_mode=common.DatabaseMode.SILICON
+    )
     assert math.isclose(custom_latency, 5.0), f"Expected custom-allreduce latency 5.0, got {custom_latency}"
 
 
-def test_query_nccl_sol_mode_all_gather(perf_db):
+def test_query_nccl_database_mode_all_gather(perf_db):
     """
-    For query_nccl(..., sol_mode=SOL) and operation='all_gather':
+    For query_nccl(..., database_mode=SOL) and operation='all_gather':
         if dtype == CommQuantMode.half → type_bytes = 2
         sol_time = message_size * (num_gpus - 1) * type_bytes / num_gpus / p2pBW * 1000
     We set p2pBW = perf_db.system_spec['node']['inter_node_bw'] = 100.0
@@ -109,7 +126,7 @@ def test_query_nccl_sol_mode_all_gather(perf_db):
     operation = "all_gather"
     message_size = 512
 
-    sol_time = perf_db.query_nccl(dtype, num_gpus, operation, message_size, sol_mode=common.SOLMode.SOL)
+    sol_time = perf_db.query_nccl(dtype, num_gpus, operation, message_size, database_mode=common.DatabaseMode.SOL)
     expected = (
         dtype.value.memory
         * message_size
@@ -123,7 +140,7 @@ def test_query_nccl_sol_mode_all_gather(perf_db):
 
 
 @pytest.mark.parametrize("operation", ["alltoall", "reduce_scatter"])
-def test_query_nccl_sol_mode_alltoall_and_reduce_scatter(perf_db, operation):
+def test_query_nccl_database_mode_alltoall_and_reduce_scatter(perf_db, operation):
     """
     The code for 'alltoall' and 'reduce_scatter' in get_sol is identical:
         sol_time = message_size * (num_gpus - 1) * type_bytes / num_gpus / p2pBW * 1000
@@ -133,21 +150,43 @@ def test_query_nccl_sol_mode_alltoall_and_reduce_scatter(perf_db, operation):
     """
     dtype = common.CommQuantMode.int8  # type_bytes = 1 for int8
     num_gpus = 8  # num_gpus only matters for 'all_gather'
-    sol_time = perf_db.query_nccl(dtype, num_gpus, operation, 1000, sol_mode=common.SOLMode.SOL)
+    sol_time = perf_db.query_nccl(dtype, num_gpus, operation, 1000, database_mode=common.DatabaseMode.SOL)
     expected = (
         dtype.value.memory * 1000 * (num_gpus - 1) / num_gpus / perf_db.system_spec["node"]["inter_node_bw"] * 1000
     )
     assert math.isclose(sol_time, expected), f"Expected {expected} for op {operation}, got {sol_time}"
 
 
-def test_query_p2p_sol_mode(perf_db):
+def test_query_context_attention_hybrid_fallback(perf_db):
     """
-    query_p2p(..., sol_mode=SOL) uses:
+    HYBRID mode should fall back to the empirical calculation when silicon data is missing.
+    """
+    kwargs = dict(
+        b=2,
+        s=32,
+        prefix=0,
+        n=32,
+        n_kv=16,
+        kvcache_quant_mode=common.KVCacheQuantMode.float16,
+        fmha_quant_mode=common.FMHAQuantMode.float16,
+        head_size=128,
+        window_size=0,
+    )
+
+    empirical = perf_db.query_context_attention(database_mode=common.DatabaseMode.EMPIRICAL, **kwargs)
+    hybrid = perf_db.query_context_attention(database_mode=common.DatabaseMode.HYBRID, **kwargs)
+
+    assert math.isclose(hybrid, empirical), f"HYBRID fallback mismatch: expected {empirical}, got {hybrid}"
+
+
+def test_query_p2p_database_mode(perf_db):
+    """
+    query_p2p(..., database_mode=SOL) uses:
         sol_time = message_bytes / inter_node_bw * 1000
     With message_bytes=256 and inter_node_bw=100.0:
         sol_time = (256 / 100.0) * 1000 = 2.56 * 1000 = 2560.0
     """
-    sol_time = perf_db.query_p2p(256, sol_mode=common.SOLMode.SOL)
+    sol_time = perf_db.query_p2p(256, database_mode=common.DatabaseMode.SOL)
     expected = (256 / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
     assert math.isclose(sol_time, expected), f"Expected {expected}, got {sol_time}"
 

@@ -283,7 +283,7 @@ class TestCorrectData:
         m, n, k = 64, 128, 256
 
         # Calculate what SOL should be
-        sol_value = comprehensive_perf_db.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.SOL)
+        sol_value = comprehensive_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
 
         # Set an artificially low value
         comprehensive_perf_db._gemm_data[quant_mode][m][n][k] = sol_value * 0.5
@@ -304,7 +304,7 @@ class TestCorrectData:
 
         # Calculate SOL
         sol_value = comprehensive_perf_db.query_generation_attention(
-            b, s, n, n, kv_cache_quant_mode, sol_mode=common.SOLMode.SOL
+            b, s, n, n, kv_cache_quant_mode, database_mode=common.DatabaseMode.SOL
         )
 
         # Set an artificially low value
