@@ -1,0 +1,90 @@
+{%- set _default_vllm_workdir = '/workspace/examples/backends/vllm' -%}
+{%- if working_dir and working_dir != '/workspace/components/backends/vllm' -%}
+{%- set runtime_working_dir = working_dir -%}
+{%- else -%}
+{%- set runtime_working_dir = _default_vllm_workdir -%}
+{%- endif -%}
+
+{%- macro render_worker(component_name, role, replicas, gpu, cli_args_list) -%}
+    {%- set parsed_args = cli_args_list | default([]) -%}
+{{ "    " ~ component_name ~ ":" }}
+      dynamoNamespace: {{ name }}
+      envFromSecret: hf-token-secret
+      componentType: worker
+      {% if role %}
+      subComponentType: {{ role }}
+      {% endif %}
+      replicas: {{ replicas | default(1) }}
+      resources:
+        limits:
+          gpu: "{{ gpu }}"
+      extraPodSpec:
+        {% if k8s.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ k8s.k8s_image }}
+          workingDir: {{ runtime_working_dir }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - "{{ service.model_path }}"
+            {% for arg in parsed_args %}
+            - {{ arg | tojson }}
+            {% endfor %}
+            {% if role == 'prefill' %}
+            - --is-prefill-worker
+            {% elif role == 'decode' %}
+            - --is-decode-worker
+            {% endif %}
+{%- endmacro %}
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ name }}
+  namespace: {{ k8s.k8s_namespace }}
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: {{ name }}
+      componentType: frontend
+      replicas: {{ frontend_replicas | default(1) }}
+      extraPodSpec:
+        {% if k8s.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ k8s.k8s_image }}
+          imagePullPolicy: IfNotPresent
+
+    {% if k8s.mode == 'agg' %}
+{{ render_worker(
+    "VllmDecodeWorker",
+    "decode",
+    agg_workers,
+    agg_gpu,
+    agg_cli_args_list | default([])
+) }}
+    {% else %}
+{{ render_worker(
+    "VllmPrefillWorker",
+    "prefill",
+    prefill_workers,
+    prefill_gpu,
+    prefill_cli_args_list | default([])
+) }}
+{{ render_worker(
+    "VllmDecodeWorker",
+    "decode",
+    decode_workers,
+    decode_gpu,
+    decode_cli_args_list | default([])
+) }}
+    {% endif %}

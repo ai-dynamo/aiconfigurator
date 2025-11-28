@@ -12,11 +12,14 @@ import pandas as pd
 import yaml
 from prettytable import PrettyTable
 
-from aiconfigurator.generator.api import generate_backend_config
-from aiconfigurator.generator.cli_args import build_dynamo_config
+from aiconfigurator.generator.api import (
+    generate_backend_artifacts,
+    load_generator_overrides_from_args,
+)
+from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 from aiconfigurator.sdk import pareto_analysis
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
-from aiconfigurator.sdk.task import TaskConfig, task_config_to_generator_config
+from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.utils import safe_mkdir
 
 logger = logging.getLogger(__name__)
@@ -320,6 +323,7 @@ def save_results(
     logger.info(f"Saving results to {result_dir_path}")
     try:
         safe_result_dir = safe_mkdir(result_dir_path, exist_ok=True)
+        generator_overrides = load_generator_overrides_from_args(args)
 
         # Save overall pareto plots in the root directory
         fig, ax = plt.subplots(1, 1, figsize=(8, 5))
@@ -371,9 +375,12 @@ def save_results(
 
             # 4. Save the generated config for this experiment, sub-directory for each best config
             if best_config_df is not None:
-                dynamo_overrides = build_dynamo_config(args)
                 for i, (idx, result_df) in enumerate(best_config_df.iterrows()):
-                    cfg = task_config_to_generator_config(task_config=exp_task_config, result_df=result_df)
+                    cfg = task_config_to_generator_config(
+                        task_config=exp_task_config,
+                        result_df=result_df,
+                        generator_overrides=generator_overrides,
+                    )
 
                     top_config_dir = os.path.join(exp_dir, f"top{i + 1}")
                     safe_mkdir(top_config_dir, exist_ok=True)
@@ -381,12 +388,11 @@ def save_results(
                         yaml.safe_dump(cfg, f, sort_keys=False)
 
                     try:
-                        generate_backend_config.from_runtime(
-                            cfg=cfg,
+                        generate_backend_artifacts(
+                            params=cfg,
                             backend=exp_task_config.backend_name,
-                            version=generated_backend_version or exp_task_config.backend_version,
-                            overrides=dynamo_overrides,
-                            save_dir=top_config_dir,
+                            backend_version=generated_backend_version or exp_task_config.backend_version,
+                            output_dir=top_config_dir,
                         )
                     except Exception as exc:
                         logger.warning(

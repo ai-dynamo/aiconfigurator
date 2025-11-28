@@ -1,0 +1,28 @@
+backend: pytorch
+
+{% if is_moe is defined %}  # is_moe from sdk
+moe_expert_parallel_size: {{ moe_expert_parallel_size }}
+moe_tensor_parallel_size: {{ moe_tensor_parallel_size }}
+{% endif %}
+
+tensor_parallel_size: {{ tensor_parallel_size }}
+pipeline_parallel_size: {{ pipeline_parallel_size }}
+enable_attention_dp: {{ enable_attention_dp | default(false) }}
+enable_chunked_prefill: {{ enable_chunked_prefill | default(false) }}
+
+max_batch_size: {{ build_config.max_batch_size }}
+max_num_tokens: {{ build_config.max_num_tokens }}
+max_seq_len: {{ build_config.max_seq_len }}
+
+kv_cache_config:
+  enable_block_reuse: {{ kv_cache_config.enable_block_reuse | default(false) }}
+  free_gpu_memory_fraction: {{ kv_cache_config.free_gpu_memory_fraction | default(0.80) }}  # Fraction for KV‑cache
+  {% if kv_cache_config.tokens_per_block is defined %}
+  tokens_per_block: {{ kv_cache_config.tokens_per_block }}
+  {% endif %}
+
+{% if is_speculative is defined %}  # speculative decoding
+speculative_config:
+  decoding_type: {{ decoding_type }}
+  num_nextn_predict_layers: {{ num_nextn_predict_layers }}
+{% endif %}

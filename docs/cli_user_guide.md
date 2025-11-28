@@ -139,7 +139,14 @@ results/QWEN3_32B_isl4000_osl1000_ttft1000_tpot20_904495
 ```
 By default, we output top3 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. `agg_config.yaml` and `node_0_run.sh` are the files you need to deploy with Dynamo. If you want to deploy using k8s, you can leverage `k8s_deploy.yaml`. Refer to [deployment guide](dynamo_deployment_guide.md) for info about deployment.
 
-`--save_dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated_config_version 1.0.0rc6` can give you the right result. Specify more arugments to precisely control the generated configs by checking `aiconfigurator cli default -h`.
+`--save_dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated_config_version 1.0.0rc6` can give you the right result.
+
+Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/Workers sections, or add inline overrides via `--generator-set KEY=VALUE`. Examples:
+
+- `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`
+- `--generator-set K8sConfig.k8s_namespace=dynamo \`
+
+These keys match `config/unified_config.yaml`. Combining YAML + inline overrides lets you precisely control the generated artifacts.
 
 ### Exp mode
 If you want to customize your experiment apart from simple command which only compares disagg and agg of a same model, you can use `exp` mode. The command is,
