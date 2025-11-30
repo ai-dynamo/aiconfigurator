@@ -161,9 +161,6 @@ def worker(
 
         # Sweep power limits
         for power_limit in power_limits or [default_power_limit]:
-            with lock:
-                progress_value.value += 1
-
             # Set power limit if specified
             if power_limit is not None:
                 try:
@@ -206,6 +203,10 @@ def worker(
                 # Force flush logs
                 for handler in worker_logger.handlers:
                     handler.flush()
+            finally:
+                # Increment progress after task completes (success or failure)
+                with lock:
+                    progress_value.value += 1
 
 
 def parallel_run(
