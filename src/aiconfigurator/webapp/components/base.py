@@ -16,12 +16,13 @@ def create_model_name_config(app_config):
             label="model name",
             value="DEEPSEEK_V3",
             interactive=True,
+            required=True,
         )
 
     return {"model_name": model_name}
 
 
-def create_system_config(app_config):
+def create_system_config(app_config, gpu_config=False):
     """create system config components"""
     database_dict = get_all_databases()
     system_choices = sorted(database_dict.keys())
@@ -31,14 +32,42 @@ def create_system_config(app_config):
     version_choices = sorted(database_dict[default_system][default_backend].keys())
     default_version = version_choices[-1]
 
-    with gr.Accordion("System config"), gr.Row():
-        system = gr.Dropdown(choices=system_choices, label="System", value=default_system, interactive=True)
-        backend = gr.Dropdown(choices=backend_choices, label="Backend", value=default_backend, interactive=True)
-        version = gr.Dropdown(choices=version_choices, label="Version", value=default_version, interactive=True)
-
+    with gr.Accordion("System config"):
+        with gr.Row():
+            system = gr.Dropdown(
+                choices=system_choices, label="System", value=default_system, interactive=True, required=True
+            )
+            backend = gr.Dropdown(
+                choices=backend_choices, label="Backend", value=default_backend, interactive=True, required=True
+            )
+            version = gr.Dropdown(
+                choices=version_choices, label="Version", value=default_version, interactive=True, required=True
+            )
+        if gpu_config:
+            with gr.Row():
+                gpu_config_components = {
+                    "min_gpu_per_engine": gr.Number(
+                        label="Minimum GPUs per engine", value=4, interactive=True, required=True
+                    ),
+                    "max_gpu_per_engine": gr.Number(
+                        label="Maximum GPUs per engine", value=16, interactive=True, required=True
+                    ),
+                    "gpus_per_node": gr.Number(label="GPUs per node", value=8, interactive=True, required=True),
+                    "gpu_cost_per_hour": gr.Number(
+                        label="GPU cost per hour", value="", interactive=True, optional=True
+                    ),
+                }
+        else:
+            gpu_config_components = {}
         sol_mode = gr.Checkbox(label="SOL Mode", value=False, interactive=True, visible=app_config["experimental"])
 
-    return {"system": system, "backend": backend, "version": version, "sol_mode": sol_mode}
+    return {
+        "system": system,
+        "backend": backend,
+        "version": version,
+        "sol_mode": sol_mode,
+        **gpu_config_components,
+    }
 
 
 def create_model_quant_config(app_config):
@@ -176,19 +205,40 @@ def create_model_misc_config(app_config):
     return {"nextn": nextn, "nextn_accept_rates": nextn_accept_rates, "enable_wideep": enable_wideep}
 
 
-def create_runtime_config(app_config, with_sla=False):
+def create_runtime_config(app_config, with_sla=False, max_context_length=False, prefix_length=True):
     """create runtime config components"""
 
     with gr.Accordion("Runtime config"):
         with gr.Row():
-            isl = gr.Number(value=2048, label="input sequence length", interactive=True)
-            osl = gr.Number(value=128, label="output sequence length", interactive=True)
-            prefix = gr.Number(value=0, label="prefix cache length", interactive=True)
+            gr.HTML(
+                "<span style='color: var(--body-text-color-subdued);'>More inputs = more precise profiling results.</span>"
+            )
+        with gr.Row():
+            isl = gr.Number(value=2048, label="input sequence length", interactive=True, required=True)
+            osl = gr.Number(value=128, label="output sequence length", interactive=True, required=True)
+            if prefix_length:
+                prefix = gr.Number(value=0, label="prefix cache length", interactive=True)
+            else:
+                prefix = None
+            if max_context_length:
+                max_context_length = gr.Number(value=2048, label="max context length", interactive=True, required=True)
+            else:
+                max_context_length = None
 
             if with_sla:
-                ttft = gr.Number(value=2000, label="first token latency(ms)", interactive=True)
-                tpot = gr.Number(value=50, label="inter token latency(ms)", interactive=True)
-                return {"isl": isl, "osl": osl, "prefix": prefix, "ttft": ttft, "tpot": tpot}
+                ttft = gr.Number(value=2000, label="first token latency/ms", interactive=True, optional=True)
+                tpot = gr.Number(value=50, label="inter token latency/ms", interactive=True, optional=True)
+                batch_size = None
             else:
                 batch_size = gr.Number(value=1, label="batch size", interactive=True)
-                return {"isl": isl, "osl": osl, "prefix": prefix, "batch_size": batch_size}
+                ttft = None
+                tpot = None
+        return {
+            "isl": isl,
+            "osl": osl,
+            "prefix": prefix,
+            "max_context_length": max_context_length,
+            "ttft": ttft,
+            "tpot": tpot,
+            "batch_size": batch_size,
+        }
