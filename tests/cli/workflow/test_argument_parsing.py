@@ -88,6 +88,7 @@ class TestCLIArgumentParsing:
         assert args.save_dir is None
         assert args.ttft == 2000.0
         assert args.tpot == 30.0
+        assert args.request_latency is None
         assert args.prefix == 0
 
     def test_debug_mode_flag(self, cli_parser):
@@ -132,6 +133,7 @@ class TestCLIArgumentParsing:
             ("osl", "2048", int),
             ("ttft", "300.0", float),
             ("tpot", "10.0", float),
+            ("request_latency", "1200.0", float),
             ("prefix", "128", int),
         ],
     )
