@@ -40,4 +40,3 @@ def coerce_int(value: Optional[Any]) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
-

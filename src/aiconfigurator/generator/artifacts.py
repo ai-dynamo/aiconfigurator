@@ -61,4 +61,3 @@ class ArtifactWriter:
         if path.endswith(".sh"):
             current_mode = os.stat(path).st_mode
             os.chmod(path, current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-

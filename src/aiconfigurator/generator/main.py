@@ -103,10 +103,7 @@ def main(argv: Optional[list[str]] = None):
 
 
 def _resolve_roles(requested: str, params: dict[str, Any], logger: logging.Logger) -> list[str]:
-    available = [
-        role for role, data in (params.get("params") or {}).items()
-        if data
-    ]
+    available = [role for role, data in (params.get("params") or {}).items() if data]
     if requested in {"prefill", "decode", "agg"}:
         if requested not in available:
             logger.warning("Requested role '%s' not present in inputs, falling back to auto detection.", requested)

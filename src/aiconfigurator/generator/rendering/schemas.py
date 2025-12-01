@@ -16,6 +16,7 @@ _BASE_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = _BASE_DIR.parent / "config"
 _SCHEMA_FILE = (_CONFIG_DIR / "deployment_config.yaml").resolve()
 
+
 def _load_schema_inputs(schema_path: str) -> list[dict[str, Any]]:
     path = os.path.abspath(schema_path)
     cached = _SCHEMA_CACHE.get(path)

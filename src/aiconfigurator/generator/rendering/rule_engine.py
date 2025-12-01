@@ -13,9 +13,11 @@ logger = logging.getLogger(__name__)
 _BASE_DIR = Path(__file__).resolve().parent
 _RULES_DIR = (_BASE_DIR.parent / "rule_plugin").resolve()
 
+
 def _ensure_scope(pv: dict[str, Any], scope: str) -> dict[str, Any]:
     params = pv.setdefault("params", {})
     return params.setdefault(scope, {})
+
 
 def _get_scope(pv: dict[str, Any], scope: str) -> Optional[dict[str, Any]]:
     params = pv.setdefault("params", {})
@@ -23,6 +25,7 @@ def _get_scope(pv: dict[str, Any], scope: str) -> Optional[dict[str, Any]]:
     if isinstance(sc, dict) and sc:
         return sc
     return None
+
 
 def _eval(expr: str, scope: str, pv: dict[str, Any]) -> Any:
     ctx: dict[str, Any] = {}
@@ -56,6 +59,7 @@ def _eval(expr: str, scope: str, pv: dict[str, Any]) -> Any:
     fn = _ENV.compile_expression(expr.strip())
     return fn(**ctx)
 
+
 def _parse_assign(line: str) -> Optional[tuple[Optional[str], str, str]]:
     s = line.strip().rstrip(";")
     if not s or s.startswith("#"):
@@ -76,6 +80,7 @@ def _parse_assign(line: str) -> Optional[tuple[Optional[str], str, str]]:
     if "_" in alias and all(p in allowed for p in parts0):
         return (alias, " ".join(toks[1:]).strip(), right)
     return (None, left, right)
+
 
 def _apply_line(
     assign: tuple[Optional[str], str, str],
@@ -110,9 +115,11 @@ def _apply_line(
         if name in promote_keys and default_scope and scope_name == default_scope:
             pv[name] = value
 
+
 def _load_rule_path(base_dir: str, backend: str) -> Optional[str]:
     p = os.path.join(base_dir, f"{backend}.rule")
     return p if os.path.exists(p) else None
+
 
 def apply_rule_plugins(param_values: dict[str, Any], backend: str, dsl_dir: Optional[str] = None) -> dict[str, Any]:
     base = str(Path(dsl_dir).resolve()) if dsl_dir else str(_RULES_DIR)

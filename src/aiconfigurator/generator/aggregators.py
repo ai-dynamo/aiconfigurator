@@ -23,6 +23,7 @@ def _entry_allows_backend(entry: dict[str, Any], backend: str) -> bool:
         allowed_set = set()
     return not allowed_set or backend in allowed_set
 
+
 def collect_generator_params(
     service: dict[str, Any],
     k8s: dict[str, Any],
@@ -51,7 +52,7 @@ def collect_generator_params(
     mode_tag = "agg" if mode_value == "agg" else "disagg"
     name_prefix = k8s.get("name_prefix") or "dynamo"
     name = f"{name_prefix}-{mode_tag}{('-router' if is_kv else '')}"
-    use_engine_cm = (k8s.get("k8s_engine_mode", "inline") == "configmap")
+    use_engine_cm = k8s.get("k8s_engine_mode", "inline") == "configmap"
     _mc_raw = k8s.get("k8s_model_cache")
     k8s_model_cache = _mc_raw.strip() if isinstance(_mc_raw, str) else ""
     workers_dict = {
@@ -105,6 +106,7 @@ def collect_generator_params(
         "sla": sla or {},
     }
 
+
 def generate_config_from_yaml(
     yaml_path: str,
     backend: Optional[str] = None,
@@ -132,6 +134,8 @@ def _set_by_path(dst: dict[str, Any], path: str, value: Any) -> None:
             cur[p] = {}
         cur = cur[p]
     cur[parts[-1]] = value
+
+
 def generate_config_from_input_dict(
     input_params: dict[str, Any],
     schema_path: Optional[str] = None,

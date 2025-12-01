@@ -31,10 +31,7 @@ _BACKEND_MAPPING_FILE = str((_CONFIG_DIR / "backend_config_mapping.yaml").resolv
 
 
 def render_backend_templates(
-    param_values: dict[str, Any],
-    backend: str,
-    templates_dir: Optional[str] = None,
-    version: Optional[str] = None
+    param_values: dict[str, Any], backend: str, templates_dir: Optional[str] = None, version: Optional[str] = None
 ) -> dict[str, str]:
     """
     Render templates for a specific backend with version-specific template selection.
@@ -133,7 +130,7 @@ def render_backend_templates(
         prefix = f"{worker}_"
         for bk, val in list(base_ctx.items()):
             if bk.startswith(prefix):
-                name = bk[len(prefix):]
+                name = bk[len(prefix) :]
                 if "." in name:
                     parts = name.split(".")
                     cursor = wc
@@ -156,7 +153,7 @@ def render_backend_templates(
         wc.setdefault(backend, {})
         for bk, val in list(base_ctx.items()):
             if bk.startswith(prefix):
-                name = bk[len(prefix):]
+                name = bk[len(prefix) :]
                 if name in backend_keys and "." not in name:
                     wc[backend][name] = val
         return wc
@@ -296,7 +293,7 @@ def render_backend_templates(
                 for idx, cnt in enumerate(plan):
                     node_ctx = dict(context)
                     svc = dict(node_ctx.get("service", {}))
-                    svc["include_frontend"] = (idx == 0)
+                    svc["include_frontend"] = idx == 0
                     node_ctx["service"] = svc
                     node_ctx["prefill_gpu"] = prefill_gpu
                     node_ctx["decode_gpu"] = decode_gpu
@@ -407,7 +404,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
                 "tokens_per_block": "tokens_per_block",
                 "enable_chunked_prefill": "enable_chunked_prefill",
                 "cuda_graph_enable_padding": "cuda_graph_enable_padding",
-                "disable_prefix_cache": "disable_prefix_cache"
+                "disable_prefix_cache": "disable_prefix_cache",
             }
 
             if param_key in template_var_mapping:
@@ -610,7 +607,7 @@ def render_parameters(
                 default_expr = mapping.get("default")
 
                 v = evaluate_expression(v_expr, param_values)
-                has_default = ("default" in mapping)
+                has_default = "default" in mapping
                 if v is None and has_default:
                     # Presence of default implies retention, even if evaluated default is None
                     v_default = evaluate_expression(default_expr, param_values)
@@ -686,6 +683,7 @@ def get_param_keys(yaml_path: str) -> list[str]:
     _PARAM_KEYS_CACHE[path] = keys
     return keys
 
+
 def _format_cli_args(backend: str, worker_ctx: dict[str, Any]) -> str:
     rendered = render_backend_parameters(worker_ctx, backend, yaml_path=_BACKEND_MAPPING_FILE)
     parts: list[str] = []
@@ -697,7 +695,7 @@ def _format_cli_args(backend: str, worker_ctx: dict[str, Any]) -> str:
                 continue
             if isinstance(val, (list, tuple)):
                 v = ",".join(str(x) for x in val)
-                parts.append(f"--{flag} \"{v}\"")
+                parts.append(f'--{flag} "{v}"')
                 continue
-            parts.append(f"--{flag} \"{val}\"")
+            parts.append(f'--{flag} "{val}"')
     return " ".join(parts)

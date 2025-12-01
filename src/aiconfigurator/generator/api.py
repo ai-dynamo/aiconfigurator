@@ -174,7 +174,7 @@ def print_generator_help(
     *,
     schema_path: str = DEFAULT_DEPLOYMENT_SCHEMA_PATH,
     mapping_path: str = DEFAULT_BACKEND_MAPPING_PATH,
-    stream = None,
+    stream=None,
 ) -> None:
     """
     Print generator configuration reference tables or raw deployment schema.
@@ -237,10 +237,9 @@ def maybe_handle_generator_help(argv: list[str]) -> bool:
     print_generator_help(section=section, backend=backend)
     return True
 
+
 def generate_backend_config(
-    params: dict[str, Any],
-    backend: str,
-    mapping_path: Optional[str] = None
+    params: dict[str, Any], backend: str, mapping_path: Optional[str] = None
 ) -> dict[str, dict[str, Any]]:
     """
     Generate backend-specific configuration from parameters.
@@ -256,14 +255,12 @@ def generate_backend_config(
     return render_backend_parameters(params, backend, yaml_path=mapping_path)
 
 
-
-
 def generate_backend_artifacts(
     params: dict[str, Any],
     backend: str,
     templates_dir: Optional[str] = None,
     output_dir: Optional[str] = None,
-    backend_version: Optional[str] = None
+    backend_version: Optional[str] = None,
 ) -> dict[str, str]:
     """
     Generate complete backend artifacts including run scripts, configs, and k8s YAML.
@@ -282,10 +279,10 @@ def generate_backend_artifacts(
     artifacts = render_backend_templates(params, backend, templates_dir, backend_version)
 
     if output_dir:
-        params_obj = params.get('params', {})
-        has_prefill = bool(params_obj.get('prefill'))
-        has_decode = bool(params_obj.get('decode'))
-        has_agg = bool(params_obj.get('agg'))
+        params_obj = params.get("params", {})
+        has_prefill = bool(params_obj.get("prefill"))
+        has_decode = bool(params_obj.get("decode"))
+        has_agg = bool(params_obj.get("agg"))
         prefer_disagg = has_prefill and has_decode
         writer = ArtifactWriter(
             output_dir=os.path.abspath(output_dir),
@@ -298,7 +295,6 @@ def generate_backend_artifacts(
             logger.exception("Failed to write artifacts")
 
     return artifacts
-
 
 
 # CLI Interface Functions
@@ -521,10 +517,7 @@ def _assign_path(target: dict[str, Any], dotted_key: str, value: Any) -> None:
 def _deep_merge_dicts(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in incoming.items():
-        if (
-            isinstance(value, dict)
-            and isinstance(merged.get(key), dict)
-        ):
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge_dicts(merged[key], value)
         else:
             merged[key] = value
