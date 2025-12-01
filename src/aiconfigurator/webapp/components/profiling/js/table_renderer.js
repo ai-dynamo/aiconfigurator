@@ -8,7 +8,7 @@ let allowConfirmDatapoint = false;
 /**
  * Initialize DataTables table with hover synchronization
  */
-function createTable(wrapperId, columns, data, plotType, settings) {
+function createTable(wrapperId, columns, data, plotType, settings, referencePoints) {
     const tableId = `${plotType}_table`;
     
     if (settings && settings.allow_confirm_datapoint !== undefined) {
@@ -24,6 +24,8 @@ function createTable(wrapperId, columns, data, plotType, settings) {
     if (!wrapper) return null;
     
     wrapper.innerHTML = `<table id="${tableId}" class="display" style="width:100%"></table>`;
+    
+    const refPoints = referencePoints || {};
     
     const table = $(`#${tableId}`).DataTable({
         data: data,
@@ -43,6 +45,14 @@ function createTable(wrapperId, columns, data, plotType, settings) {
             style: 'single'
         },
         createdRow: function(row, data, dataIndex) {
+            // Add reference point styling
+            if (refPoints.maxUnderSLA && dataIndex === refPoints.maxUnderSLA.tableIdx) {
+                $(row).addClass('ref-point-max-under-sla');
+            }
+            if (refPoints.maxOverall && dataIndex === refPoints.maxOverall.tableIdx) {
+                $(row).addClass('ref-point-max-overall');
+            }
+            
             // Add hover handler
             $(row).on('mouseenter', function() {
                 highlightChartPoint(plotType, dataIndex);

@@ -13,8 +13,27 @@ function createChart(canvasId, config, plotType) {
     const chartType = plotType === 'prefill' ? 'scatter' : 'line';
     const showLine = plotType !== 'prefill';
     
+    // Mark reference points in datasets
+    const refPoints = config.referencePoints || {};
+    
+    // For cost plot, enrich all points with table data
+    if (plotType === 'cost' && config.tableData) {
+        config.data.datasets.forEach((dataset) => {
+            dataset.data.forEach((point) => {
+                const tableRow = config.tableData[point.tableIdx];
+                if (tableRow) {
+                    // Table structure: [TTFT, Prefill Thpt, ITL, Decode Thpt, Tokens/User, Cost, Config]
+                    point.ttft = tableRow[0];
+                    point.prefillThpt = tableRow[1];
+                    point.itl = tableRow[2];
+                    point.decodeThpt = tableRow[3];
+                }
+            });
+        });
+    }
+    
     // Configure datasets
-    config.data.datasets.forEach(dataset => {
+    config.data.datasets.forEach((dataset, dsIdx) => {
         if (showLine) {
             dataset.showLine = true;
             dataset.borderWidth = 2;
@@ -24,6 +43,24 @@ function createChart(canvasId, config, plotType) {
             dataset.pointRadius = 8;
             dataset.pointHoverRadius = 12;
         }
+        
+        // Mark reference points with special styling
+        dataset.data.forEach((point, ptIdx) => {
+            // Check if this is max throughput under SLA (red)
+            if (refPoints.maxUnderSLA && 
+                point.tableIdx === refPoints.maxUnderSLA.tableIdx &&
+                dsIdx === refPoints.maxUnderSLA.datasetIndex &&
+                ptIdx === refPoints.maxUnderSLA.pointIndex) {
+                point.isMaxUnderSLA = true;
+            }
+            // Check if this is max throughput overall (yellow)
+            if (refPoints.maxOverall && 
+                point.tableIdx === refPoints.maxOverall.tableIdx &&
+                dsIdx === refPoints.maxOverall.datasetIndex &&
+                ptIdx === refPoints.maxOverall.pointIndex) {
+                point.isMaxOverall = true;
+            }
+        });
     });
     
     // Add target line as a dataset if provided
@@ -77,7 +114,30 @@ function createChart(canvasId, config, plotType) {
                             const xLabel = config.xAxisLabel || 'X';
                             const yLabel = config.yAxisLabel || 'Y';
                             
-                            return `${xLabel}: ${point.x.toFixed(2)}\n ${yLabel}: ${point.y.toFixed(2)}`;
+                            let labels = [`${xLabel}: ${point.x.toFixed(2)}`, `${yLabel}: ${point.y.toFixed(2)}`];
+                            
+                            // For cost plot, always show TTFT, ITL, and decode throughput
+                            if (plotType === 'cost' && point.ttft !== undefined) {
+                                labels.push(`TTFT: ${point.ttft.toFixed(2)} ms`);
+                                labels.push(`ITL: ${point.itl.toFixed(2)} ms`);
+                                labels.push(`Decode Thpt: ${point.decodeThpt.toFixed(2)} tokens/s/GPU`);
+                            }
+                            
+                            // Add reference point labels at the top
+                            if (point.isMaxUnderSLA) {
+                                const labelText = plotType === 'cost' 
+                                    ? '🔴 Max Decode Throughput/GPU Under SLA' 
+                                    : '🔴 Max Throughput Under SLA';
+                                labels.unshift(labelText);
+                            }
+                            if (point.isMaxOverall) {
+                                const labelText = plotType === 'cost' 
+                                    ? '🟡 Max Decode Throughput/GPU' 
+                                    : '🟡 Max Throughput';
+                                labels.unshift(labelText);
+                            }
+                            
+                            return labels;
                         }
                     }
                 },
@@ -130,7 +190,38 @@ function createChart(canvasId, config, plotType) {
                     }
                 }
             }
-        }
+        },
+        plugins: [{
+            id: 'referencePointsPlugin',
+            afterDatasetsDraw: function(chart) {
+                const ctx = chart.ctx;
+                
+                chart.data.datasets.forEach((dataset, dsIdx) => {
+                    const meta = chart.getDatasetMeta(dsIdx);
+                    
+                    dataset.data.forEach((point, ptIdx) => {
+                        if (point.isMaxUnderSLA || point.isMaxOverall) {
+                            const element = meta.data[ptIdx];
+                            if (!element) return;
+                            
+                            const x = element.x;
+                            const y = element.y;
+                            const radius = element.options.radius + 8;
+                            
+                            ctx.save();
+                            ctx.strokeStyle = point.isMaxUnderSLA ? 'rgba(255, 0, 0, 0.8)' : 'rgba(255, 215, 0, 0.8)';
+                            ctx.lineWidth = 3;
+                            ctx.setLineDash([5, 5]);
+                            
+                            ctx.beginPath();
+                            ctx.arc(x, y, radius, 0, 2 * Math.PI);
+                            ctx.stroke();
+                            ctx.restore();
+                        }
+                    });
+                });
+            }
+        }]
     });
     
     return chart;

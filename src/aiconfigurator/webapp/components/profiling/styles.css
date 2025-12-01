@@ -28,6 +28,22 @@
     50% { background-color: rgba(76, 175, 80, 0.5); }
 }
 
+/* Reference point row highlighting */
+.ref-point-max-under-sla {
+    border: 3px dotted rgba(255, 0, 0, 0.8) !important;
+    background-color: rgba(255, 0, 0, 0.05) !important;
+}
+
+.ref-point-max-overall {
+    border: 3px dotted rgba(255, 215, 0, 0.8) !important;
+    background-color: rgba(255, 215, 0, 0.05) !important;
+}
+
+/* When both reference points are the same row */
+tr.ref-point-max-under-sla.ref-point-max-overall {
+    border: 3px dotted rgba(255, 0, 0, 0.8) !important;
+    background-color: rgba(255, 0, 0, 0.05) !important;
+}
 .chart-container {
     position: relative;
     height: 500px;
