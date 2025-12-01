@@ -6,7 +6,6 @@ from __future__ import annotations
 import os
 import stat
 from dataclasses import dataclass
-from typing import Dict
 
 
 @dataclass
@@ -15,7 +14,7 @@ class ArtifactWriter:
     prefer_disagg: bool
     has_agg_role: bool
 
-    def write(self, artifacts: Dict[str, str]) -> None:
+    def write(self, artifacts: dict[str, str]) -> None:
         os.makedirs(self.output_dir, exist_ok=True)
         for artifact_name, content in artifacts.items():
             destination = self._destination_for(artifact_name)
@@ -42,13 +41,7 @@ class ArtifactWriter:
     def _should_emit_engine_file(self, artifact_name: str) -> bool:
         if "agg" in artifact_name and self.prefer_disagg:
             return False
-        if (
-            self.has_agg_role
-            and not self.prefer_disagg
-            and ("prefill" in artifact_name or "decode" in artifact_name)
-        ):
-            return False
-        return True
+        return not (self.has_agg_role and not self.prefer_disagg and ("prefill" in artifact_name or "decode" in artifact_name))
 
     @staticmethod
     def _map_engine_name(artifact_name: str) -> str:

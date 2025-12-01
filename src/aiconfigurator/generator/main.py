@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from api import (
     generate_backend_artifacts,
@@ -25,10 +25,10 @@ from api import (
 )
 
 
-def main(argv: Optional[List[str]] = None):
+def main(argv: Optional[list[str]] = None):
     """
     Main entry point for the AI generator CLI.
-    
+
     This function handles command-line argument parsing, configuration generation,
     and output formatting.
     """
@@ -72,14 +72,14 @@ def main(argv: Optional[List[str]] = None):
     try:
         yaml_path = resolve_mapping_yaml(explicit_mapping, default_mapping_path)
     except FileNotFoundError as e:
-        logger.error("%s", e)
+        logger.exception("%s", e)
         sys.exit(2)
 
     try:
         cli_params = parse_cli_params(args.set or [])
         generator_params = prepare_generator_params(args.config, cli_params, backend=backend)
     except (FileNotFoundError, ValueError) as exc:
-        logger.error("%s", exc)
+        logger.exception("%s", exc)
         sys.exit(2)
 
     cmd = args.cmd
@@ -95,14 +95,14 @@ def main(argv: Optional[List[str]] = None):
         return
 
     roles = _resolve_roles(args.role, generator_params, logger)
-    rendered_backend: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    rendered_backend: dict[str, dict[str, dict[str, Any]]] = {}
     for role in roles:
         ctx = _build_worker_context(generator_params, role)
         rendered_backend[role] = generate_backend_config(ctx, backend, yaml_path)
     print(json.dumps(rendered_backend, ensure_ascii=False, indent=2))
 
 
-def _resolve_roles(requested: str, params: Dict[str, Any], logger: logging.Logger) -> List[str]:
+def _resolve_roles(requested: str, params: dict[str, Any], logger: logging.Logger) -> list[str]:
     available = [
         role for role, data in (params.get("params") or {}).items()
         if data
@@ -117,8 +117,8 @@ def _resolve_roles(requested: str, params: Dict[str, Any], logger: logging.Logge
     return available or ["prefill"]
 
 
-def _build_worker_context(params: Dict[str, Any], role: str) -> Dict[str, Any]:
-    ctx: Dict[str, Any] = {}
+def _build_worker_context(params: dict[str, Any], role: str) -> dict[str, Any]:
+    ctx: dict[str, Any] = {}
     ctx.update(params.get("service") or {})
     ctx.update(params.get("k8s") or {})
     ctx.update(params.get("workers") or {})

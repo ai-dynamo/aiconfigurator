@@ -12,7 +12,7 @@ import logging
 import os
 import shlex
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, Undefined
@@ -20,10 +20,10 @@ from jinja2 import Environment, FileSystemLoader, Undefined
 from .rule_engine import apply_rule_plugins
 
 _JINJA_ENV = Environment(trim_blocks=True, lstrip_blocks=True)
-_TEMPLATE_ENV_CACHE: Dict[str, Environment] = {}
+_TEMPLATE_ENV_CACHE: dict[str, Environment] = {}
 logger = logging.getLogger(__name__)
-_YAML_CACHE: Dict[str, Any] = {}
-_PARAM_KEYS_CACHE: Dict[str, List[str]] = {}
+_YAML_CACHE: dict[str, Any] = {}
+_PARAM_KEYS_CACHE: dict[str, list[str]] = {}
 _BASE_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = (_BASE_DIR.parent / "config").resolve()
 _TEMPLATE_ROOT = _CONFIG_DIR / "backend_templates"
@@ -31,20 +31,20 @@ _BACKEND_MAPPING_FILE = str((_CONFIG_DIR / "backend_config_mapping.yaml").resolv
 
 
 def render_backend_templates(
-    param_values: Dict[str, Any],
+    param_values: dict[str, Any],
     backend: str,
     templates_dir: Optional[str] = None,
     version: Optional[str] = None
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """
     Render templates for a specific backend with version-specific template selection.
-    
+
     Args:
         param_values: Dictionary of parameter values to use in template rendering
         backend: Backend name (e.g., 'trtllm', 'vllm', 'sglang')
         templates_dir: Directory containing backend-specific template directories
         version: Version string (e.g., '1.1.0rc5'). If None, uses default templates
-        
+
     Returns:
         Dictionary mapping template names to rendered content
     """
@@ -118,11 +118,11 @@ def render_backend_templates(
     param_keys = get_param_keys(_BACKEND_MAPPING_FILE)
 
     def make_worker_context(
-        base_ctx: Dict[str, Any],
+        base_ctx: dict[str, Any],
         worker: str,
-        worker_param_keys: List[str],
-        mapping_def: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        worker_param_keys: list[str],
+        mapping_def: dict[str, Any],
+    ) -> dict[str, Any]:
         wc = dict(base_ctx)
         for k in worker_param_keys:
             wk = f"{worker}_{k}"
@@ -311,17 +311,17 @@ def render_backend_templates(
     return rendered_templates
 
 
-def prepare_template_context(param_values: Dict[str, Any], backend: str) -> Dict[str, Any]:
+def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict[str, Any]:
     """
     Prepare the context dictionary for template rendering.
-    
+
     This function transforms the parameter values into the format expected by the original templates,
     following the backend_config_mapping.yaml structure exactly.
-    
+
     Args:
         param_values: Dictionary of parameter values
         backend: Backend name
-        
+
     Returns:
         Context dictionary for template rendering
     """
@@ -483,10 +483,10 @@ def prepare_template_context(param_values: Dict[str, Any], backend: str) -> Dict
 def _cast_literal(s: str) -> Any:
     """
     Lightweight casting via YAML loader to get bool/int/float.
-    
+
     Args:
         s: String value to cast
-        
+
     Returns:
         Casted value (bool, int, float, or original string)
     """
@@ -496,16 +496,16 @@ def _cast_literal(s: str) -> Any:
         return s
 
 
-def evaluate_expression(expr: Any, context: Dict[str, Any]) -> Any:
+def evaluate_expression(expr: Any, context: dict[str, Any]) -> Any:
     """
     Evaluate Jinja2 expressions with the provided context.
-    
+
     Supports conditionals, logical operators, arithmetic, and identity lookup.
-    
+
     Args:
         expr: Expression to evaluate (string or other type)
         context: Context dictionary for variable resolution
-        
+
     Returns:
         Evaluated expression result
     """
@@ -524,13 +524,13 @@ def evaluate_expression(expr: Any, context: Dict[str, Any]) -> Any:
     return result
 
 
-def load_yaml_mapping(yaml_path: str) -> Dict[str, Any]:
+def load_yaml_mapping(yaml_path: str) -> dict[str, Any]:
     """
     Load YAML mapping file.
-    
+
     Args:
         yaml_path: Path to YAML file
-        
+
     Returns:
         Parsed YAML content as dictionary
     """
@@ -545,9 +545,9 @@ def load_yaml_mapping(yaml_path: str) -> Dict[str, Any]:
 
 
 def render_parameters(
-    param_values: Dict[str, Any],
+    param_values: dict[str, Any],
     yaml_path: Optional[str] = None,
-) -> Dict[str, Dict[str, Dict[str, Any]]]:
+) -> dict[str, dict[str, dict[str, Any]]]:
     """
     Render parameter mappings to concrete key/value dicts per framework.
 
@@ -563,14 +563,14 @@ def render_parameters(
     Args:
         param_values: Dictionary of parameter values
         yaml_path: Optional path to YAML mapping file
-        
+
     Returns:
         Nested dictionary structure: {param_key: {framework: {key: value}}}
     """
     yaml_file = _BACKEND_MAPPING_FILE if yaml_path is None else str(yaml_path)
     data = load_yaml_mapping(yaml_file)
 
-    out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    out: dict[str, dict[str, dict[str, Any]]] = {}
     parameters = data.get("parameters", [])
 
     for entry in parameters:
@@ -579,8 +579,8 @@ def render_parameters(
             continue
 
         # Determine frameworks dynamically from entry keys
-        framework_keys = [k for k in entry.keys() if k not in ("param_key",)]
-        result: Dict[str, Dict[str, Any]] = {}
+        framework_keys = [k for k in entry if k not in ("param_key",)]
+        result: dict[str, dict[str, Any]] = {}
         for fw in framework_keys:
             mapping = entry.get(fw)
 
@@ -618,7 +618,7 @@ def render_parameters(
 
             # Dict as {key: expr} mapping (fallback)
             if isinstance(mapping, dict):
-                rendered: Dict[str, Any] = {}
+                rendered: dict[str, Any] = {}
                 for k, v_expr in mapping.items():
                     v = evaluate_expression(v_expr, param_values)
                     if v is not None:
@@ -638,23 +638,23 @@ def render_parameters(
 
 
 def render_backend_parameters(
-    param_values: Dict[str, Any],
+    param_values: dict[str, Any],
     backend: str,
     yaml_path: Optional[str] = None,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """
     Render parameter mappings only for a specific backend.
-    
+
     Args:
         param_values: Dictionary of parameter values
         backend: Target backend name
         yaml_path: Optional path to YAML mapping file
-        
+
     Returns:
         Dictionary structure: {param_key: {backend_key: value}} (pruned for None)
     """
     all_rendered = render_parameters(param_values, yaml_path=yaml_path)
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for param_key, fw_map in all_rendered.items():
         backend_dict = fw_map.get(backend)
         if not backend_dict:
@@ -663,13 +663,13 @@ def render_backend_parameters(
     return out
 
 
-def get_param_keys(yaml_path: str) -> List[str]:
+def get_param_keys(yaml_path: str) -> list[str]:
     """
     Get parameter keys from YAML mapping file.
-    
+
     Args:
         yaml_path: Path to YAML mapping file
-        
+
     Returns:
         List of parameter keys
     """
@@ -682,9 +682,9 @@ def get_param_keys(yaml_path: str) -> List[str]:
     _PARAM_KEYS_CACHE[path] = keys
     return keys
 
-def _format_cli_args(backend: str, worker_ctx: Dict[str, Any]) -> str:
+def _format_cli_args(backend: str, worker_ctx: dict[str, Any]) -> str:
     rendered = render_backend_parameters(worker_ctx, backend, yaml_path=_BACKEND_MAPPING_FILE)
-    parts: List[str] = []
+    parts: list[str] = []
     for _pk, kv in rendered.items():
         for flag, val in kv.items():
             if isinstance(val, bool):

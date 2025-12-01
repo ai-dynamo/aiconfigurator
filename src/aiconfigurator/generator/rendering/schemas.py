@@ -4,19 +4,19 @@
 import os
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import yaml
 
 from .engine import evaluate_expression
 
-_SCHEMA_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+_SCHEMA_CACHE: dict[str, list[dict[str, Any]]] = {}
 _DEFAULT_BACKEND = "trtllm"
 _BASE_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = _BASE_DIR.parent / "config"
 _SCHEMA_FILE = (_CONFIG_DIR / "deployment_config.yaml").resolve()
 
-def _load_schema_inputs(schema_path: str) -> List[Dict[str, Any]]:
+def _load_schema_inputs(schema_path: str) -> list[dict[str, Any]]:
     path = os.path.abspath(schema_path)
     cached = _SCHEMA_CACHE.get(path)
     if cached is not None:
@@ -24,7 +24,7 @@ def _load_schema_inputs(schema_path: str) -> List[Dict[str, Any]]:
     try:
         with open(path, encoding="utf-8") as f:
             schema = yaml.safe_load(f) or []
-        inputs: List[Dict[str, Any]]
+        inputs: list[dict[str, Any]]
         if isinstance(schema, list):
             inputs = schema
         else:
@@ -41,7 +41,7 @@ def _normalize_backend(backend: Optional[str]) -> str:
     return _DEFAULT_BACKEND
 
 
-def _entry_allows_backend(entry: Dict[str, Any], backend: str) -> bool:
+def _entry_allows_backend(entry: dict[str, Any], backend: str) -> bool:
     allowed = entry.get("backends")
     if not allowed:
         return True
@@ -54,7 +54,7 @@ def _entry_allows_backend(entry: Dict[str, Any], backend: str) -> bool:
     return not allowed_set or backend in allowed_set
 
 
-def _select_backend_default(entry: Dict[str, Any], backend: str) -> Any:
+def _select_backend_default(entry: dict[str, Any], backend: str) -> Any:
     backend_defaults = entry.get("backend_defaults")
     if isinstance(backend_defaults, dict):
         for key, value in backend_defaults.items():
@@ -63,7 +63,7 @@ def _select_backend_default(entry: Dict[str, Any], backend: str) -> Any:
     return entry.get("default")
 
 
-def apply_defaults(group: str, cfg: Dict[str, Any], backend: Optional[str] = None) -> Dict[str, Any]:
+def apply_defaults(group: str, cfg: dict[str, Any], backend: Optional[str] = None) -> dict[str, Any]:
     inputs = _load_schema_inputs(str(_SCHEMA_FILE))
     eval_ctx = {group: dict(cfg)}
     out = dict(cfg)

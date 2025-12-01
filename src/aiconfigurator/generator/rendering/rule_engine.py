@@ -4,7 +4,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 from jinja2 import Environment
 
@@ -13,19 +13,19 @@ logger = logging.getLogger(__name__)
 _BASE_DIR = Path(__file__).resolve().parent
 _RULES_DIR = (_BASE_DIR.parent / "rule_plugin").resolve()
 
-def _ensure_scope(pv: Dict[str, Any], scope: str) -> Dict[str, Any]:
+def _ensure_scope(pv: dict[str, Any], scope: str) -> dict[str, Any]:
     params = pv.setdefault("params", {})
     return params.setdefault(scope, {})
 
-def _get_scope(pv: Dict[str, Any], scope: str) -> Optional[Dict[str, Any]]:
+def _get_scope(pv: dict[str, Any], scope: str) -> Optional[dict[str, Any]]:
     params = pv.setdefault("params", {})
     sc = params.get(scope)
     if isinstance(sc, dict) and sc:
         return sc
     return None
 
-def _eval(expr: str, scope: str, pv: Dict[str, Any]) -> Any:
-    ctx: Dict[str, Any] = {}
+def _eval(expr: str, scope: str, pv: dict[str, Any]) -> Any:
+    ctx: dict[str, Any] = {}
     ctx.update(pv)
     ctx.update(pv.get("service", {}))
     ctx.update(pv.get("k8s", {}))
@@ -40,7 +40,7 @@ def _eval(expr: str, scope: str, pv: Dict[str, Any]) -> Any:
     mc = pv.get("ModelConfig") or pv.get("model") or pv.get("model_config") or {}
     if not mc and "service" in pv and isinstance(pv["service"], dict):
         svc = pv["service"]
-        modeled: Dict[str, Any] = {}
+        modeled: dict[str, Any] = {}
         if "is_moe" in svc:
             modeled["is_moe"] = svc.get("is_moe")
         if modeled:
@@ -56,7 +56,7 @@ def _eval(expr: str, scope: str, pv: Dict[str, Any]) -> Any:
     fn = _ENV.compile_expression(expr.strip())
     return fn(**ctx)
 
-def _parse_assign(line: str) -> Optional[Tuple[Optional[str], str, str]]:
+def _parse_assign(line: str) -> Optional[tuple[Optional[str], str, str]]:
     s = line.strip().rstrip(";")
     if not s or s.startswith("#"):
         return None
@@ -77,7 +77,7 @@ def _parse_assign(line: str) -> Optional[Tuple[Optional[str], str, str]]:
         return (alias, " ".join(toks[1:]).strip(), right)
     return (None, left, right)
 
-def _apply_line(assign: Tuple[Optional[str], str, str], backend: str, pv: Dict[str, Any], default_scope: Optional[str]) -> None:
+def _apply_line(assign: tuple[Optional[str], str, str], backend: str, pv: dict[str, Any], default_scope: Optional[str]) -> None:
     scope, name, expr = assign
     sc = scope or default_scope
     if not sc:
@@ -103,7 +103,7 @@ def _load_rule_path(base_dir: str, backend: str) -> Optional[str]:
     p = os.path.join(base_dir, f"{backend}.rule")
     return p if os.path.exists(p) else None
 
-def apply_rule_plugins(param_values: Dict[str, Any], backend: str, dsl_dir: Optional[str] = None) -> Dict[str, Any]:
+def apply_rule_plugins(param_values: dict[str, Any], backend: str, dsl_dir: Optional[str] = None) -> dict[str, Any]:
     base = str(Path(dsl_dir).resolve()) if dsl_dir else str(_RULES_DIR)
     rule_path = _load_rule_path(base, backend)
     if not rule_path:
@@ -111,7 +111,7 @@ def apply_rule_plugins(param_values: Dict[str, Any], backend: str, dsl_dir: Opti
     with open(rule_path, encoding="utf-8") as f:
         content = f.read().splitlines()
     default_scope = "prefill" if backend in ("trtllm", "vllm", "sglang") else None
-    cond_stack: list[Tuple[int, bool]] = []
+    cond_stack: list[tuple[int, bool]] = []
     for idx, line in enumerate(content, start=1):
         if not line.strip():
             continue
@@ -124,7 +124,7 @@ def apply_rule_plugins(param_values: Dict[str, Any], backend: str, dsl_dir: Opti
             try:
                 active = bool(_eval(expr, default_scope or "prefill", param_values))
             except Exception as e:
-                logger.error("rule when compile failed at line %d: %s", idx, e)
+                logger.exception("rule when compile failed at line %d: %s", idx, e)
                 active = False
             cond_stack.append((indent, active))
             continue
@@ -133,11 +133,11 @@ def apply_rule_plugins(param_values: Dict[str, Any], backend: str, dsl_dir: Opti
         try:
             assign = _parse_assign(s)
         except Exception as e:
-            logger.error("rule parse failed at line %d: %s", idx, e)
+            logger.exception("rule parse failed at line %d: %s", idx, e)
             assign = None
         if assign:
             try:
                 _apply_line(assign, backend, param_values, default_scope)
             except Exception as e:
-                logger.error("rule apply failed at line %d: %s", idx, e)
+                logger.exception("rule apply failed at line %d: %s", idx, e)
     return param_values

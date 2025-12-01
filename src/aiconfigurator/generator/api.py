@@ -13,7 +13,7 @@ import argparse
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import yaml
 from prettytable import PrettyTable
@@ -68,7 +68,7 @@ def _format_mapping_value(value: Any) -> str:
         key = value.get("key")
         val = value.get("value")
         default = value.get("default")
-        segments: List[str] = []
+        segments: list[str] = []
         if key and val is not None:
             segments.append(f"{key} <- {val}")
         elif key:
@@ -81,7 +81,7 @@ def _format_mapping_value(value: Any) -> str:
     return str(value)
 
 
-def _entry_matches_backend(entry: Dict[str, Any], backend: Optional[str]) -> bool:
+def _entry_matches_backend(entry: dict[str, Any], backend: Optional[str]) -> bool:
     if not backend:
         return True
     allowed = entry.get("backends")
@@ -128,10 +128,10 @@ def _build_inputs_table(schema_path: str, backend: Optional[str]) -> PrettyTable
     return table
 
 
-def _collect_mapping_backends(parameters: List[Dict[str, Any]]) -> List[str]:
+def _collect_mapping_backends(parameters: list[dict[str, Any]]) -> list[str]:
     discovered: set[str] = set()
     for entry in parameters:
-        for key in entry.keys():
+        for key in entry:
             if key not in {"param_key", "description"}:
                 discovered.add(str(key))
     preferred_order = ["trtllm", "vllm", "sglang"]
@@ -152,7 +152,7 @@ def _build_mapping_table(mapping_path: str, backend: Optional[str]) -> PrettyTab
     else:
         backend_names = _collect_mapping_backends(parameters)
     table = PrettyTable()
-    headers = ["Param key"] + [name for name in backend_names]
+    headers = ["Param key"] + list(backend_names)
     table.field_names = headers
     table.align["Param key"] = "l"
     rows_added = False
@@ -190,7 +190,7 @@ def print_generator_help(
     if section_lower not in _VALID_GENERATOR_HELP_SECTIONS:
         raise ValueError(f"Unsupported generator help section: {section}")
     stream = stream or sys.stdout
-    blocks: List[str] = []
+    blocks: list[str] = []
     if section_lower in {"deploy", "all"}:
         # Show the complete deployment_config.yaml so users can see the full schema.
         payload = _load_yaml_payload(schema_path)
@@ -202,7 +202,7 @@ def print_generator_help(
     stream.write("\n\n".join(blocks) + "\n")
 
 
-def maybe_handle_generator_help(argv: List[str]) -> bool:
+def maybe_handle_generator_help(argv: list[str]) -> bool:
     """
     Inspect argv for generator help flags, print the tables, and exit early.
 
@@ -238,18 +238,18 @@ def maybe_handle_generator_help(argv: List[str]) -> bool:
     return True
 
 def generate_backend_config(
-    params: Dict[str, Any],
+    params: dict[str, Any],
     backend: str,
     mapping_path: Optional[str] = None
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """
     Generate backend-specific configuration from parameters.
-    
+
     Args:
         params: Complete parameter configuration
         backend: Target backend name (e.g., 'sglang', 'vllm')
         mapping_path: Optional path to mapping YAML file
-        
+
     Returns:
         Backend-specific configuration dict
     """
@@ -259,22 +259,22 @@ def generate_backend_config(
 
 
 def generate_backend_artifacts(
-    params: Dict[str, Any],
+    params: dict[str, Any],
     backend: str,
     templates_dir: Optional[str] = None,
     output_dir: Optional[str] = None,
     backend_version: Optional[str] = None
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """
     Generate complete backend artifacts including run scripts, configs, and k8s YAML.
-    
+
     Args:
         params: Complete parameter configuration
         backend: Target backend name (e.g., 'trtllm', 'vllm', 'sglang')
         templates_dir: Optional directory containing templates
         output_dir: Optional directory to save generated files
         backend_version: Optional version string for version-specific template selection
-        
+
     Returns:
         Dictionary mapping artifact names to their content
     """
@@ -295,24 +295,24 @@ def generate_backend_artifacts(
         try:
             writer.write(artifacts)
         except OSError as exc:
-            logger.error("Failed to write artifacts: %s", exc)
+            logger.exception("Failed to write artifacts: %s", exc)
 
     return artifacts
 
 
 
 # CLI Interface Functions
-def parse_cli_params(argv: List[str]) -> Dict[str, Any]:
+def parse_cli_params(argv: list[str]) -> dict[str, Any]:
     """
     Parse command-line parameters in key=value format.
-    
+
     Args:
         argv: List of command-line arguments
-        
+
     Returns:
         Dictionary of parsed parameters
     """
-    cli_params: Dict[str, Any] = {}
+    cli_params: dict[str, Any] = {}
     for item in argv:
         if "=" not in item:
             continue
@@ -371,8 +371,8 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
 
 def load_generator_overrides(
     config_path: Optional[str],
-    inline_overrides: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    inline_overrides: Optional[list[str]] = None,
+) -> dict[str, Any]:
     """
     Load generator overrides from a YAML file and optional inline CLI overrides.
 
@@ -380,7 +380,7 @@ def load_generator_overrides(
         config_path: Optional path to a YAML file containing overrides.
         inline_overrides: Optional list of dotted KEY=VALUE strings.
     """
-    config_payload: Dict[str, Any] = {}
+    config_payload: dict[str, Any] = {}
     if config_path:
         expanded = os.path.abspath(config_path)
         with open(expanded, encoding="utf-8") as f:
@@ -395,7 +395,7 @@ def load_generator_overrides(
     return _deep_merge_dicts(config_payload, inline_payload)
 
 
-def load_generator_overrides_from_args(args: argparse.Namespace) -> Dict[str, Any]:
+def load_generator_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     """
     Convenience wrapper that pulls generator override fields from an argparse namespace.
     """
@@ -405,13 +405,13 @@ def load_generator_overrides_from_args(args: argparse.Namespace) -> Dict[str, An
     )
 
 
-def parse_backend_arg(argv: List[str]) -> Optional[str]:
+def parse_backend_arg(argv: list[str]) -> Optional[str]:
     """
     Extract backend argument from command-line arguments.
-    
+
     Args:
         argv: List of command-line arguments
-        
+
     Returns:
         Backend name if found, None otherwise
     """
@@ -422,13 +422,13 @@ def parse_backend_arg(argv: List[str]) -> Optional[str]:
     return None
 
 
-def parse_mapping_arg(argv: List[str]) -> Optional[str]:
+def parse_mapping_arg(argv: list[str]) -> Optional[str]:
     """
     Extract mapping argument from command-line arguments.
-    
+
     Args:
         argv: List of command-line arguments
-        
+
     Returns:
         Mapping path if found, None otherwise
     """
@@ -442,14 +442,14 @@ def parse_mapping_arg(argv: List[str]) -> Optional[str]:
 def resolve_mapping_yaml(mapping_arg: Optional[str], default_mapping_path: str) -> str:
     """
     Resolve mapping YAML file path from argument or default location.
-    
+
     Args:
         mapping_arg: Optional mapping path from command line
         default_mapping_path: Default mapping file path
-        
+
     Returns:
         Absolute path to mapping YAML file
-        
+
     Raises:
         FileNotFoundError: If mapping file cannot be found
     """
@@ -471,10 +471,10 @@ def resolve_mapping_yaml(mapping_arg: Optional[str], default_mapping_path: str) 
 
 def prepare_generator_params(
     config_path: Optional[str],
-    overrides: Optional[Dict[str, Any]] = None,
+    overrides: Optional[dict[str, Any]] = None,
     schema_path: Optional[str] = None,
     backend: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Load generator inputs from YAML (if provided), apply CLI overrides, and emit normalized params.
 
@@ -484,7 +484,7 @@ def prepare_generator_params(
         schema_path: Optional alternative schema file.
         backend: Backend name used for backend-scoped defaults (e.g., trtllm, vllm, sglang).
     """
-    raw_config: Dict[str, Any] = {}
+    raw_config: dict[str, Any] = {}
 
     if config_path:
         if not os.path.isabs(config_path):
@@ -503,7 +503,7 @@ def prepare_generator_params(
     return generate_config_from_input_dict(raw_config, schema_path=schema_path, backend=backend)
 
 
-def _assign_path(target: Dict[str, Any], dotted_key: str, value: Any) -> None:
+def _assign_path(target: dict[str, Any], dotted_key: str, value: Any) -> None:
     parts = [p for p in dotted_key.split(".") if p]
     if not parts:
         return
@@ -517,7 +517,7 @@ def _assign_path(target: Dict[str, Any], dotted_key: str, value: Any) -> None:
     node[parts[-1]] = value
 
 
-def _deep_merge_dicts(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+def _deep_merge_dicts(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in incoming.items():
         if (
