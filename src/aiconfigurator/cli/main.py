@@ -84,6 +84,12 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
     parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms.")
     parser.add_argument("--tpot", type=float, default=30.0, help="Time per output token in ms.")
+    parser.add_argument(
+        "--request_latency",
+        type=float,
+        default=None,
+        help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
+    )
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
 
 
@@ -134,6 +140,7 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
         "osl": args.osl,
         "ttft": args.ttft,
         "tpot": args.tpot,
+        "request_latency": args.request_latency,
         "prefix": args.prefix,
     }
 
@@ -162,6 +169,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "osl",
     "ttft",
     "tpot",
+    "request_latency",
     "enable_wideep",
     "total_gpus",
     "use_specific_quant_mode",
@@ -267,7 +275,7 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             task_kwargs["decode_system_name"] = inferred_decode_system or system_name
 
         # Per-experiment overrides for runtime numeric parameters if provided at top level
-        for numeric_key in ("isl", "osl", "ttft", "tpot"):
+        for numeric_key in ("isl", "osl", "ttft", "tpot", "request_latency"):
             if numeric_key in exp_config:
                 task_kwargs[numeric_key] = exp_config[numeric_key]
 

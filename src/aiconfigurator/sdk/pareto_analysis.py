@@ -8,79 +8,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotext
-from scipy.interpolate import interp1d
 
-from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk import config
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.common import ColumnsAgg
 from aiconfigurator.sdk.inference_session import DisaggInferenceSession, InferenceSession
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
-
-
-def enumerate_parallel_config(
-    num_gpu_list: list[int],
-    tp_list: list[int],
-    pp_list: list[int],
-    dp_list: list[int] = [1],
-    moe_tp_list: list[int] = [1],
-    moe_ep_list: list[int] = [1],
-    is_moe: bool = False,
-    backend: common.BackendName = common.BackendName.trtllm,
-    enable_wideep: bool = False,
-) -> list[list[int]]:
-    """
-    Enumerate parallel configurations based on parallel list.
-    This is a helper function for agg_pareto and disagg_pareto to define search space.
-
-    Args:
-        num_gpu_list: list of number of gpus, this is used to filter out invalid parallel
-            configurations
-        tp_list: list of tensor parallel sizes
-        pp_list: list of pipeline parallel sizes
-        dp_list: list of data parallel sizes
-        moe_tp_list: list of moe tensor parallel sizes
-        moe_ep_list: list of moe expert parallel sizes
-        is_moe: whether to use moe
-        backend: backend name enum. Important for moe parallel enumeration as different backends
-            have different moe parallel support.
-    Returns:
-        parallel_config_list: list of parallel configurations
-    """
-    parallel_config_list = []
-    for tp in tp_list:
-        for pp in pp_list:
-            if is_moe:
-                for dp in dp_list:
-                    for moe_tp in moe_tp_list:
-                        for moe_ep in moe_ep_list:
-                            if dp * tp * pp in num_gpu_list and dp * tp == moe_tp * moe_ep:  # check num gpu and width
-                                # backend specific filters
-                                # trtllm
-                                if (
-                                    backend == common.BackendName.trtllm and dp > 1 and tp > 1
-                                ):  # trtllm as trtllm don't supports attn tp > 1
-                                    continue
-                                # sglang
-                                elif backend == common.BackendName.sglang:
-                                    if (enable_wideep and moe_tp > 1) or (
-                                        not enable_wideep and moe_ep > 1
-                                    ):  # wideep only has ep
-                                        continue
-                                elif backend == common.BackendName.vllm:
-                                    pass  # TODO
-                                parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
-            else:
-                if tp * pp in num_gpu_list:
-                    parallel_config_list.append([tp, pp, 1, 1, 1])
-
-    for parallel_config in parallel_config_list:
-        tp, pp, dp, moe_tp, moe_ep = parallel_config
-        logger.info(f"Enumerated parallel config: tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
-
-    return parallel_config_list
 
 
 def agg_pareto(
@@ -109,8 +46,6 @@ def agg_pareto(
         results_df: dataframe of the results
     """
 
-    tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
-
     # agg is agg server, the loop over parallel is outside here.
     results_df = pd.DataFrame(columns=ColumnsAgg)
     for parallel_config in parallel_config_list:
@@ -134,9 +69,38 @@ def agg_pareto(
             )
             backend = get_backend(backend_name)
             sess = InferenceSession(model=model, database=database, backend=backend)
-            for tpot in tpot_list:
-                overwritten_runtime_config = copy.deepcopy(runtime_config)
-                overwritten_runtime_config.tpot = tpot
+
+            runtime_configs_to_evaluate: list[config.RuntimeConfig] = []
+            if runtime_config.request_latency is not None and runtime_config.request_latency > 0:
+                ttft_tpot_constraints = enumerate_ttft_tpot_constraints(
+                    runtime_config.osl, runtime_config.request_latency, runtime_config.ttft
+                )
+                if not ttft_tpot_constraints:
+                    logger.debug(
+                        "No ttft/tpot constraints derived for request_latency=%s", runtime_config.request_latency
+                    )
+                    continue
+                logger.debug(
+                    "Enumerated %d ttft/tpot constraint pairs for request_latency=%sms",
+                    len(ttft_tpot_constraints),
+                    runtime_config.request_latency,
+                )
+                for ttft_constraint, tpot_constraint in ttft_tpot_constraints:
+                    overwritten_runtime_config = copy.deepcopy(runtime_config)
+                    overwritten_runtime_config.ttft = ttft_constraint
+                    overwritten_runtime_config.tpot = tpot_constraint
+                    runtime_configs_to_evaluate.append(overwritten_runtime_config)
+            else:
+                tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
+                for tpot in tpot_list:
+                    overwritten_runtime_config = copy.deepcopy(runtime_config)
+                    overwritten_runtime_config.tpot = tpot
+                    runtime_configs_to_evaluate.append(overwritten_runtime_config)
+
+            if not runtime_configs_to_evaluate:
+                continue
+
+            for overwritten_runtime_config in runtime_configs_to_evaluate:
                 summary = sess.find_best_agg_result_under_constraints(
                     runtime_config=overwritten_runtime_config,
                     top_k=10,
@@ -145,7 +109,12 @@ def agg_pareto(
                 )
                 result_df = summary.get_summary_df()
                 if len(result_df) == 0:
-                    logger.debug(f"No result found for tpot {tpot}ms in agg pareto.")
+                    logger.debug(
+                        "No result found for constraints ttft=%s, tpot=%s, request_latency=%s in agg pareto.",
+                        overwritten_runtime_config.ttft,
+                        overwritten_runtime_config.tpot,
+                        overwritten_runtime_config.request_latency,
+                    )
                     continue
                 if len(results_df) == 0:
                     results_df = result_df
@@ -163,7 +132,9 @@ def agg_pareto(
             )
             continue
 
-    results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
+    if not results_df.empty:
+        results_df = results_df.drop_duplicates(ignore_index=True)
+        results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
 
     return results_df
 
@@ -415,57 +386,6 @@ def draw_pareto_to_string(
         buf = ""
     plotext.clear_data()
     return buf
-
-
-def interpolate_throughput_at_tpot(df: pd.DataFrame | None, target_tpot: float) -> float:
-    """
-    Interpolates the throughput at a given TPOT.
-    This is more for reference by reading the pareto frontier.
-    Args:
-        df: The DataFrame containing the throughput data.
-        target_tpot: The target TPOT in ms.
-    Returns:
-        The interpolated throughput at the target TPOT.
-    """
-    if df is None or df.empty:
-        return 0.0
-
-    target_tps_user = 1000.0 / target_tpot
-
-    # Filter out points where tpot is not available or invalid
-    df_filtered = df.dropna(subset=["tokens/s/user", "tokens/s/gpu"])
-    if df_filtered.empty or len(df_filtered) < 2:
-        # Not enough points to interpolate, try to find closest or return 0
-        if not df_filtered.empty:
-            # Fallback: find the point with tpot closest to target_tps_user
-            closest_idx = (df_filtered["tokens/s/user"] - target_tps_user).abs().idxmin()
-            return df_filtered.loc[closest_idx, "tokens/s/gpu"]
-        return 0.0
-
-    # Sort by tokens/s/user for interpolation
-    df_sorted = df_filtered.sort_values(by="tokens/s/user")
-
-    # Create interpolation functions
-    # If target_tpot is outside the range, interp1d will extrapolate or error depending on
-    # fill_value
-    # Using fill_value="extrapolate" can be risky.
-    # It's often better to clamp to the nearest value if outside the range.
-    min_tps_user, max_tps_user = df_sorted["tokens/s/user"].min(), df_sorted["tokens/s/user"].max()
-
-    if target_tps_user < min_tps_user:
-        return df_sorted.iloc[0]["tokens/s/gpu"]  # Closest value at smallest tokens/s/user
-    if target_tps_user > max_tps_user:
-        return 0.0  # cannot meet the target tps_user
-
-    interp_func = interp1d(
-        df_sorted["tokens/s/user"],
-        df_sorted["tokens/s/gpu"],
-        kind="linear",
-        fill_value="extrapolate",
-    )
-
-    interpolated_throughput = float(interp_func(target_tps_user))
-    return max(0.0, interpolated_throughput)  # Ensure non-negative throughput
 
 
 def get_best_configs_under_tpot_constraint(

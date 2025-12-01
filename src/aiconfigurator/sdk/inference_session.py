@@ -11,6 +11,7 @@ import pandas as pd
 from aiconfigurator.sdk import common, config, models, perf_database
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.inference_summary import InferenceSummary
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -201,6 +202,8 @@ class DisaggInferenceSession:
         tokens_s = seq_s * prefill_summary_dict["osl"]
         tokens_s_gpu = tokens_s / (prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker)
         num_total_gpus = prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker
+        osl = prefill_summary_dict["osl"]
+        request_latency = prefill_summary_dict["ttft"] + decode_summary_dict["tpot"] * max(osl - 1, 0)
 
         return {
             "model": prefill_summary_dict["model"],
@@ -218,6 +221,7 @@ class DisaggInferenceSession:
             "(d)workers": decode_num_worker,
             "ttft": prefill_summary_dict["ttft"],
             "tpot": decode_summary_dict["tpot"],
+            "request_latency": request_latency,
             "seq/s": seq_s,
             "seq/s/gpu": seq_s_gpu,
             "tokens/s": tokens_s,
@@ -643,13 +647,31 @@ class DisaggInferenceSession:
             return disagg_summary
 
         # find best result under constraints
-        ttft = runtime_config.ttft
-        tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
-        for tpot in tpot_list:
-            logger.debug(f"Finding best result under constraints for tpot={tpot}ms...")
+        constraint_pairs: list[tuple[float, float]] = []
+        if runtime_config.request_latency is not None and runtime_config.request_latency > 0:
+            constraint_pairs = enumerate_ttft_tpot_constraints(
+                runtime_config.osl,
+                runtime_config.request_latency,
+                runtime_config.ttft,
+            )
+            if not constraint_pairs:
+                logger.debug(
+                    "No ttft/tpot constraints derived for request_latency=%s in disagg optimization.",
+                    runtime_config.request_latency,
+                )
+        else:
+            tpot_values = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
+            constraint_pairs = [(runtime_config.ttft, tpot) for tpot in tpot_values]
+
+        for ttft_constraint, tpot_constraint in constraint_pairs:
+            logger.debug(
+                "Finding best result under constraints for ttft=%sms, tpot=%sms...",
+                ttft_constraint,
+                tpot_constraint,
+            )
             filtered_disagg_summary_df = _find_best_result_under_constraints(
-                ttft=ttft,
-                tpot=tpot,
+                ttft=ttft_constraint,
+                tpot=tpot_constraint,
                 prefill_summary_df=prefill_summary_df,
                 decode_summary_df=decode_summary_df,
                 return_top_k=5,
@@ -665,6 +687,7 @@ class DisaggInferenceSession:
             logger.debug(f"No disagg result found for {model_name} with given constraints.")
             return disagg_summary
 
+        disagg_summary_df = disagg_summary_df.drop_duplicates(ignore_index=True)
         # set final disagg summary
         disagg_summary.set_summary_df(disagg_summary_df)
         return disagg_summary

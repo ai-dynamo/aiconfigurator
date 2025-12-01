@@ -216,6 +216,7 @@ class SGLANGBackend(BaseBackend):
             seq_s = request_rate
             seq_s_gpu = seq_s / pp / tp / dp
             tokens_s = output_throughput
+            request_latency = ttft + tpot * max(osl - 1, 0)
             num_total_gpus = tp * pp * dp
             parallel = f"tp{tp}pp{pp}dp{dp}etp{moe_tp}ep{moe_ep}"
             gemm = model.config.gemm_quant_mode.name
@@ -241,6 +242,7 @@ class SGLANGBackend(BaseBackend):
                 "tokens/s": tokens_s,
                 "tokens/s/gpu": tokens_s_gpu,
                 "tokens/s/user": tokens_s_user,
+                "request_latency": request_latency,
                 "num_total_gpus": num_total_gpus,
                 "tp": tp,
                 "pp": pp,

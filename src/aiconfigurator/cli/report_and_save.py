@@ -69,6 +69,7 @@ def _plot_worker_setup_table(
             "\033[1mtokens/s/gpu\033[0m",
             "tokens/s/user",
             "TTFT",
+            "request_latency",
             "concurrency",
             "total_gpus (used)",
             "replicas",
@@ -115,6 +116,7 @@ def _plot_worker_setup_table(
                     f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['ttft']:.2f}",
+                    f"{row['request_latency']:.2f}",
                     f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
                     f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                     row["replicas"],
@@ -139,6 +141,7 @@ def _plot_worker_setup_table(
             "\033[1mtokens/s/gpu\033[0m",
             "tokens/s/user",
             "TTFT",
+            "request_latency",
             "concurrency",
             "total_gpus (used)",
             "replicas",
@@ -169,6 +172,7 @@ def _plot_worker_setup_table(
                     f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['ttft']:.2f}",
+                    f"{row['request_latency']:.2f}",
                     f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
                     f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                     row["replicas"],
@@ -240,6 +244,7 @@ def log_final_summary(
         summary_box.append(f"    - Per-User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
+        summary_box.append(f"    - Request Latency: {best_conf_details['request_latency']:.2f}ms")
     summary_box.append("  " + "-" * 76)
 
     # ============================= pareto frontier

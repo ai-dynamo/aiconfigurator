@@ -53,8 +53,10 @@ def stub_pareto_analysis(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "aiconfigurator.sdk.pareto_analysis", stub_module)
     import aiconfigurator.sdk as sdk_pkg
+    import aiconfigurator.sdk.utils as sdk_utils
 
     monkeypatch.setattr(sdk_pkg, "pareto_analysis", stub_module, raising=False)
+    monkeypatch.setattr(sdk_utils, "enumerate_parallel_config", stub_module.enumerate_parallel_config)
 
 
 def _enum_name(value):

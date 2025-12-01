@@ -17,6 +17,7 @@ from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.inference_session import InferenceSession
 from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
 from aiconfigurator.sdk.perf_database import get_all_databases, get_database
+from aiconfigurator.sdk.utils import enumerate_parallel_config
 
 
 class LogCapture:
@@ -302,7 +303,7 @@ class EventFn:
                 runtime_config = config.RuntimeConfig(isl=isl, osl=osl, prefix=prefix, ttft=ttft, tpot=tpot)
 
                 is_moe = check_is_moe(model_name)
-                parallel_config_list = pareto_analysis.enumerate_parallel_config(
+                parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=[tp_size * pp_size * dp_size],
                     tp_list=[tp_size],
                     pp_list=[pp_size],
@@ -414,7 +415,7 @@ class EventFn:
                 )
 
                 is_moe = check_is_moe(model_name)
-                parallel_config_list = pareto_analysis.enumerate_parallel_config(
+                parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=num_gpus,
                     tp_list=tp_size,
                     pp_list=pp_size,
@@ -600,7 +601,7 @@ class EventFn:
 
                 is_moe = check_is_moe(model_name)
 
-                prefill_parallel_config_list = pareto_analysis.enumerate_parallel_config(
+                prefill_parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=prefill_num_gpus,
                     tp_list=prefill_tp_size,
                     pp_list=prefill_pp_size,
@@ -611,7 +612,7 @@ class EventFn:
                     backend=common.BackendName(prefill_backend_name),
                     enable_wideep=enable_wideep,
                 )
-                decode_parallel_config_list = pareto_analysis.enumerate_parallel_config(
+                decode_parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=decode_num_gpus,
                     tp_list=decode_tp_size,
                     pp_list=decode_pp_size,

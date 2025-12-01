@@ -38,7 +38,7 @@ exp_agg_full:
       kvcache_quant_mode: "float16" # fp8, int8, float16
       fmha_quant_mode: "float16" # fp8, float16
       comm_quant_mode: "half" # half
-      num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
+      num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1, 2, 4, 8]
       pp_list: [1]
       dp_list: [1, 2, 4, 8]
@@ -71,7 +71,7 @@ exp_disagg_full:
       kvcache_quant_mode: "float16" # fp8, int8, float16
       fmha_quant_mode: "float16" # fp8, float16
       comm_quant_mode: "half" # half
-      num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
+      num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1, 2, 4, 8]
       pp_list: [1]
       dp_list: [1] # we didn't enable attn dp here. You can enable it if you want.
@@ -84,7 +84,7 @@ exp_disagg_full:
       kvcache_quant_mode: "float16" # fp8, int8, float16
       fmha_quant_mode: "float16" # fp8, float16
       comm_quant_mode: "half" # half
-      num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
+      num_gpu_per_worker: [4, 8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1, 2, 4, 8]
       pp_list: [1]
       dp_list: [1, 2, 4, 8]

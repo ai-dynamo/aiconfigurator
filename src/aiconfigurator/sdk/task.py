@@ -20,6 +20,7 @@ from aiconfigurator.sdk.perf_database import (
     get_database,
     get_latest_database_version,
 )
+from aiconfigurator.sdk.utils import enumerate_parallel_config
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,9 @@ class TaskContext:
     isl: int
     osl: int
     prefix: int
-    ttft: float
-    tpot: float
+    ttft: float | None
+    tpot: float | None
+    request_latency: float | None
     enable_wideep: bool
     total_gpus: int | None
     profiles: list[str] = field(default_factory=list)
@@ -178,6 +180,7 @@ class TaskConfigFactory:
                 "prefix": ctx.prefix,
                 "ttft": ctx.ttft,
                 "tpot": ctx.tpot,
+                "request_latency": ctx.request_latency,
             },
             "enable_wideep": ctx.enable_wideep,
             "moe_backend": None,  # sglang wideep only
@@ -679,6 +682,7 @@ class TaskConfig:
         prefix: int = 0,
         ttft: float = 1000,
         tpot: float = 50,
+        request_latency: float | None = None,
         enable_wideep: bool = False,
         total_gpus: int | None = None,
         profiles: list[str] | None = None,
@@ -707,6 +711,7 @@ class TaskConfig:
             osl: The output sequence length.
             ttft: The target TTFT.
             tpot: The target TPOT.
+            request_latency: The target end-to-end request latency.
             enable_wideep: Whether to enable wideep.
             total_gpus: The total number of GPUs.
             profiles: The profiles to use.
@@ -752,6 +757,7 @@ class TaskConfig:
             prefix=prefix,
             ttft=ttft,
             tpot=tpot,
+            request_latency=request_latency,
             enable_wideep=enable_wideep,
             total_gpus=total_gpus,
             profiles=effective_profiles,
@@ -870,7 +876,7 @@ class TaskConfig:
         printable.update(
             {
                 k: runtime_dict.get(k)
-                for k in ("isl", "osl", "prefix", "ttft", "tpot")
+                for k in ("isl", "osl", "prefix", "ttft", "tpot", "request_latency")
                 if runtime_dict.get(k) is not None
             }
         )
@@ -948,6 +954,7 @@ class TaskRunner:
             prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
+            request_latency=getattr(task_config.runtime_config, "request_latency", None),
         )
         logger.info("Task %s: Setting up database", task_config.task_name)
         try:
@@ -983,7 +990,7 @@ class TaskRunner:
         try:
             from aiconfigurator.sdk import pareto_analysis as pa
 
-            parallel_config_list = pa.enumerate_parallel_config(
+            parallel_config_list = enumerate_parallel_config(
                 num_gpu_list=task_config.worker_config.num_gpu_per_worker,
                 tp_list=task_config.worker_config.tp_list,
                 pp_list=task_config.worker_config.pp_list,
@@ -1026,6 +1033,7 @@ class TaskRunner:
             prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
+            request_latency=getattr(task_config.runtime_config, "request_latency", None),
         )
 
         logger.info("Task %s: Setting up prefill database", task_config.task_name)
@@ -1063,7 +1071,7 @@ class TaskRunner:
         try:
             from aiconfigurator.sdk import pareto_analysis as pa
 
-            prefill_parallel_config_list = pa.enumerate_parallel_config(
+            prefill_parallel_config_list = enumerate_parallel_config(
                 num_gpu_list=task_config.prefill_worker_config.num_gpu_per_worker,
                 tp_list=task_config.prefill_worker_config.tp_list,
                 pp_list=task_config.prefill_worker_config.pp_list,
@@ -1118,7 +1126,7 @@ class TaskRunner:
         try:
             from aiconfigurator.sdk import pareto_analysis as pa
 
-            decode_parallel_config_list = pa.enumerate_parallel_config(
+            decode_parallel_config_list = enumerate_parallel_config(
                 num_gpu_list=task_config.decode_worker_config.num_gpu_per_worker,
                 tp_list=task_config.decode_worker_config.tp_list,
                 pp_list=task_config.decode_worker_config.pp_list,

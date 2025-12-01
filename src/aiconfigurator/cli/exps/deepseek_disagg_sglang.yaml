@@ -40,7 +40,7 @@ exp_disagg_wideep:
       kvcache_quant_mode: "fp8" 
       fmha_quant_mode: "fp8_block" 
       comm_quant_mode: "half" 
-      num_gpu_per_worker: [8, 16, 32, 64] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
+      num_gpu_per_worker: [8, 16, 32, 64] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1]
       pp_list: [1]
       dp_list: [8, 16, 32, 64] 
@@ -53,7 +53,7 @@ exp_disagg_wideep:
       kvcache_quant_mode: "fp8" 
       fmha_quant_mode: "fp8_block" 
       comm_quant_mode: "half" 
-      num_gpu_per_worker: [8, 16, 32, 64] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
+      num_gpu_per_worker: [8, 16, 32, 64] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1]
       pp_list: [1]
       dp_list: [8, 16, 32, 64]
@@ -96,7 +96,7 @@ exp_disagg_non_wideep:
       kvcache_quant_mode: "fp8" 
       fmha_quant_mode: "fp8_block" 
       comm_quant_mode: "half" 
-      num_gpu_per_worker: [8] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
+      num_gpu_per_worker: [8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1, 8]
       pp_list: [1]
       dp_list: [1, 8] 
@@ -109,7 +109,7 @@ exp_disagg_non_wideep:
       kvcache_quant_mode: "fp8" 
       fmha_quant_mode: "fp8_block" 
       comm_quant_mode: "half" 
-      num_gpu_per_worker: [8] # num gpus per worker, please refer to enumerate_parallel_config in pareto_analysis.py
+      num_gpu_per_worker: [8] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1, 8]
       pp_list: [1]
       dp_list: [1, 8]
