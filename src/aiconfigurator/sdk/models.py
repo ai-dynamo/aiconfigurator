@@ -1332,7 +1332,7 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_tp_size,
                     moe_ep_size,
                     moe_quant_mode,
-                    "uniform",
+                    workload_distribution,
                     attention_dp_size,
                     is_context=True,
                     moe_backend=moe_backend,
