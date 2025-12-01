@@ -9,19 +9,19 @@ It uses the new architecture with separate API layer for parameter collection
 and configuration modules for better organization.
 """
 
+import argparse
 import json
+import logging
 import os
 import sys
-import argparse
-import logging
 from typing import Any, Dict, List, Optional
 
 from api import (
-    resolve_mapping_yaml,
+    generate_backend_artifacts,
     generate_backend_config,
     parse_cli_params,
-    generate_backend_artifacts,
     prepare_generator_params,
+    resolve_mapping_yaml,
 )
 
 
@@ -35,7 +35,7 @@ def main(argv: Optional[List[str]] = None):
     # Get current directory for default mapping path
     current_dir = os.path.dirname(__file__)
     default_mapping_path = os.path.join(current_dir, "config", "backend_config_mapping.yaml")
-    
+
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     parser = argparse.ArgumentParser(

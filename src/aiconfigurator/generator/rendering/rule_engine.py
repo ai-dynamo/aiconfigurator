@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -108,7 +108,7 @@ def apply_rule_plugins(param_values: Dict[str, Any], backend: str, dsl_dir: Opti
     rule_path = _load_rule_path(base, backend)
     if not rule_path:
         return param_values
-    with open(rule_path, "r", encoding="utf-8") as f:
+    with open(rule_path, encoding="utf-8") as f:
         content = f.read().splitlines()
     default_scope = "prefill" if backend in ("trtllm", "vllm", "sglang") else None
     cond_stack: list[Tuple[int, bool]] = []

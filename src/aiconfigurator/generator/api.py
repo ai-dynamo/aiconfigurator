@@ -19,7 +19,7 @@ import yaml
 from prettytable import PrettyTable
 
 from .artifacts import ArtifactWriter
-from .rendering import render_backend_parameters, render_backend_templates, _cast_literal
+from .rendering import _cast_literal, render_backend_parameters, render_backend_templates
 from .utils import DEFAULT_BACKEND, normalize_backend
 
 GENERATOR_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
@@ -29,7 +29,7 @@ _VALID_GENERATOR_HELP_SECTIONS = {"all", "deploy", "backend"}
 
 
 def _load_yaml_payload(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         return yaml.safe_load(fh) or {}
 
 
@@ -55,7 +55,7 @@ def _format_backend_list(backends: Any) -> str:
 def _format_backend_defaults(values: Any) -> str:
     if not isinstance(values, dict):
         return "-"
-    parts = [f"{str(k)}={str(v)}" for k, v in values.items()]
+    parts = [f"{k!s}={v!s}" for k, v in values.items()]
     return " | ".join(parts) if parts else "-"
 
 
@@ -256,7 +256,7 @@ def generate_backend_config(
     return render_backend_parameters(params, backend, yaml_path=mapping_path)
 
 
-    
+
 
 def generate_backend_artifacts(
     params: Dict[str, Any],
@@ -280,7 +280,7 @@ def generate_backend_artifacts(
     """
     logger = logging.getLogger(__name__)
     artifacts = render_backend_templates(params, backend, templates_dir, backend_version)
-    
+
     if output_dir:
         params_obj = params.get('params', {})
         has_prefill = bool(params_obj.get('prefill'))
@@ -296,7 +296,7 @@ def generate_backend_artifacts(
             writer.write(artifacts)
         except OSError as exc:
             logger.error("Failed to write artifacts: %s", exc)
-    
+
     return artifacts
 
 
@@ -383,7 +383,7 @@ def load_generator_overrides(
     config_payload: Dict[str, Any] = {}
     if config_path:
         expanded = os.path.abspath(config_path)
-        with open(expanded, "r", encoding="utf-8") as f:
+        with open(expanded, encoding="utf-8") as f:
             loaded = yaml.safe_load(f) or {}
             if not isinstance(loaded, dict):
                 raise ValueError("--generator-config must point to a YAML mapping.")
@@ -460,10 +460,10 @@ def resolve_mapping_yaml(mapping_arg: Optional[str], default_mapping_path: str) 
         if os.path.isfile(candidate):
             return os.path.abspath(candidate)
         raise FileNotFoundError(f"Mapping file not found: {candidate}")
-    
+
     if os.path.isfile(default_mapping_path):
         return os.path.abspath(default_mapping_path)
-    
+
     raise FileNotFoundError(
         f"Cannot resolve mapping YAML. Expected at {default_mapping_path} or provided via mapping=<path>."
     )
@@ -491,7 +491,7 @@ def prepare_generator_params(
             config_path = os.path.abspath(config_path)
         if not os.path.isfile(config_path):
             raise FileNotFoundError(f"Config file not found: {config_path}")
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             raw_config = yaml.safe_load(f) or {}
 
     if overrides:
@@ -532,23 +532,28 @@ def _deep_merge_dicts(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[st
 
 from .aggregators import (
     collect_generator_params as collect_generator_params,
-    generate_config_from_yaml as generate_config_from_yaml,
+)
+from .aggregators import (
     generate_config_from_input_dict as generate_config_from_input_dict,
 )
+from .aggregators import (
+    generate_config_from_yaml as generate_config_from_yaml,
+)
+
 __all__ = [
-    "collect_generator_params",
-    "generate_config_from_yaml",
-    "generate_config_from_input_dict",
-    "generate_backend_config",
-    "generate_backend_artifacts",
-    "parse_cli_params",
     "add_generator_override_arguments",
+    "collect_generator_params",
+    "generate_backend_artifacts",
+    "generate_backend_config",
+    "generate_config_from_input_dict",
+    "generate_config_from_yaml",
     "load_generator_overrides",
     "load_generator_overrides_from_args",
+    "maybe_handle_generator_help",
     "parse_backend_arg",
+    "parse_cli_params",
     "parse_mapping_arg",
-    "resolve_mapping_yaml",
     "prepare_generator_params",
     "print_generator_help",
-    "maybe_handle_generator_help",
+    "resolve_mapping_yaml",
 ]

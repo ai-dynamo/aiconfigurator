@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -21,7 +22,7 @@ def _load_schema_inputs(schema_path: str) -> List[Dict[str, Any]]:
     if cached is not None:
         return cached
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             schema = yaml.safe_load(f) or []
         inputs: List[Dict[str, Any]]
         if isinstance(schema, list):

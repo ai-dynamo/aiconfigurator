@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Any, Dict, Iterable, Optional
+from collections.abc import Iterable
+from typing import Any, Optional
 
 import yaml
 
@@ -10,7 +11,7 @@ from .rendering import apply_defaults, get_param_keys
 from .utils import DEFAULT_BACKEND, coerce_bool, coerce_int, normalize_backend
 
 
-def _entry_allows_backend(entry: Dict[str, Any], backend: str) -> bool:
+def _entry_allows_backend(entry: dict[str, Any], backend: str) -> bool:
     allowed = entry.get("backends")
     if not allowed:
         return True
@@ -23,18 +24,18 @@ def _entry_allows_backend(entry: Dict[str, Any], backend: str) -> bool:
     return not allowed_set or backend in allowed_set
 
 def collect_generator_params(
-    service: Dict[str, Any],
-    k8s: Dict[str, Any],
-    prefill_params: Optional[Dict[str, Any]] = None,
-    decode_params: Optional[Dict[str, Any]] = None,
-    agg_params: Optional[Dict[str, Any]] = None,
+    service: dict[str, Any],
+    k8s: dict[str, Any],
+    prefill_params: Optional[dict[str, Any]] = None,
+    decode_params: Optional[dict[str, Any]] = None,
+    agg_params: Optional[dict[str, Any]] = None,
     prefill_workers: int = 1,
     decode_workers: int = 1,
     agg_workers: int = 1,
-    sla: Optional[Dict[str, Any]] = None,
-    dyn_config: Optional[Dict[str, Any]] = None,
+    sla: Optional[dict[str, Any]] = None,
+    dyn_config: Optional[dict[str, Any]] = None,
     backend: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     prefill_params = prefill_params or {}
     decode_params = decode_params or {}
     agg_params = agg_params or {}
@@ -108,12 +109,13 @@ def generate_config_from_yaml(
     yaml_path: str,
     backend: Optional[str] = None,
     schema_path: Optional[str] = None,
-) -> Dict[str, Any]:
-    with open(yaml_path, "r") as f:
+) -> dict[str, Any]:
+    with open(yaml_path) as f:
         cfg = yaml.safe_load(f) or {}
     return generate_config_from_input_dict(cfg, schema_path=schema_path, backend=backend)
 
-def _get_by_path(src: Dict[str, Any], path: str) -> Any:
+
+def _get_by_path(src: dict[str, Any], path: str) -> Any:
     cur = src
     for p in path.split("."):
         if not isinstance(cur, dict) or p not in cur:
@@ -121,7 +123,8 @@ def _get_by_path(src: Dict[str, Any], path: str) -> Any:
         cur = cur[p]
     return cur
 
-def _set_by_path(dst: Dict[str, Any], path: str, value: Any) -> None:
+
+def _set_by_path(dst: dict[str, Any], path: str, value: Any) -> None:
     parts = path.split(".")
     cur = dst
     for p in parts[:-1]:
@@ -129,16 +132,15 @@ def _set_by_path(dst: Dict[str, Any], path: str, value: Any) -> None:
             cur[p] = {}
         cur = cur[p]
     cur[parts[-1]] = value
-
 def generate_config_from_input_dict(
-    input_params: Dict[str, Any],
+    input_params: dict[str, Any],
     schema_path: Optional[str] = None,
     backend: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     current_dir = os.path.dirname(__file__)
     if not schema_path:
         schema_path = os.path.join(current_dir, "config", "deployment_config.yaml")
-    with open(schema_path, "r") as f:
+    with open(schema_path) as f:
         schema = yaml.safe_load(f)
     if schema is None:
         inputs = []
@@ -146,7 +148,7 @@ def generate_config_from_input_dict(
         inputs = schema
     else:
         inputs = schema.get("inputs", [])
-    target: Dict[str, Any] = {}
+    target: dict[str, Any] = {}
     backend_key = normalize_backend(backend, DEFAULT_BACKEND)
     for entry in inputs:
         key = entry.get("key")
@@ -176,9 +178,7 @@ def generate_config_from_input_dict(
                     dest = ".".join(["params", role] + rest[1:])
                 else:
                     dest = None
-            elif group == "WorkerCounts":
-                dest = ".".join(["workers"] + rest)
-            elif group == "WorkerConfig":
+            elif group in {"WorkerCounts", "WorkerConfig"}:
                 dest = ".".join(["workers"] + rest)
             elif group == "SlaConfig":
                 dest = ".".join(["sla"] + rest)

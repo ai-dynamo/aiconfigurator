@@ -8,11 +8,11 @@ This module provides the mapping engine for converting parameters
 to backend-specific configurations using YAML mapping files and Jinja2 templates.
 """
 
-import os
 import logging
+import os
 import shlex
-from typing import Any, Dict, Optional, List
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, Undefined
@@ -50,16 +50,16 @@ def render_backend_templates(
     """
     if templates_dir is None:
         templates_dir = str(_TEMPLATE_ROOT / backend)
-    
+
     if not os.path.exists(templates_dir):
         raise FileNotFoundError(f"Templates directory not found: {templates_dir}")
-    
+
     # Set up Jinja2 environment with FileSystemLoader
     env = _TEMPLATE_ENV_CACHE.get(templates_dir)
     if env is None:
         env = Environment(loader=FileSystemLoader(templates_dir), trim_blocks=True, lstrip_blocks=True)
         _TEMPLATE_ENV_CACHE[templates_dir] = env
-    
+
     param_values = apply_rule_plugins(dict(param_values), backend)
     context = prepare_template_context(param_values, backend)
     # Assign backend-specific working_dir (removes need for input-driven path)
@@ -90,12 +90,12 @@ def render_backend_templates(
     else:
         # Fallback: prefer disagg if any prefill/decode provided, else agg
         worker_plan = ["prefill", "decode"] if (has_prefill or has_decode) else ["agg"]
-    
+
     rendered_templates = {}
-    
+
     # Find template files
     template_path = Path(templates_dir)
-    
+
     # Resolve engine template (version-specific preferred). Some backends (e.g., vllm, sglang)
     # do not ship engine configs at all, so only warn when such templates actually exist.
     engine_template_file = None
@@ -112,7 +112,7 @@ def render_backend_templates(
         if default_candidates:
             engine_template_file = default_candidates[0]
         # If no engine args template exists (e.g., sglang/vllm), proceed without it
-    
+
     # Render engine templates per worker plan with worker-specific context
     mapping_data = load_yaml_mapping(_BACKEND_MAPPING_FILE)
     param_keys = get_param_keys(_BACKEND_MAPPING_FILE)
@@ -262,7 +262,7 @@ def render_backend_templates(
                 # Use GPU counts injected earlier from rule outputs
                 prefill_gpu = int(context.get("prefill_gpu", 1))
                 decode_gpu = int(context.get("decode_gpu", 1))
-                
+
                 prefill_workers = int(context.get("prefill_workers", 1))
                 decode_workers = int(context.get("decode_workers", 1))
 
@@ -307,7 +307,7 @@ def render_backend_templates(
                     rendered_templates[f"run_{idx}.sh"] = rendered
         except Exception as e:
             logger.warning(f"Failed to render template run.sh.j2: {e}")
-    
+
     return rendered_templates
 
 
@@ -326,14 +326,14 @@ def prepare_template_context(param_values: Dict[str, Any], backend: str) -> Dict
         Context dictionary for template rendering
     """
     context = {}
-    
+
     # Extract unified service configuration
     service_config = param_values.get("service", {})
     context["model_name"] = service_config.get("model_name") or service_config.get("served_model_name", "")
     context["model_path"] = service_config.get("model_path")
     context["served_model_name"] = service_config.get("served_model_name")
     context["service"] = dict(service_config)
-    
+
     # Extract K8s configuration
     k8s_config = param_values.get("k8s", {})
     context["name_prefix"] = k8s_config.get("name_prefix")
@@ -354,18 +354,18 @@ def prepare_template_context(param_values: Dict[str, Any], backend: str) -> Dict
     k8s_copy["is_kv"] = enable_router
     k8s_copy["enable_router"] = enable_router
     context["k8s"] = k8s_copy
-    
+
     # Runtime is part of service
     context["head_node_ip"] = service_config.get("head_node_ip")
     context["port"] = service_config.get("port")
     context["include_frontend"] = service_config.get("include_frontend")
-    
+
     # Extract worker parameters
     worker_params = param_values.get("params", {})
     context["prefill_params"] = worker_params.get("prefill", {})
     context["decode_params"] = worker_params.get("decode", {})
     context["agg_params"] = worker_params.get("agg", {})
-    
+
     # Extract worker counts
     workers = param_values.get("workers", {})
     context["prefill_workers"] = workers.get("prefill_workers", 1)
@@ -377,25 +377,25 @@ def prepare_template_context(param_values: Dict[str, Any], backend: str) -> Dict
 
     fr = 1 if (context.get("include_frontend") is True) else 0
     context["frontend_replicas"] = fr
-    
+
     # Load backend_config_mapping.yaml to understand parameter mappings
     mapping_data = load_yaml_mapping(_BACKEND_MAPPING_FILE)
-    
+
     # Create a mapping from parameter keys to backend-specific keys and template variables
     param_to_backend = {}
     param_to_template_var = {}
-    
+
     # Build mapping from backend_config_mapping.yaml
     for entry in mapping_data.get("parameters", []):
         param_key = entry.get("param_key")
         backend_mapping = entry.get(backend)
         if backend_mapping is not None and backend_mapping != "null":
             param_to_backend[param_key] = backend_mapping
-            
+
             # Map to template variable names (based on template analysis)
             template_var_mapping = {
                 "tensor_parallel_size": "tp",
-                "pipeline_parallel_size": "pp", 
+                "pipeline_parallel_size": "pp",
                 "data_parallel_size": "dp",
                 "max_batch_size": "max_batch_size",
                 "max_num_tokens": "max_num_tokens",
@@ -406,39 +406,39 @@ def prepare_template_context(param_values: Dict[str, Any], backend: str) -> Dict
                 "cuda_graph_enable_padding": "cuda_graph_enable_padding",
                 "disable_prefix_cache": "disable_prefix_cache"
             }
-            
+
             if param_key in template_var_mapping:
                 param_to_template_var[param_key] = template_var_mapping[param_key]
-    
+
     # Apply parameter mapping for each worker type
     for worker_type in ["prefill", "decode", "agg"]:
         worker_config = worker_params.get(worker_type, {})
-        
+
         for param_key, value in worker_config.items():
             # Always expose param_key variables
             context[param_key] = value
             context[f"{worker_type}_{param_key}"] = value
             if param_key in param_to_backend:
                 backend_mapping = param_to_backend[param_key]
-                
+
                 # Handle different types of backend mappings
                 if isinstance(backend_mapping, str):
                     # Simple string mapping (e.g., "tensor_parallel_size" -> "tensor_parallel_size")
                     context[backend_mapping] = value
                     # Also add with worker prefix for disambiguation
                     context[f"{worker_type}_{backend_mapping}"] = value
-                    
+
                     # Map to template variable if available
                     if param_key in param_to_template_var:
                         template_var = param_to_template_var[param_key]
                         context[template_var] = value
                         context[f"{worker_type}_{template_var}"] = value
-                        
+
                 elif isinstance(backend_mapping, dict):
                     # Complex mapping with key and value expressions
                     dest_key = backend_mapping.get("key")
                     value_expr = backend_mapping.get("value")
-                    
+
                     if dest_key:
                         # Evaluate the value expression if provided
                         if value_expr:
@@ -450,16 +450,16 @@ def prepare_template_context(param_values: Dict[str, Any], backend: str) -> Dict
                         else:
                             context[dest_key] = value
                             context[f"{worker_type}_{dest_key}"] = value
-    
+
     # Add individual parameter shortcuts for easy template access
     # Expose worker-scoped parameters with role prefixes only
     for worker_type in ["prefill", "decode", "agg"]:
         worker_config = worker_params.get(worker_type, {})
         for key, value in worker_config.items():
             context[f"{worker_type}_{key}"] = value
-    
+
     # No dynamo_config in new templates
-    
+
     # Add engine args paths for templates
     context["prefill_engine_args"] = "/workspace/engine_configs/prefill_config.yaml"
     context["decode_engine_args"] = "/workspace/engine_configs/decode_config.yaml"
@@ -476,7 +476,7 @@ def prepare_template_context(param_values: Dict[str, Any], backend: str) -> Dict
     ]:
         if nested not in context or not isinstance(context.get(nested), dict):
             context[nested] = {}
-    
+
     return context
 
 
@@ -538,7 +538,7 @@ def load_yaml_mapping(yaml_path: str) -> Dict[str, Any]:
     cached = _YAML_CACHE.get(path)
     if cached is not None:
         return cached
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     _YAML_CACHE[path] = data
     return data
