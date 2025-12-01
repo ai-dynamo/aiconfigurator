@@ -41,7 +41,8 @@ class ArtifactWriter:
     def _should_emit_engine_file(self, artifact_name: str) -> bool:
         if "agg" in artifact_name and self.prefer_disagg:
             return False
-        return not (self.has_agg_role and not self.prefer_disagg and ("prefill" in artifact_name or "decode" in artifact_name))
+        has_prefill_or_decode = ("prefill" in artifact_name) or ("decode" in artifact_name)
+        return not (self.has_agg_role and not self.prefer_disagg and has_prefill_or_decode)
 
     @staticmethod
     def _map_engine_name(artifact_name: str) -> str:

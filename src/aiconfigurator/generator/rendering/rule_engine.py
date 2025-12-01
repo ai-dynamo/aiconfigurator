@@ -77,7 +77,12 @@ def _parse_assign(line: str) -> Optional[tuple[Optional[str], str, str]]:
         return (alias, " ".join(toks[1:]).strip(), right)
     return (None, left, right)
 
-def _apply_line(assign: tuple[Optional[str], str, str], backend: str, pv: dict[str, Any], default_scope: Optional[str]) -> None:
+def _apply_line(
+    assign: tuple[Optional[str], str, str],
+    backend: str,
+    pv: dict[str, Any],
+    default_scope: Optional[str],
+) -> None:
     scope, name, expr = assign
     sc = scope or default_scope
     if not sc:
@@ -89,14 +94,20 @@ def _apply_line(assign: tuple[Optional[str], str, str], backend: str, pv: dict[s
     else:
         scopes = [sc]
 
-    for s in scopes:
-        target = _get_scope(pv, s)
+    promote_keys = {
+        "max_num_tokens",
+        "enable_chunked_prefill",
+        "max_seq_len",
+        "max_batch_size",
+    }
+    for scope_name in scopes:
+        target = _get_scope(pv, scope_name)
         if target is None:
             continue
-        value = _eval(expr, s, pv)
+        value = _eval(expr, scope_name, pv)
         target[name] = value
         # Promote selected names to top-level only for default scope to avoid ambiguity
-        if name in {"max_num_tokens", "enable_chunked_prefill", "max_seq_len", "max_batch_size"} and (default_scope and s == default_scope):
+        if name in promote_keys and default_scope and scope_name == default_scope:
             pv[name] = value
 
 def _load_rule_path(base_dir: str, backend: str) -> Optional[str]:
@@ -123,8 +134,8 @@ def apply_rule_plugins(param_values: dict[str, Any], backend: str, dsl_dir: Opti
             expr = s[5:-1].strip()
             try:
                 active = bool(_eval(expr, default_scope or "prefill", param_values))
-            except Exception as e:
-                logger.exception("rule when compile failed at line %d: %s", idx, e)
+            except Exception:
+                logger.exception("rule when compile failed at line %d", idx)
                 active = False
             cond_stack.append((indent, active))
             continue
@@ -132,12 +143,12 @@ def apply_rule_plugins(param_values: dict[str, Any], backend: str, dsl_dir: Opti
             continue
         try:
             assign = _parse_assign(s)
-        except Exception as e:
-            logger.exception("rule parse failed at line %d: %s", idx, e)
+        except Exception:
+            logger.exception("rule parse failed at line %d", idx)
             assign = None
         if assign:
             try:
                 _apply_line(assign, backend, param_values, default_scope)
-            except Exception as e:
-                logger.exception("rule apply failed at line %d: %s", idx, e)
+            except Exception:
+                logger.exception("rule apply failed at line %d", idx)
     return param_values

@@ -71,15 +71,15 @@ def main(argv: Optional[list[str]] = None):
     explicit_mapping = args.mapping
     try:
         yaml_path = resolve_mapping_yaml(explicit_mapping, default_mapping_path)
-    except FileNotFoundError as e:
-        logger.exception("%s", e)
+    except FileNotFoundError:
+        logger.exception("Failed to resolve mapping YAML")
         sys.exit(2)
 
     try:
         cli_params = parse_cli_params(args.set or [])
         generator_params = prepare_generator_params(args.config, cli_params, backend=backend)
-    except (FileNotFoundError, ValueError) as exc:
-        logger.exception("%s", exc)
+    except (FileNotFoundError, ValueError):
+        logger.exception("Failed to prepare generator parameters")
         sys.exit(2)
 
     cmd = args.cmd

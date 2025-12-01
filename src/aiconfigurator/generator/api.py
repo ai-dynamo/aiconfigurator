@@ -294,8 +294,8 @@ def generate_backend_artifacts(
         )
         try:
             writer.write(artifacts)
-        except OSError as exc:
-            logger.exception("Failed to write artifacts: %s", exc)
+        except OSError:
+            logger.exception("Failed to write artifacts")
 
     return artifacts
 
@@ -331,7 +331,8 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
     grp = parser.add_argument_group(
         "Generator overrides",
         "Options forwarded to the generator. "
-        "Use dotted keys (e.g. ServiceConfig.model_path=Qwen/Qwen3-32B-FP8), please refer to aiconfigurator/src/aiconfigurator/generator/config for the available keys.",
+        "Use dotted keys (e.g. ServiceConfig.model_path=Qwen/Qwen3-32B-FP8). "
+        "See generator config docs for the available keys.",
     )
     grp.add_argument(
         "--generator-config",
@@ -386,7 +387,7 @@ def load_generator_overrides(
         with open(expanded, encoding="utf-8") as f:
             loaded = yaml.safe_load(f) or {}
             if not isinstance(loaded, dict):
-                raise ValueError("--generator-config must point to a YAML mapping.")
+                raise TypeError("--generator-config must point to a YAML mapping.")
             config_payload = loaded
 
     inline_payload = parse_cli_params(inline_overrides or [])

@@ -129,7 +129,7 @@ def render_backend_templates(
             if wk in base_ctx:
                 wc[k] = base_ctx[wk]
 
-        # Promote worker‑scoped dotted backend keys into nested dicts
+        # Promote worker-scoped dotted backend keys into nested dicts
         prefix = f"{worker}_"
         for bk, val in list(base_ctx.items()):
             if bk.startswith(prefix):
@@ -348,7 +348,10 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["router_mode"] = "kv" if enable_router else ""
     context["is_kv"] = enable_router
     context["enable_router"] = enable_router
-    context["name"] = k8s_config.get("name") or f"{context['name_prefix']}-{'agg' if context['mode']=='agg' else 'disagg'}{'-router' if enable_router else ''}"
+    name_suffix = "agg" if context["mode"] == "agg" else "disagg"
+    router_suffix = "-router" if enable_router else ""
+    full_name = f"{context['name_prefix']}-{name_suffix}{router_suffix}"
+    context["name"] = k8s_config.get("name") or full_name
     k8s_copy = dict(k8s_config)
     k8s_copy["router_mode"] = context["router_mode"]
     k8s_copy["is_kv"] = enable_router
@@ -555,7 +558,8 @@ def render_parameters(
     - String shorthand (e.g. vllm: some-flag) includes only when the input value is not None.
     - Dict form retention is controlled solely by presence of "default":
       { "key": <dest_key>, "value": <jinja_expr>, ["default": <jinja_expr>] }
-      * If value evaluates to None and default is present, include dest_key with the evaluated default (which may be None).
+      * If value evaluates to None and default is present, include dest_key
+        with the evaluated default (which may be None).
       * If value evaluates to a non-None value, include it.
       * If value is None and no default is present, omit.
       * Inline form {dest_key: <jinja_expr>} behaves like shorthand (omit when None).
