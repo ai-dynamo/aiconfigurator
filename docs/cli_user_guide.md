@@ -141,6 +141,105 @@ By default, we output top3 configs we have found. You can get the configs and sc
 
 `--save_dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated_config_version 1.0.0rc6` can give you the right result. Specify more arugments to precisely control the generated configs by checking `aiconfigurator cli default -h`.
 
+#### Request latency constraint
+`--request_latency <ms>` gives you a single end-to-end SLA on TTFT + TPOT × (OSL − 1). When the flag is set, `default` mode automatically enumerates TTFT/TPOT pairs that satisfy that budget (respecting any explicit `--ttft`, if provided) and only keeps configurations whose estimated request latency stays within the bound. Because the CLI derives TPOT from the request latency target, any `--tpot` argument is ignored in this mode.
+
+- The detailed tables printed for both agg and disagg add a `request_latency` column, and the global Pareto plot flips to “request latency vs tokens/s/gpu” whenever every experiment is operating under this constraint.
+- You can still set `--ttft` to reserve more headroom for prefill. Leaving it unset lets the enumerator try multiple TTFT splits automatically.
+
+Example: search for 16x H200 configs that meet a 12s end-to-end budget while capping TTFT at 4s.
+```bash
+aiconfigurator cli default \
+  --model QWEN3_32B \
+  --total_gpus 16 \
+  --system h200_sxm \
+  --backend trtllm \
+  --request_latency 12000 \
+  --isl 4000 \
+  --osl 500 \
+  --ttft 4000
+```
+The summary will highlight the fastest configuration whose estimated request latency is ≤ 12,000 ms and will show the derived TTFT/TPOT pair that satisfied the constraint. The example output,
+```
+********************************************************************************
+*                     Dynamo aiconfigurator Final Results                      *
+********************************************************************************
+  ----------------------------------------------------------------------------
+  Input Configuration & SLA Target:
+    Model: QWEN3_32B (is_moe: False)
+    Total GPUs: 16
+    Best Experiment Chosen: disagg at 932.91 tokens/s/gpu (disagg 1.09x better)
+  ----------------------------------------------------------------------------
+  Overall Best Configuration:
+    - Best Throughput: 14,926.50 tokens/s
+    - Per-GPU Throughput: 932.91 tokens/s/gpu
+    - Per-User Throughput: 57.49 tokens/s/user
+    - TTFT: 542.58ms
+    - TPOT: 17.39ms
+    - Request Latency: 9222.18ms
+  ----------------------------------------------------------------------------
+  Pareto Frontier:
+          QWEN3_32B Pareto Frontier: tokens/s/gpu_cluster vs request_latency    
+      ┌────────────────────────────────────────────────────────────────────────┐
+1150.0┤ •• agg                                                                 │
+      │ ff disagg                                                              │
+      │ xx disagg best                                                         │
+      │                                                                        │
+ 958.3┤                                                                        │
+      │                                     ffffffffffffffx                    │
+      │                                    f                            •      │
+      │                                    f                         •••       │
+ 766.7┤                                    f                    •••••          │
+      │                                   f                •••••               │
+      │                                 ff            •••••                    │
+      │                               ff         •••••                         │
+ 575.0┤                             ff     ••••••                              │
+      │                           ff     •••                                   │
+      │                         ff     ••                                      │
+      │                              ••                                        │
+ 383.3┤                          ••••                                          │
+      │                        •••                                             │
+      │                   ••••••                                               │
+      │                 •••                                                    │
+ 191.7┤                                                                        │
+      │                                                                        │
+      │                                                                        │
+      │                                                                        │
+   0.0┤                                                                        │
+      └┬─────────────────┬─────────────────┬────────────────┬─────────────────┬┘
+       0               3220              6440             9660            12880 
+tokens/s/gpu_cluster                request_latency                             
+
+  ----------------------------------------------------------------------------
+  Deployment Details:
+    (p) stands for prefill, (d) stands for decode, bs stands for batch size, a replica stands for the smallest scalable unit xPyD of the disagg system
+    Some math: total gpus used = replicas * gpus/replica
+               gpus/replica = (p)gpus/worker * (p)workers + (d)gpus/worker * (d)workers; for Agg, gpus/replica = gpus/worker
+               gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; tp * pp for dense models (underlined numbers are the actual values in math)
+
+agg Top Configurations: (Sorted by tokens/s/gpu)
++------+--------------+---------------+--------+-----------------+--------------+-------------------+----------+--------------+-------------+----------+----+
+| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | request_latency | concurrency  | total_gpus (used) | replicas | gpus/replica | gpus/worker | parallel | bs |
++------+--------------+---------------+--------+-----------------+--------------+-------------------+----------+--------------+-------------+----------+----+
+|  1   |    852.23    |     46.35     | 937.94 |     11704.26    | 320 (=40x8)  |    16 (16=8x2)    |    8     |      2       |  2 (=2x1x1) |  tp2pp1  | 40 |
+|  2   |    748.51    |     49.46     | 711.67 |     10799.77    | 256 (=64x4)  |    16 (16=4x4)    |    4     |      4       |  4 (=4x1x1) |  tp4pp1  | 64 |
+|  3   |    742.79    |     50.12     | 735.24 |     10691.50    | 256 (=16x16) |    16 (16=16x1)   |    16    |      1       |  1 (=1x1x1) |  tp1pp1  | 16 |
+|  4   |    550.53    |     47.56     | 568.11 |     11060.92    | 192 (=96x2)  |    16 (16=2x8)    |    2     |      8       |  8 (=8x1x1) |  tp8pp1  | 96 |
++------+--------------+---------------+--------+-----------------+--------------+-------------------+----------+--------------+-------------+----------+----+
+
+disagg Top Configurations: (Sorted by tokens/s/gpu)
++------+--------------+---------------+--------+-----------------+--------------+-------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | request_latency | concurrency  | total_gpus (used) | replicas |  gpus/replica  | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
++------+--------------+---------------+--------+-----------------+--------------+-------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+|  1   |    932.91    |     57.49     | 542.58 |     9222.18     | 384 (=384x1) |    16 (16=1x16)   |    1     | 16 (=10x1+3x2) |     10     |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    2 (=2x1)    |    tp2pp1   |  128  |
+|  2   |    932.91    |     49.29     | 542.58 |     10666.29    | 384 (=192x2) |    16 (16=2x8)    |    2     |  8 (=5x1+3x1)  |     5      |    1 (=1x1)    |    tp1pp1   |   1   |     3      |    1 (=1x1)    |    tp1pp1   |   64  |
+|  3   |    818.83    |     43.33     | 326.26 |     11842.68    | 328 (=328x1) |    16 (16=1x16)   |    1     | 16 (=6x2+1x4)  |     6      |    2 (=2x1)    |    tp2pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |  328  |
+|  4   |    746.33    |     43.72     | 542.58 |     11955.71    | 496 (=496x1) |    16 (16=1x16)   |    1     | 16 (=8x1+1x8)  |     8      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    8 (=8x1)    |    tp8pp1   |  496  |
++------+--------------+---------------+--------+-----------------+--------------+-------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+********************************************************************************
+2025-12-01 23:36:41,892 - aiconfigurator.cli.main - INFO - All experiments completed in 1.92 seconds
+```
+
 ### Exp mode
 If you want to customize your experiment apart from simple command which only compares disagg and agg of a same model, you can use `exp` mode. The command is,
 ```bash
