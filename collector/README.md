@@ -109,6 +109,8 @@ See `deep_collector/README.md` for complete multi-node setup instructions.
 
 The collector can measure kernel power consumption during benchmarking, which is used for power-aware configuration generation.
 
+When using `--measure_power`, the collector adds power data columns (`power_limit`, `power`) to the standard `*_perf.txt` files.
+
 ```bash
 python collector/collect.py \
   --backend trtllm \

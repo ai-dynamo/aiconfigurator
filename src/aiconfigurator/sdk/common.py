@@ -359,6 +359,9 @@ class BackendName(Enum):
 class PerfDataFilename(Enum):
     """
     Perf data filename for database to load.
+    
+    All performance data is stored in *_perf.txt files, which may optionally contain
+    power data columns (power_limit, power) if collected with --measure_power flag.
     """
 
     gemm = "gemm_perf.txt"

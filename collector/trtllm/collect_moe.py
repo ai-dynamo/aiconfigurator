@@ -322,10 +322,6 @@ def run_moe_torch(
     measure_power=False,
     kernel_power_measurement_duration=3.0,
 ):
-    # Use different filename for power measurement runs
-    if measure_power:
-        perf_filename = perf_filename.replace("_perf.txt", "_power.txt")
-    
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 

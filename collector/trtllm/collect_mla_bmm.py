@@ -120,10 +120,6 @@ def run_mla_gen_pre(
         measure_power: Whether to measure power consumption
         kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
     """
-    # Use different filename for power measurement runs
-    if measure_power:
-        perf_filename = perf_filename.replace("_perf.txt", "_power.txt")
-
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
@@ -257,10 +253,6 @@ def run_mla_gen_post(
         measure_power: Whether to measure power consumption
         kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
     """
-    # Use different filename for power measurement runs
-    if measure_power:
-        perf_filename = perf_filename.replace("_perf.txt", "_power.txt")
-
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 

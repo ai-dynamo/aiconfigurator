@@ -206,10 +206,6 @@ def run_mla(
     measure_power=False,
     kernel_power_measurement_duration=3.0,
 ):
-    # Use different filename for power measurement runs
-    if measure_power:
-        perf_filename = perf_filename.replace("_perf.txt", "_power.txt")
-    
     scenario = Scenario()
     q_lora_rank = scenario.q_lora_rank
     kv_lora_rank = scenario.kv_lora_rank

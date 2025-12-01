@@ -60,11 +60,7 @@ num_gpus_allreduce=(2 4 8)
 
 if [[ "$all_reduce_backend" == "trtllm" ]]; then
     # TRTLLM allreduce (CUDA Graph based)
-    # Use different filename for power measurement runs
     allreduce_filename="custom_allreduce_perf.txt"
-    if [[ -n "$measure_power" ]]; then
-        allreduce_filename="custom_allreduce_power.txt"
-    fi
     
     for n in "${num_gpus_allreduce[@]}"; do
         echo "Running TRTLLM AllReduce benchmark with $n GPUs using CUDA Graph method"
@@ -73,11 +69,7 @@ if [[ "$all_reduce_backend" == "trtllm" ]]; then
     done
 elif [[ "$all_reduce_backend" == "vllm" ]]; then
     # VLLM allreduce implementation
-    # Use different filename for power measurement runs
     allreduce_filename="custom_allreduce_perf.txt"
-    if [[ -n "$measure_power" ]]; then
-        allreduce_filename="custom_allreduce_power.txt"
-    fi
     
     for n in "${num_gpus_allreduce[@]}"; do
         echo "Running VLLM AllReduce benchmark with $n GPUs"

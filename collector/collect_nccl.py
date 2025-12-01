@@ -104,8 +104,7 @@ def nccl_benchmark(
 
         print(nccl_test_bin, f"{size=}, {latency=}, {power=}")
         
-        # Use different filename for power measurement runs
-        perf_filename = "nccl_power.txt" if measure_power else "nccl_perf.txt"
+        perf_filename = "nccl_perf.txt"
         
         log_perf(
             item_list=[item],

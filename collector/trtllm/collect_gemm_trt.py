@@ -162,8 +162,7 @@ def run_gemm(
         measure_power: Whether to measure power consumption
         kernel_power_measurement_duration: Target duration for memory-bound benchmarks (seconds)
     """
-    # Use different filename for power measurement runs
-    perf_filename = "gemm_power.txt" if measure_power else "gemm_perf.txt"
+    perf_filename = "gemm_perf.txt"
 
     device = torch.device(device)
     torch.cuda.set_device(device)

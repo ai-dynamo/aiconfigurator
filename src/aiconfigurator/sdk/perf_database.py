@@ -230,41 +230,25 @@ def get_all_databases(
 # by default float16
 def _resolve_perf_data_file(data_dir: str, filename: str) -> str:
     """
-    Resolve the performance data file path, checking for both *_power.txt and *_perf.txt variants.
+    Resolve the performance data file path.
     
-    The collector generates different filenames based on whether power measurement is enabled:
-    - With --measure-power: generates *_power.txt files
-    - Without --measure-power: generates *_perf.txt files
-    
-    This function checks for both variants and prefers the *_power.txt version if it exists,
-    since it contains both latency and power data.
+    All performance data is now stored in *_perf.txt files, which may optionally contain
+    power data columns (power_limit, power) if collected with --measure-power flag.
     
     Args:
         data_dir: The directory containing the performance data files
         filename: The base filename (e.g., "gemm_perf.txt")
     
     Returns:
-        The resolved file path (either *_power.txt or *_perf.txt)
+        The resolved file path to the *_perf.txt file
     """
     perf_path = os.path.join(data_dir, filename)
     
-    # Check if a *_power.txt variant exists
-    if filename.endswith("_perf.txt"):
-        power_filename = filename.replace("_perf.txt", "_power.txt")
-        power_path = os.path.join(data_dir, power_filename)
-        
-        if os.path.exists(power_path):
-            logger.info(f"Loading {power_filename} (with power data)")
-            return power_path
-        elif os.path.exists(perf_path):
-            logger.info(f"Loading {filename} (power data not available, using latency-only file)")
-            return perf_path
-        else:
-            # Neither file exists - return the expected perf path (will be handled by load functions)
-            logger.debug(f"Neither {power_filename} nor {filename} found in {data_dir}")
-            return perf_path
+    if os.path.exists(perf_path):
+        logger.info(f"Loading {filename}")
+    else:
+        logger.debug(f"{filename} not found in {data_dir}")
     
-    # For non-perf files (shouldn't happen with current usage), just return the path
     return perf_path
 
 
