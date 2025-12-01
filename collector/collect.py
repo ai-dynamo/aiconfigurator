@@ -40,7 +40,7 @@ from datetime import datetime
 import torch
 from tqdm import tqdm
 
-from helper import create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
+from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
 
 logger = None
 
@@ -151,7 +151,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
         return p
 
     def create_process_exit_error(device_id, exit_code):
-        if exit_code in (None, 0):
+        if exit_code in (None, 0, EXIT_CODE_RESTART):
             return None
 
         if exit_code < 0:
@@ -222,10 +222,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             # Stall detection unchanged...
             if progress_value.value == last_progress:
                 stall_count += 1
-                if stall_count > 30 and "moe" not in func.__name__:
+                if stall_count > 30:
                     logger.warning(f"Progress stalled at {progress_value.value}/{len(tasks)}")
-                if stall_count > 900 and "moe" in func.__name__:
-                    logger.warning(f"Moe Progress stalled at {progress_value.value}/{len(tasks)}")
             else:
                 stall_count = 0
                 last_progress = progress_value.value
@@ -235,11 +233,17 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
                 if not p.is_alive():
                     exit_code = p.exitcode
                     process_stats[i]["restarts"] += 1
-                    logger.warning(
-                        f"Process {i} died (exit code: {exit_code}, "
-                        f"restarts: {process_stats[i]['restarts']}, "
-                        f"errors: {len(process_stats[i]['errors'])})"
-                    )
+                    if exit_code == EXIT_CODE_RESTART:
+                        logger.debug(
+                            f"Process {i} completed task and exited normally for release gpu memory"
+                            f"(completed tasks: {process_stats[i]['restarts']})"
+                        )
+                    else:
+                        logger.warning(
+                            f"Process {i} died (exit code: {exit_code}, "
+                            f"restarts: {process_stats[i]['restarts']}, "
+                            f"errors: {len(process_stats[i]['errors'])})"
+                        )
 
                     crash_error = create_process_exit_error(i, exit_code)
                     if crash_error:
@@ -266,10 +270,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
 
     # Wait for processes
     for p in processes:
-        if "moe" in func.__name__:
-            p.join(timeout=500)  # tune + 30 tokens cases
-        else:
-            p.join(timeout=10)
+        p.join(timeout=10)
         if p.is_alive():
             logger.warning(f"Process {p.pid} did not terminate, forcing...")
             p.terminate()

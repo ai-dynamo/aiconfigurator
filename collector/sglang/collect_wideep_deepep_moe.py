@@ -24,13 +24,13 @@ from sglang.srt.utils import (
 )
 
 try:
-    from helper import log_perf
+    from helper import log_perf, power_law_logits_v4
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import log_perf
+    from helper import log_perf, power_law_logits_v4
 import pkg_resources
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")

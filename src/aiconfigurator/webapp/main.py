@@ -76,6 +76,14 @@ def main(args):
                     <p style="font-size: 14px; margin-top: -10px;">
                         Version {aiconfigurator.__version__}
                     </p>
+                    <p style="font-size: 12px; margin-top: -10px; color: #666;">
+                        Use of this service is for test and evaluation purposes only.
+                        Results are estimates and may be inaccurate.
+                        The AI Configurator software available at
+                        <a href="https://github.com/ai-dynamo/aiconfigurator/" target="_blank">
+                        https://github.com/ai-dynamo/aiconfigurator/</a>
+                        is governed by the Apache 2.0 License.
+                    </p>
                 </div>
                 """
             )
