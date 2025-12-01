@@ -46,6 +46,7 @@ def generate_config_yaml(
 
     Returns:
         YAML string representation of the k8s_deploy.yaml config
+        Returns "N/A" if backend generator is not available
     """
     # Build the generator config (same structure as generator_config.yaml)
     config = {
@@ -85,22 +86,29 @@ def generate_config_yaml(
         }
     )
 
-    # Generate artifacts using the backend generator
-    artifacts = generate_backend_config.from_runtime(
-        cfg=config,
-        backend=backend,
-        version=version,
-        overrides=dynamo_overrides,
-        save_dir=None,  # Don't save to disk
-    )
+    try:
+        # Generate artifacts using the backend generator
+        artifacts = generate_backend_config.from_runtime(
+            cfg=config,
+            backend=backend,
+            version=version,
+            overrides=dynamo_overrides,
+            save_dir=None,  # Don't save to disk
+        )
 
-    # Extract the k8s_deploy.yaml from the agg mode artifacts
-    if "agg" in artifacts.by_mode and "k8s_deploy.yaml" in artifacts.by_mode["agg"]:
-        k8s_yaml_dict = artifacts.by_mode["agg"]["k8s_deploy.yaml"]
-        # Convert dict to YAML string
-        return yaml.dump(k8s_yaml_dict, sort_keys=False, default_flow_style=False, width=4096)
-    else:
-        raise ValueError("Failed to generate k8s_deploy.yaml from artifacts")
+        # Extract the k8s_deploy.yaml from the agg mode artifacts
+        if "agg" in artifacts.by_mode and "k8s_deploy.yaml" in artifacts.by_mode["agg"]:
+            k8s_yaml_dict = artifacts.by_mode["agg"]["k8s_deploy.yaml"]
+            # Convert dict to YAML string
+            return yaml.dump(k8s_yaml_dict, sort_keys=False, default_flow_style=False, width=4096)
+        else:
+            raise ValueError("Failed to generate k8s_deploy.yaml from artifacts")
+    except ValueError as e:
+        # Handle case where backend generator is not available (e.g., vllm, sglang)
+        if "Unknown backend" in str(e):
+            return "N/A"
+        else:
+            raise
 
 
 def validate_inputs(model_name, system, backend, version):

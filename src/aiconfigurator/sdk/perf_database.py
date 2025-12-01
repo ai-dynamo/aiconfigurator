@@ -2165,6 +2165,11 @@ class PerfDatabase:
 
         if sol_mode is None:
             sol_mode = self._default_sol_mode
+
+        # If MLA data is not available (e.g., for vllm backend), force SOL mode
+        if self._context_mla_data is None:
+            sol_mode = common.SOLMode.SOL
+
         if sol_mode == common.SOLMode.SOL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
@@ -2212,6 +2217,11 @@ class PerfDatabase:
 
         if sol_mode is None:
             sol_mode = self._default_sol_mode
+
+        # If MLA data is not available (e.g., for vllm backend), force SOL mode
+        if self._generation_mla_data is None:
+            sol_mode = common.SOLMode.SOL
+
         if sol_mode == common.SOLMode.SOL:
             return get_sol(b, s, num_heads, kvcache_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
