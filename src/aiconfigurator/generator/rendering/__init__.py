@@ -1,5 +1,7 @@
-"""
-Rendering package for generator inputs and backend artifacts.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Rendering package for generator inputs and backend artifacts.
 
 This module exposes a single import surface so callers do not need to know
 where schemas, mapping logic, or rule engines live internally.
