@@ -11,21 +11,21 @@ const charts = {
     prefill: null,
     decode: null,
     cost: null
-};
+}
 
 const tables = {
     prefill: null,
     decode: null,
     cost: null
-};
+}
 
 /**
  * Inject config modal directly into document.body (outside Gradio container)
  * This prevents Gradio's .prose styles from affecting highlight.js
  */
 function injectConfigModal() {
-    if (document.getElementById('configModal')) {
-        return; // Already injected
+    if (document.getElementById("configModal")) {
+        return // Already injected
     }
     
     const modalHTML = `
@@ -43,9 +43,9 @@ function injectConfigModal() {
             <button class="config-action-btn" onclick="downloadConfig()">Download</button>
         </div>
     </div>
-</div>`;
+</div>`
     
-    document.body.insertAdjacentHTML('beforeend', modalHTML);
+    document.body.insertAdjacentHTML("beforeend", modalHTML)
 }
 
 /**
@@ -54,43 +54,43 @@ function injectConfigModal() {
 function initializeVisualizations(jsonData) {
     waitForLibraries(() => {
         // Inject modal outside Gradio container
-        injectConfigModal();
+        injectConfigModal()
         
-        const data = typeof jsonData === 'string' ? JSON.parse(jsonData) : jsonData;
-        _initializeVisualizationsInternal(data);
-    });
+        const data = typeof jsonData === "string" ? JSON.parse(jsonData) : jsonData
+        _initializeVisualizationsInternal(data)
+    })
 }
 
 /**
  * Find reference points for a dataset (prefill/decode plots)
  */
 function findReferencePoints(datasets, targetValue) {
-    if (!targetValue) return { maxUnderSLA: null, maxOverall: null };
+    if (!targetValue) return { maxUnderSLA: null, maxOverall: null }
     
     // Flatten all points from all datasets
-    const allPoints = [];
+    const allPoints = []
     datasets.forEach((dataset, dsIdx) => {
         dataset.data.forEach((point, ptIdx) => {
             allPoints.push({
                 ...point,
                 datasetIndex: dsIdx,
                 pointIndex: ptIdx
-            });
-        });
-    });
+            })
+        })
+    })
     
     // Find max throughput overall (highest y value)
     const maxOverall = allPoints.reduce((max, point) => 
         !max || point.y > max.y ? point : max
-    , null);
+    , null)
     
     // Find max throughput under SLA (highest y where x <= target)
-    const pointsUnderSLA = allPoints.filter(p => p.x <= targetValue);
+    const pointsUnderSLA = allPoints.filter(p => p.x <= targetValue)
     const maxUnderSLA = pointsUnderSLA.reduce((max, point) => 
         !max || point.y > max.y ? point : max
-    , null);
+    , null)
     
-    return { maxUnderSLA, maxOverall };
+    return { maxUnderSLA, maxOverall }
 }
 
 /**
@@ -98,15 +98,15 @@ function findReferencePoints(datasets, targetValue) {
  */
 function findCostReferencePoints(datasets, tableData, targetTTFT, targetITL) {
     if (!tableData || tableData.length === 0) {
-        return { maxUnderSLA: null, maxOverall: null };
+        return { maxUnderSLA: null, maxOverall: null }
     }
     
     // Flatten all points from all datasets
-    const allPoints = [];
+    const allPoints = []
     datasets.forEach((dataset, dsIdx) => {
         dataset.data.forEach((point, ptIdx) => {
             // Get corresponding table row
-            const tableRow = tableData[point.tableIdx];
+            const tableRow = tableData[point.tableIdx]
             if (tableRow) {
                 // Table structure: [TTFT, Prefill Thpt, ITL, Decode Thpt, Tokens/User, Cost, Config]
                 allPoints.push({
@@ -117,34 +117,34 @@ function findCostReferencePoints(datasets, tableData, targetTTFT, targetITL) {
                     prefillThpt: tableRow[1],
                     itl: tableRow[2],
                     decodeThpt: tableRow[3]  // Use decode throughput per GPU as the objective
-                });
+                })
             }
-        });
-    });
+        })
+    })
     
     // Find max decode throughput overall (highest decodeThpt)
     const maxOverall = allPoints.reduce((max, point) => 
         !max || point.decodeThpt > max.decodeThpt ? point : max
-    , null);
+    , null)
     
     // Find max throughput under SLA (highest decodeThpt where TTFT <= targetTTFT AND ITL <= targetITL)
-    let pointsUnderSLA = allPoints;
+    let pointsUnderSLA = allPoints
     
     // Apply TTFT constraint if provided
     if (targetTTFT !== null && targetTTFT !== undefined && !isNaN(targetTTFT)) {
-        pointsUnderSLA = pointsUnderSLA.filter(p => p.ttft <= targetTTFT);
+        pointsUnderSLA = pointsUnderSLA.filter(p => p.ttft <= targetTTFT)
     }
     
     // Apply ITL constraint if provided
     if (targetITL !== null && targetITL !== undefined && !isNaN(targetITL)) {
-        pointsUnderSLA = pointsUnderSLA.filter(p => p.itl <= targetITL);
+        pointsUnderSLA = pointsUnderSLA.filter(p => p.itl <= targetITL)
     }
     
     const maxUnderSLA = pointsUnderSLA.reduce((max, point) => 
         !max || point.decodeThpt > max.decodeThpt ? point : max
-    , null);
+    , null)
     
-    return { maxUnderSLA, maxOverall };
+    return { maxUnderSLA, maxOverall }
 }
 
 /**
@@ -153,17 +153,17 @@ function findCostReferencePoints(datasets, tableData, targetTTFT, targetITL) {
 function _initializeVisualizationsInternal(data) {
     Object.keys(charts).forEach(key => {
         if (charts[key]) {
-            charts[key].destroy();
-            charts[key] = null;
+            charts[key].destroy()
+            charts[key] = null
         }
-    });
+    })
     
     if (data.prefill) {
-        const maxY = Math.max(...data.prefill.chart.datasets[0].data.map(p => p.y)) * 1.1;
-        const targetValue = data.prefill.chart.target_line?.value;
-        const refPoints = findReferencePoints(data.prefill.chart.datasets, targetValue);
+        const maxY = Math.max(...data.prefill.chart.datasets[0].data.map(p => p.y)) * 1.1
+        const targetValue = data.prefill.chart.target_line?.value
+        const refPoints = findReferencePoints(data.prefill.chart.datasets, targetValue)
         
-        charts.prefill = createChart('prefill_chart', {
+        charts.prefill = createChart("prefill_chart", {
             data: { datasets: data.prefill.chart.datasets },
             xAxisLabel: data.prefill.chart.axes.x.title,
             yAxisLabel: data.prefill.chart.axes.y.title,
@@ -172,25 +172,25 @@ function _initializeVisualizationsInternal(data) {
             yMax: maxY,
             targetLine: data.prefill.chart.target_line,
             referencePoints: refPoints
-        }, 'prefill');
+        }, "prefill")
         
         tables.prefill = createTable(
-            'prefill_table_wrapper',
+            "prefill_table_wrapper",
             data.prefill.table.columns,
             data.prefill.table.data,
-            'prefill',
+            "prefill",
             data.settings,
             refPoints
-        );
+        )
     }
     
     if (data.decode) {
-        const allYValues = data.decode.chart.datasets.flatMap(ds => ds.data.map(p => p.y));
-        const maxY = Math.max(...allYValues) * 1.1;
-        const targetValue = data.decode.chart.target_line?.value;
-        const refPoints = findReferencePoints(data.decode.chart.datasets, targetValue);
+        const allYValues = data.decode.chart.datasets.flatMap(ds => ds.data.map(p => p.y))
+        const maxY = Math.max(...allYValues) * 1.1
+        const targetValue = data.decode.chart.target_line?.value
+        const refPoints = findReferencePoints(data.decode.chart.datasets, targetValue)
         
-        charts.decode = createChart('decode_chart', {
+        charts.decode = createChart("decode_chart", {
             data: { datasets: data.decode.chart.datasets },
             xAxisLabel: data.decode.chart.axes.x.title,
             yAxisLabel: data.decode.chart.axes.y.title,
@@ -199,30 +199,30 @@ function _initializeVisualizationsInternal(data) {
             yMax: maxY,
             targetLine: data.decode.chart.target_line,
             referencePoints: refPoints
-        }, 'decode');
+        }, "decode")
         
         tables.decode = createTable(
-            'decode_table_wrapper',
+            "decode_table_wrapper",
             data.decode.table.columns,
             data.decode.table.data,
-            'decode',
+            "decode",
             data.settings,
             refPoints
-        );
+        )
     }
     
     if (data.cost) {
         // For cost plot, we need both TTFT and ITL targets, and use table data for throughput
-        const targetTTFT = data.prefill?.chart?.target_line?.value;
-        const targetITL = data.decode?.chart?.target_line?.value;
+        const targetTTFT = data.prefill?.chart?.target_line?.value
+        const targetITL = data.decode?.chart?.target_line?.value
         const refPoints = findCostReferencePoints(
             data.cost.chart.datasets, 
             data.cost.table.data,
             targetTTFT,
             targetITL
-        );
+        )
         
-        charts.cost = createChart('cost_chart', {
+        charts.cost = createChart("cost_chart", {
             data: { datasets: data.cost.chart.datasets },
             title: data.cost.chart.title,
             xAxisLabel: data.cost.chart.axes.x.title,
@@ -231,19 +231,19 @@ function _initializeVisualizationsInternal(data) {
             yMin: data.cost.chart.axes.y.min,
             referencePoints: refPoints,
             tableData: data.cost.table.data  // Pass table data for tooltip enrichment
-        }, 'cost');
+        }, "cost")
         
         tables.cost = createTable(
-            'cost_table_wrapper',
+            "cost_table_wrapper",
             data.cost.table.columns,
             data.cost.table.data,
-            'cost',
+            "cost",
             data.settings,
             refPoints
-        );
+        )
     }
 }
 
 // Export for use in Gradio
-window.initializeVisualizations = initializeVisualizations;
+window.initializeVisualizations = initializeVisualizations
 

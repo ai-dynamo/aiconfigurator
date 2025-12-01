@@ -9,42 +9,42 @@
  * Create Chart.js chart with hover synchronization
  */
 function createChart(canvasId, config, plotType) {
-    const ctx = document.getElementById(canvasId);
-    if (!ctx) return null;
+    const ctx = document.getElementById(canvasId)
+    if (!ctx) return null
     
     // Determine chart type based on plot
-    const chartType = plotType === 'prefill' ? 'scatter' : 'line';
-    const showLine = plotType !== 'prefill';
+    const chartType = plotType === "prefill" ? "scatter" : "line"
+    const showLine = plotType !== "prefill"
     
     // Mark reference points in datasets
-    const refPoints = config.referencePoints || {};
+    const refPoints = config.referencePoints || {}
     
     // For cost plot, enrich all points with table data
-    if (plotType === 'cost' && config.tableData) {
+    if (plotType === "cost" && config.tableData) {
         config.data.datasets.forEach((dataset) => {
             dataset.data.forEach((point) => {
-                const tableRow = config.tableData[point.tableIdx];
+                const tableRow = config.tableData[point.tableIdx]
                 if (tableRow) {
                     // Table structure: [TTFT, Prefill Thpt, ITL, Decode Thpt, Tokens/User, Cost, Config]
-                    point.ttft = tableRow[0];
-                    point.prefillThpt = tableRow[1];
-                    point.itl = tableRow[2];
-                    point.decodeThpt = tableRow[3];
+                    point.ttft = tableRow[0]
+                    point.prefillThpt = tableRow[1]
+                    point.itl = tableRow[2]
+                    point.decodeThpt = tableRow[3]
                 }
-            });
-        });
+            })
+        })
     }
     
     // Configure datasets
     config.data.datasets.forEach((dataset, dsIdx) => {
         if (showLine) {
-            dataset.showLine = true;
-            dataset.borderWidth = 2;
-            dataset.pointRadius = 5;
-            dataset.pointHoverRadius = 7;
+            dataset.showLine = true
+            dataset.borderWidth = 2
+            dataset.pointRadius = 5
+            dataset.pointHoverRadius = 7
         } else {
-            dataset.pointRadius = 8;
-            dataset.pointHoverRadius = 12;
+            dataset.pointRadius = 8
+            dataset.pointHoverRadius = 12
         }
         
         // Mark reference points with special styling
@@ -54,17 +54,17 @@ function createChart(canvasId, config, plotType) {
                 point.tableIdx === refPoints.maxUnderSLA.tableIdx &&
                 dsIdx === refPoints.maxUnderSLA.datasetIndex &&
                 ptIdx === refPoints.maxUnderSLA.pointIndex) {
-                point.isMaxUnderSLA = true;
+                point.isMaxUnderSLA = true
             }
             // Check if this is max throughput overall (yellow)
             if (refPoints.maxOverall && 
                 point.tableIdx === refPoints.maxOverall.tableIdx &&
                 dsIdx === refPoints.maxOverall.datasetIndex &&
                 ptIdx === refPoints.maxOverall.pointIndex) {
-                point.isMaxOverall = true;
+                point.isMaxOverall = true
             }
-        });
-    });
+        })
+    })
     
     // Add target line as a dataset if provided
     if (config.targetLine) {
@@ -75,14 +75,14 @@ function createChart(canvasId, config, plotType) {
                 {x: config.targetLine.value, y: config.yMax || 1000}
             ],
             showLine: true,
-            borderColor: 'red',
+            borderColor: "red",
             borderWidth: 2,
             borderDash: [5, 5],
             pointRadius: 0,
             fill: false,
             order: 999
-        };
-        config.data.datasets.push(targetDataset);
+        }
+        config.data.datasets.push(targetDataset)
     }
     
     const chart = new Chart(ctx, {
@@ -100,58 +100,58 @@ function createChart(canvasId, config, plotType) {
                 tooltip: {
                     callbacks: {
                         title: function(context) {
-                            const point = context[0].raw;
+                            const point = context[0].raw
                             if (point.gpuLabel) {
-                                return point.gpuLabel;
+                                return point.gpuLabel
                             }
-                            return context[0].dataset.label || '';
+                            return context[0].dataset.label || ""
                         },
                         label: function(context) {
-                            const point = context.raw;
-                            const dataset = context.dataset;
+                            const point = context.raw
+                            const dataset = context.dataset
                             
-                            if (dataset.label && dataset.label.startsWith('Target')) {
-                                return null;
+                            if (dataset.label && dataset.label.startsWith("Target")) {
+                                return null
                             }
                             
-                            const xLabel = config.xAxisLabel || 'X';
-                            const yLabel = config.yAxisLabel || 'Y';
+                            const xLabel = config.xAxisLabel || "X"
+                            const yLabel = config.yAxisLabel || "Y"
                             
-                            let labels = [`${xLabel}: ${point.x.toFixed(2)}`, `${yLabel}: ${point.y.toFixed(2)}`];
+                            const labels = [`${xLabel}: ${point.x.toFixed(2)}`, `${yLabel}: ${point.y.toFixed(2)}`]
                             
                             // For cost plot, always show TTFT, ITL, and decode throughput
-                            if (plotType === 'cost' && point.ttft !== undefined) {
-                                labels.push(`TTFT: ${point.ttft.toFixed(2)} ms`);
-                                labels.push(`ITL: ${point.itl.toFixed(2)} ms`);
-                                labels.push(`Decode Thpt: ${point.decodeThpt.toFixed(2)} tokens/s/GPU`);
+                            if (plotType === "cost" && point.ttft !== undefined) {
+                                labels.push(`TTFT: ${point.ttft.toFixed(2)} ms`)
+                                labels.push(`ITL: ${point.itl.toFixed(2)} ms`)
+                                labels.push(`Decode Thpt: ${point.decodeThpt.toFixed(2)} tokens/s/GPU`)
                             }
                             
                             // Add reference point labels at the top
                             if (point.isMaxUnderSLA) {
-                                const labelText = plotType === 'cost' 
-                                    ? '🔴 Max Decode Throughput/GPU Under SLA' 
-                                    : '🔴 Max Throughput Under SLA';
-                                labels.unshift(labelText);
+                                const labelText = plotType === "cost" 
+                                    ? "🔴 Max Decode Throughput/GPU Under SLA" 
+                                    : "🔴 Max Throughput Under SLA"
+                                labels.unshift(labelText)
                             }
                             if (point.isMaxOverall) {
-                                const labelText = plotType === 'cost' 
-                                    ? '🟡 Max Decode Throughput/GPU' 
-                                    : '🟡 Max Throughput';
-                                labels.unshift(labelText);
+                                const labelText = plotType === "cost" 
+                                    ? "🟡 Max Decode Throughput/GPU" 
+                                    : "🟡 Max Throughput"
+                                labels.unshift(labelText)
                             }
                             
-                            return labels;
+                            return labels
                         }
                     }
                 },
                 legend: {
                     display: true,
-                    position: 'top'
+                    position: "top"
                 }
             },
             scales: {
                 x: {
-                    type: 'linear',
+                    type: "linear",
                     title: {
                         display: true,
                         text: config.xAxisLabel
@@ -159,7 +159,7 @@ function createChart(canvasId, config, plotType) {
                     min: config.xMin
                 },
                 y: {
-                    type: 'linear',
+                    type: "linear",
                     title: {
                         display: true,
                         text: config.yAxisLabel
@@ -169,64 +169,64 @@ function createChart(canvasId, config, plotType) {
             },
             onHover: (event, activeElements) => {
                 if (activeElements.length > 0) {
-                    const element = activeElements[0];
-                    const datasetIndex = element.datasetIndex;
-                    const dataIndex = element.index;
-                    const point = chart.data.datasets[datasetIndex].data[dataIndex];
+                    const element = activeElements[0]
+                    const datasetIndex = element.datasetIndex
+                    const dataIndex = element.index
+                    const point = chart.data.datasets[datasetIndex].data[dataIndex]
                     
                     if (point.tableIdx !== undefined) {
-                        highlightTableRow(plotType, point.tableIdx);
+                        highlightTableRow(plotType, point.tableIdx)
                     }
                 } else {
-                    clearTableHighlight(plotType);
+                    clearTableHighlight(plotType)
                 }
             },
             onClick: (event, activeElements) => {
                 if (activeElements.length > 0) {
-                    const element = activeElements[0];
-                    const datasetIndex = element.datasetIndex;
-                    const dataIndex = element.index;
-                    const point = chart.data.datasets[datasetIndex].data[dataIndex];
+                    const element = activeElements[0]
+                    const datasetIndex = element.datasetIndex
+                    const dataIndex = element.index
+                    const point = chart.data.datasets[datasetIndex].data[dataIndex]
                     
                     if (point.tableIdx !== undefined) {
-                        scrollToTableRow(plotType, point.tableIdx);
+                        scrollToTableRow(plotType, point.tableIdx)
                     }
                 }
             }
         },
         plugins: [{
-            id: 'referencePointsPlugin',
+            id: "referencePointsPlugin",
             afterDatasetsDraw: function(chart) {
-                const ctx = chart.ctx;
+                const ctx = chart.ctx
                 
                 chart.data.datasets.forEach((dataset, dsIdx) => {
-                    const meta = chart.getDatasetMeta(dsIdx);
+                    const meta = chart.getDatasetMeta(dsIdx)
                     
                     dataset.data.forEach((point, ptIdx) => {
                         if (point.isMaxUnderSLA || point.isMaxOverall) {
-                            const element = meta.data[ptIdx];
-                            if (!element) return;
+                            const element = meta.data[ptIdx]
+                            if (!element) return
                             
-                            const x = element.x;
-                            const y = element.y;
-                            const radius = element.options.radius + 8;
+                            const x = element.x
+                            const y = element.y
+                            const radius = element.options.radius + 8
                             
-                            ctx.save();
-                            ctx.strokeStyle = point.isMaxUnderSLA ? 'rgba(255, 0, 0, 0.8)' : 'rgba(255, 215, 0, 0.8)';
-                            ctx.lineWidth = 3;
-                            ctx.setLineDash([5, 5]);
+                            ctx.save()
+                            ctx.strokeStyle = point.isMaxUnderSLA ? "rgba(255, 0, 0, 0.8)" : "rgba(255, 215, 0, 0.8)"
+                            ctx.lineWidth = 3
+                            ctx.setLineDash([5, 5])
                             
-                            ctx.beginPath();
-                            ctx.arc(x, y, radius, 0, 2 * Math.PI);
-                            ctx.stroke();
-                            ctx.restore();
+                            ctx.beginPath()
+                            ctx.arc(x, y, radius, 0, 2 * Math.PI)
+                            ctx.stroke()
+                            ctx.restore()
                         }
-                    });
-                });
+                    })
+                })
             }
         }]
-    });
+    })
     
-    return chart;
+    return chart
 }
 

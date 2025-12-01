@@ -10,167 +10,167 @@
  * Show config modal with YAML content
  */
 window.showConfig = function(button) {
-    const configYaml = button.getAttribute('data-config');
+    const configYaml = button.getAttribute("data-config")
     if (!configYaml) {
-        console.error('[Profiling] No config data found');
-        return;
+        console.error("[Profiling] No config data found")
+        return
     }
     
     // Unescape HTML entities
-    const textarea = document.createElement('textarea');
-    textarea.innerHTML = configYaml;
-    const decodedConfig = textarea.value;
+    const textarea = document.createElement("textarea")
+    textarea.innerHTML = configYaml
+    const decodedConfig = textarea.value
     
     // Display in modal
-    const modal = document.getElementById('configModal');
-    const content = document.getElementById('configContent');
+    const modal = document.getElementById("configModal")
+    const content = document.getElementById("configContent")
     if (modal && content) {
-        content.textContent = decodedConfig;
+        content.textContent = decodedConfig
         
         // Apply highlight.js YAML syntax highlighting
-        if (typeof hljs !== 'undefined' && hljs.highlightAll) {
+        if (typeof hljs !== "undefined" && hljs.highlightAll) {
             // clear previous highlights
-            $('code').each((idx, element) => {
-                $(element).removeAttr('data-highlighted');
-            });
+            $("code").each((idx, element) => {
+                $(element).removeAttr("data-highlighted")
+            })
             // apply new highlights
-            hljs.highlightAll();
+            hljs.highlightAll()
         } else {
-            console.error('[Profiling] Highlight.js not found');
+            console.error("[Profiling] Highlight.js not found")
         }
         
-        modal.style.display = 'block';
+        modal.style.display = "block"
     }
-};
+}
 
 /**
  * Close config modal
  */
 window.closeConfigModal = function() {
-    const modal = document.getElementById('configModal');
+    const modal = document.getElementById("configModal")
     if (modal) {
-        modal.style.display = 'none';
+        modal.style.display = "none"
     }
-};
+}
 
 /**
  * Copy config to clipboard
  */
 window.copyConfig = function() {
-    const content = document.getElementById('configContent');
+    const content = document.getElementById("configContent")
     if (!content) {
-        console.error('[Profiling] Config content not found');
-        return;
+        console.error("[Profiling] Config content not found")
+        return
     }
     
-    const text = content.textContent;
-    const copyBtn = event.target;
+    const text = content.textContent
+    const copyBtn = event.target
     
     // Use modern Clipboard API
     if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text)
             .then(() => {
-                console.log('[Profiling] Config copied to clipboard');
+                console.log("[Profiling] Config copied to clipboard")
                 if (copyBtn) {
-                    const originalText = copyBtn.textContent;
-                    copyBtn.textContent = 'Copied!';
-                    copyBtn.classList.add('active');
+                    const originalText = copyBtn.textContent
+                    copyBtn.textContent = "Copied!"
+                    copyBtn.classList.add("active")
                     setTimeout(() => {
-                        copyBtn.textContent = originalText;
-                        copyBtn.classList.remove('active');
-                    }, 2000);
+                        copyBtn.textContent = originalText
+                        copyBtn.classList.remove("active")
+                    }, 2000)
                 }
             })
             .catch(err => {
-                console.error('[Profiling] Copy failed:', err);
-                fallbackCopy(text, copyBtn);
-            });
+                console.error("[Profiling] Copy failed:", err)
+                fallbackCopy(text, copyBtn)
+            })
     } else {
-        fallbackCopy(text, copyBtn);
+        fallbackCopy(text, copyBtn)
     }
-};
+}
 
 /**
  * Download config as YAML file
  */
 window.downloadConfig = function() {
-    const content = document.getElementById('configContent');
+    const content = document.getElementById("configContent")
     if (!content) {
-        console.error('[Profiling] Config content not found');
-        return;
+        console.error("[Profiling] Config content not found")
+        return
     }
     
-    const text = content.textContent;
-    const downloadBtn = event.target;
+    const text = content.textContent
+    const downloadBtn = event.target
     
     try {
         // Create a Blob with the YAML content
-        const blob = new Blob([text], { type: 'text/yaml' });
-        const url = URL.createObjectURL(blob);
+        const blob = new Blob([text], { type: "text/yaml" })
+        const url = URL.createObjectURL(blob)
         
         // Create a temporary anchor element and trigger download
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'config.yaml';
-        document.body.appendChild(a);
-        a.click();
+        const a = document.createElement("a")
+        a.href = url
+        a.download = "config.yaml"
+        document.body.appendChild(a)
+        a.click()
         
         // Cleanup
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
         
-        console.log('[Profiling] Config downloaded as config.yaml');
+        console.log("[Profiling] Config downloaded as config.yaml")
         
         // Visual feedback
         if (downloadBtn) {
-            const originalText = downloadBtn.textContent;
-            downloadBtn.textContent = 'Downloaded!';
-            downloadBtn.classList.add('active');
+            const originalText = downloadBtn.textContent
+            downloadBtn.textContent = "Downloaded!"
+            downloadBtn.classList.add("active")
             setTimeout(() => {
-                downloadBtn.textContent = originalText;
-                downloadBtn.classList.remove('active');
-            }, 2000);
+                downloadBtn.textContent = originalText
+                downloadBtn.classList.remove("active")
+            }, 2000)
         }
     } catch (err) {
-        console.error('[Profiling] Download failed:', err);
+        console.error("[Profiling] Download failed:", err)
     }
-};
+}
 
 /**
  * Fallback copy method for older browsers
  */
 function fallbackCopy(text, copyBtn) {
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    textarea.style.position = 'fixed';
-    textarea.style.opacity = '0';
-    document.body.appendChild(textarea);
-    textarea.select();
+    const textarea = document.createElement("textarea")
+    textarea.value = text
+    textarea.style.position = "fixed"
+    textarea.style.opacity = "0"
+    document.body.appendChild(textarea)
+    textarea.select()
     
     try {
-        const success = document.execCommand('copy');
+        const success = document.execCommand("copy")
         if (success && copyBtn) {
-            const originalText = copyBtn.textContent;
-            copyBtn.textContent = 'Copied!';
-            copyBtn.classList.add('active');
+            const originalText = copyBtn.textContent
+            copyBtn.textContent = "Copied!"
+            copyBtn.classList.add("active")
             setTimeout(() => {
-                copyBtn.textContent = originalText;
-                copyBtn.classList.remove('active');
-            }, 2000);
+                copyBtn.textContent = originalText
+                copyBtn.classList.remove("active")
+            }, 2000)
         }
     } catch (err) {
-        console.error('[Profiling] Fallback copy failed:', err);
+        console.error("[Profiling] Fallback copy failed:", err)
     }
     
-    document.body.removeChild(textarea);
+    document.body.removeChild(textarea)
 }
 
 /**
  * Close modal when clicking outside
  */
-window.addEventListener('click', function(event) {
-    const modal = document.getElementById('configModal');
+window.addEventListener("click", function(event) {
+    const modal = document.getElementById("configModal")
     if (event.target === modal) {
-        window.closeConfigModal();
+        window.closeConfigModal()
     }
-});
+})
