@@ -59,6 +59,11 @@
         loadScript('https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js', 'highlight.js')
     ])
     .then(() => {
+        // Configure highlight.js
+        hljs.configure({
+            languages: ['yaml'],
+            ignoreUnescapedHTML: true // allow unescaped HTML in YAML (as we are free from XSS attacks)
+        });
         // Load dependent libraries concurrently
         return Promise.all([
             loadScript('https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js', 'DataTables'),

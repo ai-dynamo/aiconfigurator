@@ -26,6 +26,11 @@ window.showConfig = function(button) {
         
         // Apply highlight.js YAML syntax highlighting
         if (typeof hljs !== 'undefined' && hljs.highlightAll) {
+            // clear previous highlights
+            $('code').each((idx, element) => {
+                $(element).removeAttr('data-highlighted');
+            });
+            // apply new highlights
             hljs.highlightAll();
         } else {
             console.error('[Profiling] Highlight.js not found');
