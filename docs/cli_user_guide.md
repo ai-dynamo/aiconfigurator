@@ -146,7 +146,18 @@ Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/Wo
 - `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`
 - `--generator-set K8sConfig.k8s_namespace=dynamo \`
 
-These keys match `config/unified_config.yaml`. Combining YAML + inline overrides lets you precisely control the generated artifacts.
+Need to inspect which generator knobs exist? Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
+
+The `--generator-help` command supports three section options:
+- `--generator-help` or `--generator-help all` (default): Shows both the full deployment schema and the backend parameter mappings
+- `--generator-help deploy`: Shows the complete content of `generator/config/deployment_config.yaml` in YAML format, including all sections such as `ServiceConfig.*`, `K8sConfig.*`, `WorkerConfig.*`, etc.
+- `--generator-help backend`: Shows only the backend parameter mappings table from `generator/config/backend_config_mapping.yaml`, which maps unified parameter keys (e.g., `kv_cache_free_gpu_memory_fraction`, `kv_cache_dtype`) to backend-specific parameter names for trtllm, vllm, and sglang
+
+You can filter the backend-mapping output to a specific backend using `--generator-help-backend BACKEND`, where BACKEND can be `trtllm`, `vllm`, or `sglang`. For example:
+- `aiconfigurator cli default --generator-help backend --generator-help-backend sglang`: Shows only sglang-specific parameter mappings
+- `aiconfigurator cli default --generator-help backend --generator-help-backend trtllm`: Shows only trtllm-specific parameter mappings
+
+The command exits after printing the help information, so you do not need to provide the required `default` mode arguments (like `--model`, `--backend`, etc.) when using this flag.
 
 ### Exp mode
 If you want to customize your experiment apart from simple command which only compares disagg and agg of a same model, you can use `exp` mode. The command is,

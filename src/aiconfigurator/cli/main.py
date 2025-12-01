@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import os
+import sys
 import time
 from typing import Any
 
@@ -14,7 +15,7 @@ import yaml
 
 from aiconfigurator import __version__
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
-from aiconfigurator.generator.api import add_generator_override_arguments
+from aiconfigurator.generator.api import add_generator_override_arguments, maybe_handle_generator_help
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_tpot_constraint,
@@ -410,6 +411,8 @@ def main(args):
 
 
 if __name__ == "__main__":
+    if maybe_handle_generator_help(sys.argv[1:]):
+        sys.exit(0)
     parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for Disaggregated Serving Deployment")
     configure_parser(parser)
     args = parser.parse_args()
