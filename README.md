@@ -217,6 +217,8 @@ Use `--generator-config path/to/file.yaml` to load a YAML payload with `ServiceC
 - `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`
 - `--generator-set K8sConfig.k8s_namespace=dynamo \`
 
+Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
+
 ### All-in-one automation
 
 To further simpify the end-to-end user experience, we're now supporting automate everything in one script, starting from configuring the deployment, generating the configs, preparing docker image and container, pulling model checkpoints, deploying the service, benchmarking and summarizing. 

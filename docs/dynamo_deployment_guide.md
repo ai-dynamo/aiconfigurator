@@ -132,15 +132,9 @@ aiconfigurator cli default \
   --head_node_ip x.x.x.x
 ````
 
-Since TRTLLM has many custom parameters, run:
-
-```bash
-aiconfigurator cli --help
-```
-
-to see all supported options. We haven’t listed all trtllm configurations here. Feel free to modify the generated configuration file to include any additional ones [(trtllm args)](https://github.com/NVIDIA/TensorRT-LLM/blob/v0.20.0/tensorrt_llm/llmapi/llm_args.py).
-
 To customize parameters per worker type, override the `Workers.<role>` keys with `--generator-set`. For example:
+
+Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
 
 ```bash
 aiconfigurator cli default \

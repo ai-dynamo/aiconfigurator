@@ -146,7 +146,7 @@ Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/Wo
 - `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`
 - `--generator-set K8sConfig.k8s_namespace=dynamo \`
 
-Need to inspect which generator knobs exist? Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
+Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
 
 The `--generator-help` command supports three section options:
 - `--generator-help` or `--generator-help all` (default): Shows both the full deployment schema and the backend parameter mappings
