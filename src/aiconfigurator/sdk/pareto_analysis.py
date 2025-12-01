@@ -3,6 +3,7 @@
 
 import copy
 import logging
+import math
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -364,6 +365,7 @@ def draw_pareto_to_string(
 
     y_max = 0.0
     x_max = 0.0
+    x_min = math.inf
 
     for idx, entry in enumerate(series):
         df = entry.get("df")
@@ -381,6 +383,7 @@ def draw_pareto_to_string(
         )
         y_max = max(df[y_label].max(), y_max)
         x_max = max(df[x_label].max(), x_max)
+        x_min = min(df[x_label].min(), x_min)
 
     if highlight is not None:
         highlight_df = highlight.get("df")
@@ -397,6 +400,7 @@ def draw_pareto_to_string(
             )
             y_max = max(highlight_df[y_label].max(), y_max)
             x_max = max(highlight_df[x_label].max(), x_max)
+            x_min = min(highlight_df[x_label].min(), x_min)
 
     plotext.title(f"{title}: {y_label} vs {x_label}")
     plotext.xlabel(x_label)
@@ -405,10 +409,12 @@ def draw_pareto_to_string(
 
     if y_max > 0.0 and x_max > 0.0:
         y_max = ((y_max * 1.2) + 49) // 50 * 50
-        x_max = ((x_max * 1.1) + 19) // 20 * 20
-        x_max = min(x_max, 300)
+        x_limit = ((x_max * 1.1) + 19) // 20 * 20
+        cap = 300.0
+        has_points_within_cap = x_min <= cap
+        effective_x_max = min(x_limit, cap) if has_points_within_cap else x_limit
         plotext.ylim(0.0, y_max)
-        plotext.xlim(0.0, x_max)
+        plotext.xlim(0.0, effective_x_max)
 
     try:
         buf = plotext.build()
@@ -426,6 +432,9 @@ def _get_best_configs_under_constraint(
     constraint_col: str,
     top_n: int = 1,
     group_by: str | None = None,
+    *,
+    secondary_sort_col: str | None = None,
+    secondary_sort_ascending: bool = False,
 ) -> pd.DataFrame:
     """Generic helper to rank configs under a scalar constraint."""
     if pareto_df is None or pareto_df.empty:
@@ -459,8 +468,13 @@ def _get_best_configs_under_constraint(
         if group_by is not None:
             top_indexes = candidate_configs.groupby(group_by)["tokens/s/gpu_cluster"].idxmax()
             candidate_configs = candidate_configs.loc[top_indexes]
+        sort_columns = ["tokens/s/gpu_cluster"]
+        sort_ascending = [False]
+        if secondary_sort_col and secondary_sort_col in candidate_configs.columns:
+            sort_columns.append(secondary_sort_col)
+            sort_ascending.append(secondary_sort_ascending)
         candidate_configs = (
-            candidate_configs.sort_values(by="tokens/s/gpu_cluster", ascending=False).head(top_n).reset_index(drop=True)
+            candidate_configs.sort_values(by=sort_columns, ascending=sort_ascending).head(top_n).reset_index(drop=True)
         )
         return candidate_configs
     else:
@@ -486,6 +500,8 @@ def get_best_configs_under_tpot_constraint(
         constraint_col="tpot",
         top_n=top_n,
         group_by=group_by,
+        secondary_sort_col="tokens/s/user",
+        secondary_sort_ascending=False,
     )
 
 
@@ -504,4 +520,6 @@ def get_best_configs_under_request_latency_constraint(
         constraint_col="request_latency",
         top_n=top_n,
         group_by=group_by,
+        secondary_sort_col="request_latency",
+        secondary_sort_ascending=True,
     )
