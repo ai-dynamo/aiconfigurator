@@ -15,6 +15,7 @@ from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import check_is_moe, get_model_family
+from aiconfigurator.sdk.pareto_analysis import get_pareto_front
 from aiconfigurator.sdk.perf_database import (
     PerfDatabase,
     get_database,
@@ -1020,9 +1021,6 @@ class TaskRunner:
         )
         return {
             "pareto_df": result_df,
-            "pareto_frontier_df": pa.get_pareto_front(result_df, "tokens/s/user", "tokens/s/gpu")
-            .reset_index(drop=True)
-            .reset_index(),
         }
 
     def run_disagg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
@@ -1168,12 +1166,7 @@ class TaskRunner:
             prefill_latency_correction_scale=task_config.advanced_tuning_config.prefill_latency_correction_scale,
             decode_latency_correction_scale=task_config.advanced_tuning_config.decode_latency_correction_scale,
         )
-        return {
-            "pareto_df": result_df,
-            "pareto_frontier_df": pa.get_pareto_front(result_df, "tokens/s/user", "tokens/s/gpu")
-            .reset_index(drop=True)
-            .reset_index(),
-        }
+        return {"pareto_df": result_df}
 
     def run(self, task_config: TaskConfig) -> dict[str, pd.DataFrame | None]:
         serving_mode = task_config.config.serving_mode
@@ -1218,7 +1211,8 @@ if __name__ == "__main__":
     task_runner = TaskRunner()
     print("\n=== TaskConfig (agg) ===")
     print(task_agg.pretty())
-    agg_df = task_runner.run(task_agg)["pareto_frontier_df"]
+    agg_df = task_runner.run(task_agg)["pareto_df"]
+    agg_df = get_pareto_front(agg_df, "tokens/s/user", "tokens/s/gpu").reset_index(drop=True).reset_index()
     agg_df.to_csv("agg_df.csv", index=False)
     print("\n=== agg pareto ===")
     print(agg_df)
@@ -1246,7 +1240,8 @@ if __name__ == "__main__":
     )
     print("\n=== TaskConfig (disagg) ===")
     print(task_disagg.pretty())
-    disagg_df = task_runner.run(task_disagg)["pareto_frontier_df"]
+    disagg_df = task_runner.run(task_disagg)["pareto_df"]
+    disagg_df = get_pareto_front(disagg_df, "tokens/s/user", "tokens/s/gpu").reset_index(drop=True).reset_index()
     disagg_df.to_csv("disagg_df.csv", index=False)
     print("\n=== disagg pareto ===")
     print(disagg_df)
