@@ -106,7 +106,7 @@ def _setup_button_validation(generate_btn, model_name_components, model_system_c
         runtime_config_components: Runtime config components dictionary
     """
 
-    def validate_fields(model_name, system, backend, version, min_gpu, max_gpu, gpus_per_node, isl, osl, max_ctx):
+    def validate_fields(model_name, system, backend, version, min_gpu, max_gpu, gpus_per_node, isl, osl):
         """Check if all required fields are filled."""
         # Check dropdowns - all must be selected
         dropdowns_filled = all([model_name, system, backend, version])
@@ -119,7 +119,6 @@ def _setup_button_validation(generate_btn, model_name_components, model_system_c
                 gpus_per_node is not None and gpus_per_node != "",
                 isl is not None and isl != "",
                 osl is not None and osl != "",
-                max_ctx is not None and max_ctx != "",
             ]
         )
 
@@ -136,7 +135,6 @@ def _setup_button_validation(generate_btn, model_name_components, model_system_c
         model_system_components["gpus_per_node"],
         runtime_config_components["isl"],
         runtime_config_components["osl"],
-        runtime_config_components["max_context_length"],
     ]
 
     # Attach change and blur listeners to all required fields
@@ -176,9 +174,7 @@ def create_setup_section(app_config):
     with gr.Accordion("Setup Your Profiling Job"):
         model_name_components = create_model_name_config(app_config)
         model_system_components = create_system_config(app_config, gpu_config=True)
-        runtime_config_components = create_runtime_config(
-            app_config, with_sla=True, max_context_length=True, prefix_length=False
-        )
+        runtime_config_components = create_runtime_config(app_config, with_sla=True, prefix_length=False)
         generate_btn = gr.Button("Generate Profiling Job", variant="primary", interactive=False)
         status = gr.Textbox(
             label="Status",

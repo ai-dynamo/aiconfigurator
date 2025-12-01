@@ -205,7 +205,7 @@ def create_model_misc_config(app_config):
     return {"nextn": nextn, "nextn_accept_rates": nextn_accept_rates, "enable_wideep": enable_wideep}
 
 
-def create_runtime_config(app_config, with_sla=False, max_context_length=False, prefix_length=True):
+def create_runtime_config(app_config, with_sla=False, prefix_length=True):
     """create runtime config components"""
 
     with gr.Accordion("Runtime config"):
@@ -220,10 +220,6 @@ def create_runtime_config(app_config, with_sla=False, max_context_length=False, 
                 prefix = gr.Number(value=0, label="prefix cache length", interactive=True)
             else:
                 prefix = None
-            if max_context_length:
-                max_context_length = gr.Number(value=2048, label="max context length", interactive=True, required=True)
-            else:
-                max_context_length = None
 
             if with_sla:
                 ttft = gr.Number(value=2000, label="first token latency/ms", interactive=True, optional=True)
@@ -237,7 +233,6 @@ def create_runtime_config(app_config, with_sla=False, max_context_length=False, 
             "isl": isl,
             "osl": osl,
             "prefix": prefix,
-            "max_context_length": max_context_length,
             "ttft": ttft,
             "tpot": tpot,
             "batch_size": batch_size,
