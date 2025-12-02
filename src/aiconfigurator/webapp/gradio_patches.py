@@ -51,6 +51,27 @@ def _create_patched_init(original_init):
     return patched_init
 
 
+# Patch Dropdown.preprocess to suppress "Value not in choices" errors
+# This can happen when choices are dynamically updated but frontend has stale value
+_original_dropdown_preprocess = gr.Dropdown.preprocess
+
+
+def _patched_dropdown_preprocess(self, payload):
+    """
+    Patched preprocess that returns None instead of raising an error
+    when the submitted value is not in the current list of choices.
+    """
+    try:
+        return _original_dropdown_preprocess(self, payload)
+    except gr.exceptions.Error as e:
+        if "is not in the list of choices" in str(e):
+            # Return None for invalid values - handlers should deal with None gracefully
+            return None
+        raise
+
+
+gr.Dropdown.preprocess = _patched_dropdown_preprocess
+
 # Monkey patch Gradio components for required/optional labels
 gr.Dropdown.__init__ = _create_patched_init(gr.Dropdown.__init__)
 gr.Number.__init__ = _create_patched_init(gr.Number.__init__)
