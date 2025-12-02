@@ -851,7 +851,10 @@ if __name__ == "__main__":
     num_warmup = 3
     num_iterations = 10
     test_layer = 3
-    num_experts = 128
+
+    # num_experts list to simulate different EP sizes
+    # num_experts=256 -> EP 2, num_experts=128 -> EP 4, ..., num_experts=2 -> EP 256
+    num_experts_list = [256, 128, 64, 32, 16, 8, 4, 2]
 
     server_args = ServerArgs(
         model_path=model_path,
@@ -879,37 +882,45 @@ if __name__ == "__main__":
     _set_envs_and_config(server_args)
     port_args = PortArgs.init_new(server_args)
 
-    workers = []
-    for tp_rank in range(server_args.tp_size):
-        proc = multiprocessing.Process(
-            target=run_moe,
-            args=(
-                server_args,
-                port_args,
-                num_warmup,
-                num_iterations,
-                test_layer,
-                num_experts,
-                tp_rank,
-                output_path,
-            ),
-        )
-        proc.start()
-        workers.append(proc)
+    for num_experts in num_experts_list:
+        simulated_ep_size = 256 // num_experts * server_args.ep_size
+        print("\n" + "=" * 60)
+        print(f"Testing num_experts={num_experts} (simulating EP size {simulated_ep_size})")
+        print("=" * 60)
 
-    for proc in workers:
-        proc.join()
+        workers = []
+        for tp_rank in range(server_args.tp_size):
+            proc = multiprocessing.Process(
+                target=run_moe,
+                args=(
+                    server_args,
+                    port_args,
+                    num_warmup,
+                    num_iterations,
+                    test_layer,
+                    num_experts,
+                    tp_rank,
+                    output_path,
+                ),
+            )
+            proc.start()
+            workers.append(proc)
 
-    for i, proc in enumerate(workers):
-        if proc.exitcode != 0:
-            print(f"Process {i} (tp_rank={i}) failed with exit code {proc.exitcode}")
+        for proc in workers:
+            proc.join()
 
-    for proc in workers:
-        if proc.is_alive():
-            proc.terminate()
-            proc.join(timeout=5)
+        for i, proc in enumerate(workers):
+            if proc.exitcode != 0:
+                print(f"Process {i} (tp_rank={i}) failed with exit code {proc.exitcode}")
+
+        for proc in workers:
             if proc.is_alive():
-                proc.kill()
+                proc.terminate()
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+
+        print(f"Completed testing num_experts={num_experts} (EP size {simulated_ep_size})")
 
     print("\n" + "=" * 60)
     print("SCRIPT COMPLETED SUCCESSFULLY")
