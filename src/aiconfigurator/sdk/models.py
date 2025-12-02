@@ -1267,7 +1267,7 @@ class WideEPDeepSeekModel(BaseModel):
         moe_backend = self.config.moe_backend
         attn_backend = self.config.attention_backend
 
-        self._power_law_alpha = 0.8
+        self._power_law_alpha = 1.01
         workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
 
         sms = self.config.sms
