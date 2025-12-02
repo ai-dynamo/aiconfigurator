@@ -16,7 +16,6 @@ def create_model_name_config(app_config):
             label="model name",
             value="DEEPSEEK_V3",
             interactive=True,
-            required=True,
         )
 
     return {"model_name": model_name}
@@ -35,24 +34,41 @@ def create_system_config(app_config, gpu_config=False):
     with gr.Accordion("System config"):
         with gr.Row():
             system = gr.Dropdown(
-                choices=system_choices, label="System", value=default_system, interactive=True, required=True
+                choices=system_choices,
+                label="System",
+                value=default_system,
+                interactive=True,
             )
             backend = gr.Dropdown(
-                choices=backend_choices, label="Backend", value=default_backend, interactive=True, required=True
+                choices=backend_choices,
+                label="Backend",
+                value=default_backend,
+                interactive=True,
             )
             version = gr.Dropdown(
-                choices=version_choices, label="Version", value=default_version, interactive=True, required=True
+                choices=version_choices,
+                label="Version",
+                value=default_version,
+                interactive=True,
             )
         if gpu_config:
             with gr.Row():
                 gpu_config_components = {
                     "min_gpu_per_engine": gr.Number(
-                        label="Minimum GPUs per engine", value=4, interactive=True, required=True
+                        label="Minimum GPUs per engine",
+                        value=4,
+                        interactive=True,
                     ),
                     "max_gpu_per_engine": gr.Number(
-                        label="Maximum GPUs per engine", value=16, interactive=True, required=True
+                        label="Maximum GPUs per engine",
+                        value=16,
+                        interactive=True,
                     ),
-                    "gpus_per_node": gr.Number(label="GPUs per node", value=8, interactive=True, required=True),
+                    "gpus_per_node": gr.Number(
+                        label="GPUs per node",
+                        value=8,
+                        interactive=True,
+                    ),
                     "gpu_cost_per_hour": gr.Number(
                         label="GPU cost per hour", value="", interactive=True, optional=True
                     ),
@@ -205,25 +221,39 @@ def create_model_misc_config(app_config):
     return {"nextn": nextn, "nextn_accept_rates": nextn_accept_rates, "enable_wideep": enable_wideep}
 
 
-def create_runtime_config(app_config, with_sla=False, prefix_length=True):
+def create_runtime_config(
+    app_config,
+    with_sla=False,
+    prefix_length=True,
+    tip_text=None,
+    ttft_optional=False,
+    itl_optional=False,
+):
     """create runtime config components"""
 
     with gr.Accordion("Runtime config"):
+        if tip_text:
+            with gr.Row():
+                gr.HTML(f"<span style='color: var(--body-text-color-subdued);'>{tip_text}</span>")
         with gr.Row():
-            gr.HTML(
-                "<span style='color: var(--body-text-color-subdued);'>More inputs = more precise profiling results.</span>"
+            isl = gr.Number(
+                value=2048,
+                label="input sequence length",
+                interactive=True,
             )
-        with gr.Row():
-            isl = gr.Number(value=2048, label="input sequence length", interactive=True, required=True)
-            osl = gr.Number(value=128, label="output sequence length", interactive=True, required=True)
+            osl = gr.Number(
+                value=128,
+                label="output sequence length",
+                interactive=True,
+            )
             if prefix_length:
                 prefix = gr.Number(value=0, label="prefix cache length", interactive=True)
             else:
                 prefix = None
 
             if with_sla:
-                ttft = gr.Number(value=2000, label="first token latency/ms", interactive=True, optional=True)
-                tpot = gr.Number(value=50, label="inter token latency/ms", interactive=True, optional=True)
+                ttft = gr.Number(value=2000, label="first token latency/ms", interactive=True, optional=ttft_optional)
+                tpot = gr.Number(value=50, label="inter token latency/ms", interactive=True, optional=itl_optional)
                 batch_size = None
             else:
                 batch_size = gr.Number(value=1, label="batch size", interactive=True)

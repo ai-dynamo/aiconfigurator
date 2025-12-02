@@ -33,14 +33,14 @@ def _create_patched_init(original_init):
     @functools.wraps(original_init)
     def patched_init(self, *args, **kwargs):
         # Extract our custom parameters before passing to original
-        required = kwargs.pop("required", False)
+        required = kwargs.pop("required", True)
         optional = kwargs.pop("optional", False)
 
         # Add CSS classes (styling handled via CSS ::after pseudo-element)
-        if required:
-            _add_elem_class(kwargs, "required")
-        elif optional:
+        if optional:  # optional has higher precedence than required
             _add_elem_class(kwargs, "optional")
+        elif required:
+            _add_elem_class(kwargs, "required")
 
         # Call original init
         return original_init(self, *args, **kwargs)
@@ -51,8 +51,9 @@ def _create_patched_init(original_init):
     return patched_init
 
 
-# Monkey patch Dropdown to support required/optional labels
+# Monkey patch Gradio components for required/optional labels
 gr.Dropdown.__init__ = _create_patched_init(gr.Dropdown.__init__)
-
-# Monkey patch Number to support required/optional labels
 gr.Number.__init__ = _create_patched_init(gr.Number.__init__)
+gr.Textbox.__init__ = _create_patched_init(gr.Textbox.__init__)
+gr.CheckboxGroup.__init__ = _create_patched_init(gr.CheckboxGroup.__init__)
+gr.Checkbox.__init__ = _create_patched_init(gr.Checkbox.__init__)

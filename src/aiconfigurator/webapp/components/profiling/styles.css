@@ -175,13 +175,13 @@ table td button {
 }
 
 /* Required/Optional field label styles */
-div.required span:first-child::after {
+div.required span:after, fieldset.required span:after {
     content: " *";
     color: var(--primary-500);
     font-weight: bold;
 }
 
-div.optional span:first-child::after {
+div.optional span:after, fieldset.optional span:after {
     content: " (optional)";
     color: var(--body-text-color-subdued);
 }
