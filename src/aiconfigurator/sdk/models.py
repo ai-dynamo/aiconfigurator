@@ -727,35 +727,6 @@ class MOEModel(BaseModel):
             ]
         )
 
-        self.generation_ops.extend(
-            [
-                ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("generation_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.GEMM(
-                    "generation_qkv_gemm",
-                    self._num_layers,
-                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GenerationAttention(
-                    "generation_attention",
-                    self._num_layers,
-                    self._num_heads // tp_size,
-                    num_kv_heads_per_gpu,
-                    kvcache_quant_mode,
-                ),
-                ops.GEMM(
-                    "generation_proj_gemm",
-                    self._num_layers,
-                    h,
-                    self._num_heads * self._head_size // tp_size,
-                    gemm_quant_mode,
-                ),
-                ops.ElementWise("generation_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
-            ]
-        )
-
         # router, only take it into account when num_experts >= 128
         if self._num_experts >= 128:
             self.generation_ops.extend(
