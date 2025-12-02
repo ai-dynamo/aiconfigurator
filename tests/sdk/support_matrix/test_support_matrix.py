@@ -26,6 +26,7 @@ SUPPORT_MATRIX_CSV = os.path.join(
 GENERATE_SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
     "tools",
+    "support_matrix",
     "generate_support_matrix.py",
 )
 

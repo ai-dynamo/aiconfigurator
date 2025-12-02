@@ -23,7 +23,7 @@ from sdk.support_matrix.suppport_matrix import SupportMatrix
 def main():
     # Default output location: <package>/systems/support_matrix.csv
     default_output = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "src",
         "aiconfigurator",
         "systems",
