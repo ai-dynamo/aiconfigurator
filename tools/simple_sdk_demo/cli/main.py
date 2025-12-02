@@ -100,7 +100,7 @@ def parse(args):
         "--workload_distribution",
         type=str,
         default="uniform",
-        choices=["uniform", "balanced", "mostUnbalanced"],
+        choices=["uniform", "balanced", "mostUnbalanced", "power_law"],
         help="workload for moe models",
     )
     parser.add_argument("--ttft", type=float, default=300, help="SLA requirement: ttft limit (ms)")
