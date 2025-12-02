@@ -2050,7 +2050,14 @@ class PerfDatabase:
             # y_direction
             for y in target_y_list:
                 if y not in data_dict[x]:
-                    y_left, y_right = self._nearest_1d_point_helper(y, list(data_dict[x].keys()), False)
+                    y_keys = list(data_dict[x].keys())
+                    if len(y_keys) < 2:
+                        logger.warning(
+                            f"Skipping interpolation for y={y} at x={x}: insufficient y values "
+                            f"(need at least 2, got {len(y_keys)})"
+                        )
+                        continue
+                    y_left, y_right = self._nearest_1d_point_helper(y, y_keys, False)
                     # Check if both left and right boundaries exist
                     if y_left not in data_dict[x] or y_right not in data_dict[x]:
                         logger.warning(
@@ -2086,7 +2093,14 @@ class PerfDatabase:
 
         for x in target_x_list:
             if x not in data_dict:
-                x_left, x_right = self._nearest_1d_point_helper(x, list(data_dict.keys()), False)
+                x_keys = list(data_dict.keys())
+                if len(x_keys) < 2:
+                    logger.warning(
+                        f"Skipping interpolation for x={x}: insufficient x values "
+                        f"(need at least 2, got {len(x_keys)})"
+                    )
+                    continue
+                x_left, x_right = self._nearest_1d_point_helper(x, x_keys, False)
                 # Check if both left and right boundaries exist
                 if x_left not in data_dict or x_right not in data_dict:
                     logger.warning(
@@ -2989,7 +3003,14 @@ class PerfDatabase:
             comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
                 "AUTO"
             ]  # use AUTO for allreduce strategy
-            size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
+            comm_keys = list(comm_dict.keys())
+            if len(comm_keys) < 2:
+                logger.warning(
+                    f"Insufficient allreduce data points for tp_size={tp_size}, size={size} "
+                    f"(need at least 2, got {len(comm_keys)}), falling back to SOL"
+                )
+                return get_sol(quant_mode, tp_size, size)[0]
+            size_left, size_right = self._nearest_1d_point_helper(size, comm_keys, inner_only=False)
             lat = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
             if tp_size > 8:  # FIXME, to collect real data, use inter-node and intra-node data seperately
                 if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
@@ -3056,7 +3077,14 @@ class PerfDatabase:
 
         max_num_gpus = max(self._nccl_data[dtype][operation].keys())
         nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
-        size_left, size_right = self._nearest_1d_point_helper(message_size, list(nccl_dict.keys()), inner_only=False)
+        nccl_keys = list(nccl_dict.keys())
+        if len(nccl_keys) < 2:
+            logger.warning(
+                f"Insufficient NCCL data points for num_gpus={num_gpus}, operation={operation}, message_size={message_size} "
+                f"(need at least 2, got {len(nccl_keys)}), falling back to SOL"
+            )
+            return get_sol(dtype, num_gpus, operation, message_size)[0]
+        size_left, size_right = self._nearest_1d_point_helper(message_size, nccl_keys, inner_only=False)
         lat = self._interp_1d([size_left, size_right], [nccl_dict[size_left], nccl_dict[size_right]], message_size)
 
         if num_gpus > max_num_gpus:  # need to do some correction
@@ -3097,7 +3125,14 @@ class PerfDatabase:
 
         try:
             comm_dict = self._custom_allreduce_power_data[quant_mode][min(tp_size, 8)]["AUTO"]
-            size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
+            comm_keys = list(comm_dict.keys())
+            if len(comm_keys) < 2:
+                logger.warning(
+                    f"Insufficient allreduce power data points for tp_size={tp_size}, size={size} "
+                    f"(need at least 2, got {len(comm_keys)}), falling back to default power"
+                )
+                return self.system_spec["gpu"]["power"]
+            size_left, size_right = self._nearest_1d_point_helper(size, comm_keys, inner_only=False)
             power = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
             return power
         except Exception as e:
@@ -3133,7 +3168,14 @@ class PerfDatabase:
         try:
             max_num_gpus = max(self._nccl_power_data[dtype][operation].keys())
             nccl_dict = self._nccl_power_data[dtype][operation][min(num_gpus, max_num_gpus)]
-            size_left, size_right = self._nearest_1d_point_helper(message_size, list(nccl_dict.keys()), inner_only=False)
+            nccl_keys = list(nccl_dict.keys())
+            if len(nccl_keys) < 2:
+                logger.warning(
+                    f"Insufficient NCCL power data points for num_gpus={num_gpus}, operation={operation}, message_size={message_size} "
+                    f"(need at least 2, got {len(nccl_keys)}), falling back to default power"
+                )
+                return self.system_spec["gpu"]["power"]
+            size_left, size_right = self._nearest_1d_point_helper(message_size, nccl_keys, inner_only=False)
             power = self._interp_1d([size_left, size_right], [nccl_dict[size_left], nccl_dict[size_right]], message_size)
             return power
         except Exception as e:
