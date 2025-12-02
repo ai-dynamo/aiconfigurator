@@ -21,8 +21,3 @@ env/
 *.pyc
 *.pyo
 *.pyd
-
-# Log files
-*.log
-result.jsonl
-run_sglang.sh
