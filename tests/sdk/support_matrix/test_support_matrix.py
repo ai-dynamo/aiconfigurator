@@ -4,12 +4,16 @@
 import csv
 import os
 import subprocess
+import sys
 from collections import defaultdict
 
 import pytest
 from packaging.version import Version
 
-from aiconfigurator.sdk.suppport_matrix import SupportMatrix
+# Add tests directory to path for support_matrix module
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from sdk.support_matrix.suppport_matrix import SupportMatrix
 
 SUPPORT_MATRIX_CSV = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),

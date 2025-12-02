@@ -12,8 +12,12 @@ Usage:
 import argparse
 import logging
 import os
+import sys
 
-from aiconfigurator.sdk.suppport_matrix import SupportMatrix
+# Add tests directory to path for support_matrix module
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tests"))
+
+from sdk.support_matrix.suppport_matrix import SupportMatrix
 
 
 def main():
