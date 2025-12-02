@@ -56,6 +56,7 @@ def main(args):
         )
 
     with gr.Blocks(
+        title="Dynamo aiconfigurator for Disaggregated Serving Deployment",
         css="""
         .config-column {
             border-right: 5px solid #e0e0e0;
@@ -64,7 +65,7 @@ def main(args):
         .config-column:last-child {
             border-right: none;
         }
-    """
+    """,
     ) as demo:
         pareto_results_state = gr.State(defaultdict())
 
