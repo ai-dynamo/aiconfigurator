@@ -46,7 +46,7 @@ def get_moe_prefill_test_cases(rank):
     """
     test_cases = []
     num_tokens = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-    power_law_alphas = [0.6, 0.8, 1.02, 1.2]
+    power_law_alphas = [0.6, 0.8, 1.01, 1.02, 1.2]
 
     for num_token in sorted(num_tokens):
         if num_token * 8 < 128:
@@ -75,7 +75,7 @@ def get_moe_decode_test_cases():
     For uniform distribution, 'power_law_alpha' is None.
     """
     batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
-    power_law_alphas = [0.6, 0.8, 1.2]
+    power_law_alphas = [0.6, 0.8, 1.01, 1.02, 1.2]
     test_cases = []
     # Uniform cases
     for bs in batch_sizes:
