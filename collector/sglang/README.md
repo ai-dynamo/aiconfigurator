@@ -114,9 +114,9 @@ server_args = ServerArgs(
 The `num_experts` parameter in `MoEBenchArgs` is used to simulate different expert parallel (EP) sizes. For example, when using 2 GPUs with `tp_size=2` and `ep_size=2`:
 
 - `num_experts=256` → simulates **EP 2** (256 experts / 2 = 128 experts per GPU)
-- `num_experts=128` → simulates **EP 4** (128 experts / 4 = 32 experts per GPU)
-- `num_experts=64` → simulates **EP 8** (64 experts / 8 = 8 experts per GPU)
-- `num_experts=32` → simulates **EP 16** (32 experts / 16 = 2 experts per GPU)
+- `num_experts=128` → simulates **EP 4** (128 experts / 2 = 64 experts per GPU)
+- `num_experts=64` → simulates **EP 8** (64 experts / 2 = 32 experts per GPU)
+- `num_experts=32` → simulates **EP 16** (32 experts / 2 = 16 experts per GPU)
 - `num_experts=16` → simulates **EP 32**
 - `num_experts=8` → simulates **EP 64**
 - `num_experts=4` → simulates **EP 128**
