@@ -1258,6 +1258,20 @@ class WideEPDeepSeekModel(BaseModel):
         # context mla attention
         self.context_ops.extend(
             [
+                *(
+                    [
+                        ops.NCCL(
+                            "context_tp_all_gather",
+                            self._num_layers,
+                            "all_gather",
+                            h,
+                            tp_size,
+                            common.CommQuantMode.half,
+                        )
+                    ]
+                    if tp_size > 1
+                    else []
+                ),
                 ops.WideEPContextMLA(
                     "context_attention",
                     self._num_layers,
@@ -1265,7 +1279,21 @@ class WideEPDeepSeekModel(BaseModel):
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     attn_backend,
-                )
+                ),
+                *(
+                    [
+                        ops.NCCL(
+                            "context_tp_reduce_scatter",
+                            self._num_layers,
+                            "reduce_scatter",
+                            h,
+                            tp_size,
+                            common.CommQuantMode.half,
+                        )
+                    ]
+                    if tp_size > 1
+                    else []
+                ),
             ]
         )
 
@@ -1278,6 +1306,7 @@ class WideEPDeepSeekModel(BaseModel):
                     h,
                     self._moe_inter_size,
                     moe_quant_mode,
+                    tp_size=tp_size,
                 )
             ]
         )
