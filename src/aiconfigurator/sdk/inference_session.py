@@ -395,7 +395,10 @@ class DisaggInferenceSession:
             for decode_num_worker in decode_num_worker_list:
                 for prefill_num_worker in prefill_num_worker_list:
                     num_gpu = prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker
-                    if num_gpu not in num_gpu_set:
+
+                    # if num_gpu_set is empty, we don't have any constraint on the number of gpus
+                    # if num_gpu_set is not empty, we only consider the gpus that are in the set
+                    if len(num_gpu_set) > 0 and num_gpu not in num_gpu_set:
                         continue
 
                     prefill_throughput_corrected = (

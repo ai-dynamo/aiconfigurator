@@ -47,12 +47,11 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
                 mode="lines+markers",
                 line=dict(color="red", width=2),
                 marker=dict(color="blue", size=8),
-                hovertemplate=f"<b>{x_col}:</b> %{{x:.2f}}<br>"
-                + "<b>tokens/s/gpu:</b> %{y:.2f}<br>"
-                + "<b>tokens/s/user:</b> %{customdata[9]:.2f}<br>"
+                hovertemplate="<b>tokens/s/user:</b> %{customdata[9]:.2f}<br>"
+                + "<b>tokens/s/gpu:</b> %{customdata[10]:.2f}<br>"
+                + "<b>request latency(ms):</b> %{customdata[8]:.2f}<br>"
                 + "<b>TTFT(ms):</b> %{customdata[0]:.2f}<br>"
                 + "<b>TPOT(ms):</b> %{customdata[1]:.2f}<br>"
-                + "<b>Request Latency(ms):</b> %{customdata[8]:.2f}<br>"
                 + "<b>seq/s (system):</b> %{customdata[2]:.2f}<br>"
                 + "<b>concurrency:</b> %{customdata[3]}<br>"
                 + "<b>parallel:</b> %{customdata[4]}<br>"
@@ -71,6 +70,7 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
                         df["index"],
                         df["request_latency"],
                         df["tokens/s/user"],
+                        df["tokens/s/gpu"],
                     ),
                     axis=1,
                 ),
@@ -84,12 +84,11 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
                 mode="lines+markers",
                 line=dict(color="red", width=2),
                 marker=dict(color="blue", size=8),
-                hovertemplate=f"<b>{x_col}:</b> %{{x:.2f}}<br>"
-                + "<b>tokens/s/gpu:</b> %{y:.2f}<br>"
-                + "<b>tokens/s/user:</b> %{customdata[19]:.2f}<br>"
+                hovertemplate="<b>tokens/s/user:</b> %{customdata[19]:.2f}<br>"
+                + "<b>tokens/s/gpu:</b> %{customdata[20]:.2f}<br>"
+                + "<b>request latency(ms):</b> %{customdata[18]:.2f}<br>"
                 + "<b>TTFT(ms):</b> %{customdata[0]:.2f}<br>"
                 + "<b>TPOT(ms):</b> %{customdata[1]:.2f}<br>"
-                + "<b>Request Latency(ms):</b> %{customdata[18]:.2f}<br>"
                 + "<b>seq/s (system):</b> %{customdata[2]:.2f}<br>"
                 + "<b>prefill hardware:</b> %{customdata[3]}<br>"
                 + "<b>prefill workers:</b> %{customdata[4]}<br>"
@@ -128,6 +127,7 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
                         df["index"],
                         df["request_latency"],
                         df["tokens/s/user"],
+                        df["tokens/s/gpu"],
                     ),
                     axis=1,
                 ),
@@ -475,7 +475,7 @@ class EventFn:
                         "more GPUs."
                     )
                 latency_info = (
-                    f"_reqLat{runtime_config.request_latency}"
+                    f"_reqlat{runtime_config.request_latency}"
                     if runtime_config.request_latency
                     else f"_ttft{runtime_config.ttft}"
                 )
@@ -721,7 +721,7 @@ class EventFn:
                         "memory size. Try to set a larger ttft limit and use more GPUs."
                     )
                 latency_info = (
-                    f"_reqLat{runtime_config.request_latency}"
+                    f"_reqlat{runtime_config.request_latency}"
                     if runtime_config.request_latency
                     else f"_ttft{runtime_config.ttft}"
                 )
@@ -1053,6 +1053,11 @@ class EventFn:
             "magenta",
         ]
         fig = go.Figure()
+
+        # Detect if any result uses request_latency mode (check if "reqlat" in result name)
+        use_request_latency_mode = any("reqlat" in name.lower() for name in candidates_dropdown)
+        x_col = "request_latency" if use_request_latency_mode else "tokens/s/user"
+
         for i, result_name in enumerate(candidates_dropdown):
             result_df = pareto_results_state[result_name]
             if "parallel" in result_df.columns:
@@ -1065,15 +1070,16 @@ class EventFn:
                 memory = "(p)" + result_df["(p)memory"].astype(str) + "_(d)" + result_df["(d)memory"].astype(str)
             fig.add_trace(
                 go.Scatter(
-                    x=result_df["tokens/s/user"],
+                    x=result_df[x_col],
                     y=result_df["tokens/s/gpu"],
                     mode="lines+markers",
                     name=result_name,
                     line=dict(color=color_list[i % len(color_list)], width=2),
                     marker=dict(color=color_list[i % len(color_list)], size=8),
                     hovertemplate=f"<b>system type:</b> {system_type}<br>"
-                    + "<b>tokens/s/user:</b> %{x:.2f}<br>"
-                    + "<b>tokens/s/gpu:</b> %{y:.2f}<br>"
+                    + "<b>tokens/s/user:</b> %{customdata[8]:.2f}<br>"
+                    + "<b>tokens/s/gpu:</b> %{customdata[9]:.2f}<br>"
+                    + "<b>request latency(ms):</b> %{customdata[10]:.2f}<br>"
                     + "<b>TTFT(ms):</b> %{customdata[0]:.2f}<br>"
                     + "<b>TPOT(ms):</b> %{customdata[1]:.2f}<br>"
                     + "<b>seq/s (system):</b> %{customdata[2]:.2f}<br>"
@@ -1092,6 +1098,9 @@ class EventFn:
                             memory,
                             result_df["num_total_gpus"],
                             result_df["index"],
+                            result_df["tokens/s/user"],
+                            result_df["tokens/s/gpu"],
+                            result_df["request_latency"],
                         ),
                         axis=1,
                     ),
@@ -1107,7 +1116,7 @@ class EventFn:
                 "yanchor": "top",
             },
             xaxis_title={
-                "text": "tokens/s/user",
+                "text": x_col,
                 "font": dict(size=14, family="Arial, sans-serif"),
             },
             yaxis_title={"text": "tokens/s/gpu", "font": dict(size=14, family="Arial, sans-serif")},
