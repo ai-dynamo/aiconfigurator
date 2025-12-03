@@ -3,85 +3,22 @@
 
 import copy
 import logging
+import math
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotext
-from scipy.interpolate import interp1d
 
-from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk import config
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.common import ColumnsAgg
 from aiconfigurator.sdk.inference_session import DisaggInferenceSession, InferenceSession
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
-
-
-def enumerate_parallel_config(
-    num_gpu_list: list[int],
-    tp_list: list[int],
-    pp_list: list[int],
-    dp_list: list[int] = [1],
-    moe_tp_list: list[int] = [1],
-    moe_ep_list: list[int] = [1],
-    is_moe: bool = False,
-    backend: common.BackendName = common.BackendName.trtllm,
-    enable_wideep: bool = False,
-) -> list[list[int]]:
-    """
-    Enumerate parallel configurations based on parallel list.
-    This is a helper function for agg_pareto and disagg_pareto to define search space.
-
-    Args:
-        num_gpu_list: list of number of gpus, this is used to filter out invalid parallel
-            configurations
-        tp_list: list of tensor parallel sizes
-        pp_list: list of pipeline parallel sizes
-        dp_list: list of data parallel sizes
-        moe_tp_list: list of moe tensor parallel sizes
-        moe_ep_list: list of moe expert parallel sizes
-        is_moe: whether to use moe
-        backend: backend name enum. Important for moe parallel enumeration as different backends
-            have different moe parallel support.
-    Returns:
-        parallel_config_list: list of parallel configurations
-    """
-    parallel_config_list = []
-    for tp in tp_list:
-        for pp in pp_list:
-            if is_moe:
-                for dp in dp_list:
-                    for moe_tp in moe_tp_list:
-                        for moe_ep in moe_ep_list:
-                            if dp * tp * pp in num_gpu_list and dp * tp == moe_tp * moe_ep:  # check num gpu and width
-                                # backend specific filters
-                                # trtllm
-                                if (
-                                    backend == common.BackendName.trtllm and dp > 1 and tp > 1
-                                ):  # trtllm as trtllm don't supports attn tp > 1
-                                    continue
-                                # sglang
-                                elif backend == common.BackendName.sglang:
-                                    if (enable_wideep and moe_tp > 1) or (
-                                        not enable_wideep and moe_ep > 1
-                                    ):  # wideep only has ep
-                                        continue
-                                elif backend == common.BackendName.vllm and moe_tp > 1 and moe_ep > 1:
-                                    continue  # vllm does not support moe_tp > 1 and moe_ep > 1 at the same time
-
-                                parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
-            else:
-                if tp * pp in num_gpu_list:
-                    parallel_config_list.append([tp, pp, 1, 1, 1])
-
-    for parallel_config in parallel_config_list:
-        tp, pp, dp, moe_tp, moe_ep = parallel_config
-        logger.info(f"Enumerated parallel config: tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
-
-    return parallel_config_list
 
 
 def agg_pareto(
@@ -110,8 +47,6 @@ def agg_pareto(
         results_df: dataframe of the results
     """
 
-    tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
-
     # agg is agg server, the loop over parallel is outside here.
     results_df = pd.DataFrame(columns=ColumnsAgg)
     exceptions = []
@@ -136,9 +71,38 @@ def agg_pareto(
             )
             backend = get_backend(backend_name)
             sess = InferenceSession(model=model, database=database, backend=backend)
-            for tpot in tpot_list:
-                overwritten_runtime_config = copy.deepcopy(runtime_config)
-                overwritten_runtime_config.tpot = tpot
+
+            runtime_configs_to_evaluate: list[config.RuntimeConfig] = []
+            if runtime_config.request_latency is not None and runtime_config.request_latency > 0:
+                ttft_tpot_constraints = enumerate_ttft_tpot_constraints(
+                    runtime_config.osl, runtime_config.request_latency, runtime_config.ttft
+                )
+                if not ttft_tpot_constraints:
+                    logger.debug(
+                        "No ttft/tpot constraints derived for request_latency=%s", runtime_config.request_latency
+                    )
+                    continue
+                logger.debug(
+                    "Enumerated %d ttft/tpot constraint pairs for request_latency=%sms",
+                    len(ttft_tpot_constraints),
+                    runtime_config.request_latency,
+                )
+                for ttft_constraint, tpot_constraint in ttft_tpot_constraints:
+                    overwritten_runtime_config = copy.deepcopy(runtime_config)
+                    overwritten_runtime_config.ttft = ttft_constraint
+                    overwritten_runtime_config.tpot = tpot_constraint
+                    runtime_configs_to_evaluate.append(overwritten_runtime_config)
+            else:
+                tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
+                for tpot in tpot_list:
+                    overwritten_runtime_config = copy.deepcopy(runtime_config)
+                    overwritten_runtime_config.tpot = tpot
+                    runtime_configs_to_evaluate.append(overwritten_runtime_config)
+
+            if not runtime_configs_to_evaluate:
+                continue
+
+            for overwritten_runtime_config in runtime_configs_to_evaluate:
                 summary = sess.find_best_agg_result_under_constraints(
                     runtime_config=overwritten_runtime_config,
                     top_k=10,
@@ -147,7 +111,12 @@ def agg_pareto(
                 )
                 result_df = summary.get_summary_df()
                 if len(result_df) == 0:
-                    logger.debug(f"No result found for tpot {tpot}ms in agg pareto.")
+                    logger.debug(
+                        "No result found for constraints ttft=%s, tpot=%s, request_latency=%s in agg pareto.",
+                        overwritten_runtime_config.ttft,
+                        overwritten_runtime_config.tpot,
+                        overwritten_runtime_config.request_latency,
+                    )
                     continue
                 if len(results_df) == 0:
                     results_df = result_df
@@ -166,13 +135,13 @@ def agg_pareto(
             exceptions.append(e)
             continue
 
-    # If no results found, raise the last exception
-    if results_df.empty:
+    if not results_df.empty:
+        results_df = results_df.drop_duplicates(ignore_index=True)
+        results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
+    else:
         raise RuntimeError(
             f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
         ) from exceptions[-1]
-
-    results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
 
     return results_df
 
@@ -293,10 +262,26 @@ def disagg_pareto(
     return summary.get_summary_df()
 
 
-def get_pareto_front(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:
+def get_pareto_front(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    *,
+    maximize_x: bool = True,
+    maximize_y: bool = True,
+) -> pd.DataFrame:
     """
     Get Pareto front from raw data points.
+
+    Args:
+        df: Source dataframe.
+        x_col: Column name for x axis.
+        y_col: Column name for y axis.
+        maximize_x: Treat larger values on x axis as better if True, else minimize.
+        maximize_y: Treat larger values on y axis as better if True, else minimize.
     """
+    if df is None or df.empty:
+        return pd.DataFrame()
     df = df.sort_values(by=x_col)
 
     def is_pareto(costs: np.ndarray) -> np.ndarray:
@@ -308,23 +293,39 @@ def get_pareto_front(df: pd.DataFrame, x_col: str, y_col: str) -> pd.DataFrame:
                 is_better[i] = True  # And keep self
         return is_better
 
+    working = df[[x_col, y_col]].copy()
+    if not maximize_x:
+        working[x_col] = -working[x_col]
+    if not maximize_y:
+        working[y_col] = -working[y_col]
+
     # Convert DataFrame columns to numpy array
-    costs = df[[x_col, y_col]].values
+    costs = working[[x_col, y_col]].values
     is_pareto_front = is_pareto(costs)
 
     # Plot Pareto front
     pareto_front = df[is_pareto_front]
-    return pareto_front
+    return pareto_front.sort_values(by=x_col).reset_index(drop=True)
 
 
-def draw_pareto(df: pd.DataFrame, x_col: str, y_col: str, ax: plt.Axes, color: str, label: str) -> None:
+def draw_pareto(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    ax: plt.Axes,
+    color: str,
+    label: str,
+    *,
+    maximize_x: bool = True,
+    maximize_y: bool = True,
+) -> None:
     """
     Draw Pareto front to plot.
     """
     df = df.sort_values(by=x_col)
 
     # Plot Pareto front
-    pareto_front = get_pareto_front(df, x_col, y_col)
+    pareto_front = get_pareto_front(df, x_col, y_col, maximize_x=maximize_x, maximize_y=maximize_y)
     ax.plot(pareto_front[x_col], pareto_front[y_col], color=color, label=label)
     ax.scatter(pareto_front[x_col], pareto_front[y_col], color=color)
 
@@ -339,6 +340,8 @@ def draw_pareto_to_string(
     series: list[dict],
     *,
     highlight: dict | None = None,
+    x_label: str = "tokens/s/user",
+    y_label: str = "tokens/s/gpu_cluster",
 ) -> str:
     """Render one or more Pareto series as ASCII plot text.
 
@@ -364,13 +367,11 @@ def draw_pareto_to_string(
         (255, 160, 122),  # light salmon
         (221, 160, 221),  # plum
     ]
-    markers = ["dot", "fdot", "hdot", "ldot", "sdot", "x"]
+    markers = ["dot", "fdot", "hdot", "ldot", "sdot", "xdot"]
 
     y_max = 0.0
     x_max = 0.0
-
-    x_label = "tokens/s/user"
-    y_label = "tokens/s/gpu_cluster"
+    x_min = math.inf
 
     for idx, entry in enumerate(series):
         df = entry.get("df")
@@ -388,12 +389,13 @@ def draw_pareto_to_string(
         )
         y_max = max(df[y_label].max(), y_max)
         x_max = max(df[x_label].max(), x_max)
+        x_min = min(df[x_label].min(), x_min)
 
     if highlight is not None:
         highlight_df = highlight.get("df")
         if highlight_df is not None and not highlight_df.empty:
             color = highlight.get("color") or (255, 215, 0)  # gold
-            marker = highlight.get("marker") or "x"
+            marker = highlight.get("marker") or "xdot"
             label = highlight.get("label") or "Best"
             plotext.plot(
                 highlight_df[x_label],
@@ -404,18 +406,21 @@ def draw_pareto_to_string(
             )
             y_max = max(highlight_df[y_label].max(), y_max)
             x_max = max(highlight_df[x_label].max(), x_max)
+            x_min = min(highlight_df[x_label].min(), x_min)
 
-    plotext.title(f"{title}: tokens/s/gpu vs tokens/s/user")
+    plotext.title(f"{title}: {y_label} vs {x_label}")
     plotext.xlabel(x_label)
     plotext.ylabel(y_label)
     plotext.grid(False)
 
     if y_max > 0.0 and x_max > 0.0:
         y_max = ((y_max * 1.2) + 49) // 50 * 50
-        x_max = ((x_max * 1.1) + 19) // 20 * 20
-        x_max = min(x_max, 300)
+        x_limit = ((x_max * 1.1) + 19) // 20 * 20
+        cap = 300.0
+        has_points_within_cap = x_min <= cap
+        effective_x_max = min(x_limit, cap) if has_points_within_cap else x_limit
         plotext.ylim(0.0, y_max)
-        plotext.xlim(0.0, x_max)
+        plotext.xlim(0.0, effective_x_max)
 
     try:
         buf = plotext.build()
@@ -426,85 +431,33 @@ def draw_pareto_to_string(
     return buf
 
 
-def interpolate_throughput_at_tpot(df: pd.DataFrame | None, target_tpot: float) -> float:
-    """
-    Interpolates the throughput at a given TPOT.
-    This is more for reference by reading the pareto frontier.
-    Args:
-        df: The DataFrame containing the throughput data.
-        target_tpot: The target TPOT in ms.
-    Returns:
-        The interpolated throughput at the target TPOT.
-    """
-    if df is None or df.empty:
-        return 0.0
-
-    target_tps_user = 1000.0 / target_tpot
-
-    # Filter out points where tpot is not available or invalid
-    df_filtered = df.dropna(subset=["tokens/s/user", "tokens/s/gpu"])
-    if df_filtered.empty or len(df_filtered) < 2:
-        # Not enough points to interpolate, try to find closest or return 0
-        if not df_filtered.empty:
-            # Fallback: find the point with tpot closest to target_tps_user
-            closest_idx = (df_filtered["tokens/s/user"] - target_tps_user).abs().idxmin()
-            return df_filtered.loc[closest_idx, "tokens/s/gpu"]
-        return 0.0
-
-    # Sort by tokens/s/user for interpolation
-    df_sorted = df_filtered.sort_values(by="tokens/s/user")
-
-    # Create interpolation functions
-    # If target_tpot is outside the range, interp1d will extrapolate or error depending on
-    # fill_value
-    # Using fill_value="extrapolate" can be risky.
-    # It's often better to clamp to the nearest value if outside the range.
-    min_tps_user, max_tps_user = df_sorted["tokens/s/user"].min(), df_sorted["tokens/s/user"].max()
-
-    if target_tps_user < min_tps_user:
-        return df_sorted.iloc[0]["tokens/s/gpu"]  # Closest value at smallest tokens/s/user
-    if target_tps_user > max_tps_user:
-        return 0.0  # cannot meet the target tps_user
-
-    interp_func = interp1d(
-        df_sorted["tokens/s/user"],
-        df_sorted["tokens/s/gpu"],
-        kind="linear",
-        fill_value="extrapolate",
-    )
-
-    interpolated_throughput = float(interp_func(target_tps_user))
-    return max(0.0, interpolated_throughput)  # Ensure non-negative throughput
-
-
-def get_best_configs_under_tpot_constraint(
+def _get_best_configs_under_constraint(
     total_gpus: int,
     pareto_df: pd.DataFrame,
-    target_tpot: float,
+    target_value: float,
+    constraint_col: str,
     top_n: int = 1,
     group_by: str | None = None,
+    *,
+    secondary_sort_col: str | None = None,
+    secondary_sort_ascending: bool = False,
 ) -> pd.DataFrame:
-    """
-    Finds the best actual config from a Pareto DataFrame
-    that meets the target_tpot constraint (tpot <= target_tpot)
-    and maximizes 'tokens/s/gpu'.
-    Args:
-        pareto_df: The Pareto DataFrame.
-        target_tpot: The target TPOT in ms.
-    Returns:
-        A DataFrame containing the best config that meets the target_tpot constraint.
-    """
+    """Generic helper to rank configs under a scalar constraint."""
     if pareto_df is None or pareto_df.empty:
         return pd.DataFrame()
 
-    # Ensure 'tpot' and 'tokens/s/gpu' columns exist
-    if "tpot" not in pareto_df.columns or "tokens/s/gpu" not in pareto_df.columns:
+    if target_value is None:
+        logger.info("No target value provided for constraint column '%s'.", constraint_col)
+        return pd.DataFrame()
+
+    if constraint_col not in pareto_df.columns or "tokens/s/gpu" not in pareto_df.columns:
         logger.warning(
-            "Pareto DataFrame for _get_best_configs_under_tpot_constraint is missing 'tpot' or 'tokens/s/gpu' columns."
+            "Pareto DataFrame for constraint evaluation is missing '%s' or 'tokens/s/gpu' columns.",
+            constraint_col,
         )
         return pd.DataFrame()
 
-    candidate_configs = pareto_df[pareto_df["tpot"] <= target_tpot].copy()
+    candidate_configs = pareto_df[pareto_df[constraint_col] <= target_value].copy()
 
     if top_n < 1:
         logger.error("top_n is less than 1")
@@ -521,18 +474,58 @@ def get_best_configs_under_tpot_constraint(
         if group_by is not None:
             top_indexes = candidate_configs.groupby(group_by)["tokens/s/gpu_cluster"].idxmax()
             candidate_configs = candidate_configs.loc[top_indexes]
+        sort_columns = ["tokens/s/gpu_cluster"]
+        sort_ascending = [False]
+        if secondary_sort_col and secondary_sort_col in candidate_configs.columns:
+            sort_columns.append(secondary_sort_col)
+            sort_ascending.append(secondary_sort_ascending)
         candidate_configs = (
-            candidate_configs.sort_values(by="tokens/s/gpu_cluster", ascending=False).head(top_n).reset_index(drop=True)
-        )
-        logger.debug(
-            f"actual replica-level throughputs: {candidate_configs['tokens/s/gpu'].iloc[0]:.2f} "
-            f"vs. actual cluster-level throughputs: "
-            f"{candidate_configs['tokens/s/gpu_cluster'].iloc[0]:.2f}"
+            candidate_configs.sort_values(by=sort_columns, ascending=sort_ascending).head(top_n).reset_index(drop=True)
         )
         return candidate_configs
     else:
-        # No config meets tpot <= target_tpot.
+        # No config meets constraint
         # Optionally, one could return the one closest to target_tpot if no strict candidates exist.
         # For now, return empty if no config meets the criteria.
-        logger.info(f"No config found on Pareto front with TPOT <= {target_tpot}ms.")
+        logger.info("No config found on Pareto front with %s <= %s.", constraint_col, target_value)
         return pd.DataFrame()
+
+
+def get_best_configs_under_tpot_constraint(
+    total_gpus: int,
+    pareto_df: pd.DataFrame,
+    target_tpot: float,
+    top_n: int = 1,
+    group_by: str | None = None,
+) -> pd.DataFrame:
+    """TPOT specific convenience wrapper."""
+    return _get_best_configs_under_constraint(
+        total_gpus=total_gpus,
+        pareto_df=pareto_df,
+        target_value=target_tpot,
+        constraint_col="tpot",
+        top_n=top_n,
+        group_by=group_by,
+        secondary_sort_col="tokens/s/user",
+        secondary_sort_ascending=False,
+    )
+
+
+def get_best_configs_under_request_latency_constraint(
+    total_gpus: int,
+    pareto_df: pd.DataFrame,
+    target_request_latency: float,
+    top_n: int = 1,
+    group_by: str | None = None,
+) -> pd.DataFrame:
+    """Request-latency specific wrapper."""
+    return _get_best_configs_under_constraint(
+        total_gpus=total_gpus,
+        pareto_df=pareto_df,
+        target_value=target_request_latency,
+        constraint_col="request_latency",
+        top_n=top_n,
+        group_by=group_by,
+        secondary_sort_col="request_latency",
+        secondary_sort_ascending=True,
+    )

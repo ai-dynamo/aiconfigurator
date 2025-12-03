@@ -29,7 +29,7 @@ def create_agg_pareto_tab(app_config):
             )
 
         model_name_components = create_model_name_config(app_config)
-        runtime_config_components = create_runtime_config(app_config, with_sla=True)
+        runtime_config_components = create_runtime_config(app_config, with_sla=True, with_request_latency=True)
         model_misc_config_components = create_model_misc_config(app_config)
         model_system_components = create_system_config(app_config)
         model_quant_components = create_model_quant_config(app_config)

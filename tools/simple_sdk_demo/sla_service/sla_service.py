@@ -18,8 +18,8 @@ from aiconfigurator.sdk.common import SupportedModels
 from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
 from aiconfigurator.sdk.inference_session import InferenceSession
 from aiconfigurator.sdk.models import check_is_moe, get_model
-from aiconfigurator.sdk.pareto_analysis import enumerate_parallel_config
 from aiconfigurator.sdk.perf_database import get_database
+from aiconfigurator.sdk.utils import enumerate_parallel_config
 
 logger = logging.getLogger(__name__)
 

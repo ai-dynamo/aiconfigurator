@@ -9,7 +9,13 @@ Tests HuggingFace config parsing and model config retrieval.
 
 from unittest.mock import patch
 
-from aiconfigurator.sdk.utils import _parse_hf_config_json, get_model_config_from_hf_id
+import pytest
+
+from aiconfigurator.sdk.utils import (
+    _parse_hf_config_json,
+    enumerate_ttft_tpot_constraints,
+    get_model_config_from_hf_id,
+)
 
 
 class TestParseHFConfig:
@@ -136,3 +142,25 @@ class TestSafeMkdir:
         from aiconfigurator.sdk.utils import safe_mkdir
 
         assert callable(safe_mkdir)
+
+
+class TestEnumerateTTFTTPOTConstraints:
+    """Tests for request-latency driven TTFT/TPOT enumeration."""
+
+    def test_constraints_respect_request_latency_and_include_explicit_ttft(self):
+        """Passing request_latency + ttft yields tuples below the latency budget."""
+        constraints = enumerate_ttft_tpot_constraints(osl=500, request_latency=12000, ttft=4000)
+
+        expected_tpot = (12000 - 4000) / (500 - 1)
+        assert any(ttft == 4000 and tpot == pytest.approx(expected_tpot) for ttft, tpot in constraints)
+        assert all(ttft < 12000 for ttft, _ in constraints)
+        assert all(tpot > 0 for _, tpot in constraints)
+
+    def test_constraints_default_to_95_percent_ttft_when_not_provided(self):
+        """When ttft is omitted, we fall back to 95% of request latency."""
+        constraints = enumerate_ttft_tpot_constraints(osl=50, request_latency=1000)
+
+        expected_ttft = 0.95 * 1000
+        derived_pair = next((pair for pair in constraints if pair[0] == pytest.approx(expected_ttft)), None)
+        assert derived_pair is not None
+        assert derived_pair[1] == pytest.approx((1000 - 950) / (50 - 1))

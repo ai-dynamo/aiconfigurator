@@ -118,7 +118,7 @@ def create_model_quant_config(app_config):
                 choices=gemm_quant_mode_choices,
                 label="gemm quant mode",
                 allow_custom_value=False,
-                value="fp8" if "fp8" in gemm_quant_mode_choices else gemm_quant_mode_choices[0],
+                value="fp8_block" if "fp8_block" in gemm_quant_mode_choices else gemm_quant_mode_choices[0],
                 interactive=True,
             )
             kvcache_quant_mode = gr.Dropdown(
@@ -132,7 +132,7 @@ def create_model_quant_config(app_config):
                 choices=fmha_quant_mode_choices,
                 label="fmha quant mode",
                 allow_custom_value=False,
-                value="float16" if "float16" in fmha_quant_mode_choices else fmha_quant_mode_choices[0],
+                value="fp8" if "fp8" in fmha_quant_mode_choices else fmha_quant_mode_choices[0],
                 interactive=True,
             )
             moe_quant_mode = gr.Dropdown(
@@ -238,6 +238,7 @@ def create_runtime_config(
     tip_text=None,
     ttft_optional=False,
     itl_optional=False,
+    with_request_latency=False,
 ):
     """create runtime config components"""
 
@@ -269,6 +270,17 @@ def create_runtime_config(
                 batch_size = gr.Number(value=1, label="batch size", interactive=True)
                 ttft = None
                 tpot = None
+
+            if with_request_latency:
+                request_latency = gr.Number(
+                    value=None,
+                    label="request latency/ms (optional, set e2e latency constraint)",
+                    interactive=True,
+                    optional=True,
+                )
+            else:
+                request_latency = None
+
         return {
             "isl": isl,
             "osl": osl,
@@ -276,4 +288,5 @@ def create_runtime_config(
             "ttft": ttft,
             "tpot": tpot,
             "batch_size": batch_size,
+            "request_latency": request_latency,
         }

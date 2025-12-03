@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# define your experiments here, the order will determine the execution order.
+exps:
+  - exp_agg
+  - exp_disagg
+
+exp_agg:
+  mode: "patch"
+  serving_mode: "agg" # required
+  model_name: "QWEN3_32B" # required
+  total_gpus: 32 # required
+  system_name: "h200_sxm" # required, for prefill
+  backend_name: "trtllm"
+  isl: 4000 # input sequence length
+  osl: 500 # output sequence length
+  request_latency: 12000
+
+exp_disagg:
+  mode: "patch"
+  serving_mode: "disagg" # required
+  model_name: "QWEN3_32B" # required
+  total_gpus: 32 # required
+  system_name: "h200_sxm" # required, for prefill
+  backend_name: "trtllm"
+  isl: 4000 # input sequence length
+  osl: 500 # output sequence length
+  request_latency: 12000

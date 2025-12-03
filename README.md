@@ -68,6 +68,11 @@ aiconfigurator cli exp --yaml_path exp.yaml
 - Use `--save_dir DIR` to generate framework configuration files for Dynamo.
 - Use `--database_mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only).
 - Use `-h` for more options and customization.
+- SLA constraints:
+  - `--ttft` and `--tpot` filter configurations that exceed either bound; omit a flag to leave that constraint unset.
+  - `--request_latency` applies an end-to-end per-request limit. The CLI searches for all configurations whose estimated 
+  latency stays within that budget, optionally honoring a provided `--ttft`. 
+  When this flag is set, `--tpot` becomes implicit and is ignored.
 
 Refer to [CLI User Guide](docs/cli_user_guide.md)
 
@@ -172,7 +177,6 @@ Refer to the YAML file and modify as needed. Pass your customized YAML file to `
 ```bash
 aiconfigurator cli exp --yaml_path customized_config.yaml
 ```
-
 We can use `exp` mode to compare multiple results, including disagg vs. agg, homegenous vs. heterogenous, and more than 2 experiments. 
 We've crafted several examples in `src/aiconfigurator/cli/exps/*.yaml`  
 For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).

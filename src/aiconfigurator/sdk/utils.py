@@ -9,9 +9,99 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import ARCHITECTURE_TO_MODEL_FAMILY, CachedHFModels
 
 logger = logging.getLogger(__name__)
+
+
+def enumerate_parallel_config(
+    num_gpu_list: list[int],
+    tp_list: list[int],
+    pp_list: list[int],
+    dp_list: list[int] = [1],
+    moe_tp_list: list[int] = [1],
+    moe_ep_list: list[int] = [1],
+    is_moe: bool = False,
+    backend: common.BackendName = common.BackendName.trtllm,
+    enable_wideep: bool = False,
+) -> list[list[int]]:
+    """
+    Enumerate parallel configurations based on parallel list.
+    This is a helper function for agg_pareto and disagg_pareto to define search space.
+
+    Args:
+        num_gpu_list: list of number of gpus, this is used to filter out invalid parallel
+            configurations
+        tp_list: list of tensor parallel sizes
+        pp_list: list of pipeline parallel sizes
+        dp_list: list of data parallel sizes
+        moe_tp_list: list of moe tensor parallel sizes
+        moe_ep_list: list of moe expert parallel sizes
+        is_moe: whether to use moe
+        backend: backend name enum. Important for moe parallel enumeration as different backends
+            have different moe parallel support.
+    Returns:
+        parallel_config_list: list of parallel configurations
+    """
+    parallel_config_list = []
+    for tp in tp_list:
+        for pp in pp_list:
+            if is_moe:
+                for dp in dp_list:
+                    for moe_tp in moe_tp_list:
+                        for moe_ep in moe_ep_list:
+                            if dp * tp * pp in num_gpu_list and dp * tp == moe_tp * moe_ep:  # check num gpu and width
+                                # backend specific filters
+                                # trtllm
+                                if (
+                                    backend == common.BackendName.trtllm and dp > 1 and tp > 1
+                                ):  # trtllm as trtllm don't supports attn tp > 1
+                                    continue
+                                # sglang
+                                elif backend == common.BackendName.sglang:
+                                    if (enable_wideep and moe_tp > 1) or (
+                                        not enable_wideep and moe_ep > 1
+                                    ):  # wideep only has ep
+                                        continue
+                                elif backend == common.BackendName.vllm:
+                                    pass  # TODO
+                                parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
+            else:
+                if tp * pp in num_gpu_list:
+                    parallel_config_list.append([tp, pp, 1, 1, 1])
+
+    for parallel_config in parallel_config_list:
+        tp, pp, dp, moe_tp, moe_ep = parallel_config
+        logger.info(f"Enumerated parallel config: tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
+
+    return parallel_config_list
+
+
+def enumerate_ttft_tpot_constraints(
+    osl: int,
+    request_latency: float,
+    ttft: float | None = None,
+) -> list[tuple[float, float]]:
+    """
+    Enumerate ttft and tpot constraints if given request latency.
+    """
+    assert osl > 1
+    if ttft is None:
+        ttft = request_latency * 0.95
+
+    # typical values for ttft
+    base_values = [300, 400, 500, 600, 800, 1000, 1200, 1400, 1600, 2000, 3000, 5000, 8000]
+    base_min, base_max = base_values[0], base_values[-1]
+
+    # values based on request_latency, only supplement values outside the base range
+    interval_values = [request_latency * p for p in [0.1, 0.2, 0.3, 0.5, 0.7]]
+    extra_values = [v for v in interval_values if v < base_min or v > base_max]
+
+    ttft_set = set(base_values + extra_values)
+    ttft_set.add(ttft)
+    ttft_list = sorted([t for t in ttft_set if t < request_latency])
+    return [(t, (request_latency - t) / (osl - 1)) for t in ttft_list]
 
 
 def safe_mkdir(target_path: str, exist_ok: bool = True) -> Path:

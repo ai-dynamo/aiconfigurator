@@ -53,8 +53,10 @@ def stub_pareto_analysis(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "aiconfigurator.sdk.pareto_analysis", stub_module)
     import aiconfigurator.sdk as sdk_pkg
+    import aiconfigurator.sdk.utils as sdk_utils
 
     monkeypatch.setattr(sdk_pkg, "pareto_analysis", stub_module, raising=False)
+    monkeypatch.setattr(sdk_utils, "enumerate_parallel_config", stub_module.enumerate_parallel_config)
 
 
 def _enum_name(value):
@@ -259,12 +261,8 @@ def test_taskrunner_runs_agg_and_disagg():
     agg_result = runner.run(agg_task)
     disagg_result = runner.run(disagg_task)
 
-    assert isinstance(agg_result["pareto_frontier_df"], pd.DataFrame)
-    assert isinstance(disagg_result["pareto_frontier_df"], pd.DataFrame)
     assert isinstance(agg_result["pareto_df"], pd.DataFrame)
     assert isinstance(disagg_result["pareto_df"], pd.DataFrame)
-    assert agg_result["pareto_frontier_df"]["tokens/s/user"].iloc[0] == pytest.approx(1.0)
-    assert disagg_result["pareto_frontier_df"]["tokens/s/user"].iloc[0] == pytest.approx(0.8)
 
 
 def test_sglang_moe_configs():

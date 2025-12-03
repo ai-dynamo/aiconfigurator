@@ -146,12 +146,15 @@ class BaseBackend(ABC):
         bs = batch_size
         global_bs = bs * model.config.attention_dp_size
         concurrency = global_bs
-        latency = context_latency + generation_latency
-        request_rate = 0.0
         ttft = context_latency
         tpot = 0.0 if osl <= 1 else generation_latency / (osl - 1)
+        num_generated_tokens = max(osl - 1, 0)
+        request_latency = ttft + tpot * num_generated_tokens
+        if request_latency == 0.0:
+            request_latency = context_latency + generation_latency
+        request_rate = 0.0
         seq_s = (
-            0.0 if latency == 0.0 else global_bs / latency * 1000 * model.config.pp_size
+            0.0 if request_latency == 0.0 else global_bs / request_latency * 1000 * model.config.pp_size
         )  # handle statc_gen only with osl==1, scale by pp
         seq_s_gpu = seq_s / model.config.tp_size / model.config.pp_size / model.config.attention_dp_size
         tokens_s = seq_s * osl if mode != "static_gen" else seq_s * (osl - 1)
@@ -190,7 +193,7 @@ class BaseBackend(ABC):
                 tokens_s,
                 tokens_s_gpu,
                 tokens_s_user,
-                latency,
+                request_latency,
                 context_latency,
                 generation_latency,
                 num_total_gpus,

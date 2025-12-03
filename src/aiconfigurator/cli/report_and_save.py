@@ -29,6 +29,7 @@ def _plot_worker_setup_table(
     tpot_target: float,
     top: int,
     is_moe: bool,
+    request_latency_target: float | None,
 ) -> str:
     """Plot worker setup table for a single experiment."""
     buf = []
@@ -44,15 +45,22 @@ def _plot_worker_setup_table(
         if total_gpus > 0
         else 0
     )
+    constraint_col = "tpot"
+    constraint_target = tpot_target
+    constraint_label = "TPOT"
+    if request_latency_target is not None and request_latency_target > 0:
+        constraint_col = "request_latency"
+        constraint_target = request_latency_target
+        constraint_label = "request latency"
     top_configs = (
-        config_df[config_df["tpot"] <= tpot_target]
+        config_df[config_df[constraint_col] <= constraint_target]
         .sort_values(by="tokens/s/gpu_cluster", ascending=False)
         .head(top)
         .copy()
     )
 
     if top_configs.empty:
-        return f"\nNo configurations for {exp_name} met the TPOT constraint."
+        return f"\nNo configurations for {exp_name} met the {constraint_label} constraint."
 
     top_configs["replicas"] = total_gpus // top_configs["num_total_gpus"]
     top_configs["total_gpus_used"] = top_configs["num_total_gpus"] * top_configs["replicas"]
@@ -69,6 +77,7 @@ def _plot_worker_setup_table(
             "\033[1mtokens/s/gpu\033[0m",
             "tokens/s/user",
             "TTFT",
+            "request_latency",
             "concurrency",
             "total_gpus (used)",
             "replicas",
@@ -115,6 +124,7 @@ def _plot_worker_setup_table(
                     f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['ttft']:.2f}",
+                    f"{row['request_latency']:.2f}",
                     f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
                     f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                     row["replicas"],
@@ -139,6 +149,7 @@ def _plot_worker_setup_table(
             "\033[1mtokens/s/gpu\033[0m",
             "tokens/s/user",
             "TTFT",
+            "request_latency",
             "concurrency",
             "total_gpus (used)",
             "replicas",
@@ -169,6 +180,7 @@ def _plot_worker_setup_table(
                     f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['ttft']:.2f}",
+                    f"{row['request_latency']:.2f}",
                     f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
                     f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                     row["replicas"],
@@ -190,6 +202,7 @@ def log_final_summary(
     pareto_fronts: dict[str, pd.DataFrame],
     task_configs: dict[str, TaskConfig],
     mode: str,
+    pareto_x_axis: dict[str, str] | None = None,
 ):
     """Log final summary of configuration results"""
 
@@ -240,15 +253,24 @@ def log_final_summary(
         summary_box.append(f"    - Per-User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
+        summary_box.append(f"    - Request Latency: {best_conf_details['request_latency']:.2f}ms")
     summary_box.append("  " + "-" * 76)
 
     # ============================= pareto frontier
     pareto_plot_buf = ""
     if len(pareto_fronts) <= 10:  # avoid overly crowded plots
         summary_box.append("  Pareto Frontier:")
-        series_payload = [
-            {"df": df, "label": name} for name, df in pareto_fronts.items() if df is not None and not df.empty
-        ]
+        target_x_axis = "tokens/s/user"
+        if pareto_x_axis:
+            target_x_axis = pareto_x_axis.get(chosen_exp, target_x_axis)
+        series_payload = []
+        for name, df in pareto_fronts.items():
+            if df is None or df.empty:
+                continue
+            series_axis = pareto_x_axis.get(name, target_x_axis) if pareto_x_axis else target_x_axis
+            if series_axis != target_x_axis:
+                continue
+            series_payload.append({"df": df, "label": name})
         highlight_series = None
         if not best_config_df.empty:
             highlight_series = {
@@ -259,6 +281,8 @@ def log_final_summary(
             f"{task_configs[chosen_exp].config.model_name} Pareto Frontier",
             series_payload,
             highlight=highlight_series,
+            x_label=target_x_axis,
+            y_label="tokens/s/gpu_cluster",
         )
         summary_box.append(pareto_plot_buf)
     summary_box.append("  " + "-" * 76)
@@ -290,6 +314,7 @@ def log_final_summary(
             exp_task_config.runtime_config.tpot,
             5,
             exp_task_config.is_moe,
+            exp_task_config.runtime_config.request_latency,
         )
         summary_box.append(table_buf)
 
@@ -323,7 +348,17 @@ def save_results(
 
         # Save overall pareto plots in the root directory
         fig, ax = plt.subplots(1, 1, figsize=(8, 5))
-        plt.title(f"{first_task_config.model_name} tokens/s/gpu vs tokens/s/user")
+        pareto_axis = {}
+        for exp_name, cfg in task_configs.items():
+            runtime_cfg = cfg.config.runtime_config
+            if runtime_cfg.request_latency is not None and runtime_cfg.request_latency > 0:
+                pareto_axis[exp_name] = "request_latency"
+            else:
+                pareto_axis[exp_name] = "tokens/s/user"
+        all_request_latency = bool(pareto_axis) and all(axis == "request_latency" for axis in pareto_axis.values())
+        global_x_axis = "request_latency" if all_request_latency else "tokens/s/user"
+        maximize_x = not all_request_latency
+        plt.title(f"{first_task_config.model_name} tokens/s/gpu vs {global_x_axis}")
         colors = [
             "blue",
             "red",
@@ -336,16 +371,21 @@ def save_results(
             "cyan",
             "magenta",
         ]
-        for i, (exp_name, pareto_df) in enumerate(pareto_fronts.items()):
+        color_idx = 0
+        for exp_name, pareto_df in pareto_fronts.items():
+            if pareto_axis.get(exp_name, global_x_axis) != global_x_axis:
+                continue
             if not pareto_df.empty:
                 pareto_analysis.draw_pareto(
                     pareto_df,
-                    "tokens/s/user",
+                    global_x_axis,
                     "tokens/s/gpu",
                     ax,
-                    colors[i % len(colors)],
+                    colors[color_idx % len(colors)],
                     exp_name,
+                    maximize_x=maximize_x,
                 )
+                color_idx += 1
         plt.savefig(os.path.join(safe_result_dir, "pareto_frontier.png"))
         plt.close()
 

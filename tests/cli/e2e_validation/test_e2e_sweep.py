@@ -470,6 +470,7 @@ class TestE2ESweep:
                 args = MagicMock()
                 args.mode = "default"
                 args.model = model_name
+                args.hf_id = None
                 args.system = system
                 args.decode_system = None
                 args.total_gpus = total_gpus
@@ -478,6 +479,7 @@ class TestE2ESweep:
                 args.prefix = prefix
                 args.ttft = float(ttft)
                 args.tpot = float(tpot)
+                args.request_latency = None
                 args.backend = backend
                 args.backend_version = version
                 args.database_mode = None  # Use default (SILICON)
@@ -486,6 +488,7 @@ class TestE2ESweep:
                 args.generated_config_version = None
                 args.config_output_dir = None
                 args.deploy_output_dir = None
+                args._dyn_meta = {}
 
                 # Execute the aiconfigurator via the main CLI entrypoint
                 cli_main(args)

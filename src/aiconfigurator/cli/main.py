@@ -17,6 +17,7 @@ from aiconfigurator.cli.report_and_save import log_final_summary, save_results
 from aiconfigurator.generator.cli_args import add_config_generation_cli
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.pareto_analysis import (
+    get_best_configs_under_request_latency_constraint,
     get_best_configs_under_tpot_constraint,
     get_pareto_front,
 )
@@ -93,6 +94,12 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
     parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms.")
     parser.add_argument("--tpot", type=float, default=30.0, help="Time per output token in ms.")
+    parser.add_argument(
+        "--request_latency",
+        type=float,
+        default=None,
+        help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
+    )
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
 
 
@@ -143,6 +150,7 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
         "osl": args.osl,
         "ttft": args.ttft,
         "tpot": args.tpot,
+        "request_latency": args.request_latency,
         "prefix": args.prefix,
         "database_mode": args.database_mode,
     }
@@ -172,6 +180,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "osl",
     "ttft",
     "tpot",
+    "request_latency",
     "enable_wideep",
     "total_gpus",
     "use_specific_quant_mode",
@@ -278,7 +287,7 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             task_kwargs["decode_system_name"] = inferred_decode_system or system_name
 
         # Per-experiment overrides for runtime numeric parameters if provided at top level
-        for numeric_key in ("isl", "osl", "ttft", "tpot"):
+        for numeric_key in ("isl", "osl", "ttft", "tpot", "request_latency"):
             if numeric_key in exp_config:
                 task_kwargs[numeric_key] = exp_config[numeric_key]
 
@@ -339,9 +348,13 @@ def _execute_task_configs(
     best_configs: dict[str, pd.DataFrame] = {}
     best_throughputs: dict[str, float] = {}
     pareto_fronts: dict[str, pd.DataFrame | None] = {}
+    pareto_x_axis: dict[str, str] = {}
     for name, task_result in results.items():
         pareto_df = task_result["pareto_df"]
-        target_tpot = task_configs[name].config.runtime_config.tpot
+        runtime_cfg = task_configs[name].config.runtime_config
+        target_tpot = runtime_cfg.tpot
+        target_request_latency = runtime_cfg.request_latency
+        use_request_latency = target_request_latency is not None and target_request_latency > 0
         total_gpus = getattr(task_configs[name], "total_gpus", None) or 0
 
         # Compute tokens/s/gpu_cluster for pareto_df
@@ -352,23 +365,38 @@ def _execute_task_configs(
                 * pareto_df["num_total_gpus"]
                 / total_gpus
             )
-            # Extract pareto frontier using tokens/s/gpu_cluster
-            pareto_frontier_df = get_pareto_front(pareto_df, "tokens/s/user", "tokens/s/gpu_cluster").reset_index(
-                drop=True
+            x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
+            pareto_frontier_df = get_pareto_front(
+                pareto_df,
+                x_axis_col,
+                "tokens/s/gpu_cluster",
+                maximize_x=not use_request_latency,
+                maximize_y=True,
             )
         else:
             pareto_frontier_df = pd.DataFrame()
+            x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
 
         group_by_key = "(d)parallel" if task_configs[name].serving_mode == "disagg" else "parallel"
-        best_config_df = get_best_configs_under_tpot_constraint(  # based on all data points
-            total_gpus=total_gpus,
-            pareto_df=pareto_df,
-            target_tpot=target_tpot,
-            top_n=5,
-            group_by=group_by_key,
-        )
+        if use_request_latency:
+            best_config_df = get_best_configs_under_request_latency_constraint(
+                total_gpus=total_gpus,
+                pareto_df=pareto_df,
+                target_request_latency=target_request_latency,
+                top_n=5,
+                group_by=group_by_key,
+            )
+        else:
+            best_config_df = get_best_configs_under_tpot_constraint(  # based on all data points
+                total_gpus=total_gpus,
+                pareto_df=pareto_df,
+                target_tpot=target_tpot,
+                top_n=5,
+                group_by=group_by_key,
+            )
         best_configs[name] = best_config_df
         pareto_fronts[name] = pareto_frontier_df
+        pareto_x_axis[name] = x_axis_col
         if not best_config_df.empty:
             best_throughputs[name] = best_config_df["tokens/s/gpu_cluster"].values[0]
         else:
@@ -383,6 +411,7 @@ def _execute_task_configs(
         pareto_fronts=pareto_fronts,  # for plotting
         task_configs=task_configs,  # for info in summary
         mode=mode,
+        pareto_x_axis=pareto_x_axis,
     )
 
     end_time = time.time()

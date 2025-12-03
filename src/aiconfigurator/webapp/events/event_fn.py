@@ -17,6 +17,7 @@ from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.inference_session import InferenceSession
 from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
 from aiconfigurator.sdk.perf_database import get_all_databases, get_database
+from aiconfigurator.sdk.utils import enumerate_parallel_config
 
 
 class LogCapture:
@@ -46,8 +47,9 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
                 mode="lines+markers",
                 line=dict(color="red", width=2),
                 marker=dict(color="blue", size=8),
-                hovertemplate="<b>tokens/s/user:</b> %{x:.2f}<br>"
-                + "<b>tokens/s/gpu:</b> %{y:.2f}<br>"
+                hovertemplate="<b>tokens/s/user:</b> %{customdata[9]:.2f}<br>"
+                + "<b>tokens/s/gpu:</b> %{customdata[10]:.2f}<br>"
+                + "<b>request latency(ms):</b> %{customdata[8]:.2f}<br>"
                 + "<b>TTFT(ms):</b> %{customdata[0]:.2f}<br>"
                 + "<b>TPOT(ms):</b> %{customdata[1]:.2f}<br>"
                 + "<b>seq/s (system):</b> %{customdata[2]:.2f}<br>"
@@ -66,6 +68,9 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
                         df["memory"],
                         df["num_total_gpus"],
                         df["index"],
+                        df["request_latency"],
+                        df["tokens/s/user"],
+                        df["tokens/s/gpu"],
                     ),
                     axis=1,
                 ),
@@ -79,8 +84,9 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
                 mode="lines+markers",
                 line=dict(color="red", width=2),
                 marker=dict(color="blue", size=8),
-                hovertemplate="<b>tokens/s/user:</b> %{x:.2f}<br>"
-                + "<b>tokens/s/gpu:</b> %{y:.2f}<br>"
+                hovertemplate="<b>tokens/s/user:</b> %{customdata[19]:.2f}<br>"
+                + "<b>tokens/s/gpu:</b> %{customdata[20]:.2f}<br>"
+                + "<b>request latency(ms):</b> %{customdata[18]:.2f}<br>"
                 + "<b>TTFT(ms):</b> %{customdata[0]:.2f}<br>"
                 + "<b>TPOT(ms):</b> %{customdata[1]:.2f}<br>"
                 + "<b>seq/s (system):</b> %{customdata[2]:.2f}<br>"
@@ -119,6 +125,9 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
                         df["concurrency"],
                         df["num_total_gpus"],
                         df["index"],
+                        df["request_latency"],
+                        df["tokens/s/user"],
+                        df["tokens/s/gpu"],
                     ),
                     axis=1,
                 ),
@@ -302,7 +311,7 @@ class EventFn:
                 runtime_config = config.RuntimeConfig(isl=isl, osl=osl, prefix=prefix, ttft=ttft, tpot=tpot)
 
                 is_moe = check_is_moe(model_name)
-                parallel_config_list = pareto_analysis.enumerate_parallel_config(
+                parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=[tp_size * pp_size * dp_size],
                     tp_list=[tp_size],
                     pp_list=[pp_size],
@@ -364,6 +373,7 @@ class EventFn:
         osl,
         prefix,
         ttft,
+        request_latency,
         num_gpus,
         tp_size,
         pp_size,
@@ -411,10 +421,11 @@ class EventFn:
                     prefix=prefix,
                     ttft=ttft,
                     tpot=list(range(2, 20, 1)) + list(range(20, 300, 5)),
+                    request_latency=request_latency if request_latency and request_latency > 0 else None,
                 )
 
                 is_moe = check_is_moe(model_name)
-                parallel_config_list = pareto_analysis.enumerate_parallel_config(
+                parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=num_gpus,
                     tp_list=tp_size,
                     pp_list=pp_size,
@@ -447,7 +458,15 @@ class EventFn:
                     parallel_config_list=parallel_config_list,
                 )
 
-                results_df = pareto_analysis.get_pareto_front(results_df, "tokens/s/user", "tokens/s/gpu")
+                # Use request_latency as x-axis if request_latency mode is active
+                if runtime_config.request_latency and runtime_config.request_latency > 0:
+                    x_col = "request_latency"
+                    # For request_latency: minimize x (lower latency is better), maximize y
+                    results_df = pareto_analysis.get_pareto_front(results_df, x_col, "tokens/s/gpu", maximize_x=False)
+                else:
+                    x_col = "tokens/s/user"
+                    results_df = pareto_analysis.get_pareto_front(results_df, x_col, "tokens/s/gpu")
+
                 results_df = results_df.reset_index(drop=True).reset_index()
                 if results_df.size == 0:
                     logger.error(
@@ -455,14 +474,19 @@ class EventFn:
                         f"ttft {ttft}ms and memory size. Try to set a larger ttft limit and use "
                         "more GPUs."
                     )
+                latency_info = (
+                    f"_reqlat{runtime_config.request_latency}"
+                    if runtime_config.request_latency
+                    else f"_ttft{runtime_config.ttft}"
+                )
                 title = (
-                    f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}_ttft"
-                    f"{runtime_config.ttft}_{system_name}_{backend_name}_{version}_"
+                    f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}"
+                    f"{latency_info}_{system_name}_{backend_name}_{version}_"
                     f"{model_config.gemm_quant_mode}_{model_config.kvcache_quant_mode}_"
                     f"{model_config.fmha_quant_mode}_{model_config.moe_quant_mode}_"
                     f"{model_config.comm_quant_mode}_Agg_Pareto"
                 )
-                pareto_html = create_scatter_plot(results_df, "tokens/s/user", "tokens/s/gpu", title)
+                pareto_html = create_scatter_plot(results_df, x_col, "tokens/s/gpu", title)
             except Exception:
                 results_df = pd.DataFrame(columns=common.ColumnsAgg)
                 traceback_log = traceback.format_exc()
@@ -493,6 +517,7 @@ class EventFn:
         osl,
         prefix,
         ttft,
+        request_latency,
         nextn,
         nextn_accept_rates,
         enable_wideep,
@@ -596,11 +621,12 @@ class EventFn:
                     prefix=prefix,
                     ttft=ttft,
                     tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
+                    request_latency=request_latency if request_latency and request_latency > 0 else None,
                 )
 
                 is_moe = check_is_moe(model_name)
 
-                prefill_parallel_config_list = pareto_analysis.enumerate_parallel_config(
+                prefill_parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=prefill_num_gpus,
                     tp_list=prefill_tp_size,
                     pp_list=prefill_pp_size,
@@ -611,7 +637,7 @@ class EventFn:
                     backend=common.BackendName(prefill_backend_name),
                     enable_wideep=enable_wideep,
                 )
-                decode_parallel_config_list = pareto_analysis.enumerate_parallel_config(
+                decode_parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=decode_num_gpus,
                     tp_list=decode_tp_size,
                     pp_list=decode_pp_size,
@@ -679,16 +705,29 @@ class EventFn:
                     decode_max_num_tokens=decode_max_batch_size,
                 )
 
-                results_df = pareto_analysis.get_pareto_front(results_df, "tokens/s/user", "tokens/s/gpu")
+                # Use request_latency as x-axis if request_latency mode is active
+                if runtime_config.request_latency and runtime_config.request_latency > 0:
+                    x_col = "request_latency"
+                    # For request_latency: minimize x (lower latency is better), maximize y
+                    results_df = pareto_analysis.get_pareto_front(results_df, x_col, "tokens/s/gpu", maximize_x=False)
+                else:
+                    x_col = "tokens/s/user"
+                    results_df = pareto_analysis.get_pareto_front(results_df, x_col, "tokens/s/gpu")
+
                 results_df = results_df.reset_index(drop=True).reset_index()
                 if results_df.size == 0:
                     logger.error(
                         f"No result for {model_name} under this restriction ttft {ttft}ms and "
                         "memory size. Try to set a larger ttft limit and use more GPUs."
                     )
+                latency_info = (
+                    f"_reqlat{runtime_config.request_latency}"
+                    if runtime_config.request_latency
+                    else f"_ttft{runtime_config.ttft}"
+                )
                 title = (
-                    f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}_ttft"
-                    f"{runtime_config.ttft}_prefill_{prefill_system_name}_{prefill_backend_name}_"
+                    f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}"
+                    f"{latency_info}_prefill_{prefill_system_name}_{prefill_backend_name}_"
                     f"{prefill_version}_{prefill_database_mode}_{prefill_gemm_quant_mode}_"
                     f"{prefill_kvcache_quant_mode}_{prefill_fmha_quant_mode}_{prefill_moe_quant_mode}_"
                     f"{prefill_comm_quant_mode}_decode_{decode_system_name}_{decode_backend_name}_"
@@ -696,7 +735,7 @@ class EventFn:
                     f"{decode_kvcache_quant_mode}_{decode_fmha_quant_mode}_{decode_moe_quant_mode}_"
                     f"{decode_comm_quant_mode}_Disagg_Pareto"
                 )
-                pareto_html = create_scatter_plot(results_df, "tokens/s/user", "tokens/s/gpu", title, is_disagg=True)
+                pareto_html = create_scatter_plot(results_df, x_col, "tokens/s/gpu", title, is_disagg=True)
             except Exception:
                 results_df = pd.DataFrame(columns=common.ColumnsDisagg)
                 traceback_log = traceback.format_exc()
@@ -1014,6 +1053,11 @@ class EventFn:
             "magenta",
         ]
         fig = go.Figure()
+
+        # Detect if any result uses request_latency mode (check if "reqlat" in result name)
+        use_request_latency_mode = any("reqlat" in name.lower() for name in candidates_dropdown)
+        x_col = "request_latency" if use_request_latency_mode else "tokens/s/user"
+
         for i, result_name in enumerate(candidates_dropdown):
             result_df = pareto_results_state[result_name]
             if "parallel" in result_df.columns:
@@ -1026,15 +1070,16 @@ class EventFn:
                 memory = "(p)" + result_df["(p)memory"].astype(str) + "_(d)" + result_df["(d)memory"].astype(str)
             fig.add_trace(
                 go.Scatter(
-                    x=result_df["tokens/s/user"],
+                    x=result_df[x_col],
                     y=result_df["tokens/s/gpu"],
                     mode="lines+markers",
                     name=result_name,
                     line=dict(color=color_list[i % len(color_list)], width=2),
                     marker=dict(color=color_list[i % len(color_list)], size=8),
                     hovertemplate=f"<b>system type:</b> {system_type}<br>"
-                    + "<b>tokens/s/user:</b> %{x:.2f}<br>"
-                    + "<b>tokens/s/gpu:</b> %{y:.2f}<br>"
+                    + "<b>tokens/s/user:</b> %{customdata[8]:.2f}<br>"
+                    + "<b>tokens/s/gpu:</b> %{customdata[9]:.2f}<br>"
+                    + "<b>request latency(ms):</b> %{customdata[10]:.2f}<br>"
                     + "<b>TTFT(ms):</b> %{customdata[0]:.2f}<br>"
                     + "<b>TPOT(ms):</b> %{customdata[1]:.2f}<br>"
                     + "<b>seq/s (system):</b> %{customdata[2]:.2f}<br>"
@@ -1053,6 +1098,9 @@ class EventFn:
                             memory,
                             result_df["num_total_gpus"],
                             result_df["index"],
+                            result_df["tokens/s/user"],
+                            result_df["tokens/s/gpu"],
+                            result_df["request_latency"],
                         ),
                         axis=1,
                     ),
@@ -1068,7 +1116,7 @@ class EventFn:
                 "yanchor": "top",
             },
             xaxis_title={
-                "text": "tokens/s/user",
+                "text": x_col,
                 "font": dict(size=14, family="Arial, sans-serif"),
             },
             yaxis_title={"text": "tokens/s/gpu", "font": dict(size=14, family="Arial, sans-serif")},
