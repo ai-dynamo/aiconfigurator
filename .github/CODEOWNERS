@@ -73,16 +73,16 @@
 /tools/simple_sdk_demo @tianhaox @jasonqinzhou @Arsene12358
 
 # misc
-/ATTRIBUTIONS.md @saturley-hall
-/CODE_OF_CONDUCT.md @saturley-hall
-/CONTRIBUTING.md @saturley-hall
-/DEVELOPMENT.md @saturley-hall @anish-shanbhag
-/LICENSE @saturley-hall
-/pyproject.toml @tianhaox @jasonqinzhou @saturley-hall @Arsene12358
-/pytest.ini @saturley-hall
+/ATTRIBUTIONS.md @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
+/CODE_OF_CONDUCT.md @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
+/CONTRIBUTING.md @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
+/DEVELOPMENT.md @saturley-hall @anish-shanbhag @tianhaox @jasonqinzhou @Arsene12358
+/LICENSE @saturley-hall 
+/pyproject.toml @tianhaox @jasonqinzhou @saturley-hall @Arsene12358 @tianhaox @jasonqinzhou @Arsene12358
+/pytest.ini @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
 /README.md @tianhaox @jasonqinzhou @Arsene12358
 /SECURITY.md @saturley-hall
-/.pre-commit-config.yaml @saturley-hall
+/.pre-commit-config.yaml @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
 
 # CI/CD and workflows
 /.github/workflows @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
