@@ -29,7 +29,8 @@
 /src/aiconfigurator/eval @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
 
 # webapp
-/src/aiconfigurator/webapp @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/webapp @tianhaox @jasonqinzhou @Arsene12358 @Harrilee
+/src/aiconfigurator/webapp/components/profiling @Harrilee
 
 # systems & data files
 /src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen @Arsene12358

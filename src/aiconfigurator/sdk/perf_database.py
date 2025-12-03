@@ -2165,6 +2165,7 @@ class PerfDatabase:
 
         if sol_mode is None:
             sol_mode = self._default_sol_mode
+
         if sol_mode == common.SOLMode.SOL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
@@ -2212,6 +2213,7 @@ class PerfDatabase:
 
         if sol_mode is None:
             sol_mode = self._default_sol_mode
+
         if sol_mode == common.SOLMode.SOL:
             return get_sol(b, s, num_heads, kvcache_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
@@ -2721,6 +2723,7 @@ class PerfDatabase:
 
         if sol_mode is None:
             sol_mode = self._default_sol_mode
+
         if sol_mode == common.SOLMode.SOL:
             return get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
