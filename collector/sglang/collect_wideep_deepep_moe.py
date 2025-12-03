@@ -24,13 +24,13 @@ from sglang.srt.utils import (
 )
 
 try:
-    from helper import log_perf, power_law_logits_v4
+    from helper import log_perf, power_law_logits_v4, sample_power_law
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import log_perf, power_law_logits_v4
+    from helper import log_perf, power_law_logits_v4, sample_power_law
 import pkg_resources
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
@@ -97,12 +97,6 @@ def get_moe_decode_test_cases():
                 }
             )
     return test_cases
-
-
-def sample_power_law(size, alpha, xmin, xmax):
-    u = torch.rand(size)
-    inv_cdf = ((xmax ** (1 - alpha) - xmin ** (1 - alpha)) * u + xmin ** (1 - alpha)) ** (1 / (1 - alpha))
-    return inv_cdf
 
 
 def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
