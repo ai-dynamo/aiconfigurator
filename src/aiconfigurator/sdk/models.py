@@ -580,7 +580,11 @@ class MOEModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
 
         if self.model_name in ["GPT_OSS_120B", "GPT_OSS_20B"]:
             attn_scale_factor = 2
@@ -867,7 +871,11 @@ class DeepSeekModel(BaseModel):
 
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
 
         self.context_ops.extend(
             [
@@ -1239,7 +1247,11 @@ class WideEPDeepSeekModel(BaseModel):
         attn_backend = self.config.attention_backend
 
         self._power_law_alpha = 0.8
-        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
 
         sms = self.config.sms
 
