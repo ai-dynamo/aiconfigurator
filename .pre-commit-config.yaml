@@ -12,3 +12,12 @@ repos:
       # Run the formatter
       - id: ruff-format
         exclude: ".*\\.ipynb$"
+  - repo: https://github.com/pre-commit/mirrors-eslint
+    rev: v9.15.0
+    hooks:
+      - id: eslint
+        args: [--fix]
+        files: \.(js|jsx|ts|tsx)$
+        additional_dependencies:
+          - eslint@9.15.0
+          - eslint-config-prettier@9.1.0

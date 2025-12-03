@@ -13,6 +13,7 @@ from aiconfigurator.webapp.components.agg_tab import create_agg_tab
 from aiconfigurator.webapp.components.disagg_pareto_tab import create_disagg_pareto_tab
 from aiconfigurator.webapp.components.disagg_pd_ratio_tab import create_disagg_pd_ratio_tab
 from aiconfigurator.webapp.components.pareto_comparison_tab import create_pareto_comparison_tab
+from aiconfigurator.webapp.components.profiling.create_profiling_tab import create_profiling_tab
 from aiconfigurator.webapp.components.readme_tab import create_readme_tab
 from aiconfigurator.webapp.components.static_tab import create_static_tab
 from aiconfigurator.webapp.events.event_handler import EventHandler
@@ -26,6 +27,7 @@ def configure_parser(parser):
     parser.add_argument("--server_port", type=int, default=7860, help="Server port")
     parser.add_argument("--enable_agg", action="store_true", help="Enable Agg tab")
     parser.add_argument("--enable_disagg_pd_ratio", action="store_true", help="Enable Disagg PD Ratio tab")
+    parser.add_argument("--enable_profiling", action="store_true", help="Enable Profiling tab")
     parser.add_argument("--debug", help="Debug mode", action="store_true")
     parser.add_argument("--experimental", help="enable experimental features", action="store_true")
 
@@ -37,6 +39,7 @@ def main(args):
     app_config = {
         "enable_agg": args.enable_agg,
         "enable_disagg_pd_ratio": args.enable_disagg_pd_ratio,
+        "enable_profiling": args.enable_profiling,
         "experimental": args.experimental,
         "debug": args.debug,
     }
@@ -55,6 +58,7 @@ def main(args):
         )
 
     with gr.Blocks(
+        title="Dynamo aiconfigurator for Disaggregated Serving Deployment",
         css="""
         .config-column {
             border-right: 5px solid #e0e0e0;
@@ -63,7 +67,7 @@ def main(args):
         .config-column:last-child {
             border-right: none;
         }
-    """
+    """,
     ) as demo:
         pareto_results_state = gr.State(defaultdict())
 
@@ -99,6 +103,8 @@ def main(args):
             if app_config["enable_disagg_pd_ratio"]:
                 disagg_pd_ratio_components = create_disagg_pd_ratio_tab(app_config)
             pareto_comparison_components = create_pareto_comparison_tab(app_config)
+            if app_config["enable_profiling"]:
+                profiling_components = create_profiling_tab(app_config)
 
         # setup events
         EventHandler.setup_static_events(static_components)
@@ -123,6 +129,8 @@ def main(args):
         if app_config["enable_disagg_pd_ratio"]:
             EventHandler.setup_disagg_pd_ratio_events(disagg_pd_ratio_components)
         EventHandler.setup_pareto_comparison_events(pareto_comparison_components, pareto_results_state)
+        if app_config["enable_profiling"]:
+            EventHandler.setup_profiling_events(profiling_components)
 
         demo.launch(server_name=args.server_name, server_port=args.server_port)
 

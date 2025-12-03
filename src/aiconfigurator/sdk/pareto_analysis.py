@@ -69,8 +69,9 @@ def enumerate_parallel_config(
                                         not enable_wideep and moe_ep > 1
                                     ):  # wideep only has ep
                                         continue
-                                elif backend == common.BackendName.vllm:
-                                    pass  # TODO
+                                elif backend == common.BackendName.vllm and moe_tp > 1 and moe_ep > 1:
+                                    continue  # vllm does not support moe_tp > 1 and moe_ep > 1 at the same time
+
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
             else:
                 if tp * pp in num_gpu_list:
@@ -113,6 +114,7 @@ def agg_pareto(
 
     # agg is agg server, the loop over parallel is outside here.
     results_df = pd.DataFrame(columns=ColumnsAgg)
+    exceptions = []
     for parallel_config in parallel_config_list:
         tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
         logger.debug(
@@ -151,8 +153,8 @@ def agg_pareto(
                     results_df = result_df
                 else:
                     results_df = pd.concat([results_df, result_df], axis=0, ignore_index=True)
-        except Exception:
-            logger.exception(
+        except Exception as e:
+            logger.info(
                 "Error getting candidate workers with parallel config: tp=%s, pp=%s, dp=%s, "
                 "moe_tp=%s, moe_ep=%s, skip this combination",
                 tp_size,
@@ -161,7 +163,14 @@ def agg_pareto(
                 moe_tp_size,
                 moe_ep_size,
             )
+            exceptions.append(e)
             continue
+
+    # If no results found, raise the last exception
+    if results_df.empty:
+        raise RuntimeError(
+            f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
+        ) from exceptions[-1]
 
     results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
 

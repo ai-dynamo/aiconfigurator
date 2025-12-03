@@ -69,7 +69,7 @@ def create_disagg_pd_ratio_tab(app_config):
                 interactive=False,
                 visible=True,
             )
-        debugging_box = gr.Textbox(label="Debugging", lines=5)
+        debugging_box = gr.Textbox(label="Debugging", lines=5, required=False)
 
         download_btn = gr.Button("Download")
         output_file = gr.File(label="When you click the download button, the downloaded form will be displayed here.")

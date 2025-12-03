@@ -54,6 +54,7 @@ dependencies = [
     "pydantic~=2.11.4",
     "pyyaml>=6.0",
     "scipy>=1.13.1",
+    "tqdm>=4.0.0",
     "uvicorn>=0.34.2",
     "bokeh",
     "nvidia-ml-py",
@@ -92,6 +93,7 @@ aiconfigurator = "aiconfigurator.main:main"
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
 "aiconfigurator.generator" = ["*.yaml", "templates/**/*.j2"]
 "aiconfigurator" = ["systems/*.yaml", "systems/**/*.txt", "model_configs/*.json"]
+"aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -147,6 +149,7 @@ ignore = [
     "UP007",  # require using X | Y for type annotations
     "UP045", # require using X | None for type annotations
     "B019", # forbid using functools.cache on class methods
+    "B023", # Function definition does not bind loop variable
 ]
 
 [tool.ruff.lint.isort]
