@@ -1992,7 +1992,9 @@ class PerfDatabase:
                     logger.debug(f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}, using empirical mode")
                     result = get_empirical(m, n, k, quant_mode)
                 else:
-                    logger.exception(f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}")
+                    logger.exception(
+                        f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
+                    )
                     raise
             return result
 
@@ -2120,8 +2122,9 @@ class PerfDatabase:
                     )
                 else:
                     logger.exception(
-                        f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, \
-                        {n_kv=}, {head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}"
+                        f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, "
+                        f"{n_kv=}, {head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}. "
+                        "Please consider Hybrid mode."
                     )
                     raise
             return latency
@@ -2221,8 +2224,9 @@ class PerfDatabase:
                     latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
                 else:
                     logger.exception(
-                        f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, \
-                        {head_size=}, {window_size=}, {kvcache_quant_mode=}, {database_mode=}"
+                        f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, "
+                        f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {database_mode=}. "
+                        "Please consider Hybrid mode."
                     )
                     raise
             return latency
@@ -2305,7 +2309,7 @@ class PerfDatabase:
                 else:
                     logger.exception(
                         f"Failed to query context mla data for {b=}, {s=}, {prefix=}, {num_heads=}, \
-                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}"
+                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
             return latency
@@ -2379,7 +2383,7 @@ class PerfDatabase:
                 else:
                     logger.exception(
                         f"Failed to query generation mla data for {b=}, {s=}, {num_heads=}, \
-                        {kvcache_quant_mode=}, {database_mode=}"
+                        {kvcache_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
             return latency
@@ -2512,7 +2516,7 @@ class PerfDatabase:
                 else:
                     logger.exception(
                         f"Failed to query wideep generation mla data for {b=}, {s=}, {tp_size=}, \
-                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}"
+                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
             return latency
@@ -2643,7 +2647,7 @@ class PerfDatabase:
                 else:
                     logger.exception(
                         f"Failed to query wideep context mla data for {b=}, {s=}, {prefix=}, {tp_size=}, \
-                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}"
+                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
             return latency
@@ -2732,7 +2736,7 @@ class PerfDatabase:
                 else:
                     logger.exception(
                         f"Failed to query custom allreduce data for {quant_mode=}, {tp_size=}, {size=}, \
-                        {database_mode=}"
+                        {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
             return lat
@@ -2827,7 +2831,7 @@ class PerfDatabase:
                 else:
                     logger.exception(
                         f"Failed to query nccl data for {dtype=}, {num_gpus=}, \
-                        {operation=}, {message_size=}, {database_mode=}"
+                        {operation=}, {message_size=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
             return lat
@@ -3064,7 +3068,7 @@ class PerfDatabase:
                         "Failed to query moe data for "
                         f"{num_tokens=}, {hidden_size=}, {inter_size=}, {topk=}, {num_experts=}, "
                         f"{moe_tp_size=}, {moe_ep_size=}, {quant_mode=}, {workload_distribution=}, "
-                        f"{database_mode=}"
+                        f"{database_mode=}. Please consider Hybrid mode."
                     )
                     raise
                 return latency
@@ -3141,7 +3145,7 @@ class PerfDatabase:
                 else:
                     logger.exception(
                         f"Failed to query mla bmm data for {num_tokens=}, {num_heads=}, {quant_mode=}, \
-                        {if_pre=}, {database_mode=}"
+                        {if_pre=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
             return lat
