@@ -149,6 +149,7 @@ ignore = [
     "UP007",  # require using X | Y for type annotations
     "UP045", # require using X | None for type annotations
     "B019", # forbid using functools.cache on class methods
+    "B023", # Function definition does not bind loop variable
 ]
 
 [tool.ruff.lint.isort]
