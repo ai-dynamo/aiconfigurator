@@ -299,8 +299,8 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 | System | Framework(Version) | Status |
 |--------|-------------------|--------|
-| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.1.post1), vLLM(0.11.0) | ✅ |
-| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.1.post1), vLLM(0.11.0) | ✅ |
+| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.5.post2, 0.5.5.post3), vLLM(0.11.0) | ✅ |
+| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.5.post2, 0.5.5.post3), vLLM(0.11.0) | ✅ |
 | b200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | gb200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | a100_sxm | TRTLLM(1.0.0) | ✅ |
