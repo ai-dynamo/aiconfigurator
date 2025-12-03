@@ -163,3 +163,40 @@ class TestCLIIntegration:
 
         mock_builder.assert_called_once()
         mock_execute.assert_called_once()
+
+    @pytest.mark.parametrize("database_mode", ["SILICON", "HYBRID", "EMPIRICAL"])
+    def test_cli_default_mode_with_database_mode(self, cli_args_factory, database_mode):
+        """Test that database_mode is correctly parsed and passed through in default mode."""
+        args = cli_args_factory(
+            mode="default",
+            extra_args=["--database_mode", database_mode],
+        )
+        assert args.database_mode == database_mode
+
+    @patch("aiconfigurator.cli.main._execute_task_configs")
+    @patch("aiconfigurator.cli.main._build_experiment_task_configs")
+    def test_cli_exp_mode_with_database_mode_in_yaml(self, mock_build_exp, mock_execute, tmp_path):
+        """Test that database_mode from YAML is correctly parsed in exp mode."""
+        yaml_content = """
+exp_with_db_mode:
+    serving_mode: "agg"
+    model_name: "QWEN3_32B"
+    system_name: "h200_sxm"
+    total_gpus: 8
+    database_mode: "HYBRID"
+"""
+        yaml_file = tmp_path / "exp_db_mode.yaml"
+        yaml_file.write_text(yaml_content)
+
+        mock_task_config = MagicMock(name="TaskConfig")
+        mock_build_exp.return_value = {"exp_with_db_mode": mock_task_config}
+        mock_execute.return_value = ("exp_with_db_mode", {}, {}, {})
+
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+        args = parser.parse_args(["exp", "--yaml_path", str(yaml_file)])
+
+        cli_main(args)
+
+        mock_build_exp.assert_called_once()
+        mock_execute.assert_called_once()

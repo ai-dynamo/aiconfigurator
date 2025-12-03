@@ -80,6 +80,7 @@ class TestCLIArgumentParsing:
 
         assert args.backend == common.BackendName.trtllm.value
         assert args.backend_version is None
+        assert args.database_mode == common.DatabaseMode.SILICON.name
         assert args.debug is False
         assert args.decode_system is None
         assert args.generated_config_version is None
@@ -207,3 +208,49 @@ class TestCLIArgumentParsing:
                     "h200_sxm",
                 ]
             )
+
+    @pytest.mark.parametrize(
+        "database_mode_value",
+        ["SILICON", "HYBRID", "EMPIRICAL", "SOL"],
+    )
+    def test_database_mode_values_parse_successfully(self, cli_parser, database_mode_value):
+        """Database mode flag should accept all supported mode values."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model",
+                "QWEN3_32B",
+                "--total_gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--database_mode",
+                database_mode_value,
+            ]
+        )
+        assert args.database_mode == database_mode_value
+
+    def test_database_mode_invalid_value_raises(self, cli_parser):
+        """Test that invalid database_mode value raises an error."""
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model",
+                    "QWEN3_32B",
+                    "--total_gpus",
+                    "8",
+                    "--system",
+                    "h200_sxm",
+                    "--database_mode",
+                    "INVALID_MODE",
+                ]
+            )
+
+    def test_database_mode_choices_validation(self, cli_parser):
+        """Test that database_mode argument validates against supported choices."""
+        subparser_action = next(action for action in cli_parser._actions if action.dest == "mode")
+        default_parser = subparser_action.choices["default"]
+        action = next(action for action in default_parser._actions if action.dest == "database_mode")
+        expected_choices = [mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL]
+        assert sorted(action.choices) == sorted(expected_choices)

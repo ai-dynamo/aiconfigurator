@@ -702,6 +702,7 @@ class TaskConfig:
         total_gpus: int | None = None,
         profiles: list[str] | None = None,
         yaml_config: dict | None = None,
+        database_mode: str | None = None,
     ) -> None:
         """
         Initialize a TaskConfig object.
@@ -780,6 +781,7 @@ class TaskConfig:
 
         self.config, applied_layers = TaskConfigFactory.create(ctx)
         self.config.applied_layers = applied_layers
+        self.config.database_mode = database_mode  # Store in config for TaskRunner access
 
         self.serving_mode = serving_mode
         self.model_name = model_name
@@ -977,6 +979,12 @@ class TaskRunner:
                     version=task_config.worker_config.backend_version,
                 )
             )
+            # Set database mode if specified
+            database_mode = getattr(task_config, "database_mode", None)
+            if database_mode is not None:
+                db_mode = common.DatabaseMode[database_mode]
+                database.set_default_database_mode(db_mode)
+                logger.info("Task %s: Using database mode: %s", task_config.task_name, database_mode)
         except Exception:  # pragma: no cover
             logger.exception(
                 "Error getting database for %s %s %s",
@@ -1047,6 +1055,9 @@ class TaskRunner:
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
         )
 
+        # Get database mode from config
+        database_mode = getattr(task_config, "database_mode", None)
+
         logger.info("Task %s: Setting up prefill database", task_config.task_name)
         try:
             prefill_database = copy.deepcopy(
@@ -1056,6 +1067,11 @@ class TaskRunner:
                     version=task_config.prefill_worker_config.backend_version,
                 )
             )
+            # Set database mode if specified
+            if database_mode is not None:
+                db_mode = common.DatabaseMode[database_mode]
+                prefill_database.set_default_database_mode(db_mode)
+                logger.info("Task %s: Using prefill database mode: %s", task_config.task_name, database_mode)
         except Exception:  # pragma: no cover
             logger.exception(
                 "Error getting prefill database for %s %s %s",
@@ -1111,6 +1127,10 @@ class TaskRunner:
                     version=task_config.decode_worker_config.backend_version,
                 )
             )
+            # Set database mode if specified (using same database_mode from above)
+            if database_mode is not None:
+                decode_database.set_default_database_mode(db_mode)
+                logger.info("Task %s: Using decode database mode: %s", task_config.task_name, database_mode)
         except Exception:  # pragma: no cover
             logger.exception(
                 "Error getting decode database for %s %s %s",
