@@ -1323,7 +1323,7 @@ class WideEPDeepSeekModel(BaseModel):
                     h,
                     self._moe_inter_size,
                     moe_quant_mode,
-                    tp_attn_size=tp_size,
+                    tp_size=tp_size,
                 )
             ]
         )

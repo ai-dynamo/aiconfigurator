@@ -747,11 +747,11 @@ class WideEPMLP(Operation):
         self._quant_mode = quant_mode
         self._weights = (3 * self._hidden_size * self._intermediate_size) * quant_mode.value.memory
         self.is_context = kwargs.get("is_context", True)  # Default to context mode
-        self.tp_attn_size = kwargs.get("tp_attn_size", 1)
+        self.tp_size = kwargs.get("tp_size", 1)
 
     def query(self, database: PerfDatabase, **kwargs):
         x = kwargs.get("x")  # num_tokens
-        x /= self.tp_attn_size
+        x /= self.tp_size
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
