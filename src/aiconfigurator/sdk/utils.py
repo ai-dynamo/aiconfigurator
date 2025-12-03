@@ -89,11 +89,19 @@ def enumerate_ttft_tpot_constraints(
     assert osl > 1
     if ttft is None:
         ttft = request_latency * 0.95
-    ttft_list = [300, 400, 500, 600, 800, 1000, 1200, 1400, 1600, 2000, 3000, 5000, 8000]
-    if ttft not in ttft_list:
-        ttft_list.append(ttft)
-    ttft_list = [ttft for ttft in ttft_list if ttft < request_latency]
-    return [(ttft, (request_latency - ttft) / (osl - 1)) for ttft in ttft_list]
+
+    # typical values for ttft
+    base_values = [300, 400, 500, 600, 800, 1000, 1200, 1400, 1600, 2000, 3000, 5000, 8000]
+    base_min, base_max = base_values[0], base_values[-1]
+
+    # values based on request_latency, only supplement values outside the base range
+    interval_values = [request_latency * p for p in [0.1, 0.2, 0.3, 0.5, 0.7]]
+    extra_values = [v for v in interval_values if v < base_min or v > base_max]
+
+    ttft_set = set(base_values + extra_values)
+    ttft_set.add(ttft)
+    ttft_list = sorted([t for t in ttft_set if t < request_latency])
+    return [(t, (request_latency - t) / (osl - 1)) for t in ttft_list]
 
 
 def safe_mkdir(target_path: str, exist_ok: bool = True) -> Path:
