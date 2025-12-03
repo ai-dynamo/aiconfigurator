@@ -81,6 +81,15 @@ def _add_default_mode_arguments(parser):
         default=None,
         help="Backend database version. Default is latest",
     )
+    parser.add_argument(
+        "--database_mode",
+        choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
+        type=str,
+        default=common.DatabaseMode.SILICON.name,
+        help="Database mode for performance estimation. Options: SILICON (default, uses silicon data), "
+        "HYBRID (uses silicon data when available, otherwise SOL+empirical factor), "
+        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only).",
+    )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
     parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms.")
@@ -143,6 +152,7 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
         "tpot": args.tpot,
         "request_latency": args.request_latency,
         "prefix": args.prefix,
+        "database_mode": args.database_mode,
     }
 
     task_configs: dict[str, TaskConfig] = {}
@@ -174,6 +184,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "enable_wideep",
     "total_gpus",
     "use_specific_quant_mode",
+    "database_mode",
 }
 
 
@@ -284,6 +295,8 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
         if "use_specific_quant_mode" in exp_config:
             task_kwargs["use_specific_quant_mode"] = exp_config["use_specific_quant_mode"]
+        if "database_mode" in exp_config:
+            task_kwargs["database_mode"] = exp_config["database_mode"]
 
         yaml_config = _build_yaml_config(exp_config, config_section)
         if yaml_config:

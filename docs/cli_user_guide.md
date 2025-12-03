@@ -240,6 +240,37 @@ disagg Top Configurations: (Sorted by tokens/s/gpu)
 2025-12-01 23:36:41,892 - aiconfigurator.cli.main - INFO - All experiments completed in 1.92 seconds
 ```
 
+#### Database Mode
+
+The `--database_mode` argument controls how performance is estimated:
+
+| Mode | Description |
+|------|-------------|
+| `SILICON` | **(Default)** Uses actual collected silicon data. Most accurate when data is available for your configuration. |
+| `HYBRID` | Uses silicon data when available, falls back to SOL+empirical factor when data is missing. Best for exploring configurations that may not have complete silicon data. |
+| `EMPIRICAL` | Uses Speed-of-Light (SOL) + empirical correction factors for all estimations. Useful for rough estimates without relying on collected data. |
+| `SOL` | Provides theoretical Speed-of-Light time only. Useful for understanding theoretical limits. |
+
+Example using hybrid mode:
+```bash
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --database_mode HYBRID
+```
+
+For exp mode, you can specify `database_mode` in your YAML file:
+```yaml
+exp_hybrid:
+  serving_mode: "agg"
+  model_name: "QWEN3_32B"
+  system_name: "h200_sxm"
+  total_gpus: 8
+  database_mode: "HYBRID"
+```
+
+Hybrid mode is a quick solution to support new models without modeling the operation and collecting the data. 
+Will be leveraged more and more in future.
+
+See `src/aiconfigurator/cli/exps/database_mode_comparison.yaml` for an example comparing different database modes.
+
 ### Exp mode
 If you want to customize your experiment apart from simple command which only compares disagg and agg of a same model, you can use `exp` mode. The command is,
 ```bash

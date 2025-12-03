@@ -14,7 +14,7 @@ class EventHandler:
                 components["model_system_components"]["system"],
                 components["model_system_components"]["backend"],
                 components["model_system_components"]["version"],
-                components["model_system_components"]["sol_mode"],
+                components["model_system_components"]["database_mode"],
                 components["runtime_config_components"]["batch_size"],
                 components["runtime_config_components"]["isl"],
                 components["runtime_config_components"]["osl"],
@@ -75,7 +75,7 @@ class EventHandler:
                 components["model_system_components"]["system"],
                 components["model_system_components"]["backend"],
                 components["model_system_components"]["version"],
-                components["model_system_components"]["sol_mode"],
+                components["model_system_components"]["database_mode"],
                 components["runtime_config_components"]["isl"],
                 components["runtime_config_components"]["osl"],
                 components["runtime_config_components"]["prefix"],
@@ -125,7 +125,7 @@ class EventHandler:
                 components["model_system_components"]["system"],
                 components["model_system_components"]["backend"],
                 components["model_system_components"]["version"],
-                components["model_system_components"]["sol_mode"],
+                components["model_system_components"]["database_mode"],
                 components["runtime_config_components"]["isl"],
                 components["runtime_config_components"]["osl"],
                 components["runtime_config_components"]["prefix"],
@@ -187,7 +187,7 @@ class EventHandler:
                 components["prefill_model_system_components"]["system"],  # prefill
                 components["prefill_model_system_components"]["backend"],
                 components["prefill_model_system_components"]["version"],
-                components["prefill_model_system_components"]["sol_mode"],
+                components["prefill_model_system_components"]["database_mode"],
                 components["prefill_model_parallel_components"]["num_worker"],
                 components["prefill_model_parallel_components"]["num_gpus"],
                 components["prefill_model_parallel_components"]["tp_size"],
@@ -204,7 +204,7 @@ class EventHandler:
                 components["decode_model_system_components"]["system"],  # decode
                 components["decode_model_system_components"]["backend"],
                 components["decode_model_system_components"]["version"],
-                components["decode_model_system_components"]["sol_mode"],
+                components["decode_model_system_components"]["database_mode"],
                 components["decode_model_parallel_components"]["num_worker"],
                 components["decode_model_parallel_components"]["num_gpus"],
                 components["decode_model_parallel_components"]["tp_size"],
@@ -280,7 +280,7 @@ class EventHandler:
                 components["prefill_model_system_components"]["system"],  # prefill
                 components["prefill_model_system_components"]["backend"],
                 components["prefill_model_system_components"]["version"],
-                components["prefill_model_system_components"]["sol_mode"],
+                components["prefill_model_system_components"]["database_mode"],
                 components["prefill_model_parallel_components"]["tp_size"],
                 components["prefill_model_parallel_components"]["pp_size"],
                 components["prefill_model_parallel_components"]["dp_size"],
@@ -294,7 +294,7 @@ class EventHandler:
                 components["decode_model_system_components"]["system"],  # decode
                 components["decode_model_system_components"]["backend"],
                 components["decode_model_system_components"]["version"],
-                components["decode_model_system_components"]["sol_mode"],
+                components["decode_model_system_components"]["database_mode"],
                 components["decode_model_parallel_components"]["tp_size"],
                 components["decode_model_parallel_components"]["pp_size"],
                 components["decode_model_parallel_components"]["dp_size"],
@@ -372,12 +372,8 @@ class EventHandler:
 
     # common events
     @staticmethod
-    def setup_common_events(
-        model_name_components,
-        model_system_components,
-        model_quant_components,
-        model_misc_config_components,
-    ):
+    def setup_system_events(model_name_components, model_system_components):
+        """Setup events for system/backend/version dropdowns - reusable across tabs"""
         model_name_components["model_name"].change(
             fn=EventFn.update_system_value,
             inputs=[model_name_components["model_name"]],
@@ -395,6 +391,15 @@ class EventHandler:
             inputs=[model_system_components["system"], model_system_components["backend"]],
             outputs=[model_system_components["version"]],
         )
+
+    @staticmethod
+    def setup_common_events(
+        model_name_components,
+        model_system_components,
+        model_quant_components,
+        model_misc_config_components,
+    ):
+        EventHandler.setup_system_events(model_name_components, model_system_components)
 
         model_system_components["version"].change(
             fn=EventFn.update_quant_mode_choices,
@@ -449,4 +454,11 @@ class EventHandler:
                 model_parallel_components["moe_ep_size"],
                 model_parallel_components["dp_size"],
             ],
+        )
+
+    @staticmethod
+    def setup_profiling_events(components):
+        EventHandler.setup_system_events(
+            components["model_name_components"],
+            components["model_system_components"],
         )

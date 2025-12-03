@@ -10,11 +10,6 @@ import os
 import signal
 import sys
 import traceback
-
-try:
-    from cuda import cuda
-except:
-    from cuda.bindings import driver as cuda
 from datetime import datetime
 from pathlib import Path
 
@@ -221,21 +216,42 @@ def save_error_report(errors, filename):
 
 
 def get_sm_version():
-    # Init
-    (err,) = cuda.cuInit(0)
+    """Get CUDA compute capability (SM version)"""
+    try:
+        import torch
 
-    # Device
-    err, cu_device = cuda.cuDeviceGet(0)
+        if torch.cuda.is_available():
+            device = torch.cuda.current_device()
+            capability = torch.cuda.get_device_capability(device)
+            return capability[0] * 10 + capability[1]
+    except Exception:
+        pass
 
-    # Get target architecture
-    err, sm_major = cuda.cuDeviceGetAttribute(
-        cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, cu_device
-    )
-    err, sm_minor = cuda.cuDeviceGetAttribute(
-        cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, cu_device
-    )
+    # fallback to cuda-python
+    try:
+        from cuda import cuda
 
-    return sm_major * 10 + sm_minor
+        # Init
+        (err,) = cuda.cuInit(0)
+        if err != 0:
+            raise RuntimeError(f"cuInit failed with error code: {err}")
+
+        # Device
+        err, cu_device = cuda.cuDeviceGet(0)
+        if err != 0:
+            raise RuntimeError(f"cuDeviceGet failed with error code: {err}")
+
+        # Get target architecture
+        err, sm_major = cuda.cuDeviceGetAttribute(
+            cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, cu_device
+        )
+        err, sm_minor = cuda.cuDeviceGetAttribute(
+            cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, cu_device
+        )
+
+        return sm_major * 10 + sm_minor
+    except Exception as e:
+        raise RuntimeError(f"Cannot get SM version: both PyTorch and cuda-python failed. Error: {e}") from e
 
 
 def create_test_case_id(test_case, test_type, module_name):

@@ -482,6 +482,7 @@ class TestE2ESweep:
                 args.request_latency = None
                 args.backend = backend
                 args.backend_version = version
+                args.database_mode = None  # Use default (SILICON)
                 args.save_dir = temp_dir
                 args.debug = False
                 args.generated_config_version = None

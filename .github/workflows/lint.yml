@@ -31,3 +31,21 @@ jobs:
 
       - name: Check Formatting
         run: ruff format --check .
+
+  eslint:
+    name: Lint and Format (ESLint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install ESLint
+        run: npm install -g eslint@9.15.0 eslint-config-prettier@9.1.0
+
+      - name: Check Linting and Formatting
+        run: eslint "**/*.{js,jsx}" --max-warnings 0

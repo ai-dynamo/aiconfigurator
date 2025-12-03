@@ -358,8 +358,24 @@ class MoEDispatch(Operation):
                     else:
                         comm_latency = 0
         elif database.backend == common.BackendName.vllm.value:
-            raise NotImplementedError("Need to implement MoE dispatch for vllm")
-        elif database.backend == common.BackendName.sglang.value:  # sglang
+            assert self._moe_tp_size == 1 or self._moe_ep_size == 1, (
+                "vllm does not support MoE TP and MoE EP at the same time"
+            )
+
+            comm_latency = 0
+
+            # Add allreduce latency when TP > 1
+            if self._attention_tp_size > 1:
+                comm_latency += database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
+
+            if self._attention_dp_size > 1:
+                comm_latency += database.query_nccl(
+                    common.CommQuantMode.half,
+                    self.num_gpus,
+                    "all_gather" if self._pre_dispatch else "reduce_scatter",
+                    volume * self._attention_dp_size,
+                )
+        elif database.backend == common.BackendName.sglang.value:
             assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
                 "We don't enable the path for SGLang to support TP>1 and DP>1 for attn simultaneously"
             )
@@ -747,9 +763,11 @@ class WideEPMLP(Operation):
         self._quant_mode = quant_mode
         self._weights = (3 * self._hidden_size * self._intermediate_size) * quant_mode.value.memory
         self.is_context = kwargs.get("is_context", True)  # Default to context mode
+        self.tp_size = kwargs.get("tp_size", 1)
 
     def query(self, database: PerfDatabase, **kwargs):
         x = kwargs.get("x")  # num_tokens
+        x /= self.tp_size
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 

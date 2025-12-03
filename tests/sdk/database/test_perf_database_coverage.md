@@ -32,7 +32,7 @@ Tests for all data loading functions:
 ### 3. **test_perf_database.py**
 Basic query method tests:
 - `query_gemm()` - Exact match test
-- `query_custom_allreduce()` - SOL, SOL_FULL, and non-SOL modes
+- `query_custom_allreduce()` - SOL, SOL_FULL, and SILICON modes
 - `query_nccl()` - SOL mode for different operations
 - `query_p2p()` - SOL mode
 - System spec loading verification
@@ -42,20 +42,20 @@ Comprehensive tests for attention methods:
 - **TestContextAttention**:
   - SOL mode calculation
   - SOL_FULL mode tuple return
-  - Non-SOL mode for MHA and XQA
+  - SILICON mode for MHA and XQA
   - Assertion error for invalid n_kv
 - **TestGenerationAttention**:
   - SOL mode calculation
   - SOL_FULL mode tuple return
-  - Non-SOL mode with interpolation
+  - SILICON mode with interpolation
   - Edge cases (s=1)
 - **TestContextMLA**:
   - SOL mode calculation
-  - Non-SOL mode with data lookup
+  - SILICON mode with data lookup
   - Different tensor parallelism sizes
 - **TestGenerationMLA**:
   - SOL mode calculation
-  - Non-SOL mode with data lookup
+  - SILICON mode with data lookup
   - SOL_FULL mode tuple return
 - Default SOL mode setting/getting
 
@@ -64,23 +64,23 @@ Tests for MoE and MLA BMM operations:
 - **TestMoE**:
   - SOL mode calculation verification
   - SOL_FULL mode tuple return
-  - Non-SOL mode with data lookup
+  - SILICON mode with data lookup
   - Different workload distributions
   - Edge cases (single token, large EP size)
 - **TestMLABMM**:
   - SOL mode for pre/post operations
   - SOL_FULL mode tuple return
-  - Non-SOL mode for pre/post
+  - SILICON mode for pre/post
   - Different configurations
 - **TestMemoryOperations**:
   - SOL mode calculation
   - SOL_FULL mode tuple return
-  - Non-SOL mode with empirical scaling
+  - SILICON mode with empirical scaling
   - Edge cases (zero bytes, small/large transfers)
 - **TestP2P**:
   - SOL mode calculation
   - SOL_FULL mode tuple return
-  - Non-SOL mode with P2P latency
+  - SILICON mode with P2P latency
   - Edge cases
 
 ### 6. **test_perf_database_interpolation.py**
@@ -109,7 +109,7 @@ Tests for interpolation helper methods:
 Edge cases and additional coverage:
 - **TestNcclEdgeCases**:
   - Single GPU returns 0
-  - Non-SOL interpolation
+  - SILICON interpolation
   - Large GPU count scaling
   - Edge message sizes
 - **TestAllreduceEdgeCases**:
@@ -158,8 +158,8 @@ Edge cases and additional coverage:
 3. **Helper Methods** (100%):
    - `_correct_data()` ✓
    - `_update_support_matrix()` ✓
-   - `set_default_sol_mode()` ✓
-   - `get_default_sol_mode()` ✓
+   - `set_default_database_mode()` ✓
+   - `get_default_database_mode()` ✓
 
 4. **Data Loading Functions** (100%):
    - All loader functions tested
@@ -169,7 +169,7 @@ Edge cases and additional coverage:
    - `get_all_databases()` ✓
 
 ### Test Scenarios Covered:
-- **SOL modes**: SOL, SOL_FULL, NON_SOL
+- **SOL modes**: SOL, SOL_FULL, SILICON
 - **Edge cases**: Single GPU, zero values, out-of-range interpolation
 - **Scaling**: Large GPU counts, message sizes
 - **Error handling**: Invalid inputs, missing data

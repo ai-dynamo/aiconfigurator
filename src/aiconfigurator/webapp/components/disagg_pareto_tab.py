@@ -75,6 +75,7 @@ def create_disagg_pareto_tab(app_config):
                     value=None,
                     label="num total gpu list of the disagg system, say,: 8,16",
                     interactive=True,
+                    optional=True,
                 )
                 max_num_gpu = gr.Number(value=None, label="max gpus used in the disagg system", interactive=True)
             with gr.Row():
@@ -86,7 +87,7 @@ def create_disagg_pareto_tab(app_config):
 
         estimate_btn = gr.Button("Estimate Disaggregation Pareto")
         with gr.Row(equal_height=True):
-            result_name = gr.Textbox(value="", label="Result name", lines=2, max_lines=2)
+            result_name = gr.Textbox(value="", label="Result name", lines=2, max_lines=2, required=False)
             save_btn = gr.Button("Save for comparison", interactive=False)
 
         pareto_html = gr.HTML(value="")
@@ -96,7 +97,7 @@ def create_disagg_pareto_tab(app_config):
             interactive=False,
             visible=True,
         )
-        debugging_box = gr.Textbox(label="Debugging", lines=5)
+        debugging_box = gr.Textbox(label="Debugging", lines=5, required=False)
 
         download_btn = gr.Button("Download")
         output_file = gr.File(label="When you click the download button, the downloaded form will be displayed here.")
