@@ -103,15 +103,29 @@ def task_config_to_generator_config(
         return worker_payload, max(workers, 1)
 
     backend_name = getattr(task_config, "backend_name", None)
+    runtime_cfg = task_config.config.runtime_config
+    prefix_tokens = _safe_int(_series_val(result_df, "prefix", runtime_cfg.prefix), runtime_cfg.prefix)
+    config_obj = task_config.config
 
     service_cfg = {
         "model_name": task_config.model_name,
         "served_model_name": task_config.model_name,
         "model_path": task_config.model_name,
         "include_frontend": True,
+        "prefix": prefix_tokens,
     }
     service_cfg = _deep_merge(service_cfg, overrides.get("ServiceConfig"))
     service_cfg = apply_defaults("ServiceConfig", service_cfg, backend=backend_name)
+
+    model_cfg = {
+        "prefix": prefix_tokens,
+        "is_moe": getattr(config_obj, "is_moe", None),
+        "nextn": getattr(config_obj, "nextn", None),
+        "nextn_accept_rates": getattr(config_obj, "nextn_accept_rates", None),
+    }
+    model_cfg = {k: v for k, v in model_cfg.items() if v is not None}
+    model_cfg = _deep_merge(model_cfg, overrides.get("ModelConfig"))
+    model_cfg = apply_defaults("ModelConfig", model_cfg, backend=backend_name)
 
     k8s_cfg = {}
     k8s_cfg = _deep_merge(k8s_cfg, overrides.get("K8sConfig"))
@@ -142,7 +156,6 @@ def task_config_to_generator_config(
     if decode_params:
         decode_workers = _safe_int(worker_count_overrides.get("decode_workers"), decode_workers)
 
-    runtime_cfg = task_config.config.runtime_config
     sla_cfg = {
         "isl": runtime_cfg.isl,
         "osl": runtime_cfg.osl,
@@ -166,4 +179,5 @@ def task_config_to_generator_config(
     )
 
     params = _deep_merge(params, overrides.get("Params"))
+    params["ModelConfig"] = model_cfg
     return params

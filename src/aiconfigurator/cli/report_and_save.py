@@ -369,6 +369,33 @@ def save_results(
 
             # 3. Save the config for this experiment
             exp_task_config = task_configs[exp_name]
+            effective_generated_version = generated_backend_version or exp_task_config.backend_version
+
+            if generated_backend_version:
+                logger.warning(
+                    "\n" + "=" * 80 + "\n"
+                    "  ⚠️  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
+                    "  Experiment: %s\n"
+                    "  Using generated_config_version: %s\n"
+                    "\n"
+                    "  Config formats differ across backend releases. Please ensure you pass\n"
+                    "  the correct --generated_config_version to match your deployment target!\n" + "=" * 80,
+                    exp_name,
+                    generated_backend_version,
+                )
+            else:
+                logger.warning(
+                    "\n" + "=" * 80 + "\n"
+                    "  ⚠️  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
+                    "  Experiment: %s\n"
+                    "  --generated_config_version NOT provided\n"
+                    "  Defaulting to backend_version: %s\n"
+                    "\n"
+                    "  Config formats differ across backend releases. If you are targeting\n"
+                    "  a different version, please pass --generated_config_version explicitly!\n" + "=" * 80,
+                    exp_name,
+                    exp_task_config.backend_version,
+                )
 
             with open(os.path.join(exp_dir, "config.yaml"), "w") as f:  # for future aic repro
                 yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
@@ -391,7 +418,7 @@ def save_results(
                         generate_backend_artifacts(
                             params=cfg,
                             backend=exp_task_config.backend_name,
-                            backend_version=generated_backend_version or exp_task_config.backend_version,
+                            backend_version=effective_generated_version,
                             output_dir=top_config_dir,
                         )
                     except Exception as exc:

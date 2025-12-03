@@ -90,3 +90,6 @@ inputs:
   - key: ModelConfig.nextn
     required: false
     default: 0
+  - key: ModelConfig.prefix
+    required: false
+    default: 0

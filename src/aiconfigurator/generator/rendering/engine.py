@@ -121,10 +121,27 @@ def render_backend_templates(
         mapping_def: dict[str, Any],
     ) -> dict[str, Any]:
         wc = dict(base_ctx)
+
+        def _remove_key_and_nested(key: str) -> None:
+            if key in wc:
+                wc.pop(key, None)
+            if "." in key:
+                parts = key.split(".")
+                cursor = wc
+                for p in parts[:-1]:
+                    node = cursor.get(p)
+                    if not isinstance(node, dict):
+                        return
+                    cursor = node
+                if isinstance(cursor, dict):
+                    cursor.pop(parts[-1], None)
+
         for k in worker_param_keys:
             wk = f"{worker}_{k}"
             if wk in base_ctx:
                 wc[k] = base_ctx[wk]
+            else:
+                _remove_key_and_nested(k)
 
         # Promote worker-scoped dotted backend keys into nested dicts
         prefix = f"{worker}_"
@@ -156,6 +173,12 @@ def render_backend_templates(
                 name = bk[len(prefix) :]
                 if name in backend_keys and "." not in name:
                     wc[backend][name] = val
+        for bk in backend_keys:
+            wk = f"{worker}_{bk}"
+            if wk in base_ctx:
+                wc[bk] = base_ctx[wk]
+            else:
+                _remove_key_and_nested(bk)
         return wc
 
     if engine_template_file is not None:

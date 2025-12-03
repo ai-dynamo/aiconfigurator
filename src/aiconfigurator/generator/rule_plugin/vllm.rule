@@ -6,4 +6,8 @@ agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_par
 
 prefill max_num_tokens = (SlaConfig.isl or 0) + 1500
 decode max_num_tokens = max_batch_size
-agg max_num_tokens = (max_batch_size or 0) + (max_batch_size or 0) + 1500
+agg max_num_tokens = (max_batch_size or 0) + (SlaConfig.isl or 0) + 1500
+
+when (ModelConfig.prefix or 0) > 0:
+    disable_prefix_cache = false
+

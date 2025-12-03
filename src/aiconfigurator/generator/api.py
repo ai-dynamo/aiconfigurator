@@ -202,7 +202,7 @@ def print_generator_help(
     stream.write("\n\n".join(blocks) + "\n")
 
 
-def maybe_handle_generator_help(argv: list[str]) -> bool:
+def generator_cli_helper(argv: list[str]) -> bool:
     """
     Inspect argv for generator help flags, print the tables, and exit early.
 
@@ -541,9 +541,9 @@ __all__ = [
     "generate_backend_config",
     "generate_config_from_input_dict",
     "generate_config_from_yaml",
+    "generator_cli_helper",
     "load_generator_overrides",
     "load_generator_overrides_from_args",
-    "maybe_handle_generator_help",
     "parse_backend_arg",
     "parse_cli_params",
     "parse_mapping_arg",

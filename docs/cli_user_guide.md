@@ -153,7 +153,7 @@ The `--generator-help` command supports three section options:
 - `--generator-help deploy`: Shows the complete content of `generator/config/deployment_config.yaml` in YAML format, including all sections such as `ServiceConfig.*`, `K8sConfig.*`, `WorkerConfig.*`, etc.
 - `--generator-help backend`: Shows only the backend parameter mappings table from `generator/config/backend_config_mapping.yaml`, which maps unified parameter keys (e.g., `kv_cache_free_gpu_memory_fraction`, `kv_cache_dtype`) to backend-specific parameter names for trtllm, vllm, and sglang
 
-You can filter the backend-mapping output to a specific backend using `--generator-help-backend BACKEND`, where BACKEND can be `trtllm`, `vllm`, or `sglang`. For example:
+You can filter the backend-mapping output to a specific backend using `--generator-help --generator-help-backend BACKEND`, where BACKEND can be `trtllm`, `vllm`, or `sglang`. For example:
 - `aiconfigurator cli default --generator-help backend --generator-help-backend sglang`: Shows only sglang-specific parameter mappings
 - `aiconfigurator cli default --generator-help backend --generator-help-backend trtllm`: Shows only trtllm-specific parameter mappings
 

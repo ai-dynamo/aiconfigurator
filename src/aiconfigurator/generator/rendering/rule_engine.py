@@ -128,7 +128,8 @@ def apply_rule_plugins(param_values: dict[str, Any], backend: str, dsl_dir: Opti
         return param_values
     with open(rule_path, encoding="utf-8") as f:
         content = f.read().splitlines()
-    default_scope = "prefill" if backend in ("trtllm", "vllm", "sglang") else None
+
+    default_scope = "agg_prefill_decode" if backend in ("trtllm", "vllm", "sglang") else None
     cond_stack: list[tuple[int, bool]] = []
     for idx, line in enumerate(content, start=1):
         if not line.strip():

@@ -10,9 +10,13 @@ pipeline_parallel_size: {{ pipeline_parallel_size }}
 enable_attention_dp: {{ enable_attention_dp | default(false) }}
 enable_chunked_prefill: {{ enable_chunked_prefill | default(false) }}
 
+{% set _max_seq_len = build_config.max_seq_len | default(none) %}
+
 max_batch_size: {{ build_config.max_batch_size }}
 max_num_tokens: {{ build_config.max_num_tokens }}
-max_seq_len: {{ build_config.max_seq_len }}
+{% if _max_seq_len is not none and _max_seq_len != '' %}
+max_seq_len: {{ _max_seq_len }}
+{% endif %}
 
 kv_cache_config:
   enable_block_reuse: {{ kv_cache_config.enable_block_reuse | default(false) }}
