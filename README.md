@@ -66,6 +66,7 @@ aiconfigurator cli exp --yaml_path exp.yaml
 - Use `default`, followed with **three basic arguments**, it prints the estimated best deployment and the deployment details.
 - Use `exp`, pass in exp.yaml by `--yaml_path` to customize your experiments and even a heterogenous one.
 - Use `--save_dir DIR` to generate framework configuration files for Dynamo.
+- Use `--database_mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only).
 - Use `-h` for more options and customization.
 
 Refer to [CLI User Guide](docs/cli_user_guide.md)

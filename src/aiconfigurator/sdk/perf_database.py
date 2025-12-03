@@ -1041,7 +1041,7 @@ class PerfDatabase:
         backend (str): the backend name
         version (str): the version name
         system_spec (dict): the system spec
-        _default_sol_mode (common.SOLMode): the default sol mode of the database
+        _default_database_mode (common.DatabaseMode): the default mode of the database
         _gemm_data (dict): the gemm data
         _context_attention_data (dict): the context attention data
         _generation_attention_data (dict): the generation attention data
@@ -1084,7 +1084,7 @@ class PerfDatabase:
         self.version = version
         with open(os.path.join(systems_dir, system + ".yaml")) as f:
             self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-        self._default_sol_mode = common.SOLMode.NON_SOL  # non sol
+        self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
 
         data_dir = os.path.join(systems_dir, self.system_spec["data_dir"], backend, version)
         nccl_data_dir = os.path.join(
@@ -1928,23 +1928,23 @@ class PerfDatabase:
 
         return y0 + (y1 - y0) / (x1 - x0) * (value - x0)
 
-    def set_default_sol_mode(self, mode: common.SOLMode) -> None:
+    def set_default_database_mode(self, mode: common.DatabaseMode) -> None:
         """
-        Set the default sol mode
+        Set the default database mode
         """
-        if mode != self._default_sol_mode:
-            # Clear cached query methods since default sol mode affects the results
+        if mode != self._default_database_mode:
+            # Clear cached query methods since default database mode affects the results
             for attr_name in dir(self):
                 attr = getattr(self, attr_name)
                 if hasattr(attr, "cache_clear") and callable(attr):
                     attr.cache_clear()
-            self._default_sol_mode = mode
+            self._default_database_mode = mode
 
-    def get_default_sol_mode(self) -> common.SOLMode:
+    def get_default_database_mode(self) -> common.DatabaseMode:
         """
-        Get the default sol mode
+        Get the default database mode
         """
-        return self._default_sol_mode
+        return self._default_database_mode
 
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
@@ -1953,7 +1953,7 @@ class PerfDatabase:
         n: int,
         k: int,
         quant_mode: common.GEMMQuantMode,
-        sol_mode: common.SOLMode | None = None,
+        database_mode: common.DatabaseMode | None = None,
     ) -> float:
         """
         Query the gemm data
@@ -1968,14 +1968,34 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
+        def get_empirical(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> float:
+            """
+            Get the empirical time
+            """
+            sol_time = get_sol(m, n, k, quant_mode)[0]
+            scale_factor = 0.8
+            return sol_time / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
             return get_sol(m, n, k, quant_mode)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
+        elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(m, n, k, quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(m, n, k, quant_mode)
         else:
-            result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
+            try:
+                result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}, using empirical mode")
+                    result = get_empirical(m, n, k, quant_mode)
+                else:
+                    logger.exception(
+                        f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
             return result
 
     @functools.lru_cache(maxsize=32768)
@@ -1988,7 +2008,7 @@ class PerfDatabase:
         n_kv: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
-        sol_mode: Optional[common.SOLMode] = None,
+        database_mode: Optional[common.DatabaseMode] = None,
         window_size: int = 0,
         head_size: int = 128,
     ) -> float:
@@ -2034,23 +2054,79 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
+        def get_empirical(
+            b: int,
+            s: int,
+            prefix: int,
+            n: int,
+            n_kv: int,
+            head_size: int,
+            window_size: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+            fmha_quant_mode: common.FMHAQuantMode,
+        ) -> float:
+            """
+            Get the empirical time
+            """
+            latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            scale_factor = 0.6
+            return latency / scale_factor
+
+        # query logic starts
         assert n_kv <= n, "n_kv must be less than or equal to n"
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
             return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
+        elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(
+                b,
+                s,
+                prefix,
+                n,
+                n_kv,
+                head_size,
+                window_size,
+                kvcache_quant_mode,
+                fmha_quant_mode,
+            )
         else:
-            full_s = s + prefix
-            prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
-            n_kv = 0 if n == n_kv else n_kv
-            attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
-                window_size
-            ]
-            latency = self._interp_3d(n, full_s, b, attention_dict, "cubic") * prefix_correction
+            try:
+                full_s = s + prefix
+                prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
+                # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
+                n_kv = 0 if n == n_kv else n_kv
+                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
+                    window_size
+                ]
+                latency = self._interp_3d(n, full_s, b, attention_dict, "cubic") * prefix_correction
+            except:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, {n_kv=}, "
+                        f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
+                    )
+                    latency = get_empirical(
+                        b,
+                        s,
+                        prefix,
+                        n,
+                        n_kv,
+                        head_size,
+                        window_size,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                    )
+                else:
+                    logger.exception(
+                        f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, "
+                        f"{n_kv=}, {head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}. "
+                        "Please consider Hybrid mode."
+                    )
+                    raise
             return latency
 
     @functools.lru_cache(maxsize=32768)
@@ -2061,7 +2137,7 @@ class PerfDatabase:
         n: int,
         n_kv: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
-        sol_mode: Optional[common.SOLMode] = None,
+        database_mode: Optional[common.DatabaseMode] = None,
         window_size: int = 0,
         head_size: int = 128,
     ) -> float:
@@ -2104,24 +2180,55 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
+        def get_empirical(
+            b: int,
+            s: int,
+            n: int,
+            n_kv: int,
+            h: int,
+            w: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+        ) -> float:
+            """
+            Get the hybrid time
+            """
+            latency = get_sol(b, s, n, n_kv, h, w, kvcache_quant_mode)[0]
+            scale_factor = 0.8
+            return latency / scale_factor
+
+        # query logic starts
         assert n_kv <= n, "n_kv must be less than or equal to n"
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
             return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
+        elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
         else:
-            if head_size not in [64, 128]:
-                return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
+            try:
+                # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
+                if n_kv == n:
+                    n_kv = 0
 
-            # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
-            if n_kv == n:
-                n_kv = 0
-
-            attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
-            latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
+                attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
+                latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, "
+                        f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, using empirical mode"
+                    )
+                    latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
+                else:
+                    logger.exception(
+                        f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, "
+                        f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {database_mode=}. "
+                        "Please consider Hybrid mode."
+                    )
+                    raise
             return latency
 
     @functools.lru_cache(maxsize=32768)
@@ -2133,7 +2240,7 @@ class PerfDatabase:
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
-        sol_mode: common.SOLMode | None = None,
+        database_mode: common.DatabaseMode | None = None,
     ) -> float:
         """
         Query the context mla data
@@ -2163,18 +2270,48 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
+        def get_empirical(
+            b: int,
+            s: int,
+            prefix: int,
+            num_heads: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+            fmha_quant_mode: common.FMHAQuantMode,
+        ) -> float:
+            """
+            Get the hybrid time
+            """
+            latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+            scale_factor = 0.6
+            return latency / scale_factor
 
-        if sol_mode == common.SOLMode.SOL:
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
+        elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         else:
-            full_s = s + prefix
-            prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
-            latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
+            try:
+                full_s = s + prefix
+                prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
+                mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
+                latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query context mla data for {b=}, {s=}, {prefix=}, {num_heads=}, "
+                        f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
+                    )
+                    latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
+                else:
+                    logger.exception(
+                        f"Failed to query context mla data for {b=}, {s=}, {prefix=}, {num_heads=}, \
+                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
             return latency
 
     @functools.lru_cache(maxsize=32768)
@@ -2184,7 +2321,7 @@ class PerfDatabase:
         s: int,
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
-        sol_mode: common.SOLMode | None = None,
+        database_mode: common.DatabaseMode | None = None,
     ) -> float:
         """
         Query the generation mla data
@@ -2211,16 +2348,44 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
+        def get_empirical(
+            b: int,
+            s: int,
+            num_heads: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+        ) -> float:
+            """
+            Get the hybrid time
+            """
+            latency = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
+            scale_factor = 0.8
+            return latency / scale_factor
 
-        if sol_mode == common.SOLMode.SOL:
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
             return get_sol(b, s, num_heads, kvcache_quant_mode)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
+        elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, num_heads, kvcache_quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(b, s, num_heads, kvcache_quant_mode)
         else:
-            mla_dict = self._generation_mla_data[kvcache_quant_mode]
-            latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            try:
+                mla_dict = self._generation_mla_data[kvcache_quant_mode]
+                latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query generation mla data for {b=}, {s=}, {num_heads=}, "
+                        f"{kvcache_quant_mode=}, using empirical mode"
+                    )
+                    latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
+                else:
+                    logger.exception(
+                        f"Failed to query generation mla data for {b=}, {s=}, {num_heads=}, \
+                        {kvcache_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
             return latency
 
     @functools.lru_cache(maxsize=32768)
@@ -2232,7 +2397,7 @@ class PerfDatabase:
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         attention_backend: str | None = None,
-        sol_mode: common.SOLMode | None = None,
+        database_mode: common.DatabaseMode | None = None,
     ) -> float:
         """
         Query the generation mla data for SGLang backend with SOL calculation
@@ -2305,25 +2470,55 @@ class PerfDatabase:
 
             return sol_time, sol_math, sol_mem
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
+        def get_empirical(
+            b: int,
+            s: int,
+            tp_size: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+            fmha_quant_mode: common.FMHAQuantMode,
+        ) -> float:
+            """
+            Get the hybrid time
+            """
+            latency = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            scale_factor = 0.7
+            return latency / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
             return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
+        elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
         else:
-            if attention_backend is None:
-                attention_backend = "flashinfer"
-            if attention_backend == "flashinfer":
-                attn_data = self._wideep_generation_mla_data["flashinfer"]
-            elif attention_backend == "fa3":
-                attn_data = self._wideep_generation_mla_data["fa3"]
-            else:
-                raise ValueError(f"Unsupported attention backend: {attention_backend}")
-            # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
-            num_heads = 128 // tp_size
-            mla_dict = attn_data[kvcache_quant_mode]
-            latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            try:
+                if attention_backend is None:
+                    attention_backend = "flashinfer"
+                if attention_backend == "flashinfer":
+                    attn_data = self._wideep_generation_mla_data["flashinfer"]
+                elif attention_backend == "fa3":
+                    attn_data = self._wideep_generation_mla_data["fa3"]
+                else:
+                    raise ValueError(f"Unsupported attention backend: {attention_backend}")
+                # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
+                num_heads = 128 // tp_size
+                mla_dict = attn_data[kvcache_quant_mode]
+                latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query wideep generation mla data for {b=}, {s=}, {tp_size=}, "
+                        f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
+                    )
+                    latency = get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
+                else:
+                    logger.exception(
+                        f"Failed to query wideep generation mla data for {b=}, {s=}, {tp_size=}, \
+                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
             return latency
 
     @functools.lru_cache(maxsize=32768)
@@ -2336,7 +2531,7 @@ class PerfDatabase:
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         attention_backend: str | None = None,
-        sol_mode: common.SOLMode | None = None,
+        database_mode: common.DatabaseMode | None = None,
     ) -> float:
         def get_sol(
             b: int,
@@ -2402,28 +2597,59 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
-            return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
-        else:
-            if attention_backend is None:
-                attention_backend = "flashinfer"
-            if attention_backend == "flashinfer":
-                attn_data = self._wideep_context_mla_data["flashinfer"]
-            elif attention_backend == "fa3":
-                attn_data = self._wideep_context_mla_data["fa3"]
-            else:
-                raise ValueError(f"Unsupported attention backend: {attention_backend}")
+        def get_empirical(
+            b: int,
+            s: int,
+            prefix: int,
+            tp_size: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+            fmha_quant_mode: common.FMHAQuantMode,
+        ) -> float:
+            """
+            Get the hybrid time
+            """
+            latency = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            scale_factor = 0.6
+            return latency / scale_factor
 
-            # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
-            num_heads = 128 // tp_size
-            mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
-            full_s = s + prefix
-            prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
+        else:
+            try:
+                if attention_backend is None:
+                    attention_backend = "flashinfer"
+                if attention_backend == "flashinfer":
+                    attn_data = self._wideep_context_mla_data["flashinfer"]
+                elif attention_backend == "fa3":
+                    attn_data = self._wideep_context_mla_data["fa3"]
+                else:
+                    raise ValueError(f"Unsupported attention backend: {attention_backend}")
+
+                # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
+                num_heads = 128 // tp_size
+                mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
+                full_s = s + prefix
+                prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
+                latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query wideep context mla data for {b=}, {s=}, {prefix=}, {tp_size=}, "
+                        f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
+                    )
+                    latency = get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
+                else:
+                    logger.exception(
+                        f"Failed to query wideep context mla data for {b=}, {s=}, {prefix=}, {tp_size=}, \
+                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
             return latency
 
     # to simplify, we no longer support allreduce_strategy
@@ -2433,7 +2659,7 @@ class PerfDatabase:
         quant_mode: common.CommQuantMode,
         tp_size: int,
         size: int,
-        sol_mode: common.SOLMode | None = None,
+        database_mode: common.DatabaseMode | None = None,
     ) -> float:
         """
         Query the allreduce data
@@ -2458,37 +2684,61 @@ class PerfDatabase:
             sol_time = 2 * size * 2 / tp_size * (tp_size - 1) / p2p_bw
             return sol_time * 1000, 0, 0
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
-            return get_sol(quant_mode, tp_size, size)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(quant_mode, tp_size, size)
-        else:
-            if tp_size == 1:
-                return 0.0
-            if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
-                # on GB200, we only have custom all reduce for up to tp4.
-                return self.query_nccl(quant_mode, tp_size, "all_reduce", size)
+        def get_empirical(quant_mode: common.CommQuantMode, tp_size: int, size: int) -> float:
+            """
+            Get the empirical time
+            """
+            latency = get_sol(quant_mode, tp_size, size)[0]
+            scale_factor = 0.8
+            return latency / scale_factor
 
-            comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
-                "AUTO"
-            ]  # use AUTO for allreduce strategy
-            size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
-            lat = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
-            if tp_size > 8:  # FIXME, to collect real data, use inter-node and intra-node data seperately
-                if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
-                    lat = (
-                        lat
-                        * (tp_size - 1)
-                        / tp_size
-                        * 8
-                        / 7
-                        * self.system_spec["node"]["intra_node_bw"]
-                        / self.system_spec["node"]["inter_node_bw"]
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            return get_sol(quant_mode, tp_size, size)[0]
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(quant_mode, tp_size, size)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(quant_mode, tp_size, size)
+        else:
+            try:
+                if tp_size == 1:
+                    return 0.0
+                if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
+                    # on GB200, we only have custom all reduce for up to tp4.
+                    return self.query_nccl(quant_mode, tp_size, "all_reduce", size)
+
+                comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
+                    "AUTO"
+                ]  # use AUTO for allreduce strategy
+                size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
+                lat = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
+                if tp_size > 8:  # FIXME, to collect real data, use inter-node and intra-node data seperately
+                    if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
+                        lat = (
+                            lat
+                            * (tp_size - 1)
+                            / tp_size
+                            * 8
+                            / 7
+                            * self.system_spec["node"]["intra_node_bw"]
+                            / self.system_spec["node"]["inter_node_bw"]
+                        )
+                    else:
+                        lat = lat * (tp_size - 1) / tp_size * 8 / 7
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query custom allreduce data for {quant_mode=}, {tp_size=}, {size=}, \
+                        {database_mode=}, using empirical mode"
                     )
+                    lat = get_empirical(quant_mode, tp_size, size)
                 else:
-                    lat = lat * (tp_size - 1) / tp_size * 8 / 7
+                    logger.exception(
+                        f"Failed to query custom allreduce data for {quant_mode=}, {tp_size=}, {size=}, \
+                        {database_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
             return lat
 
     @functools.lru_cache(maxsize=32768)
@@ -2498,7 +2748,7 @@ class PerfDatabase:
         num_gpus: int,
         operation: str,
         message_size: int,  # element number
-        sol_mode: common.SOLMode | None = None,
+        database_mode: common.DatabaseMode | None = None,
     ) -> float:
         """
         Query the nccl data
@@ -2526,32 +2776,65 @@ class PerfDatabase:
                 sol_time = 2 * dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
             return sol_time, 0, sol_time
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
+        def get_empirical(dtype: common.CommQuantMode, num_gpus: int, operation: str, message_size: int) -> float:
+            """
+            Get the empirical time
+            """
+            latency = get_sol(dtype, num_gpus, operation, message_size)[0]
+            scale_factor = 0.8
+            return latency / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
             return get_sol(dtype, num_gpus, operation, message_size)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
+        elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(dtype, num_gpus, operation, message_size)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(dtype, num_gpus, operation, message_size)
         else:
-            if num_gpus == 1:
-                return 0.0
+            try:
+                if num_gpus == 1:
+                    return 0.0
 
-        max_num_gpus = max(self._nccl_data[dtype][operation].keys())
-        nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
-        size_left, size_right = self._nearest_1d_point_helper(message_size, list(nccl_dict.keys()), inner_only=False)
-        lat = self._interp_1d([size_left, size_right], [nccl_dict[size_left], nccl_dict[size_right]], message_size)
+                max_num_gpus = max(self._nccl_data[dtype][operation].keys())
+                nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
+                size_left, size_right = self._nearest_1d_point_helper(
+                    message_size,
+                    list(nccl_dict.keys()),
+                    inner_only=False,
+                )
+                lat = self._interp_1d(
+                    [size_left, size_right],
+                    [nccl_dict[size_left], nccl_dict[size_right]],
+                    message_size,
+                )
 
-        if num_gpus > max_num_gpus:  # need to do some correction
-            logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")
-            if max_num_gpus > self.system_spec["node"]["num_gpus_per_node"]:  # all inter node
-                scale_factor = 1
-            elif num_gpus > self.system_spec["node"]["num_gpus_per_node"]:
-                scale_factor = self.system_spec["node"]["intra_node_bw"] / self.system_spec["node"]["inter_node_bw"]
-            else:  # all intra node
-                scale_factor = 1
-            lat = lat * (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
-
-        return lat
+                if num_gpus > max_num_gpus:  # need to do some correction
+                    logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")
+                    if max_num_gpus > self.system_spec["node"]["num_gpus_per_node"]:  # all inter node
+                        scale_factor = 1
+                    elif num_gpus > self.system_spec["node"]["num_gpus_per_node"]:
+                        scale_factor = (
+                            self.system_spec["node"]["intra_node_bw"] / self.system_spec["node"]["inter_node_bw"]
+                        )
+                    else:  # all intra node
+                        scale_factor = 1
+                    lat = lat * (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query nccl data for {dtype=}, {num_gpus=}, "
+                        f"{operation=}, {message_size=}, using empirical mode"
+                    )
+                    lat = get_empirical(dtype, num_gpus, operation, message_size)
+                else:
+                    logger.exception(
+                        f"Failed to query nccl data for {dtype=}, {num_gpus=}, \
+                        {operation=}, {message_size=}, {database_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
+            return lat
 
     @functools.lru_cache(maxsize=32768)
     def query_moe(
@@ -2567,7 +2850,7 @@ class PerfDatabase:
         workload_distribution: str,
         is_context: bool = True,
         moe_backend: str | None = None,
-        sol_mode: common.SOLMode | None = None,
+        database_mode: common.DatabaseMode | None = None,
     ) -> float:
         """
         Query the moe data
@@ -2610,9 +2893,37 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
+        def get_empirical(
+            num_tokens: int,
+            hidden_size: int,
+            inter_size: int,
+            topk: int,
+            num_experts: int,
+            moe_tp_size: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            workload_distribution: str,
+        ) -> float:
+            """
+            Get the hybrid time
+            """
+            latency = get_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )[0]
+            scale_factor = 0.4
+            return latency / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
             return get_sol(
                 num_tokens,
                 hidden_size,
@@ -2624,7 +2935,7 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
+        elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(
                 num_tokens,
                 hidden_size,
@@ -2636,41 +2947,71 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )
         else:
-            if self.backend == common.BackendName.sglang.value:
-                # deepep_moe is for sglang wideep only
-                if moe_backend == "deepep_moe":
-                    if is_context:
-                        moe_data = self._wideep_context_moe_data
-                    else:
-                        moe_data = self._wideep_generation_moe_data
-                else:
-                    moe_data = self._moe_data
-
-                moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][
-                    moe_tp_size
-                ][moe_ep_size]
-                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
-                lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
-                return lat
-            elif self.backend == common.BackendName.trtllm.value:
-                # aligned with trtllm, kernel source selection.
-                if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
-                    try:
-                        if workload_distribution in self._moe_low_latency_data[quant_mode]:
-                            moe_dict = self._moe_low_latency_data[quant_mode][workload_distribution][topk][num_experts][
-                                hidden_size
-                            ][inter_size][moe_tp_size][moe_ep_size]
+            try:
+                if self.backend == common.BackendName.sglang.value:
+                    # deepep_moe is for sglang wideep only
+                    if moe_backend == "deepep_moe":
+                        if is_context:
+                            moe_data = self._wideep_context_moe_data
                         else:
-                            moe_dict = self._moe_low_latency_data[quant_mode]["uniform"][topk][num_experts][
-                                hidden_size
-                            ][inter_size][moe_tp_size][moe_ep_size]
-                        logger.debug(
-                            f"trying to find low latency data for moe {quant_mode} "
-                            f"{workload_distribution} {topk} {num_experts} {hidden_size} "
-                            f"{inter_size} {moe_tp_size} {moe_ep_size} but failed."
-                        )
-                    except:
+                            moe_data = self._wideep_generation_moe_data
+                    else:
+                        moe_data = self._moe_data
+
+                    moe_dict = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][
+                        moe_tp_size
+                    ][moe_ep_size]
+                    num_left, num_right = self._nearest_1d_point_helper(
+                        num_tokens,
+                        list(moe_dict.keys()),
+                        inner_only=False,
+                    )
+                    lat = self._interp_1d(
+                        [num_left, num_right],
+                        [moe_dict[num_left], moe_dict[num_right]],
+                        num_tokens,
+                    )
+                    return lat
+                elif self.backend == common.BackendName.trtllm.value:
+                    # aligned with trtllm, kernel source selection.
+                    if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
+                        try:
+                            if workload_distribution in self._moe_low_latency_data[quant_mode]:
+                                moe_dict = self._moe_low_latency_data[quant_mode][workload_distribution][topk][
+                                    num_experts
+                                ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                            else:
+                                moe_dict = self._moe_low_latency_data[quant_mode]["uniform"][topk][num_experts][
+                                    hidden_size
+                                ][inter_size][moe_tp_size][moe_ep_size]
+                            logger.debug(
+                                f"trying to find low latency data for moe {quant_mode} "
+                                f"{workload_distribution} {topk} {num_experts} {hidden_size} "
+                                f"{inter_size} {moe_tp_size} {moe_ep_size} but failed."
+                            )
+                        except:
+                            if workload_distribution in self._moe_data[quant_mode]:
+                                moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][
+                                    hidden_size
+                                ][inter_size][moe_tp_size][moe_ep_size]
+                            else:
+                                moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][
+                                    inter_size
+                                ][moe_tp_size][moe_ep_size]
+                    else:
                         if workload_distribution in self._moe_data[quant_mode]:
                             moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][
                                 hidden_size
@@ -2679,28 +3020,58 @@ class PerfDatabase:
                             moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][
                                 inter_size
                             ][moe_tp_size][moe_ep_size]
-                else:
-                    if workload_distribution in self._moe_data[quant_mode]:
-                        moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][
-                            inter_size
-                        ][moe_tp_size][moe_ep_size]
-                    else:
-                        moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][inter_size][
-                            moe_tp_size
-                        ][moe_ep_size]
 
-                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
-                lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
-                return lat
-            elif self.backend == common.BackendName.vllm.value:
-                moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][
-                    inter_size
-                ][moe_tp_size][moe_ep_size]
-                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
-                latency = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
+                    num_left, num_right = self._nearest_1d_point_helper(
+                        num_tokens,
+                        list(moe_dict.keys()),
+                        inner_only=False,
+                    )
+                    lat = self._interp_1d(
+                        [num_left, num_right],
+                        [moe_dict[num_left], moe_dict[num_right]],
+                        num_tokens,
+                    )
+                    return lat
+                elif self.backend == common.BackendName.vllm.value:
+                    moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][
+                        inter_size
+                    ][moe_tp_size][moe_ep_size]
+                    num_left, num_right = self._nearest_1d_point_helper(
+                        num_tokens, list(moe_dict.keys()), inner_only=False
+                    )
+                    latency = self._interp_1d(
+                        [num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens
+                    )
+                    return latency
+                else:
+                    raise NotImplementedError(f"backend {self.backend} not supported for moe")
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        "Failed to query moe data for "
+                        f"{num_tokens=}, {hidden_size=}, {inter_size=}, {topk=}, {num_experts=}, "
+                        f"{moe_tp_size=}, {moe_ep_size=}, {quant_mode=}, {workload_distribution=}, using empirical mode"
+                    )
+                    latency = get_empirical(
+                        num_tokens,
+                        hidden_size,
+                        inter_size,
+                        topk,
+                        num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        quant_mode,
+                        workload_distribution,
+                    )
+                else:
+                    logger.exception(
+                        "Failed to query moe data for "
+                        f"{num_tokens=}, {hidden_size=}, {inter_size=}, {topk=}, {num_experts=}, "
+                        f"{moe_tp_size=}, {moe_ep_size=}, {quant_mode=}, {workload_distribution=}, "
+                        f"{database_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
                 return latency
-            else:
-                raise NotImplementedError(f"backend {self.backend} not supported for moe")
 
     @functools.lru_cache(maxsize=32768)
     def query_mla_bmm(
@@ -2709,7 +3080,7 @@ class PerfDatabase:
         num_heads: int,
         quant_mode: common.GEMMQuantMode,
         if_pre: bool = True,
-        sol_mode: common.SOLMode | None = None,
+        database_mode: common.DatabaseMode | None = None,
     ) -> float:
         """
         Query the mla bmm data
@@ -2728,23 +3099,59 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
+        def get_empirical(
+            num_tokens: int,
+            num_heads: int,
+            quant_mode: common.GEMMQuantMode,
+            if_pre: bool,
+        ) -> float:
+            """
+            Get the hybrid time
+            """
+            latency = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
+            scale_factor = 0.8
+            return latency / scale_factor
 
-        if sol_mode == common.SOLMode.SOL:
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
             return get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
+        elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(num_tokens, num_heads, quant_mode, if_pre)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(num_tokens, num_heads, quant_mode, if_pre)
         else:
-            if quant_mode not in self._mla_bmm_data:
-                quant_mode = common.GEMMQuantMode.float16
-            mla_bmm_dict = self._mla_bmm_data[quant_mode]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
-            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mla_bmm_dict.keys()), inner_only=False)
-            lat = self._interp_1d([num_left, num_right], [mla_bmm_dict[num_left], mla_bmm_dict[num_right]], num_tokens)
+            try:
+                if quant_mode not in self._mla_bmm_data:
+                    quant_mode = common.GEMMQuantMode.float16
+                mla_bmm_dict = self._mla_bmm_data[quant_mode]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
+                num_left, num_right = self._nearest_1d_point_helper(
+                    num_tokens,
+                    list(mla_bmm_dict.keys()),
+                    inner_only=False,
+                )
+                lat = self._interp_1d(
+                    [num_left, num_right],
+                    [mla_bmm_dict[num_left], mla_bmm_dict[num_right]],
+                    num_tokens,
+                )
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query mla bmm data for {num_tokens=}, {num_heads=}, {quant_mode=}, "
+                        f"{if_pre=}, using empirical mode"
+                    )
+                    lat = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
+                else:
+                    logger.exception(
+                        f"Failed to query mla bmm data for {num_tokens=}, {num_heads=}, {quant_mode=}, \
+                        {if_pre=}, {database_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
             return lat
 
     @functools.lru_cache(maxsize=32768)
-    def query_mem_op(self, mem_bytes: int, sol_mode: common.SOLMode | None = None) -> float:
+    def query_mem_op(self, mem_bytes: int, database_mode: common.DatabaseMode | None = None) -> float:
         """
         Query the mem op data
         """
@@ -2756,22 +3163,30 @@ class PerfDatabase:
             sol_time = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
             return sol_time, 0, sol_time
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
-            return get_sol(mem_bytes)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(mem_bytes)
-        else:
-            lat = (
+        def get_empirical(mem_bytes: int) -> float:
+            """
+            Get the empirical time
+            """
+            return (
                 mem_bytes
                 / (self.system_spec["gpu"]["mem_bw"] * self.system_spec["gpu"]["mem_bw_empirical_scaling_factor"])
                 + self.system_spec["gpu"]["mem_empirical_constant_latency"]
             ) * 1000
-            return lat
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            return get_sol(mem_bytes)[0]
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(mem_bytes)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(mem_bytes)
+        else:
+            # hybrid and silicon modes have same logic
+            return get_empirical(mem_bytes)
 
     @functools.lru_cache(maxsize=32768)
-    def query_p2p(self, message_bytes: int, sol_mode: common.SOLMode | None = None) -> float:
+    def query_p2p(self, message_bytes: int, database_mode: common.DatabaseMode | None = None) -> float:
         """
         Query the p2p data
         """
@@ -2784,16 +3199,180 @@ class PerfDatabase:
             sol_time = message_bytes / self.system_spec["node"]["inter_node_bw"] * 1000
             return sol_time, 0, sol_time
 
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
-            return get_sol(message_bytes)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(message_bytes)
-        else:
+        def get_empirical(message_bytes: int) -> float:
+            """
+            Get the empirical time
+            """
             return (
                 message_bytes / self.system_spec["node"]["inter_node_bw"] + self.system_spec["node"]["p2p_latency"]
             ) * 1000
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            return get_sol(message_bytes)[0]
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(message_bytes)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(message_bytes)
+        else:
+            # hybrid and silicon modes have same logic
+            return get_empirical(message_bytes)
+
+    @functools.lru_cache(maxsize=32768)
+    def query_wideep_mlp(
+        self,
+        num_tokens: int,
+        hidden_size: int,
+        intermediate_size: int,
+        quant_mode: common.MoEQuantMode,
+        is_context: bool = True,
+        database_mode: Optional[common.DatabaseMode] = None,
+    ) -> float:
+        """
+        Query the SGLang MLP data for DeepSeek shared expert operations
+        """
+
+        def get_sol(
+            num_tokens: int,
+            hidden_size: int,
+            intermediate_size: int,
+            quant_mode: common.MoEQuantMode,
+        ) -> tuple[float, float, float]:
+            ops = 2 * num_tokens * hidden_size * intermediate_size * 3
+            mem_bytes = quant_mode.value.memory * (
+                num_tokens * hidden_size * 3  # input + output + intermediate
+                + num_tokens * intermediate_size * 3  # intermediate
+                + hidden_size * intermediate_size * 3  # weights for up + down projections
+            )
+            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+
+        def get_empirical(
+            num_tokens: int,
+            hidden_size: int,
+            intermediate_size: int,
+            quant_mode: common.MoEQuantMode,
+        ) -> float:
+            """
+            Get the hybrid time
+            """
+            latency = get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)[0]
+            scale_factor = 0.7
+            return latency / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)[0]
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(num_tokens, hidden_size, intermediate_size, quant_mode)
+        else:
+            try:
+                # Query the actual performance data
+                if is_context:
+                    mlp_data = self._wideep_context_mlp_data
+                else:
+                    mlp_data = self._wideep_generation_mlp_data
+
+                mlp_dict = mlp_data[quant_mode][hidden_size][intermediate_size]
+                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mlp_dict.keys()), inner_only=False)
+                lat = self._interp_1d([num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens)
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query wideep mlp data for {num_tokens=}, {hidden_size=}, "
+                        f"{intermediate_size=}, {quant_mode=}, using empirical mode"
+                    )
+                    lat = get_empirical(num_tokens, hidden_size, intermediate_size, quant_mode)
+                else:
+                    logger.exception(
+                        f"Failed to query wideep mlp data for {num_tokens=}, {hidden_size=}, \
+                        {intermediate_size=}, {quant_mode=}, {database_mode=}"
+                    )
+                    raise
+            return lat
+
+    @functools.lru_cache(maxsize=32768)
+    def query_wideep_deepep_ll(
+        self,
+        node_num: int,
+        num_tokens: int,
+        num_experts: int,
+        topk: int,
+        hidden_size: int,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> float:
+        """
+        Query the DeepEP LL operation data
+        """
+
+        def get_sol(num_tokens: int, topk: int, num_experts: int) -> tuple[float, float, float]:
+            raise NotImplementedError("WideEP deepep ll operation's sol is not implemented yet")
+            return
+
+        def get_empirical(num_tokens: int, topk: int, num_experts: int) -> float:
+            raise NotImplementedError("WideEP deepep ll operation's empirical is not implemented yet")
+            return
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            return get_sol(num_tokens, topk, num_experts)[0]
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(num_tokens, topk, num_experts)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(num_tokens, topk, num_experts)
+        else:
+            data = self._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
+            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
+            lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+            return lat / 1000.0
+
+    @functools.lru_cache(maxsize=32768)
+    def query_wideep_deepep_normal(
+        self,
+        node_num: int,
+        num_tokens: int,
+        num_experts: int,
+        topk: int,
+        hidden_size: int,
+        sms: int,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> float:
+        """
+        Query the DeepEP normal operation data
+        """
+
+        def get_sol(num_tokens: int, num_experts: int, topk: int, hidden_size: int) -> tuple[float, float, float]:
+            raise NotImplementedError("WideEP deepep normal operation's sol is not implemented yet")
+            return
+
+        def get_empirical(num_tokens: int, num_experts: int, topk: int, hidden_size: int) -> float:
+            raise NotImplementedError("WideEP deepep normal operation's empirical is not implemented yet")
+            return
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            return get_sol(num_tokens, num_experts, topk, hidden_size)[0]
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(num_tokens, num_experts, topk, hidden_size)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return get_empirical(num_tokens, num_experts, topk, hidden_size)
+        else:
+            if node_num == 1 and sms == 20:  # only collect sm=20 for now
+                data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
+                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
+                lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+            else:
+                data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
+                lat = self._interp_2d_linear(sms, num_tokens, data)
+            return lat / 1000.0
 
     def _correct_data(self) -> None:
         """
@@ -2805,7 +3384,7 @@ class PerfDatabase:
                 for m in self._gemm_data[quant_mode]:
                     for n in self._gemm_data[quant_mode][m]:
                         for k in self._gemm_data[quant_mode][m][n]:
-                            sol = self.query_gemm(m, n, k, quant_mode, sol_mode=common.SOLMode.SOL)
+                            sol = self.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
                             if sol > self._gemm_data[quant_mode][m][n][k]:
                                 logger.debug(
                                     f"gemm quant {quant_mode} m{m} n{n} k{k}: sol {sol} > "
@@ -2834,7 +3413,7 @@ class PerfDatabase:
                                             n,
                                             n_kv_local,
                                             quant_mode,
-                                            sol_mode=common.SOLMode.SOL,
+                                            database_mode=common.DatabaseMode.SOL,
                                             window_size=window_size,
                                             head_size=head_size,
                                         )
@@ -2852,120 +3431,6 @@ class PerfDatabase:
                                             self._generation_attention_data[quant_mode][n_kv][head_size][window_size][
                                                 n
                                             ][b][s] = sol
-
-    @functools.lru_cache(maxsize=32768)
-    def query_wideep_mlp(
-        self,
-        num_tokens: int,
-        hidden_size: int,
-        intermediate_size: int,
-        quant_mode: common.MoEQuantMode,
-        is_context: bool = True,
-        sol_mode: Optional[common.SOLMode] = None,
-    ) -> float:
-        """
-        Query the SGLang MLP data for DeepSeek shared expert operations
-        """
-
-        def get_sol(
-            num_tokens: int,
-            hidden_size: int,
-            intermediate_size: int,
-            quant_mode: common.MoEQuantMode,
-        ) -> tuple[float, float, float]:
-            ops = 2 * num_tokens * hidden_size * intermediate_size * 3
-            mem_bytes = quant_mode.value.memory * (
-                num_tokens * hidden_size * 3  # input + output + intermediate
-                + num_tokens * intermediate_size * 3  # intermediate
-                + hidden_size * intermediate_size * 3  # weights for up + down projections
-            )
-            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
-            return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)
-        else:
-            # Query the actual performance data
-            if is_context:
-                mlp_data = self._wideep_context_mlp_data
-            else:
-                mlp_data = self._wideep_generation_mlp_data
-
-            mlp_dict = mlp_data[quant_mode][hidden_size][intermediate_size]
-            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mlp_dict.keys()), inner_only=False)
-            lat = self._interp_1d([num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens)
-            return lat
-
-    @functools.lru_cache(maxsize=32768)
-    def query_wideep_deepep_ll(
-        self,
-        node_num: int,
-        num_tokens: int,
-        num_experts: int,
-        topk: int,
-        hidden_size: int,
-        sol_mode: common.SOLMode | None = None,
-    ) -> float:
-        """
-        Query the DeepEP LL operation data
-        """
-
-        def get_sol(num_tokens: int, topk: int, num_experts: int) -> tuple[float, float, float]:
-            raise NotImplementedError("WideEP deepep ll operation's sol is not implemented yet")
-            return
-
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
-            return get_sol(num_tokens, topk, num_experts)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(num_tokens, topk, num_experts)
-        else:
-            data = self._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
-            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-            lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
-            return lat / 1000.0
-
-    @functools.lru_cache(maxsize=32768)
-    def query_wideep_deepep_normal(
-        self,
-        node_num: int,
-        num_tokens: int,
-        num_experts: int,
-        topk: int,
-        hidden_size: int,
-        sms: int,
-        sol_mode: common.SOLMode | None = None,
-    ) -> float:
-        """
-        Query the DeepEP normal operation data
-        """
-
-        def get_sol(num_tokens: int, num_experts: int, topk: int, hidden_size: int) -> tuple[float, float, float]:
-            raise NotImplementedError("WideEP deepep normal operation's sol is not implemented yet")
-            return
-
-        if sol_mode is None:
-            sol_mode = self._default_sol_mode
-        if sol_mode == common.SOLMode.SOL:
-            return get_sol(num_tokens, num_experts, topk, hidden_size)[0]
-        elif sol_mode == common.SOLMode.SOL_FULL:
-            return get_sol(num_tokens, num_experts, topk, hidden_size)
-        else:
-            if node_num == 1 and sms == 20:  # only collect sm=20 for now
-                data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
-                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-                lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
-            else:
-                data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
-                lat = self._interp_2d_linear(sms, num_tokens, data)
-            return lat / 1000.0
 
 
 if __name__ == "__main__":

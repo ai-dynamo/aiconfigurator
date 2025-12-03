@@ -51,6 +51,17 @@ def create_system_config(app_config, gpu_config=False):
                 value=default_version,
                 interactive=True,
             )
+            database_mode = gr.Dropdown(
+                choices=[
+                    common.DatabaseMode.SILICON.name,
+                    common.DatabaseMode.HYBRID.name,
+                    common.DatabaseMode.EMPIRICAL.name,
+                    common.DatabaseMode.SOL.name,
+                ],
+                label="Database Mode",
+                value=common.DatabaseMode.SILICON.name,
+                interactive=True,
+            )
         if gpu_config:
             with gr.Row():
                 gpu_config_components = {
@@ -75,13 +86,12 @@ def create_system_config(app_config, gpu_config=False):
                 }
         else:
             gpu_config_components = {}
-        sol_mode = gr.Checkbox(label="SOL Mode", value=False, interactive=True, visible=app_config["experimental"])
 
     return {
         "system": system,
         "backend": backend,
         "version": version,
-        "sol_mode": sol_mode,
+        "database_mode": database_mode,
         **gpu_config_components,
     }
 
