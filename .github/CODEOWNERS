@@ -21,6 +21,7 @@
 /src/aiconfigurator/sdk/perf_database.py @Arsene12358 @YijiaZhao @ilyasher @xutizhou @AichenF @tianhaox @jasonqinzhou
 /src/aiconfigurator/sdk/task.py @tianhaox @jasonqinzhou @ilyasher @Arsene12358
 /src/aiconfigurator/sdk/utils.py @tianhaox @jasonqinzhou @simone-chen @Arsene12358
+/src/aiconfigurator/sdk/suppport_matrix.py @Harrilee
 
 # cli
 /src/aiconfigurator/cli @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
@@ -29,7 +30,8 @@
 /src/aiconfigurator/eval @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
 
 # webapp
-/src/aiconfigurator/webapp @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/webapp @tianhaox @jasonqinzhou @Arsene12358 @Harrilee
+/src/aiconfigurator/webapp/components/profiling @Harrilee
 
 # systems & data files
 /src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen @Arsene12358
@@ -71,18 +73,19 @@
 /tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358
 /tools/sanity_check @tianhaox @YijiaZhao @jasonqinzhou @Arsene12358
 /tools/simple_sdk_demo @tianhaox @jasonqinzhou @Arsene12358
+/tools/support_matrix/generate_support_matrix.py @Harrilee
 
 # misc
-/ATTRIBUTIONS.md @saturley-hall
-/CODE_OF_CONDUCT.md @saturley-hall
-/CONTRIBUTING.md @saturley-hall
-/DEVELOPMENT.md @saturley-hall @anish-shanbhag
-/LICENSE @saturley-hall
-/pyproject.toml @tianhaox @jasonqinzhou @saturley-hall @Arsene12358
-/pytest.ini @saturley-hall
+/ATTRIBUTIONS.md @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
+/CODE_OF_CONDUCT.md @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
+/CONTRIBUTING.md @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
+/DEVELOPMENT.md @saturley-hall @anish-shanbhag @tianhaox @jasonqinzhou @Arsene12358
+/LICENSE @saturley-hall 
+/pyproject.toml @tianhaox @jasonqinzhou @saturley-hall @Arsene12358 @tianhaox @jasonqinzhou @Arsene12358
+/pytest.ini @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
 /README.md @tianhaox @jasonqinzhou @Arsene12358
 /SECURITY.md @saturley-hall
-/.pre-commit-config.yaml @saturley-hall
+/.pre-commit-config.yaml @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
 
 # CI/CD and workflows
-/.github/workflows @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
+/.github/workflows @saturley-hall @tianhaox @jasonqinzhou @Arsene12358 @Harrilee

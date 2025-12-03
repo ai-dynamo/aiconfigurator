@@ -26,7 +26,9 @@ def create_static_tab(app_config):
             )
 
         model_name_components = create_model_name_config(app_config)
-        runtime_config_components = create_runtime_config(app_config)
+        runtime_config_components = create_runtime_config(
+            app_config, tip_text="More inputs = more precise profiling results.", ttft_optional=True, itl_optional=True
+        )
         model_misc_config_components = create_model_misc_config(app_config)
         model_system_components = create_system_config(app_config)
         model_quant_components = create_model_quant_config(app_config)
@@ -50,7 +52,7 @@ def create_static_tab(app_config):
                 label="Generation Breakdown",
             )
         record_df = gr.Dataframe(label="Records:", headers=ColumnsStatic, interactive=False)
-        debugging_box = gr.Textbox(label="Debugging", lines=5)
+        debugging_box = gr.Textbox(label="Debugging", lines=5, required=False)
         with gr.Row():
             clear_btn = gr.Button("Clear")
             download_btn = gr.Button("Download")

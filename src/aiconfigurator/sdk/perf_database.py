@@ -349,7 +349,7 @@ def load_moe_data(moe_file):
     """
     if not os.path.exists(moe_file):
         logger.warning(f"MOE data file {moe_file} not found.")
-        return None
+        return None, None
 
     moe_default_data = defaultdict(
         lambda: defaultdict(
@@ -1155,8 +1155,8 @@ class PerfDatabase:
                 os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
             )
             self._nccl_data = load_nccl_data(nccl_data_dir)
+            self._moe_data, _ = load_moe_data(os.path.join(data_dir, common.PerfDataFilename.moe.value))
             self._mla_bmm_data = None
-            self._moe_data, self._moe_low_latency_data = None, None
             self._context_mla_data = None
             self._generation_mla_data = None
         else:  # TRTLLM
@@ -2165,6 +2165,7 @@ class PerfDatabase:
 
         if sol_mode is None:
             sol_mode = self._default_sol_mode
+
         if sol_mode == common.SOLMode.SOL:
             return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
@@ -2212,6 +2213,7 @@ class PerfDatabase:
 
         if sol_mode is None:
             sol_mode = self._default_sol_mode
+
         if sol_mode == common.SOLMode.SOL:
             return get_sol(b, s, num_heads, kvcache_quant_mode)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:
@@ -2690,6 +2692,13 @@ class PerfDatabase:
                 num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
                 lat = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
                 return lat
+            elif self.backend == common.BackendName.vllm.value:
+                moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][
+                    inter_size
+                ][moe_tp_size][moe_ep_size]
+                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(moe_dict.keys()), inner_only=False)
+                latency = self._interp_1d([num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens)
+                return latency
             else:
                 raise NotImplementedError(f"backend {self.backend} not supported for moe")
 
@@ -2721,6 +2730,7 @@ class PerfDatabase:
 
         if sol_mode is None:
             sol_mode = self._default_sol_mode
+
         if sol_mode == common.SOLMode.SOL:
             return get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
         elif sol_mode == common.SOLMode.SOL_FULL:

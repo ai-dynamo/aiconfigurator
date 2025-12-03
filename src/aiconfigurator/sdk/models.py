@@ -580,7 +580,11 @@ class MOEModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
 
         if self.model_name in ["GPT_OSS_120B", "GPT_OSS_20B"]:
             attn_scale_factor = 2
@@ -715,35 +719,6 @@ class MOEModel(BaseModel):
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
                     head_size=self._head_size,
-                ),
-                ops.GEMM(
-                    "generation_proj_gemm",
-                    self._num_layers,
-                    h,
-                    self._num_heads * self._head_size // tp_size,
-                    gemm_quant_mode,
-                ),
-                ops.ElementWise("generation_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
-            ]
-        )
-
-        self.generation_ops.extend(
-            [
-                ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("generation_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.GEMM(
-                    "generation_qkv_gemm",
-                    self._num_layers,
-                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GenerationAttention(
-                    "generation_attention",
-                    self._num_layers,
-                    self._num_heads // tp_size,
-                    num_kv_heads_per_gpu,
-                    kvcache_quant_mode,
                 ),
                 ops.GEMM(
                     "generation_proj_gemm",
@@ -896,7 +871,11 @@ class DeepSeekModel(BaseModel):
 
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
 
         self.context_ops.extend(
             [
@@ -1268,7 +1247,11 @@ class WideEPDeepSeekModel(BaseModel):
         attn_backend = self.config.attention_backend
 
         self._power_law_alpha = 1.01
-        workload_distribution = self.config.workload_distribution + f"_{self._power_law_alpha}"
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
 
         sms = self.config.sms
 
