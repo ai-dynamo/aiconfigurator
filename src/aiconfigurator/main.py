@@ -11,6 +11,7 @@ from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.eval.main import configure_parser as configure_eval_parser
 from aiconfigurator.eval.main import main as eval_main
+from aiconfigurator.generator.api import generator_cli_helper
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ else:
 
 
 def _run_cli(extra_args: list[str]) -> None:
+    if generator_cli_helper(extra_args):
+        return
     cli_parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for disaggregated serving deployment.")
     configure_cli_parser(cli_parser)
     cli_args = cli_parser.parse_args(extra_args)

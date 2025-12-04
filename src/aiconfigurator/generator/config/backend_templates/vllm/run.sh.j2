@@ -1,0 +1,45 @@
+#!/bin/bash
+set -e
+trap 'echo "Cleaning up..."; kill 0 2>/dev/null || true' EXIT INT TERM
+
+export MODEL=${MODEL:-"{{ service.model_path }}"}
+python3 -m dynamo.frontend --http-port "{{ service.port }}" &
+
+{% if k8s.mode == 'agg' %}
+python3 -m dynamo.vllm \
+  --model "$MODEL" \
+  {{ agg_cli_args }} &
+wait
+{% else %}
+{% if prefill_workers|int > 0 %}
+PREFILL_GPU={{ prefill_gpu }}
+PREFILL_WORKERS={{ prefill_workers }}
+PREFILL_EVENT_PORT={{ service.dyn_vllm_kv_event_port }}
+PREFILL_SIDE_CHANNEL_PORT={{ service.vllm_nixl_side_channel_port }}
+for ((w=0; w<PREFILL_WORKERS; w++)); do
+  BASE=$(( w * PREFILL_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+PREFILL_GPU-1)))
+  DYN_VLLM_KV_EVENT_PORT=$PREFILL_EVENT_PORT \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
+  CUDA_VISIBLE_DEVICES=$GPU_LIST \
+    python3 -m dynamo.vllm \
+      --model "$MODEL" \
+      {{ prefill_cli_args }} --is-prefill-worker &
+done
+{% endif %}
+
+{% if decode_workers|int > 0 %}
+DECODE_GPU={{ decode_gpu }}
+DECODE_WORKERS={{ decode_workers }}
+DECODE_GPU_OFFSET={{ decode_gpu_offset | default(0) }}
+for ((w=0; w<DECODE_WORKERS; w++)); do
+  BASE=$(( DECODE_GPU_OFFSET + w * DECODE_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+DECODE_GPU-1)))
+  CUDA_VISIBLE_DEVICES=$GPU_LIST \
+    python3 -m dynamo.vllm \
+      --model "$MODEL" \
+      {{ decode_cli_args }} --is-decode-worker &
+done
+{% endif %}
+wait
+{% endif %}

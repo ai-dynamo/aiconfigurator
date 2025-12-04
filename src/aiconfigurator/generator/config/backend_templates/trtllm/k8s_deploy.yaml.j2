@@ -1,0 +1,214 @@
+{%- set router_mode = k8s.router_mode | default('') -%}
+{%- set enable_router = k8s.enable_router | default(router_mode == 'kv') -%}
+{%- set is_kv = enable_router -%}
+{%- set k8s_engine_mode = k8s.k8s_engine_mode -%}
+{%- set use_engine_cm = (k8s_engine_mode == 'configmap') -%}
+{%- set model_cache_input = k8s.k8s_model_cache | default('', true) | trim -%}
+{%- set k8s_use_model_cache = (model_cache_input != '') -%}
+{%- set k8s_model_cache_pvc = (model_cache_input if k8s_use_model_cache else 'model-cache') -%}
+{%- set k8s_model_cache_mount = '/workspace/model_cache' -%}
+{%- set runtime_working_dir = working_dir or '/workspace/' -%}
+{%- set engine_cm_name = 'engine-configs' -%}
+{%- set engine_mount_path = '/workspace/engine_configs' -%}
+
+{%- macro render_volumes() -%}
+volumes:
+  {% if k8s_use_model_cache %}
+  - name: model-cache
+    persistentVolumeClaim:
+      claimName: {{ k8s_model_cache_pvc }}
+  {% endif %}
+  {% if use_engine_cm %}
+  - name: engine-configs
+    configMap:
+      name: {{ engine_cm_name }}
+  {% else %}
+  - name: engine-configs
+    emptyDir: {}
+  {% endif %}
+  - name: tmp
+    emptyDir:
+      medium: Memory
+      sizeLimit: 10Gi
+{%- endmacro %}
+
+{%- macro render_volume_mounts() -%}
+volumeMounts:
+  {% if k8s_use_model_cache %}
+  - name: model-cache
+    mountPath: {{ k8s_model_cache_mount }}
+  {% endif %}
+  - name: engine-configs
+    mountPath: {{ engine_mount_path }}
+    {% if use_engine_cm %}readOnly: true{% endif %}
+  - name: tmp
+    mountPath: /tmp
+{%- endmacro %}
+
+{%- macro render_probes() -%}
+startupProbe:
+  httpGet:
+    path: /health
+    port: 9090
+  initialDelaySeconds: 120
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 40
+livenessProbe:
+  httpGet:
+    path: /live
+    port: 9090
+  initialDelaySeconds: 300
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 10
+readinessProbe:
+  httpGet:
+    path: /live
+    port: 9090
+  initialDelaySeconds: 300
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 10
+{%- endmacro %}
+
+{%- macro render_worker(component_name, sub_component_type, replicas, gpu, engine_path, inline_payload, disagg_mode=None, publish_metrics=False) -%}
+{{ "    " ~ component_name ~ ":" }}
+      dynamoNamespace: {{ name }}
+      envFromSecret: hf-token-secret
+      componentType: worker
+      {% if sub_component_type %}
+      subComponentType: {{ sub_component_type }}
+      {% endif %}
+      replicas: {{ replicas }}
+      resources:
+        limits:
+          gpu: "{{ gpu }}"
+      extraPodSpec:
+{{ render_volumes() | indent(8, True) }}
+        {% if k8s.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ k8s.k8s_image }}
+          workingDir: {{ runtime_working_dir }}
+          imagePullPolicy: IfNotPresent
+{{ render_volume_mounts() | indent(10, True) }}
+          command: ["/bin/bash","-c"]
+          args:
+            - |
+              set -euo pipefail
+              {% if not use_engine_cm %}
+              mkdir -p {{ engine_mount_path }}
+              cat > {{ engine_path }} <<'YAML'
+{{ (inline_payload | default('', true) | trim | indent(14, true)) }}
+              YAML
+              {% endif %}
+              args=(
+                --model-path "{{ service.model_path }}"
+                --served-model-name "{{ service.served_model_name }}"
+                --extra-engine-args "{{ engine_path }}"
+              )
+              {% if disagg_mode %}
+              args+=(--disaggregation-mode {{ disagg_mode }})
+              {% endif %}
+              {% if publish_metrics %}
+              args+=(--publish-events-and-metrics)
+              {% endif %}
+              exec python3 -m dynamo.trtllm "${args[@]}"
+{{ render_probes() | indent(10, True) }}
+{%- endmacro %}
+
+{% if use_engine_cm %}
+{%- set agg_engine_key = agg_engine_args.split('/')[-1] -%}
+{%- set prefill_engine_key = prefill_engine_args.split('/')[-1] -%}
+{%- set decode_engine_key = decode_engine_args.split('/')[-1] -%}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ engine_cm_name }}
+data:
+  {% if k8s.mode == 'agg' %}
+  {{ agg_engine_key }}: |
+{{ (agg_engine_args_inline | default('', true) | trim | indent(4, true)) }}
+  {% else %}
+  {{ prefill_engine_key }}: |
+{{ (prefill_engine_args_inline | default('', true) | trim | indent(4, true)) }}
+  {{ decode_engine_key }}: |
+{{ (decode_engine_args_inline | default('', true) | trim | indent(4, true)) }}
+  {% endif %}
+---
+{% endif %}
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ name }}
+  namespace: {{ k8s.k8s_namespace }}
+spec:
+  services:
+    Frontend:
+      dynamoNamespace: {{ name }}
+      componentType: frontend
+      replicas: {{ frontend_replicas }}
+      extraPodSpec:
+        {% if k8s_use_model_cache %}
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: {{ k8s_model_cache_pvc }}
+        {% endif %}
+        {% if k8s.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ k8s.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ k8s.k8s_image }}
+          imagePullPolicy: IfNotPresent
+          {% if k8s_use_model_cache %}
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ k8s_model_cache_mount }}
+          {% endif %}
+      {% if is_kv %}
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
+      {% endif %}
+
+    {% if k8s.mode == 'agg' %}
+{{ render_worker(
+    "TRTLLMWorker",
+    None,
+    agg_workers,
+    agg_gpu,
+    agg_engine_args,
+    agg_engine_args_inline,
+    None,
+    is_kv
+) }}
+    {% else %}
+{{ render_worker(
+    "TRTLLMPrefillWorker",
+    "prefill",
+    prefill_workers,
+    prefill_gpu,
+    prefill_engine_args,
+    prefill_engine_args_inline,
+    "prefill",
+    is_kv
+) }}
+{{ render_worker(
+    "TRTLLMDecodeWorker",
+    "decode",
+    decode_workers,
+    decode_gpu,
+    decode_engine_args,
+    decode_engine_args_inline,
+    "decode",
+    is_kv
+) }}
+    {% endif %}
+{{ '\n' }}
+

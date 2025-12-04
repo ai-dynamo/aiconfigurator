@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import os
+import sys
 import time
 from typing import Any
 
@@ -14,7 +15,7 @@ import yaml
 
 from aiconfigurator import __version__
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
-from aiconfigurator.generator.cli_args import add_config_generation_cli
+from aiconfigurator.generator.api import add_generator_override_arguments, generator_cli_helper
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_request_latency_constraint,
@@ -31,7 +32,7 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")
     common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
-    add_config_generation_cli(common_parser, default_backend=common.BackendName.trtllm.value)
+    add_generator_override_arguments(common_parser)
     return common_parser
 
 
@@ -452,6 +453,8 @@ def main(args):
 
 
 if __name__ == "__main__":
+    if generator_cli_helper(sys.argv[1:]):
+        sys.exit(0)
     parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for Disaggregated Serving Deployment")
     configure_parser(parser)
     args = parser.parse_args()

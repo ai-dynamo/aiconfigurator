@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+parameters:
+# Parallelism
+- param_key: tensor_parallel_size
+  vllm: tensor-parallel-size
+  sglang: tensor-parallel-size
+  trtllm: tensor_parallel_size
+
+- param_key: pipeline_parallel_size
+  vllm: pipeline-parallel-size
+  sglang: pipeline-parallel-size
+  trtllm: pipeline_parallel_size
+
+- param_key: enable_attention_dp
+  vllm: null
+  sglang: enable-dp-attention
+  trtllm: enable_attention_dp
+
+- param_key: data_parallel_size
+  vllm: data-parallel-size
+  sglang: data-parallel-size
+  trtllm: null
+
+- param_key: enable_expert_parallel
+  vllm: enable-expert-parallel
+  sglang: null
+  trtllm: null
+
+- param_key: moe_expert_parallel_size
+  vllm: null
+  sglang: expert-parallel-size
+  trtllm: moe_expert_parallel_size
+
+- param_key: moe_tensor_parallel_size
+  vllm: null
+  sglang: moe-dense-tp-size
+  trtllm: moe_tensor_parallel_size
+
+# KV Cache
+- param_key: kv_cache_dtype
+  vllm: kv-cache-dtype
+  sglang: kv-cache-dtype
+  trtllm: kv_cache_config.dtype
+
+- param_key: kv_cache_free_gpu_memory_fraction
+  vllm: gpu-memory-utilization
+  sglang: mem-fraction-static
+  trtllm: kv_cache_config.free_gpu_memory_fraction
+
+- param_key: kv_cache_max_tokens
+  vllm: null
+  sglang: max-total-tokens
+  trtllm: kv_cache_config.max_tokens
+
+- param_key: tokens_per_block
+  vllm: block-size
+  sglang: page-size
+  trtllm: kv_cache_config.tokens_per_block
+
+- param_key: disable_prefix_cache
+  vllm: no-enable-prefix-caching
+  sglang: disable-radix-cache
+  trtllm: 
+    key: kv_cache_config.enable_block_reuse
+    value: "not disable_prefix_cache"
+
+# Cuda Graph
+- param_key: disable_cuda_graph
+  vllm: enforce-eager
+  sglang: disable-cuda-graph
+  trtllm: null
+
+- param_key: cuda_graph_batch_sizes
+  vllm: cudagraph-capture-sizes
+  sglang: cuda-graph-bs
+  trtllm: cuda_graph_config.batch_sizes
+
+- param_key: cuda_graph_enable_padding
+  vllm: null
+  sglang:
+    key: disable-cuda-graph-padding
+    value: "not cuda_graph_enable_padding"
+  trtllm:
+    key: cuda_graph_config.enable_padding
+    value: "cuda_graph_enable_padding"
+
+- param_key: cuda_graph_max_batch_size
+  vllm: null
+  sglang: cuda-graph-max-bs
+  trtllm: cuda_graph_config.max_batch_size
+
+# lengths
+- param_key: max_batch_size
+  vllm: max-num-seqs
+  sglang: max-running-requests
+  trtllm: build_config.max_batch_size
+
+- param_key: enable_chunked_prefill
+  vllm: enable-chunked-prefill
+  sglang: 
+    key: chunked-prefill-size
+    value: "max_num_tokens if max_num_tokens else -1"
+  trtllm: enable_chunked_prefill
+
+- param_key: max_prefill_tokens
+  vllm: null
+  sglang: max-prefill-tokens
+  trtllm: null
+
+- param_key: max_num_tokens
+  vllm: max-num-batched-tokens
+  sglang: null
+  trtllm: build_config.max_num_tokens
+
+- param_key: max_seq_len
+  vllm: max-model-len
+  sglang: context-length
+  trtllm: build_config.max_seq_len
+
+# backend
+- param_key: moe_backend
+  vllm: null
+  sglang: moe-runner-backend
+  trtllm: moe_config.backend
+
+- param_key: moe_all2all_backend
+  vllm: all2all-backend
+  sglang: moe-a2a-backend
+  trtllm: null
+
+- param_key: kv_transfer_backend
+  vllm: null
+  sglang: disaggregation-transfer-backend
+  trtllm: cache_transceiver_config.backend
+
+- param_key: disaggregation_bootstrap_port
+  vllm: null
+  sglang:
+    key: disaggregation-bootstrap-port
+    value: disaggregation_bootstrap_port
+    default: 12345
+  trtllm: null
+
+- param_key: attention_backend
+  vllm: null
+  sglang: attention-backend
+  trtllm: attn_backend
+
+- param_key: elastic_ep_backend
+  vllm: null
+  sglang: elastic-ep-backend
+  trtllm: null
+
+# speculative decoding
+- param_key: speculative_decoding_type
+  vllm: speculative-config
+  sglang: speculative-algorithm
+  trtllm: speculative_config.decoding_type
+
+# Others
+- param_key: disable_overlap_scheduler
+  vllm: null
+  sglang: disable-overlap-schedule
+  trtllm: disable_overlap_scheduler
+
+- param_key: moe_load_balancer
+  vllm: null
+  sglang: load-balance-method
+  trtllm: moe_config.load_balancer
+
+- param_key: skip_tokenizer_init
+  vllm: skip-tokenizer-init
+  sglang:
+    key: skip-tokenizer-init
+    value: "skip_tokenizer_init"
+    default: "true"
+  trtllm: skip_tokenizer_init
+
+- param_key: trust_remote_code
+  vllm: trust-remote-code
+  sglang:
+    key: trust-remote-code
+    value: "trust_remote_code"
+    default: "true"
+  trtllm: trust_remote_code

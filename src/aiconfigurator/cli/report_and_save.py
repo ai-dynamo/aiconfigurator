@@ -12,11 +12,14 @@ import pandas as pd
 import yaml
 from prettytable import PrettyTable
 
-from aiconfigurator.generator.api import generate_backend_config
-from aiconfigurator.generator.cli_args import build_dynamo_config
+from aiconfigurator.generator.api import (
+    generate_backend_artifacts,
+    load_generator_overrides_from_args,
+)
+from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 from aiconfigurator.sdk import pareto_analysis
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
-from aiconfigurator.sdk.task import TaskConfig, task_config_to_generator_config
+from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.utils import safe_mkdir
 
 logger = logging.getLogger(__name__)
@@ -345,6 +348,7 @@ def save_results(
     logger.info(f"Saving results to {result_dir_path}")
     try:
         safe_result_dir = safe_mkdir(result_dir_path, exist_ok=True)
+        generator_overrides = load_generator_overrides_from_args(args)
 
         # Save overall pareto plots in the root directory
         fig, ax = plt.subplots(1, 1, figsize=(8, 5))
@@ -405,15 +409,45 @@ def save_results(
 
             # 3. Save the config for this experiment
             exp_task_config = task_configs[exp_name]
+            effective_generated_version = generated_backend_version or exp_task_config.backend_version
+
+            if generated_backend_version:
+                logger.warning(
+                    "\n" + "=" * 80 + "\n"
+                    "  ⚠️  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
+                    "  Experiment: %s\n"
+                    "  Using generated_config_version: %s\n"
+                    "\n"
+                    "  Config formats differ across backend releases. Please ensure you pass\n"
+                    "  the correct --generated_config_version to match your deployment target!\n" + "=" * 80,
+                    exp_name,
+                    generated_backend_version,
+                )
+            else:
+                logger.warning(
+                    "\n" + "=" * 80 + "\n"
+                    "  ⚠️  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
+                    "  Experiment: %s\n"
+                    "  --generated_config_version NOT provided\n"
+                    "  Defaulting to backend_version: %s\n"
+                    "\n"
+                    "  Config formats differ across backend releases. If you are targeting\n"
+                    "  a different version, please pass --generated_config_version explicitly!\n" + "=" * 80,
+                    exp_name,
+                    exp_task_config.backend_version,
+                )
 
             with open(os.path.join(exp_dir, "config.yaml"), "w") as f:  # for future aic repro
                 yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
 
             # 4. Save the generated config for this experiment, sub-directory for each best config
             if best_config_df is not None:
-                dynamo_overrides = build_dynamo_config(args)
                 for i, (idx, result_df) in enumerate(best_config_df.iterrows()):
-                    cfg = task_config_to_generator_config(task_config=exp_task_config, result_df=result_df)
+                    cfg = task_config_to_generator_config(
+                        task_config=exp_task_config,
+                        result_df=result_df,
+                        generator_overrides=generator_overrides,
+                    )
 
                     top_config_dir = os.path.join(exp_dir, f"top{i + 1}")
                     safe_mkdir(top_config_dir, exist_ok=True)
@@ -421,12 +455,11 @@ def save_results(
                         yaml.safe_dump(cfg, f, sort_keys=False)
 
                     try:
-                        generate_backend_config.from_runtime(
-                            cfg=cfg,
+                        generate_backend_artifacts(
+                            params=cfg,
                             backend=exp_task_config.backend_name,
-                            version=generated_backend_version or exp_task_config.backend_version,
-                            overrides=dynamo_overrides,
-                            save_dir=top_config_dir,
+                            backend_version=effective_generated_version,
+                            output_dir=top_config_dir,
                         )
                     except Exception as exc:
                         logger.warning(

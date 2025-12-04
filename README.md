@@ -217,6 +217,13 @@ results/QWEN3_32B_isl4000_osl1000_ttft1000_tpot20_904495
 └── pareto_frontier.png
 ```
 
+Use `--generator-config path/to/file.yaml` to load a YAML payload with `ServiceConfig`, `K8sConfig`, and `Workers.*` sections, or specify inline overrides with `--generator-set KEY=VALUE` (repeatable). Examples:
+
+- `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`
+- `--generator-set K8sConfig.k8s_namespace=dynamo \`
+
+Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
+
 ### All-in-one automation
 
 To further simpify the end-to-end user experience, we're now supporting automate everything in one script, starting from configuring the deployment, generating the configs, preparing docker image and container, pulling model checkpoints, deploying the service, benchmarking and summarizing. 

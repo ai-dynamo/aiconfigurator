@@ -1,0 +1,82 @@
+#!/bin/bash
+set -e
+trap 'echo "Cleaning up..."; kill 0 2>/dev/null || true' EXIT INT TERM
+
+export MODEL_PATH=${MODEL_PATH:-"{{ service.model_path }}"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"{{ service.served_model_name }}"}
+export HEAD_NODE_IP=${HEAD_NODE_IP:-"{{ service.head_node_ip }}"}
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+
+FRONTEND_SYSTEM_PORT=${FRONTEND_SYSTEM_PORT:-8080}
+AGG_SYSTEM_PORT=${AGG_SYSTEM_PORT:-8081}
+PREFILL_WORKERS={{ prefill_workers | default(0) | int }}
+DECODE_WORKERS={{ decode_workers | default(0) | int }}
+PREFILL_SYSTEM_PORT_BASE=${PREFILL_SYSTEM_PORT_BASE:-8082}
+DECODE_SYSTEM_PORT_BASE=${DECODE_SYSTEM_PORT_BASE:-$((PREFILL_SYSTEM_PORT_BASE + PREFILL_WORKERS))}
+
+{% set mode = k8s.mode %}
+{% if service.include_frontend %}
+OTEL_SERVICE_NAME=dynamo-frontend \
+python3 -m dynamo.frontend --http-port "{{ service.port }}" &
+{% endif %}
+
+{% if mode == 'agg' %}
+OTEL_SERVICE_NAME=dynamo-worker \
+DYN_SYSTEM_PORT="${AGG_SYSTEM_PORT}" \
+python3 -m dynamo.sglang \
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  {{ agg_cli_args }} \
+  --host "0.0.0.0" \
+  --enable-metrics &
+wait
+{% else %}
+{% if prefill_workers|int > 0 %}
+PREFILL_GPU={{ prefill_gpu }}
+for ((w=0; w<PREFILL_WORKERS; w++)); do
+  BASE=$(( w * PREFILL_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+PREFILL_GPU-1)))
+  WORKER_IDX=$(( w + 1 ))
+  SYSTEM_PORT=$(( PREFILL_SYSTEM_PORT_BASE + w ))
+  WORKER_NAME="dynamo-worker-prefill"
+  if (( PREFILL_WORKERS > 1 )); then
+    WORKER_NAME="${WORKER_NAME}-${WORKER_IDX}"
+  fi
+  CUDA_VISIBLE_DEVICES=$GPU_LIST \
+  OTEL_SERVICE_NAME="${WORKER_NAME}" \
+  DYN_SYSTEM_PORT="${SYSTEM_PORT}" \
+    python3 -m dynamo.sglang \
+      --model-path "$MODEL_PATH" \
+      --served-model-name "$SERVED_MODEL_NAME" \
+      {{ prefill_cli_args }} --disaggregation-mode prefill \
+      --host "0.0.0.0" \
+      --enable-metrics &
+done
+{% endif %}
+
+{% if decode_workers|int > 0 %}
+DECODE_GPU={{ decode_gpu }}
+DECODE_GPU_OFFSET={{ decode_gpu_offset | default(0) }}
+for ((w=0; w<DECODE_WORKERS; w++)); do
+  BASE=$(( DECODE_GPU_OFFSET + w * DECODE_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+DECODE_GPU-1)))
+  WORKER_IDX=$(( w + 1 ))
+  SYSTEM_PORT=$(( DECODE_SYSTEM_PORT_BASE + w ))
+  WORKER_NAME="dynamo-worker-decode"
+  if (( DECODE_WORKERS > 1 )); then
+    WORKER_NAME="${WORKER_NAME}-${WORKER_IDX}"
+  fi
+  CUDA_VISIBLE_DEVICES=$GPU_LIST \
+  OTEL_SERVICE_NAME="${WORKER_NAME}" \
+  DYN_SYSTEM_PORT="${SYSTEM_PORT}" \
+    python3 -m dynamo.sglang \
+      --model-path "$MODEL_PATH" \
+      --served-model-name "$SERVED_MODEL_NAME" \
+      {{ decode_cli_args }} --disaggregation-mode decode \
+      --host "0.0.0.0" \
+      --enable-metrics &
+done
+{% endif %}
+wait
+{% endif %}

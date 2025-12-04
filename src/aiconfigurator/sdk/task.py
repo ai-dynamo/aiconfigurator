@@ -637,56 +637,6 @@ def register_builtin_profiles() -> None:
 register_builtin_profiles()
 
 
-def task_config_to_generator_config(task_config: TaskConfig, result_df: pd.DataFrame) -> dict:
-    """Convert a task config and result dataframe to a generator config."""
-
-    def _build_worker_config_from_result_df(prefix: str, result_df: pd.Series) -> dict:
-        return {
-            "gemm_quant_mode": result_df[f"{prefix}gemm"],
-            "moe_quant_mode": result_df[f"{prefix}moe"],
-            "kvcache_quant_mode": result_df[f"{prefix}kvcache"],
-            "fmha_quant_mode": result_df[f"{prefix}fmha"],
-            "comm_quant_mode": result_df[f"{prefix}comm"],
-            "bs": result_df[f"{prefix}bs"],
-            "workers": result_df.get(f"{prefix}workers", 1),
-            "tp": result_df[f"{prefix}tp"],
-            "pp": result_df[f"{prefix}pp"],
-            "dp": result_df[f"{prefix}dp"],
-            "moe_tp": result_df[f"{prefix}moe_tp"],
-            "moe_ep": result_df[f"{prefix}moe_ep"],
-            "memory": result_df[f"{prefix}memory"],
-        }
-
-    cfg = {
-        "model_name": task_config.model_name,
-        "system_name": task_config.system_name,
-        "decode_system_name": getattr(task_config, "decode_system_name", None),
-        "total_gpus": task_config.total_gpus,
-        "serving_mode": task_config.serving_mode,
-        "nextn": task_config.config.nextn,
-        "is_moe": task_config.config.is_moe,
-        "isl": task_config.config.runtime_config.isl,
-        "osl": task_config.config.runtime_config.osl,
-        "prefix": task_config.config.runtime_config.prefix,
-    }
-
-    if task_config.serving_mode == "agg":
-        cfg["agg_worker_config"] = _build_worker_config_from_result_df("", result_df)
-    else:
-        cfg["disagg_prefill_worker_config"] = _build_worker_config_from_result_df("(p)", result_df)
-        cfg["disagg_decode_worker_config"] = _build_worker_config_from_result_df("(d)", result_df)
-
-    cfg["exp_config"] = {
-        "ttft": result_df["ttft"],
-        "tps_per_user": result_df["tokens/s/user"],
-        "tps_per_gpu": result_df["tokens/s/gpu_cluster"] or result_df["tokens/s/gpu"],
-        "concurrency_per_replica": result_df["concurrency"],
-        "num_requests_multiplier": 10,
-    }
-
-    return cfg
-
-
 class TaskConfig:
     def __init__(
         self,
