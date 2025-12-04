@@ -117,8 +117,8 @@ class SupportMatrix:
                 result = runner.run(task_config)
 
                 # Check if we got valid results
-                pareto_frontier_df = result.get("pareto_frontier_df")
-                if pareto_frontier_df is not None and not pareto_frontier_df.empty:
+                pareto_df = result.get("pareto_df")
+                if pareto_df is not None and not pareto_df.empty:
                     results[mode] = True
                     error_messages[mode] = None
                 else:  # pragma: no cover
