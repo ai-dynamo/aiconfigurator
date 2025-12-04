@@ -112,8 +112,10 @@ def generate_config_yaml(
     if not k8s_payload:
         raise ValueError("Failed to generate k8s_deploy.yaml from artifacts")
 
-    return k8s_payload if isinstance(k8s_payload, str) else yaml.dump(
-        k8s_payload, sort_keys=False, default_flow_style=False, width=4096
+    return (
+        k8s_payload
+        if isinstance(k8s_payload, str)
+        else yaml.dump(k8s_payload, sort_keys=False, default_flow_style=False, width=4096)
     )
 
 
