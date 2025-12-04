@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class Operation:
     """
     Base operation class.
-    
+
     Note: query() now returns PerformanceResult (float-like) instead of plain float.
     This maintains backward compatibility while adding power data.
     """
@@ -25,7 +25,7 @@ class Operation:
     def query(self, database: PerfDatabase, **kwargs) -> float:
         """
         Query operation latency with power data.
-        
+
         Returns:
             float: PerformanceResult (behaves like float) with latency in milliseconds
                    (scaled by scale_factor). Power data available via .power attribute.
@@ -139,7 +139,7 @@ class GEMM(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> float:
         """
         Query GEMM latency with power data.
-        
+
         Returns:
             PerformanceResult: Behaves like float (scaled latency in ms).
                               Power data accessible via .power attribute (NOT scaled).
@@ -150,11 +150,11 @@ class GEMM(Operation):
 
         # Query with power
         latency, power = database.query_gemm_with_power(x, self._n, self._k, quant_mode)
-        
+
         # Return PerformanceResult: scales latency, NOT power
         return PerformanceResult(
             latency=latency * self._scale_factor,  # Scaled
-            power=power  # NOT scaled
+            power=power,  # NOT scaled
         )
 
     def get_weights(self, **kwargs):
@@ -210,7 +210,7 @@ class MoE(Operation):
         x = kwargs.get("x") * self._attention_dp_size
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
-        
+
         latency, power = database.query_moe_with_power(
             num_tokens=x,
             hidden_size=self._hidden_size,
@@ -222,7 +222,7 @@ class MoE(Operation):
             quant_mode=quant_mode,
             workload_distribution=self._workload_distribution,
         )
-        
+
         return PerformanceResult(latency * self._scale_factor, power=power)
 
     def get_weights(self, **kwargs):
@@ -547,7 +547,7 @@ class ContextAttention(Operation):
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
-        
+
         latency, power = database.query_context_attention_with_power(
             batch_size,
             isl,
@@ -594,7 +594,7 @@ class GenerationAttention(Operation):
         assert beam_width == 1, "only support beam_width=1"
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
-        
+
         latency, power = database.query_generation_attention_with_power(
             batch_size,
             s,
@@ -636,7 +636,7 @@ class ContextMLA(Operation):
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
-        
+
         latency, power = database.query_context_mla_with_power(
             b=batch_size,
             s=isl,
@@ -676,7 +676,7 @@ class GenerationMLA(Operation):
         assert beam_width == 1, "only support beam_width=1"
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
-        
+
         latency, power = database.query_generation_mla_with_power(batch_size, s, self._num_heads, self._kv_cache_dtype)
         return PerformanceResult(latency * self._scale_factor, power=power)
 
@@ -709,7 +709,7 @@ class MLABmm(Operation):
         beam_width = kwargs.get("beam_width")
         assert beam_width == 1, "only support beam_width=1"
         batch_size = kwargs.get("batch_size")
-        
+
         latency = database.query_mla_bmm(batch_size, self._num_heads, self._quant_mode, self._if_pre)
         # TODO: Add query_mla_bmm_with_power to database
         return PerformanceResult(latency * self._scale_factor, power=0.0)
@@ -894,7 +894,7 @@ class WideEPContextMLA(Operation):
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
-        
+
         latency = database.query_wideep_context_mla(
             b=batch_size,
             s=isl,

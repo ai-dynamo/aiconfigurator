@@ -211,22 +211,27 @@ class DisaggInferenceSession:
         ttft = prefill_summary_dict["ttft"]
         tpot = decode_summary_dict["tpot"]
         decode_time = tpot * max(osl - 1, 0)
-        
+
         prefill_power = prefill_summary_dict.get("power_w", 0.0)
         decode_power = decode_summary_dict.get("power_w", 0.0)
-        
+
         # DEBUG: Log the power values we're getting
-        logger.debug(f"DISAGG Power Calc: prefill_power={prefill_power}W, decode_power={decode_power}W, ttft={ttft}ms, decode_time={decode_time}ms")
-        
+        logger.debug(
+            f"DISAGG Power Calc: prefill_power={prefill_power}W, "
+            f"decode_power={decode_power}W, ttft={ttft}ms, decode_time={decode_time}ms"
+        )
+
         # Simple time-weighted average (power values are already per-GPU)
         total_time = ttft + decode_time
-        
+
         if total_time > 0:
             disagg_power_avg = (prefill_power * ttft + decode_power * decode_time) / total_time
         else:
             disagg_power_avg = 0.0
-        
-        logger.debug(f"DISAGG Power Result: {disagg_power_avg}W (time-weighted from {prefill_power}W and {decode_power}W)")
+
+        logger.debug(
+            f"DISAGG Power Result: {disagg_power_avg}W (time-weighted from {prefill_power}W and {decode_power}W)"
+        )
 
         return {
             "model": prefill_summary_dict["model"],

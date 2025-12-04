@@ -92,7 +92,7 @@ class VLLMBackend(BaseBackend):
             ) -> tuple[float, float]:
                 """
                 Get mixed step latency and power.
-                
+
                 Returns:
                     tuple: (latency, power) where power is weighted average in watts
                 """
@@ -153,11 +153,13 @@ class VLLMBackend(BaseBackend):
                     gen_attention_power_weighted = power_dict.get("generation_attention", 0.0)
 
                 total_latency = non_attention_latency + ctx_attention_latency + gen_attention_latency
-                total_power_weighted = non_attention_power_weighted + ctx_attention_power_weighted + gen_attention_power_weighted
-                
+                total_power_weighted = (
+                    non_attention_power_weighted + ctx_attention_power_weighted + gen_attention_power_weighted
+                )
+
                 # Calculate weighted average power
                 avg_power = total_power_weighted / total_latency if total_latency > 0 else 0.0
-                
+
                 return total_latency, avg_power
 
             def _get_genonly_step_latency(
@@ -165,7 +167,7 @@ class VLLMBackend(BaseBackend):
             ) -> tuple[float, float]:
                 """
                 Get generation-only step latency and power.
-                
+
                 Returns:
                     tuple: (latency, power) where power is weighted average in watts
                 """
@@ -189,13 +191,15 @@ class VLLMBackend(BaseBackend):
 
                 # Calculate weighted average power
                 avg_power = genonly_power_weighted / genonly_step_latency if genonly_step_latency > 0 else 0.0
-                
+
                 return genonly_step_latency, avg_power
 
             mix_step_latency, mix_step_power = _get_mix_step_latency(
                 model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl, prefix
             )
-            genonly_step_latency, genonly_step_power = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
+            genonly_step_latency, genonly_step_power = _get_genonly_step_latency(
+                model, database, num_genonly_tokens, isl, osl
+            )
 
             ttft = mix_step_latency * np.ceil(isl / ctx_tokens)
             # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency
@@ -225,18 +229,18 @@ class VLLMBackend(BaseBackend):
             logger.debug(f"mix_step_latency: {mix_step_latency}, genonly_step_latency: {genonly_step_latency}")
             logger.debug(f"mix_step_power: {mix_step_power}W, genonly_step_power: {genonly_step_power}W")
             logger.debug(f"ttft: {ttft}, tpot: {tpot}, output_throughput: {output_throughput}")
-            
+
             # Calculate weighted average power for AGG mode
             # Power is weighted by the total time spent in each step type
             total_mix_time = num_mix_steps * mix_step_latency
             total_genonly_time = num_genonly_steps * genonly_step_latency
             total_time = total_mix_time + total_genonly_time
-            
+
             if total_time > 0:
                 agg_power_avg = (mix_step_power * total_mix_time + genonly_step_power * total_genonly_time) / total_time
             else:
                 agg_power_avg = 0.0
-            
+
             logger.debug(f"Aggregated power: {agg_power_avg}W")
 
             num_ctx_requests = np.ceil(ctx_tokens / isl)
