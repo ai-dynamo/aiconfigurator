@@ -11,6 +11,7 @@ This module handles:
 """
 
 import math
+import re
 
 import yaml
 
@@ -112,11 +113,16 @@ def generate_config_yaml(
     if not k8s_payload:
         raise ValueError("Failed to generate k8s_deploy.yaml from artifacts")
 
-    return (
+    result = (
         k8s_payload
         if isinstance(k8s_payload, str)
         else yaml.dump(k8s_payload, sort_keys=False, default_flow_style=False, width=4096)
     )
+
+    # Clean up repeated newlines from jinja2 template rendering for better readability
+    result = re.sub(r"\n{2,}", "\n", result).lstrip("\n")
+
+    return result
 
 
 def validate_inputs(model_name, system, backend, version):
