@@ -14,11 +14,11 @@ import math
 
 import yaml
 
-from aiconfigurator.generator import generate_backend_config
-from aiconfigurator.generator.inputs.schema import DynamoConfig
+from aiconfigurator.generator.api import generate_backend_artifacts, generate_config_from_input_dict
 
 # Constants
 DECODE_MAX_CONCURRENCY = 1024
+DEFAULT_NAME_PREFIX = "profiling"
 
 
 def generate_config_yaml(
@@ -38,77 +38,83 @@ def generate_config_yaml(
         model_name: Model name (e.g., "QWEN3_32B")
         system: System name (e.g., "h200_sxm")
         backend: Backend name (e.g., "trtllm")
-        version: Backend version (e.g., "0.20.0")
+        version: Backend template version (e.g., "0.20.0")
         isl: Input sequence length
         osl: Output sequence length
         num_gpus: Number of GPUs (becomes tp_size)
         batch_size: Batch size for the configuration
 
     Returns:
-        YAML string representation of the k8s_deploy.yaml config
-        Returns "N/A" if backend generator is not available
+        YAML string representation of the k8s_deploy.yaml config.
+        Returns "N/A" if backend generator templates are not available.
     """
-    # Build the generator config (same structure as generator_config.yaml)
-    config = {
-        "model_name": model_name,
-        "system_name": system,
-        "total_gpus": num_gpus,
-        "serving_mode": "agg",
-        "nextn": 0,
-        "is_moe": False,
-        "isl": isl,
-        "osl": osl,
-        "prefix": 0,
-        "agg_worker_config": {
-            "gemm_quant_mode": "float16",
-            "moe_quant_mode": "float16",
-            "kvcache_quant_mode": "float16",
-            "fmha_quant_mode": "float16",
-            "comm_quant_mode": "half",
-            "bs": batch_size,
-            "workers": 1,
-            "tp": num_gpus,
-            "pp": 1,
-            "dp": 1,
-            "moe_tp": 1,
-            "moe_ep": 1,
-            "memory": 0,  # Will be computed by aiconfigurator
+    tp_size = max(1, num_gpus)
+    safe_prefix = (system or DEFAULT_NAME_PREFIX).strip() or DEFAULT_NAME_PREFIX
+    name_prefix = safe_prefix.replace(" ", "-").lower()
+
+    input_params = {
+        "SlaConfig": {"isl": isl, "osl": osl},
+        "ServiceConfig": {
+            "model_path": model_name,
+            "served_model_name": model_name,
+            "model_name": model_name,
+            "include_frontend": True,
+        },
+        "ModelConfig": {
+            "is_moe": False,
+            "nextn": 0,
+            "prefix": 0,
+        },
+        "DynConfig": {
+            "mode": "agg",
+        },
+        "K8sConfig": {
+            "name_prefix": name_prefix,
+            "k8s_namespace": "dynamo",
+            "k8s_image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0",
+            "k8s_model_cache": "model-cache",
+            "k8s_engine_mode": "inline",
+        },
+        "Workers": {
+            "agg": {
+                "tensor_parallel_size": tp_size,
+                "pipeline_parallel_size": 1,
+                "data_parallel_size": 1,
+                "moe_tensor_parallel_size": 1,
+                "moe_expert_parallel_size": 1,
+                "max_batch_size": batch_size,
+                "gemm_quant_mode": "float16",
+                "moe_quant_mode": "float16",
+                "kvcache_quant_mode": "float16",
+                "fmha_quant_mode": "float16",
+                "comm_quant_mode": "half",
+            }
+        },
+        "WorkerConfig": {
+            "agg_workers": 1,
         },
     }
 
-    # Create dynamo config overrides (K8s-specific settings)
-    dynamo_overrides = DynamoConfig(
-        extras={
-            "k8s_namespace": "dynamo",
-            "k8s_image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0",
-            "k8s_model_cache": "pvc:model-cache",
-            "k8s_engine_mode": "inline",
-        }
-    )
-
     try:
-        # Generate artifacts using the backend generator
-        artifacts = generate_backend_config.from_runtime(
-            cfg=config,
+        params = generate_config_from_input_dict(input_params, backend=backend)
+        artifacts = generate_backend_artifacts(
+            params=params,
             backend=backend,
-            version=version,
-            overrides=dynamo_overrides,
-            save_dir=None,  # Don't save to disk
+            backend_version=version,
         )
-
-        # Extract the k8s_deploy.yaml from the agg mode artifacts
-        if "agg" in artifacts.by_mode and "k8s_deploy.yaml" in artifacts.by_mode["agg"]:
-            k8s_yaml_dict = artifacts.by_mode["agg"]["k8s_deploy.yaml"]
-            # Convert dict to YAML string
-            return yaml.dump(k8s_yaml_dict, sort_keys=False, default_flow_style=False, width=4096)
-        else:
-            raise ValueError("Failed to generate k8s_deploy.yaml from artifacts")
-    except ValueError as e:
-        # Handle case where backend generator is not available (e.g., vllm, sglang)
-        if "Unknown backend" in str(e):
+    except (FileNotFoundError, ValueError) as exc:
+        message = str(exc)
+        if "Unknown backend" in message or "Templates directory not found" in message:
             return "N/A"
-        else:
-            raise
+        raise
+
+    k8s_payload = artifacts.get("k8s_deploy.yaml")
+    if not k8s_payload:
+        raise ValueError("Failed to generate k8s_deploy.yaml from artifacts")
+
+    return k8s_payload if isinstance(k8s_payload, str) else yaml.dump(
+        k8s_payload, sort_keys=False, default_flow_style=False, width=4096
+    )
 
 
 def validate_inputs(model_name, system, backend, version):
