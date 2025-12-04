@@ -44,6 +44,8 @@ class InferenceSummary:
         self._memory = {}
         self._context_latency_dict = {}
         self._generation_latency_dict = {}
+        self._context_power_dict = {}
+        self._generation_power_dict = {}
         self._is_oom = None
 
         # summary dataframe
@@ -88,6 +90,22 @@ class InferenceSummary:
         Get generation latency dict.
         """
         return self._generation_latency_dict
+
+    def set_context_power_dict(self, context_power_dict: dict) -> None:
+        """Set context phase power dict."""
+        self._context_power_dict = context_power_dict
+
+    def set_generation_power_dict(self, generation_power_dict: dict) -> None:
+        """Set generation phase power dict."""
+        self._generation_power_dict = generation_power_dict
+
+    def get_context_power_dict(self) -> dict:
+        """Get context phase power dict."""
+        return self._context_power_dict
+
+    def get_generation_power_dict(self) -> dict:
+        """Get generation phase power dict."""
+        return self._generation_power_dict
 
     def check_oom(self) -> bool:
         """

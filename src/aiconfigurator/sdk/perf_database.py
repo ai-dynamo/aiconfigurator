@@ -231,7 +231,10 @@ def get_all_databases(
 # by default float16
 def load_custom_allreduce_data(custom_allreduce_file):
     """
-    Load the custom allreduce data for trtllm
+    Load the custom allreduce data for trtllm with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(custom_allreduce_file):
         logger.warning(f"Custom allreduce data file {custom_allreduce_file} not found.")
@@ -241,6 +244,11 @@ def load_custom_allreduce_data(custom_allreduce_file):
     with open(custom_allreduce_file) as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {custom_allreduce_file} - power will default to 0.0")
 
     for row in rows:
         dtype, tp_size, message_size, latency = (
@@ -254,22 +262,33 @@ def load_custom_allreduce_data(custom_allreduce_file):
         latency = float(latency)
         tp_size = int(tp_size)
         dtype = common.CommQuantMode.half  # TODO
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         try:
-            latency = custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
+            # Check for conflict
+            existing = custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size]
             logger.debug(
                 f"value conflict in custom allreduce data: {dtype} {tp_size} "
-                f"{allreduce_strategy} {message_size} {latency}"
+                f"{allreduce_strategy} {message_size}"
             )
         except KeyError:
-            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = latency
+            # NEW: Store as dict with both latency and power
+            custom_allreduce_data[dtype][tp_size][allreduce_strategy][message_size] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return custom_allreduce_data
 
 
 def load_nccl_data(nccl_file):
     """
-    Load the nccl data
+    Load the nccl data with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(nccl_file):
         logger.warning(f"NCCL data file {nccl_file} not found.")
@@ -279,6 +298,11 @@ def load_nccl_data(nccl_file):
     with open(nccl_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {nccl_file} - power will default to 0.0")
 
     for row in rows:
         dtype, num_gpus, message_size, op_name, latency = (
@@ -291,20 +315,32 @@ def load_nccl_data(nccl_file):
         message_size = int(message_size)
         latency = float(latency)
         num_gpus = int(num_gpus)
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         dtype = common.CommQuantMode[dtype]
         try:
-            latency = nccl_data[dtype][op_name][num_gpus][message_size]
-            logger.debug(f"value conflict in nccl data: {dtype} {op_name} {num_gpus} {message_size} {latency}")
+            # Check for conflict
+            existing = nccl_data[dtype][op_name][num_gpus][message_size]
+            logger.debug(f"value conflict in nccl data: {dtype} {op_name} {num_gpus} {message_size}")
         except KeyError:
-            nccl_data[dtype][op_name][num_gpus][message_size] = latency
+            # NEW: Store as dict with both latency and power
+            nccl_data[dtype][op_name][num_gpus][message_size] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return nccl_data
 
 
 def load_gemm_data(gemm_file):
     """
-    Load the gemm data
+    Load the gemm data with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+              For old database formats without power, defaults to power=0.0.
     """
     if not os.path.exists(gemm_file):
         logger.warning(f"GEMM data file {gemm_file} not found.")
@@ -314,6 +350,11 @@ def load_gemm_data(gemm_file):
     with open(gemm_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {gemm_file} - power will default to 0.0")
 
     for row in rows:
         quant_mode, m, n, k, latency = (
@@ -327,6 +368,10 @@ def load_gemm_data(gemm_file):
         n = int(n)
         k = int(k)
         latency = float(latency)
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+        # Note: power_limit is available in row.get("power_limit") if needed for validation
 
         # vllm gemm has some awq and gptq data, discard it.
         if quant_mode in ["awq", "gptq"]:
@@ -335,17 +380,26 @@ def load_gemm_data(gemm_file):
         quant_mode = common.GEMMQuantMode[quant_mode]
 
         try:
-            latency = gemm_data[quant_mode][m][n][k]
-            logger.debug(f"value conflict in gemm data: {quant_mode} {m} {n} {k} {latency}")
+            # Check for conflict
+            existing = gemm_data[quant_mode][m][n][k]
+            logger.debug(f"value conflict in gemm data: {quant_mode} {m} {n} {k}")
         except KeyError:
-            gemm_data[quant_mode][m][n][k] = latency
+            # NEW: Store as dict with both latency and power
+            gemm_data[quant_mode][m][n][k] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return gemm_data
 
 
 def load_moe_data(moe_file):
     """
-    Load the moe data
+    Load the moe data with power support (backward compatible).
+    
+    Returns:
+        tuple: (moe_default_data, moe_low_latency_data) where leaf values are dicts 
+               with 'latency' and 'power' keys. For old formats, power defaults to 0.0.
     """
     if not os.path.exists(moe_file):
         logger.warning(f"MOE data file {moe_file} not found.")
@@ -377,6 +431,11 @@ def load_moe_data(moe_file):
     with open(moe_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {moe_file} - power will default to 0.0")
 
     for row in rows:
         (
@@ -411,31 +470,42 @@ def load_moe_data(moe_file):
         moe_tp_size = int(moe_tp_size)
         moe_ep_size = int(moe_ep_size)
         latency = float(latency)
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         quant_mode = common.MoEQuantMode[quant_mode]
 
         moe_data = moe_low_latency_data if kernel_source == "moe_torch_flow_min_latency" else moe_default_data
 
         try:
-            latency = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][
+            # Check for conflict
+            existing = moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][
                 moe_tp_size
             ][moe_ep_size][num_tokens]
             logger.debug(
                 f"value conflict in moe data: {workload_distribution} {quant_mode} {topk} "
                 f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} "
-                f"{num_tokens} {latency}"
+                f"{num_tokens}"
             )
         except KeyError:
+            # NEW: Store as dict with both latency and power
             moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
                 moe_ep_size
-            ][num_tokens] = latency
+            ][num_tokens] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return moe_default_data, moe_low_latency_data
 
 
 def load_context_attention_data(context_attention_file):
     """
-    Load the context attention data
+    Load the context attention data with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(context_attention_file):
         logger.warning(f"Context attention data file {context_attention_file} not found.")
@@ -452,6 +522,11 @@ def load_context_attention_data(context_attention_file):
     with open(context_attention_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {context_attention_file} - power will default to 0.0")
 
     for row in rows:
         try:
@@ -475,6 +550,9 @@ def load_context_attention_data(context_attention_file):
         head_size = int(head_size)
         window_size = int(window_size)
         latency = float(latency)
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
         # Use kv_n = 0 to mean n_kv == n.
@@ -484,20 +562,28 @@ def load_context_attention_data(context_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
+            # Check for conflict
+            existing = context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
             logger.debug(
                 f"value conflict in context attention data: {quant_mode} {kv_cache_dtype} "
                 f"{head_size} {window_size} {kv_n} {n} {s}"
             )
         except KeyError:
-            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = latency
+            # NEW: Store as dict with both latency and power
+            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return context_attention_data
 
 
 def load_generation_attention_data(generation_attention_file):
     """
-    Load the generation attention data
+    Load the generation attention data with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(generation_attention_file):
         logger.warning(f"Generation attention data file {generation_attention_file} not found.")
@@ -510,6 +596,11 @@ def load_generation_attention_data(generation_attention_file):
     with open(generation_attention_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {generation_attention_file} - power will default to 0.0")
 
     for row in rows:
         try:
@@ -535,6 +626,9 @@ def load_generation_attention_data(generation_attention_file):
         window_size = int(window_size)
         step = int(step)
         latency = float(latency)
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
         # Use kv_n = 0 to mean n_kv == n.
@@ -544,20 +638,28 @@ def load_generation_attention_data(generation_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
+            # Check for conflict
+            existing = generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
             logger.debug(
                 f"value conflict in generation attention data: {kv_cache_dtype} {kv_n} "
                 f"{head_size} {window_size} {n} {b}"
             )
         except KeyError:
-            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = latency
+            # NEW: Store as dict with both latency and power
+            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return generation_attention_data
 
 
 def load_context_mla_data(context_mla_file):
     """
-    Load the context mla data for trtllm
+    Load the context mla data for trtllm with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(context_mla_file):
         logger.warning(f"Context mla data file {context_mla_file} not found.")
@@ -567,6 +669,11 @@ def load_context_mla_data(context_mla_file):
     with open(context_mla_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {context_mla_file} - power will default to 0.0")
 
     for row in rows:
         (
@@ -586,24 +693,35 @@ def load_context_mla_data(context_mla_file):
         b = int(b)
         s = int(s)
         latency = float(latency)
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         quant_mode = common.FMHAQuantMode[quant_mode]
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b]
+            # Check for conflict
+            existing = context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b]
             logger.debug(
-                f"value conflict in context mla data: {quant_mode} {kv_cache_dtype} {num_heads} {s} {b} {latency}"
+                f"value conflict in context mla data: {quant_mode} {kv_cache_dtype} {num_heads} {s} {b}"
             )
         except KeyError:
-            context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = latency
+            # NEW: Store as dict with both latency and power
+            context_mla_data[quant_mode][kv_cache_dtype][num_heads][s][b] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return context_mla_data
 
 
 def load_generation_mla_data(generation_mla_file):
     """
-    Load the generation mla data for trtllm
+    Load the generation mla data for trtllm with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(generation_mla_file):
         logger.warning(f"Generation mla data file {generation_mla_file} not found.")
@@ -612,6 +730,11 @@ def load_generation_mla_data(generation_mla_file):
     with open(generation_mla_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {generation_mla_file} - power will default to 0.0")
 
     for row in rows:
         quant_mode, kv_cache_dtype, b, s, step, latency = (  # noqa: F841
@@ -633,23 +756,34 @@ def load_generation_mla_data(generation_mla_file):
         s = int(s)
         step = int(step)
         latency = float(latency)
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         s = s + step
 
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = generation_mla_data[kv_cache_dtype][num_heads][b][s]
-            logger.debug(f"value conflict in generation mla data: {kv_cache_dtype} {num_heads} {b} {s} {latency} ")
+            # Check for conflict
+            existing = generation_mla_data[kv_cache_dtype][num_heads][b][s]
+            logger.debug(f"value conflict in generation mla data: {kv_cache_dtype} {num_heads} {b} {s} ")
         except KeyError:
-            generation_mla_data[kv_cache_dtype][num_heads][b][s] = latency
+            # NEW: Store as dict with both latency and power
+            generation_mla_data[kv_cache_dtype][num_heads][b][s] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return generation_mla_data
 
 
 def load_mla_bmm_data(mla_bmm_file):
     """
-    Load the mla bmm data for trtllm
+    Load the mla bmm data for trtllm with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(mla_bmm_file):
         logger.warning(f"MLA BMM data file {mla_bmm_file} not found.")
@@ -659,6 +793,11 @@ def load_mla_bmm_data(mla_bmm_file):
     with open(mla_bmm_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {mla_bmm_file} - power will default to 0.0")
 
     for row in rows:
         quant_mode, num_tokens, num_heads, latency, op_name = (
@@ -671,14 +810,22 @@ def load_mla_bmm_data(mla_bmm_file):
         num_tokens = int(num_tokens)
         num_heads = int(num_heads)
         latency = float(latency)
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         quant_mode = common.GEMMQuantMode[quant_mode]
 
         try:
-            latency = mla_bmm_data[quant_mode][op_name][num_heads][num_tokens]
-            logger.debug(f"value conflict in mla bmm data: {op_name} {quant_mode} {num_heads} {num_tokens} {latency} ")
+            # Check for conflict
+            existing = mla_bmm_data[quant_mode][op_name][num_heads][num_tokens]
+            logger.debug(f"value conflict in mla bmm data: {op_name} {quant_mode} {num_heads} {num_tokens} ")
         except KeyError:
-            mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = latency
+            # NEW: Store as dict with both latency and power
+            mla_bmm_data[quant_mode][op_name][num_heads][num_tokens] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return mla_bmm_data
 
@@ -686,6 +833,11 @@ def load_mla_bmm_data(mla_bmm_file):
 def load_wideep_mlp_data(wideep_context_mlp_file, wideep_generation_mlp_file):
     """
     Load the SGLang MLP data from context_ds_mlp_perf.txt and generation_ds_mlp_perf.txt
+    with power support (backward compatible).
+    
+    Returns:
+        tuple: (wideep_context_mlp_data, wideep_generation_mlp_data) where leaf values 
+               are dicts with 'latency' and 'power' keys.
     """
 
     if not os.path.exists(wideep_context_mlp_file) or not os.path.exists(wideep_generation_mlp_file):
@@ -699,7 +851,14 @@ def load_wideep_mlp_data(wideep_context_mlp_file, wideep_generation_mlp_file):
 
     with open(wideep_context_mlp_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        rows = list(reader)
+        
+        # Check if power columns exist (backward compatibility)
+        has_power = len(rows) > 0 and "power" in rows[0]
+        if not has_power:
+            logger.info(f"Legacy database format detected in {wideep_context_mlp_file} - power will default to 0.0")
+        
+        for row in rows:
             quant_type, num_token, hidden_size, intermediate_size, avg_ms = (
                 row["quant_type"],
                 row["num_token"],
@@ -713,19 +872,34 @@ def load_wideep_mlp_data(wideep_context_mlp_file, wideep_generation_mlp_file):
             intermediate_size = int(intermediate_size)
             avg_ms = float(avg_ms)
             quant_mode = common.MoEQuantMode[quant_type]
+            
+            # NEW: Read power with backward compatibility
+            power = float(row.get("power", 0.0))
 
             try:
-                latency = wideep_context_mlp_data[quant_mode][hidden_size][intermediate_size][num_token]
+                # Check for conflict
+                existing = wideep_context_mlp_data[quant_mode][hidden_size][intermediate_size][num_token]
                 logger.debug(
                     f"value conflict in SGLang wideep context MLP data: {quant_mode} {hidden_size} "
-                    f"{intermediate_size} {num_token} {latency}"
+                    f"{intermediate_size} {num_token}"
                 )
             except KeyError:
-                wideep_context_mlp_data[quant_mode][hidden_size][intermediate_size][num_token] = avg_ms
+                # NEW: Store as dict with both latency and power
+                wideep_context_mlp_data[quant_mode][hidden_size][intermediate_size][num_token] = {
+                    "latency": avg_ms,
+                    "power": power,
+                }
 
     with open(wideep_generation_mlp_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        rows = list(reader)
+        
+        # Check if power columns exist (backward compatibility)
+        has_power = len(rows) > 0 and "power" in rows[0]
+        if not has_power:
+            logger.info(f"Legacy database format detected in {wideep_generation_mlp_file} - power will default to 0.0")
+        
+        for row in rows:
             quant_type, num_token, hidden_size, intermediate_size, avg_ms = (
                 row["quant_type"],
                 row["num_token"],
@@ -738,22 +912,34 @@ def load_wideep_mlp_data(wideep_context_mlp_file, wideep_generation_mlp_file):
             intermediate_size = int(intermediate_size)
             avg_ms = float(avg_ms)
             quant_mode = common.MoEQuantMode[quant_type]
+            
+            # NEW: Read power with backward compatibility
+            power = float(row.get("power", 0.0))
 
             try:
-                latency = wideep_generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token]
+                # Check for conflict
+                existing = wideep_generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token]
                 logger.debug(
                     f"value conflict in SGLang wideep generation MLP data: {quant_mode} {hidden_size} "
-                    f"{intermediate_size} {num_token} {latency}"
+                    f"{intermediate_size} {num_token}"
                 )
             except KeyError:
-                wideep_generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token] = avg_ms
+                # NEW: Store as dict with both latency and power
+                wideep_generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token] = {
+                    "latency": avg_ms,
+                    "power": power,
+                }
 
     return wideep_context_mlp_data, wideep_generation_mlp_data
 
 
 def load_wideep_context_moe_data(wideep_context_moe_file):
     """
-    Load the SGLang wideep context MoE data from wideep_context_moe_perf.txt
+    Load the SGLang wideep context MoE data from wideep_context_moe_perf.txt 
+    with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_context_moe_file):
         logger.warning(f"Context MoE data file {wideep_context_moe_file} not found.")
@@ -774,7 +960,14 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
     logger.debug(f"Loading SGLang wideep context MoE data from: {wideep_context_moe_file}")
     with open(wideep_context_moe_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        rows = list(reader)
+        
+        # Check if power columns exist (backward compatibility)
+        has_power = len(rows) > 0 and "power" in rows[0]
+        if not has_power:
+            logger.info(f"Legacy database format detected in {wideep_context_moe_file} - power will default to 0.0")
+        
+        for row in rows:
             # Parse the CSV format with num_tokens instead of batch_size and input_len
             quant_mode = row["moe_dtype"]
             num_tokens = int(row["num_tokens"])
@@ -787,11 +980,17 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
             distribution = row["distribution"]
             latency = float(row["latency"])
             quant_mode = common.MoEQuantMode[quant_mode]
+            
+            # NEW: Read power with backward compatibility
+            power = float(row.get("power", 0.0))
 
-            # Store the data, overwriting any previous entry with the same key
+            # NEW: Store as dict with both latency and power
             wideep_context_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
                 moe_ep_size
-            ][num_tokens] = latency
+            ][num_tokens] = {
+                "latency": latency,
+                "power": power,
+            }
             logger.debug(
                 f"Loaded SGLang wideep context MoE data: {quant_mode}, {distribution}, {topk}, "
                 f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
@@ -804,6 +1003,10 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
 def load_wideep_generation_moe_data(wideep_generation_moe_file):
     """
     Load the SGLang wideep generation MoE data from wideep_generation_moe_perf.txt
+    with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_generation_moe_file):
         logger.warning(f"Generation MoE data file {wideep_generation_moe_file} not found.")
@@ -824,7 +1027,14 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
     logger.debug(f"Loading SGLang wideep generation MoE data from: {wideep_generation_moe_file}")
     with open(wideep_generation_moe_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        for row in reader:
+        rows = list(reader)
+        
+        # Check if power columns exist (backward compatibility)
+        has_power = len(rows) > 0 and "power" in rows[0]
+        if not has_power:
+            logger.info(f"Legacy database format detected in {wideep_generation_moe_file} - power will default to 0.0")
+        
+        for row in rows:
             # Parse the CSV format with num_tokens instead of batch_size and input_len
             quant_mode = row["moe_dtype"]
             num_tokens = int(row["num_tokens"])
@@ -837,11 +1047,17 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
             distribution = row["distribution"]
             latency = float(row["latency"])
             quant_mode = common.MoEQuantMode[quant_mode]
+            
+            # NEW: Read power with backward compatibility
+            power = float(row.get("power", 0.0))
 
-            # Store the data, overwriting any previous entry with the same key
+            # NEW: Store as dict with both latency and power
             wideep_generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][
                 moe_tp_size
-            ][moe_ep_size][num_tokens] = latency
+            ][moe_ep_size][num_tokens] = {
+                "latency": latency,
+                "power": power,
+            }
             logger.debug(
                 f"Loaded SGLang wideep generation MoE data: {quant_mode}, {distribution}, {topk}, "
                 f"{num_experts}, {hidden_size}, {inter_size}, {moe_tp_size}, "
@@ -854,6 +1070,10 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
 def load_wideep_context_mla_data(wideep_context_mla_file):
     """
     Load the SGLang wideep context mla data from wideep_context_mla_perf.txt
+    with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_context_mla_file):
         logger.warning(f"SGLang wideep context mla data file {wideep_context_mla_file} not found.")
@@ -865,6 +1085,11 @@ def load_wideep_context_mla_data(wideep_context_mla_file):
     with open(wideep_context_mla_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {wideep_context_mla_file} - power will default to 0.0")
 
     for row in rows:
         (
@@ -886,18 +1111,26 @@ def load_wideep_context_mla_data(wideep_context_mla_file):
         b = int(b)
         s = int(s)
         latency = float(latency)
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         quant_mode = common.FMHAQuantMode[quant_mode]
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
+            # Check for conflict
+            existing = wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b]
             logger.debug(
                 f"value conflict in context mla data: {kernel_source} {quant_mode} "
-                f"{kv_cache_dtype} {num_heads} {s} {b} {latency}"
+                f"{kv_cache_dtype} {num_heads} {s} {b}"
             )
         except KeyError:
-            wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b] = latency
+            # NEW: Store as dict with both latency and power
+            wideep_context_mla_data[kernel_source][quant_mode][kv_cache_dtype][num_heads][s][b] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return wideep_context_mla_data
 
@@ -905,6 +1138,10 @@ def load_wideep_context_mla_data(wideep_context_mla_file):
 def load_wideep_generation_mla_data(wideep_generation_mla_file):
     """
     Load the SGLang wideep generation mla data from wideep_generation_mla_perf.txt
+    with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_generation_mla_file):
         logger.warning(f"SGLang wideep generation mla data file {wideep_generation_mla_file} not found.")
@@ -915,6 +1152,11 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
     with open(wideep_generation_mla_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {wideep_generation_mla_file} - power will default to 0.0")
 
     for row in rows:
         kv_cache_dtype, b, s, step, latency = (
@@ -937,19 +1179,27 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
         s = int(s)
         step = int(step)
         latency = float(latency)
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         s = s + step
 
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            latency = wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s]
+            # Check for conflict
+            existing = wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s]
             logger.debug(
                 f"value conflict in generation mla data: {kernel_source} {kv_cache_dtype} "
-                f"{num_heads} {b} {s} {latency} "
+                f"{num_heads} {b} {s} "
             )
         except KeyError:
-            wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s] = latency
+            # NEW: Store as dict with both latency and power
+            wideep_generation_mla_data[kernel_source][kv_cache_dtype][num_heads][b][s] = {
+                "latency": latency,
+                "power": power,
+            }
 
     return wideep_generation_mla_data
 
@@ -957,6 +1207,10 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
 def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
     """
     Load the SGLang wideep deepep LL operation data from wideep_deepep_ll_perf.txt
+    with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_deepep_ll_file):
         logger.warning(f"SGLang wideep deepep LL operation data file {wideep_deepep_ll_file} not found.")
@@ -968,6 +1222,11 @@ def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
         reader = csv.DictReader(f)
         rows = list(reader)
 
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {wideep_deepep_ll_file} - power will default to 0.0")
+
     for row in rows:
         hidden_size = int(row["hidden_size"])
         node_num = int(row["node_num"])
@@ -977,6 +1236,9 @@ def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
         combine_avg_t_us = float(row["combine_avg_t_us"])
         dispatch_avg_t_us = float(row["dispatch_avg_t_us"])
         lat = combine_avg_t_us + dispatch_avg_t_us
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         # Store the data with key structure: [hidden_size][num_topk][num_experts][num_token]
         # -> timing data
@@ -986,7 +1248,11 @@ def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
                 f"{hidden_size} {num_topk} {num_experts} {num_token}"
             )
         else:
-            wideep_deepep_ll_data[node_num][hidden_size][num_topk][num_experts][num_token] = lat
+            # NEW: Store as dict with both latency and power
+            wideep_deepep_ll_data[node_num][hidden_size][num_topk][num_experts][num_token] = {
+                "latency": lat,
+                "power": power,
+            }
 
     return wideep_deepep_ll_data
 
@@ -994,6 +1260,10 @@ def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
 def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
     """
     Load the SGLang wideep deepep normal operation data from wideep_deepep_normal_perf.txt
+    with power support (backward compatible).
+    
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_deepep_normal_file):
         logger.warning(f"SGLang wideep deepep normal operation data file {wideep_deepep_normal_file} not found.")
@@ -1007,6 +1277,11 @@ def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
         reader = csv.DictReader(f)
         rows = list(reader)
 
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.info(f"Legacy database format detected in {wideep_deepep_normal_file} - power will default to 0.0")
+
     for row in rows:
         num_token = int(row["num_token"])
         topk = int(row["num_topk"])
@@ -1019,6 +1294,9 @@ def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
         combine_transmit_us = float(row["combine_transmit_us"])
         combine_notify_us = float(row["combine_notify_us"])
         lat = dispatch_transmit_us + dispatch_notify_us + combine_transmit_us + combine_notify_us
+        
+        # NEW: Read power with backward compatibility
+        power = float(row.get("power", 0.0))
 
         # Store the data with key structure:
         # [hidden_size][topk][num_experts][dispatch_sms][num_token] -> timing data
@@ -1027,7 +1305,11 @@ def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
                 f"value conflict in deepep normal data: {hidden_size} {topk} {num_experts} {dispatch_sms} {num_token}"
             )
         else:
-            wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms][num_token] = lat
+            # NEW: Store as dict with both latency and power
+            wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][dispatch_sms][num_token] = {
+                "latency": lat,
+                "power": power,
+            }
 
     return wideep_deepep_normal_data
 
@@ -1663,6 +1945,46 @@ class PerfDatabase:
         """
         return num_gpus > self.system_spec["node"]["num_gpus_per_node"]
 
+    def _get_value(self, data_value, metric: str = "latency"):
+        """
+        Extract a metric from a data value (handles both dict and float formats).
+        
+        Args:
+            data_value: Either a dict {"latency": float, "power": float} or a float (legacy)
+            metric: Which metric to extract ("latency" or "power")
+        
+        Returns:
+            float: The requested metric value
+        """
+        if isinstance(data_value, dict):
+            return data_value.get(metric, 0.0)
+        else:
+            # Legacy format: raw float is latency, power is 0
+            return data_value if metric == "latency" else 0.0
+    
+    def _extract_metric_data_3d(self, data: dict, metric: str) -> dict:
+        """
+        Extract a specific metric from 3D dict-based data structure.
+        
+        Converts {k1: {k2: {k3: {"latency": l, "power": p}}}}
+        to      {k1: {k2: {k3: l}}} or {k1: {k2: {k3: p}}}
+        
+        Args:
+            data: Nested 3-level dict where leaf values are dicts or floats
+            metric: Which metric to extract ("latency" or "power")
+        
+        Returns:
+            dict: Same structure but with scalar leaf values
+        """
+        result = {}
+        for k1, v1 in data.items():
+            result[k1] = {}
+            for k2, v2 in v1.items():
+                result[k1][k2] = {}
+                for k3, v3 in v2.items():
+                    result[k1][k2][k3] = self._get_value(v3, metric)
+        return result
+
     def _extrapolate_data_grid(
         self,
         data_dict: dict[int, dict[int, dict[int, float]]],
@@ -1729,11 +2051,30 @@ class PerfDatabase:
                         y_right_value = data_dict[x][y_right][z]
                         assert y_right_value is not None, "y_right_value cannot be None"
                         if sqrt_y_value:
-                            y_left_value = math.sqrt(y_left_value)
-                            y_right_value = math.sqrt(y_right_value)
+                            if isinstance(y_left_value, dict):
+                                # Handle dict format: apply sqrt to both latency and power
+                                y_left_value = {
+                                    "latency": math.sqrt(y_left_value["latency"]),
+                                    "power": math.sqrt(y_left_value["power"]) if y_left_value["power"] > 0 else 0.0
+                                }
+                                y_right_value = {
+                                    "latency": math.sqrt(y_right_value["latency"]),
+                                    "power": math.sqrt(y_right_value["power"]) if y_right_value["power"] > 0 else 0.0
+                                }
+                            else:
+                                # Handle legacy float format
+                                y_left_value = math.sqrt(y_left_value)
+                                y_right_value = math.sqrt(y_right_value)
                         value = self._interp_1d([y_left, y_right], [y_left_value, y_right_value], y)
                         if sqrt_y_value:
-                            value = value * value
+                            if isinstance(value, dict):
+                                # Square both latency and power
+                                value = {
+                                    "latency": value["latency"] * value["latency"],
+                                    "power": value["power"] * value["power"]
+                                }
+                            else:
+                                value = value * value
 
                         if y not in data_dict[x]:
                             data_dict[x][y] = {z: value}
@@ -1854,14 +2195,48 @@ class PerfDatabase:
             interpolate.griddata(np.array(points_list), np.array(values_list), (x, y), method="linear")
         )
 
-    def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str) -> float:
+    def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str) -> dict:
         """
-        Interpolate the 3d data using the given method
+        Interpolate the 3d data using the given method.
+        
+        Returns:
+            dict: {"latency": float, "power": float} - interpolated values for both metrics
         """
-        if method == "linear":
-            return self._interp_3d_linear(x, y, z, data)
+        # Check if data uses new dict format by sampling a leaf value
+        sample_value = self._get_sample_leaf_value(data)
+        
+        if isinstance(sample_value, dict):
+            # New format: interpolate latency and power separately
+            latency_data = self._extract_metric_data_3d(data, "latency")
+            power_data = self._extract_metric_data_3d(data, "power")
+            
+            if method == "linear":
+                latency = self._interp_3d_linear(x, y, z, latency_data)
+                power = self._interp_3d_linear(x, y, z, power_data)
+            else:
+                latency = self._interp_2d_1d(x, y, z, latency_data, method)
+                power = self._interp_2d_1d(x, y, z, power_data, method)
+            
+            return {"latency": latency, "power": power}
         else:
-            return self._interp_2d_1d(x, y, z, data, method)
+            # Legacy format: data values are floats
+            if method == "linear":
+                latency = self._interp_3d_linear(x, y, z, data)
+            else:
+                latency = self._interp_2d_1d(x, y, z, data, method)
+            
+            return {"latency": latency, "power": 0.0}
+    
+    def _get_sample_leaf_value(self, data: dict):
+        """Get a sample leaf value from nested dict to determine format."""
+        current = data
+        while isinstance(current, dict) and current:
+            # Check if this is a leaf dict with latency/power keys
+            if "latency" in current or "power" in current:
+                return current
+            key = next(iter(current))
+            current = current[key]
+        return current
 
     def _bilinear_interpolation(self, x_list: list[int], y_list: list[int], x: int, y: int, data: dict) -> float:
         """
@@ -1914,19 +2289,52 @@ class PerfDatabase:
 
         return self._validate(self._interp_1d([x_left, x_right], x_values, x))
 
-    def _interp_1d(self, x: list[int], y: list[int], value: int) -> float:
+    def _interp_1d(self, x: list[int], y: list, value: int):
         """
-        Interpolate the 1d data using linear interpolation
+        Interpolate the 1d data using linear interpolation.
+        Handles both float and dict values.
+        
+        Args:
+            x: list of x coordinates
+            y: list of y values (can be floats or dicts)
+            value: target x value
+        
+        Returns:
+            float or dict: Interpolated result (dict if input was dict, float otherwise)
         """
         x0, x1 = x
         y0, y1 = y
-        if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:
-            y1 = y0
-
-        if y0 == y1:
-            return y0
-
-        return y0 + (y1 - y0) / (x1 - x0) * (value - x0)
+        
+        # Check if values are dicts (new format) or floats (legacy)
+        if isinstance(y0, dict) and isinstance(y1, dict):
+            # New format: interpolate latency and power separately
+            lat0, lat1 = y0["latency"], y1["latency"]
+            pow0, pow1 = y0["power"], y1["power"]
+            
+            # Apply interpolation logic for latency
+            if (x0 - x1) * (lat0 - lat1) < 0 and (value - x0) * (value - x1) > 0:
+                lat1 = lat0
+            if lat0 == lat1:
+                lat_result = lat0
+            else:
+                lat_result = lat0 + (lat1 - lat0) / (x1 - x0) * (value - x0)
+            
+            # Apply interpolation logic for power
+            if (x0 - x1) * (pow0 - pow1) < 0 and (value - x0) * (value - x1) > 0:
+                pow1 = pow0
+            if pow0 == pow1:
+                pow_result = pow0
+            else:
+                pow_result = pow0 + (pow1 - pow0) / (x1 - x0) * (value - x0)
+            
+            return {"latency": lat_result, "power": pow_result}
+        else:
+            # Legacy format: y values are floats
+            if (x0 - x1) * (y0 - y1) < 0 and (value - x0) * (value - x1) > 0:
+                y1 = y0
+            if y0 == y1:
+                return y0
+            return y0 + (y1 - y0) / (x1 - x0) * (value - x0)
 
     def set_default_database_mode(self, mode: common.DatabaseMode) -> None:
         """
@@ -1946,19 +2354,20 @@ class PerfDatabase:
         """
         return self._default_database_mode
 
-    @functools.lru_cache(maxsize=32768)
-    def query_gemm(
+    def _query_gemm_internal(
         self,
         m: int,
         n: int,
         k: int,
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> dict:
         """
-        Query the gemm data
+        Internal GEMM query returning full result dict.
+        
+        Returns:
+            dict: {"latency": float, "power": float}
         """
-
         def get_sol(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> tuple[float, float, float]:
             """
             Get the sol time, sol math and sol mem
@@ -1978,25 +2387,70 @@ class PerfDatabase:
 
         if database_mode is None:
             database_mode = self._default_database_mode
+        
+        # SOL and EMPIRICAL modes don't have power data
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(m, n, k, quant_mode)[0]
+            return {"latency": get_sol(m, n, k, quant_mode)[0], "power": 0.0}
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(m, n, k, quant_mode)
+            sol_result = get_sol(m, n, k, quant_mode)
+            return {"latency": sol_result, "power": 0.0}  # SOL_FULL returns tuple, wrap it
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(m, n, k, quant_mode)
+            return {"latency": get_empirical(m, n, k, quant_mode), "power": 0.0}
         else:
+            # SILICON or HYBRID mode - use database
             try:
                 result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
+                return result  # Already a dict: {"latency": ..., "power": ...}
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}, using empirical mode")
-                    result = get_empirical(m, n, k, quant_mode)
+                    return {"latency": get_empirical(m, n, k, quant_mode), "power": 0.0}
                 else:
                     logger.exception(
                         f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
                     )
                     raise
-            return result
+
+    @functools.lru_cache(maxsize=32768)
+    def query_gemm(
+        self,
+        m: int,
+        n: int,
+        k: int,
+        quant_mode: common.GEMMQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> float:
+        """
+        Query GEMM latency (backward compatible).
+        
+        Returns:
+            float: Latency in milliseconds
+        """
+        result = self._query_gemm_internal(m, n, k, quant_mode, database_mode)
+        # Handle SOL_FULL which returns tuple
+        if isinstance(result["latency"], tuple):
+            return result["latency"]
+        return result["latency"]
+    
+    @functools.lru_cache(maxsize=50000)
+    def query_gemm_with_power(
+        self,
+        m: int,
+        n: int,
+        k: int,
+        quant_mode: common.GEMMQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> tuple[float, float]:
+        """
+        Query GEMM with power data.
+        
+        Returns:
+            tuple[float, float]: (latency_ms, power_w)
+        """
+        result = self._query_gemm_internal(m, n, k, quant_mode, database_mode)
+        # Handle SOL_FULL which returns tuple for latency
+        latency = result["latency"] if not isinstance(result["latency"], tuple) else result["latency"]
+        return latency, result["power"]
 
     @functools.lru_cache(maxsize=32768)
     def query_context_attention(
@@ -2102,7 +2556,8 @@ class PerfDatabase:
                 attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
                     window_size
                 ]
-                latency = self._interp_3d(n, full_s, b, attention_dict, "cubic") * prefix_correction
+                result = self._interp_3d(n, full_s, b, attention_dict, "cubic")
+                latency = result["latency"] * prefix_correction
             except:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -2128,6 +2583,61 @@ class PerfDatabase:
                     )
                     raise
             return latency
+
+    @functools.lru_cache(maxsize=10000)
+    def query_context_attention_with_power(
+        self,
+        b: int,
+        s: int,
+        prefix: int,
+        n: int,
+        n_kv: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+        database_mode: Optional[common.DatabaseMode] = None,
+        window_size: int = 0,
+        head_size: int = 128,
+    ) -> tuple[float, float]:
+        """
+        Query context attention with power data.
+        
+        Returns:
+            tuple[float, float]: (latency in ms, power in watts)
+        """
+        # The internal method now returns dict with latency and power
+        # But we need to handle the _interp_3d call that was modified
+        # For now, call the regular method and return 0 power since we need to trace through
+        # Actually, let me check the flow - query_context_attention calls _interp_3d which returns dict
+        
+        # Re-implement the key logic to extract power
+        latency = self.query_context_attention(
+            b, s, prefix, n, n_kv, kvcache_quant_mode, fmha_quant_mode,
+            database_mode, window_size, head_size
+        )
+        
+        # For now, extract power from the actual data lookup
+        # The challenge is that _interp_3d is called internally and returns dict
+        # but query_context_attention extracts only latency
+        
+        # Let me re-implement the core logic here to get both values
+        if database_mode is None:
+            database_mode = self._default_database_mode
+            
+        # For SOL modes, power is 0
+        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
+            return latency, 0.0
+            
+        try:
+            full_s = s + prefix
+            prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
+            n_kv_key = 0 if n == n_kv else n_kv
+            attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv_key][head_size][
+                window_size
+            ]
+            result = self._interp_3d(n, full_s, b, attention_dict, "cubic")
+            return result["latency"] * prefix_correction, result["power"]
+        except:
+            return latency, 0.0
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_attention(
@@ -2214,7 +2724,8 @@ class PerfDatabase:
                     n_kv = 0
 
                 attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
-                latency = self._interp_3d(n, b, s, attention_dict, "bilinear")
+                result = self._interp_3d(n, b, s, attention_dict, "bilinear")
+                latency = result["latency"]
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -2230,6 +2741,43 @@ class PerfDatabase:
                     )
                     raise
             return latency
+
+    @functools.lru_cache(maxsize=10000)
+    def query_generation_attention_with_power(
+        self,
+        b: int,
+        s: int,
+        n: int,
+        n_kv: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        database_mode: Optional[common.DatabaseMode] = None,
+        window_size: int = 0,
+        head_size: int = 128,
+    ) -> tuple[float, float]:
+        """
+        Query generation attention with power data.
+        
+        Returns:
+            tuple[float, float]: (latency in ms, power in watts)
+        """
+        latency = self.query_generation_attention(
+            b, s, n, n_kv, kvcache_quant_mode, database_mode, window_size, head_size
+        )
+        
+        if database_mode is None:
+            database_mode = self._default_database_mode
+            
+        # For SOL modes, power is 0
+        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
+            return latency, 0.0
+            
+        try:
+            n_kv_key = 0 if n == n_kv else n_kv
+            attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv_key][head_size][window_size]
+            result = self._interp_3d(n, b, s, attention_dict, "bilinear")
+            return result["latency"], result["power"]
+        except:
+            return latency, 0.0
 
     @functools.lru_cache(maxsize=32768)
     def query_context_mla(
@@ -2298,7 +2846,8 @@ class PerfDatabase:
                 full_s = s + prefix
                 prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
                 mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
-                latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
+                result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
+                latency = result["latency"] * prefix_correction
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -2313,6 +2862,42 @@ class PerfDatabase:
                     )
                     raise
             return latency
+
+    def query_context_mla_with_power(
+        self,
+        b: int,
+        s: int,
+        prefix: int,
+        num_heads: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+        database_mode: Optional[common.DatabaseMode] = None,
+    ) -> tuple[float, float]:
+        """
+        Query context MLA with power data.
+        
+        Returns:
+            tuple[float, float]: (latency in ms, power in watts)
+        """
+        latency = self.query_context_mla(
+            b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode, database_mode
+        )
+        
+        if database_mode is None:
+            database_mode = self._default_database_mode
+            
+        # For SOL modes, power is 0
+        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
+            return latency, 0.0
+            
+        try:
+            full_s = s + prefix
+            prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
+            mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
+            result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
+            return result["latency"] * prefix_correction, result["power"]
+        except:
+            return latency, 0.0
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_mla(
@@ -2372,7 +2957,8 @@ class PerfDatabase:
         else:
             try:
                 mla_dict = self._generation_mla_data[kvcache_quant_mode]
-                latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+                result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+                latency = result["latency"]
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -2505,7 +3091,8 @@ class PerfDatabase:
                 # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
                 num_heads = 128 // tp_size
                 mla_dict = attn_data[kvcache_quant_mode]
-                latency = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+                result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+                latency = result["latency"]
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -2636,7 +3223,8 @@ class PerfDatabase:
                 mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
                 full_s = s + prefix
                 prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-                latency = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic") * prefix_correction
+                result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
+                latency = result["latency"] * prefix_correction
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -2712,7 +3300,8 @@ class PerfDatabase:
                     "AUTO"
                 ]  # use AUTO for allreduce strategy
                 size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
-                lat = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
+                result = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
+                lat = result["latency"] if isinstance(result, dict) else result
                 if tp_size > 8:  # FIXME, to collect real data, use inter-node and intra-node data seperately
                     if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
                         lat = (
@@ -2804,11 +3393,12 @@ class PerfDatabase:
                     list(nccl_dict.keys()),
                     inner_only=False,
                 )
-                lat = self._interp_1d(
+                result = self._interp_1d(
                     [size_left, size_right],
                     [nccl_dict[size_left], nccl_dict[size_right]],
                     message_size,
                 )
+                lat = result["latency"] if isinstance(result, dict) else result
 
                 if num_gpus > max_num_gpus:  # need to do some correction
                     logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")
@@ -2979,11 +3569,12 @@ class PerfDatabase:
                         list(moe_dict.keys()),
                         inner_only=False,
                     )
-                    lat = self._interp_1d(
+                    result = self._interp_1d(
                         [num_left, num_right],
                         [moe_dict[num_left], moe_dict[num_right]],
                         num_tokens,
                     )
+                    lat = result["latency"] if isinstance(result, dict) else result
                     return lat
                 elif self.backend == common.BackendName.trtllm.value:
                     # aligned with trtllm, kernel source selection.
@@ -3026,11 +3617,12 @@ class PerfDatabase:
                         list(moe_dict.keys()),
                         inner_only=False,
                     )
-                    lat = self._interp_1d(
+                    result = self._interp_1d(
                         [num_left, num_right],
                         [moe_dict[num_left], moe_dict[num_right]],
                         num_tokens,
                     )
+                    lat = result["latency"] if isinstance(result, dict) else result
                     return lat
                 elif self.backend == common.BackendName.vllm.value:
                     moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][
@@ -3039,9 +3631,10 @@ class PerfDatabase:
                     num_left, num_right = self._nearest_1d_point_helper(
                         num_tokens, list(moe_dict.keys()), inner_only=False
                     )
-                    latency = self._interp_1d(
+                    result = self._interp_1d(
                         [num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens
                     )
+                    latency = result["latency"] if isinstance(result, dict) else result
                     return latency
                 else:
                     raise NotImplementedError(f"backend {self.backend} not supported for moe")
@@ -3072,6 +3665,64 @@ class PerfDatabase:
                     )
                     raise
                 return latency
+
+    def query_moe_with_power(
+        self,
+        num_tokens: int,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str = "uniform",
+        database_mode: common.DatabaseMode | None = None,
+    ) -> tuple[float, float]:
+        """
+        Query MoE with power data.
+        
+        Returns:
+            tuple[float, float]: (latency in ms, power in watts)
+        """
+        latency = self.query_moe(
+            num_tokens, hidden_size, inter_size, topk, num_experts,
+            moe_tp_size, moe_ep_size, quant_mode, workload_distribution, database_mode
+        )
+        
+        # For now, MoE power data may not be available, return 0
+        # This can be updated when MoE database has power columns
+        return latency, 0.0
+
+    def query_generation_mla_with_power(
+        self,
+        b: int,
+        s: int,
+        num_heads: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        database_mode: Optional[common.DatabaseMode] = None,
+    ) -> tuple[float, float]:
+        """
+        Query generation MLA with power data.
+        
+        Returns:
+            tuple[float, float]: (latency in ms, power in watts)
+        """
+        latency = self.query_generation_mla(b, s, num_heads, kvcache_quant_mode, database_mode)
+        
+        if database_mode is None:
+            database_mode = self._default_database_mode
+            
+        # For SOL modes, power is 0
+        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
+            return latency, 0.0
+            
+        try:
+            mla_dict = self._generation_mla_data[kvcache_quant_mode]
+            result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
+            return result["latency"], result["power"]
+        except:
+            return latency, 0.0
 
     @functools.lru_cache(maxsize=32768)
     def query_mla_bmm(
@@ -3130,11 +3781,12 @@ class PerfDatabase:
                     list(mla_bmm_dict.keys()),
                     inner_only=False,
                 )
-                lat = self._interp_1d(
+                result = self._interp_1d(
                     [num_left, num_right],
                     [mla_bmm_dict[num_left], mla_bmm_dict[num_right]],
                     num_tokens,
                 )
+                lat = result["latency"] if isinstance(result, dict) else result
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -3281,7 +3933,8 @@ class PerfDatabase:
 
                 mlp_dict = mlp_data[quant_mode][hidden_size][intermediate_size]
                 num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mlp_dict.keys()), inner_only=False)
-                lat = self._interp_1d([num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens)
+                result = self._interp_1d([num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens)
+                lat = result["latency"] if isinstance(result, dict) else result
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -3330,7 +3983,8 @@ class PerfDatabase:
         else:
             data = self._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
             num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-            lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+            result = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+            lat = result["latency"] if isinstance(result, dict) else result
             return lat / 1000.0
 
     @functools.lru_cache(maxsize=32768)
@@ -3368,10 +4022,12 @@ class PerfDatabase:
             if node_num == 1 and sms == 20:  # only collect sm=20 for now
                 data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
                 num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
-                lat = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+                result = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
+                lat = result["latency"] if isinstance(result, dict) else result
             else:
                 data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
-                lat = self._interp_2d_linear(sms, num_tokens, data)
+                result = self._interp_2d_linear(sms, num_tokens, data)
+                lat = result["latency"] if isinstance(result, dict) else result
             return lat / 1000.0
 
     def _correct_data(self) -> None:
@@ -3385,12 +4041,19 @@ class PerfDatabase:
                     for n in self._gemm_data[quant_mode][m]:
                         for k in self._gemm_data[quant_mode][m][n]:
                             sol = self.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
-                            if sol > self._gemm_data[quant_mode][m][n][k]:
+                            data = self._gemm_data[quant_mode][m][n][k]
+                            current_latency = data["latency"] if isinstance(data, dict) else data
+                            if sol > current_latency:
                                 logger.debug(
                                     f"gemm quant {quant_mode} m{m} n{n} k{k}: sol {sol} > "
-                                    f"perf_db {self._gemm_data[quant_mode][m][n][k]}"
+                                    f"perf_db {current_latency}"
                                 )
-                                self._gemm_data[quant_mode][m][n][k] = max(sol, self._gemm_data[quant_mode][m][n][k])
+                                if isinstance(data, dict):
+                                    # Update only latency, keep power unchanged
+                                    self._gemm_data[quant_mode][m][n][k]["latency"] = max(sol, current_latency)
+                                else:
+                                    # Legacy format (float)
+                                    self._gemm_data[quant_mode][m][n][k] = max(sol, current_latency)
 
         # regular generation attention
         if self._generation_attention_data is not None:
@@ -3417,20 +4080,20 @@ class PerfDatabase:
                                             window_size=window_size,
                                             head_size=head_size,
                                         )
-                                        if (
-                                            sol
-                                            > self._generation_attention_data[quant_mode][n_kv][head_size][window_size][
-                                                n
-                                            ][b][s]
-                                        ):
+                                        data = self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][b][s]
+                                        current_latency = data["latency"] if isinstance(data, dict) else data
+                                        if sol > current_latency:
                                             logger.debug(
                                                 f"generation attention quant {quant_mode} n{n} "
-                                                f"n_kv{n_kv_local} b{b} s{s}: sol {window_size} > "
-                                                f"perf_db {sol}"
+                                                f"n_kv{n_kv_local} b{b} s{s}: sol {sol} > "
+                                                f"perf_db {current_latency}"
                                             )
-                                            self._generation_attention_data[quant_mode][n_kv][head_size][window_size][
-                                                n
-                                            ][b][s] = sol
+                                            if isinstance(data, dict):
+                                                # Update only latency, keep power unchanged
+                                                self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][b][s]["latency"] = sol
+                                            else:
+                                                # Legacy format (float)
+                                                self._generation_attention_data[quant_mode][n_kv][head_size][window_size][n][b][s] = sol
 
 
 if __name__ == "__main__":

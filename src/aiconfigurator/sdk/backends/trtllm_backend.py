@@ -89,7 +89,13 @@ class TRTLLMBackend(BaseBackend):
                 isl: int,
                 osl: int,
                 prefix: int,
-            ) -> float:
+            ) -> tuple[float, float]:
+                """
+                Get mixed step latency and power.
+                
+                Returns:
+                    tuple: (latency, power) where power is weighted average in watts
+                """
                 num_tokens = ctx_tokens + gen_tokens
                 # treat this as a combined single batch inference, extract non-attention latency
                 summary = self.run_static(
@@ -102,10 +108,14 @@ class TRTLLMBackend(BaseBackend):
                     mode="static_ctx",
                 )
                 latency_dict = summary.get_context_latency_dict()
+                power_dict = summary.get_context_power_dict()
                 non_attention_latency = 0.0
+                non_attention_power_weighted = 0.0
                 for layer_name, latency in latency_dict.items():
                     if layer_name != "context_attention":
                         non_attention_latency += latency
+                        # power_dict already contains power*latency, so just sum it
+                        non_attention_power_weighted += power_dict.get(layer_name, 0.0)
 
                 # second pass to get ctx attn, split full isl over
                 # num_steps(=np.ceil(isl/ctx_tokens))
@@ -119,9 +129,15 @@ class TRTLLMBackend(BaseBackend):
                     mode="static_ctx",
                 )
                 latency_dict = summary.get_context_latency_dict()
-                ctx_attention_latency = latency_dict["context_attention"] / (np.ceil(isl / ctx_tokens))
+                power_dict = summary.get_context_power_dict()
+                scale_factor = np.ceil(isl / ctx_tokens)
+                ctx_attention_latency = latency_dict["context_attention"] / scale_factor
+                # power_dict already contains power*latency, so scale it the same way as latency
+                ctx_attention_power_weighted = power_dict.get("context_attention", 0.0) / scale_factor
 
                 # third pass to get generation attn. use isl+osl//2 for avg generation attn latency.
+                gen_attention_latency = 0.0
+                gen_attention_power_weighted = 0.0
                 if gen_tokens > 0:
                     num_tokens = gen_tokens
                     summary = self.run_static(
@@ -131,17 +147,30 @@ class TRTLLMBackend(BaseBackend):
                         mode="static_gen",
                     )
                     latency_dict = summary.get_generation_latency_dict()
+                    power_dict = summary.get_generation_power_dict()
                     gen_attention_latency = latency_dict["generation_attention"]
-                else:
-                    gen_attention_latency = 0.0
+                    # power_dict already contains power*latency, so just use it directly
+                    gen_attention_power_weighted = power_dict.get("generation_attention", 0.0)
 
-                return non_attention_latency + ctx_attention_latency + gen_attention_latency
+                total_latency = non_attention_latency + ctx_attention_latency + gen_attention_latency
+                total_power_weighted = non_attention_power_weighted + ctx_attention_power_weighted + gen_attention_power_weighted
+                
+                # Calculate weighted average power
+                avg_power = total_power_weighted / total_latency if total_latency > 0 else 0.0
+                
+                return total_latency, avg_power
 
             def _get_genonly_step_latency(
                 model: BaseModel, database: PerfDatabase, gen_tokens: int, isl: int, osl: int
-            ) -> float:
+            ) -> tuple[float, float]:
+                """
+                Get generation-only step latency and power.
+                
+                Returns:
+                    tuple: (latency, power) where power is weighted average in watts
+                """
                 if gen_tokens <= 0:
-                    return 0.0
+                    return 0.0, 0.0
                 num_tokens = gen_tokens
                 summary = self.run_static(
                     model,
@@ -150,16 +179,23 @@ class TRTLLMBackend(BaseBackend):
                     mode="static_gen",
                 )
                 latency_dict = summary.get_generation_latency_dict()
+                power_dict = summary.get_generation_power_dict()
                 genonly_step_latency = 0.0
+                genonly_power_weighted = 0.0
                 for layer_name, latency in latency_dict.items():
                     genonly_step_latency += latency
+                    # power_dict already contains power*latency, so just sum it
+                    genonly_power_weighted += power_dict.get(layer_name, 0.0)
 
-                return genonly_step_latency
+                # Calculate weighted average power
+                avg_power = genonly_power_weighted / genonly_step_latency if genonly_step_latency > 0 else 0.0
+                
+                return genonly_step_latency, avg_power
 
-            mix_step_latency = _get_mix_step_latency(
+            mix_step_latency, mix_step_power = _get_mix_step_latency(
                 model, database, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl, prefix
             )
-            genonly_step_latency = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
+            genonly_step_latency, genonly_step_power = _get_genonly_step_latency(model, database, num_genonly_tokens, isl, osl)
 
             ttft = mix_step_latency * np.ceil(isl / ctx_tokens)
             # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency
@@ -187,7 +223,21 @@ class TRTLLMBackend(BaseBackend):
                 f"num_genonly_tokens: {num_genonly_tokens}"
             )
             logger.debug(f"mix_step_latency: {mix_step_latency}, genonly_step_latency: {genonly_step_latency}")
+            logger.debug(f"mix_step_power: {mix_step_power}W, genonly_step_power: {genonly_step_power}W")
             logger.debug(f"ttft: {ttft}, tpot: {tpot}, output_throughput: {output_throughput}")
+            
+            # Calculate weighted average power for AGG mode
+            # Power is weighted by the total time spent in each step type
+            total_mix_time = num_mix_steps * mix_step_latency
+            total_genonly_time = num_genonly_steps * genonly_step_latency
+            total_time = total_mix_time + total_genonly_time
+            
+            if total_time > 0:
+                agg_power_avg = (mix_step_power * total_mix_time + genonly_step_power * total_genonly_time) / total_time
+            else:
+                agg_power_avg = 0.0
+            
+            logger.debug(f"Aggregated power: {agg_power_avg}W")
 
             num_ctx_requests = np.ceil(ctx_tokens / isl)
             num_gen_requests = b - num_ctx_requests
@@ -267,6 +317,7 @@ class TRTLLMBackend(BaseBackend):
                 "backend": database.backend,
                 "version": database.version,
                 "system": database.system,
+                "power_w": agg_power_avg,  # Weighted average power for AGG mode
             }
             result = pd.DataFrame([result_dict], columns=common.ColumnsAgg).round(3)
             summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
