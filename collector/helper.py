@@ -195,7 +195,7 @@ def benchmark_with_power(
 
         if actual_num_runs > 1000:
             logging.getLogger(__name__).warning(
-                f"Kernel is very fast ({single_iter_time*1000:.3f}ms), running {actual_num_runs} iterations"
+                f"Kernel is very fast ({single_iter_time * 1000:.3f}ms), running {actual_num_runs} iterations"
             )
     else:
         # Normal warmup
