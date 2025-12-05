@@ -1243,6 +1243,7 @@ class WideEPDeepSeekModel(BaseModel):
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
+        gemm_quant_mode = self.config.gemm_quant_mode
         moe_backend = self.config.moe_backend
         attn_backend = self.config.attention_backend
 
@@ -1298,16 +1299,32 @@ class WideEPDeepSeekModel(BaseModel):
         )
 
         # shared expert
+        # TODO: support shared expert TP
         self.context_ops.extend(
             [
-                ops.WideEPMLP(
-                    "context_shared_expert",
+                ops.GEMM(
+                    "context_gate_ffn1_gemm",
+                    self._num_layers,
+                    2 * self._moe_inter_size,
+                    h,
+                    gemm_quant_mode,
+                    tp_size=tp_size,
+                ),
+                ops.ElementWise(
+                    "context_act_gate",
+                    self._num_layers,
+                    2 * self._moe_inter_size // tp_size,
+                    self._moe_inter_size // tp_size,
+                    0.8,
+                ),
+                ops.GEMM(
+                    "context_ffn2_gemm",
                     self._num_layers,
                     h,
                     self._moe_inter_size,
-                    moe_quant_mode,
+                    gemm_quant_mode,
                     tp_size=tp_size,
-                )
+                ),
             ]
         )
 
@@ -1369,13 +1386,27 @@ class WideEPDeepSeekModel(BaseModel):
         # shared expert
         self.generation_ops.extend(
             [
-                ops.WideEPMLP(
-                    "generation_shared_expert",
+                ops.GEMM(
+                    "generation_gate_ffn1_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * self._moe_inter_size,
+                    h,
+                    gemm_quant_mode,
+                ),
+                ops.ElementWise(
+                    "generation_act_gate",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * self._moe_inter_size,
+                    self._moe_inter_size,
+                    0.8,
+                ),
+                ops.GEMM(
+                    "generation_ffn2_gemm",
                     self._num_layers * self._mtp_scale_factor,
                     h,
                     self._moe_inter_size,
-                    moe_quant_mode,
-                )
+                    gemm_quant_mode,
+                ),
             ]
         )
 
