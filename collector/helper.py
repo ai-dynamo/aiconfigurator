@@ -24,6 +24,26 @@ _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
 
 
+def _parse_bool_env(env_var: str, default: bool = False) -> bool:
+    """
+    Robustly parse boolean environment variables.
+
+    Accepts: "true", "True", "TRUE", "1", "yes", "Yes", "YES"
+    Rejects: "false", "False", "FALSE", "0", "no", "No", "NO", or unset
+
+    Args:
+        env_var: Environment variable name to read
+        default: Default value if variable is not set
+
+    Returns:
+        Boolean value
+    """
+    value = os.environ.get(env_var)
+    if value is None:
+        return default
+    return value.lower() in ("true", "1", "yes")
+
+
 def _ensure_nvml_initialized():
     """Initialize NVML once per process. Thread-safe."""
     global _NVML_INITIALIZED
@@ -171,7 +191,7 @@ def benchmark_with_power(
 
     # Auto-detect configuration from environment if not explicitly provided
     if measure_power is None:
-        measure_power = os.environ.get("COLLECTOR_MEASURE_POWER", "false").lower() == "true"
+        measure_power = _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
     if power_min_duration is None:
         power_min_duration = float(os.environ.get("COLLECTOR_POWER_MIN_DURATION", "1.0"))
 
@@ -288,7 +308,7 @@ def power_monitoring_only(device, measure_power: bool | None = None):
     """
     # Auto-detect from environment if not specified
     if measure_power is None:
-        measure_power = os.environ.get("COLLECTOR_MEASURE_POWER", "false").lower() == "true"
+        measure_power = _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
 
     power_monitor = None
 
@@ -364,7 +384,7 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
     # For worker processes
     if worker_id is not None:
         # Read configuration from environment
-        debug = os.environ.get("COLLECTOR_DEBUG", "false").lower() == "true"
+        debug = _parse_bool_env("COLLECTOR_DEBUG", default=False)
         log_dir = os.environ.get("COLLECTOR_LOG_DIR", "")
 
         if log_dir:

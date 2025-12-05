@@ -19,6 +19,8 @@ try:
 
     from helper import (
         EXIT_CODE_RESTART,
+        PowerMonitor,
+        _parse_bool_env,
         balanced_logits,
         get_sm_version,
         log_perf,
@@ -33,6 +35,8 @@ except ModuleNotFoundError:
 
     from helper import (
         EXIT_CODE_RESTART,
+        PowerMonitor,
+        _parse_bool_env,
         balanced_logits,
         get_sm_version,
         log_perf,
@@ -376,49 +380,128 @@ def run_moe_torch(
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Helper closure to encapsulate forward pass logic (reduces duplication)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        def run_forward_pass():
+            """Execute one forward pass through MOE, handling both power_law and balanced modes."""
+            if distributed == "power_law":
+                for logits in actual_logits_list:
+                    moe.forward(hidden_states, logits, do_finalize=not min_latency_mode)  # noqa: F821
+            else:
+                moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)  # noqa: F821
+
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Adaptive run count calculation for power measurement
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Determine base warmups and runs
         num_warmups = 3
         num_runs = 6
         if distributed == "power_law":
             num_warmups = 1
             num_runs = 1
 
+        # Read power measurement configuration
+        measure_power = _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
+        power_min_duration = float(os.environ.get("COLLECTOR_POWER_MIN_DURATION", "1.0"))
+
+        if measure_power:
+            # Quick timing estimate with warmup
+            warmup_start = torch.cuda.Event(enable_timing=True)
+            warmup_end = torch.cuda.Event(enable_timing=True)
+
+            torch.cuda.synchronize()
+            warmup_start.record()
+            for _ in range(num_warmups):
+                run_forward_pass()  # Use helper closure
+            warmup_end.record()
+            torch.cuda.synchronize()
+
+            # Calculate single iteration time (accounting for num_iter)
+            single_iter_time = warmup_start.elapsed_time(warmup_end) / num_warmups / 1000.0  # seconds
+            single_iter_time *= num_iter
+
+            # Adjust num_runs to meet minimum duration
+            original_num_runs = num_runs
+            num_runs = max(num_runs, int(power_min_duration / single_iter_time) + 1)
+            num_runs = min(num_runs, 10000)  # Safety cap
+
+            if num_runs != original_num_runs and aic_debug == 1:
+                print(
+                    f"Adjusted num_runs from {original_num_runs} to {num_runs} for power measurement "
+                    f"(iter_time={single_iter_time*1000:.2f}ms, target={power_min_duration}s)"
+                )
+
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Initialize power monitoring
+        # ═══════════════════════════════════════════════════════════════════════════════
+        power_monitor = None
+        if measure_power:
+            power_monitor = PowerMonitor(device.index)
+            if not power_monitor._init_handle():
+                power_monitor = None  # Failed to initialize
+                if aic_debug == 1:
+                    print(f"Warning: Power monitoring initialization failed for device {device.index}")
+
+        # [CRITICAL] Initialize power_stats before try/except to avoid undefined variable
+        power_stats = None
+
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         try:
-            # capture
+            # Capture CUDA graph
             with torch.cuda.graph(reusable_graph):
-                if distributed == "power_law":
-                    for actual_logits in actual_logits_list:
-                        moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-                else:
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-            # warmup
+                run_forward_pass()  # Use helper closure
+
+            # Warmup the captured graph
             for i in range(num_warmups):
                 reusable_graph.replay()
+            torch.cuda.synchronize()  # CRITICAL: Ensure warmup completes before power monitoring
+
+            # Start power monitoring before timed execution
+            if power_monitor:
+                power_monitor.start_sampling()
 
             start_event.record()
             for i in range(num_runs):
                 reusable_graph.replay()
             end_event.record()
+            torch.cuda.synchronize()  # CRITICAL: Ensure execution completes before stopping power
+
+            # Stop power monitoring and get statistics
+            if power_monitor:
+                power_stats = power_monitor.stop_sampling()
 
         except Exception as e:
             print(f"cuda graph failed for {num_tokens} tokens: {e}, fallback to no cuda graph")
+
+            # Fallback warmup without graph
             if distributed == "power_law":
-                for actual_logits in actual_logits_list:
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+                run_forward_pass()  # Use helper (runs once, loops internally)
             else:
                 for i in range(num_warmups):
                     moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+            torch.cuda.synchronize()  # CRITICAL: Ensure warmup completes before power monitoring
+
+            # Start power monitoring before timed execution
+            if power_monitor:
+                power_monitor.start_sampling()
+
             start_event.record()
+            # Fallback execution
             if distributed == "power_law":
-                for actual_logits in actual_logits_list:
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+                run_forward_pass()  # Use helper (runs once, loops internally)
             else:
                 for i in range(num_runs):
                     moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
             end_event.record()
+            torch.cuda.synchronize()  # CRITICAL: Ensure execution completes before stopping power
 
-        torch.cuda.synchronize()
+            # Stop power monitoring and get statistics
+            if power_monitor:
+                power_stats = power_monitor.stop_sampling()
+
+        # Calculate latency
         latency = start_event.elapsed_time(end_event) / num_runs / num_iter
 
         if min_latency_mode:
@@ -447,6 +530,7 @@ def run_moe_torch(
             op_name="moe",
             kernel_source=source,
             perf_filename=perf_filename,
+            power_stats=power_stats,
         )
         if distributed == "power_law":
             del actual_logits_list
