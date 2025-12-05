@@ -5,7 +5,7 @@
 import tensorrt_llm
 import torch
 
-from helper import get_sm_version, log_perf
+from helper import benchmark_with_power, get_sm_version, log_perf
 
 
 def get_mla_gen_pre_test_cases():
@@ -139,46 +139,42 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
             q_nope_fp8, k_b_proj_trans, q_nope_scales, k_b_proj_trans_scale, q_nope_out
         )
 
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+        def kernel_func():
             q_nope_fp8, q_nope_scales = torch.ops.trtllm.fp8_batched_quantize_1x128_permute102(q_nope)
             q_nope_out = fused_q.transpose(0, 1)
             torch.ops.trtllm.fp8_block_scaling_bmm_out(
                 q_nope_fp8, k_b_proj_trans, q_nope_scales, k_b_proj_trans_scale, q_nope_out
             )
+
+        # Use benchmark_with_power context manager
+        with benchmark_with_power(
+            device=device,
+            kernel_func=kernel_func,
+            num_warmups=num_warmups,
+            num_runs=num_runs,
+            repeat_n=1,
+        ) as results:
+            pass
+
+        log_perf(
+            item_list=[
+                {
+                    "bmm_dtype": dtype,
+                    "num_tokens": num_tokens,
+                    "num_heads": num_heads,
+                    "latency": results["latency_ms"],
+                }
+            ],
+            framework="TRTLLM",
+            version=tensorrt_llm.__version__,
+            device_name=torch.cuda.get_device_name(device),
+            op_name="mla_gen_pre",
+            kernel_source="default",
+            perf_filename=perf_filename,
+            power_stats=results["power_stats"],
+        )
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
-
-    # warm up
-    for i in range(num_warmups):
-        g.replay()
-
-    # measure
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / num_runs
-
-    log_perf(
-        item_list=[
-            {
-                "bmm_dtype": dtype,
-                "num_tokens": num_tokens,
-                "num_heads": num_heads,
-                "latency": latency,
-            }
-        ],
-        framework="TRTLLM",
-        version=tensorrt_llm.__version__,
-        device_name=torch.cuda.get_device_name(device),
-        op_name="mla_gen_pre",
-        kernel_source="default",
-        perf_filename=perf_filename,
-    )
 
 
 def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_filename, device="cuda:0"):
@@ -224,8 +220,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
             attn_output.transpose(0, 1),
         )
 
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+        def kernel_func():
             attn_out_latent_fp8, attn_out_latent_scales = torch.ops.trtllm.fp8_batched_quantize_1x128_permute102(
                 attn_out_latent
             )
@@ -236,39 +231,36 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
                 v_b_proj_scale,
                 attn_output.transpose(0, 1),
             )
+
+        # Use benchmark_with_power context manager
+        with benchmark_with_power(
+            device=device,
+            kernel_func=kernel_func,
+            num_warmups=num_warmups,
+            num_runs=num_runs,
+            repeat_n=1,
+        ) as results:
+            pass
+
+        log_perf(
+            item_list=[
+                {
+                    "bmm_dtype": dtype,
+                    "num_tokens": num_tokens,
+                    "num_heads": num_heads,
+                    "latency": results["latency_ms"],
+                }
+            ],
+            framework="TRTLLM",
+            version=tensorrt_llm.__version__,
+            device_name=torch.cuda.get_device_name(device),
+            op_name="mla_gen_post",
+            kernel_source="default",
+            perf_filename=perf_filename,
+            power_stats=results["power_stats"],
+        )
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
-
-    # warm up
-    for i in range(num_warmups):
-        g.replay()
-
-    # measure
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / num_runs
-
-    log_perf(
-        item_list=[
-            {
-                "bmm_dtype": dtype,
-                "num_tokens": num_tokens,
-                "num_heads": num_heads,
-                "latency": latency,
-            }
-        ],
-        framework="TRTLLM",
-        version=tensorrt_llm.__version__,
-        device_name=torch.cuda.get_device_name(device),
-        op_name="mla_gen_post",
-        kernel_source="default",
-        perf_filename=perf_filename,
-    )
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from sglang.srt.layers.quantization.fp8_kernel import (
     per_tensor_quant_mla_fp8,
 )
 
-from helper import log_perf
+from helper import benchmark_with_power, log_perf
 
 
 def get_mla_gen_pre_test_cases():
@@ -113,30 +113,24 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
             device=device,
         )
 
-        bmm_fp8(q_nope_val, w_kc, q_nope_scale, w_scale, torch.bfloat16)
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+        def kernel_func():
             q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(q_nope.transpose(0, 1), zeroscale)
             bmm_fp8(q_nope_val, w_kc, q_nope_scale, w_scale, torch.bfloat16)
     else:
         w_kc = torch.randn((num_heads, kv_lora_rank, qk_nope_head_dim), dtype=torch.bfloat16, device=device)
         w_kc = w_kc.transpose(1, 2)
-        torch.bmm(q_nope.transpose(0, 1), w_kc)
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+
+        def kernel_func():
             torch.bmm(q_nope.transpose(0, 1), w_kc)
 
-    for i in range(num_warmups):
-        g.replay()
-
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / num_runs
+    with benchmark_with_power(
+        device=device,
+        kernel_func=kernel_func,
+        num_warmups=num_warmups,
+        num_runs=num_runs,
+        repeat_n=1,
+    ) as results:
+        pass
 
     log_perf(
         item_list=[
@@ -144,7 +138,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
                 "bmm_dtype": dtype,
                 "num_tokens": num_tokens,
                 "num_heads": num_heads,
-                "latency": latency,
+                "latency": results["latency_ms"],
             }
         ],
         framework="SGLang",
@@ -153,6 +147,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
         op_name="mla_gen_pre",
         kernel_source="default",
         perf_filename=perf_filename,
+        power_stats=results["power_stats"],
     )
 
 
@@ -182,8 +177,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
             out=attn_bmm_output.view(-1, qk_nope_head_dim, v_head_dim).transpose(0, 1),
         )
 
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+        def kernel_func():
             torch.bmm(
                 attn_output.transpose(0, 1),
                 w_vc,
@@ -199,25 +193,13 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
         attn_bmm_output = torch.randn([num_tokens, num_heads, v_head_dim]).bfloat16().to(torch.device(device))
 
         zeroscale = torch.tensor([1], dtype=torch.float32, device=device)
-        attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
-            attn_output.transpose(0, 1),
-            zeroscale,
-        )
-        attn_bmm_output = bmm_fp8(
-            attn_output_val,
-            w_vc,
-            attn_output_scale,
-            w_scale,
-            torch.bfloat16,
-        )
 
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+        def kernel_func():
             attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
                 attn_output.transpose(0, 1),
                 zeroscale,
             )
-            attn_bmm_output = bmm_fp8(
+            bmm_fp8(
                 attn_output_val,
                 w_vc,
                 attn_output_scale,
@@ -225,19 +207,14 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
                 torch.bfloat16,
             )
 
-    # warm up
-    for i in range(num_warmups):
-        g.replay()
-
-    # measure
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / num_runs
+    with benchmark_with_power(
+        device=device,
+        kernel_func=kernel_func,
+        num_warmups=num_warmups,
+        num_runs=num_runs,
+        repeat_n=1,
+    ) as results:
+        pass
 
     log_perf(
         item_list=[
@@ -245,7 +222,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
                 "bmm_dtype": dtype,
                 "num_tokens": num_tokens,
                 "num_heads": num_heads,
-                "latency": latency,
+                "latency": results["latency_ms"],
             }
         ],
         framework="SGLang",
@@ -254,4 +231,5 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
         op_name="mla_gen_post",
         kernel_source="default",
         perf_filename=perf_filename,
+        power_stats=results["power_stats"],
     )

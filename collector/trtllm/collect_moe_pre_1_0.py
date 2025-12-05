@@ -16,7 +16,7 @@ from torch.nn.parameter import Parameter
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 except ModuleNotFoundError:
     import os
     import sys
@@ -24,7 +24,7 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 

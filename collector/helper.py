@@ -9,12 +9,300 @@ import multiprocessing as mp
 import os
 import signal
 import sys
+import threading
+import time
 import traceback
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 # Exit codes
 EXIT_CODE_RESTART = 10  # Exit code to indicate restart is needed
+
+# Global NVML state per worker process
+_NVML_INITIALIZED = False
+_NVML_LOCK = threading.Lock()
+
+
+def _ensure_nvml_initialized():
+    """Initialize NVML once per process. Thread-safe."""
+    global _NVML_INITIALIZED
+    with _NVML_LOCK:
+        if not _NVML_INITIALIZED:
+            try:
+                import pynvml as nvml
+
+                nvml.nvmlInit()
+                _NVML_INITIALIZED = True
+                logging.getLogger(__name__).info("NVML initialized for power monitoring")
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Failed to initialize NVML: {e}")
+                return False
+        return _NVML_INITIALIZED
+
+
+class PowerMonitor:
+    """
+    Background thread that samples GPU power using NVML at 100ms intervals.
+    Designed to be reusable across multiple kernel runs within a worker process.
+    """
+
+    SAMPLE_INTERVAL_MS = 100  # Fixed sampling interval
+
+    def __init__(self, device_id: int):
+        """
+        Args:
+            device_id: CUDA device index to monitor
+        """
+        self.device_id = device_id
+        self.interval_s = self.SAMPLE_INTERVAL_MS / 1000.0
+        self._thread = None
+        self._stop_event = threading.Event()
+        self._samples = []  # List of (timestamp, power_mw) tuples
+        self._lock = threading.Lock()
+        self._nvml_handle = None
+        self._power_limit_mw = None
+        self._is_initialized = False
+
+    def _init_handle(self):
+        """Get NVML handle (called once, cached)."""
+        if self._is_initialized:
+            return True
+
+        if not _ensure_nvml_initialized():
+            return False
+
+        try:
+            import pynvml as nvml
+
+            self._nvml_handle = nvml.nvmlDeviceGetHandleByIndex(self.device_id)
+            self._power_limit_mw = nvml.nvmlDeviceGetPowerManagementLimit(self._nvml_handle)
+            self._is_initialized = True
+            return True
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed to get NVML handle for device {self.device_id}: {e}")
+            return False
+
+    def start_sampling(self):
+        """Start background sampling thread."""
+        if not self._init_handle():
+            return False
+
+        # Clear previous samples
+        with self._lock:
+            self._samples.clear()
+
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._monitoring_loop, daemon=True)
+        self._thread.start()
+        return True
+
+    def stop_sampling(self) -> dict | None:
+        """Stop sampling and return statistics."""
+        if self._thread is None:
+            return None
+
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+        self._thread = None
+
+        # Calculate statistics
+        with self._lock:
+            if not self._samples:
+                return None
+            power_values_w = [p_mw / 1000.0 for _, p_mw in self._samples]
+
+        import numpy as np
+
+        return {
+            "power": float(np.mean(power_values_w)),
+            "power_limit": float(self._power_limit_mw / 1000.0) if self._power_limit_mw else None,
+        }
+
+    def _monitoring_loop(self):
+        """Background thread function that samples power every 100ms."""
+        import pynvml as nvml
+
+        while not self._stop_event.is_set():
+            try:
+                timestamp = time.time()
+                power_mw = nvml.nvmlDeviceGetPowerUsage(self._nvml_handle)
+
+                with self._lock:
+                    self._samples.append((timestamp, power_mw))
+            except Exception:
+                # Skip failed samples silently
+                pass
+
+            # Wait for next interval
+            self._stop_event.wait(self.interval_s)
+
+
+@contextmanager
+def benchmark_with_power(
+    device,
+    kernel_func,
+    num_warmups: int = 3,
+    num_runs: int = 6,
+    repeat_n: int = 1,  # Default 1; GEMM files use 5
+    measure_power: bool | None = None,  # Auto-detect from environment if None
+    power_min_duration: float | None = None,  # Auto-detect from environment if None
+):
+    """
+    Context manager that handles warmup, graph capture, timing, and power monitoring.
+
+    Args:
+        device: torch.device object
+        kernel_func: Callable that executes the kernel (e.g., lambda: gemm_op())
+        num_warmups: Number of warmup iterations
+        num_runs: Base number of runs (adjusted if measure_power=True)
+        repeat_n: Number of repetitions per graph replay
+        measure_power: Enable power monitoring (None = auto-detect from env)
+        power_min_duration: Minimum duration for power measurement (None = auto-detect from env)
+
+    Yields:
+        dict with keys:
+            - 'latency_ms': Average latency in milliseconds
+            - 'power_stats': Dict with power/power_limit (or None)
+            - 'throttled': Boolean indicating if GPU was throttled
+            - 'num_runs_executed': Actual number of runs performed
+    """
+    import torch
+
+    # Auto-detect configuration from environment if not explicitly provided
+    if measure_power is None:
+        measure_power = os.environ.get("COLLECTOR_MEASURE_POWER", "false").lower() == "true"
+    if power_min_duration is None:
+        power_min_duration = float(os.environ.get("COLLECTOR_POWER_MIN_DURATION", "1.0"))
+
+    # Adaptive num_runs calculation
+    actual_num_runs = num_runs
+    if measure_power:
+        # Estimate single iteration time with warmup
+        start_warmup = torch.cuda.Event(enable_timing=True)
+        end_warmup = torch.cuda.Event(enable_timing=True)
+
+        torch.cuda.synchronize()
+        start_warmup.record()
+        for _ in range(num_warmups):
+            kernel_func()
+        end_warmup.record()
+        torch.cuda.synchronize()
+
+        single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
+        actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
+        actual_num_runs = min(actual_num_runs, 10000)  # Cap at 10k
+
+        if actual_num_runs > 1000:
+            logging.getLogger(__name__).warning(
+                f"Kernel is very fast ({single_iter_time*1000:.3f}ms), running {actual_num_runs} iterations"
+            )
+    else:
+        # Normal warmup
+        torch.cuda.synchronize()
+        for _ in range(num_warmups):
+            kernel_func()
+        torch.cuda.synchronize()
+
+    # Capture CUDA graph
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        for _ in range(repeat_n):
+            kernel_func()
+    torch.cuda.synchronize()
+
+    # Initialize power monitor if enabled
+    power_monitor = None
+    power_stats = None
+    if measure_power:
+        power_monitor = PowerMonitor(device.index)
+        if not power_monitor.start_sampling():
+            power_monitor = None  # Failed to start
+
+    # Get initial clock info for throttling detection
+    initial_clocks = None
+    if measure_power and _NVML_INITIALIZED:
+        try:
+            import pynvml as nvml
+
+            handle = nvml.nvmlDeviceGetHandleByIndex(device.index)
+            initial_clocks = nvml.nvmlDeviceGetClockInfo(handle, nvml.NVML_CLOCK_SM)
+        except Exception:
+            pass
+
+    # Execute and time
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    start_event.record()
+    for _ in range(actual_num_runs):
+        g.replay()
+    end_event.record()
+    torch.cuda.synchronize()
+
+    # Check for throttling
+    throttled = False
+    if initial_clocks is not None:
+        try:
+            import pynvml as nvml
+
+            handle = nvml.nvmlDeviceGetHandleByIndex(device.index)
+            final_clocks = nvml.nvmlDeviceGetClockInfo(handle, nvml.NVML_CLOCK_SM)
+            # If clocks dropped by more than 10%, likely throttled
+            if final_clocks < initial_clocks * 0.9:
+                throttled = True
+                logging.getLogger(__name__).warning(
+                    f"Clock throttling detected: {initial_clocks}MHz -> {final_clocks}MHz"
+                )
+        except Exception:
+            pass
+
+    # Stop power monitoring
+    if power_monitor:
+        power_stats = power_monitor.stop_sampling()
+
+    # Calculate latency
+    latency_ms = start_event.elapsed_time(end_event) / actual_num_runs / repeat_n
+
+    # Return results
+    yield {
+        "latency_ms": latency_ms,
+        "power_stats": power_stats,
+        "throttled": throttled,
+        "num_runs_executed": actual_num_runs,
+    }
+
+
+@contextmanager
+def power_monitoring_only(device, measure_power: bool | None = None):
+    """
+    Lightweight context manager for TRT profiler cases.
+    Only handles power monitoring, no timing/warmup.
+
+    Args:
+        device: torch.device object
+        measure_power: Enable power monitoring (None = auto-detect from env)
+
+    Yields:
+        PowerMonitor instance or None
+    """
+    # Auto-detect from environment if not specified
+    if measure_power is None:
+        measure_power = os.environ.get("COLLECTOR_MEASURE_POWER", "false").lower() == "true"
+
+    power_monitor = None
+
+    if measure_power:
+        power_monitor = PowerMonitor(device.index)
+        if not power_monitor.start_sampling():
+            power_monitor = None  # Failed to start
+            logging.getLogger(__name__).warning("Failed to start power monitoring")
+
+    try:
+        yield power_monitor
+    finally:
+        # Cleanup happens after yield returns
+        pass
 
 
 def setup_signal_handlers(worker_id, error_queue=None):
@@ -269,11 +557,19 @@ def log_perf(
     op_name: str,
     kernel_source: str,
     perf_filename: str,
+    power_stats: dict | None = None,  # NEW PARAMETER
 ):
     content_prefix = f"{framework},{version},{device_name},{op_name},{kernel_source}"
     header_prefix = "framework,version,device,op_name,kernel_source"
     for item in item_list:
         for key, value in item.items():
+            content_prefix += f",{value}"
+            header_prefix += f",{key}"
+
+    # Add power stats if available
+    if power_stats:
+        for key in ["power", "power_limit"]:
+            value = power_stats.get(key, "")
             content_prefix += f",{value}"
             header_prefix += f",{key}"
 

@@ -50,6 +50,46 @@ The generated file is comm_perf.txt and custom_all_reduce.txt.
 
 # Collect gemm/attention/moe data/etc.
 
+## Power Monitoring (Optional)
+
+The collector supports GPU power monitoring during kernel execution using NVML. This feature is optional and disabled by default.
+
+### Enable Power Monitoring
+```bash
+# Basic power monitoring
+python3 collect.py --backend trtllm --measure_power
+
+# With custom minimum duration (default: 1.0s)
+python3 collect.py --backend trtllm --measure_power --power_test_duration_sec 2.0
+```
+
+### Options
+- `--measure_power`: Enable NVML-based power monitoring (samples at 100ms intervals)
+- `--power_test_duration_sec`: Minimum test duration for accurate power readings (default: 1.0s)
+
+### Output
+When power monitoring is enabled, performance CSV files will include additional columns:
+- `power`: Average power consumption during kernel execution (Watts)
+- `power_limit`: GPU power management limit (Watts)
+
+**Example output:**
+```csv
+framework,version,device,op_name,kernel_source,gemm_dtype,m,n,k,latency,power,power_limit
+TRTLLM,1.2.0,NVIDIA H200 SXM,gemm,torch_flow,float16,1024,4096,4096,0.234,523.4,700.0
+```
+
+### Requirements
+Power monitoring requires:
+- `pynvml` Python package: `pip install pynvml`
+- NVML support (NVIDIA drivers)
+
+If unavailable, a warning is logged and execution continues without power data.
+
+### Notes
+- Power monitoring adds minimal overhead (<1%)
+- Kernel iterations are automatically adjusted to meet minimum duration for accurate measurements
+- Backward compatible: without `--measure_power`, CSVs remain unchanged
+
 ## For TensorRT-LLM
 ```bash
 python3 collect.py --backend trtllm
