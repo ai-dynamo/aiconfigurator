@@ -13,7 +13,7 @@ from torch.nn.parameter import Parameter
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf
+    from helper import balanced_logits, get_sm_version, log_perf
 except ModuleNotFoundError:
     import os
     import sys
@@ -21,7 +21,7 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf
+    from helper import balanced_logits, get_sm_version, log_perf
 
 
 def get_moe_test_cases():
