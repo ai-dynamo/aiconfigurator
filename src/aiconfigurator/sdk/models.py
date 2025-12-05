@@ -1313,9 +1313,10 @@ class WideEPDeepSeekModel(BaseModel):
                 ops.ElementWise(
                     "context_act_gate",
                     self._num_layers,
-                    2 * self._moe_inter_size // tp_size,
-                    self._moe_inter_size // tp_size,
+                    2 * self._moe_inter_size,
+                    self._moe_inter_size,
                     0.8,
+                    tp_size=tp_size,
                 ),
                 ops.GEMM(
                     "context_ffn2_gemm",

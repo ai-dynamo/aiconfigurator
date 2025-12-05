@@ -111,7 +111,15 @@ class GEMM(Operation):
     GEMM operation.
     """
 
-    def __init__(self, name: str, scale_factor: float, n: int, k: int, quant_mode: common.GEMMQuantMode, **kwargs) -> None:
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        n: int,
+        k: int,
+        quant_mode: common.GEMMQuantMode,
+        **kwargs,
+    ) -> None:
         super().__init__(name, scale_factor)
         self._n = n
         self._k = k
@@ -724,6 +732,7 @@ class ElementWise(Operation):
         dim_in: int,
         dim_out: int,
         empirical_bw_scaling_factor: float = 0.8,
+        **kwargs,
     ) -> None:
         super().__init__(name, scale_factor)
         self._weights = 0.0
@@ -731,10 +740,12 @@ class ElementWise(Operation):
         self._constant_latency = 5e-6  # 5us
         self._dim_in = dim_in
         self._dim_out = dim_out
+        self._tp_size = kwargs.get("tp_size", 1)
 
     # sol only
     def query(self, database: PerfDatabase, **kwargs):
         x = kwargs.get("x")  # num tokens
+        x //= self._tp_size
         read_bytes = x * self._dim_in * 2  # fp16 for act
         write_bytes = x * self._dim_out * 2
 
