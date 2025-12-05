@@ -293,7 +293,7 @@ def run_moe_torch(
             if num_runs != original_num_runs and aic_debug == 1:
                 print(
                     f"Adjusted num_runs from {original_num_runs} to {num_runs} for power measurement "
-                    f"(iter_time={single_iter_time*1000:.2f}ms, target={power_min_duration}s)"
+                    f"(iter_time={single_iter_time * 1000:.2f}ms, target={power_min_duration}s)"
                 )
 
         # Initialize power monitoring
