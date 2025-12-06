@@ -17,7 +17,7 @@ from tensorrt_llm.layers import Linear
 from tensorrt_llm.quantization.layers import FP8Linear, SmoothQuantLinear, WeightOnlyQuantLinear
 from tensorrt_llm.quantization.mode import QuantMode
 
-from helper import log_perf
+from helper import log_perf, power_monitoring_only
 
 
 def get_gemm_test_cases():
@@ -64,7 +64,7 @@ class GEMMProfiler(trt.IProfiler):
             self._layer_name = layer_name
             self._latency = ms
 
-    def write_to_file(self):
+    def write_to_file(self, power_stats=None):
         log_perf(
             item_list=[
                 {
@@ -81,6 +81,7 @@ class GEMMProfiler(trt.IProfiler):
             op_name="gemm",
             kernel_source=f"trt_flow_{self._layer_name}",
             perf_filename=self._perf_filename,
+            power_stats=power_stats,
         )
 
 
@@ -186,12 +187,18 @@ def run_gemm(gemm_type, use_plugin, m, n, k, device="cuda:0"):
     # l2_cache_flusher = L2CacheFlusher()
     cudart.cudaProfilerStart()
     x_data = x_data.to(torch.device(device))
-    with TrtRunner(build_engine) as runner:
+
+    # Use power_monitoring_only context manager for TRT profiler pattern
+    with power_monitoring_only(device) as power_monitor, TrtRunner(build_engine) as runner:
         runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
         if use_fp8 and not use_plugin:  # additional warmup for fp8 OOTB
             for i in range(4):
                 runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
         runner.context.profiler = profiler
         runner.infer(feed_dict={"x": x_data}, check_inputs=False, copy_outputs_to_host=False)
+
     cudart.cudaProfilerStop()
-    profiler.write_to_file()
+
+    # Get power stats after monitoring completes
+    power_stats = power_monitor.stop_sampling() if power_monitor else None
+    profiler.write_to_file(power_stats=power_stats)

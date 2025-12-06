@@ -12,7 +12,7 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
-from helper import log_perf
+from helper import benchmark_with_power, log_perf
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
@@ -84,25 +84,22 @@ def create_req_to_token_pool(
 
 
 def benchmark_layer(layer, forward_batch, q, k, v, q_rope, k_rope):
-    torch.cuda.synchronize()
-    for _ in range(3):
-        layer(q, k, v, forward_batch, q_rope=q_rope, k_rope=k_rope)
-    torch.cuda.synchronize()
+    # Use benchmark_with_power context manager
+    device = q.device
 
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    def kernel_func():
         layer(q, k, v, forward_batch, q_rope=q_rope, k_rope=k_rope)
-    torch.cuda.synchronize()
 
-    num_runs = 20
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for _ in range(num_runs):
-        graph.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    return start_event.elapsed_time(end_event) / num_runs
+    with benchmark_with_power(
+        device=device,
+        kernel_func=kernel_func,
+        num_warmups=3,
+        num_runs=20,
+        repeat_n=1,
+    ) as results:
+        pass
+
+    return results["latency_ms"], results["power_stats"]
 
 
 def get_context_mla_test_cases():
@@ -356,7 +353,7 @@ def run_mla(
     forward_batch.attn_backend = attn_backend
     attn_backend.init_forward_metadata(forward_batch)
 
-    latency = benchmark_layer(layer, forward_batch, q, k, v, q_rope, k_rope)
+    latency, power_stats = benchmark_layer(layer, forward_batch, q, k, v, q_rope, k_rope)
 
     if is_context_phase:
         isl = input_len
@@ -385,4 +382,5 @@ def run_mla(
         op_name=f"mla_{'context' if is_context_phase else 'generation'}",
         kernel_source="flash_attention",
         perf_filename=perf_filename,
+        power_stats=power_stats,
     )

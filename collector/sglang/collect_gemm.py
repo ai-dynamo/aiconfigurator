@@ -12,7 +12,7 @@ from sglang.srt.layers.deep_gemm_wrapper import (
 )
 from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
 
-from helper import log_perf
+from helper import benchmark_with_power, log_perf
 
 compatible_sglang_versions = ["0.5.5.post2", "0.5.5.post3"]
 
@@ -195,46 +195,26 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
     else:
         raise ValueError(f"Unsupported gemm type: {gemm_type}")
 
-    num_warmups = 3
-    num_runs = 6
-    repeat_n = 5
-
-    # Warmup outside of graph capture
-    torch.cuda.synchronize()
-    for _ in range(num_warmups):
-        gemm_op()
-    torch.cuda.synchronize()
-
-    # Capture the graph with repeated operations
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
-        for _ in range(repeat_n):
-            gemm_op()
-    torch.cuda.synchronize()
-
-    # Time the graph replay
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
+    # Use benchmark_with_power context manager
     nvtx_tag = f"{gemm_type}_m{M}_n{N}_k{K}"
     torch.cuda.nvtx.range_push(nvtx_tag)
 
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
+    with benchmark_with_power(
+        device=device,
+        kernel_func=gemm_op,
+        repeat_n=5,
+    ) as results:
+        pass
 
     torch.cuda.nvtx.range_pop()
 
-    latency = start_event.elapsed_time(end_event) / num_runs / repeat_n
-
     log_perf(
-        item_list=[{"gemm_dtype": gemm_type, "m": M, "n": N, "k": K, "latency": latency}],
+        item_list=[{"gemm_dtype": gemm_type, "m": M, "n": N, "k": K, "latency": results["latency_ms"]}],
         framework="SGLang",
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name="gemm",
         kernel_source="sglang",
         perf_filename=perf_filename,
+        power_stats=results["power_stats"],
     )

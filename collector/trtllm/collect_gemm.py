@@ -9,7 +9,7 @@ from common_test_cases import get_gemm_common_test_cases
 from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
-from helper import get_sm_version, log_perf
+from helper import benchmark_with_power, get_sm_version, log_perf
 
 
 def pad_up(x: int, y: int) -> int:
@@ -114,33 +114,25 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         gemm.forward(x)  # dry run to init
         op_list.append(gemm)
 
-    num_warmups = 3
-    num_runs = 6
-
-    # capture
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
+    # Use benchmark_with_power context manager
+    def kernel_func():
         for op in op_list:
             op.forward(x)
-    # warmup
-    for i in range(num_warmups):
-        g.replay()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / num_runs / len(op_list)
+    with benchmark_with_power(
+        device=device,
+        kernel_func=kernel_func,
+        repeat_n=1,  # Already repeating inside kernel_func via op_list
+    ) as results:
+        pass
 
     log_perf(
-        item_list=[{"gemm_dtype": gemm_type, "m": m, "n": n, "k": k, "latency": latency}],
+        item_list=[{"gemm_dtype": gemm_type, "m": m, "n": n, "k": k, "latency": results["latency_ms"]}],
         framework="TRTLLM",
         version=tensorrt_llm.__version__,
         device_name=torch.cuda.get_device_name(device),
         op_name="gemm",
         kernel_source="torch_flow",
         perf_filename=perf_filename,
+        power_stats=results["power_stats"],
     )

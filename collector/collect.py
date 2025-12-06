@@ -665,6 +665,17 @@ def main():
         "Available ops vary by backend - see backend-specific collectors for details.",
         default=None,
     )
+    parser.add_argument(
+        "--measure_power",
+        action="store_true",
+        help="Enable power monitoring during kernel execution (samples at 100ms intervals)",
+    )
+    parser.add_argument(
+        "--power_test_duration_sec",
+        type=float,
+        default=1.0,
+        help="Minimum duration for kernel runs when power measurement is enabled (default: 1.0s)",
+    )
     args = parser.parse_args()
     ops = args.ops
 
@@ -677,6 +688,14 @@ def main():
 
     num_processes = torch.cuda.device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
+
+    # Set environment variables for worker processes
+    if args.measure_power:
+        os.environ["COLLECTOR_MEASURE_POWER"] = "true"
+        os.environ["COLLECTOR_POWER_MIN_DURATION"] = str(args.power_test_duration_sec)
+        logger.info(f"Power monitoring enabled (min duration: {args.power_test_duration_sec}s)")
+    else:
+        os.environ["COLLECTOR_MEASURE_POWER"] = "false"
 
     mp.set_start_method("spawn")
 

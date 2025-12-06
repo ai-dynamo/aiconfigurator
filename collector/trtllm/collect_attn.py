@@ -19,7 +19,7 @@ from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
-from helper import get_sm_version, log_perf
+from helper import benchmark_with_power, get_sm_version, log_perf
 
 
 def run_attention_torch(
@@ -202,9 +202,8 @@ def run_attention_torch(
         out_scale=out_scale,
     )
 
-    # capture
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
+    # Use benchmark_with_power context manager
+    def kernel_func():
         attn.forward(
             input_qkv,
             None,
@@ -214,18 +213,17 @@ def run_attention_torch(
             attention_sinks=sinks,
             out_scale=out_scale,
         )
-    # warmup
-    for i in range(warming_up):
-        g.replay()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(test_ite):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / test_ite
+    with benchmark_with_power(
+        device=device,
+        kernel_func=kernel_func,
+        num_warmups=warming_up,
+        num_runs=test_ite,
+        repeat_n=1,
+    ) as results:
+        pass
+
+    latency = results["latency_ms"]
 
     # write result
     if is_context_phase:
@@ -266,6 +264,7 @@ def run_attention_torch(
         op_name=op_name,
         kernel_source="torch_flow",
         perf_filename=perf_filename,
+        power_stats=results["power_stats"],
     )
     kv_cache_manager.shutdown()
 

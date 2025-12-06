@@ -16,7 +16,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.version import __version__ as vllm_version
 
-from helper import get_sm_version, log_perf
+from helper import benchmark_with_power, get_sm_version, log_perf
 
 
 @functools.cache  # only run once per process
@@ -106,35 +106,29 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
     gemm.forward(x)  # dry run to init
 
-    num_warmups = 3
-    num_runs = 6
-
-    # capture
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
-        for i in range(num_runs):
+    # Use benchmark_with_power context manager
+    def kernel_func():
+        for _ in range(6):
             gemm.forward(x)
-    # warmup
-    for i in range(num_warmups):
-        g.replay()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / (num_runs * num_runs)
+    with benchmark_with_power(
+        device=device,
+        kernel_func=kernel_func,
+        num_warmups=3,
+        num_runs=6,
+        repeat_n=1,
+    ) as results:
+        pass
 
     log_perf(
-        item_list=[{"gemm_dtype": gemm_type, "m": m, "n": n, "k": k, "latency": latency}],
+        item_list=[{"gemm_dtype": gemm_type, "m": m, "n": n, "k": k, "latency": results["latency_ms"]}],
         framework="VLLM",
         version=vllm_version,
         device_name=torch.cuda.get_device_name(device),
         op_name="gemm",
         kernel_source="vllm_default",
         perf_filename=perf_filename,
+        power_stats=results["power_stats"],
     )
 
 

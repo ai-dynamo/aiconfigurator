@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_confi
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
-from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+from helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
@@ -200,36 +200,20 @@ def run_moe_torch(
                 )
 
         def run_iterations(use_cuda_graph=False):
-            g = torch.cuda.CUDAGraph()
-            if use_cuda_graph:
-                # CUDA Graph capture
-                with torch.cuda.graph(g):
-                    run_single_iteration()
+            # Use benchmark_with_power context manager
+            with benchmark_with_power(
+                device=device,
+                kernel_func=run_single_iteration,
+                num_warmups=num_warmups,
+                num_runs=num_runs,
+                repeat_n=1,
+            ) as results:
+                pass
 
-            # Warmup
-            for i in range(num_warmups):
-                if use_cuda_graph:
-                    g.replay()
-                else:
-                    run_single_iteration()
-
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-
-            # Performance measurement
-            start_event.record()
-            for i in range(num_runs):
-                if use_cuda_graph:
-                    g.replay()
-                else:
-                    run_single_iteration()
-            end_event.record()
-            torch.cuda.synchronize()
-
-            return start_event.elapsed_time(end_event) / num_runs / num_iter
+            return results["latency_ms"] / num_iter, results["power_stats"]
 
         try:
-            latency = run_iterations(use_cuda_graph=False)
+            latency, power_stats = run_iterations(use_cuda_graph=False)
         except torch.OutOfMemoryError:
             # If OOM, check if we had at least one successful run.
             if num_tokens_idx > 0:
@@ -261,6 +245,7 @@ def run_moe_torch(
             op_name="moe",
             kernel_source=source,
             perf_filename=perf_filename,
+            power_stats=power_stats,
         )
 
 

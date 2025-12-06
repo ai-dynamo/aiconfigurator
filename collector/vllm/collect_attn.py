@@ -20,7 +20,7 @@ from collector.vllm.utils import (
     get_attention_backend,
     resolve_obj_by_qualname,
 )
-from helper import get_sm_version, log_perf
+from helper import benchmark_with_power, get_sm_version, log_perf
 
 
 class MockAttentionLayer:
@@ -226,21 +226,17 @@ def run_attention_torch(
             output=output,
         )
 
-    # Warmup
-    for i in range(warm_up):
-        run()
+    # Use benchmark_with_power context manager
+    with benchmark_with_power(
+        device=device,
+        kernel_func=run,
+        num_warmups=warm_up,
+        num_runs=test_ite,
+        repeat_n=1,
+    ) as results:
+        pass
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    torch.cuda.synchronize()
-    start_event.record()
-    for i in range(test_ite):
-        run()
-    end_event.record()
-    torch.cuda.synchronize()
-
-    latency = start_event.elapsed_time(end_event) / test_ite
+    latency = results["latency_ms"]
     print(f"attn latency: {latency}")
 
     if is_context_phase:
@@ -277,6 +273,7 @@ def run_attention_torch(
         op_name=op_name,
         kernel_source=kernel_source,
         perf_filename=perf_filename,
+        power_stats=results["power_stats"],
     )
 
 

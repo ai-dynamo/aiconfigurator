@@ -18,7 +18,7 @@ from sglang.srt.utils import is_hip
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, log_perf, power_law_logits_v3
+    from helper import balanced_logits, benchmark_with_power, log_perf, power_law_logits_v3
 except ModuleNotFoundError:
     import os
     import sys
@@ -26,7 +26,7 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, log_perf, power_law_logits_v3
+    from helper import balanced_logits, benchmark_with_power, log_perf, power_law_logits_v3
 
 
 _is_hip = is_hip()
@@ -189,38 +189,23 @@ def benchmark_config(
                 block_shape=block_shape,
             )
 
-    # JIT compilation & warmup
-    run()
-    torch.cuda.synchronize()
+    # Use benchmark_with_power context manager
+    device = torch.device(x.device)
 
-    # Capture 10 invocations with CUDA graph
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    def kernel_func():
         for _ in range(10):
             run()
-    torch.cuda.synchronize()
 
-    # Warmup
-    for _ in range(5):
-        graph.replay()
-    torch.cuda.synchronize()
+    with benchmark_with_power(
+        device=device,
+        kernel_func=kernel_func,
+        num_warmups=5,
+        num_runs=num_iters,
+        repeat_n=1,
+    ) as results:
+        pass
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    latencies: list[float] = []
-    for i in range(num_iters):
-        prepare(i)
-        torch.cuda.synchronize()
-
-        start_event.record()
-        graph.replay()
-        end_event.record()
-        end_event.synchronize()
-        latencies.append(start_event.elapsed_time(end_event))
-    avg = sum(latencies) / (num_iters * 10)
-    graph.reset()
-    return avg
+    return results["latency_ms"], results["power_stats"]
 
 
 def benchmark(
@@ -257,7 +242,7 @@ def benchmark(
         )
     else:
         config = op_config[min(op_config.keys(), key=lambda x: abs(x - num_tokens))]
-    kernel_time = benchmark_config(
+    kernel_time, power_stats = benchmark_config(
         config,
         num_tokens,
         num_experts,
@@ -272,7 +257,7 @@ def benchmark(
         distributed=distributed,
         power_law_alpha=power_law_alpha,
     )
-    return kernel_time
+    return kernel_time, power_stats
 
 
 def run_moe_torch(
@@ -297,7 +282,7 @@ def run_moe_torch(
     assert moe_type == "fp8_block" or moe_type == "float16", "only support moe type = fp8_block or float16"
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
 
-    latency = benchmark(
+    latency, power_stats = benchmark(
         num_tokens,
         num_experts,
         2 * inter_size // moe_tp_size,
@@ -333,4 +318,5 @@ def run_moe_torch(
         op_name="moe",
         kernel_source="sglang_fused_moe_triton",
         perf_filename=perf_filename,
+        power_stats=power_stats,
     )
