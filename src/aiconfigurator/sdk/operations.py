@@ -111,15 +111,25 @@ class GEMM(Operation):
     GEMM operation.
     """
 
-    def __init__(self, name: str, scale_factor: float, n: int, k: int, quant_mode: common.GEMMQuantMode) -> None:
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        n: int,
+        k: int,
+        quant_mode: common.GEMMQuantMode,
+        **kwargs,
+    ) -> None:
         super().__init__(name, scale_factor)
         self._n = n
         self._k = k
         self._quant_mode = quant_mode
         self._weights = self._n * self._k * quant_mode.value.memory
+        self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
 
     def query(self, database: PerfDatabase, **kwargs):
         x = kwargs.get("x")
+        x //= self._scale_num_tokens
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
@@ -722,6 +732,7 @@ class ElementWise(Operation):
         dim_in: int,
         dim_out: int,
         empirical_bw_scaling_factor: float = 0.8,
+        **kwargs,
     ) -> None:
         super().__init__(name, scale_factor)
         self._weights = 0.0
@@ -729,52 +740,16 @@ class ElementWise(Operation):
         self._constant_latency = 5e-6  # 5us
         self._dim_in = dim_in
         self._dim_out = dim_out
+        self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
 
     # sol only
     def query(self, database: PerfDatabase, **kwargs):
         x = kwargs.get("x")  # num tokens
+        x //= self._scale_num_tokens
         read_bytes = x * self._dim_in * 2  # fp16 for act
         write_bytes = x * self._dim_out * 2
 
         return database.query_mem_op(read_bytes + write_bytes) * self._scale_factor
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
-
-
-class WideEPMLP(Operation):
-    """
-    WideEP MLP operation.
-    This handles the gate, ffn1, and ffn2 operations in a single class.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        hidden_size: int,
-        intermediate_size: int,
-        quant_mode: common.GEMMQuantMode,
-        **kwargs,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._hidden_size = hidden_size
-        self._intermediate_size = intermediate_size
-        self._quant_mode = quant_mode
-        self._weights = (3 * self._hidden_size * self._intermediate_size) * quant_mode.value.memory
-        self.is_context = kwargs.get("is_context", True)  # Default to context mode
-        self.tp_size = kwargs.get("tp_size", 1)
-
-    def query(self, database: PerfDatabase, **kwargs):
-        x = kwargs.get("x")  # num_tokens
-        x /= self.tp_size
-        overwrite_quant_mode = kwargs.get("quant_mode")
-        quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
-
-        return (
-            database.query_wideep_mlp(x, self._hidden_size, self._intermediate_size, quant_mode, self.is_context)
-            * self._scale_factor
-        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
