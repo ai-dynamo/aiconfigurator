@@ -113,6 +113,7 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             # Only do this every 100 tasks to avoid overhead
             if progress_value.value % 100 == 0:
                 import gc
+
                 gc.collect()
                 torch.cuda.empty_cache()
         except Exception as e:

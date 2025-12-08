@@ -63,10 +63,11 @@ class BaseBackend(ABC):
             Run context phase.
 
             Returns:
-                tuple: (context_latency_dict, context_power_dict)
+                tuple: (context_latency_dict, context_energy_wms_dict)
+                       latency in ms, energy in W·ms (watt-milliseconds)
             """
-            context_latency_dict = defaultdict(float)
-            context_power_dict = defaultdict(float)  # NEW
+            context_latency_dict = defaultdict(float)  # milliseconds
+            context_energy_wms_dict = defaultdict(float)  # W·ms (watt-milliseconds)
 
             # isl is corrected based on prefix.
             # Please handle the real logic in your context attention related operations.
@@ -79,16 +80,15 @@ class BaseBackend(ABC):
                 x = batch_size * isl if "logits_gemm" not in op._name else batch_size
                 result = op.query(database, x=x, batch_size=batch_size, beam_width=1, s=isl, prefix=prefix)
 
-                # Extract latency (automatic, it's a float)
-                latency = float(result)
-                context_latency_dict[op._name] += latency
+                # ✅ IMMEDIATELY extract values - do NOT use PerformanceResult arithmetic!
+                latency_ms = float(result)  # Extract latency in milliseconds
+                energy_wms = getattr(result, "energy", 0.0)  # Extract energy in watt-milliseconds
 
-                # Extract power and weight by latency
-                # This gives us sum(power * time) for weighted average calculation
-                power = getattr(result, "power", 0.0)  # Safe: defaults to 0 if attribute missing
-                context_power_dict[op._name] += power * latency
+                # Aggregate in separate dicts (simple addition)
+                context_latency_dict[op._name] += latency_ms
+                context_energy_wms_dict[op._name] += energy_wms
 
-            return context_latency_dict, context_power_dict
+            return context_latency_dict, context_energy_wms_dict
 
         def _run_generation(
             batch_size: int, beam_width: int, isl: int, osl: int, stride: int
@@ -97,17 +97,18 @@ class BaseBackend(ABC):
             Run generation phase.
 
             Returns:
-                tuple: (generation_latency_dict, generation_power_dict)
+                tuple: (generation_latency_dict, generation_energy_wms_dict)
+                       latency in ms, energy in W·ms
             """
             # mtp/speculative decoding correction
             batch_size = batch_size * (model._nextn + 1)
 
-            generation_latency_dict = defaultdict(float)
-            generation_power_dict = defaultdict(float)  # NEW
+            generation_latency_dict = defaultdict(float)  # milliseconds
+            generation_energy_wms_dict = defaultdict(float)  # W·ms
 
             for i in range(0, osl - 1, stride):
                 latency_dict = defaultdict(float)
-                power_dict = defaultdict(float)  # NEW
+                energy_wms_dict = defaultdict(float)  # W·ms
 
                 for op in model.generation_ops:
                     result = op.query(
@@ -118,21 +119,22 @@ class BaseBackend(ABC):
                         s=isl + i + 1,
                     )
 
-                    # Extract latency and power
-                    latency_dict[op._name] += float(result)
-                    power_dict[op._name] += getattr(result, "power", 0.0)
+                    # ✅ IMMEDIATELY extract values - do NOT accumulate PerformanceResult objects!
+                    latency_ms = float(result)
+                    energy_wms = getattr(result, "energy", 0.0)
+
+                    latency_dict[op._name] += latency_ms
+                    energy_wms_dict[op._name] += energy_wms
 
                 # usually stride, but might be less at the end
                 repeat_count = min(stride, osl - 1 - i)
 
                 for op in latency_dict:
-                    # Latency is cumulative - multiply by repeat_count
+                    # Both latency and energy are additive - multiply by repeat_count
                     generation_latency_dict[op] += latency_dict[op] * repeat_count
-                    # Power is instantaneous (watts) - weight by latency*repeat_count when accumulating
-                    # This gives us sum(power * time) which we'll divide by sum(time) for weighted average
-                    generation_power_dict[op] += power_dict[op] * latency_dict[op] * repeat_count
+                    generation_energy_wms_dict[op] += energy_wms_dict[op] * repeat_count  # SIMPLIFIED
 
-            return generation_latency_dict, generation_power_dict
+            return generation_latency_dict, generation_energy_wms_dict
 
         summary = InferenceSummary(runtime_config)
         batch_size, beam_width, isl, osl, prefix = (
@@ -143,15 +145,17 @@ class BaseBackend(ABC):
             runtime_config.prefix,
         )
 
-        # Execute phases (MODIFIED to unpack power dicts)
-        context_latency_dict, context_power_dict = {}, {}
-        generation_latency_dict, generation_power_dict = {}, {}
+        # Execute phases (UPDATED to return energy_wms dicts)
+        context_latency_dict, context_energy_wms_dict = {}, {}
+        generation_latency_dict, generation_energy_wms_dict = {}, {}
 
         if mode == "static_ctx":
-            context_latency_dict, context_power_dict = _run_context(batch_size, isl, prefix)
+            context_latency_dict, context_energy_wms_dict = _run_context(batch_size, isl, prefix)
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, 1)
         elif mode == "static_gen":
-            generation_latency_dict, generation_power_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
+            generation_latency_dict, generation_energy_wms_dict = _run_generation(
+                batch_size, beam_width, isl, osl, stride
+            )
             memory = self._get_memory_usage(
                 model,
                 database,
@@ -162,46 +166,40 @@ class BaseBackend(ABC):
                 num_tokens=batch_size * beam_width,
             )  # for gen only, all kvcache is needed.
         else:
-            context_latency_dict, context_power_dict = _run_context(batch_size, isl, prefix)
-            generation_latency_dict, generation_power_dict = _run_generation(batch_size, beam_width, isl, osl, stride)
+            context_latency_dict, context_energy_wms_dict = _run_context(batch_size, isl, prefix)
+            generation_latency_dict, generation_energy_wms_dict = _run_generation(
+                batch_size, beam_width, isl, osl, stride
+            )
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl)
 
         if latency_correction_scale != 1.0:
-            logger.debug(f"latency_correction_scale: {latency_correction_scale} is applied to the latency")
+            logger.debug(f"latency_correction_scale: {latency_correction_scale} is applied")
             for op in context_latency_dict:
                 context_latency_dict[op] *= latency_correction_scale
+                context_energy_wms_dict[op] *= latency_correction_scale  # Energy scales with latency!
             for op in generation_latency_dict:
                 generation_latency_dict[op] *= latency_correction_scale
+                generation_energy_wms_dict[op] *= latency_correction_scale  # Energy scales with latency!
 
-        # Calculate total latencies
-        context_latency = sum(context_latency_dict.values())
-        generation_latency = sum(generation_latency_dict.values())
+        # Calculate total latencies and energies (simple sums - decoupled!)
+        context_latency_ms = sum(context_latency_dict.values())  # milliseconds
+        context_energy_wms = sum(context_energy_wms_dict.values())  # watt-milliseconds
 
-        # NEW: Calculate weighted average power
-        # Formula: sum(power * latency) / sum(latency)
-        context_power_avg = 0.0
-        if context_latency > 0:
-            # context_power_dict contains sum(power * latency)
-            # context_latency contains sum(latency)
-            # So: avg_power = sum(power * latency) / sum(latency)
-            weighted_power_sum = sum(context_power_dict[op] for op in context_latency_dict)
-            context_power_avg = weighted_power_sum / context_latency
+        generation_latency_ms = sum(generation_latency_dict.values())  # milliseconds
+        generation_energy_wms = sum(generation_energy_wms_dict.values())  # watt-milliseconds
 
-        generation_power_avg = 0.0
-        if generation_latency > 0:
-            # generation_power_dict contains sum(power * latency * repeat_count)
-            # generation_latency contains sum(latency * repeat_count)
-            # So: avg_power = sum(power * latency) / sum(latency)
-            weighted_power_sum = sum(generation_power_dict[op] for op in generation_latency_dict)
-            generation_power_avg = weighted_power_sum / generation_latency
+        # Calculate average power (SIMPLIFIED - just divide! Single operation.)
+        context_power_avg = context_energy_wms / context_latency_ms if context_latency_ms > 0 else 0.0
+        generation_power_avg = generation_energy_wms / generation_latency_ms if generation_latency_ms > 0 else 0.0
 
-        # E2E weighted average power
-        total_latency = context_latency + generation_latency
-        e2e_power_avg = 0.0
-        if total_latency > 0:
-            e2e_power_avg = (
-                context_power_avg * context_latency + generation_power_avg * generation_latency
-            ) / total_latency
+        # E2E weighted average power (EVEN SIMPLER - natural weighted average!)
+        total_latency_ms = context_latency_ms + generation_latency_ms
+        total_energy_wms = context_energy_wms + generation_energy_wms
+        e2e_power_avg = total_energy_wms / total_latency_ms if total_latency_ms > 0 else 0.0
+
+        # For backward compatibility, keep old variable names
+        context_latency = context_latency_ms
+        generation_latency = generation_latency_ms
 
         bs = batch_size
         global_bs = bs * model.config.attention_dp_size
@@ -280,8 +278,11 @@ class BaseBackend(ABC):
 
         summary.set_context_latency_dict(context_latency_dict)
         summary.set_generation_latency_dict(generation_latency_dict)
-        summary.set_context_power_dict(context_power_dict)  # NEW
-        summary.set_generation_power_dict(generation_power_dict)  # NEW
+        summary.set_context_energy_wms_dict(context_energy_wms_dict)  # UPDATED: explicit units
+        summary.set_generation_energy_wms_dict(generation_energy_wms_dict)  # UPDATED: explicit units
+        summary.set_context_power_avg(context_power_avg)
+        summary.set_generation_power_avg(generation_power_avg)
+        summary.set_e2e_power_avg(e2e_power_avg)
         summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])
         summary.set_summary_df(summary_df)
 

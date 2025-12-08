@@ -59,16 +59,29 @@ def patch_all_loaders_and_yaml(request, monkeypatch):
 
         # 2) Patch load_gemm_data to return a minimal nested dict keyed by
         #    common.GEMMQuantMode.float16 with multiple entries to avoid extrapolation errors
+        #    Each entry now includes {"latency": ..., "power": ..., "energy": ...}
         dummy_gemm_data = {
             common.GEMMQuantMode.float16: {
                 64: {
                     128: {
-                        256: 10.0,  # "latency" at (m=64, n=128, k=256)
-                        512: 20.0,  # Additional point to satisfy extrapolation
+                        256: {"latency": 10.0, "power": 5.0, "energy": 50.0},  # at (m=64, n=128, k=256)
+                        512: {"latency": 20.0, "power": 6.0, "energy": 120.0},
                     },
-                    256: {256: 15.0, 512: 25.0},
+                    256: {
+                        256: {"latency": 15.0, "power": 5.5, "energy": 82.5},
+                        512: {"latency": 25.0, "power": 6.5, "energy": 162.5},
+                    },
                 },
-                128: {128: {256: 12.0, 512: 22.0}, 256: {256: 17.0, 512: 27.0}},
+                128: {
+                    128: {
+                        256: {"latency": 12.0, "power": 5.2, "energy": 62.4},
+                        512: {"latency": 22.0, "power": 6.2, "energy": 136.4},
+                    },
+                    256: {
+                        256: {"latency": 17.0, "power": 5.7, "energy": 96.9},
+                        512: {"latency": 27.0, "power": 6.7, "energy": 180.9},
+                    },
+                },
             }
         }
         monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_gemm_data", lambda path: dummy_gemm_data)
@@ -132,13 +145,20 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
 
     monkeypatch.setattr("yaml.load", lambda stream, Loader=None: dummy_system_spec)  # noqa: N803
 
-    # Comprehensive GEMM data
+    # Comprehensive GEMM data with energy
     dummy_gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     for quant_mode in [common.GEMMQuantMode.float16, common.GEMMQuantMode.fp8]:
         for m in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
             for n in [128, 256, 512, 1024]:
                 for k in [128, 256, 512, 1024]:
-                    dummy_gemm_data[quant_mode][m][n][k] = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
+                    latency = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
+                    power = 5.0 + m * 0.01  # Dummy power value
+                    energy = power * latency
+                    dummy_gemm_data[quant_mode][m][n][k] = {
+                        "latency": latency,
+                        "power": power,
+                        "energy": energy,
+                    }
 
     # Context attention data
     dummy_context_attention_data = defaultdict(
