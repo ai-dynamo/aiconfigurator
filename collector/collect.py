@@ -100,14 +100,23 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             task = task_info
             task_id = create_test_case_id(task, "unknown", module_name)
 
-        with lock:
-            progress_value.value += 1
-
         try:
             worker_logger.debug(f"Starting task {task_id}")
             func(*task, device)
             worker_logger.debug(f"Completed task {task_id}")
+
+            # Increment progress AFTER successful completion
+            with lock:
+                progress_value.value += 1
+
+            # Periodic memory cleanup to reduce fragmentation
+            # Only do this every 100 tasks to avoid overhead
+            if progress_value.value % 100 == 0:
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
         except Exception as e:
+            # Build comprehensive error info
             error_info = {
                 "module": module_name,
                 "device_id": device_id,
@@ -119,19 +128,33 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 "timestamp": datetime.now().isoformat(),
             }
 
+            # Report error to queue BEFORE any exit
             if error_queue:
                 error_queue.put(error_info)
 
             worker_logger.exception(f"Task {task_id} failed")
 
-            # Force flush logs
+            # Force flush logs before any potential exit
             for handler in worker_logger.handlers:
                 handler.flush()
 
+            # CRITICAL: Increment progress even on failure to prevent infinite retry loops
+            # This marks the task as "attempted" so it won't be picked up again
+            with lock:
+                progress_value.value += 1
+
             # This error is could be fatal and require a process restart.
             if isinstance(e, torch.AcceleratorError):
+                worker_logger.warning(
+                    f"Fatal AcceleratorError encountered on task {task_id}. "
+                    f"Worker {device_id} exiting to reset GPU context. "
+                    f"Progress: {progress_value.value}"
+                )
+                # Flush logs again after warning
+                for handler in worker_logger.handlers:
+                    handler.flush()
                 # Exiting with non-zero code will add an additional error to the summary,
-                # which we don't want.
+                # which we don't want (error already reported above).
                 exit(0)
 
 

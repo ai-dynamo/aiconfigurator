@@ -210,8 +210,13 @@ def benchmark_with_power(
         torch.cuda.synchronize()
 
         single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
-        actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
-        actual_num_runs = min(actual_num_runs, 10000)  # Cap at 10k
+
+        # Adaptive duration: use shorter duration for very fast kernels to reduce memory pressure
+        target_duration = power_min_duration
+        if single_iter_time < 0.0001:  # < 0.1ms
+            target_duration = min(power_min_duration, 0.3)
+        actual_num_runs = max(num_runs, int(target_duration / (single_iter_time * repeat_n)) + 1)
+        actual_num_runs = min(actual_num_runs, 3000)
 
         if actual_num_runs > 1000:
             logging.getLogger(__name__).warning(
