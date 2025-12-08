@@ -1308,7 +1308,7 @@ class WideEPDeepSeekModel(BaseModel):
                     2 * self._moe_inter_size,
                     h,
                     gemm_quant_mode,
-                    tp_size=tp_size,
+                    scale_num_tokens=tp_size,
                 ),
                 ops.ElementWise(
                     "context_act_gate",
@@ -1316,7 +1316,7 @@ class WideEPDeepSeekModel(BaseModel):
                     2 * self._moe_inter_size,
                     self._moe_inter_size,
                     0.8,
-                    tp_size=tp_size,
+                    scale_num_tokens=tp_size,
                 ),
                 ops.GEMM(
                     "context_ffn2_gemm",
@@ -1324,7 +1324,7 @@ class WideEPDeepSeekModel(BaseModel):
                     h,
                     self._moe_inter_size,
                     gemm_quant_mode,
-                    tp_size=tp_size,
+                    scale_num_tokens=tp_size,
                 ),
             ]
         )

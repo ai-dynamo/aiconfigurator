@@ -125,11 +125,11 @@ class GEMM(Operation):
         self._k = k
         self._quant_mode = quant_mode
         self._weights = self._n * self._k * quant_mode.value.memory
-        self._tp_size = kwargs.get("tp_size", 1)
+        self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
 
     def query(self, database: PerfDatabase, **kwargs):
         x = kwargs.get("x")
-        x //= self._tp_size
+        x //= self._scale_num_tokens
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
@@ -740,12 +740,12 @@ class ElementWise(Operation):
         self._constant_latency = 5e-6  # 5us
         self._dim_in = dim_in
         self._dim_out = dim_out
-        self._tp_size = kwargs.get("tp_size", 1)
+        self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
 
     # sol only
     def query(self, database: PerfDatabase, **kwargs):
         x = kwargs.get("x")  # num tokens
-        x //= self._tp_size
+        x //= self._scale_num_tokens
         read_bytes = x * self._dim_in * 2  # fp16 for act
         write_bytes = x * self._dim_out * 2
 
