@@ -472,8 +472,8 @@ class MoEDispatch(Operation):
         else:  # other backends
             raise NotImplementedError(f"MoEDispatch: Not implemented for backend {database.backend}")
 
-        # MoEDispatch calculates latency rather than querying, so power=0
-        return PerformanceResult(comm_latency * self._scale_factor, power=0.0)
+        # MoEDispatch calculates latency rather than querying, so energy=0
+        return PerformanceResult(comm_latency * self._scale_factor, energy=0.0)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
