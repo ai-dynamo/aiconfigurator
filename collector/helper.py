@@ -591,7 +591,7 @@ def log_perf(
             content_prefix += f",{value}"
             header_prefix += f",{key}"
 
-    # Add power stats if available
+    # Add power stats only if power measurement was enabled
     if power_stats:
         for key in ["power", "power_limit"]:
             value = power_stats.get(key, "")
