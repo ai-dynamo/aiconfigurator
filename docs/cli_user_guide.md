@@ -12,6 +12,21 @@ aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm -
 `model`, `total_gpus`, `system` are three required arguments to define the problem.  
 If you want to specify your problem with more details, we allow to define `ttft`, `tpot`, `isl`, `osl` and `prefix`.
 
+#### Backend Selection
+
+You can specify which inference backend to use with the `--backend` flag:
+
+```bash
+# Use TensorRT-LLM (default)
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --backend trtllm
+
+# Use vLLM (dense models only, currently being evaluated)
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --backend vllm
+
+# Use SGLang (dense and MoE models, currently being evaluated)
+aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --backend sglang
+```
+
 The command will create two experiments for the given problem, one is `agg` and another one is `disagg`. Compare them to find the better one and estimates the perf gain.
 
 The command will print out the result to your terminal with the basic info of the comparison, the pareto curve (the best point is tagged as `x`), 
@@ -315,7 +330,7 @@ exp_disagg_full:
   total_gpus: 32 # required
   system_name: "h200_sxm" # required
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
-  backend_name: "trtllm" # optional, default to trtllm
+  backend_name: "trtllm" # optional, can be "trtllm" (default), "vllm", or "sglang"
   backend_version: "0.20.0" # optional, default to the latest version in the database
   isl: 4000 # input sequence length, optional, default to 4000
   osl: 1000 # output sequence length, optional, default to 1000
@@ -371,7 +386,9 @@ exp_disagg_full:
 This section is very long, let's go through the basic setting quickly  
     - `mode`: patch means the `config` session below will do patch to default config while replace will overwrite everything. Typically, no need to modify  
     - `serving_mode`: defines agg or disagg of this exp  
-    - `model_name`, `total_gpus`, `backend_name`, `backend_version`, `isl`, `osl`, `ttft`, `tpot` defines the same things as in `default` mode  
+    - `model_name`, `total_gpus`: defines the model and GPU resources
+    - `backend_name`: specifies the inference backend - `trtllm` (default), `vllm`, or `sglang`
+    - `backend_version`, `isl`, `osl`, `ttft`, `tpot`: defines the same things as in `default` mode  
     - `enable_wideep`: will trigger wide-ep for fined-grained moe model  
     - `profiles`: some inherit patch, we current have 'fp8_default', 'float16_default', 'nvfp4_default' to force the precision of a worker.  
     - `config`: the most important part. It defines `nextn` for MTP; It also defines the agg_/prefill_/decode_worker's quantization, and parallelism search space; It also defines more about how we search for the disagg replica and do correction for better performance alignment. We'll go through it in [Advanced Tuning](advanced_tuning.md). Typically, the only thing here for you to modify, perhaps, is the quantization of the worker.
@@ -408,7 +425,7 @@ exp_h200_h200:
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
-  backend_name: "trtllm"
+  backend_name: "trtllm" # can also be "vllm" or "sglang"
   profiles: []
   isl: 4000 # input sequence length
   osl: 500 # output sequence length
@@ -422,7 +439,7 @@ exp_b200_h200:
   total_gpus: 16 # required
   system_name: "b200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
-  backend_name: "trtllm"
+  backend_name: "trtllm" # can also be "vllm" or "sglang"
   profiles: []
   isl: 4000 # input sequence length
   osl: 500 # output sequence length
@@ -430,6 +447,8 @@ exp_b200_h200:
   tpot: 50.0   # Target TPOT in ms
 ```
 We defined two experiments. `exp_h200_h200` uses h200 for both prefill and decode. `exp_b200_h200` uses b200 for prefill and h200 for decode.
+
+**Note**: You can also compare different backends by setting different `backend_name` values (trtllm, vllm, sglang) in your experiments.
 
 2. use a specific quantization  
 The example [yaml](../src/aiconfigurator/cli/exps/qwen3_32b_disagg_pertensor.yaml)
@@ -444,7 +463,7 @@ exp_agg:
   model_name: "QWEN3_32B" # required
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
-  backend_name: "trtllm"
+  backend_name: "trtllm" # can also be "vllm" or "sglang"
   profiles: ["fp8_default"]
   isl: 4000 # input sequence length
   osl: 500 # output sequence length
@@ -458,7 +477,7 @@ exp_disagg:
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
-  backend_name: "trtllm"
+  backend_name: "trtllm" # can also be "vllm" or "sglang"
   profiles: ["fp8_default"]
   isl: 4000 # input sequence length
   osl: 500 # output sequence length
