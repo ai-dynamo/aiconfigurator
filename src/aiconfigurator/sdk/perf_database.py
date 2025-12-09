@@ -2049,6 +2049,35 @@ class PerfDatabase:
                     result[k1][k2][k3] = self._get_value(v3, metric)
         return result
 
+    def _extract_latency_and_energy_3d(self, data: dict) -> tuple[dict, dict]:
+        """
+        Extract both latency and energy from 3D dict-based data structure in a single pass.
+
+        This is more efficient than calling _extract_metric_data_3d twice.
+
+        Args:
+            data: Nested 3-level dict where leaf values are dicts {"latency": l, "power": p, "energy": e}
+
+        Returns:
+            tuple: (latency_data, energy_data) - two dicts with same structure but scalar values
+        """
+        latency_result = {}
+        energy_result = {}
+
+        for k1, v1 in data.items():
+            latency_result[k1] = {}
+            energy_result[k1] = {}
+
+            for k2, v2 in v1.items():
+                latency_result[k1][k2] = {}
+                energy_result[k1][k2] = {}
+
+                for k3, v3 in v2.items():
+                    latency_result[k1][k2][k3] = self._get_value(v3, "latency")
+                    energy_result[k1][k2][k3] = self._get_value(v3, "energy")
+
+        return latency_result, energy_result
+
     def _extrapolate_data_grid(
         self,
         data_dict: dict[int, dict[int, dict[int, float]]],
@@ -2265,26 +2294,24 @@ class PerfDatabase:
 
         Returns:
             dict: {"latency": float, "power": float, "energy": float} - interpolated values for all metrics
+            Note: power is always 0.0 as it's not currently used by callers (only latency and energy are used)
         """
         # Check if data uses new dict format by sampling a leaf value
         sample_value = self._get_sample_leaf_value(data)
 
         if isinstance(sample_value, dict):
-            # New format: interpolate latency, power, and energy separately
-            latency_data = self._extract_metric_data_3d(data, "latency")
-            power_data = self._extract_metric_data_3d(data, "power")
-            energy_data = self._extract_metric_data_3d(data, "energy")
+            # New format: interpolate latency and energy only (power is not used by callers)
+            # Extract both metrics in a single pass for maximum efficiency
+            latency_data, energy_data = self._extract_latency_and_energy_3d(data)
 
             if method == "linear":
                 latency = self._interp_3d_linear(x, y, z, latency_data)
-                power = self._interp_3d_linear(x, y, z, power_data)
                 energy = self._interp_3d_linear(x, y, z, energy_data)
             else:
                 latency = self._interp_2d_1d(x, y, z, latency_data, method)
-                power = self._interp_2d_1d(x, y, z, power_data, method)
                 energy = self._interp_2d_1d(x, y, z, energy_data, method)
 
-            return {"latency": latency, "power": power, "energy": energy}
+            return {"latency": latency, "power": 0.0, "energy": energy}
         else:
             # Legacy format: data values are floats
             if method == "linear":
@@ -2297,12 +2324,33 @@ class PerfDatabase:
     def _get_sample_leaf_value(self, data: dict):
         """Get a sample leaf value from nested dict to determine format."""
         current = data
-        while isinstance(current, dict) and current:
+        max_depth = 20  # Safety limit to prevent infinite loops
+        depth = 0
+        visited = set()  # Track visited dict ids to detect cycles
+
+        while isinstance(current, dict) and current and depth < max_depth:
+            dict_id = id(current)
+            if dict_id in visited:
+                # Circular reference detected
+                logger.warning("Circular reference detected in _get_sample_leaf_value")
+                break
+            visited.add(dict_id)
+
             # Check if this is a leaf dict with latency/power keys
             if "latency" in current or "power" in current:
                 return current
-            key = next(iter(current))
-            current = current[key]
+
+            try:
+                key = next(iter(current))
+                current = current[key]
+                depth += 1
+            except (StopIteration, KeyError, TypeError):
+                # Handle edge cases: empty dict, missing key, or non-dict value
+                break
+
+        if depth >= max_depth:
+            logger.warning(f"Maximum depth ({max_depth}) exceeded in _get_sample_leaf_value")
+
         return current
 
     def _bilinear_interpolation(self, x_list: list[int], y_list: list[int], x: int, y: int, data: dict) -> float:
