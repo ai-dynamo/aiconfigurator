@@ -3532,8 +3532,12 @@ class PerfDatabase:
             if tp_size > 8:
                 if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
                     scale = (
-                        (tp_size - 1) / tp_size * 8 / 7
-                        * self.system_spec["node"]["intra_node_bw"] / self.system_spec["node"]["inter_node_bw"]
+                        (tp_size - 1)
+                        / tp_size
+                        * 8
+                        / 7
+                        * self.system_spec["node"]["intra_node_bw"]
+                        / self.system_spec["node"]["inter_node_bw"]
                     )
                 else:
                     scale = (tp_size - 1) / tp_size * 8 / 7
@@ -4011,9 +4015,7 @@ class PerfDatabase:
             if quant_mode not in self._mla_bmm_data:
                 quant_mode = common.GEMMQuantMode.float16
             mla_bmm_dict = self._mla_bmm_data[quant_mode]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
-            num_left, num_right = self._nearest_1d_point_helper(
-                num_tokens, list(mla_bmm_dict.keys()), inner_only=False
-            )
+            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mla_bmm_dict.keys()), inner_only=False)
             result = self._interp_1d(
                 [num_left, num_right], [mla_bmm_dict[num_left], mla_bmm_dict[num_right]], num_tokens
             )
