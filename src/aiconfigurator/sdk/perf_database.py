@@ -1432,6 +1432,9 @@ class PerfDatabase:
             self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
 
+        # Cache for extracted metric data to avoid repeated extraction in _interp_3d
+        self._extracted_metrics_cache = {}
+
         data_dir = os.path.join(systems_dir, self.system_spec["data_dir"], backend, version)
         nccl_data_dir = os.path.join(
             systems_dir,
@@ -2301,8 +2304,13 @@ class PerfDatabase:
 
         if isinstance(sample_value, dict):
             # New format: interpolate latency and energy only (power is not used by callers)
-            # Extract both metrics in a single pass for maximum efficiency
-            latency_data, energy_data = self._extract_latency_and_energy_3d(data)
+            # Use cache to avoid repeated extraction of the same data dictionary
+            data_id = id(data)
+            if data_id not in self._extracted_metrics_cache:
+                # Extract both metrics in a single pass for maximum efficiency
+                self._extracted_metrics_cache[data_id] = self._extract_latency_and_energy_3d(data)
+
+            latency_data, energy_data = self._extracted_metrics_cache[data_id]
 
             if method == "linear":
                 latency = self._interp_3d_linear(x, y, z, latency_data)
