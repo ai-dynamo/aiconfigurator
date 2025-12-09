@@ -3491,6 +3491,58 @@ class PerfDatabase:
                     raise
             return lat
 
+    def query_custom_allreduce_with_energy(
+        self,
+        quant_mode: common.CommQuantMode,
+        tp_size: int,
+        size: int,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> tuple[float, float]:
+        """
+        Query custom allreduce latency with energy data.
+
+        Returns:
+            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
+        """
+        # First get latency using existing method
+        latency = self.query_custom_allreduce(quant_mode, tp_size, size, database_mode)
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        # For SOL/EMPIRICAL modes, no energy data available
+        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
+            return latency, 0.0
+
+        # SILICON or HYBRID mode - extract energy from interpolated result
+        try:
+            if tp_size == 1:
+                return 0.0, 0.0
+            if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
+                # Fallback to NCCL
+                return self.query_nccl_with_energy(quant_mode, tp_size, "all_reduce", size, database_mode)
+
+            comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)]["AUTO"]
+            size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
+            result = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
+
+            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+
+            # Apply scaling for tp_size > 8 (same scaling as latency)
+            if tp_size > 8:
+                if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
+                    scale = (
+                        (tp_size - 1) / tp_size * 8 / 7
+                        * self.system_spec["node"]["intra_node_bw"] / self.system_spec["node"]["inter_node_bw"]
+                    )
+                else:
+                    scale = (tp_size - 1) / tp_size * 8 / 7
+                energy *= scale
+
+            return latency, energy
+        except:
+            return latency, 0.0
+
     @functools.lru_cache(maxsize=32768)
     def query_moe(
         self,
@@ -3874,6 +3926,103 @@ class PerfDatabase:
                     )
                     raise
             return lat
+
+    def query_nccl_with_energy(
+        self,
+        dtype: common.CommQuantMode,
+        num_gpus: int,
+        operation: str,
+        message_size: int,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> tuple[float, float]:
+        """
+        Query NCCL latency with energy data.
+
+        Returns:
+            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
+        """
+        # First get latency using existing method
+        latency = self.query_nccl(dtype, num_gpus, operation, message_size, database_mode)
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        # For SOL/EMPIRICAL modes, no energy data available
+        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
+            return latency, 0.0
+
+        # SILICON or HYBRID mode - extract energy from interpolated result
+        try:
+            if num_gpus == 1:
+                return 0.0, 0.0
+
+            max_num_gpus = max(self._nccl_data[dtype][operation].keys())
+            nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
+            size_left, size_right = self._nearest_1d_point_helper(
+                message_size, list(nccl_dict.keys()), inner_only=False
+            )
+            result = self._interp_1d(
+                [size_left, size_right], [nccl_dict[size_left], nccl_dict[size_right]], message_size
+            )
+
+            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+
+            # Apply scaling for num_gpus > max_num_gpus (same scaling as latency)
+            if num_gpus > max_num_gpus:
+                if max_num_gpus > self.system_spec["node"]["num_gpus_per_node"]:
+                    scale_factor = 1
+                elif num_gpus > self.system_spec["node"]["num_gpus_per_node"]:
+                    scale_factor = self.system_spec["node"]["intra_node_bw"] / self.system_spec["node"]["inter_node_bw"]
+                else:
+                    scale_factor = 1
+                scale = (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
+                energy *= scale
+
+            return latency, energy
+        except:
+            return latency, 0.0
+
+    def query_mla_bmm_with_energy(
+        self,
+        num_tokens: int,
+        num_heads: int,
+        quant_mode: common.GEMMQuantMode,
+        if_pre: bool = True,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> tuple[float, float]:
+        """
+        Query MLA BMM latency with energy data.
+
+        Returns:
+            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
+        """
+        # First get latency using existing method
+        latency = self.query_mla_bmm(num_tokens, num_heads, quant_mode, if_pre, database_mode)
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        # For SOL/EMPIRICAL modes, no energy data available
+        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
+            return latency, 0.0
+
+        # SILICON or HYBRID mode - extract energy from interpolated result
+        try:
+            if quant_mode not in self._mla_bmm_data:
+                quant_mode = common.GEMMQuantMode.float16
+            mla_bmm_dict = self._mla_bmm_data[quant_mode]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
+            num_left, num_right = self._nearest_1d_point_helper(
+                num_tokens, list(mla_bmm_dict.keys()), inner_only=False
+            )
+            result = self._interp_1d(
+                [num_left, num_right], [mla_bmm_dict[num_left], mla_bmm_dict[num_right]], num_tokens
+            )
+
+            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+
+            return latency, energy
+        except:
+            return latency, 0.0
 
     @functools.lru_cache(maxsize=32768)
     def query_mem_op(self, mem_bytes: int, database_mode: common.DatabaseMode | None = None) -> float:

@@ -54,9 +54,8 @@ class CustomAllReduce(Operation):
         # count, not size in bytes
         size = kwargs.get("x") * self._h
 
-        latency = database.query_custom_allreduce(common.CommQuantMode.half, self._tp_size, size)
-        # TODO: Add query_custom_allreduce_with_energy to database
-        return PerformanceResult(latency * self._scale_factor, energy=0.0)
+        latency, energy = database.query_custom_allreduce_with_energy(common.CommQuantMode.half, self._tp_size, size)
+        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -116,9 +115,10 @@ class NCCL(Operation):
         """Query NCCL latency with power data."""
         message_size = kwargs.get("x") * self._num_elements_per_token
 
-        latency = database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
-        # TODO: Add query_nccl_with_energy to database
-        return PerformanceResult(latency * self._scale_factor, energy=0.0)
+        latency, energy = database.query_nccl_with_energy(
+            self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size
+        )
+        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -724,9 +724,10 @@ class MLABmm(Operation):
         assert beam_width == 1, "only support beam_width=1"
         batch_size = kwargs.get("batch_size")
 
-        latency = database.query_mla_bmm(batch_size, self._num_heads, self._quant_mode, self._if_pre)
-        # TODO: Add query_mla_bmm_with_energy to database
-        return PerformanceResult(latency * self._scale_factor, energy=0.0)
+        latency, energy = database.query_mla_bmm_with_energy(
+            batch_size, self._num_heads, self._quant_mode, self._if_pre
+        )
+        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
