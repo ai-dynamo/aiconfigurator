@@ -50,7 +50,7 @@ Let's run `aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system
 ```
 This shows that for model `QWEN3_32B` to deploy on 32 H200, if you require your TTFT to be less than 1000ms and TPOT to be less than 10ms, and your problem is isl=3000 osl=512, then disagg will be 1.43x of agg. The target result is shown as Overall Best Configuration.
 
-1. Pareto frontier
+2. Pareto frontier
 ```
   Pareto Frontier:
               QWEN3_32B Pareto Frontier: tokens/s/gpu vs tokens/s/user          
@@ -86,7 +86,7 @@ tokens/s/gpu                        tokens/s/user
 ```
 Pareto frontier shows the trade-off betwen generation speed `tokens/s/user` and throughput `tokens/s/gpu`. The best points is tagged as `x`. As you want the TPOT to be less than 10ms, which means the generation speed is faster than 1000/10ms = 100 tokens/s/user, then by reading the pareto froniter, you will get the point tagged as x. You can see that, if you want different TPOT, you will have different result. Sometimes, agg will be better than disagg (higher throughput at same tokens/s/user)
 
-1. Worker setup
+3. Worker setup
 ```
   Deployment Details:
     (p) stands for prefill, (d) stands for decode, bs stands for batch size, a replica stands for the smallest scalable unit xPyD of the disagg system

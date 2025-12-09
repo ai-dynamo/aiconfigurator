@@ -266,11 +266,6 @@ To estimate performance, we take the following steps:
 
 ### Supported Features
 
-- **Inference Backends**:
-  - **TensorRT-LLM (trtllm)** - Fully supported for dense and MoE models
-  - **vLLM** - Dense model support (under evaluation, non-MoE only)
-  - **SGLang** - Dense and MoE model support, including WideEP mode (under evaluation)
-
 - **Models**:
   - GPT
   - LLAMA (2, 3)
@@ -304,6 +299,11 @@ To estimate performance, we take the following steps:
   - Aggregated serving (continuous batching)
   - Disaggregated serving
   - MTP (for DEEPSEEK)
+
+- **Inference Backends**:
+  - TensorRT-LLM (trtllm)
+  - vLLM
+  - SGLang
 
 ### Data Collection
 
