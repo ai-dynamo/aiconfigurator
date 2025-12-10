@@ -13,8 +13,7 @@ class PerformanceResult(float):
     Behaves exactly like a float for backward compatibility, but stores energy
     instead of power internally. Power is derived as energy / latency.
 
-    ⚠️ WARNING: Do NOT use for aggregation! Use separate latency_dict and energy_dict.
-    PerformanceResult is for returning atomic operation results only.
+    Supports all arithmetic and comparison operations for full float compatibility.
 
     Units:
         - latency: milliseconds (ms)
@@ -30,13 +29,20 @@ class PerformanceResult(float):
         print(result.energy)    # 3675.0 (energy in W·ms = 3.675 J)
         print(result.power)     # 350.0 (derived: 3675.0 / 10.5 = 350W)
 
-        # ❌ WRONG: Do not sum PerformanceResults directly
-        # total = sum([result1, result2])  # Might lose energy!
+        # Comparisons work correctly
+        if result > 10.0:  # Uses __gt__
+            print("Latency exceeds threshold")
 
-        # ✅ CORRECT: Extract and aggregate separately
-        # latency_sum = float(result1) + float(result2)
-        # energy_sum = result1.energy + result2.energy
+        # Aggregation with sum()
+        results = [result1, result2, result3]
+        total = sum(results)  # __radd__ handles sum() start value
+        print(total.energy)   # Energy is preserved
+
+        # Sorting works based on latency
+        sorted_results = sorted(results)
     """
+
+    # Note: We don't use __slots__ here because float subclasses cannot define __slots__
 
     def __new__(cls, latency, energy=0.0):
         """
@@ -63,15 +69,17 @@ class PerformanceResult(float):
     @property
     def power(self):
         """
-        Derived power in watts (for backward compatibility).
+        Calculate average power (Watts) from energy and latency.
+
+        Returns 0.0 if latency is too small to avoid division by zero.
 
         Power = Energy / Latency
 
         Returns:
-            float: Power in watts
+            float: Power in watts, or 0.0 if latency < 1e-9
         """
         latency = float(self)
-        if latency > 0:
+        if latency > 1e-9:  # Use threshold to avoid numerical issues
             return self.energy / latency
         return 0.0
 
@@ -89,7 +97,14 @@ class PerformanceResult(float):
             return PerformanceResult(float(self) + other, energy=self.energy)
 
     def __radd__(self, other):
-        """Right addition for sum() support."""
+        """Right addition for sum() support.
+
+        CRITICAL: Handle sum() which starts with 0.
+        Without this special case, sum([r1, r2, r3]) would fail or lose energy data.
+        """
+        if other == 0:
+            # sum() starts with 0, just return self
+            return self
         return self.__add__(other)
 
     def __mul__(self, other):
@@ -105,3 +120,51 @@ class PerformanceResult(float):
         """Divide PerformanceResult by a scalar."""
         # Scale both latency and energy
         return PerformanceResult(float(self) / other, energy=self.energy / other)
+
+    def __rtruediv__(self, other):
+        """Right division: other / self."""
+        # Return plain float when dividing by PerformanceResult
+        return other / float(self)
+
+    # Comparison operators (CRITICAL - Python doesn't auto-infer from float inheritance)
+    def __lt__(self, other):
+        """Less than comparison based on latency."""
+        return float(self) < float(other)
+
+    def __gt__(self, other):
+        """Greater than comparison based on latency."""
+        return float(self) > float(other)
+
+    def __le__(self, other):
+        """Less than or equal comparison based on latency."""
+        return float(self) <= float(other)
+
+    def __ge__(self, other):
+        """Greater than or equal comparison based on latency."""
+        return float(self) >= float(other)
+
+    def __eq__(self, other):
+        """Equality comparison based on latency."""
+        try:
+            return float(self) == float(other)
+        except (TypeError, ValueError):
+            return False
+
+    def __ne__(self, other):
+        """Inequality comparison based on latency."""
+        try:
+            return float(self) != float(other)
+        except (TypeError, ValueError):
+            return True
+
+    def __abs__(self):
+        """Absolute value of latency and energy."""
+        return PerformanceResult(abs(float(self)), energy=abs(self.energy))
+
+    def __hash__(self):
+        """Hash based on latency and energy for use in sets/dicts."""
+        return hash((float(self), self.energy))
+
+    def __str__(self):
+        """String representation (acts like float for easy printing)."""
+        return str(float(self))

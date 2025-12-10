@@ -54,8 +54,8 @@ class CustomAllReduce(Operation):
         # count, not size in bytes
         size = kwargs.get("x") * self._h
 
-        latency, energy = database.query_custom_allreduce_with_energy(common.CommQuantMode.half, self._tp_size, size)
-        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
+        result = database.query_custom_allreduce(common.CommQuantMode.half, self._tp_size, size)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -115,10 +115,8 @@ class NCCL(Operation):
         """Query NCCL latency with power data."""
         message_size = kwargs.get("x") * self._num_elements_per_token
 
-        latency, energy = database.query_nccl_with_energy(
-            self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size
-        )
-        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
+        result = database.query_nccl(self._comm_quant_mode, self._num_gpus, self._nccl_op, message_size)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -160,13 +158,13 @@ class GEMM(Operation):
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
         # Query with energy
-        latency, energy = database.query_gemm_with_energy(x, self._n, self._k, quant_mode)
+        result = database.query_gemm(x, self._n, self._k, quant_mode)
 
         # Return PerformanceResult: scale BOTH latency and energy
         # (energy scales with latency for serial execution)
         return PerformanceResult(
-            latency=latency * self._scale_factor,  # Scaled latency
-            energy=energy * self._scale_factor,  # Scaled energy (proportional to latency)
+            latency=float(result) * self._scale_factor,  # Scaled latency
+            energy=result.energy * self._scale_factor,  # Scaled energy (proportional to latency)
         )
 
     def get_weights(self, **kwargs):
@@ -223,7 +221,7 @@ class MoE(Operation):
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
-        latency, energy = database.query_moe_with_energy(
+        result = database.query_moe(
             num_tokens=x,
             hidden_size=self._hidden_size,
             inter_size=self._inter_size,
@@ -235,7 +233,7 @@ class MoE(Operation):
             workload_distribution=self._workload_distribution,
         )
 
-        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -560,7 +558,7 @@ class ContextAttention(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
 
-        latency, energy = database.query_context_attention_with_energy(
+        result = database.query_context_attention(
             batch_size,
             isl,
             prefix,
@@ -571,7 +569,7 @@ class ContextAttention(Operation):
             window_size=self._window_size,
             head_size=self._head_size,
         )
-        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -607,7 +605,7 @@ class GenerationAttention(Operation):
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
 
-        latency, energy = database.query_generation_attention_with_energy(
+        result = database.query_generation_attention(
             batch_size,
             s,
             self._n,
@@ -616,7 +614,7 @@ class GenerationAttention(Operation):
             window_size=self._window_size,
             head_size=self._head_size,
         )
-        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -649,7 +647,7 @@ class ContextMLA(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
 
-        latency, energy = database.query_context_mla_with_energy(
+        result = database.query_context_mla(
             b=batch_size,
             s=isl,
             prefix=prefix,
@@ -657,7 +655,7 @@ class ContextMLA(Operation):
             kvcache_quant_mode=self._kvcache_quant_mode,
             fmha_quant_mode=self._fmha_quant_mode,
         )
-        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -689,10 +687,8 @@ class GenerationMLA(Operation):
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
 
-        latency, energy = database.query_generation_mla_with_energy(
-            batch_size, s, self._num_heads, self._kv_cache_dtype
-        )
-        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
+        result = database.query_generation_mla(batch_size, s, self._num_heads, self._kv_cache_dtype)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -724,10 +720,8 @@ class MLABmm(Operation):
         assert beam_width == 1, "only support beam_width=1"
         batch_size = kwargs.get("batch_size")
 
-        latency, energy = database.query_mla_bmm_with_energy(
-            batch_size, self._num_heads, self._quant_mode, self._if_pre
-        )
-        return PerformanceResult(latency * self._scale_factor, energy=energy * self._scale_factor)
+        result = database.query_mla_bmm(batch_size, self._num_heads, self._quant_mode, self._if_pre)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

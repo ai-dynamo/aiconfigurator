@@ -17,6 +17,7 @@ import yaml
 from scipy import interpolate
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.performance_result import PerformanceResult
 
 databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
@@ -2543,48 +2544,37 @@ class PerfDatabase:
         k: int,
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult:
         """
-        Query GEMM latency (backward compatible).
-
-        Returns:
-            float: Latency in milliseconds
-        """
-        result = self._query_gemm_internal(m, n, k, quant_mode, database_mode)
-        # Handle SOL_FULL which returns tuple
-        if isinstance(result["latency"], tuple):
-            return result["latency"]
-        return result["latency"]
-
-    @functools.lru_cache(maxsize=50000)
-    def query_gemm_with_energy(
-        self,
-        m: int,
-        n: int,
-        k: int,
-        quant_mode: common.GEMMQuantMode,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> tuple[float, float]:
-        """
-        Query GEMM latency with energy data.
+        Query GEMM operation latency and energy.
 
         Args:
             m: Number of rows in output matrix
             n: Number of columns in output matrix
             k: Inner dimension
             quant_mode: Quantization mode
-            database_mode: Database mode (SILICON, HYBRID, etc.)
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
 
         Returns:
-            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
+                              Power can be computed as energy/latency (W).
+
+        Example:
+            >>> result = db.query_gemm(4096, 4096, 4096, GEMMQuantMode.nvfp4)
+            >>> latency_ms = float(result)  # Use as float
+            >>> energy_wms = result.energy
+            >>> power_w = result.power  # or result.energy / float(result)
         """
         result = self._query_gemm_internal(m, n, k, quant_mode, database_mode)
 
         # Handle SOL_FULL which returns tuple for latency
         if isinstance(result["latency"], tuple):
-            return result["latency"], result["energy"]
+            # SOL_FULL mode - return first element of tuple as latency
+            return PerformanceResult(result["latency"][0], energy=result.get("energy", 0.0))
 
-        return result["latency"], result["energy"]
+        # Return PerformanceResult with latency and energy
+        return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
 
     @functools.lru_cache(maxsize=32768)
     def query_context_attention(
@@ -2599,9 +2589,25 @@ class PerfDatabase:
         database_mode: Optional[common.DatabaseMode] = None,
         window_size: int = 0,
         head_size: int = 128,
-    ) -> float:
+    ) -> PerformanceResult:
         """
-        Query the context attention data
+        Query context (prefill) attention latency and energy.
+
+        Args:
+            b: Batch size
+            s: Sequence length to be computed
+            prefix: Prefix cache length
+            n: Number of attention heads
+            n_kv: Number of KV heads (for GQA)
+            kvcache_quant_mode: KV cache quantization mode
+            fmha_quant_mode: Attention computation quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+            window_size: Sliding window size (0 for no window)
+            head_size: Dimension per head
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
         """
 
         def get_sol(
@@ -2666,11 +2672,13 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            sol_latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
+            sol_result = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(
+            emp_latency = get_empirical(
                 b,
                 s,
                 prefix,
@@ -2681,6 +2689,7 @@ class PerfDatabase:
                 kvcache_quant_mode,
                 fmha_quant_mode,
             )
+            return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
                 full_s = s + prefix
@@ -2692,6 +2701,8 @@ class PerfDatabase:
                 ]
                 result = self._interp_3d(n, full_s, b, attention_dict, "cubic")
                 latency = result["latency"] * prefix_correction
+                energy = result.get("energy", 0.0) * prefix_correction
+                return PerformanceResult(latency, energy=energy)
             except:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -2709,6 +2720,7 @@ class PerfDatabase:
                         kvcache_quant_mode,
                         fmha_quant_mode,
                     )
+                    return PerformanceResult(latency, energy=0.0)
                 else:
                     logger.exception(
                         f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, "
@@ -2716,50 +2728,6 @@ class PerfDatabase:
                         "Please consider Hybrid mode."
                     )
                     raise
-            return latency
-
-    def query_context_attention_with_energy(
-        self,
-        b: int,
-        s: int,
-        prefix: int,
-        n: int,
-        n_kv: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        database_mode: Optional[common.DatabaseMode] = None,
-        window_size: int = 0,
-        head_size: int = 128,
-    ) -> tuple[float, float]:
-        """
-        Query context attention latency with energy data.
-
-        Returns:
-            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
-        """
-        latency = self.query_context_attention(
-            b, s, prefix, n, n_kv, kvcache_quant_mode, fmha_quant_mode, database_mode, window_size, head_size
-        )
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        # For SOL modes, energy is 0
-        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
-            return latency, 0.0
-
-        try:
-            full_s = s + prefix
-            prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            n_kv_key = 0 if n == n_kv else n_kv
-            attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv_key][head_size][
-                window_size
-            ]
-            result = self._interp_3d(n, full_s, b, attention_dict, "cubic")
-            # Energy should also be scaled by prefix_correction since it's proportional to work done
-            return result["latency"] * prefix_correction, result["energy"] * prefix_correction
-        except:
-            return latency, 0.0
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_attention(
@@ -2772,9 +2740,23 @@ class PerfDatabase:
         database_mode: Optional[common.DatabaseMode] = None,
         window_size: int = 0,
         head_size: int = 128,
-    ) -> float:
+    ) -> PerformanceResult:
         """
-        Query the generation attention data
+        Query generation (decode) attention latency and energy.
+
+        Args:
+            b: Batch size
+            s: KV cache length
+            n: Number of attention heads
+            n_kv: Number of KV heads (for GQA)
+            kvcache_quant_mode: KV cache quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+            window_size: Sliding window size (0 for no window)
+            head_size: Dimension per head
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
         """
 
         def get_sol(
@@ -2834,11 +2816,14 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
+            sol_latency = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
+            return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
+            sol_result = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
+            emp_latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
+            return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
                 # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
@@ -2848,6 +2833,8 @@ class PerfDatabase:
                 attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
                 result = self._interp_3d(n, b, s, attention_dict, "bilinear")
                 latency = result["latency"]
+                energy = result.get("energy", 0.0)
+                return PerformanceResult(latency, energy=energy)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -2855,6 +2842,7 @@ class PerfDatabase:
                         f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, using empirical mode"
                     )
                     latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
+                    return PerformanceResult(latency, energy=0.0)
                 else:
                     logger.exception(
                         f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, "
@@ -2862,45 +2850,8 @@ class PerfDatabase:
                         "Please consider Hybrid mode."
                     )
                     raise
-            return latency
 
     @functools.lru_cache(maxsize=10000)
-    def query_generation_attention_with_energy(
-        self,
-        b: int,
-        s: int,
-        n: int,
-        n_kv: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        database_mode: Optional[common.DatabaseMode] = None,
-        window_size: int = 0,
-        head_size: int = 128,
-    ) -> tuple[float, float]:
-        """
-        Query generation attention latency with energy data.
-
-        Returns:
-            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
-        """
-        latency = self.query_generation_attention(
-            b, s, n, n_kv, kvcache_quant_mode, database_mode, window_size, head_size
-        )
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        # For SOL modes, energy is 0
-        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
-            return latency, 0.0
-
-        try:
-            n_kv_key = 0 if n == n_kv else n_kv
-            attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv_key][head_size][window_size]
-            result = self._interp_3d(n, b, s, attention_dict, "bilinear")
-            return result["latency"], result["energy"]
-        except:
-            return latency, 0.0
-
     @functools.lru_cache(maxsize=32768)
     def query_context_mla(
         self,
@@ -2911,9 +2862,22 @@ class PerfDatabase:
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult:
         """
-        Query the context mla data
+        Query context MLA (Multi-head Latent Attention) latency and energy.
+
+        Args:
+            b: Batch size
+            s: Sequence length to be computed
+            prefix: Prefix cache length
+            num_heads: Number of attention heads
+            kvcache_quant_mode: KV cache quantization mode
+            fmha_quant_mode: Attention computation quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
         """
 
         def get_sol(
@@ -2958,11 +2922,14 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+            sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+            return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
+            sol_result = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
+            emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
+            return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
                 full_s = s + prefix
@@ -2970,6 +2937,8 @@ class PerfDatabase:
                 mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
                 result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
                 latency = result["latency"] * prefix_correction
+                energy = result.get("energy", 0.0) * prefix_correction
+                return PerformanceResult(latency, energy=energy)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -2977,48 +2946,13 @@ class PerfDatabase:
                         f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
                     )
                     latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
+                    return PerformanceResult(latency, energy=0.0)
                 else:
                     logger.exception(
                         f"Failed to query context mla data for {b=}, {s=}, {prefix=}, {num_heads=}, \
                         {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
-            return latency
-
-    def query_context_mla_with_energy(
-        self,
-        b: int,
-        s: int,
-        prefix: int,
-        num_heads: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        database_mode: Optional[common.DatabaseMode] = None,
-    ) -> tuple[float, float]:
-        """
-        Query context MLA latency with energy data.
-
-        Returns:
-            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
-        """
-        latency = self.query_context_mla(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode, database_mode)
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        # For SOL modes, energy is 0
-        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
-            return latency, 0.0
-
-        try:
-            full_s = s + prefix
-            prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
-            mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
-            result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
-            # Energy should also be scaled by prefix_correction
-            return result["latency"] * prefix_correction, result["energy"] * prefix_correction
-        except:
-            return latency, 0.0
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_mla(
@@ -3028,9 +2962,20 @@ class PerfDatabase:
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult:
         """
-        Query the generation mla data
+        Query generation MLA (Multi-head Latent Attention) latency and energy.
+
+        Args:
+            b: Batch size
+            s: KV cache length
+            num_heads: Number of attention heads
+            kvcache_quant_mode: KV cache quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
         """
 
         def get_sol(
@@ -3070,16 +3015,21 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(b, s, num_heads, kvcache_quant_mode)[0]
+            sol_latency = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
+            return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, num_heads, kvcache_quant_mode)
+            sol_result = get_sol(b, s, num_heads, kvcache_quant_mode)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(b, s, num_heads, kvcache_quant_mode)
+            emp_latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
+            return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
                 mla_dict = self._generation_mla_data[kvcache_quant_mode]
                 result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
                 latency = result["latency"]
+                energy = result.get("energy", 0.0)
+                return PerformanceResult(latency, energy=energy)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -3087,13 +3037,13 @@ class PerfDatabase:
                         f"{kvcache_quant_mode=}, using empirical mode"
                     )
                     latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
+                    return PerformanceResult(latency, energy=0.0)
                 else:
                     logger.exception(
                         f"Failed to query generation mla data for {b=}, {s=}, {num_heads=}, \
                         {kvcache_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
-            return latency
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_generation_mla(
@@ -3369,9 +3319,19 @@ class PerfDatabase:
         tp_size: int,
         size: int,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult:
         """
-        Query the allreduce data
+        Query custom AllReduce operation latency and energy.
+
+        Args:
+            quant_mode: Communication quantization mode
+            tp_size: Tensor parallelism size
+            size: Number of elements to reduce
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
         """
 
         def get_sol(quant_mode: common.CommQuantMode, tp_size: int, size: int) -> tuple[float, float, float]:
@@ -3404,15 +3364,18 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(quant_mode, tp_size, size)[0]
+            sol_latency = get_sol(quant_mode, tp_size, size)[0]
+            return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(quant_mode, tp_size, size)
+            sol_result = get_sol(quant_mode, tp_size, size)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(quant_mode, tp_size, size)
+            emp_latency = get_empirical(quant_mode, tp_size, size)
+            return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
                 if tp_size == 1:
-                    return 0.0
+                    return PerformanceResult(0.0, energy=0.0)
                 if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
                     # on GB200, we only have custom all reduce for up to tp4.
                     return self.query_nccl(quant_mode, tp_size, "all_reduce", size)
@@ -3422,12 +3385,19 @@ class PerfDatabase:
                 ]  # use AUTO for allreduce strategy
                 size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
                 result = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
-                lat = result["latency"] if isinstance(result, dict) else result
+
+                # Extract latency and energy
+                if isinstance(result, dict):
+                    lat = result["latency"]
+                    energy = result.get("energy", 0.0)
+                else:
+                    lat = result
+                    energy = 0.0
+
                 if tp_size > 8:  # FIXME, to collect real data, use inter-node and intra-node data seperately
                     if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
-                        lat = (
-                            lat
-                            * (tp_size - 1)
+                        scale_factor = (
+                            (tp_size - 1)
                             / tp_size
                             * 8
                             / 7
@@ -3435,7 +3405,11 @@ class PerfDatabase:
                             / self.system_spec["node"]["inter_node_bw"]
                         )
                     else:
-                        lat = lat * (tp_size - 1) / tp_size * 8 / 7
+                        scale_factor = (tp_size - 1) / tp_size * 8 / 7
+                    lat = lat * scale_factor
+                    energy = energy * scale_factor
+
+                return PerformanceResult(lat, energy=energy)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -3443,13 +3417,13 @@ class PerfDatabase:
                         {database_mode=}, using empirical mode"
                     )
                     lat = get_empirical(quant_mode, tp_size, size)
+                    return PerformanceResult(lat, energy=0.0)
                 else:
                     logger.exception(
                         f"Failed to query custom allreduce data for {quant_mode=}, {tp_size=}, {size=}, \
                         {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
-            return lat
 
     @functools.lru_cache(maxsize=32768)
     def query_nccl(
@@ -3459,11 +3433,27 @@ class PerfDatabase:
         operation: str,
         message_size: int,  # element number
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult:
         """
-        Query the nccl data
+        Query NCCL collective communication latency and energy.
 
-        message_size: element number
+        Args:
+            dtype: Communication quantization mode
+            num_gpus: Number of GPUs in collective
+            operation: NCCL operation type ("all_reduce", "all_gather", etc.)
+            message_size: Number of elements to communicate
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
+                              Power can be computed as energy/latency (W).
+
+        Example:
+            >>> result = db.query_nccl(CommQuantMode.half, 8, "all_reduce", 16384)
+            >>> latency_ms = float(result)
+            >>> energy_wms = result.energy
+            >>> power_w = result.power
         """
 
         def get_sol(
@@ -3497,15 +3487,16 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(dtype, num_gpus, operation, message_size)[0]
+            return PerformanceResult(get_sol(dtype, num_gpus, operation, message_size)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(dtype, num_gpus, operation, message_size)
+            sol_result = get_sol(dtype, num_gpus, operation, message_size)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(dtype, num_gpus, operation, message_size)
+            return PerformanceResult(get_empirical(dtype, num_gpus, operation, message_size), energy=0.0)
         else:
             try:
                 if num_gpus == 1:
-                    return 0.0
+                    return PerformanceResult(0.0, energy=0.0)
 
                 max_num_gpus = max(self._nccl_data[dtype][operation].keys())
                 nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
@@ -3519,7 +3510,14 @@ class PerfDatabase:
                     [nccl_dict[size_left], nccl_dict[size_right]],
                     message_size,
                 )
-                lat = result["latency"] if isinstance(result, dict) else result
+
+                # Extract latency and energy from result
+                if isinstance(result, dict):
+                    lat = result["latency"]
+                    energy = result.get("energy", 0.0)
+                else:
+                    lat = result
+                    energy = 0.0
 
                 if num_gpus > max_num_gpus:  # need to do some correction
                     logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")
@@ -3532,6 +3530,9 @@ class PerfDatabase:
                     else:  # all intra node
                         scale_factor = 1
                     lat = lat * (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
+                    energy = energy * scale_factor  # Scale energy proportionally
+
+                return PerformanceResult(lat, energy=energy)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -3539,69 +3540,13 @@ class PerfDatabase:
                         f"{operation=}, {message_size=}, using empirical mode"
                     )
                     lat = get_empirical(dtype, num_gpus, operation, message_size)
+                    return PerformanceResult(lat, energy=0.0)
                 else:
                     logger.exception(
                         f"Failed to query nccl data for {dtype=}, {num_gpus=}, \
                         {operation=}, {message_size=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
-            return lat
-
-    def query_custom_allreduce_with_energy(
-        self,
-        quant_mode: common.CommQuantMode,
-        tp_size: int,
-        size: int,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> tuple[float, float]:
-        """
-        Query custom allreduce latency with energy data.
-
-        Returns:
-            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
-        """
-        # First get latency using existing method
-        latency = self.query_custom_allreduce(quant_mode, tp_size, size, database_mode)
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        # For SOL/EMPIRICAL modes, no energy data available
-        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
-            return latency, 0.0
-
-        # SILICON or HYBRID mode - extract energy from interpolated result
-        try:
-            if tp_size == 1:
-                return 0.0, 0.0
-            if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
-                # Fallback to NCCL
-                return self.query_nccl_with_energy(quant_mode, tp_size, "all_reduce", size, database_mode)
-
-            comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)]["AUTO"]
-            size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
-            result = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
-
-            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-
-            # Apply scaling for tp_size > 8 (same scaling as latency)
-            if tp_size > 8:
-                if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
-                    scale = (
-                        (tp_size - 1)
-                        / tp_size
-                        * 8
-                        / 7
-                        * self.system_spec["node"]["intra_node_bw"]
-                        / self.system_spec["node"]["inter_node_bw"]
-                    )
-                else:
-                    scale = (tp_size - 1) / tp_size * 8 / 7
-                energy *= scale
-
-            return latency, energy
-        except:
-            return latency, 0.0
 
     @functools.lru_cache(maxsize=32768)
     def query_moe(
@@ -3618,9 +3563,27 @@ class PerfDatabase:
         is_context: bool = True,
         moe_backend: str | None = None,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult:
         """
-        Query the moe data
+        Query MoE (Mixture of Experts) layer latency and energy.
+
+        Args:
+            num_tokens: Number of tokens
+            hidden_size: Hidden dimension size
+            inter_size: Intermediate size
+            topk: Number of experts activated per token
+            num_experts: Total number of experts
+            moe_tp_size: MoE tensor parallelism size
+            moe_ep_size: MoE expert parallelism size
+            quant_mode: MoE quantization mode
+            workload_distribution: Workload distribution pattern
+            is_context: Whether this is context (prefill) phase
+            moe_backend: MoE backend type (for SGLang)
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
         """
 
         def get_sol(
@@ -3691,7 +3654,7 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(
+            sol_latency = get_sol(
                 num_tokens,
                 hidden_size,
                 inter_size,
@@ -3702,8 +3665,9 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )[0]
+            return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(
+            sol_result = get_sol(
                 num_tokens,
                 hidden_size,
                 inter_size,
@@ -3714,8 +3678,9 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(
+            emp_latency = get_empirical(
                 num_tokens,
                 hidden_size,
                 inter_size,
@@ -3726,6 +3691,7 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )
+            return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
                 if self.backend == common.BackendName.sglang.value:
@@ -3751,8 +3717,13 @@ class PerfDatabase:
                         [moe_dict[num_left], moe_dict[num_right]],
                         num_tokens,
                     )
-                    lat = result["latency"] if isinstance(result, dict) else result
-                    return lat
+                    if isinstance(result, dict):
+                        lat = result["latency"]
+                        energy = result.get("energy", 0.0)
+                    else:
+                        lat = result
+                        energy = 0.0
+                    return PerformanceResult(lat, energy=energy)
                 elif self.backend == common.BackendName.trtllm.value:
                     # aligned with trtllm, kernel source selection.
                     if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
@@ -3799,8 +3770,13 @@ class PerfDatabase:
                         [moe_dict[num_left], moe_dict[num_right]],
                         num_tokens,
                     )
-                    lat = result["latency"] if isinstance(result, dict) else result
-                    return lat
+                    if isinstance(result, dict):
+                        lat = result["latency"]
+                        energy = result.get("energy", 0.0)
+                    else:
+                        lat = result
+                        energy = 0.0
+                    return PerformanceResult(lat, energy=energy)
                 elif self.backend == common.BackendName.vllm.value:
                     moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][
                         inter_size
@@ -3811,8 +3787,13 @@ class PerfDatabase:
                     result = self._interp_1d(
                         [num_left, num_right], [moe_dict[num_left], moe_dict[num_right]], num_tokens
                     )
-                    latency = result["latency"] if isinstance(result, dict) else result
-                    return latency
+                    if isinstance(result, dict):
+                        latency = result["latency"]
+                        energy = result.get("energy", 0.0)
+                    else:
+                        latency = result
+                        energy = 0.0
+                    return PerformanceResult(latency, energy=energy)
                 else:
                     raise NotImplementedError(f"backend {self.backend} not supported for moe")
             except Exception:
@@ -3833,6 +3814,7 @@ class PerfDatabase:
                         quant_mode,
                         workload_distribution,
                     )
+                    return PerformanceResult(latency, energy=0.0)
                 else:
                     logger.exception(
                         "Failed to query moe data for "
@@ -3841,73 +3823,6 @@ class PerfDatabase:
                         f"{database_mode=}. Please consider Hybrid mode."
                     )
                     raise
-                return latency
-
-    def query_moe_with_energy(
-        self,
-        num_tokens: int,
-        hidden_size: int,
-        inter_size: int,
-        topk: int,
-        num_experts: int,
-        moe_tp_size: int,
-        moe_ep_size: int,
-        quant_mode: common.MoEQuantMode,
-        workload_distribution: str = "uniform",
-        database_mode: common.DatabaseMode | None = None,
-    ) -> tuple[float, float]:
-        """
-        Query MoE latency with energy data.
-
-        Returns:
-            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
-        """
-        latency = self.query_moe(
-            num_tokens,
-            hidden_size,
-            inter_size,
-            topk,
-            num_experts,
-            moe_tp_size,
-            moe_ep_size,
-            quant_mode,
-            workload_distribution,
-            database_mode,
-        )
-
-        # For now, MoE energy data may not be available, return 0
-        # This can be updated when MoE database has energy columns
-        return latency, 0.0
-
-    def query_generation_mla_with_energy(
-        self,
-        b: int,
-        s: int,
-        num_heads: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        database_mode: Optional[common.DatabaseMode] = None,
-    ) -> tuple[float, float]:
-        """
-        Query generation MLA latency with energy data.
-
-        Returns:
-            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
-        """
-        latency = self.query_generation_mla(b, s, num_heads, kvcache_quant_mode, database_mode)
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        # For SOL modes, energy is 0
-        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
-            return latency, 0.0
-
-        try:
-            mla_dict = self._generation_mla_data[kvcache_quant_mode]
-            result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
-            return result["latency"], result["energy"]
-        except:
-            return latency, 0.0
 
     @functools.lru_cache(maxsize=32768)
     def query_mla_bmm(
@@ -3917,9 +3832,20 @@ class PerfDatabase:
         quant_mode: common.GEMMQuantMode,
         if_pre: bool = True,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult:
         """
-        Query the mla bmm data
+        Query MLA batch matrix multiply latency and energy.
+
+        Args:
+            num_tokens: Number of tokens
+            num_heads: Number of attention heads
+            quant_mode: Quantization mode
+            if_pre: Whether this is pre or post operation
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
         """
 
         def get_sol(
@@ -3951,11 +3877,14 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
+            sol_latency = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
+            return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(num_tokens, num_heads, quant_mode, if_pre)
+            sol_result = get_sol(num_tokens, num_heads, quant_mode, if_pre)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(num_tokens, num_heads, quant_mode, if_pre)
+            emp_latency = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
+            return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
                 if quant_mode not in self._mla_bmm_data:
@@ -3971,7 +3900,13 @@ class PerfDatabase:
                     [mla_bmm_dict[num_left], mla_bmm_dict[num_right]],
                     num_tokens,
                 )
-                lat = result["latency"] if isinstance(result, dict) else result
+                if isinstance(result, dict):
+                    lat = result["latency"]
+                    energy = result.get("energy", 0.0)
+                else:
+                    lat = result
+                    energy = 0.0
+                return PerformanceResult(lat, energy=energy)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -3979,108 +3914,13 @@ class PerfDatabase:
                         f"{if_pre=}, using empirical mode"
                     )
                     lat = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
+                    return PerformanceResult(lat, energy=0.0)
                 else:
                     logger.exception(
                         f"Failed to query mla bmm data for {num_tokens=}, {num_heads=}, {quant_mode=}, \
                         {if_pre=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
-            return lat
-
-    def query_nccl_with_energy(
-        self,
-        dtype: common.CommQuantMode,
-        num_gpus: int,
-        operation: str,
-        message_size: int,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> tuple[float, float]:
-        """
-        Query NCCL latency with energy data.
-
-        Returns:
-            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
-        """
-        # First get latency using existing method
-        latency = self.query_nccl(dtype, num_gpus, operation, message_size, database_mode)
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        # For SOL/EMPIRICAL modes, no energy data available
-        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
-            return latency, 0.0
-
-        # SILICON or HYBRID mode - extract energy from interpolated result
-        try:
-            if num_gpus == 1:
-                return 0.0, 0.0
-
-            max_num_gpus = max(self._nccl_data[dtype][operation].keys())
-            nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
-            size_left, size_right = self._nearest_1d_point_helper(
-                message_size, list(nccl_dict.keys()), inner_only=False
-            )
-            result = self._interp_1d(
-                [size_left, size_right], [nccl_dict[size_left], nccl_dict[size_right]], message_size
-            )
-
-            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-
-            # Apply scaling for num_gpus > max_num_gpus (same scaling as latency)
-            if num_gpus > max_num_gpus:
-                if max_num_gpus > self.system_spec["node"]["num_gpus_per_node"]:
-                    scale_factor = 1
-                elif num_gpus > self.system_spec["node"]["num_gpus_per_node"]:
-                    scale_factor = self.system_spec["node"]["intra_node_bw"] / self.system_spec["node"]["inter_node_bw"]
-                else:
-                    scale_factor = 1
-                scale = (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
-                energy *= scale
-
-            return latency, energy
-        except:
-            return latency, 0.0
-
-    def query_mla_bmm_with_energy(
-        self,
-        num_tokens: int,
-        num_heads: int,
-        quant_mode: common.GEMMQuantMode,
-        if_pre: bool = True,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> tuple[float, float]:
-        """
-        Query MLA BMM latency with energy data.
-
-        Returns:
-            tuple[float, float]: (latency in ms, energy in watt-milliseconds)
-        """
-        # First get latency using existing method
-        latency = self.query_mla_bmm(num_tokens, num_heads, quant_mode, if_pre, database_mode)
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        # For SOL/EMPIRICAL modes, no energy data available
-        if database_mode in [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL]:
-            return latency, 0.0
-
-        # SILICON or HYBRID mode - extract energy from interpolated result
-        try:
-            if quant_mode not in self._mla_bmm_data:
-                quant_mode = common.GEMMQuantMode.float16
-            mla_bmm_dict = self._mla_bmm_data[quant_mode]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
-            num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mla_bmm_dict.keys()), inner_only=False)
-            result = self._interp_1d(
-                [num_left, num_right], [mla_bmm_dict[num_left], mla_bmm_dict[num_right]], num_tokens
-            )
-
-            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
-
-            return latency, energy
-        except:
-            return latency, 0.0
 
     @functools.lru_cache(maxsize=32768)
     def query_mem_op(self, mem_bytes: int, database_mode: common.DatabaseMode | None = None) -> float:
