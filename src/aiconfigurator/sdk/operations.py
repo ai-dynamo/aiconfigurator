@@ -82,9 +82,8 @@ class P2P(Operation):
         size = kwargs.get("x") * self._h
         p2p_bytes = size * 2
 
-        latency = database.query_p2p(p2p_bytes)
-        # TODO: Add query_p2p_with_energy to database
-        return PerformanceResult(latency * self._scale_factor, energy=0.0)
+        result = database.query_p2p(p2p_bytes)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -753,9 +752,8 @@ class Embedding(Operation):
         x = kwargs.get("x")
         d2d_bytes = x * self._column_size * 2
 
-        latency = database.query_mem_op(d2d_bytes)
-        # TODO: Add query_mem_op_with_energy to database
-        return PerformanceResult(latency * self._scale_factor, energy=0.0)
+        result = database.query_mem_op(d2d_bytes)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -791,9 +789,8 @@ class ElementWise(Operation):
         read_bytes = x * self._dim_in * 2  # fp16 for act
         write_bytes = x * self._dim_out * 2
 
-        latency = database.query_mem_op(read_bytes + write_bytes)
-        # TODO: Add query_mem_op_with_energy to database
-        return PerformanceResult(latency * self._scale_factor, energy=0.0)
+        result = database.query_mem_op(read_bytes + write_bytes)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

@@ -3923,9 +3923,17 @@ class PerfDatabase:
                     raise
 
     @functools.lru_cache(maxsize=32768)
-    def query_mem_op(self, mem_bytes: int, database_mode: common.DatabaseMode | None = None) -> float:
+    def query_mem_op(self, mem_bytes: int, database_mode: common.DatabaseMode | None = None) -> PerformanceResult:
         """
-        Query the mem op data
+        Query memory operation latency and energy.
+
+        Args:
+            mem_bytes: Number of bytes to transfer
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
         """
 
         def get_sol(mem_bytes: int) -> tuple[float, float, float]:
@@ -3948,19 +3956,28 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(mem_bytes)[0]
+            return PerformanceResult(get_sol(mem_bytes)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(mem_bytes)
+            sol_result = get_sol(mem_bytes)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(mem_bytes)
+            return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
         else:
             # hybrid and silicon modes have same logic
-            return get_empirical(mem_bytes)
+            return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
 
     @functools.lru_cache(maxsize=32768)
-    def query_p2p(self, message_bytes: int, database_mode: common.DatabaseMode | None = None) -> float:
+    def query_p2p(self, message_bytes: int, database_mode: common.DatabaseMode | None = None) -> PerformanceResult:
         """
-        Query the p2p data
+        Query P2P (point-to-point) communication latency and energy.
+
+        Args:
+            message_bytes: Number of bytes to transfer
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
         """
 
         def get_sol(message_bytes: int) -> tuple[float, float, float]:
@@ -3982,14 +3999,15 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(message_bytes)[0]
+            return PerformanceResult(get_sol(message_bytes)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(message_bytes)
+            sol_result = get_sol(message_bytes)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(message_bytes)
+            return PerformanceResult(get_empirical(message_bytes), energy=0.0)
         else:
             # hybrid and silicon modes have same logic
-            return get_empirical(message_bytes)
+            return PerformanceResult(get_empirical(message_bytes), energy=0.0)
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_mlp(
