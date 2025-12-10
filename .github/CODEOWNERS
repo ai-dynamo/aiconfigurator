@@ -64,10 +64,10 @@
 /docs/dynamo_deployment_guide.md @Ethan-ES @davilu-nvidia @tianhaox @jasonqinzhou @Arsene12358
 
 # docker
-/docker @jasonqinzhou @anish-shanbhag @ilyasher @saturley-hall @tianhaox @Arsene12358
+/docker @jasonqinzhou @anish-shanbhag @ilyasher @Devops @tianhaox @Arsene12358
 
 # tests
-/tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @saturley-hall
+/tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @Devops
 
 # tools
 /tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358
@@ -76,16 +76,16 @@
 /tools/support_matrix/generate_support_matrix.py @Harrilee
 
 # misc
-/ATTRIBUTIONS.md @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
-/CODE_OF_CONDUCT.md @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
-/CONTRIBUTING.md @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
-/DEVELOPMENT.md @saturley-hall @anish-shanbhag @tianhaox @jasonqinzhou @Arsene12358
-/LICENSE @saturley-hall 
-/pyproject.toml @tianhaox @jasonqinzhou @saturley-hall @Arsene12358 @tianhaox @jasonqinzhou @Arsene12358
-/pytest.ini @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
+/ATTRIBUTIONS.md @Devops @tianhaox @jasonqinzhou @Arsene12358
+/CODE_OF_CONDUCT.md @Devops @tianhaox @jasonqinzhou @Arsene12358
+/CONTRIBUTING.md @Devops @tianhaox @jasonqinzhou @Arsene12358
+/DEVELOPMENT.md @Devops @anish-shanbhag @tianhaox @jasonqinzhou @Arsene12358
+/LICENSE @Devops 
+/pyproject.toml @tianhaox @jasonqinzhou @Devops @Arsene12358
+/pytest.ini @Devops @tianhaox @jasonqinzhou @Arsene12358
 /README.md @tianhaox @jasonqinzhou @Arsene12358
-/SECURITY.md @saturley-hall
-/.pre-commit-config.yaml @saturley-hall @tianhaox @jasonqinzhou @Arsene12358
+/SECURITY.md @Devops
+/.pre-commit-config.yaml @Devops @tianhaox @jasonqinzhou @Arsene12358
 
 # CI/CD and workflows
-/.github/workflows @saturley-hall @tianhaox @jasonqinzhou @Arsene12358 @Harrilee
+/.github/workflows @Devops @tianhaox @jasonqinzhou @Arsene12358 @Harrilee
