@@ -206,6 +206,7 @@ def log_final_summary(
     task_configs: dict[str, TaskConfig],
     mode: str,
     pareto_x_axis: dict[str, str] | None = None,
+    top_n: int = 5,
 ):
     """Log final summary of configuration results"""
 
@@ -315,7 +316,7 @@ def log_final_summary(
             config_df,
             total_gpus,
             exp_task_config.runtime_config.tpot,
-            5,
+            top_n,
             exp_task_config.is_moe,
             exp_task_config.runtime_config.request_latency,
         )
