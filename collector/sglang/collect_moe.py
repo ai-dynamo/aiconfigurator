@@ -52,6 +52,11 @@ def get_moe_test_cases():
         if common_moe_testcase.token_expert_distribution != "power_law":
             continue
 
+        # Skip EP > 1 test cases - this collector only supports single-GPU MOE (ep_size=1)
+        # For EP > 1 (multi-GPU expert parallelism), use collect_wideep_deepep_moe.py instead
+        if common_moe_testcase.ep != 1:
+            continue
+
         model_name = common_moe_testcase.model_name
         if model_name in ["GPT_OSS_20B", "GPT_OSS_120B"]:
             continue
