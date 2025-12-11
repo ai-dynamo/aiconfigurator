@@ -3,11 +3,22 @@
 import itertools
 import os
 from typing import TypedDict
+from unittest.mock import MagicMock
 
 import pkg_resources
+
+# Mock global server args before importing MOE modules (required by SGLang 0.5.5+)
+# The fused_moe_triton_config module now requires get_global_server_args() to be set
+import sglang.srt.server_args as _server_args_module
 import torch
-from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
-    fused_moe,
+
+if _server_args_module._global_server_args is None:
+    _mock_server_args = MagicMock()
+    _mock_server_args.enable_deterministic_inference = False
+    _server_args_module._global_server_args = _mock_server_args
+
+from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_moe
+from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config import (
     get_config_dtype_str,
     get_default_config,
     get_moe_configs,
