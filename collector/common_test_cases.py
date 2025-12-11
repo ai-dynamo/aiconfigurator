@@ -195,3 +195,145 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
                 test_cases.append(GemmCommonTestCase(x=x, n=n, k=k))
 
     return test_cases
+
+
+@dataclasses.dataclass
+class MLACommonTestCase:
+    num_heads: int
+    batch_size: int
+    input_len: int
+    is_context_phase: bool
+
+
+def get_context_mla_common_test_cases():
+    test_cases = []
+
+    n_list = [128]
+    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    s_list = [
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        1536,
+        2048,
+        3072,
+        4096,
+        6144,
+        8192,
+        10240,
+        12288,
+        16384,
+    ]
+
+    for (
+        n,
+        s,
+        b,
+    ) in itertools.product(
+        n_list,
+        s_list,
+        b_list,
+    ):
+        if b * s > 32768:
+            continue
+
+        test_cases.append(
+            MLACommonTestCase(
+                num_heads=n,
+                input_len=s,
+                batch_size=b,
+                is_context_phase=True,
+            )
+        )
+
+        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size,
+        #  tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
+        # test_cases.append(
+        #     [
+        #         s,
+        #         b,
+        #         1,
+        #         dtype,
+        #         n,
+        #         tp_size,
+        #         tp_size,
+        #         64,
+        #         10,
+        #         6,
+        #         True,
+        #         "context_mla_perf.txt",
+        #     ]
+        # )
+    return test_cases
+
+
+def get_generation_mla_common_test_cases():
+    test_cases = []
+
+    n_list = [128]
+    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    s_list = [
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+        8192,
+        16384,
+        32768,
+        65536,
+        131072,
+    ]  # [target token s] is equivalent to [in: s-1, step=1]
+
+    for (
+        n,
+        s,
+        b,
+    ) in itertools.product(
+        n_list,
+        s_list,
+        b_list,
+    ):
+        if b * s > 1024 * 4096 * 2 * 2:
+            continue
+
+        test_cases.append(
+            MLACommonTestCase(
+                num_heads=n,
+                input_len=s - 1,
+                batch_size=b,
+                is_context_phase=False,
+            )
+        )
+
+        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size,
+        #  tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
+        # test_cases.append(
+        #     [
+        #         s - 1,
+        #         b,
+        #         1,
+        #         dtype,
+        #         n,
+        #         tp_size,
+        #         tp_size,
+        #         64,
+        #         10,
+        #         6,
+        #         False,
+        #         "generation_mla_perf.txt",
+        #     ]
+        # )
+
+    return test_cases
