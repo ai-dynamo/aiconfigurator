@@ -7,7 +7,6 @@ import os
 import torch
 from vllm.config import set_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.version import __version__ as vllm_version
 
@@ -32,12 +31,13 @@ def run_attention_torch(
     batch_size,
     input_len,
     num_heads,
-    num_kv_heads,  # keep same as num_heads for MHA
+    num_kv_heads,
     q_lora_rank,
     kv_lora_rank,
     qk_rope_head_dim,
     qk_nope_head_dim,
     v_head_dim,
+    block_size,
     use_fp8_kv_cache,
     is_context_phase,
     perf_filename,
@@ -52,7 +52,6 @@ def run_attention_torch(
 
     dtype = torch.float16
     model = os.path.join(os.path.dirname(__file__), "fake_mla_hf_model")
-    block_size = 64
     head_dim = kv_lora_rank + qk_rope_head_dim
 
     # TODO: Let vllm choose the backend.
@@ -151,20 +150,10 @@ def run_attention_torch(
         kv_cache = kv_cache.transpose(2, 3).contiguous().transpose(2, 3)
         set_kv_cache_layout("HND")
 
-    # Handle special case for FLEX_ATTENTION_SLOW
-    actual_backend = backend_name
-    use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
-    if backend_name == "FLEX_ATTENTION_SLOW":
-        actual_backend = _Backend.FLEX_ATTENTION
-        use_direct_block_mask = False
-
-    builder_cls, impl_cls = get_attention_backend(actual_backend)
-    layer_names = ["placeholder"]
-
     # Build metadata
+    builder_cls, impl_cls = get_attention_backend(backend_name)
+    layer_names = ["placeholder"]
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-    if actual_backend == _Backend.FLEX_ATTENTION:
-        builder.direct_build = use_direct_block_mask
     attn_metadata = builder.build(
         common_prefix_len=0,
         common_attn_metadata=common_attn_metadata,
@@ -286,84 +275,68 @@ def run_attention_torch(
     )
 
 
-def get_context_attention_test_cases():
+# TODO: remove num_kv_heads
+
+
+def _get_mla_test_cases(is_context: bool):
     test_cases = []
 
     kv_cache_dtype_list = [False]
     if get_sm_version() > 86:
         kv_cache_dtype_list.append(True)
 
-    # TODO: TP size
+    if is_context:
+        common_test_cases = get_context_mla_common_test_cases()
+    else:
+        common_test_cases = get_generation_mla_common_test_cases()
 
-    for common_mla_testcase in get_context_mla_common_test_cases():
-        n = common_mla_testcase.num_heads
-        b = common_mla_testcase.batch_size
-        s = common_mla_testcase.input_len
+    tp_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
 
-        for is_fp8_kv_cache in kv_cache_dtype_list:
-            test_cases.append(
-                [
-                    b,
-                    s,
-                    n,
-                    common_mla_testcase.num_kv_heads,
-                    common_mla_testcase.q_lora_rank,
-                    common_mla_testcase.kv_lora_rank,
-                    common_mla_testcase.qk_rope_head_dim,
-                    common_mla_testcase.qk_nope_head_dim,
-                    common_mla_testcase.v_head_dim,
-                    is_fp8_kv_cache,
-                    True,
-                    "context_attention_perf.txt",
-                ]
-            )
+    for common_mla_testcase in common_test_cases:
+        for tp_size in tp_sizes:
+            if common_mla_testcase.num_heads % tp_size != 0:
+                continue
+            if common_mla_testcase.num_kv_heads % tp_size != 0:
+                continue
 
-    return test_cases
-
-
-def get_generation_attention_test_cases():
-    test_cases = []
-
-    kv_cache_dtype_list = [False]
-    if get_sm_version() > 86:
-        kv_cache_dtype_list.append(True)
-
-    # TODO: TP size
-
-    for common_mla_testcase in get_generation_mla_common_test_cases():
-        n = common_mla_testcase.num_heads
-        b = common_mla_testcase.batch_size
-        s = common_mla_testcase.input_len
-
-        for is_fp8_kv_cache in kv_cache_dtype_list:
-            test_cases.append(
-                [
-                    b,
-                    s,
-                    n,
-                    common_mla_testcase.num_kv_heads,
-                    common_mla_testcase.q_lora_rank,
-                    common_mla_testcase.kv_lora_rank,
-                    common_mla_testcase.qk_rope_head_dim,
-                    common_mla_testcase.qk_nope_head_dim,
-                    common_mla_testcase.v_head_dim,
-                    is_fp8_kv_cache,
-                    False,
-                    "generation_attention_perf.txt",
-                ]
-            )
+            for is_fp8_kv_cache in kv_cache_dtype_list:
+                test_cases.append(
+                    [
+                        common_mla_testcase.batch_size,
+                        common_mla_testcase.input_len,
+                        common_mla_testcase.num_heads // tp_size,
+                        common_mla_testcase.num_kv_heads // tp_size,
+                        common_mla_testcase.q_lora_rank,
+                        common_mla_testcase.kv_lora_rank,
+                        common_mla_testcase.qk_rope_head_dim,
+                        common_mla_testcase.qk_nope_head_dim,
+                        common_mla_testcase.v_head_dim,
+                        common_mla_testcase.kv_cache_block_size,
+                        is_fp8_kv_cache,
+                        is_context,
+                        "context_attention_perf.txt" if is_context else "generation_attention_perf.txt",
+                    ]
+                )
 
     return test_cases
+
+
+def get_context_mla_test_cases():
+    return _get_mla_test_cases(is_context=True)
+
+
+def get_generation_mla_test_cases():
+    return _get_mla_test_cases(is_context=False)
 
 
 if __name__ == "__main__":
-    test_cases = get_context_attention_test_cases()
+    test_cases = get_context_mla_test_cases()
     test_cases = test_cases[:1]
     for test_case in test_cases:
         print(f"Running context attention test case: {test_case}")
         run_attention_torch(*test_case)
 
-    test_cases = get_generation_attention_test_cases()
+    test_cases = get_generation_mla_test_cases()
     test_cases = test_cases[:1]
     for test_case in test_cases:
         print(f"Running generation attention test case: {test_case}")
