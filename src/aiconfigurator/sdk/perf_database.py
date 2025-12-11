@@ -2053,6 +2053,29 @@ class PerfDatabase:
                     result[k1][k2][k3] = self._get_value(v3, metric)
         return result
 
+    def _extract_latency_and_energy_2d(self, data: dict) -> tuple[dict, dict]:
+        """
+        Extract both latency and energy from 2D dict-based data structure in a single pass.
+
+        Args:
+            data: Nested 2-level dict where leaf values are dicts {"latency": l, "power": p, "energy": e}
+
+        Returns:
+            tuple: (latency_data, energy_data) - two dicts with same structure but scalar values
+        """
+        latency_result = {}
+        energy_result = {}
+
+        for k1, v1 in data.items():
+            latency_result[k1] = {}
+            energy_result[k1] = {}
+
+            for k2, v2 in v1.items():
+                latency_result[k1][k2] = self._get_value(v2, "latency")
+                energy_result[k1][k2] = self._get_value(v2, "energy")
+
+        return latency_result, energy_result
+
     def _extract_latency_and_energy_3d(self, data: dict) -> tuple[dict, dict]:
         """
         Extract both latency and energy from 3D dict-based data structure in a single pass.
@@ -2275,22 +2298,66 @@ class PerfDatabase:
             interpolate.griddata(np.array(points_list), np.array(values_list), (x, y, z), method="linear")
         )
 
-    def _interp_2d_linear(self, x: int, y: int, data: dict) -> float:
+    def _interp_2d_linear(self, x: int, y: int, data: dict) -> dict:
         """
-        Interpolate the 3d data using linear interpolation
-        """
-        points_list = []
-        values_list = []
-        x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
-        for i in [x_left, x_right]:
-            y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
-            for j in [y_left, y_right]:
-                points_list.append([i, j])
-                values_list.append(data[i][j])
+        Interpolate the 2D data using linear interpolation.
 
-        return self._validate(
-            interpolate.griddata(np.array(points_list), np.array(values_list), (x, y), method="linear")
-        )
+        Returns:
+            dict: {"latency": float, "power": float, "energy": float} - interpolated values for all metrics
+        """
+        # Check if data uses new dict format by sampling a leaf value
+        sample_value = self._get_sample_leaf_value(data)
+
+        if isinstance(sample_value, dict):
+            # New format: interpolate latency and energy separately
+            data_id = id(data)
+            if data_id not in self._extracted_metrics_cache:
+                self._extracted_metrics_cache[data_id] = self._extract_latency_and_energy_2d(data)
+
+            latency_data, energy_data = self._extracted_metrics_cache[data_id]
+
+            # Interpolate latency
+            points_list = []
+            latency_values = []
+            x_left, x_right = self._nearest_1d_point_helper(x, list(latency_data.keys()))
+            for i in [x_left, x_right]:
+                y_left, y_right = self._nearest_1d_point_helper(y, list(latency_data[i].keys()))
+                for j in [y_left, y_right]:
+                    points_list.append([i, j])
+                    latency_values.append(latency_data[i][j])
+
+            latency = self._validate(
+                interpolate.griddata(np.array(points_list), np.array(latency_values), (x, y), method="linear")
+            )
+
+            # Interpolate energy using same points
+            energy_values = []
+            for i in [x_left, x_right]:
+                y_left, y_right = self._nearest_1d_point_helper(y, list(energy_data[i].keys()))
+                for j in [y_left, y_right]:
+                    energy_values.append(energy_data[i][j])
+
+            energy = self._validate(
+                interpolate.griddata(np.array(points_list), np.array(energy_values), (x, y), method="linear")
+            )
+
+            return {"latency": latency, "power": 0.0, "energy": energy}
+        else:
+            # Legacy format: data values are floats
+            points_list = []
+            values_list = []
+            x_left, x_right = self._nearest_1d_point_helper(x, list(data.keys()))
+            for i in [x_left, x_right]:
+                y_left, y_right = self._nearest_1d_point_helper(y, list(data[i].keys()))
+                for j in [y_left, y_right]:
+                    points_list.append([i, j])
+                    values_list.append(data[i][j])
+
+            latency = self._validate(
+                interpolate.griddata(np.array(points_list), np.array(values_list), (x, y), method="linear")
+            )
+
+            return {"latency": latency, "power": 0.0, "energy": 0.0}
 
     def _interp_3d(self, x: int, y: int, z: int, data: dict, method: str) -> dict:
         """
@@ -2478,64 +2545,6 @@ class PerfDatabase:
         """
         return self._default_database_mode
 
-    def _query_gemm_internal(
-        self,
-        m: int,
-        n: int,
-        k: int,
-        quant_mode: common.GEMMQuantMode,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> dict:
-        """
-        Internal GEMM query returning full result dict.
-
-        Returns:
-            dict: {"latency": float, "power": float, "energy": float}
-        """
-
-        def get_sol(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> tuple[float, float, float]:
-            """
-            Get the sol time, sol math and sol mem
-            """
-            sol_math = 2 * m * n * k / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
-            sol_mem = quant_mode.value.memory * (m * n + m * k + n * k) / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> float:
-            """
-            Get the empirical time
-            """
-            sol_time = get_sol(m, n, k, quant_mode)[0]
-            scale_factor = 0.8
-            return sol_time / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        # SOL and EMPIRICAL modes don't have power/energy data
-        if database_mode == common.DatabaseMode.SOL:
-            return {"latency": get_sol(m, n, k, quant_mode)[0], "power": 0.0, "energy": 0.0}
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(m, n, k, quant_mode)
-            return {"latency": sol_result, "power": 0.0, "energy": 0.0}  # SOL_FULL returns tuple, wrap it
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return {"latency": get_empirical(m, n, k, quant_mode), "power": 0.0, "energy": 0.0}
-        else:
-            # SILICON or HYBRID mode - use database
-            try:
-                result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
-                return result  # Already a dict: {"latency": ..., "power": ..., "energy": ...}
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}, using empirical mode")
-                    return {"latency": get_empirical(m, n, k, quant_mode), "power": 0.0, "energy": 0.0}
-                else:
-                    logger.exception(
-                        f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
-
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
         self,
@@ -2566,15 +2575,51 @@ class PerfDatabase:
             >>> energy_wms = result.energy
             >>> power_w = result.power  # or result.energy / float(result)
         """
-        result = self._query_gemm_internal(m, n, k, quant_mode, database_mode)
 
-        # Handle SOL_FULL which returns tuple for latency
-        if isinstance(result["latency"], tuple):
-            # SOL_FULL mode - return first element of tuple as latency
-            return PerformanceResult(result["latency"][0], energy=result.get("energy", 0.0))
+        def get_sol(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> tuple[float, float, float]:
+            """
+            Get the sol time, sol math and sol mem
+            """
+            sol_math = 2 * m * n * k / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_mem = quant_mode.value.memory * (m * n + m * k + n * k) / self.system_spec["gpu"]["mem_bw"] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
 
-        # Return PerformanceResult with latency and energy
-        return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+        def get_empirical(m: int, n: int, k: int, quant_mode: common.GEMMQuantMode) -> float:
+            """
+            Get the empirical time
+            """
+            sol_time = get_sol(m, n, k, quant_mode)[0]
+            scale_factor = 0.8
+            return sol_time / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        # SOL and EMPIRICAL modes don't have power/energy data
+        if database_mode == common.DatabaseMode.SOL:
+            return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            sol_result = get_sol(m, n, k, quant_mode)
+            # SOL_FULL returns tuple - use first element as latency
+            return PerformanceResult(sol_result[0], energy=0.0)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0)
+        else:
+            # SILICON or HYBRID mode - use database
+            try:
+                result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
+                # Result is dict: {"latency": ..., "power": ..., "energy": ...}
+                return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}, using empirical mode")
+                    return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0)
+                else:
+                    logger.exception(
+                        f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
 
     @functools.lru_cache(maxsize=32768)
     def query_context_attention(
@@ -2851,7 +2896,6 @@ class PerfDatabase:
                     )
                     raise
 
-    @functools.lru_cache(maxsize=10000)
     @functools.lru_cache(maxsize=32768)
     def query_context_mla(
         self,
@@ -3529,8 +3573,10 @@ class PerfDatabase:
                         )
                     else:  # all intra node
                         scale_factor = 1
-                    lat = lat * (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
-                    energy = energy * scale_factor  # Scale energy proportionally
+                    # Apply the same scaling formula to both latency and energy
+                    scaling_formula = (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
+                    lat = lat * scaling_formula
+                    energy = energy * scaling_formula
 
                 return PerformanceResult(lat, energy=energy)
             except Exception:
@@ -4187,10 +4233,11 @@ class PerfDatabase:
                                 )
                                 if isinstance(data, dict):
                                     # Update only latency, keep power unchanged
-                                    self._gemm_data[quant_mode][m][n][k]["latency"] = max(sol, current_latency)
+                                    # Convert PerformanceResult to float
+                                    self._gemm_data[quant_mode][m][n][k]["latency"] = float(max(sol, current_latency))
                                 else:
                                     # Legacy format (float)
-                                    self._gemm_data[quant_mode][m][n][k] = max(sol, current_latency)
+                                    self._gemm_data[quant_mode][m][n][k] = float(max(sol, current_latency))
 
         # regular generation attention
         if self._generation_attention_data is not None:
@@ -4229,14 +4276,15 @@ class PerfDatabase:
                                             )
                                             if isinstance(data, dict):
                                                 # Update only latency, keep power unchanged
+                                                # Convert PerformanceResult to float
                                                 self._generation_attention_data[quant_mode][n_kv][head_size][
                                                     window_size
-                                                ][n][b][s]["latency"] = sol
+                                                ][n][b][s]["latency"] = float(sol)
                                             else:
                                                 # Legacy format (float)
                                                 self._generation_attention_data[quant_mode][n_kv][head_size][
                                                     window_size
-                                                ][n][b][s] = sol
+                                                ][n][b][s] = float(sol)
 
 
 if __name__ == "__main__":

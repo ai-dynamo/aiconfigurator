@@ -104,18 +104,6 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             worker_logger.debug(f"Starting task {task_id}")
             func(*task, device)
             worker_logger.debug(f"Completed task {task_id}")
-
-            # Increment progress AFTER successful completion
-            with lock:
-                progress_value.value += 1
-
-            # Periodic memory cleanup to reduce fragmentation
-            # Only do this every 100 tasks to avoid overhead
-            if progress_value.value % 100 == 0:
-                import gc
-
-                gc.collect()
-                torch.cuda.empty_cache()
         except Exception as e:
             # Build comprehensive error info
             error_info = {
@@ -139,11 +127,6 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             for handler in worker_logger.handlers:
                 handler.flush()
 
-            # CRITICAL: Increment progress even on failure to prevent infinite retry loops
-            # This marks the task as "attempted" so it won't be picked up again
-            with lock:
-                progress_value.value += 1
-
             # This error is could be fatal and require a process restart.
             if isinstance(e, torch.AcceleratorError):
                 worker_logger.warning(
@@ -157,6 +140,19 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 # Exiting with non-zero code will add an additional error to the summary,
                 # which we don't want (error already reported above).
                 exit(0)
+        finally:
+            # CRITICAL: Increment progress regardless of success or failure
+            # This marks the task as "attempted" and tracks overall progress
+            with lock:
+                progress_value.value += 1
+
+            # Periodic memory cleanup to reduce fragmentation
+            # Only do this every 100 tasks to avoid overhead
+            if progress_value.value % 100 == 0:
+                import gc
+
+                gc.collect()
+                torch.cuda.empty_cache()
 
 
 def parallel_run(tasks, func, num_processes, module_name="unknown"):

@@ -132,8 +132,6 @@ class SGLANGBackend(BaseBackend):
                 ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor
 
                 # third pass to get generation attn. use isl+osl//2 for avg generation attn latency.
-                gen_attention_latency_ms = 0.0
-                gen_attention_energy_wms = 0.0
                 if gen_tokens > 0:
                     num_tokens = gen_tokens
                     summary = self.run_static(
@@ -146,6 +144,9 @@ class SGLANGBackend(BaseBackend):
                     energy_wms_dict = summary.get_generation_energy_wms_dict()
                     gen_attention_latency_ms = latency_dict["generation_attention"]
                     gen_attention_energy_wms = energy_wms_dict.get("generation_attention", 0.0)
+                else:
+                    gen_attention_latency_ms = 0.0
+                    gen_attention_energy_wms = 0.0
 
                 # Combine all components (simple addition)
                 total_latency_ms = non_attention_latency_ms + ctx_attention_latency_ms + gen_attention_latency_ms
