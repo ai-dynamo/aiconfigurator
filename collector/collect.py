@@ -301,6 +301,9 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             logger.warning(f"Process {p.pid} did not terminate, forcing...")
             p.terminate()
 
+    # Shutdown manager to clean up resources (semaphores, etc.)
+    manager.shutdown()
+
     # Log summary
     if errors:
         log_dir = os.environ.get("COLLECTOR_LOG_DIR", "")

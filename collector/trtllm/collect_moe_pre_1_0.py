@@ -16,7 +16,13 @@ from torch.nn.parameter import Parameter
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import PowerMonitor, _parse_bool_env, balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import (
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+        power_law_logits_v3,
+    )
 except ModuleNotFoundError:
     import os
     import sys
@@ -24,7 +30,13 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import PowerMonitor, _parse_bool_env, balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import (
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+        power_law_logits_v3,
+    )
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
@@ -258,113 +270,26 @@ def run_moe_torch(
             else:
                 moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
 
-        # Determine base warmups and runs
-        num_warmups = 3
-        num_runs = 6
-        if distributed == "power_law":
-            num_warmups = 1
-            num_runs = 1
+        # Benchmark with automatic power measurement and graph fallback
+        num_warmups = 1 if distributed == "power_law" else 3
+        num_runs = 1 if distributed == "power_law" else 6
 
-        # Read power measurement configuration
-        measure_power = _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
-        power_min_duration = float(os.environ.get("COLLECTOR_POWER_MIN_DURATION", "1.0"))
+        # Use benchmark_with_power with graceful graph fallback
+        with benchmark_with_power(
+            device=device,
+            kernel_func=run_forward_pass,
+            num_warmups=num_warmups,
+            num_runs=num_runs,
+            repeat_n=1,
+            allow_graph_fail=True,  # Enable graceful fallback to eager execution
+        ) as results:
+            # Calculate per-iteration latency (accounting for internal iterations)
+            latency = results["latency_ms"] / num_iter
+            power_stats = results["power_stats"]
 
-        if measure_power:
-            # Quick timing estimate with warmup
-            warmup_start = torch.cuda.Event(enable_timing=True)
-            warmup_end = torch.cuda.Event(enable_timing=True)
-
-            torch.cuda.synchronize()
-            warmup_start.record()
-            for _ in range(num_warmups):
-                run_forward_pass()  # Use helper closure
-            warmup_end.record()
-            torch.cuda.synchronize()
-
-            # Calculate single iteration time (accounting for num_iter)
-            single_iter_time = warmup_start.elapsed_time(warmup_end) / num_warmups / 1000.0  # seconds
-            single_iter_time *= num_iter  # Account for internal iterations
-
-            # Adjust num_runs to meet minimum duration
-            original_num_runs = num_runs
-            num_runs = max(num_runs, int(power_min_duration / single_iter_time) + 1)
-            num_runs = min(num_runs, 10000)  # Safety cap
-
-            if num_runs != original_num_runs and aic_debug == 1:
-                print(
-                    f"Adjusted num_runs from {original_num_runs} to {num_runs} for power measurement "
-                    f"(iter_time={single_iter_time * 1000:.2f}ms, target={power_min_duration}s)"
-                )
-
-        # Initialize power monitoring
-        power_monitor = None
-        if measure_power:
-            power_monitor = PowerMonitor(device.index)
-            if not power_monitor._init_handle():
-                power_monitor = None
-                if aic_debug == 1:
-                    print(f"Warning: Power monitoring initialization failed for device {device.index}")
-
-        power_stats = None
-
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        try:
-            # Capture CUDA graph
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
-                run_forward_pass()  # Use helper closure
-
-            # Warmup the captured graph
-            for i in range(num_warmups):
-                g.replay()
-            torch.cuda.synchronize()  # CRITICAL: Ensure warmup completes before power monitoring
-
-            # Start power monitoring before timed execution
-            if power_monitor:
-                power_monitor.start_sampling()
-
-            start_event.record()
-            for i in range(num_runs):
-                g.replay()
-            end_event.record()
-            torch.cuda.synchronize()  # CRITICAL: Ensure execution completes before stopping power
-
-            # Stop power monitoring and get statistics
-            if power_monitor:
-                power_stats = power_monitor.stop_sampling()
-
-        except Exception as e:
-            print(f"cuda graph failed for {num_tokens} tokens: {e}, fallback to no cuda graph")
-
-            # Fallback warmup without graph
-            if distributed == "power_law":
-                run_forward_pass()  # Use helper (runs once, loops internally)
-            else:
-                for i in range(num_warmups):
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-            torch.cuda.synchronize()  # CRITICAL: Ensure warmup completes before power monitoring
-
-            # Start power monitoring before timed execution
-            if power_monitor:
-                power_monitor.start_sampling()
-
-            start_event.record()
-            # Fallback execution
-            if distributed == "power_law":
-                run_forward_pass()  # Use helper (runs once, loops internally)
-            else:
-                for i in range(num_runs):
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-            end_event.record()
-            torch.cuda.synchronize()  # CRITICAL: Ensure execution completes before stopping power
-
-            # Stop power monitoring and get statistics
-            if power_monitor:
-                power_stats = power_monitor.stop_sampling()
-
-        # Calculate latency
-        latency = start_event.elapsed_time(end_event) / num_runs / num_iter
+            # Log if CUDA graph capture failed (for debugging)
+            if not results["used_cuda_graph"] and aic_debug == 1:
+                print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
 
         if min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen

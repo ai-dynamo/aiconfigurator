@@ -167,6 +167,7 @@ def benchmark_with_power(
     repeat_n: int = 1,  # Default 1; GEMM files use 5
     measure_power: bool | None = None,  # Auto-detect from environment if None
     power_min_duration: float | None = None,  # Auto-detect from environment if None
+    allow_graph_fail: bool = False,  # NEW: Enable graceful fallback on graph capture failure
 ):
     """
     Context manager that handles warmup, graph capture, timing, and power monitoring.
@@ -179,6 +180,9 @@ def benchmark_with_power(
         repeat_n: Number of repetitions per graph replay
         measure_power: Enable power monitoring (None = auto-detect from env)
         power_min_duration: Minimum duration for power measurement (None = auto-detect from env)
+        allow_graph_fail: If True, gracefully fallback to eager execution when
+                         CUDA graph capture fails. Power monitoring continues
+                         to work in both paths. Default False for backward compatibility.
 
     Yields:
         dict with keys:
@@ -186,6 +190,7 @@ def benchmark_with_power(
             - 'power_stats': Dict with power/power_limit (or None)
             - 'throttled': Boolean indicating if GPU was throttled
             - 'num_runs_executed': Actual number of runs performed
+            - 'used_cuda_graph': Boolean indicating if graph was used
     """
     import torch
 
@@ -229,12 +234,25 @@ def benchmark_with_power(
             kernel_func()
         torch.cuda.synchronize()
 
-    # Capture CUDA graph
+    # ═══════════════════════════════════════════════════════════════════
+    # CUDA Graph Capture with Optional Fallback
+    # ═══════════════════════════════════════════════════════════════════
+    use_graph = True
     g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
-        for _ in range(repeat_n):
-            kernel_func()
-    torch.cuda.synchronize()
+
+    try:
+        with torch.cuda.graph(g):
+            for _ in range(repeat_n):
+                kernel_func()
+        torch.cuda.synchronize()
+    except Exception as e:
+        if allow_graph_fail:
+            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
+            torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
+            use_graph = False
+        else:
+            # Standard behavior: re-raise exception
+            raise
 
     # Initialize power monitor if enabled
     power_monitor = None
@@ -255,13 +273,21 @@ def benchmark_with_power(
         except Exception:
             pass
 
-    # Execute and time
+    # ═══════════════════════════════════════════════════════════════════
+    # Execute with Graph or Eager (both paths measured!)
+    # ═══════════════════════════════════════════════════════════════════
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
     start_event.record()
     for _ in range(actual_num_runs):
-        g.replay()
+        if use_graph:
+            g.replay()
+        else:
+            # Fallback: Direct execution
+            # This matches SGLang/VLLM pattern where kernel_func handles internal loops
+            for _ in range(repeat_n):
+                kernel_func()
     end_event.record()
     torch.cuda.synchronize()
 
@@ -295,6 +321,7 @@ def benchmark_with_power(
         "power_stats": power_stats,
         "throttled": throttled,
         "num_runs_executed": actual_num_runs,
+        "used_cuda_graph": use_graph,  # NEW: Inform caller which path was used
     }
 
 

@@ -15,7 +15,12 @@ from torch.nn.parameter import Parameter
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import PowerMonitor, _parse_bool_env, balanced_logits, get_sm_version, log_perf
+    from helper import (
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+    )
 except ModuleNotFoundError:
     import os
     import sys
@@ -23,7 +28,12 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import PowerMonitor, _parse_bool_env, balanced_logits, get_sm_version, log_perf
+    from helper import (
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+    )
 
 
 def get_moe_test_cases():
@@ -179,74 +189,21 @@ def run_moe_torch(
     moe.w3_w1_weight = ffn1_weights
     moe.w2_weight = ffn2_weights
 
-    # Determine base warmups and runs
-    num_warmups = 3
-    num_runs = 6
-
-    # Read power measurement configuration
-    measure_power = _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
-    power_min_duration = float(os.environ.get("COLLECTOR_POWER_MIN_DURATION", "1.0"))
-
-    if measure_power:
-        # Quick timing estimate with warmup
-        warmup_start = torch.cuda.Event(enable_timing=True)
-        warmup_end = torch.cuda.Event(enable_timing=True)
-
-        # Temporary graph for timing
-        temp_g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(temp_g):
-            moe.forward(hidden_states, router_logits, cutlass_min_latency_mode=cutlass_min_latency_mode)
-
-        torch.cuda.synchronize()
-        warmup_start.record()
-        for _ in range(num_warmups):
-            temp_g.replay()
-        warmup_end.record()
-        torch.cuda.synchronize()
-
-        # Calculate single iteration time
-        single_iter_time = warmup_start.elapsed_time(warmup_end) / num_warmups / 1000.0  # seconds
-
-        # Adjust num_runs to meet minimum duration
-        num_runs = max(num_runs, int(power_min_duration / single_iter_time) + 1)
-        num_runs = min(num_runs, 10000)  # Safety cap
-
-    # Initialize power monitoring
-    power_monitor = None
-    if measure_power:
-        power_monitor = PowerMonitor(device.index if hasattr(device, "index") else 0)
-        if not power_monitor._init_handle():
-            power_monitor = None
-
-    power_stats = None
-
-    # Capture CUDA graph
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
+    # Define kernel function for benchmarking
+    def kernel_func():
         moe.forward(hidden_states, router_logits, cutlass_min_latency_mode=cutlass_min_latency_mode)
 
-    # Warmup the captured graph
-    for i in range(num_warmups):
-        g.replay()
-    torch.cuda.synchronize()  # CRITICAL: Ensure warmup completes before power monitoring
-
-    # Start power monitoring before timed execution
-    if power_monitor:
-        power_monitor.start_sampling()
-
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()  # CRITICAL: Ensure execution completes before stopping power
-
-    # Stop power monitoring and get statistics
-    if power_monitor:
-        power_stats = power_monitor.stop_sampling()
-
-    latency = start_event.elapsed_time(end_event) / num_runs
+    # Benchmark with automatic power measurement and graph fallback
+    with benchmark_with_power(
+        device=device,
+        kernel_func=kernel_func,
+        num_warmups=3,
+        num_runs=6,
+        repeat_n=1,
+        allow_graph_fail=True,  # Enable graceful fallback to eager execution
+    ) as results:
+        latency = results["latency_ms"]
+        power_stats = results["power_stats"]
 
     if cutlass_min_latency_mode:
         source = "moe_torch_flow_min_latency"
