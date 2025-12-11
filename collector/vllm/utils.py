@@ -7,7 +7,7 @@
 import functools
 import os
 from dataclasses import dataclass
-from typing import Union
+from typing import Optional, Union
 
 import torch
 from vllm import _custom_ops as ops
@@ -28,6 +28,19 @@ from vllm.platforms import _Backend, current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+
+class MockAttentionLayer:
+    """A mock attention layer for testing."""
+
+    def __init__(self, device: torch.device):
+        self._q_scale = torch.tensor(1.0, device=device)
+        self._k_scale = torch.tensor(1.0, device=device)
+        self._v_scale = torch.tensor(1.0, device=device)
+        # Add float versions for flashinfer
+        self._q_scale_float = 1.0
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
 
 
 @dataclass
@@ -258,9 +271,6 @@ def convert_dtype_to_torch(dtype):
         return dtype
     else:
         raise TypeError(f"Unknown dtype: {dtype}")
-
-
-from typing import Optional
 
 
 def create_and_prepopulate_kv_cache_mla(

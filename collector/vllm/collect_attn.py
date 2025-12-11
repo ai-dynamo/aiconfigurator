@@ -12,6 +12,7 @@ from vllm.version import __version__ as vllm_version
 
 from collector.vllm.utils import (
     BatchSpec,
+    MockAttentionLayer,
     _Backend,
     create_and_prepopulate_kv_cache,
     create_common_attn_metadata,
@@ -21,20 +22,6 @@ from collector.vllm.utils import (
     resolve_obj_by_qualname,
 )
 from helper import get_sm_version, log_perf
-
-
-class MockAttentionLayer:
-    """A mock attention layer for testing."""
-
-    def __init__(self, device: torch.device):
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
-        # Add float versions for flashinfer
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
-
 
 # https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends
 # support MHA GQA MQA fp16 tensor and float16/fp8 kv cache

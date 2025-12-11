@@ -200,140 +200,109 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
 @dataclasses.dataclass
 class MLACommonTestCase:
     num_heads: int
+    num_kv_heads: int
     batch_size: int
     input_len: int
     is_context_phase: bool
+    kv_cache_block_size: int
+    q_lora_rank: int
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+
+
+def _get_mla_common_test_cases(is_context: bool):
+    test_cases = []
+
+    # num_heads, num_kv_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim
+    model_config_list = [
+        [128, 128, 1536, 512, 128, 64, 128, "DEEPSEEK_V3"],
+    ]
+
+    if is_context:
+        b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+        s_list = [
+            16,
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            1536,
+            2048,
+            3072,
+            4096,
+            6144,
+            8192,
+            10240,
+            12288,
+            16384,
+        ]
+    else:
+        b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+        s_list = [
+            2,
+            4,
+            8,
+            16,
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192,
+            16384,
+            32768,
+            65536,
+            131072,
+        ]  # [target token s] is equivalent to [in: s-1, step=1]
+    kv_cache_block_size_list = [64]
+
+    for (
+        s,
+        b,
+        kv_cache_block_size,
+        model_config,
+    ) in itertools.product(
+        s_list,
+        b_list,
+        kv_cache_block_size_list,
+        model_config_list,
+    ):
+        if is_context:
+            if b * s > 32768:
+                continue
+        else:
+            if b * s > 1024 * 4096 * 2 * 2:
+                continue
+
+        test_cases.append(
+            MLACommonTestCase(
+                num_heads=model_config[0],
+                num_kv_heads=model_config[1],
+                input_len=s if is_context else s - 1,
+                batch_size=b,
+                is_context_phase=is_context,
+                kv_cache_block_size=kv_cache_block_size,
+                q_lora_rank=model_config[2],
+                kv_lora_rank=model_config[3],
+                qk_nope_head_dim=model_config[4],
+                qk_rope_head_dim=model_config[5],
+                v_head_dim=model_config[6],
+            )
+        )
+
+    return test_cases
 
 
 def get_context_mla_common_test_cases():
-    test_cases = []
-
-    n_list = [128]
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    s_list = [
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        10240,
-        12288,
-        16384,
-    ]
-
-    for (
-        n,
-        s,
-        b,
-    ) in itertools.product(
-        n_list,
-        s_list,
-        b_list,
-    ):
-        if b * s > 32768:
-            continue
-
-        test_cases.append(
-            MLACommonTestCase(
-                num_heads=n,
-                input_len=s,
-                batch_size=b,
-                is_context_phase=True,
-            )
-        )
-
-        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size,
-        #  tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
-        # test_cases.append(
-        #     [
-        #         s,
-        #         b,
-        #         1,
-        #         dtype,
-        #         n,
-        #         tp_size,
-        #         tp_size,
-        #         64,
-        #         10,
-        #         6,
-        #         True,
-        #         "context_mla_perf.txt",
-        #     ]
-        # )
-    return test_cases
+    return _get_mla_common_test_cases(is_context=True)
 
 
 def get_generation_mla_common_test_cases():
-    test_cases = []
-
-    n_list = [128]
-    b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    s_list = [
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-        65536,
-        131072,
-    ]  # [target token s] is equivalent to [in: s-1, step=1]
-
-    for (
-        n,
-        s,
-        b,
-    ) in itertools.product(
-        n_list,
-        s_list,
-        b_list,
-    ):
-        if b * s > 1024 * 4096 * 2 * 2:
-            continue
-
-        test_cases.append(
-            MLACommonTestCase(
-                num_heads=n,
-                input_len=s - 1,
-                batch_size=b,
-                is_context_phase=False,
-            )
-        )
-
-        # (input_len, batch_size, output_len, kv_cache_dtype, num_heads, world_size,
-        #  tp_size, tokens_per_block, warming_up, test_ite, is_context_phase)
-        # test_cases.append(
-        #     [
-        #         s - 1,
-        #         b,
-        #         1,
-        #         dtype,
-        #         n,
-        #         tp_size,
-        #         tp_size,
-        #         64,
-        #         10,
-        #         6,
-        #         False,
-        #         "generation_mla_perf.txt",
-        #     ]
-        # )
-
-    return test_cases
+    return _get_mla_common_test_cases(is_context=False)

@@ -15,6 +15,7 @@ from collector.common_test_cases import get_context_mla_common_test_cases, get_g
 from collector.helper import get_sm_version, log_perf
 from collector.vllm.utils import (
     BatchSpec,
+    MockAttentionLayer,
     _Backend,
     convert_dtype_to_torch,
     create_and_prepopulate_kv_cache_mla,
@@ -27,25 +28,16 @@ from collector.vllm.utils import (
 )
 
 
-class MockAttentionLayer:
-    """A mock attention layer for testing."""
-
-    def __init__(self, device: torch.device):
-        self._q_scale = torch.tensor(1.0, device=device)
-        self._k_scale = torch.tensor(1.0, device=device)
-        self._v_scale = torch.tensor(1.0, device=device)
-        # Add float versions for flashinfer
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
-
-
 def run_attention_torch(
     batch_size,
     input_len,
     num_heads,
     num_kv_heads,  # keep same as num_heads for MHA
-    head_dim,
+    q_lora_rank,
+    kv_lora_rank,
+    qk_rope_head_dim,
+    qk_nope_head_dim,
+    v_head_dim,
     use_fp8_kv_cache,
     is_context_phase,
     perf_filename,
@@ -61,14 +53,7 @@ def run_attention_torch(
     dtype = torch.float16
     model = os.path.join(os.path.dirname(__file__), "fake_mla_hf_model")
     block_size = 64
-
-    kv_lora_rank = 512
-    qk_rope_head_dim = 64
-    qk_nope_head_dim = 128
-    v_head_dim = 128
-    total_head_size = kv_lora_rank + qk_rope_head_dim
-    head_dim = total_head_size
-    assert kv_lora_rank + qk_rope_head_dim == head_dim, f"MLA dimensions don't match: {total_head_size} != {head_dim}"
+    head_dim = kv_lora_rank + qk_rope_head_dim
 
     # TODO: Let vllm choose the backend.
     # backend = current_platform.get_attn_backend_cls(
@@ -149,7 +134,6 @@ def run_attention_torch(
         kv_c_contexts=all_kv_c_vllm,
         k_pe_contexts=all_k_pe_vllm,
         block_size=block_size,
-        # num_kv_heads=num_kv_heads,
         head_size=head_dim,
         dtype=current_platform.fp8_dtype() if use_fp8_kv_cache else dtype,
         device=device,
@@ -209,7 +193,7 @@ def run_attention_torch(
             logits_soft_cap=None,
             attn_type="decoder",
             kv_sharing_target_layer_name=None,
-            q_lora_rank=None,
+            q_lora_rank=q_lora_rank,
             kv_lora_rank=kv_lora_rank,
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
@@ -309,7 +293,7 @@ def get_context_attention_test_cases():
     if get_sm_version() > 86:
         kv_cache_dtype_list.append(True)
 
-    num_kv_heads = 8  # TODO: remove
+    # TODO: TP size
 
     for common_mla_testcase in get_context_mla_common_test_cases():
         n = common_mla_testcase.num_heads
@@ -322,26 +306,17 @@ def get_context_attention_test_cases():
                     b,
                     s,
                     n,
-                    num_kv_heads,
-                    128,  # FIXME
+                    common_mla_testcase.num_kv_heads,
+                    common_mla_testcase.q_lora_rank,
+                    common_mla_testcase.kv_lora_rank,
+                    common_mla_testcase.qk_rope_head_dim,
+                    common_mla_testcase.qk_nope_head_dim,
+                    common_mla_testcase.v_head_dim,
                     is_fp8_kv_cache,
                     True,
                     "context_attention_perf.txt",
                 ]
             )
-
-            # test_cases.append(
-            #     [
-            #         b,
-            #         s,
-            #         n,
-            #         num_kv_heads,
-            #         128,
-            #         is_fp8_kv_cache,
-            #         True,
-            #         "context_attention_perf.txt",
-            #     ]
-            # )
 
     return test_cases
 
@@ -353,7 +328,7 @@ def get_generation_attention_test_cases():
     if get_sm_version() > 86:
         kv_cache_dtype_list.append(True)
 
-    num_kv_heads = 8  # TODO: remove
+    # TODO: TP size
 
     for common_mla_testcase in get_generation_mla_common_test_cases():
         n = common_mla_testcase.num_heads
@@ -366,8 +341,12 @@ def get_generation_attention_test_cases():
                     b,
                     s,
                     n,
-                    num_kv_heads,
-                    128,  # FIXME
+                    common_mla_testcase.num_kv_heads,
+                    common_mla_testcase.q_lora_rank,
+                    common_mla_testcase.kv_lora_rank,
+                    common_mla_testcase.qk_rope_head_dim,
+                    common_mla_testcase.qk_nope_head_dim,
+                    common_mla_testcase.v_head_dim,
                     is_fp8_kv_cache,
                     False,
                     "generation_attention_perf.txt",
@@ -384,8 +363,8 @@ if __name__ == "__main__":
         print(f"Running context attention test case: {test_case}")
         run_attention_torch(*test_case)
 
-    # test_cases = get_generation_attention_test_cases()
-    # test_cases = test_cases[:1]
-    # for test_case in test_cases:
-    #     print(f"Running generation attention test case: {test_case}")
-    #     run_attention_torch(*test_case)
+    test_cases = get_generation_attention_test_cases()
+    test_cases = test_cases[:1]
+    for test_case in test_cases:
+        print(f"Running generation attention test case: {test_case}")
+        run_attention_torch(*test_case)
