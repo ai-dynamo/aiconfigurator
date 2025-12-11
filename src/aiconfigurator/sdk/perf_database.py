@@ -1390,8 +1390,12 @@ class PerfDatabase:
             self._nccl_data = load_nccl_data(nccl_data_dir)
             self._moe_data, _ = load_moe_data(os.path.join(data_dir, common.PerfDataFilename.moe.value))
             self._mla_bmm_data = None
-            self._context_mla_data = None
-            self._generation_mla_data = None
+            self._context_mla_data = load_context_mla_data(
+                os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
+            )
+            self._generation_mla_data = load_generation_mla_data(
+                os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
+            )
         else:  # TRTLLM
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(

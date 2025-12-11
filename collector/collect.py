@@ -501,6 +501,20 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
             "get_func": "get_moe_test_cases",
             "run_func": "run_moe_torch",
         },
+        {
+            "name": "vllm",
+            "type": "mla_context",
+            "module": "collector.vllm.collect_mla",
+            "get_func": "get_context_mla_test_cases",
+            "run_func": "run_attention_torch",
+        },
+        {
+            "name": "vllm",
+            "type": "mla_generation",
+            "module": "collector.vllm.collect_mla",
+            "get_func": "get_generation_mla_test_cases",
+            "run_func": "run_attention_torch",
+        },
     ]
 
     all_errors = collect_ops(num_processes, collections, ops, version)
