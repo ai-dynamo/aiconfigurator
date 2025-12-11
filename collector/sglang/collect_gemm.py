@@ -12,14 +12,21 @@ from sglang.srt.layers.deep_gemm_wrapper import (
 )
 from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
 
-from helper import log_perf
+from helper import get_sm_version, log_perf
 
 compatible_sglang_versions = ["0.5.5.post2", "0.5.5.post3"]
 
 
 def get_gemm_test_cases():
     test_cases = []
-    gemm_list = ["int8_wo", "fp8_block", "float16", "fp8"]
+
+    # fp8_block (DeepGEMM) requires SM90+ for TMA support
+    sm_version = get_sm_version()
+    if sm_version < 90:
+        # SM89 (L40S) and earlier don't have TMA - skip fp8_block
+        gemm_list = ["int8_wo", "float16", "fp8"]
+    else:
+        gemm_list = ["int8_wo", "fp8_block", "float16", "fp8"]
 
     for gemm_common_testcase in get_gemm_common_test_cases():
         x = gemm_common_testcase.x
