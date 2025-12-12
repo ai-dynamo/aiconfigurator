@@ -45,31 +45,25 @@ def run_attention_torch(
     setup_distributed(device)
     torch.cuda.set_device(device)
 
-    # # TODO: remove
-    # batch_size = 2
-    # input_len = 1024
-
     dtype = torch.float16
     model = os.path.join(os.path.dirname(__file__), "fake_mla_hf_model")
     head_dim = kv_lora_rank + qk_rope_head_dim
     num_kv_heads = num_heads
 
-    # TODO: Let vllm choose the backend.
-    # backend = current_platform.get_attn_backend_cls(
-    #     None,
-    #     head_dim,
-    #     dtype,
-    #     kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-    #     block_size=block_size,
-    #     use_v1=True,
-    #     use_mla=False,
-    #     has_sink=False,
-    #     use_sparse=False,
-    # )
-    # backend = "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
-    backend = "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"
-    # backend = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
+    # Let vllm choose the backend.
+    backend = current_platform.get_attn_backend_cls(
+        None,
+        head_dim,
+        dtype,
+        kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+        block_size=block_size,
+        use_v1=True,
+        use_mla=True,
+        has_sink=False,
+        use_sparse=False,
+    )
     backend_name = _Backend[resolve_obj_by_qualname(backend).get_name()]
+    print(f"VLLM chose MLA backend: {backend_name}")
 
     if is_context_phase:
         batch_spec = BatchSpec(
