@@ -270,6 +270,13 @@ def log_perf(
     kernel_source: str,
     perf_filename: str,
 ):
+    """
+    Log performance data to a CSV file with file locking.
+
+    WARNING: fcntl.flock() advisory locks do NOT work reliably on NFS/shared
+    filesystems. If your output file is on NFS, workers may deadlock.
+    Use local filesystem paths (e.g., /tmp/) for output files instead.
+    """
     content_prefix = f"{framework},{version},{device_name},{op_name},{kernel_source}"
     header_prefix = "framework,version,device,op_name,kernel_source"
     for item in item_list:

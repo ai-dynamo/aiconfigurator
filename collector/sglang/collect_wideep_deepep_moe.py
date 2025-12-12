@@ -11,9 +11,13 @@ import torch.distributed as dist
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.entrypoints.engine import _set_envs_and_config
 from sglang.srt.layers.moe.token_dispatcher.deepep import (
-    DeepEPLLOutput,
-    DeepEPNormalOutput,
+    DeepEPLLDispatchOutput,
+    DeepEPNormalDispatchOutput,
 )
+
+# Aliases for backwards compatibility with collector code
+DeepEPLLOutput = DeepEPLLDispatchOutput
+DeepEPNormalOutput = DeepEPNormalDispatchOutput
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (

@@ -12,7 +12,7 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
-from helper import log_perf
+from helper import get_sm_version, log_perf
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
@@ -106,6 +106,12 @@ def benchmark_layer(layer, forward_batch, q, k, v, q_rope, k_rope):
 
 
 def get_context_mla_test_cases():
+    # MLA requires SM90+ (Hopper) due to asymmetric head dimensions
+    # (Q/K headdim != V headdim requires Hopper-specific FlashAttention kernels)
+    sm_version = get_sm_version()
+    if sm_version < 90:
+        return []
+
     dtype_list = [torch.bfloat16, torch.float8_e4m3fn]
     test_cases = []
     n_list = [64, 128]
@@ -155,6 +161,12 @@ def get_context_mla_test_cases():
 
 
 def get_generation_mla_test_cases():
+    # MLA requires SM90+ (Hopper) due to asymmetric head dimensions
+    # (Q/K headdim != V headdim requires Hopper-specific FlashAttention kernels)
+    sm_version = get_sm_version()
+    if sm_version < 90:
+        return []
+
     dtype_list = [torch.bfloat16, torch.float8_e4m3fn]
     test_cases = []
     n_list = [64, 128]
