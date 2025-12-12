@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Introduction
 Data collection is a standalone process for collecting the database for aiconfigurator. By default, you don't have to collect the data by yourself.
-Small versions of database will not introduce huge perf difference. Say, you can use 1.0.0rc3 data of trtllm on h200_sxm and deploy the generated 
+Small versions of database will not introduce huge perf difference. Say, you can use 1.0.0rc3 data of trtllm on h200_sxm and deploy the generated
 configs with Dynamo + trtllm 1.0.0rc4 worker.
 
 If you want to go through the process, you can try belowing commands. However, you need to prepare the env by yourself such as installing a specific trtllm version.
@@ -141,7 +141,7 @@ python3 collect.py --backend trtllm
 ```
 For trtllm, the whole collecting process takes about 30 gpu-hours. On 8-gpu, it takes 3-4 hours.
 Please note that the whole process will report a lot of missing datapoints with errors. But it's okay. Our system is kindof robust to fair amount of missing data.
-Once everything is done, you might see mutliple xxx.txt files under the same folder. Refer to src/aiconfigurator/systems/ folder to prepare the database including 
+Once everything is done, you might see mutliple xxx.txt files under the same folder. Refer to src/aiconfigurator/systems/ folder to prepare the database including
 how many files are needed accordingly.
 
 ## For SGLang
@@ -149,7 +149,7 @@ how many files are needed accordingly.
 SGLang requires a **hybrid collection approach**:
 
 ### 1. Run unified collectors (GEMM, MLA, MoE, Normal Attention)
-Suggest to start from lmsysorg docker image. Say, for 0.5.1.post1, we can use lmsysorg/sglang:v0.5.1.post1-cu126
+Suggest to start from lmsysorg docker image. Say, for 0.5.5.post3, we can use lmsysorg/sglang:v0.5.5.post3-cu126
 ```bash
 python3 collect.py --backend sglang
 ```
@@ -195,11 +195,21 @@ See `deep_collector/README.md` for complete multi-node setup instructions.
 Rebuild and install the new aiconfigurator. Please make sure you have your new system definition file prepared. It's src/aiconfigurator/systems/xxx.yaml
 
 # Validate the correctness
-Today, we have limited method to validate the database. You can try tools/sanity_check to validate the database a little bit. But it highly depends on your understanding 
+Today, we have limited method to validate the database. You can try tools/sanity_check to validate the database a little bit. But it highly depends on your understanding
 of the GPU system and kernel optimization.
 
+# Known Issues
+
+## NFS File Locking (Worker Deadlock)
+
+**Symptom**: Collection stalls after a few test cases with no error messages.
+
+**Cause**: `fcntl.flock()` doesn't work reliably on NFS. Workers deadlock when writing to shared output files.
+
+**Solution**: Use `/tmp/` for output files, then copy results after collection.
+
 # Support Matrix
-aiconfigurator 0.1.0  
-trtllm: 0.20.0, 1.0.0rc3 on Hopper GPUs  
-vllm: NA  
-sglang: 0.5.1.post1 on Hopper GPUs
+aiconfigurator 0.1.0
+trtllm: 0.20.0, 1.0.0rc3 on Hopper GPUs
+vllm: NA
+sglang: 0.5.5.post2, 0.5.5.post3 on Hopper GPUs

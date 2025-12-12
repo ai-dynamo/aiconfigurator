@@ -63,7 +63,8 @@ aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm
 aiconfigurator cli exp --yaml_path exp.yaml
 ```
 - We have two modes, `default` and `exp`.
-- Use `default`, followed with **three basic arguments**, it prints the estimated best deployment and the deployment details.
+- Use `default`, followed with **three basic arguments** (model, total_gpus, system), it prints the estimated best deployment and the deployment details.
+- Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
 - Use `exp`, pass in exp.yaml by `--yaml_path` to customize your experiments and even a heterogenous one.
 - Use `--save_dir DIR` to generate framework configuration files for Dynamo.
 - Use `--database_mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only).
@@ -265,14 +266,15 @@ To estimate performance, we take the following steps:
 
 ### Supported Features
 
-- Models:
+- **Models**:
   - GPT
   - LLAMA (2, 3)
   - MOE
   - QWEN
   - DEEPSEEK_V3
   - Support using huggingface model id if falls into these model family and not MoE models.
-- Operations:
+
+- **Operations**:
   - Attention
     - MHA/GQA (FP8, FP16)
     - MLA (FP8, FP16)
@@ -285,20 +287,23 @@ To estimate performance, we take the following steps:
   - NCCL (all_reduce, all_gather, all-to-all, reduce_scatter)
   - MoE (FP16, FP8, FP8-Block, W4A-FP8, INT4 WO, NVFP4)
   - MLA BMM (FP16, FP8)
-- Parallel modes:
+
+- **Parallel modes**:
   - Tensor-parallel
   - Pipeline-parallel
   - Expert Tensor-parallel/Expert-parallel
   - Attention DP (for DEEPSEEK and MoE)
-- Scheduling:
+
+- **Scheduling**:
   - Static
   - Aggregated serving (continuous batching)
   - Disaggregated serving
   - MTP (for DEEPSEEK)
-- Backends:
-  - TRTLLM (regular)
-  - SGLang (WideEP and regular)
-  - vLLM (regular with dense models; Non-moe support for now)
+
+- **Inference Backends**:
+  - TensorRT-LLM (trtllm)
+  - vLLM
+  - SGLang
 
 ### Data Collection
 
@@ -313,8 +318,8 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 | System | Framework(Version) | Status |
 |--------|-------------------|--------|
-| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.1.post1), vLLM(0.11.0) | ✅ |
-| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.1.post1), vLLM(0.11.0) | ✅ |
+| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.5.post2, 0.5.5.post3), vLLM(0.11.0) | ✅ |
+| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.5.post2, 0.5.5.post3), vLLM(0.11.0) | ✅ |
 | b200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | gb200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | a100_sxm | TRTLLM(1.0.0) | ✅ |
@@ -339,6 +344,6 @@ Adding a new model will require modifying the source code and perhaps collecting
 
 1. Memory estimation for the backends needs to be studied more.
 2. Results can be overly optimistic in the low-speed, high-throughput region.
-3. SGLang and vLLM support is the initial version, needs more alignment in future.
+3. **vLLM and SGLang support is currently being evaluated**. While both backends are functional and available for use, we are still completing comprehensive performance evaluations and alignment testing. We recommend validating results with real benchmarks for production use.
 
 > **Note**: The results are not final or absolute. They can be inaccurate due to modeling gaps or indicate performance improvement opportunities. The tool aims to align with the framework's current implementation and to provide configuration suggestions. Verify results in real benchmarks with the generated configurations and perform follow-up tuning.

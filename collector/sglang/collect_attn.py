@@ -12,7 +12,7 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
-from helper import benchmark_with_power, log_perf
+from helper import benchmark_with_power, get_sm_version, log_perf
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
@@ -80,6 +80,11 @@ def get_context_attention_test_cases():
     s_list = [16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 262144]
     n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
     n_kv_list = [0, 1, 2, 4, 8]
+
+    # FP8 attention requires SM90+ (Hopper)
+    sm_version = get_sm_version()
+    skip_fp8 = sm_version < 90
+
     for n in sorted(n_list, reverse=True):
         for s in sorted(s_list, reverse=True):
             for b in sorted(b_list, reverse=True):
@@ -97,15 +102,23 @@ def get_context_attention_test_cases():
                     if b * s * num_kv_heads * 128 * 2 >= 2147483647:
                         continue
 
+                    # BF16 attention - works on all GPUs
                     test_cases.append([b, s, n, num_kv_heads, 128, False, False, True, "context_attention_perf.txt"])
-                    test_cases.append([b, s, n, num_kv_heads, 128, True, False, True, "context_attention_perf.txt"])
-                    test_cases.append([b, s, n, num_kv_heads, 128, True, True, True, "context_attention_perf.txt"])
+
+                    # FP8 attention - requires SM90+ (Hopper)
+                    if not skip_fp8:
+                        test_cases.append([b, s, n, num_kv_heads, 128, True, False, True, "context_attention_perf.txt"])
+                        test_cases.append([b, s, n, num_kv_heads, 128, True, True, True, "context_attention_perf.txt"])
 
     return test_cases
 
 
 def get_generation_attention_test_cases():
     test_cases = []
+
+    # FP8 attention requires SM90+ (Hopper)
+    sm_version = get_sm_version()
+    skip_fp8 = sm_version < 90
 
     # generation
     b_list = [1, 2, 4, 64, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
@@ -141,8 +154,11 @@ def get_generation_attention_test_cases():
             if b >= 256:
                 target_s_list = target_s_list[:-1]
             for s in target_s_list:
+                # BF16 attention - works on all GPUs
                 test_cases.append([b, s, n, n, 128, False, False, False, "generation_attention_perf.txt"])
-                test_cases.append([b, s, n, n, 128, True, False, False, "generation_attention_perf.txt"])
+                # FP8 attention - requires SM90+ (Hopper)
+                if not skip_fp8:
+                    test_cases.append([b, s, n, n, 128, True, False, False, "generation_attention_perf.txt"])
 
     # XQA
     max_bsn = 8192 * 1024 * 2
@@ -174,8 +190,11 @@ def get_generation_attention_test_cases():
                 if n_kv >= n:
                     continue
                 for s in target_s_list:
+                    # BF16 attention - works on all GPUs
                     test_cases.append([b, s, n, n_kv, 128, False, False, False, "generation_attention_perf.txt"])
-                    test_cases.append([b, s, n, n_kv, 128, True, False, False, "generation_attention_perf.txt"])
+                    # FP8 attention - requires SM90+ (Hopper)
+                    if not skip_fp8:
+                        test_cases.append([b, s, n, n_kv, 128, True, False, False, "generation_attention_perf.txt"])
     return test_cases
 
 

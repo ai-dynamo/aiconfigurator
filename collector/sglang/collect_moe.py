@@ -3,11 +3,22 @@
 import itertools
 import os
 from typing import TypedDict
+from unittest.mock import MagicMock
 
 import pkg_resources
+
+# Mock global server args before importing MOE modules (required by SGLang 0.5.5+)
+# The fused_moe_triton_config module now requires get_global_server_args() to be set
+import sglang.srt.server_args as _server_args_module
 import torch
-from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
-    fused_moe,
+
+if _server_args_module._global_server_args is None:
+    _mock_server_args = MagicMock()
+    _mock_server_args.enable_deterministic_inference = False
+    _server_args_module._global_server_args = _mock_server_args
+
+from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_moe
+from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_config import (
     get_config_dtype_str,
     get_default_config,
     get_moe_configs,
@@ -18,7 +29,7 @@ from sglang.srt.utils import is_hip
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, benchmark_with_power, log_perf, power_law_logits_v3
+    from helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 except ModuleNotFoundError:
     import os
     import sys
@@ -26,19 +37,30 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, benchmark_with_power, log_perf, power_law_logits_v3
+    from helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
 
 _is_hip = is_hip()
 
 
 def get_moe_test_cases():
-    moe_list = ["float16", "fp8_block"]
+    # fp8_block MOE requires SM90+ due to shared memory requirements
+    # L40S (SM89) has 100KB shared memory, fp8_block kernel needs ~144KB
+    sm_version = get_sm_version()
+    if sm_version < 90:
+        moe_list = ["float16"]
+    else:
+        moe_list = ["float16", "fp8_block"]
 
     test_cases = []
 
     for common_moe_testcase in get_common_moe_test_cases():
         if common_moe_testcase.token_expert_distribution != "power_law":
+            continue
+
+        # Skip EP > 1 test cases - this collector only supports single-GPU MOE (ep_size=1)
+        # For EP > 1 (multi-GPU expert parallelism), use collect_wideep_deepep_moe.py instead
+        if common_moe_testcase.ep != 1:
             continue
 
         model_name = common_moe_testcase.model_name
