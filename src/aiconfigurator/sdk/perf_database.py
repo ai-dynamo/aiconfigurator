@@ -4143,7 +4143,7 @@ class PerfDatabase:
         topk: int,
         hidden_size: int,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult:
         """
         Query the DeepEP LL operation data
         """
@@ -4159,17 +4159,19 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(num_tokens, topk, num_experts)[0]
+            return PerformanceResult(get_sol(num_tokens, topk, num_experts)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(num_tokens, topk, num_experts)
+            sol_result = get_sol(num_tokens, topk, num_experts)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(num_tokens, topk, num_experts)
+            return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0)
         else:
             data = self._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
             num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
             result = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
             lat = result["latency"] if isinstance(result, dict) else result
-            return lat / 1000.0
+            energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+            return PerformanceResult(lat / 1000.0, energy=energy / 1000.0)
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_deepep_normal(
@@ -4181,7 +4183,7 @@ class PerfDatabase:
         hidden_size: int,
         sms: int,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult:
         """
         Query the DeepEP normal operation data
         """
@@ -4197,22 +4199,25 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(num_tokens, num_experts, topk, hidden_size)[0]
+            return PerformanceResult(get_sol(num_tokens, num_experts, topk, hidden_size)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(num_tokens, num_experts, topk, hidden_size)
+            sol_result = get_sol(num_tokens, num_experts, topk, hidden_size)
+            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(num_tokens, num_experts, topk, hidden_size)
+            return PerformanceResult(get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0)
         else:
             if node_num == 1 and sms == 20:  # only collect sm=20 for now
                 data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
                 num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(data.keys()), inner_only=False)
                 result = self._interp_1d([num_left, num_right], [data[num_left], data[num_right]], num_tokens)
                 lat = result["latency"] if isinstance(result, dict) else result
+                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
             else:
                 data = self._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
                 result = self._interp_2d_linear(sms, num_tokens, data)
                 lat = result["latency"] if isinstance(result, dict) else result
-            return lat / 1000.0
+                energy = result.get("energy", 0.0) if isinstance(result, dict) else 0.0
+            return PerformanceResult(lat / 1000.0, energy=energy / 1000.0)
 
     def _correct_data(self) -> None:
         """

@@ -22,12 +22,12 @@ class Operation:
         self._name = name
         self._scale_factor = scale_factor
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """
         Query operation latency with power data.
 
         Returns:
-            float: PerformanceResult (behaves like float) with latency in milliseconds
+            PerformanceResult: PerformanceResult (behaves like float) with latency in milliseconds
                    (scaled by scale_factor). Power data available via .power attribute.
         """
         raise NotImplementedError
@@ -47,7 +47,7 @@ class CustomAllReduce(Operation):
         self._tp_size = tp_size
         self._weights = 0.0
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query custom allreduce latency with power data."""
         if self._tp_size == 1:
             return PerformanceResult(0.0, 0.0)
@@ -74,7 +74,7 @@ class P2P(Operation):
         # self._empirical_scaling_factor = 1.1
         self._weights = 0.0
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query P2P latency with power data."""
         if self._pp_size == 1:
             return PerformanceResult(0.0, 0.0)
@@ -110,7 +110,7 @@ class NCCL(Operation):
         self._comm_quant_mode = comm_quant_mode
         self._weights = 0.0
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query NCCL latency with power data."""
         message_size = kwargs.get("x") * self._num_elements_per_token
 
@@ -142,7 +142,7 @@ class GEMM(Operation):
         self._weights = self._n * self._k * quant_mode.value.memory
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """
         Query GEMM latency with energy data.
 
@@ -213,7 +213,7 @@ class MoE(Operation):
             // self._moe_tp_size
         )  # 3 for ffn1,gate,ffn2; 2 for float16
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query MoE latency with energy data."""
         # attention dp size will scale up the total input tokens.
         x = kwargs.get("x") * self._attention_dp_size
@@ -274,7 +274,7 @@ class MoEDispatch(Operation):
         self._moe_backend = kwargs.get("moe_backend")
         self._is_context = kwargs.get("is_context", True)
 
-    def query(self, database: PerfDatabase, **kwargs):
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         num_tokens = kwargs.get("x")
         volume = num_tokens * self._hidden_size
         _sm_version = database.system_spec["gpu"]["sm_version"]
@@ -551,7 +551,7 @@ class ContextAttention(Operation):
         self._window_size = window_size
         self._head_size = head_size
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query context attention latency with energy data."""
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")
@@ -597,7 +597,7 @@ class GenerationAttention(Operation):
         self._window_size = window_size
         self._head_size = head_size
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query generation attention latency with energy data."""
         beam_width = kwargs.get("beam_width")
         assert beam_width == 1, "only support beam_width=1"
@@ -640,7 +640,7 @@ class ContextMLA(Operation):
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query context MLA latency with energy data."""
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")
@@ -679,7 +679,7 @@ class GenerationMLA(Operation):
         self._weights = 0.0
         self._kv_cache_dtype = kv_cache_dtype
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query generation MLA latency with energy data."""
         beam_width = kwargs.get("beam_width")
         assert beam_width == 1, "only support beam_width=1"
@@ -713,7 +713,7 @@ class MLABmm(Operation):
         self._quant_mode = quant_mode
         self._if_pre = if_pre
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query MLA BMM latency with power data."""
         beam_width = kwargs.get("beam_width")
         assert beam_width == 1, "only support beam_width=1"
@@ -747,7 +747,7 @@ class Embedding(Operation):
         self._constant_latency = 5e-6  # 5us
 
     # sol only
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query embedding latency with power data."""
         x = kwargs.get("x")
         d2d_bytes = x * self._column_size * 2
@@ -782,7 +782,7 @@ class ElementWise(Operation):
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
 
     # sol only
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query element-wise operation latency with power data."""
         x = kwargs.get("x")  # num tokens
         x //= self._scale_num_tokens
@@ -819,7 +819,7 @@ class WideEPMLP(Operation):
         self.is_context = kwargs.get("is_context", True)  # Default to context mode
         self.tp_size = kwargs.get("tp_size", 1)
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query WideEP MLP latency with power data."""
         x = kwargs.get("x")  # num_tokens
         x /= self.tp_size
@@ -856,7 +856,7 @@ class WideEPGenerationMLA(Operation):
         self._fmha_quant_mode = fmha_quant_mode
         self._attn_backend = attn_backend
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query WideEP generation MLA latency with power data."""
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
@@ -898,7 +898,7 @@ class WideEPContextMLA(Operation):
         self._fmha_quant_mode = fmha_quant_mode
         self._attn_backend = attn_backend
 
-    def query(self, database: PerfDatabase, **kwargs) -> float:
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query WideEP context MLA latency with power data."""
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")

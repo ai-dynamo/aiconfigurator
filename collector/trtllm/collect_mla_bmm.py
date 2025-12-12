@@ -105,16 +105,45 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
         out = torch.randn([num_tokens, num_heads, kv_lora_rank]).bfloat16().to(torch.device(device))
         # => num_heads, num_tokens, kv_lora_rank
 
+        # Dry run
         q_nope_trans = q_nope.transpose(0, 1)
         k_b_proj_trans_trans = k_b_proj_trans.transpose(1, 2)
         out_trans = out.transpose(0, 1)
         torch.ops.trtllm.bmm_out(q_nope_trans, k_b_proj_trans_trans, out_trans)
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+
+        def kernel_func():
             q_nope_trans = q_nope.transpose(0, 1)
             k_b_proj_trans_trans = k_b_proj_trans.transpose(1, 2)
             out_trans = out.transpose(0, 1)
             torch.ops.trtllm.bmm_out(q_nope_trans, k_b_proj_trans_trans, out_trans)
+
+        # Use benchmark_with_power context manager
+        with benchmark_with_power(
+            device=device,
+            kernel_func=kernel_func,
+            num_warmups=num_warmups,
+            num_runs=num_runs,
+            repeat_n=1,
+        ) as results:
+            pass
+
+        log_perf(
+            item_list=[
+                {
+                    "bmm_dtype": dtype,
+                    "num_tokens": num_tokens,
+                    "num_heads": num_heads,
+                    "latency": results["latency_ms"],
+                }
+            ],
+            framework="TRTLLM",
+            version=tensorrt_llm.__version__,
+            device_name=torch.cuda.get_device_name(device),
+            op_name="mla_gen_pre",
+            kernel_source="default",
+            perf_filename=perf_filename,
+            power_stats=results["power_stats"],
+        )
     elif dtype == "fp8":
         q_nope = torch.randn([num_tokens, num_heads, qk_nope_head_dim], dtype=torch.bfloat16).to(torch.device(device))
         # q_nope_fp8 = torch.randn(
@@ -190,14 +219,43 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
         v_b_proj = torch.randn([num_heads, v_head_dim, kv_lora_rank]).bfloat16().to(torch.device(device))
         attn_output = torch.randn([num_tokens, num_heads, v_head_dim]).bfloat16().to(torch.device(device))
 
+        # Dry run
         torch.ops.trtllm.bmm_out(attn_out_latent.transpose(0, 1), v_b_proj.transpose(1, 2), attn_output.transpose(0, 1))
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+
+        def kernel_func():
             torch.ops.trtllm.bmm_out(
                 attn_out_latent.transpose(0, 1),
                 v_b_proj.transpose(1, 2),
                 attn_output.transpose(0, 1),
             )
+
+        # Use benchmark_with_power context manager
+        with benchmark_with_power(
+            device=device,
+            kernel_func=kernel_func,
+            num_warmups=num_warmups,
+            num_runs=num_runs,
+            repeat_n=1,
+        ) as results:
+            pass
+
+        log_perf(
+            item_list=[
+                {
+                    "bmm_dtype": dtype,
+                    "num_tokens": num_tokens,
+                    "num_heads": num_heads,
+                    "latency": results["latency_ms"],
+                }
+            ],
+            framework="TRTLLM",
+            version=tensorrt_llm.__version__,
+            device_name=torch.cuda.get_device_name(device),
+            op_name="mla_gen_post",
+            kernel_source="default",
+            perf_filename=perf_filename,
+            power_stats=results["power_stats"],
+        )
     elif dtype == "fp8":
         attn_out_latent = torch.randn([num_tokens, num_heads, kv_lora_rank], dtype=torch.bfloat16, device=device)
         v_b_proj = torch.randn([num_heads, v_head_dim, kv_lora_rank], dtype=torch.bfloat16, device=device).to(

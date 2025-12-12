@@ -254,6 +254,19 @@ def benchmark_with_power(
             # Standard behavior: re-raise exception
             raise
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Warmup the ACTUAL execution path (after graph capture)
+    # ═══════════════════════════════════════════════════════════════════
+    torch.cuda.synchronize()
+    for _ in range(num_warmups):
+        if use_graph:
+            g.replay()
+        else:
+            # Fallback: Direct execution matching actual execution path
+            for _ in range(repeat_n):
+                kernel_func()
+    torch.cuda.synchronize()
+
     # Initialize power monitor if enabled
     power_monitor = None
     power_stats = None
