@@ -200,7 +200,6 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
 @dataclasses.dataclass
 class MLACommonTestCase:
     num_heads: int
-    num_kv_heads: int
     batch_size: int
     input_len: int
     is_context_phase: bool
@@ -215,9 +214,9 @@ class MLACommonTestCase:
 def _get_mla_common_test_cases(is_context: bool):
     test_cases = []
 
-    # num_heads, num_kv_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim
+    # num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim
     model_config_list = [
-        [128, 128, 1536, 512, 128, 64, 128, "DEEPSEEK_V3"],
+        [128, 1536, 512, 128, 64, 128, "DEEPSEEK_V3"],
     ]
 
     if is_context:
@@ -284,16 +283,15 @@ def _get_mla_common_test_cases(is_context: bool):
         test_cases.append(
             MLACommonTestCase(
                 num_heads=model_config[0],
-                num_kv_heads=model_config[1],
                 input_len=s if is_context else s - 1,
                 batch_size=b,
                 is_context_phase=is_context,
                 kv_cache_block_size=kv_cache_block_size,
-                q_lora_rank=model_config[2],
-                kv_lora_rank=model_config[3],
-                qk_nope_head_dim=model_config[4],
-                qk_rope_head_dim=model_config[5],
-                v_head_dim=model_config[6],
+                q_lora_rank=model_config[1],
+                kv_lora_rank=model_config[2],
+                qk_nope_head_dim=model_config[3],
+                qk_rope_head_dim=model_config[4],
+                v_head_dim=model_config[5],
             )
         )
 

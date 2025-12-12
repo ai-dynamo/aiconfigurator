@@ -31,7 +31,6 @@ def run_attention_torch(
     batch_size,
     input_len,
     num_heads,
-    num_kv_heads,
     q_lora_rank,
     kv_lora_rank,
     qk_rope_head_dim,
@@ -46,13 +45,14 @@ def run_attention_torch(
     setup_distributed(device)
     torch.cuda.set_device(device)
 
-    # TODO: remove
-    batch_size = 2
-    input_len = 1024
+    # # TODO: remove
+    # batch_size = 2
+    # input_len = 1024
 
     dtype = torch.float16
     model = os.path.join(os.path.dirname(__file__), "fake_mla_hf_model")
     head_dim = kv_lora_rank + qk_rope_head_dim
+    num_kv_heads = num_heads
 
     # TODO: Let vllm choose the backend.
     # backend = current_platform.get_attn_backend_cls(
@@ -197,9 +197,12 @@ def run_attention_torch(
 
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device)
-    # output = torch.empty_like(query_vllm)
-
-    output = torch.empty(query_vllm.shape[0], num_heads * v_head_dim, dtype=query_vllm.dtype, device=query_vllm.device)
+    output = torch.empty(
+        query_vllm.shape[0],
+        num_heads * v_head_dim,
+        dtype=query_vllm.dtype,
+        device=query_vllm.device,
+    )
 
     # Run forward pass
 
@@ -241,27 +244,27 @@ def run_attention_torch(
     if is_context_phase:
         isl = input_len
         step = 0
-        op_name = "context_attention"
+        op_name = "context_mla"
     else:
         isl = 1
         step = input_len
-        op_name = "generation_attention"
+        op_name = "generation_mla"
 
     kv_cache_dtype_str = "float16" if not use_fp8_kv_cache else "fp8"
     dtype_str = "float16"
     kernel_source = f"vllm_{backend_name}".lower()
 
+    # TODO: fix all these
     log_perf(
         item_list=[
             {
+                "mla_dtype": dtype_str,
+                "kv_cache_dtype": kv_cache_dtype_str,
+                "num_heads": num_heads,
                 "batch_size": batch_size,
                 "isl": isl,
-                "num_heads": num_heads,
-                "num_key_value_heads": num_kv_heads,
-                "head_dim": head_dim,
-                "beam_width": 1,
-                "attn_dtype": dtype_str,
-                "kv_cache_dtype": kv_cache_dtype_str,
+                "tp_size": 128 // num_heads,
+                # "head_dim": head_dim,
                 "step": step,
                 "latency": latency,
             }
@@ -273,9 +276,6 @@ def run_attention_torch(
         kernel_source=kernel_source,
         perf_filename=perf_filename,
     )
-
-
-# TODO: remove num_kv_heads
 
 
 def _get_mla_test_cases(is_context: bool):
@@ -296,8 +296,6 @@ def _get_mla_test_cases(is_context: bool):
         for tp_size in tp_sizes:
             if common_mla_testcase.num_heads % tp_size != 0:
                 continue
-            if common_mla_testcase.num_kv_heads % tp_size != 0:
-                continue
 
             for is_fp8_kv_cache in kv_cache_dtype_list:
                 test_cases.append(
@@ -305,7 +303,6 @@ def _get_mla_test_cases(is_context: bool):
                         common_mla_testcase.batch_size,
                         common_mla_testcase.input_len,
                         common_mla_testcase.num_heads // tp_size,
-                        common_mla_testcase.num_kv_heads // tp_size,
                         common_mla_testcase.q_lora_rank,
                         common_mla_testcase.kv_lora_rank,
                         common_mla_testcase.qk_rope_head_dim,
@@ -314,7 +311,7 @@ def _get_mla_test_cases(is_context: bool):
                         common_mla_testcase.kv_cache_block_size,
                         is_fp8_kv_cache,
                         is_context,
-                        "context_attention_perf.txt" if is_context else "generation_attention_perf.txt",
+                        "context_mla_perf.txt" if is_context else "generation_mla_perf.txt",
                     ]
                 )
 
