@@ -29,14 +29,13 @@ from .profiling import profile_decode_performance, profile_prefill_performance
 logger = logging.getLogger(__name__)
 
 
-def format_status_message(profile_num_gpus, prefill_results, gpu_cost_per_hour):
+def format_status_message(profile_num_gpus, prefill_results):
     """
     Format success status message with profiling summary.
 
     Args:
         profile_num_gpus: List of GPU counts profiled
         prefill_results: Prefill profiling results
-        gpu_cost_per_hour: Cost per GPU per hour
 
     Returns:
         Formatted status message string
@@ -48,9 +47,7 @@ def format_status_message(profile_num_gpus, prefill_results, gpu_cost_per_hour):
     return (
         f"✅ Plots generated successfully!\n"
         f"📊 Profiled {len(profile_num_gpus)} GPU configurations: {profile_num_gpus}\n"
-        f"⚡ Best prefill: {min(prefill_ttft):.1f}ms TTFT at {prefill_num_gpus[best_prefill_idx]} GPUs\n"
-        + "💰 GPU Cost: "
-        + (f"${gpu_cost_per_hour:.2f}/hour" if gpu_cost_per_hour else "N/A")
+        f"⚡ Best prefill: {min(prefill_ttft):.1f}ms TTFT at {prefill_num_gpus[best_prefill_idx]} GPUs"
     )
 
 
@@ -61,7 +58,6 @@ def generate_profiling_plots(
     version: str,
     min_num_gpus_per_engine: int,
     max_num_gpus_per_engine: int,
-    gpu_cost_per_hour: float,
     isl: int,
     osl: int,
     ttft: float,
@@ -74,7 +70,7 @@ def generate_profiling_plots(
     This is the PRIMARY ENTRY POINT for profiling. It orchestrates:
     1. Estimating prefill performance (TTFT) across different GPU counts
     2. Estimating decode performance (ITL) at various concurrency levels
-    3. Computing cost-vs-SLA tradeoffs based on GPU pricing
+    3. Computing GPU hours for cost analysis (frontend handles cost calculation)
 
     Args:
         model_name: Model name (e.g., "QWEN3_32B")
@@ -83,7 +79,6 @@ def generate_profiling_plots(
         version: Backend version (e.g., "0.20.0")
         min_num_gpus_per_engine: Minimum TP size to profile
         max_num_gpus_per_engine: Maximum TP size to profile
-        gpu_cost_per_hour: Cost per GPU per hour in dollars
         isl: Input sequence length
         osl: Output sequence length
         ttft: Target TTFT in milliseconds (for visualization)
@@ -129,7 +124,7 @@ def generate_profiling_plots(
         prefill_table_data = prepare_prefill_table_data(prefill_results, model_name, system, backend, version, isl, osl)
         decode_table_data = prepare_decode_table_data(decode_results, model_name, system, backend, version, isl, osl)
         cost_table_data = prepare_cost_table_data(
-            isl, osl, prefill_results, decode_results, gpu_cost_per_hour, model_name, system, backend, version
+            isl, osl, prefill_results, decode_results, model_name, system, backend, version
         )
 
         # Serialize all data to JSON for frontend
@@ -143,12 +138,11 @@ def generate_profiling_plots(
             osl,
             ttft,
             itl,
-            gpu_cost_per_hour,
             allow_confirm_datapoint,
         )
 
         # Generate success status message
-        status_msg = format_status_message(profile_num_gpus, prefill_results, gpu_cost_per_hour)
+        status_msg = format_status_message(profile_num_gpus, prefill_results)
 
         return (json_data, status_msg)
 

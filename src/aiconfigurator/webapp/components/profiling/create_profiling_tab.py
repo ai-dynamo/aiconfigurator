@@ -7,7 +7,10 @@ import gradio as gr
 
 from aiconfigurator.webapp.components.base import create_model_name_config, create_runtime_config, create_system_config
 from aiconfigurator.webapp.components.profiling.constants import (
+    COST_TAB_DESCRIPTION,
+    DECODE_TAB_DESCRIPTION,
     PLOT_INTERACTION_INSTRUCTIONS,
+    PREFILL_TAB_DESCRIPTION,
 )
 from aiconfigurator.webapp.events.event_profiler import setup_profiling_events
 
@@ -30,6 +33,7 @@ def _load_profiling_javascript():
         "sync_interactions.js",
         "config_modal.js",
         "main.js",
+        "gpu_cost_toggle.js",
     ]
 
     combined_js = []
@@ -79,20 +83,39 @@ def create_performance_results_section():
     with gr.Accordion("Performance Results"):
         gr.Markdown(PLOT_INTERACTION_INSTRUCTIONS)
 
+        with gr.Tab("Cost vs SLA"):
+            with gr.Accordion("Description", open=True):
+                gr.Markdown(COST_TAB_DESCRIPTION)
+            show_gpu_cost = gr.Checkbox(  # noqa: F841 - accessed via JS
+                label="Show GPU cost",
+                value=False,
+                elem_id="show_gpu_cost_checkbox",
+            )
+            gpu_cost_per_hr = gr.Number(  # noqa: F841 - accessed via JS
+                label="GPU cost / hr ($)",
+                value=2.00,
+                minimum=0,
+                elem_id="gpu_cost_per_hr_input",
+                interactive=True,
+                optional=True,
+            )
+            gr.HTML('<div class="chart-container"><canvas id="cost_chart"></canvas></div>')
+            gr.Markdown("#### Data Points")
+            gr.HTML('<div id="cost_table_wrapper"></div>')
+
         with gr.Tab("Prefill Performance"):
+            with gr.Accordion("Description", open=True):
+                gr.Markdown(PREFILL_TAB_DESCRIPTION)
             gr.HTML('<div class="chart-container"><canvas id="prefill_chart"></canvas></div>')
             gr.Markdown("#### Data Points")
             gr.HTML('<div id="prefill_table_wrapper"></div>')
 
         with gr.Tab("Decode Performance"):
+            with gr.Accordion("Description", open=True):
+                gr.Markdown(DECODE_TAB_DESCRIPTION)
             gr.HTML('<div class="chart-container"><canvas id="decode_chart"></canvas></div>')
             gr.Markdown("#### Data Points")
             gr.HTML('<div id="decode_table_wrapper"></div>')
-
-        with gr.Tab("Cost vs SLA"):
-            gr.HTML('<div class="chart-container"><canvas id="cost_chart"></canvas></div>')
-            gr.Markdown("#### Data Points")
-            gr.HTML('<div id="cost_table_wrapper"></div>')
 
 
 def _setup_button_validation(generate_btn, model_name_components, model_system_components, runtime_config_components):

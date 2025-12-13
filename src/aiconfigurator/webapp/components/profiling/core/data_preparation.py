@@ -139,21 +139,19 @@ def prepare_cost_table_data(
     osl,
     prefill_results,
     decode_results,
-    gpu_cost_per_hour,
     model_name: str,
     system: str,
     backend: str,
     version: str,
 ):
     """
-    Prepare table data for cost analysis.
+    Prepare table data for cost analysis (GPU hours only, frontend handles cost calculation).
 
     Args:
         isl: Input sequence length
         osl: Output sequence length
         prefill_results: Tuple of (num_gpus, ttft, thpt_per_gpu) for prefill
         decode_results: List of tuples (num_gpus, itl_list, thpt_per_gpu_list, batch_size_list) for decode
-        gpu_cost_per_hour: Cost per GPU per hour in dollars
         model_name: Model name
         system: System name
         backend: Backend name
@@ -198,22 +196,13 @@ def prepare_cost_table_data(
     d_itl = np.array(d_itl)
     d_thpt = np.array(d_thpt)
 
-    # Calculate cost data or GPU hours
-    # Handle empty strings, None, or 0 values - use GPU hours instead of cost
-    use_gpu_hours = gpu_cost_per_hour is None or gpu_cost_per_hour == "" or gpu_cost_per_hour == 0
-
     table_data = []
     for p_idx, (_p_ttft, _p_thpt) in enumerate(zip(p_ttft, p_thpt)):
         tokens_per_user_array = 1000 / d_itl
 
-        if use_gpu_hours:
-            # Calculate GPU hours (no cost multiplication)
-            prefill_gpu_hours = isl * 1000 / _p_thpt / 3600
-            value_array = osl * 1000 / d_thpt / 3600 + prefill_gpu_hours
-        else:
-            # Calculate cost (with cost multiplication)
-            prefill_cost = isl * 1000 / _p_thpt * gpu_cost_per_hour / 3600
-            value_array = osl * 1000 / d_thpt * gpu_cost_per_hour / 3600 + prefill_cost
+        # Calculate GPU hours (frontend will handle cost conversion if needed)
+        prefill_gpu_hours = isl * 1000 / _p_thpt / 3600
+        gpu_hours_array = osl * 1000 / d_thpt / 3600 + prefill_gpu_hours
 
         for i in range(len(d_itl)):
             # Use the tracked GPU counts and batch sizes for config generation
@@ -237,7 +226,7 @@ def prepare_cost_table_data(
                     round(float(d_itl[i]), 3),
                     round(float(d_thpt[i]), 3),
                     round(float(tokens_per_user_array[i]), 3),
-                    round(float(value_array[i]), 3),
+                    round(float(gpu_hours_array[i]), 6),
                     config_yaml,
                 ]
             )

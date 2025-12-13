@@ -80,9 +80,6 @@ def create_system_config(app_config, gpu_config=False):
                         value=8,
                         interactive=True,
                     ),
-                    "gpu_cost_per_hour": gr.Number(
-                        label="GPU cost per hour", value="", interactive=True, optional=True
-                    ),
                 }
         else:
             gpu_config_components = {}

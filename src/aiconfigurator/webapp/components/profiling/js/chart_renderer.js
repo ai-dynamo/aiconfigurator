@@ -115,9 +115,10 @@ function createChart(canvasId, config, plotType) {
                             }
                             
                             const xLabel = config.xAxisLabel || "X"
-                            const yLabel = config.yAxisLabel || "Y"
+                            // Read y-axis label dynamically from chart options (allows GPU cost toggle to update it)
+                            const yLabel = context.chart.options.scales.y.title.text || config.yAxisLabel || "Y"
                             
-                            const labels = [`${xLabel}: ${point.x.toFixed(2)}`, `${yLabel}: ${point.y.toFixed(2)}`]
+                            const labels = [`${xLabel}: ${point.x.toFixed(2)}`, `${yLabel}: ${point.y.toFixed(6)}`]
                             
                             // For cost plot, always show TTFT, ITL, and decode throughput
                             if (plotType === "cost" && point.ttft !== undefined) {

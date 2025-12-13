@@ -22,7 +22,6 @@ def serialize_profiling_data(
     osl,
     ttft,
     itl,
-    gpu_cost_per_hour,
     allow_confirm_datapoint=False,
 ):
     """
@@ -34,9 +33,6 @@ def serialize_profiling_data(
     Returns JSON string with all data for Chart.js and DataTables.
     """
     num_gpus_list, ttft_list, thpt_per_gpu_list = prefill_results
-
-    # Determine if using GPU hours or cost
-    use_gpu_hours = gpu_cost_per_hour is None or gpu_cost_per_hour == "" or gpu_cost_per_hour == 0
 
     data = {
         "settings": {
@@ -92,9 +88,9 @@ def serialize_profiling_data(
                 "datasets": [],
                 "axes": {
                     "x": {"title": "Tokens per User", "min": 0},
-                    "y": {"title": "GPU Hours" if use_gpu_hours else "Cost ($)", "min": 0},
+                    "y": {"title": "GPU Hours", "min": 0},
                 },
-                "title": f"{'GPU Hours' if use_gpu_hours else 'Cost'} Per 1000 i{isl}o{osl} requests",
+                "title": f"GPU Hours Per 1000 i{isl}o{osl} requests",
             },
             "table": {
                 "columns": [
@@ -103,7 +99,7 @@ def serialize_profiling_data(
                     "ITL (ms)",
                     "Decode Thpt (tokens/s/GPU)",
                     "Tokens/User",
-                    "GPU Hours" if use_gpu_hours else "Cost ($)",
+                    "GPU Hours",
                     "Action",
                 ],
                 "data": cost_table_data,
