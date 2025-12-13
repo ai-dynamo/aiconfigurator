@@ -3,6 +3,7 @@
 
 import csv
 import logging
+import os
 import traceback
 
 from packaging.version import Version
@@ -149,7 +150,13 @@ class SupportMatrix:
                 error_messages[mode] = traceback.format_exc()
             finally:
                 # format error messages to one line with "\n" as separator
-                error_messages[mode] = error_messages[mode].replace("\n", "\\n") if error_messages[mode] else None
+                # remove absolute path prefix to avoid PII exposure
+                if error_messages[mode]:
+                    cwd = os.getcwd() + os.sep
+                    error_messages[mode] = error_messages[mode].replace(cwd, "")
+                    error_messages[mode] = error_messages[mode].replace("\n", "\\n")
+                else:
+                    error_messages[mode] = None
         return results, error_messages
 
     def test_support_matrix(self) -> list[tuple[str, str, str, str, str, bool, str | None]]:
