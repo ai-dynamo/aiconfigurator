@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import math
 import os
 
 import torch
 from vllm.config import set_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.version import __version__ as vllm_version
 
 from collector.common_test_cases import get_context_mla_common_test_cases, get_generation_mla_common_test_cases
@@ -45,10 +45,18 @@ def run_attention_torch(
     setup_distributed(device)
     torch.cuda.set_device(device)
 
-    dtype = torch.float16
+    dtype = torch.bfloat16
     model = os.path.join(os.path.dirname(__file__), "fake_mla_hf_model")
     head_dim = kv_lora_rank + qk_rope_head_dim
     num_kv_heads = num_heads
+
+    num_kv_cache_blocks = max(
+        # Number of kv cache blocks needed for number of tokens in the entire KV cache.
+        # Add +1 because VLLM considers the 1st block to be the "null" block.
+        1 + math.ceil((input_len + 1) / block_size) * batch_size,
+        # set a reasonable minimum
+        8192,
+    )
 
     # Let vllm choose the backend.
     backend = current_platform.get_attn_backend_cls(
@@ -81,9 +89,10 @@ def run_attention_torch(
         model_name=model,
         max_model_len=max(batch_spec.seq_lens),
         block_size=block_size,
-        num_gpu_blocks=8192,
+        num_gpu_blocks=num_kv_cache_blocks,
         max_num_seqs=batch_size,
     )
+    assert convert_dtype_to_torch(vllm_config.model_config.dtype) == torch.bfloat16
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache)
 
@@ -130,19 +139,11 @@ def run_attention_torch(
         head_size=head_dim,
         dtype=current_platform.fp8_dtype() if use_fp8_kv_cache else dtype,
         device=device,
-        num_blocks=vllm_config.cache_config.num_gpu_blocks or 1000,
+        num_blocks=num_kv_cache_blocks,
         common_attn_metadata=common_attn_metadata,
         randomize_blocks=True,
         kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
     )
-
-    # Fix backend-specific kv cache layout.
-    if backend_name == _Backend.FLASHINFER:
-        kv_cache = kv_cache.transpose(0, 1)
-
-        # For FlashInfer default to HND layout
-        kv_cache = kv_cache.transpose(2, 3).contiguous().transpose(2, 3)
-        set_kv_cache_layout("HND")
 
     # Build metadata
     builder_cls, impl_cls = get_attention_backend(backend_name)
@@ -186,8 +187,7 @@ def run_attention_torch(
         )
 
     # Process weights to create W_UK_T and W_UV attributes needed by MLA
-    act_dtype = convert_dtype_to_torch(vllm_config.model_config.dtype)
-    impl.process_weights_after_loading(act_dtype)
+    impl.process_weights_after_loading(dtype)
 
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device)
@@ -202,10 +202,6 @@ def run_attention_torch(
 
     test_ite = 6
     warm_up = 3
-
-    if use_fp8_kv_cache:
-        query_vllm = query_vllm.to(current_platform.fp8_dtype())
-        output = output.to(torch.bfloat16)
 
     def run():
         impl.forward(
@@ -233,7 +229,7 @@ def run_attention_torch(
     torch.cuda.synchronize()
 
     latency = start_event.elapsed_time(end_event) / test_ite
-    print(f"attn latency: {latency}")
+    print(f"MLA latency: {latency}")
 
     if is_context_phase:
         isl = input_len
