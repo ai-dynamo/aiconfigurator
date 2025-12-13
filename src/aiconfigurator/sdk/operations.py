@@ -230,6 +230,8 @@ class MoE(Operation):
             moe_ep_size=self._moe_ep_size,
             quant_mode=quant_mode,
             workload_distribution=self._workload_distribution,
+            is_context=self._is_context,
+            moe_backend=self._moe_backend,
         )
 
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
