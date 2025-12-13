@@ -32,6 +32,9 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")
     common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
+    common_parser.add_argument(
+        "--top_n", type=int, default=5, help="Number of top configurations to display. Default is 5."
+    )
     add_generator_override_arguments(common_parser)
     return common_parser
 
@@ -318,6 +321,7 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
 def _execute_task_configs(
     task_configs: dict[str, TaskConfig],
     mode: str,
+    top_n: int = 5,
 ) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float]]:
     """Execute the task configs and return the chosen experiment, best configs, results, and best
     throughputs."""
@@ -384,7 +388,7 @@ def _execute_task_configs(
                 total_gpus=total_gpus,
                 pareto_df=pareto_df,
                 target_request_latency=target_request_latency,
-                top_n=5,
+                top_n=top_n,
                 group_by=group_by_key,
             )
         else:
@@ -392,7 +396,7 @@ def _execute_task_configs(
                 total_gpus=total_gpus,
                 pareto_df=pareto_df,
                 target_tpot=target_tpot,
-                top_n=5,
+                top_n=top_n,
                 group_by=group_by_key,
             )
         best_configs[name] = best_config_df
@@ -413,6 +417,7 @@ def _execute_task_configs(
         task_configs=task_configs,  # for info in summary
         mode=mode,
         pareto_x_axis=pareto_x_axis,
+        top_n=top_n,
     )
 
     end_time = time.time()
@@ -439,6 +444,7 @@ def main(args):
     chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs(
         task_configs,
         args.mode,
+        top_n=args.top_n,
     )
 
     if args.save_dir:
