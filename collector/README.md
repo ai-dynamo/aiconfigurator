@@ -50,6 +50,91 @@ The generated file is comm_perf.txt and custom_all_reduce.txt.
 
 # Collect gemm/attention/moe data/etc.
 
+## Power Monitoring (Optional)
+
+The collector supports GPU power monitoring during kernel execution using NVML. This feature is optional and disabled by default.
+
+### Enable Power Monitoring
+```bash
+# Basic power monitoring
+python3 collect.py --backend trtllm --measure_power
+
+# With custom minimum duration (default: 1.0s)
+python3 collect.py --backend trtllm --measure_power --power_test_duration_sec 2.0
+```
+
+### Options
+- `--measure_power`: Enable NVML-based power monitoring (samples at 100ms intervals)
+- `--power_test_duration_sec`: Minimum test duration for accurate power readings (default: 1.0s)
+
+### Output
+When power monitoring is enabled, performance CSV files will include additional columns:
+- `power`: Average power consumption during kernel execution (Watts)
+- `power_limit`: GPU power management limit (Watts)
+
+**Example output:**
+```csv
+framework,version,device,op_name,kernel_source,gemm_dtype,m,n,k,latency,power,power_limit
+TRTLLM,1.2.0,NVIDIA H200 SXM,gemm,torch_flow,float16,1024,4096,4096,0.234,523.4,700.0
+```
+
+### Requirements
+Power monitoring requires:
+- `pynvml` Python package: `pip install pynvml`
+- NVML support (NVIDIA drivers)
+
+If unavailable, a warning is logged and execution continues without power data.
+
+### Notes
+- Power monitoring adds minimal overhead (<1%)
+- Kernel iterations are automatically adjusted to meet minimum duration for accurate measurements
+- Backward compatible: without `--measure_power`, CSVs remain unchanged
+
+## CUDA Graph Fallback Support
+
+The `benchmark_with_power` helper function now supports graceful fallback to eager execution when CUDA graph capture fails. This is particularly useful for complex operations like MOE (Mixture of Experts) with large batch sizes.
+
+### Features
+- **Automatic fallback**: When `allow_graph_fail=True`, CUDA graph capture failures trigger eager execution instead of raising exceptions
+- **Power measurement in both paths**: Power monitoring works correctly in both graph replay and eager execution modes
+- **Memory safety**: Automatic `torch.cuda.empty_cache()` call on graph capture failure to prevent memory fragmentation
+- **Transparency**: Results include `used_cuda_graph` flag to indicate which execution path was used
+
+### Usage Example
+```python
+from helper import benchmark_with_power
+
+def my_kernel():
+    # Your kernel code here
+    moe.forward(hidden_states, logits)
+
+# Use benchmark_with_power with fallback support
+with benchmark_with_power(
+    device=device,
+    kernel_func=my_kernel,
+    num_warmups=3,
+    num_runs=6,
+    repeat_n=1,
+    allow_graph_fail=True,  # Enable graceful fallback
+) as results:
+    latency = results["latency_ms"]
+    power_stats = results["power_stats"]  # Available in both paths
+
+    # Check which execution path was used
+    if not results["used_cuda_graph"]:
+        print("CUDA graph capture failed, used eager execution")
+```
+
+### When to Use
+- **Complex operations**: MOE, dynamic memory patterns, or operations that may not be graph-compatible
+- **Large batch sizes**: When graph capture may fail due to memory constraints
+- **Development/debugging**: To ensure collection continues even if graph capture fails
+
+### Backward Compatibility
+- Default behavior unchanged: `allow_graph_fail=False` maintains existing behavior
+- Existing collectors work without modifications
+- Only opt-in when needed for specific use cases
+
 ## For TensorRT-LLM
 ```bash
 python3 collect.py --backend trtllm

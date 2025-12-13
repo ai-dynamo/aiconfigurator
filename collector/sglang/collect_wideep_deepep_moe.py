@@ -664,42 +664,24 @@ def benchmark_moe_layer_decode(
             )
             dispatch_output_list.append(output)
 
-        graph = torch.cuda.CUDAGraph()
+        # Use benchmark_with_power for timing
+        from collector.helper import benchmark_with_power
 
-        with torch.cuda.graph(graph):
-            for dispatch_output in dispatch_output_list:
+        def kernel_func():
+            for dispatch_output in dispatch_output_list:  # noqa: F821
                 _ = moe_layer.experts.moe_impl(dispatch_output)
 
-        graph.replay()
+        with benchmark_with_power(
+            device=device,
+            kernel_func=kernel_func,
+            num_warmups=3,
+            num_runs=num_iterations,
+            repeat_n=1,
+        ) as results:
+            pass
 
-        torch.get_device_module(device).synchronize()
-
-        profiler = torch.profiler.profile(
-            record_shapes=False,
-            profile_memory=False,
-            with_stack=False,
-        )
-        profiler.start()
-
-        gemm_latencies = []
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        graph.replay()
-
-        start_event.record()
-        torch.get_device_module(device).synchronize()
-        for i in range(num_iterations):
-            graph.replay()
-
-        torch.get_device_module(device).synchronize()
-        end_event.record()
-        latency_ms = start_event.elapsed_time(end_event)
-
-        gemm_latencies.append(latency_ms / num_iterations / len(masked_m_list))
-
-        profiler.stop()
-
-        avg_latency_ms = np.mean(gemm_latencies)
+        avg_latency_ms = results["latency_ms"] / len(masked_m_list)
+        power_stats = results["power_stats"]
 
         if tp_rank == 0:
             rank_print("DeepEP MoE GEMM Results (Decode) - CUDA Graph Enabled:")
@@ -737,6 +719,7 @@ def benchmark_moe_layer_decode(
                     op_name="moe_generation",
                     kernel_source="deepepmoe",
                     perf_filename=perf_filename,
+                    power_stats=power_stats,
                 )
             except Exception as e:
                 rank_print(f"  Warning: failed to log decode MoE metrics: {e}")

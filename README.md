@@ -312,6 +312,8 @@ Small changes to the database may not materially change performance estimates. F
 
 To go through the process, refer to the [guidance](collector/README.md) under the `collector` folder.
 
+**New:** The collector now supports optional GPU power monitoring during kernel execution. Use the `--measure_power` flag to collect power consumption data alongside performance metrics. See the [collector README](collector/README.md#power-monitoring-optional) for details.
+
 ### System Data Support Matrix
 
 | System | Framework(Version) | Status |

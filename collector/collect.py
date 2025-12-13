@@ -100,14 +100,12 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             task = task_info
             task_id = create_test_case_id(task, "unknown", module_name)
 
-        with lock:
-            progress_value.value += 1
-
         try:
             worker_logger.debug(f"Starting task {task_id}")
             func(*task, device)
             worker_logger.debug(f"Completed task {task_id}")
         except Exception as e:
+            # Build comprehensive error info
             error_info = {
                 "module": module_name,
                 "device_id": device_id,
@@ -119,20 +117,42 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 "timestamp": datetime.now().isoformat(),
             }
 
+            # Report error to queue BEFORE any exit
             if error_queue:
                 error_queue.put(error_info)
 
             worker_logger.exception(f"Task {task_id} failed")
 
-            # Force flush logs
+            # Force flush logs before any potential exit
             for handler in worker_logger.handlers:
                 handler.flush()
 
             # This error is could be fatal and require a process restart.
             if isinstance(e, torch.AcceleratorError):
+                worker_logger.warning(
+                    f"Fatal AcceleratorError encountered on task {task_id}. "
+                    f"Worker {device_id} exiting to reset GPU context. "
+                    f"Progress: {progress_value.value}"
+                )
+                # Flush logs again after warning
+                for handler in worker_logger.handlers:
+                    handler.flush()
                 # Exiting with non-zero code will add an additional error to the summary,
-                # which we don't want.
+                # which we don't want (error already reported above).
                 exit(0)
+        finally:
+            # CRITICAL: Increment progress regardless of success or failure
+            # This marks the task as "attempted" and tracks overall progress
+            with lock:
+                progress_value.value += 1
+
+            # Periodic memory cleanup to reduce fragmentation
+            # Only do this every 100 tasks to avoid overhead
+            if progress_value.value % 100 == 0:
+                import gc
+
+                gc.collect()
+                torch.cuda.empty_cache()
 
 
 def parallel_run(tasks, func, num_processes, module_name="unknown"):
@@ -280,6 +300,9 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
         if p.is_alive():
             logger.warning(f"Process {p.pid} did not terminate, forcing...")
             p.terminate()
+
+    # Shutdown manager to clean up resources (semaphores, etc.)
+    manager.shutdown()
 
     # Log summary
     if errors:
@@ -665,6 +688,17 @@ def main():
         "Available ops vary by backend - see backend-specific collectors for details.",
         default=None,
     )
+    parser.add_argument(
+        "--measure_power",
+        action="store_true",
+        help="Enable power monitoring during kernel execution (samples at 100ms intervals)",
+    )
+    parser.add_argument(
+        "--power_test_duration_sec",
+        type=float,
+        default=1.0,
+        help="Minimum duration for kernel runs when power measurement is enabled (default: 1.0s)",
+    )
     args = parser.parse_args()
     ops = args.ops
 
@@ -677,6 +711,14 @@ def main():
 
     num_processes = torch.cuda.device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
+
+    # Set environment variables for worker processes
+    if args.measure_power:
+        os.environ["COLLECTOR_MEASURE_POWER"] = "true"
+        os.environ["COLLECTOR_POWER_MIN_DURATION"] = str(args.power_test_duration_sec)
+        logger.info(f"Power monitoring enabled (min duration: {args.power_test_duration_sec}s)")
+    else:
+        os.environ["COLLECTOR_MEASURE_POWER"] = "false"
 
     mp.set_start_method("spawn")
 

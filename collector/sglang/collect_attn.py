@@ -12,7 +12,7 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
-from helper import get_sm_version, log_perf
+from helper import benchmark_with_power, get_sm_version, log_perf
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
@@ -386,26 +386,17 @@ def run_attention_torch(
         layer(q, k, v, forward_batch)
 
     warmup = 3
-    torch.cuda.synchronize()
-    for _ in range(warmup):
-        run_iter()
-    torch.cuda.synchronize()
+    # Use benchmark_with_power context manager
+    with benchmark_with_power(
+        device=torch_device,
+        kernel_func=run_iter,
+        num_warmups=warmup,
+        num_runs=20,
+        repeat_n=1,
+    ) as results:
+        pass
 
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        run_iter()
-    torch.cuda.synchronize()
-
-    num_runs = 20
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for _ in range(num_runs):
-        graph.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-
-    latency = start_event.elapsed_time(end_event) / num_runs
+    latency = results["latency_ms"]
 
     if is_context_phase:
         isl = input_len
@@ -437,6 +428,7 @@ def run_attention_torch(
         op_name=op_name,
         kernel_source="flash_attention",
         perf_filename=perf_filename,
+        power_stats=results["power_stats"],
     )
 
     return Timing(latency * 1e-3)

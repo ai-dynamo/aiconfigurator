@@ -367,8 +367,10 @@ def run_attention_torch(
                 decode_positions = torch.full((batch_size,), seq_length, device="cuda")
                 zero_allocator = BumpAllocator(buffer_size=2048, dtype=torch.float32, device="cuda")
 
-                g = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(g), torch.no_grad():
+                # Use benchmark_with_power for timing
+                from collector.helper import benchmark_with_power
+
+                def kernel_func():
                     _ = attention_module(
                         positions=decode_positions,
                         hidden_states=decode_hidden,
@@ -376,18 +378,17 @@ def run_attention_torch(
                         zero_allocator=zero_allocator,
                     )
 
-                for _ in range(num_warmup):
-                    g.replay()
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=kernel_func,
+                    num_warmups=num_warmup,
+                    num_runs=num_iterations,
+                    repeat_n=1,
+                ) as results:
+                    pass
 
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
-                start_event.record()
-                for _ in range(num_iterations):
-                    g.replay()
-                end_event.record()
-                torch.cuda.synchronize()
-
-                avg_time_ms = start_event.elapsed_time(end_event) / num_iterations
+                avg_time_ms = results["latency_ms"]
+                power_stats = results["power_stats"]
 
                 if enable_profiler:
                     profiler_output_dir = "/aiconfigurator/profiler_output"
@@ -407,7 +408,7 @@ def run_attention_torch(
                         ) as prof:
                             for iter_idx in range(num_iterations):
                                 with record_function("attention_decode"):
-                                    g.replay()
+                                    kernel_func()
                                 torch.cuda.synchronize()
                                 prof.step()
 
@@ -443,6 +444,7 @@ def run_attention_torch(
                         op_name="mla_generation",
                         kernel_source=attention_backend,
                         perf_filename=perf_filename,
+                        power_stats=power_stats,
                     )
                 except Exception as e:
                     print(f"  Warning: failed to log decode metrics: {e}")

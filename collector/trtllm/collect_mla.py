@@ -17,7 +17,7 @@ from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantConfig
 
-from helper import log_perf
+from helper import benchmark_with_power, log_perf
 
 
 def get_context_mla_test_cases():
@@ -341,9 +341,8 @@ def run_mla(
             q_pe=q_pe,
         )
 
-    # capture
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
+    # Use benchmark_with_power context manager
+    def kernel_func():
         if is_context_phase:
             attn.forward(
                 fused_q,
@@ -366,19 +365,16 @@ def run_mla(
                 q_pe=q_pe,
             )
 
-    # warmup
-    for i in range(warming_up):
-        g.replay()
+    with benchmark_with_power(
+        device=device,
+        kernel_func=kernel_func,
+        num_warmups=warming_up,
+        num_runs=test_ite,
+        repeat_n=1,
+    ) as results:
+        pass
 
-    # collect
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(test_ite):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / test_ite
+    latency = results["latency_ms"]
 
     # write result
     if is_context_phase:
@@ -407,4 +403,5 @@ def run_mla(
         op_name=f"mla_{'context' if is_context_phase else 'generation'}",
         kernel_source="default",
         perf_filename=perf_filename,
+        power_stats=results["power_stats"],
     )

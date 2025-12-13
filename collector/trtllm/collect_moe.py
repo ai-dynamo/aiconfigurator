@@ -17,7 +17,14 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import EXIT_CODE_RESTART, balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import (
+        EXIT_CODE_RESTART,
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+        power_law_logits_v3,
+    )
 except ModuleNotFoundError:
     import os
     import sys
@@ -25,7 +32,14 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import EXIT_CODE_RESTART, balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import (
+        EXIT_CODE_RESTART,
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+        power_law_logits_v3,
+    )
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
@@ -348,7 +362,6 @@ def run_moe_torch(
 
     del hidden_states_max_tokens, logits_max_tokens
 
-    reusable_graph = torch.cuda.CUDAGraph()
     for num_tokens in num_tokens_lists:
         if num_tokens > max_tokens:
             continue
@@ -364,50 +377,40 @@ def run_moe_torch(
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 
-        num_warmups = 3
-        num_runs = 6
-        if distributed == "power_law":
-            num_warmups = 1
-            num_runs = 1
-
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        try:
-            # capture
-            with torch.cuda.graph(reusable_graph):
-                if distributed == "power_law":
-                    for actual_logits in actual_logits_list:
-                        moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-                else:
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-            # warmup
-            for i in range(num_warmups):
-                reusable_graph.replay()
-
-            start_event.record()
-            for i in range(num_runs):
-                reusable_graph.replay()
-            end_event.record()
-
-        except Exception as e:
-            print(f"cuda graph failed for {num_tokens} tokens: {e}, fallback to no cuda graph")
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Helper closure to encapsulate forward pass logic (reduces duplication)
+        # ═══════════════════════════════════════════════════════════════════════════════
+        def run_forward_pass():
+            """Execute one forward pass through MOE, handling both power_law and balanced modes."""
             if distributed == "power_law":
-                for actual_logits in actual_logits_list:
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+                for logits in actual_logits_list:
+                    moe.forward(hidden_states, logits, do_finalize=not min_latency_mode)  # noqa: F821
             else:
-                for i in range(num_warmups):
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-            start_event.record()
-            if distributed == "power_law":
-                for actual_logits in actual_logits_list:
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-            else:
-                for i in range(num_runs):
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-            end_event.record()
+                moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)  # noqa: F821
 
-        torch.cuda.synchronize()
-        latency = start_event.elapsed_time(end_event) / num_runs / num_iter
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Benchmark with automatic power measurement and graph fallback
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # Determine base warmups and runs based on distribution mode
+        num_warmups = 1 if distributed == "power_law" else 3
+        num_runs = 1 if distributed == "power_law" else 6
+
+        # Use benchmark_with_power with graceful graph fallback
+        with benchmark_with_power(
+            device=device,
+            kernel_func=run_forward_pass,
+            num_warmups=num_warmups,
+            num_runs=num_runs,
+            repeat_n=1,
+            allow_graph_fail=True,  # Enable graceful fallback to eager execution
+        ) as results:
+            # Calculate per-iteration latency (accounting for internal iterations)
+            latency = results["latency_ms"] / num_iter
+            power_stats = results["power_stats"]
+
+            # Log if CUDA graph capture failed (for debugging)
+            if not results["used_cuda_graph"] and aic_debug == 1:
+                print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
 
         if min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
@@ -435,29 +438,19 @@ def run_moe_torch(
             op_name="moe",
             kernel_source=source,
             perf_filename=perf_filename,
+            power_stats=power_stats,
         )
         if distributed == "power_law":
             del actual_logits_list
         else:
             del actual_logits
 
-        del hidden_states, start_event, end_event
-
-        try:
-            reusable_graph.reset()
-            torch.cuda.synchronize()
-        except Exception as e:
-            print(f"Warning: Failed to reset CUDA Graph: {e}")
+        del hidden_states
 
         import gc
 
         gc.collect()
         torch.cuda.empty_cache()
-    try:
-        reusable_graph.reset()
-        del reusable_graph
-    except Exception as e:
-        print(f"Warning: Failed to delete CUDA Graph: {e}")
 
     del moe
     import gc

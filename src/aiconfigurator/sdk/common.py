@@ -223,6 +223,7 @@ ColumnsStatic = [
     "backend",
     "version",
     "system",
+    "power_w",  # NEW: E2E weighted average power in watts
 ]
 
 """
@@ -267,6 +268,7 @@ ColumnsAgg = [
     "backend",
     "version",
     "system",
+    "power_w",  # NEW: E2E weighted average power in watts
 ]
 
 """
@@ -326,6 +328,7 @@ ColumnsDisagg = [
     "(d)backend",
     "(d)version",
     "(d)system",
+    "power_w",  # NEW: E2E weighted average power in watts
 ]
 
 

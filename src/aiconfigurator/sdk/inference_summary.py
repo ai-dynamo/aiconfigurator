@@ -12,14 +12,21 @@ logger = logging.getLogger(__name__)
 
 class InferenceSummary:
     """
-    InferecneSummary to hold results of inference
+    InferecneSummary to hold results of inference with energy tracking.
 
     Attributes:
         runtime_config: runtime config
         memory: memory breakdown
-        context_latency_dict: latency breakdown for context
-        generation_latency_dict: latency breakdown for generation
+        context_latency_dict: latency breakdown for context (ms)
+        generation_latency_dict: latency breakdown for generation (ms)
+        context_energy_wms_dict: energy breakdown for context (W·ms)
+        generation_energy_wms_dict: energy breakdown for generation (W·ms)
         summary_df: summary dataframe
+
+    Units:
+        - latency: milliseconds (ms)
+        - energy: watt-milliseconds (W·ms) = millijoules (mJ)
+        - power: watts (W) - derived from energy/latency
 
     Methods:
         set_memory_and_check_oom: set memory and check oom
@@ -28,6 +35,10 @@ class InferenceSummary:
         set_generation_latency_dict: set generation latency dict
         get_context_latency_dict: get context latency dict
         get_generation_latency_dict: get generation latency dict
+        set_context_energy_wms_dict: set context energy dict
+        set_generation_energy_wms_dict: set generation energy dict
+        get_context_energy_wms_dict: get context energy dict
+        get_generation_energy_wms_dict: get generation energy dict
         check_oom: check oom
         get_static_info: get static info for static mode print
         set_summary_df: set summary dataframe
@@ -42,9 +53,16 @@ class InferenceSummary:
 
         # raw data dict
         self._memory = {}
-        self._context_latency_dict = {}
-        self._generation_latency_dict = {}
+        self._context_latency_dict = {}  # ms
+        self._generation_latency_dict = {}  # ms
+        self._context_energy_wms_dict = {}  # RENAMED from _context_power_dict, W·ms
+        self._generation_energy_wms_dict = {}  # RENAMED from _generation_power_dict, W·ms
         self._is_oom = None
+
+        # NEW: Store computed power averages
+        self._context_power_avg = 0.0
+        self._generation_power_avg = 0.0
+        self._e2e_power_avg = 0.0
 
         # summary dataframe
         self._summary_df = None
@@ -88,6 +106,104 @@ class InferenceSummary:
         Get generation latency dict.
         """
         return self._generation_latency_dict
+
+    # NEW: Energy dict accessors (explicit _wms naming for clarity)
+    def set_context_energy_wms_dict(self, energy_wms_dict: dict[str, float]) -> None:
+        """
+        Set context energy dict (units: W·ms).
+
+        Args:
+            energy_wms_dict: Dict of operation -> energy in watt-milliseconds (W·ms).
+                            Note: 1 W·ms = 1 millijoule (mJ).
+        """
+        self._context_energy_wms_dict = energy_wms_dict
+
+    def set_generation_energy_wms_dict(self, energy_wms_dict: dict[str, float]) -> None:
+        """
+        Set generation energy dict (units: W·ms).
+
+        Args:
+            energy_wms_dict: Dict of operation -> energy in watt-milliseconds (W·ms).
+        """
+        self._generation_energy_wms_dict = energy_wms_dict
+
+    def get_context_energy_wms_dict(self) -> dict[str, float]:
+        """
+        Returns dict of operation -> energy in watt-milliseconds (W·ms).
+
+        Note: 1 W·ms = 1 millijoule (mJ). To convert to joules: divide by 1000.
+        """
+        return self._context_energy_wms_dict
+
+    def get_generation_energy_wms_dict(self) -> dict[str, float]:
+        """
+        Returns dict of operation -> energy in watt-milliseconds (W·ms).
+        """
+        return self._generation_energy_wms_dict
+
+    # Alias accessors (for less verbose code)
+    def get_context_energy_dict(self) -> dict[str, float]:
+        """Alias for get_context_energy_wms_dict() - returns energy in W·ms"""
+        return self._context_energy_wms_dict
+
+    def get_generation_energy_dict(self) -> dict[str, float]:
+        """Alias for get_generation_energy_wms_dict() - returns energy in W·ms"""
+        return self._generation_energy_wms_dict
+
+    # NEW: Power average accessors
+    def set_context_power_avg(self, power_avg: float) -> None:
+        """Set context phase average power (watts)."""
+        self._context_power_avg = power_avg
+
+    def set_generation_power_avg(self, power_avg: float) -> None:
+        """Set generation phase average power (watts)."""
+        self._generation_power_avg = power_avg
+
+    def set_e2e_power_avg(self, power_avg: float) -> None:
+        """Set end-to-end average power (watts)."""
+        self._e2e_power_avg = power_avg
+
+    def get_context_power_avg(self) -> float:
+        """Get context phase average power (watts)."""
+        return self._context_power_avg
+
+    def get_generation_power_avg(self) -> float:
+        """Get generation phase average power (watts)."""
+        return self._generation_power_avg
+
+    def get_e2e_power_avg(self) -> float:
+        """Get end-to-end average power (watts)."""
+        return self._e2e_power_avg
+
+    def has_sufficient_power_data(self, threshold: float = 0.9) -> bool:
+        """
+        Check if power data coverage is sufficient for reliable power estimation.
+
+        Args:
+            threshold: Minimum ratio of latency with non-zero energy to total latency (default 0.9)
+
+        Returns:
+            bool: True if latency with non-zero energy >= threshold * total latency
+        """
+        # Calculate total latency
+        total_latency = sum(self._context_latency_dict.values()) + sum(self._generation_latency_dict.values())
+
+        if total_latency == 0:
+            return False
+
+        # Calculate latency from operations with non-zero energy
+        latency_with_energy = 0.0
+        for op_name, latency in self._context_latency_dict.items():
+            if self._context_energy_wms_dict.get(op_name, 0.0) > 0:
+                latency_with_energy += latency
+
+        for op_name, latency in self._generation_latency_dict.items():
+            if self._generation_energy_wms_dict.get(op_name, 0.0) > 0:
+                latency_with_energy += latency
+
+        # Check if coverage meets threshold
+        coverage_ratio = latency_with_energy / total_latency
+        return coverage_ratio >= threshold
 
     def check_oom(self) -> bool:
         """

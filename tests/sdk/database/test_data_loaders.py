@@ -139,11 +139,11 @@ def test_load_custom_allreduce_data_basic(tmp_path):
     assert key_dtype in data
 
     # Expected format:
-    # data[dtype][tp_size][allreduce_strategy][message_size]
+    # data[dtype][tp_size][allreduce_strategy][message_size] = {"latency": float, "power": float}
     assert 2 in data[key_dtype]
     assert "AUTO" in data[key_dtype][2]
-    assert data[key_dtype][2]["AUTO"][128] == pytest.approx(0.0038)
-    assert data[key_dtype][2]["AUTO"][8192] == pytest.approx(0.0045)
+    assert data[key_dtype][2]["AUTO"][128]["latency"] == pytest.approx(0.0038)
+    assert data[key_dtype][2]["AUTO"][8192]["latency"] == pytest.approx(0.0045)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -190,14 +190,14 @@ def test_load_nccl_data_basic(tmp_path):
     assert "allgather" in data[half_key]
     assert 2 in data[half_key]["allgather"]
     assert 512 in data[half_key]["allgather"][2]
-    assert data[half_key]["allgather"][2][512] == pytest.approx(1.0)
+    assert data[half_key]["allgather"][2][512]["latency"] == pytest.approx(1.0)
 
     # "allreduce" entry:
     assert int8_key in data
     assert "allreduce" in data[int8_key]
     assert 4 in data[int8_key]["allreduce"]
     assert 1024 in data[int8_key]["allreduce"][4]
-    assert data[int8_key]["allreduce"][4][1024] == pytest.approx(2.5)
+    assert data[int8_key]["allreduce"][4][1024]["latency"] == pytest.approx(2.5)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -239,7 +239,7 @@ def test_load_gemm_data_basic(tmp_path):
     assert 128 in data[key_mode]
     assert 256 in data[key_mode][128]
     assert 512 in data[key_mode][128][256]
-    assert data[key_mode][128][256][512] == pytest.approx(0.789)
+    assert data[key_mode][128][256][512]["latency"] == pytest.approx(0.789)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -311,7 +311,7 @@ def test_load_moe_data_basic(tmp_path):
     assert 2 in data[qm]["uniform"][2][4][16][32]  # moe_tp_size
     assert 2 in data[qm]["uniform"][2][4][16][32][2]  # moe_ep_size
     assert 1 in data[qm]["uniform"][2][4][16][32][2][2]  # num_tokens
-    assert data[qm]["uniform"][2][4][16][32][2][2][1] == pytest.approx(1.23)
+    assert data[qm]["uniform"][2][4][16][32][2][2][1]["latency"] == pytest.approx(1.23)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -377,7 +377,7 @@ def test_load_context_attention_data_basic(tmp_path):
     assert 4 in data[qm][kcd][0][16][0]  # n == 4
     assert 2 in data[qm][kcd][0][16][0][4]  # s == 2
     assert 1 in data[qm][kcd][0][16][0][4][2]  # b == 1
-    assert data[qm][kcd][0][16][0][4][2][1] == pytest.approx(0.321)
+    assert data[qm][kcd][0][16][0][4][2][1]["latency"] == pytest.approx(0.321)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -439,7 +439,7 @@ def test_load_generation_attention_data_basic(tmp_path):
     assert 4 in data[kcd][0][16][0]  # n == 4
     assert 1 in data[kcd][0][16][0][4]  # b == 1
     assert 3 in data[kcd][0][16][0][4][1]  # s = original 2 + step 1 = 3
-    assert data[kcd][0][16][0][4][1][3] == pytest.approx(0.987)
+    assert data[kcd][0][16][0][4][1][3]["latency"] == pytest.approx(0.987)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -497,7 +497,7 @@ def test_load_context_mla_data_basic(tmp_path):
     assert num_heads in data[qm][kcd]
     assert 2 in data[qm][kcd][num_heads]  # s == 2
     assert 1 in data[qm][kcd][num_heads][2]  # b == 1
-    assert data[qm][kcd][num_heads][2][1] == pytest.approx(1.111)
+    assert data[qm][kcd][num_heads][2][1]["latency"] == pytest.approx(1.111)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -551,7 +551,7 @@ def test_load_generation_mla_data_basic(tmp_path):
     assert num_heads in data[kcd]
     assert 1 in data[kcd][num_heads]  # b == 1
     assert 3 in data[kcd][num_heads][1]  # s = original 2 + step 1 = 3
-    assert data[kcd][num_heads][1][3] == pytest.approx(2.222)
+    assert data[kcd][num_heads][1][3]["latency"] == pytest.approx(2.222)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -599,4 +599,4 @@ def test_load_mla_bmm_data_basic(tmp_path):
     assert "bmm_op" in data[qg]
     assert 2 in data[qg]["bmm_op"]
     assert 8 in data[qg]["bmm_op"][2]
-    assert data[qg]["bmm_op"][2][8] == pytest.approx(3.333)
+    assert data[qg]["bmm_op"][2][8]["latency"] == pytest.approx(3.333)

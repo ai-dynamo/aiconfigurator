@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import os
+
 import tensorrt_llm
 import torch
 from tensorrt_llm._torch.model_config import ModelConfig
@@ -13,7 +15,12 @@ from torch.nn.parameter import Parameter
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, get_sm_version, log_perf
+    from helper import (
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+    )
 except ModuleNotFoundError:
     import os
     import sys
@@ -21,7 +28,12 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, get_sm_version, log_perf
+    from helper import (
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+    )
 
 
 def get_moe_test_cases():
@@ -177,25 +189,21 @@ def run_moe_torch(
     moe.w3_w1_weight = ffn1_weights
     moe.w2_weight = ffn2_weights
 
-    num_warmups = 3
-    num_runs = 6
-
-    # capture
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g):
+    # Define kernel function for benchmarking
+    def kernel_func():
         moe.forward(hidden_states, router_logits, cutlass_min_latency_mode=cutlass_min_latency_mode)
-    # warmup
-    for i in range(num_warmups):
-        g.replay()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for i in range(num_runs):
-        g.replay()
-    end_event.record()
-    torch.cuda.synchronize()
-    latency = start_event.elapsed_time(end_event) / num_runs
+    # Benchmark with automatic power measurement and graph fallback
+    with benchmark_with_power(
+        device=device,
+        kernel_func=kernel_func,
+        num_warmups=3,
+        num_runs=6,
+        repeat_n=1,
+        allow_graph_fail=True,  # Enable graceful fallback to eager execution
+    ) as results:
+        latency = results["latency_ms"]
+        power_stats = results["power_stats"]
 
     if cutlass_min_latency_mode:
         source = "moe_torch_flow_min_latency"
@@ -223,4 +231,5 @@ def run_moe_torch(
         op_name="moe",
         kernel_source=source,
         perf_filename=perf_filename,
+        power_stats=power_stats,
     )

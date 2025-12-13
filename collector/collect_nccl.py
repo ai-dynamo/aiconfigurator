@@ -6,10 +6,16 @@ from argparse import ArgumentParser
 
 import torch
 
-from helper import log_perf
+from helper import PowerMonitor, log_perf
 
 
-def nccl_benchmark(dtype: str, nccl_op: str = "all_gather", test_range: str = "10,10000000,1000", num_gpus: int = 8):
+def nccl_benchmark(
+    dtype: str,
+    nccl_op: str = "all_gather",
+    test_range: str = "10,10000000,1000",
+    num_gpus: int = 8,
+    measure_power: bool = False,
+):
     nccl_test_bin = ""
     if nccl_op == "all_gather":
         nccl_test_bin = "all_gather_perf"
@@ -28,6 +34,15 @@ def nccl_benchmark(dtype: str, nccl_op: str = "all_gather", test_range: str = "1
     nccl_version = f"{major}.{minor}.{patch}"
 
     bytes_per_element = 2 if dtype == "half" else 1
+
+    # Initialize power monitoring if enabled
+    power_monitor = None
+    if measure_power:
+        # Use GPU 0 for power monitoring (representative in multi-GPU scenarios)
+        power_monitor = PowerMonitor(device_id=0)
+        if not power_monitor._init_handle():
+            print("Warning: Failed to initialize power monitoring, continuing without power measurement")
+            power_monitor = None
 
     while size < max_size:
         inner_loop = 100 if size <= 16777216 else 60
@@ -50,7 +65,18 @@ def nccl_benchmark(dtype: str, nccl_op: str = "all_gather", test_range: str = "1
             "-c",
             "0",
         ]
+
+        # Start power monitoring before benchmark
+        power_stats = None
+        if power_monitor:
+            power_monitor.start_sampling()
+
         result = subprocess.run(cmd_args, capture_output=True, text=True)
+
+        # Stop power monitoring after benchmark
+        if power_monitor:
+            power_stats = power_monitor.stop_sampling()
+
         print_lines = result.stdout.split("\n")
         for index_line in range(len(print_lines)):
             if "time" in print_lines[index_line]:
@@ -58,6 +84,9 @@ def nccl_benchmark(dtype: str, nccl_op: str = "all_gather", test_range: str = "1
         latency = float(print_lines[index_line + 2].split()[5]) * 1e-3  # us to ms
 
         print(nccl_test_bin, f"{size=}, {latency=}")
+        if power_stats:
+            print(f"  Power: {power_stats['power']:.2f}W (limit: {power_stats['power_limit']:.2f}W)")
+
         log_perf(
             item_list=[
                 {
@@ -73,6 +102,7 @@ def nccl_benchmark(dtype: str, nccl_op: str = "all_gather", test_range: str = "1
             op_name=nccl_op,
             kernel_source="NCCL",
             perf_filename="nccl_perf.txt",
+            power_stats=power_stats,
         )
 
         size *= ratio
@@ -95,6 +125,18 @@ if __name__ == "__main__":
         help="min_size,max_size,multiplicative_ratio",
     )
     parser.add_argument("--num_gpus", "-n", default=8, type=int)
+    parser.add_argument(
+        "--measure_power",
+        action="store_true",
+        help="Enable power monitoring during NCCL benchmark execution (samples at 100ms intervals)",
+    )
+    parser.add_argument(
+        "--power_test_duration_sec",
+        type=float,
+        default=1.0,
+        help="Minimum duration for benchmark runs when power measurement is enabled (default: 1.0s). "
+        "Note: NCCL tests already run long enough, so this is informational only.",
+    )
     args = parser.parse_args()
 
-    nccl_benchmark(args.dtype, args.nccl_op, args.range, args.num_gpus)
+    nccl_benchmark(args.dtype, args.nccl_op, args.range, args.num_gpus, args.measure_power)

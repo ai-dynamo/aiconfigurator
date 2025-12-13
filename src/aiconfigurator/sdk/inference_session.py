@@ -205,6 +205,34 @@ class DisaggInferenceSession:
         osl = prefill_summary_dict["osl"]
         request_latency = prefill_summary_dict["ttft"] + decode_summary_dict["tpot"] * max(osl - 1, 0)
 
+        # Calculate weighted average power for DISAGG mode
+        # Power is weighted by time spent in each phase
+        # Note: prefill_power and decode_power are already per-GPU averages
+        ttft = prefill_summary_dict["ttft"]
+        tpot = decode_summary_dict["tpot"]
+        decode_time = tpot * max(osl - 1, 0)
+
+        prefill_power = prefill_summary_dict.get("power_w", 0.0)
+        decode_power = decode_summary_dict.get("power_w", 0.0)
+
+        # DEBUG: Log the power values we're getting
+        logger.debug(
+            f"DISAGG Power Calc: prefill_power={prefill_power}W, "
+            f"decode_power={decode_power}W, ttft={ttft}ms, decode_time={decode_time}ms"
+        )
+
+        # Simple time-weighted average (power values are already per-GPU)
+        total_time = ttft + decode_time
+
+        if total_time > 0:
+            disagg_power_avg = (prefill_power * ttft + decode_power * decode_time) / total_time
+        else:
+            disagg_power_avg = 0.0
+
+        logger.debug(
+            f"DISAGG Power Result: {disagg_power_avg}W (time-weighted from {prefill_power}W and {decode_power}W)"
+        )
+
         return {
             "model": prefill_summary_dict["model"],
             "isl": prefill_summary_dict["isl"],
@@ -260,6 +288,7 @@ class DisaggInferenceSession:
             "(d)backend": decode_summary_dict["backend"],
             "(d)version": decode_summary_dict["version"],
             "(d)system": decode_summary_dict["system"],
+            "power_w": disagg_power_avg,  # Weighted average power for DISAGG mode
         }
 
     def _get_disagg_summary_df(

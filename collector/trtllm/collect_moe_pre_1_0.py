@@ -16,7 +16,13 @@ from torch.nn.parameter import Parameter
 try:
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import (
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+        power_law_logits_v3,
+    )
 except ModuleNotFoundError:
     import os
     import sys
@@ -24,7 +30,13 @@ except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from common_test_cases import get_common_moe_test_cases
 
-    from helper import balanced_logits, get_sm_version, log_perf, power_law_logits_v3
+    from helper import (
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+        power_law_logits_v3,
+    )
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
@@ -249,32 +261,35 @@ def run_moe_torch(
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 
-        num_warmups = 3
-        num_runs = 6
-        if distributed == "power_law":
-            num_warmups = 1
-            num_runs = 1
-
-        # capture
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+        # Helper closure to encapsulate forward pass logic (reduces duplication)
+        def run_forward_pass():
+            """Execute one forward pass through MOE, handling both power_law and balanced modes."""
             if distributed == "power_law":
-                for actual_logits in actual_logits_list:
-                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+                for logits in actual_logits_list:
+                    moe.forward(hidden_states, logits, do_finalize=not min_latency_mode)
             else:
                 moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
-        # warmup
-        for i in range(num_warmups):
-            g.replay()
 
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
-        for i in range(num_runs):
-            g.replay()
-        end_event.record()
-        torch.cuda.synchronize()
-        latency = start_event.elapsed_time(end_event) / num_runs / num_iter
+        # Benchmark with automatic power measurement and graph fallback
+        num_warmups = 1 if distributed == "power_law" else 3
+        num_runs = 1 if distributed == "power_law" else 6
+
+        # Use benchmark_with_power with graceful graph fallback
+        with benchmark_with_power(
+            device=device,
+            kernel_func=run_forward_pass,
+            num_warmups=num_warmups,
+            num_runs=num_runs,
+            repeat_n=1,
+            allow_graph_fail=True,  # Enable graceful fallback to eager execution
+        ) as results:
+            # Calculate per-iteration latency (accounting for internal iterations)
+            latency = results["latency_ms"] / num_iter
+            power_stats = results["power_stats"]
+
+            # Log if CUDA graph capture failed (for debugging)
+            if not results["used_cuda_graph"] and aic_debug == 1:
+                print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
 
         if min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
@@ -302,4 +317,5 @@ def run_moe_torch(
             op_name="moe",
             kernel_source=source,
             perf_filename=perf_filename,
+            power_stats=power_stats,
         )

@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import math
 import os
 
 import torch
@@ -178,59 +177,47 @@ def run_mlp_torch(
 
         input_tensor = torch.randn((num_token, hidden_size), dtype=torch.bfloat16, device=device)
 
+        # Import at function level to avoid scoping issues with ruff
+        from collector.helper import benchmark_with_power
+
         if is_context:
-            # Context phase: no CUDA graph
-            with torch.no_grad():
-                for _ in range(num_warmup):
-                    _ = mlp(input_tensor)
+            # Context phase: use benchmark_with_power
+            def kernel_func():
+                _ = mlp(input_tensor)  # noqa: F821
 
-            torch.cuda.synchronize()
+            with benchmark_with_power(
+                device=device,
+                kernel_func=kernel_func,
+                num_warmups=num_warmup,
+                num_runs=num_iterations,
+                repeat_n=1,
+            ) as results:
+                pass
 
-            times = []
-            with torch.no_grad():
-                for i in range(num_iterations):
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-
-                    start_event.record()
-                    _ = mlp(input_tensor)
-                    end_event.record()
-
-                    torch.cuda.synchronize()
-                    times.append(start_event.elapsed_time(end_event))
-
-            avg_time = sum(times) / len(times)
+            avg_time = results["latency_ms"]
+            power_stats = results["power_stats"]
             perf_filename = os.path.join(output_path, "wideep_context_mlp_perf.txt")
             kernel_source = "deepseek_v3"
 
-            std_time = math.sqrt(sum((t - avg_time) ** 2 for t in times) / len(times))
-            print(
-                f"  {phase} MLP time: {avg_time:.3f} ms "
-                f"(min: {min(times):.3f}, max: {max(times):.3f}, std: {std_time:.3f})"
-            )
+            print(f"  {phase} MLP time: {avg_time:.3f} ms")
         else:
-            # Decode phase: use CUDA graph
-            torch.cuda.synchronize()
+            # Decode phase: use benchmark_with_power
+            def kernel_func():
+                _ = mlp(input_tensor)  # noqa: F821
 
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
-                _ = mlp(input_tensor)
+            with benchmark_with_power(
+                device=device,
+                kernel_func=kernel_func,
+                num_warmups=num_warmup,
+                num_runs=num_iterations,
+                repeat_n=1,
+            ) as results:
+                pass
 
-            for _ in range(num_warmup):
-                g.replay()
-
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-
-            start_event.record()
-            for _ in range(num_iterations):
-                g.replay()
-            end_event.record()
-
-            torch.cuda.synchronize()
-            avg_time = start_event.elapsed_time(end_event) / num_iterations
+            avg_time = results["latency_ms"]
+            power_stats = results["power_stats"]
             perf_filename = os.path.join(output_path, "wideep_generation_mlp_perf.txt")
-            kernel_source = "deepseek_v3_cuda_graph"
+            kernel_source = "deepseek_v3"
 
             print(f"  {phase} MLP time: {avg_time:.3f} ms")
 
@@ -255,6 +242,7 @@ def run_mlp_torch(
                 op_name="mlp",
                 kernel_source=kernel_source,
                 perf_filename=perf_filename,
+                power_stats=power_stats,
             )
         except Exception as e:
             print(f"  Warning: failed to log MLP metrics: {e}")

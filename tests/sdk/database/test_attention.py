@@ -37,7 +37,7 @@ class TestContextAttention:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_context_attention_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns tuple with math and memory components."""
+        """Test SOL_FULL mode returns PerformanceResult (acts as float)."""
         b, full_s, prefix, n, n_kv = 1, 32, 0, 8, 4
         s = full_s - prefix
         kv_cache_quant_mode = common.KVCacheQuantMode.float16
@@ -47,9 +47,11 @@ class TestContextAttention:
             b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, database_mode=common.DatabaseMode.SOL_FULL
         )
 
-        assert isinstance(result, tuple)
-        assert len(result) == 3
-        assert result[0] == max(result[1], result[2])  # sol_time = max(sol_math, sol_mem)
+        # Should return PerformanceResult that acts as float
+        assert isinstance(result, float)  # PerformanceResult is a float subclass
+        assert float(result) > 0  # Latency should be positive
+        assert hasattr(result, "energy")  # Should have energy attribute
+        assert result.energy == 0.0  # SOL mode has no energy data
 
     def test_query_context_attention_non_database_mode_mha(self, comprehensive_perf_db):
         """Test SILICON mode with MHA (n_kv == n)."""
@@ -137,7 +139,7 @@ class TestGenerationAttention:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_generation_attention_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns tuple."""
+        """Test SOL_FULL mode returns PerformanceResult (acts as float)."""
         b, s, n, n_kv = 2, 64, 16, 4
         kv_cache_quant_mode = common.KVCacheQuantMode.fp8
 
@@ -145,9 +147,11 @@ class TestGenerationAttention:
             b, s, n, n_kv, kv_cache_quant_mode, database_mode=common.DatabaseMode.SOL_FULL
         )
 
-        assert isinstance(result, tuple)
-        assert len(result) == 3
-        assert all(isinstance(x, (int, float)) for x in result)
+        # Should return PerformanceResult that acts as float
+        assert isinstance(result, float)  # PerformanceResult is a float subclass
+        assert float(result) > 0  # Latency should be positive
+        assert hasattr(result, "energy")  # Should have energy attribute
+        assert result.energy == 0.0  # SOL mode has no energy data
 
     def test_query_generation_attention_non_database_mode(self, comprehensive_perf_db):
         """Test SILICON mode with interpolation."""
@@ -286,14 +290,16 @@ class TestGenerationMLA:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_generation_mla_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns complete tuple."""
+        """Test SOL_FULL mode returns PerformanceResult (acts as float)."""
         result = comprehensive_perf_db.query_generation_mla(
             1, 32, 32, common.KVCacheQuantMode.float16, database_mode=common.DatabaseMode.SOL_FULL
         )
 
-        assert isinstance(result, tuple)
-        assert len(result) == 3
-        assert result[0] == max(result[1], result[2])
+        # Should return PerformanceResult that acts as float
+        assert isinstance(result, float)  # PerformanceResult is a float subclass
+        assert float(result) > 0  # Latency should be positive
+        assert hasattr(result, "energy")  # Should have energy attribute
+        assert result.energy == 0.0  # SOL mode has no energy data
 
 
 def test_default_database_mode(comprehensive_perf_db):
