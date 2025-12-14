@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.entrypoints.engine import _set_envs_and_config
+from sglang.srt.layers.moe import initialize_moe_config
 from sglang.srt.layers.moe.token_dispatcher.deepep import (
     DeepEPLLDispatchOutput,
     DeepEPNormalDispatchOutput,
@@ -740,6 +741,11 @@ def run_moe(
         set_gpu_proc_affinity(server_args.tp_size, server_args.nnodes, tp_rank)
 
     configure_logger(server_args, prefix=f" TP{tp_rank}")
+
+    # Initialize MoE config in subprocess (required for DeepEP + DeepGEMM backend)
+    _set_envs_and_config(server_args)
+    initialize_moe_config(server_args)
+
     rank_print = print if tp_rank == 0 else lambda *args, **kwargs: None
 
     rank_print(f"\n{'=' * 60}")
@@ -843,6 +849,7 @@ if __name__ == "__main__":
         trust_remote_code=True,
         mem_fraction_static=0.3,
         moe_a2a_backend="deepep",  # replaced enable_deepep_moe=True
+        moe_runner_backend="deep_gemm",  # use DeepGEMM for MoE
         deepep_mode="normal",  # 'auto', 'normal', or 'low_latency'
         ep_size=2,
         node_rank=0,
@@ -858,6 +865,7 @@ if __name__ == "__main__":
     )
 
     _set_envs_and_config(server_args)
+    # Note: initialize_moe_config is called in subprocess (run_moe) since global vars aren't shared across processes
     port_args = PortArgs.init_new(server_args)
 
     for num_experts in num_experts_list:
