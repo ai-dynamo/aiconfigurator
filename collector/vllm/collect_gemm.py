@@ -106,9 +106,11 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
     gemm.forward(x)  # dry run to init
 
+    outside_loop_count = 6
+
     # Use benchmark_with_power context manager
     def kernel_func():
-        for _ in range(6):
+        for _ in range(outside_loop_count):
             gemm.forward(x)
 
     with benchmark_with_power(
@@ -121,7 +123,9 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         pass
 
     log_perf(
-        item_list=[{"gemm_dtype": gemm_type, "m": m, "n": n, "k": k, "latency": results["latency_ms"]}],
+        item_list=[
+            {"gemm_dtype": gemm_type, "m": m, "n": n, "k": k, "latency": results["latency_ms"] / outside_loop_count}
+        ],
         framework="VLLM",
         version=vllm_version,
         device_name=torch.cuda.get_device_name(device),
