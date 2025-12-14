@@ -14,10 +14,6 @@ from sglang.srt.layers.moe.token_dispatcher.deepep import (
     DeepEPLLDispatchOutput,
     DeepEPNormalDispatchOutput,
 )
-
-# Aliases for backwards compatibility with collector code
-DeepEPLLOutput = DeepEPLLDispatchOutput
-DeepEPNormalOutput = DeepEPNormalDispatchOutput
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
@@ -418,9 +414,10 @@ def benchmark_moe_layer_prefill(
                     device=hidden_states_per_token_iter.device,
                     dtype=torch.float32,
                 )
-                dispatch_output = DeepEPNormalOutput(
-                    hidden_states=(hidden_states_fp8_tensor_iter, scale_tensor_iter),
-                    topk_idx=topk_idx_sample.clone(),
+                dispatch_output = DeepEPNormalDispatchOutput(
+                    hidden_states=hidden_states_fp8_tensor_iter,
+                    hidden_states_scale=scale_tensor_iter,
+                    topk_ids=topk_idx_sample.clone(),
                     topk_weights=topk_weights_sample.clone(),
                     num_recv_tokens_per_expert=num_recv_sample,
                 )
@@ -446,9 +443,10 @@ def benchmark_moe_layer_prefill(
                     device=hidden_states_per_token_iter.device,
                     dtype=torch.float32,
                 )
-                dispatch_output = DeepEPNormalOutput(
-                    hidden_states=(hidden_states_fp8_tensor_iter, scale_tensor_iter),
-                    topk_idx=topk_idx_sample.clone(),
+                dispatch_output = DeepEPNormalDispatchOutput(
+                    hidden_states=hidden_states_fp8_tensor_iter,
+                    hidden_states_scale=scale_tensor_iter,
+                    topk_ids=topk_idx_sample.clone(),
                     topk_weights=topk_weights_sample.clone(),
                     num_recv_tokens_per_expert=num_recv_sample,
                 )
@@ -632,12 +630,10 @@ def benchmark_moe_layer_decode(
                 hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
                 scale_tensor_copy = scale_tensor.clone()
 
-                output = DeepEPLLOutput(
-                    hidden_states_fp8=(
-                        hidden_states_fp8_tensor_copy,
-                        scale_tensor_copy,
-                    ),
-                    topk_idx=topk_idx_empty,
+                output = DeepEPLLDispatchOutput(
+                    hidden_states=hidden_states_fp8_tensor_copy,
+                    hidden_states_scale=scale_tensor_copy,
+                    topk_ids=topk_idx_empty,
                     topk_weights=topk_weights_empty,
                     masked_m=masked_m,
                     expected_m=int(torch.ceil(masked_m.float().mean()).item()),
@@ -655,9 +651,10 @@ def benchmark_moe_layer_decode(
             hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
             scale_tensor_copy = scale_tensor.clone()
 
-            output = DeepEPLLOutput(
-                hidden_states_fp8=(hidden_states_fp8_tensor_copy, scale_tensor_copy),
-                topk_idx=topk_idx_empty,
+            output = DeepEPLLDispatchOutput(
+                hidden_states=hidden_states_fp8_tensor_copy,
+                hidden_states_scale=scale_tensor_copy,
+                topk_ids=topk_idx_empty,
                 topk_weights=topk_weights_empty,
                 masked_m=masked_m,
                 expected_m=int(torch.ceil(masked_m.float().mean()).item()),
