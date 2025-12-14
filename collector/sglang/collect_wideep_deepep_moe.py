@@ -421,7 +421,7 @@ def benchmark_moe_layer_prefill(
                     topk_weights=topk_weights_sample.clone(),
                     num_recv_tokens_per_expert=num_recv_sample,
                 )
-                _ = moe_layer.experts.moe_impl(dispatch_output)
+                _ = moe_layer.experts.run_moe_core(dispatch_output)
 
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
@@ -455,7 +455,7 @@ def benchmark_moe_layer_prefill(
                 end_event = torch.cuda.Event(enable_timing=True)
                 start_event.record()
 
-                _ = moe_layer.experts.moe_impl(dispatch_output)
+                _ = moe_layer.experts.run_moe_core(dispatch_output)
 
                 torch.get_device_module(device).synchronize()
                 end_event.record()
@@ -641,7 +641,7 @@ def benchmark_moe_layer_decode(
                 dispatch_output_list.append(output)
 
             for dispatch_output in dispatch_output_list:
-                _ = moe_layer.experts.moe_impl(dispatch_output)
+                _ = moe_layer.experts.run_moe_core(dispatch_output)
 
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
@@ -666,7 +666,7 @@ def benchmark_moe_layer_decode(
 
         def kernel_func():
             for dispatch_output in dispatch_output_list:  # noqa: F821
-                _ = moe_layer.experts.moe_impl(dispatch_output)
+                _ = moe_layer.experts.run_moe_core(dispatch_output)
 
         with benchmark_with_power(
             device=device,
