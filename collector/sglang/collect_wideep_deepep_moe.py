@@ -842,8 +842,8 @@ if __name__ == "__main__":
         tp_size=2,
         trust_remote_code=True,
         mem_fraction_static=0.3,
-        enable_deepep_moe=True,
-        enable_ep_moe=True,
+        moe_a2a_backend="deepep",  # replaced enable_deepep_moe=True
+        deepep_mode="normal",  # 'auto', 'normal', or 'low_latency'
         ep_size=2,
         node_rank=0,
         host="localhost",
