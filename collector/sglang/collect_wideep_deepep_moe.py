@@ -541,7 +541,7 @@ def benchmark_moe_layer_decode(
 
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
-    top_k = moe_layer.topk.top_k
+    top_k = moe_layer.topk.topk_config.top_k
     num_local_experts = int(num_experts // ep_size)
 
     for case in decode_test_cases:
@@ -864,8 +864,8 @@ if __name__ == "__main__":
         format="%(message)s",
     )
 
-    _set_envs_and_config(server_args)
-    # Note: initialize_moe_config is called in subprocess (run_moe) since global vars aren't shared across processes
+    # Note: _set_envs_and_config and initialize_moe_config are called in subprocess (run_moe)
+    # since environment vars/global vars need to be set in the process that loads the model
     port_args = PortArgs.init_new(server_args)
 
     for num_experts in num_experts_list:
