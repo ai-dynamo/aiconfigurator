@@ -18,7 +18,7 @@ from vllm.version import __version__ as vllm_version
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
-compatible_versions = ["0.11.0"]
+compatible_versions = ["0.11.0", "0.12.0"]
 
 FP8_BLOCK_SHAPE = (128, 128)
 
