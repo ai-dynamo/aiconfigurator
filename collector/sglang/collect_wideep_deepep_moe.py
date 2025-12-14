@@ -774,23 +774,23 @@ def run_moe(
         prefill_test_cases = get_moe_prefill_test_cases(num_rank)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 
-        benchmark_moe_layer_prefill(
-            model_runner,
-            server_args,
-            port_args,
-            num_warmup,
-            num_iterations,
-            test_layer,
-            rank_print,
-            server_args.device,
-            tp_rank,
-            prefill_test_cases,
-            moe_layer,
-            actual_num_experts,
-            ep_size,
-            num_rank,
-            output_path,
-        )
+        # benchmark_moe_layer_prefill(
+        #     model_runner,
+        #     server_args,
+        #     port_args,
+        #     num_warmup,
+        #     num_iterations,
+        #     test_layer,
+        #     rank_print,
+        #     server_args.device,
+        #     tp_rank,
+        #     prefill_test_cases,
+        #     moe_layer,
+        #     actual_num_experts,
+        #     ep_size,
+        #     num_rank,
+        #     output_path,
+        # )
 
         decode_test_cases = get_moe_decode_test_cases()
         rank_print(f"Testing {len(decode_test_cases)} decode configurations...")
@@ -864,8 +864,8 @@ if __name__ == "__main__":
         format="%(message)s",
     )
 
-    # Note: _set_envs_and_config and initialize_moe_config are called in subprocess (run_moe)
-    # since environment vars/global vars need to be set in the process that loads the model
+    _set_envs_and_config(server_args)
+    # initialize_moe_config(server_args)  # Initialize MoE config (sets moe_a2a_backend, moe_runner_backend, etc.)
     port_args = PortArgs.init_new(server_args)
 
     for num_experts in num_experts_list:
