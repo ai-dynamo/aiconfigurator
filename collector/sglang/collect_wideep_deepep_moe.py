@@ -793,26 +793,30 @@ def run_moe(
         prefill_test_cases = get_moe_prefill_test_cases(num_rank)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 
-        # benchmark_moe_layer_prefill(
-        #     model_runner,
-        #     server_args,
-        #     port_args,
-        #     num_warmup,
-        #     num_iterations,
-        #     test_layer,
-        #     rank_print,
-        #     server_args.device,
-        #     tp_rank,
-        #     prefill_test_cases,
-        #     moe_layer,
-        #     actual_num_experts,
-        #     ep_size,
-        #     num_rank,
-        #     output_path,
-        # )
+        # Use deepep_mode="normal" for prefill
+        server_args.deepep_mode = "normal"
+        benchmark_moe_layer_prefill(
+            model_runner,
+            server_args,
+            port_args,
+            num_warmup,
+            num_iterations,
+            test_layer,
+            rank_print,
+            server_args.device,
+            tp_rank,
+            prefill_test_cases,
+            moe_layer,
+            actual_num_experts,
+            ep_size,
+            num_rank,
+            output_path,
+        )
 
         decode_test_cases = get_moe_decode_test_cases()
         rank_print(f"Testing {len(decode_test_cases)} decode configurations...")
+        # Use deepep_mode="low_latency" for decode
+        server_args.deepep_mode = "low_latency"
         benchmark_moe_layer_decode(
             model_runner,
             server_args,
@@ -869,7 +873,7 @@ if __name__ == "__main__":
         mem_fraction_static=0.3,
         moe_a2a_backend="deepep",  # replaced enable_deepep_moe=True
         moe_runner_backend="deep_gemm",  # use DeepGEMM for MoE
-        deepep_mode="low_latency",  # 'auto', 'normal', or 'low_latency' - use low_latency for decode benchmark
+        deepep_mode="auto",  # Will be set dynamically: "normal" for prefill, "low_latency" for decode
         ep_size=2,
         node_rank=0,
         host="localhost",
