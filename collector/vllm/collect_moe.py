@@ -99,8 +99,14 @@ def run_moe_torch(
         dtype = torch.float8_e4m3fn
 
     # Calculate local number of experts
-    local_num_experts = num_experts // moe_ep_size
     local_inter_size = inter_size // moe_tp_size
+    expert_map_result = determine_expert_map(moe_ep_size, 0, num_experts)
+    if isinstance(expert_map_result, tuple) and len(expert_map_result) == 3:
+        local_num_experts, expert_map, _ = expert_map_result
+    else:
+        # Backward compatibility with older determine_expert_map signatures
+        # that return only (local_num_experts, expert_map)
+        local_num_experts, expert_map = expert_map_result  # type: ignore[misc]
 
     # Create weight tensors
     # w1: gate + up projection weights [num_experts, 2 * inter_size, hidden_size]
@@ -119,9 +125,6 @@ def run_moe_torch(
         dtype=torch.float16,
         device=device,
     )
-
-    # Maps global expert index to local expert index.
-    _, expert_map = determine_expert_map(moe_ep_size, 0, num_experts)
 
     if dtype == torch.float8_e4m3fn:
         w1 = w1.to(dtype)

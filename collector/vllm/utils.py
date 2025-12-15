@@ -8,19 +8,43 @@ from dataclasses import dataclass
 from typing import Union
 
 import torch
+
+try:
+    from vllm.attention.backends.registry import AttentionBackendEnum
+except ImportError:
+    AttentionBackendEnum = None  # type: ignore
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
     DeviceConfig,
     LoadConfig,
     ModelConfig,
-    ModelDType,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
 )
-from vllm.platforms import _Backend, current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, resolve_obj_by_qualname
+
+try:
+    from vllm.config.model import ModelDType
+except Exception:  # pragma: no cover - compatibility with older vLLM installs
+    from typing import Union as _Union
+
+    import torch as _torch
+
+    ModelDType = _Union[str, _torch.dtype]  # type: ignore[misc]
+from vllm.platforms import current_platform
+
+try:
+    from vllm.platforms import _Backend  # type: ignore
+except Exception:
+    _Backend = None  # type: ignore
+try:
+    from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, resolve_obj_by_qualname
+except ImportError:
+    # Compatibility with newer vLLM where these live in submodules
+    from vllm.utils.import_utils import resolve_obj_by_qualname  # type: ignore
+    from vllm.utils.math_utils import cdiv  # type: ignore
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE  # type: ignore
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -85,60 +109,75 @@ def create_common_attn_metadata(
     # Calculate max query length
     max_query_len = max(batch_spec.query_lens)
 
-    return CommonAttentionMetadata(
-        query_start_loc=query_start_loc,
-        query_start_loc_cpu=query_start_loc_cpu,
-        seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens_cpu,
-        num_computed_tokens_cpu=num_computed_tokens_cpu,
-        num_reqs=batch_spec.batch_size,
-        num_actual_tokens=num_tokens,
-        max_query_len=max_query_len,
-        max_seq_len=max_seq_len,
-        block_table_tensor=block_table_tensor,
-        slot_mapping=slot_mapping,
-        causal=True,
-    )
-
-
-def get_attention_backend(backend_name: _Backend):
-    """Set up attention backend classes for testing.
-
-    Args:
-        backend_name: Name of the backend ("flash_attn", "flashinfer", etc.)
-        vllm_config: VllmConfig instance
-
-    Returns:
-        Tuple of (backend_builder_class, backend_impl_class)
-    """
-    backend_map = {
-        _Backend.FLASH_ATTN: (
-            "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
-            if current_platform.is_cuda()
-            else "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
-        ),
-        _Backend.FLASHINFER: "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
-        _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
-        _Backend.TRITON_ATTN: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
-        _Backend.TREE_ATTN: "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
-        _Backend.XFORMERS: "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",
-        _Backend.CUTLASS_MLA: "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
-        _Backend.FLASHMLA: "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
-        _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
-        _Backend.FLASHINFER_MLA: "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",
-        _Backend.TRITON_MLA: "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
-    }
-
-    if backend_name not in backend_map:
-        raise ValueError(f"Unknown backend: {backend_name}")
-
-    backend_class_name = backend_map[backend_name]
-
     try:
+        # Newer API uses underscored CPU copies.
+        return CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens,
+            _seq_lens_cpu=seq_lens_cpu,
+            _num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_reqs=batch_spec.batch_size,
+            num_actual_tokens=num_tokens,
+            max_query_len=max_query_len,
+            max_seq_len=max_seq_len,
+            block_table_tensor=block_table_tensor,
+            slot_mapping=slot_mapping,
+            causal=True,
+        )
+    except TypeError:
+        # Older API expects explicit CPU tensors without underscores.
+        return CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens_cpu,
+            num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_reqs=batch_spec.batch_size,
+            num_actual_tokens=num_tokens,
+            max_query_len=max_query_len,
+            max_seq_len=max_seq_len,
+            block_table_tensor=block_table_tensor,
+            slot_mapping=slot_mapping,
+            causal=True,
+        )
+
+
+def get_attention_backend(backend_name: AttentionBackendEnum):
+    """Set up attention backend classes for testing (new and legacy)."""
+    # Newer API: AttentionBackendEnum with get_class()
+    try:
+        backend_class = backend_name.get_class()
+        return backend_class.get_builder_cls(), backend_class.get_impl_cls()
+    except Exception:
+        pass
+
+    # Legacy API: _Backend enum with manual mapping
+    if _Backend is not None and isinstance(backend_name, _Backend):
+        backend_map = {
+            _Backend.FLASH_ATTN: (
+                "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+                if current_platform.is_cuda()
+                else "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
+            ),
+            _Backend.FLASHINFER: "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
+            _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
+            _Backend.TRITON_ATTN: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+            _Backend.TREE_ATTN: "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
+            _Backend.XFORMERS: "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",
+            _Backend.CUTLASS_MLA: "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
+            _Backend.FLASHMLA: "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
+            _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
+            _Backend.FLASHINFER_MLA: "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",
+            _Backend.TRITON_MLA: "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
+        }
+        if backend_name not in backend_map:
+            raise ValueError(f"Unknown backend: {backend_name}")
+        backend_class_name = backend_map[backend_name]
         backend_class = resolve_obj_by_qualname(backend_class_name)
         return backend_class.get_builder_cls(), backend_class.get_impl_cls()
-    except ImportError as e:
-        raise ValueError(f"{backend_name} not available: {e}") from e
+
+    raise ValueError(f"Unsupported backend type: {backend_name}")
 
 
 def create_standard_kv_cache_spec(vllm_config: VllmConfig, use_fp8_kv_cache: bool = False) -> FullAttentionSpec:
@@ -163,6 +202,7 @@ def create_vllm_config(
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
     add_mock_model_methods: bool = True,
+    hf_config_override: dict | None = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
@@ -193,6 +233,8 @@ def create_vllm_config(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         enable_chunked_prefill=enable_chunked_prefill,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
 
     device_config = DeviceConfig()
@@ -212,6 +254,9 @@ def create_vllm_config(
         model_config.get_sm_scale_for_layer = types.MethodType(
             lambda self, i: 1.0 / model_config.get_head_size() ** 0.5, model_config
         )
+
+    if hf_config_override:
+        model_config.hf_config.update(hf_config_override)
 
     return VllmConfig(
         model_config=model_config,
