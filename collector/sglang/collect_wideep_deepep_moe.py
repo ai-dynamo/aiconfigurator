@@ -647,26 +647,45 @@ def benchmark_moe_layer_decode(
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
 
-        dispatch_output_list = []
-        for masked_m in masked_m_list:
-            hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
-            scale_tensor_copy = scale_tensor.clone()
-
-            output = DeepEPLLDispatchOutput(
-                hidden_states=hidden_states_fp8_tensor_copy,
-                hidden_states_scale=scale_tensor_copy,
-                topk_ids=topk_idx_empty,
-                topk_weights=topk_weights_empty,
-                masked_m=masked_m,
-                expected_m=int(torch.ceil(masked_m.float().mean()).item()),
-            )
-            dispatch_output_list.append(output)
-
         # Use benchmark_with_power for timing
-        from collector.helper import benchmark_with_power
+        from helper import benchmark_with_power
+
+        # Pre-compute expected_m values outside of kernel_func to avoid .item() during CUDA graph capture
+        expected_m_list = [int(torch.ceil(masked_m_item.float().mean()).item()) for masked_m_item in masked_m_list]
+
+        # Pre-clone masked_m tensors (they won't be disposed by run_moe_core)
+        masked_m_clones = [m.clone() for m in masked_m_list]
+
+        # Create base tensors for cloning inside kernel_func
+        # run_moe_core disposes hidden_states and hidden_states_scale via dispose_tensor()
+        # so we must create fresh copies for each call
+        hidden_states_base = torch.randn(
+            num_local_experts,
+            num_max_dispatch_tokens_per_rank * num_rank,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device=device,
+        ).to(torch.float8_e4m3fn)
+
+        scale_base = torch.ones(
+            num_local_experts,
+            num_max_dispatch_tokens_per_rank * num_rank,
+            scale_hidden_size,
+            device=device,
+            dtype=torch.float32,
+        )
 
         def kernel_func():
-            for dispatch_output in dispatch_output_list:  # noqa: F821
+            # Must create fresh tensors each call because run_moe_core disposes them
+            for masked_m_clone, expected_m_val in zip(masked_m_clones, expected_m_list):
+                dispatch_output = DeepEPLLDispatchOutput(
+                    hidden_states=hidden_states_base.clone(),
+                    hidden_states_scale=scale_base.clone(),
+                    topk_ids=torch.empty(0, device=device, dtype=torch.int32),
+                    topk_weights=torch.empty(0, device=device, dtype=torch.float32),
+                    masked_m=masked_m_clone,
+                    expected_m=expected_m_val,
+                )
                 _ = moe_layer.experts.run_moe_core(dispatch_output)
 
         with benchmark_with_power(
@@ -850,7 +869,7 @@ if __name__ == "__main__":
         mem_fraction_static=0.3,
         moe_a2a_backend="deepep",  # replaced enable_deepep_moe=True
         moe_runner_backend="deep_gemm",  # use DeepGEMM for MoE
-        deepep_mode="normal",  # 'auto', 'normal', or 'low_latency'
+        deepep_mode="low_latency",  # 'auto', 'normal', or 'low_latency' - use low_latency for decode benchmark
         ep_size=2,
         node_rank=0,
         host="localhost",
