@@ -656,31 +656,47 @@ def benchmark_moe_layer_decode(
         # Pre-clone masked_m tensors (they won't be disposed by run_moe_core)
         masked_m_clones = [m.clone() for m in masked_m_list]
 
-        # Create base tensors for cloning inside kernel_func
+        # Pre-create enough tensor copies to avoid clone() inside kernel_func
         # run_moe_core disposes hidden_states and hidden_states_scale via dispose_tensor()
-        # so we must create fresh copies for each call
-        hidden_states_base = torch.randn(
-            num_local_experts,
-            num_max_dispatch_tokens_per_rank * num_rank,
-            hidden_size,
-            dtype=torch.bfloat16,
-            device=device,
-        ).to(torch.float8_e4m3fn)
+        # Estimate: kernel_func called ~4 times (warmup 3 + capture 1) in graph mode
+        # Each call iterates len(masked_m_list) times (max 5 for power_law)
+        # Total: 4 * 5 = 20 tensor sets needed, use 50 for safety
+        num_masked_m = len(masked_m_list)
+        num_kernel_calls = 50  # Conservative estimate for kernel_func invocations
+        num_tensor_sets = num_kernel_calls * num_masked_m
 
-        scale_base = torch.ones(
-            num_local_experts,
-            num_max_dispatch_tokens_per_rank * num_rank,
-            scale_hidden_size,
-            device=device,
-            dtype=torch.float32,
-        )
+        hidden_states_copies = []
+        scale_copies = []
+        for _ in range(num_tensor_sets):
+            hidden_states_copies.append(
+                torch.randn(
+                    num_local_experts,
+                    num_max_dispatch_tokens_per_rank * num_rank,
+                    hidden_size,
+                    dtype=torch.bfloat16,
+                    device=device,
+                ).to(torch.float8_e4m3fn)
+            )
+            scale_copies.append(
+                torch.ones(
+                    num_local_experts,
+                    num_max_dispatch_tokens_per_rank * num_rank,
+                    scale_hidden_size,
+                    device=device,
+                    dtype=torch.float32,
+                )
+            )
+
+        # Use a mutable container to track tensor index across all run_moe_core calls
+        tensor_idx = [0]
 
         def kernel_func():
-            # Must create fresh tensors each call because run_moe_core disposes them
             for masked_m_clone, expected_m_val in zip(masked_m_clones, expected_m_list):
+                idx = tensor_idx[0] % num_tensor_sets
+                tensor_idx[0] += 1
                 dispatch_output = DeepEPLLDispatchOutput(
-                    hidden_states=hidden_states_base.clone(),
-                    hidden_states_scale=scale_base.clone(),
+                    hidden_states=hidden_states_copies[idx],
+                    hidden_states_scale=scale_copies[idx],
                     topk_ids=torch.empty(0, device=device, dtype=torch.int32),
                     topk_weights=torch.empty(0, device=device, dtype=torch.float32),
                     masked_m=masked_m_clone,
