@@ -14,6 +14,8 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMo
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
+compatible_version = ["0.5.5.post3", "0.5.6.post2"]
+
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
 KV_LORA_RANK = 512
@@ -33,6 +35,10 @@ class MockModelConfig:
         self.attention_arch = AttentionArch.MLA
         self.is_hybrid = False
         self.attention_chunk_size = None
+        # Provide compatibility with newer sglang versions that expect hybrid-SWA metadata
+        self.is_hybrid_swa = None
+        self.swa_attention_layer_ids = None
+        self.full_attention_layer_ids = None
 
 
 class MockServerArgs:
@@ -60,6 +66,8 @@ class MockModelRunner:
         self.sliding_window_size = None
         self.is_hybrid = False
         self.model_config = MockModelConfig()
+        # Keep attribute for compatibility across sglang versions (older code ignores it)
+        self.is_hybrid_swa = self.model_config.is_hybrid_swa
         self.server_args = MockServerArgs(kv_cache_dtype, page_size)
 
 
