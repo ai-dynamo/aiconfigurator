@@ -28,13 +28,13 @@ from sglang.srt.utils import (
 )
 
 try:
-    from helper import log_perf, power_law_for_deepep, power_law_logits_v4
+    from helper import log_perf, power_law_deepep_decode, power_law_deepep_prefill
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import log_perf, power_law_for_deepep, power_law_logits_v4
+    from helper import log_perf, power_law_deepep_decode, power_law_deepep_prefill
 import pkg_resources
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
@@ -241,7 +241,7 @@ def benchmark_moe_layer_prefill(
             # Generate multiple samples to avoid outliers from a single sampling
             power_law_samples = []
             for _ in range(5):
-                topk_idx_sample, topk_weights_sample, num_recv_tensor = power_law_for_deepep(
+                topk_idx_sample, topk_weights_sample, num_recv_tensor = power_law_deepep_prefill(
                     num_tokens_iter,
                     num_local_experts * num_rank,
                     topk,
@@ -441,7 +441,7 @@ def benchmark_moe_layer_decode(
         # support two distributed mode: power_law and uniform
         if distributed == "power_law":
             masked_m_list = [
-                power_law_logits_v4(
+                power_law_deepep_decode(
                     num_token * num_rank,
                     num_local_experts * num_rank,
                     top_k,

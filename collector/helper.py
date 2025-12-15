@@ -697,7 +697,7 @@ def sample_power_law(size, alpha, xmin, xmax):
 def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
     """Core function to generate power law token distribution across experts.
 
-    This is the shared logic used by power_law_logits_v3 and power_law_for_deepep.
+    This is the shared logic used by power_law_logits_v3, power_law_deepep_prefill, and power_law_deepep_decode.
 
     Args:
         num_tokens: Number of tokens
@@ -815,8 +815,8 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
     return router_logits
 
 
-def power_law_for_deepep(num_tokens, num_experts, topk, ep, alpha):
-    """Generate power law distribution for DeepEP MoE testing.
+def power_law_deepep_prefill(num_tokens, num_experts, topk, ep, alpha):
+    """Generate power law distribution for DeepEP MoE prefill phase.
 
     Used by: sglang/collect_wideep_deepep_moe.py
 
@@ -856,13 +856,13 @@ def power_law_for_deepep(num_tokens, num_experts, topk, ep, alpha):
     return topk_idx, topk_weights, num_recv_tokens_per_expert
 
 
-def power_law_logits_v4(num_tokens, num_experts, topk, ep, alpha):
-    """Generate power law distribution for the EP rank with maximum load.
+def power_law_deepep_decode(num_tokens, num_experts, topk, ep, alpha):
+    """Generate power law distribution for DeepEP MoE decode phase.
 
     Creates a power law token distribution across all experts, then returns
     the distribution for the EP rank that has the highest total token count.
 
-    Used by: sglang/collect_wideep_deepep_moe.py (decode phase)
+    Used by: sglang/collect_wideep_deepep_moe.py
 
     Args:
         num_tokens: Number of tokens
