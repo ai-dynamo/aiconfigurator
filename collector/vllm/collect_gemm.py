@@ -18,6 +18,8 @@ from vllm.version import __version__ as vllm_version
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
+compatible_version = ["0.11.0", "0.12.0"]
+
 
 @functools.cache  # only run once per process
 def setup_distributed(device):

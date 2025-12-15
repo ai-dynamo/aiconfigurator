@@ -11,9 +11,23 @@ from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_confi
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
+# Compatibility: block FP8 helpers may differ by version.
+# Priority: vllm.utils.deep_gemm -> deep_gemm extension -> None.
+try:
+    from vllm.utils.deep_gemm import per_block_cast_to_fp8
+except Exception:
+    try:
+        import deep_gemm  # type: ignore
+
+        per_block_cast_to_fp8 = getattr(deep_gemm, "per_block_cast_to_fp8", None)
+    except Exception:
+        per_block_cast_to_fp8 = None  # type: ignore[assignment]
+
 from helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
+
+compatible_version = ["0.11.0", "0.12.0"]
 
 
 def get_moe_test_cases():
@@ -23,6 +37,8 @@ def get_moe_test_cases():
     moe_list = ["float16"]
     if get_sm_version() > 86:
         moe_list += ["fp8"]
+    if get_sm_version() >= 90 and per_block_cast_to_fp8 is not None:
+        moe_list += ["fp8_block"]
 
     test_cases = []
 
@@ -81,22 +97,9 @@ def run_moe_torch(
     # Configure quantization parameters
     dtype = torch.float16
     quant_config = None
-
-    if moe_type == "fp8":
-        w1_scale = torch.randn(num_experts, dtype=torch.float32)
-        w2_scale = torch.randn(num_experts, dtype=torch.float32)
-        a1_scale = torch.randn(1, dtype=torch.float32)
-        a2_scale = torch.randn(1, dtype=torch.float32)
-        block_shape = None
-
-        quant_config = fp8_w8a8_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-            block_shape=block_shape,
-        )
-        dtype = torch.float8_e4m3fn
+    block_shape: list[int] | None = None
+    a1_scale = None
+    a2_scale = None
 
     # Calculate local number of experts
     local_inter_size = inter_size // moe_tp_size
@@ -125,6 +128,41 @@ def run_moe_torch(
         dtype=torch.float16,
         device=device,
     )
+
+    if moe_type in ["fp8", "fp8_block"]:
+        dtype = torch.float8_e4m3fn
+        if moe_type == "fp8_block":
+            block_shape = [128, 128]
+
+            if per_block_cast_to_fp8 is None:
+                raise ImportError("per_block_cast_to_fp8 is unavailable; fp8_block requires a newer vLLM build.")
+
+            w1_scale_list = []
+            w2_scale_list = []
+            w1_q = torch.empty_like(w1, dtype=dtype)
+            w2_q = torch.empty_like(w2, dtype=dtype)
+            for i in range(local_num_experts):
+                w1_q[i], w1_scale_i = per_block_cast_to_fp8(w1[i], block_size=block_shape, use_ue8m0=True)
+                w2_q[i], w2_scale_i = per_block_cast_to_fp8(w2[i], block_size=block_shape, use_ue8m0=True)
+                w1_scale_list.append(w1_scale_i)
+                w2_scale_list.append(w2_scale_i)
+            w1 = w1_q
+            w2 = w2_q
+            w1_scale = torch.stack(w1_scale_list)
+            w2_scale = torch.stack(w2_scale_list)
+        else:
+            w1_scale = torch.randn(local_num_experts, dtype=torch.float32, device=device)
+            w2_scale = torch.randn(local_num_experts, dtype=torch.float32, device=device)
+            a1_scale = torch.randn(1, dtype=torch.float32, device=device)
+            a2_scale = torch.randn(1, dtype=torch.float32, device=device)
+
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_shape,
+        )
 
     if dtype == torch.float8_e4m3fn:
         w1 = w1.to(dtype)
