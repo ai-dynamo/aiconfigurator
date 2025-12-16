@@ -8,7 +8,10 @@ import numpy as np
 import torch
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.entrypoints.engine import _set_envs_and_config
+from sglang.srt.layers.communicator import AttentionInputs, get_attn_tp_context
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
+from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+from sglang.srt.mem_cache.chunk_cache import ChunkCache
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.sampling.sampling_params import SamplingParams
@@ -115,7 +118,7 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
         load_format=load_format,
         tp_size=1,
         trust_remote_code=True,
-        mem_fraction_static=0.5,
+        mem_fraction_static=0.88,
         disable_radix_cache=True,
     )
 
@@ -134,7 +137,7 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
     model_config = ModelConfig.from_server_args(server_args)
     model_runner = ModelRunner(
         model_config=model_config,
-        mem_fraction_static=0.5,
+        mem_fraction_static=0.88,
         gpu_id=tp_rank,
         tp_rank=tp_rank,
         tp_size=server_args.tp_size,
@@ -184,21 +187,29 @@ def run_attention_torch(
                         origin_input_ids=list(torch.randint(0, 10000, (seq_length,)).tolist()),
                         sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
                     )
-                    req.prefix_indices = []
+                    req.prefix_indices = torch.empty((0,), dtype=torch.int64)
                     req.fill_ids = req.origin_input_ids
                     req.extend_input_len = len(req.fill_ids)
                     req.logprob_start_len = 0
                     reqs.append(req)
 
+                # Create tree_cache for new SGLang API
+                cache_params = CacheInitParams(
+                    disable=True,
+                    req_to_token_pool=model_runner.req_to_token_pool,
+                    token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+                    page_size=model_runner.token_to_kv_pool_allocator.page_size,
+                )
+                tree_cache = ChunkCache(cache_params)
+
                 batch = ScheduleBatch.init_new(
                     reqs=reqs,
                     req_to_token_pool=model_runner.req_to_token_pool,
                     token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
-                    tree_cache=None,
+                    tree_cache=tree_cache,
                     model_config=model_runner.model_config,
                     enable_overlap=False,
                     spec_algorithm=SpeculativeAlgorithm.NONE,
-                    enable_custom_logit_processor=False,
                 )
                 batch.prepare_for_extend()
                 model_worker_batch = batch.get_model_worker_batch()
@@ -214,6 +225,20 @@ def run_attention_torch(
                 )
                 positions = torch.arange(seq_length, device="cuda").unsqueeze(0).expand(batch_size, -1).flatten()
                 zero_allocator = BumpAllocator(buffer_size=256, dtype=torch.float32, device="cuda")
+
+                # Set up attn_inputs_ for new SGLang communicator pattern
+                # qkv_latent needs shape: (tokens, q_lora_rank + kv_lora_rank + qk_rope_head_dim)
+                q_lora_rank = getattr(attention_module, "q_lora_rank", 1536) or 1536
+                kv_lora_rank = getattr(attention_module, "kv_lora_rank", 512)
+                qk_rope_head_dim = getattr(attention_module, "qk_rope_head_dim", 64)
+                qkv_latent_dim = q_lora_rank + kv_lora_rank + qk_rope_head_dim
+
+                def dummy_qkv_latent_func(h, fb):
+                    # Return tensor with correct dimension for qkv_latent
+                    return torch.randn(h.shape[0], qkv_latent_dim, dtype=h.dtype, device=h.device)
+
+                attn_inputs = AttentionInputs(hidden_states, forward_batch, dummy_qkv_latent_func)
+                get_attn_tp_context().set_attn_inputs(attn_inputs)
 
                 for _ in range(num_warmup):
                     with torch.no_grad():
@@ -317,7 +342,17 @@ def run_attention_torch(
                 torch.cuda.empty_cache()
 
             except Exception as e:
+                import traceback
+
                 print(f"  Prefill test failed: {e!s}")
+                traceback.print_exc()
+
+                # Only break on illegal memory access (context corruption), not OOM
+                error_str = str(e).lower()
+                if "cuda" in error_str and "illegal" in error_str:
+                    print("  CUDA illegal access detected - stopping tests to prevent cascading failures")
+                    break
+
                 print("  Skipping this configuration...")
                 continue
 
@@ -335,25 +370,47 @@ def run_attention_torch(
                         origin_input_ids=list(torch.randint(0, 10000, (seq_length,)).tolist()),
                         sampling_params=SamplingParams(temperature=0, max_new_tokens=1),
                     )
-                    req.prefix_indices = []
+                    req.prefix_indices = torch.empty((0,), dtype=torch.int64)
                     req.fill_ids = req.origin_input_ids
                     req.extend_input_len = len(req.fill_ids)
                     req.logprob_start_len = 0
                     req.cached_tokens = 0
                     req.already_computed = 0
                     reqs.append(req)
+
+                # Create tree_cache for new SGLang API
+                cache_params = CacheInitParams(
+                    disable=True,
+                    req_to_token_pool=model_runner.req_to_token_pool,
+                    token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
+                    page_size=model_runner.token_to_kv_pool_allocator.page_size,
+                )
+                tree_cache = ChunkCache(cache_params)
+
                 batch = ScheduleBatch.init_new(
                     reqs=reqs,
                     req_to_token_pool=model_runner.req_to_token_pool,
                     token_to_kv_pool_allocator=model_runner.token_to_kv_pool_allocator,
-                    tree_cache=None,
+                    tree_cache=tree_cache,
                     model_config=model_runner.model_config,
                     enable_overlap=False,
                     spec_algorithm=SpeculativeAlgorithm.NONE,
-                    enable_custom_logit_processor=False,
                 )
+                # Allocate KV cache slots via prepare_for_extend, then switch to decode
                 batch.prepare_for_extend()
-                batch.output_ids = seq_length
+
+                # Set up qkv_latent_func for AttentionInputs
+                q_lora_rank = getattr(attention_module, "q_lora_rank", 1536) or 1536
+                kv_lora_rank = getattr(attention_module, "kv_lora_rank", 512)
+                qk_rope_head_dim = getattr(attention_module, "qk_rope_head_dim", 64)
+                qkv_latent_dim = q_lora_rank + kv_lora_rank + qk_rope_head_dim
+
+                def dummy_qkv_latent_func(h, fb):
+                    return torch.randn(h.shape[0], qkv_latent_dim, dtype=h.dtype, device=h.device)
+
+                # === DIRECTLY TO DECODE (skip prefill pass to reduce peak memory) ===
+                # Set output_ids as tensor of last token IDs for decode
+                batch.output_ids = torch.randint(0, 10000, (batch_size,), dtype=torch.int64, device="cuda")
                 batch.prepare_for_decode()
                 model_worker_batch_decode = batch.get_model_worker_batch()
                 forward_batch_decode = ForwardBatch.init_new(model_worker_batch_decode, model_runner)
@@ -367,8 +424,12 @@ def run_attention_torch(
                 decode_positions = torch.full((batch_size,), seq_length, device="cuda")
                 zero_allocator = BumpAllocator(buffer_size=2048, dtype=torch.float32, device="cuda")
 
+                # Set up attn_inputs_ for decode
+                attn_inputs_decode = AttentionInputs(decode_hidden, forward_batch_decode, dummy_qkv_latent_func)
+                get_attn_tp_context().set_attn_inputs(attn_inputs_decode)
+
                 # Use benchmark_with_power for timing
-                from collector.helper import benchmark_with_power
+                from helper import benchmark_with_power
 
                 def kernel_func():
                     _ = attention_module(
@@ -457,7 +518,17 @@ def run_attention_torch(
                 torch.cuda.empty_cache()
 
             except Exception as e:
+                import traceback
+
                 print(f"  Decode test failed: {e!s}")
+                traceback.print_exc()
+
+                # Only break on illegal memory access (context corruption), not OOM
+                error_str = str(e).lower()
+                if "cuda" in error_str and "illegal" in error_str:
+                    print("  CUDA illegal access detected - stopping tests to prevent cascading failures")
+                    break
+
                 print("  Skipping this configuration...")
                 continue
 
@@ -498,7 +569,10 @@ if __name__ == "__main__":
         print(f"{'=' * 60}")
         cleanup_distributed()
 
-        torch.cuda.empty_cache()
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass  # Ignore if CUDA context is corrupted
         model_runner = load_model_runner(model_path, attention_backend, head_num, test_layer, dtype, device)
 
         run_attention_torch(
@@ -516,7 +590,10 @@ if __name__ == "__main__":
 
         del model_runner
         cleanup_distributed()
-        torch.cuda.empty_cache()
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass  # Ignore if CUDA context is corrupted
 
     print("\n" + "=" * 50)
     print("ALL TESTS COMPLETED")
