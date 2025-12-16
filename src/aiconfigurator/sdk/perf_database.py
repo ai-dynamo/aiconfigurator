@@ -2601,8 +2601,7 @@ class PerfDatabase:
             return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(m, n, k, quant_mode)
-            # SOL_FULL returns tuple - use first element as latency
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0)
         else:
@@ -2721,7 +2720,7 @@ class PerfDatabase:
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(
                 b,
@@ -2865,7 +2864,7 @@ class PerfDatabase:
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
@@ -2970,7 +2969,7 @@ class PerfDatabase:
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
@@ -3063,7 +3062,7 @@ class PerfDatabase:
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(b, s, num_heads, kvcache_quant_mode)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
@@ -3190,7 +3189,8 @@ class PerfDatabase:
         if database_mode == common.DatabaseMode.SOL:
             return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
+            sol_result = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
         else:
@@ -3319,7 +3319,8 @@ class PerfDatabase:
         if database_mode == common.DatabaseMode.SOL:
             return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
+            sol_result = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
         else:
@@ -3412,7 +3413,7 @@ class PerfDatabase:
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(quant_mode, tp_size, size)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(quant_mode, tp_size, size)
             return PerformanceResult(emp_latency, energy=0.0)
@@ -3534,7 +3535,7 @@ class PerfDatabase:
             return PerformanceResult(get_sol(dtype, num_gpus, operation, message_size)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(dtype, num_gpus, operation, message_size)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(dtype, num_gpus, operation, message_size), energy=0.0)
         else:
@@ -3724,7 +3725,7 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(
                 num_tokens,
@@ -3927,7 +3928,7 @@ class PerfDatabase:
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(num_tokens, num_heads, quant_mode, if_pre)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
             return PerformanceResult(emp_latency, energy=0.0)
@@ -4005,7 +4006,7 @@ class PerfDatabase:
             return PerformanceResult(get_sol(mem_bytes)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(mem_bytes)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
         else:
@@ -4048,7 +4049,7 @@ class PerfDatabase:
             return PerformanceResult(get_sol(message_bytes)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(message_bytes)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(message_bytes), energy=0.0)
         else:
@@ -4104,7 +4105,8 @@ class PerfDatabase:
         if database_mode == common.DatabaseMode.SOL:
             return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)[0]
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)
+            sol_result = get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return get_empirical(num_tokens, hidden_size, intermediate_size, quant_mode)
         else:
@@ -4162,7 +4164,7 @@ class PerfDatabase:
             return PerformanceResult(get_sol(num_tokens, topk, num_experts)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(num_tokens, topk, num_experts)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0)
         else:
@@ -4202,7 +4204,7 @@ class PerfDatabase:
             return PerformanceResult(get_sol(num_tokens, num_experts, topk, hidden_size)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             sol_result = get_sol(num_tokens, num_experts, topk, hidden_size)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return tuple(PerformanceResult(x, energy=0.0) for x in sol_result)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0)
         else:
