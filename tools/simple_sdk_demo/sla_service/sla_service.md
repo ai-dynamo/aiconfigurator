@@ -3,15 +3,29 @@ SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# clone the repo
-git clone the repo
+# Web Service
 
-# install aiconfigurator follow readme including the required dependency
+This example demonstrates how to use the aiconfigurator SDK to build a simple SLA service.
 
-# launch the container
-python3 tools/sla_service/sla_service.py --server_name 0.0.0.0 --server_port 7860
+NOTE: this script is not actively maintained and may contain bugs.
 
-# access the service
+# Install aiconfigurator with extra dependencies
+
+Install aiconfigurator with some extra packages that are needed for the service:
+
+```bash
+pip install aiconfigurator[service]
+```
+
+# Launch the Web Service
+
+```bash
+python3 tools/simple_sdk_demo/sla_service/sla_service.py --server_name 0.0.0.0 --server_port 7860
+```
+
+# Access the Service
+
+Estimate performance:
 ```
 curl -X 'POST' \
   'http://127.0.0.1:7860/sla' \
@@ -29,7 +43,8 @@ curl -X 'POST' \
     "kvcache_quant": "fp8"
   }'
 ```
-get supported models
+
+Get a list of the supported models:
 ```
 curl -X 'GET' \
   'http://127.0.0.1:7860/sla/supported_models' \
