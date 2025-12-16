@@ -6,7 +6,12 @@ import os
 
 import torch
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer
+
+try:
+    from vllm.utils import is_torch_equal_or_newer
+except ImportError:
+    from vllm.torch_utils import is_torch_equal_or_newer
+
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.version import __version__ as vllm_version
 
@@ -21,6 +26,8 @@ from collector.vllm.utils import (
     resolve_obj_by_qualname,
 )
 from helper import benchmark_with_power, get_sm_version, log_perf
+
+compatible_versions = ["0.11.0", "0.12.0"]
 
 
 class MockAttentionLayer:
