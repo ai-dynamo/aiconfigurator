@@ -798,44 +798,6 @@ class ElementWise(Operation):
         return self._weights * self._scale_factor
 
 
-class WideEPMLP(Operation):
-    """
-    WideEP MLP operation.
-    This handles the gate, ffn1, and ffn2 operations in a single class.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        hidden_size: int,
-        intermediate_size: int,
-        quant_mode: common.GEMMQuantMode,
-        **kwargs,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._hidden_size = hidden_size
-        self._intermediate_size = intermediate_size
-        self._quant_mode = quant_mode
-        self._weights = (3 * self._hidden_size * self._intermediate_size) * quant_mode.value.memory
-        self.is_context = kwargs.get("is_context", True)  # Default to context mode
-        self.tp_size = kwargs.get("tp_size", 1)
-
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """Query WideEP MLP latency with power data."""
-        x = kwargs.get("x")  # num_tokens
-        x /= self.tp_size
-        overwrite_quant_mode = kwargs.get("quant_mode")
-        quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
-
-        latency = database.query_wideep_mlp(x, self._hidden_size, self._intermediate_size, quant_mode, self.is_context)
-        # TODO: Add query_wideep_mlp_with_energy to database
-        return PerformanceResult(latency * self._scale_factor, energy=0.0)
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
-
-
 class WideEPGenerationMLA(Operation):
     """
     WideEP Generation MLA operation.
@@ -863,7 +825,7 @@ class WideEPGenerationMLA(Operation):
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
 
-        latency = database.query_wideep_generation_mla(
+        result = database.query_wideep_generation_mla(
             batch_size,
             s,
             self._tp_size,
@@ -871,8 +833,7 @@ class WideEPGenerationMLA(Operation):
             self._fmha_quant_mode,
             self._attn_backend,
         )
-        # TODO: Add query_wideep_generation_mla_with_energy to database
-        return PerformanceResult(latency * self._scale_factor, energy=0.0)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
@@ -906,7 +867,7 @@ class WideEPContextMLA(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix")
 
-        latency = database.query_wideep_context_mla(
+        result = database.query_wideep_context_mla(
             b=batch_size,
             s=isl,
             prefix=prefix,
@@ -915,8 +876,7 @@ class WideEPContextMLA(Operation):
             fmha_quant_mode=self._fmha_quant_mode,
             attention_backend=self._attn_backend,
         )
-        # TODO: Add query_wideep_context_mla_with_energy to database
-        return PerformanceResult(latency * self._scale_factor, energy=0.0)
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
