@@ -39,7 +39,7 @@ from collector.vllm.utils import (
 )
 from helper import benchmark_with_power, get_sm_version, log_perf
 
-compatible_version = ["0.11.0", "0.12.0"]
+compatible_versions = ["0.11.0", "0.12.0"]
 
 
 class MockAttentionLayer:

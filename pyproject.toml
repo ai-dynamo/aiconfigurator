@@ -41,12 +41,9 @@ license-files = ["LICENSE"]
 requires-python = ">=3.9"
 
 dependencies = [
-    "uv",
-    "fastapi>=0.115.12",
     "jinja2>=3.1.0",
     "matplotlib>=3.9.4",
     "numpy~=1.26.4",
-    "orjson>=3.10.16",
     "pandas>=2.2.3",
     "plotext>=5.3.2",
     "plotly>=6.0.1",
@@ -54,7 +51,6 @@ dependencies = [
     "pyyaml>=6.0",
     "scipy>=1.13.1",
     "tqdm>=4.0.0",
-    "uvicorn>=0.34.2",
     "bokeh",
     "nvidia-ml-py",
     "munch>=4.0.0"
@@ -62,6 +58,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "uv",
     "ruff==0.14.1",
     "pre-commit==4.3.0",
     "pytest>=8.3.5",
@@ -75,6 +72,11 @@ dev = [
 ]
 webapp = [
     "gradio==5.47.1"
+]
+service = [
+    "fastapi>=0.115.12",
+    "orjson>=3.10.16",
+    "uvicorn>=0.34.2"
 ]
 
 [project.urls]
