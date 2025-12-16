@@ -118,7 +118,7 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
         load_format=load_format,
         tp_size=1,
         trust_remote_code=True,
-        mem_fraction_static=0.88,
+        mem_fraction_static=0.5,
         disable_radix_cache=True,
     )
 
@@ -137,7 +137,7 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
     model_config = ModelConfig.from_server_args(server_args)
     model_runner = ModelRunner(
         model_config=model_config,
-        mem_fraction_static=0.88,
+        mem_fraction_static=0.5,
         gpu_id=tp_rank,
         tp_rank=tp_rank,
         tp_size=server_args.tp_size,
