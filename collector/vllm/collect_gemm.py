@@ -1,13 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import functools
 import os
 
 import torch
 from common_test_cases import get_gemm_common_test_cases
-from vllm.distributed import init_distributed_environment
-from vllm.distributed.parallel_state import ensure_model_parallel_initialized
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -16,26 +13,12 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
-from helper import benchmark_with_power, get_sm_version, log_perf
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
+from collector.vllm.utils import setup_distributed
 
 compatible_versions = ["0.11.0", "0.12.0"]
 
 FP8_BLOCK_SHAPE = (128, 128)
-
-
-@functools.cache  # only run once per process
-def setup_distributed(device):
-    # Each process needs to use a different port.
-    device_idx = torch.device(device).index
-    port = 8889 + device_idx
-    print(device, device_idx, port)
-
-    os.environ["RANK"] = "0"
-    os.environ["WORLD_SIZE"] = "1"
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(port)
-    init_distributed_environment()
-    ensure_model_parallel_initialized(1, 1)
 
 
 def get_gemm_test_cases():
