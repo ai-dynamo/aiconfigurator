@@ -3,6 +3,80 @@ SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 */
 
+/* ===========================================
+   GRADIO FULL-WIDTH LAYOUT
+   ===========================================
+   Override Gradio's default width constraints.
+   Note: !important is necessary to override Gradio's inline styles.
+*/
+
+.gradio-container {
+    max-width: 100% !important;
+}
+
+.gradio-container > .main {
+    max-width: 100% !important;
+}
+
+.gradio-row,
+.gradio-column {
+    max-width: 100% !important;
+    width: 100% !important;
+}
+
+.tabitem,
+.tab-nav + div,
+div[data-testid="tabitem"] {
+    width: 100% !important;
+    max-width: 100% !important;
+}
+
+/* ===========================================
+   DATATABLES WRAPPER STYLES
+   ===========================================
+   Ensure DataTables use full container width.
+*/
+
+#cost_table_wrapper,
+#prefill_table_wrapper,
+#decode_table_wrapper {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    overflow-x: visible !important;
+}
+
+.dataTables_wrapper {
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow-x: visible !important;
+}
+
+table.dataTable {
+    width: 100% !important;
+    max-width: 100% !important;
+    table-layout: auto !important;
+}
+
+#cost_table_wrapper table.dataTable th,
+#cost_table_wrapper table.dataTable td {
+    padding: 8px 10px !important;
+}
+
+.dataTables_wrapper .dataTables_length,
+.dataTables_wrapper .dataTables_filter {
+    margin-bottom: 12px !important;
+}
+
+.dataTables_wrapper .dataTables_filter input {
+    padding: 6px 12px !important;
+    margin-bottom: 8px !important;
+}
+
+/* ===========================================
+   SCROLLBAR & VISIBILITY
+   =========================================== */
+
 /* Hide scrollbars globally */
 * {
     scrollbar-width: none; /* Firefox */
