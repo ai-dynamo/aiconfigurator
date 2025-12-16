@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import torch
 from common_test_cases import get_gemm_common_test_cases
 from vllm.model_executor.layers.linear import RowParallelLinear

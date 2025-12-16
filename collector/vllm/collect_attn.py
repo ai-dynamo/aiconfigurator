@@ -15,6 +15,7 @@ except ImportError:
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.version import __version__ as vllm_version
 
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import (
     BatchSpec,
     MockAttentionLayer,
@@ -26,7 +27,6 @@ from collector.vllm.utils import (
     get_attention_backend,
     resolve_obj_by_qualname,
 )
-from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
 compatible_versions = ["0.11.0", "0.12.0"]
 
