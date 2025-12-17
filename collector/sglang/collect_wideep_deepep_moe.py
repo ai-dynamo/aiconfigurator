@@ -10,14 +10,11 @@ import torch
 import torch.distributed as dist
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.entrypoints.engine import _set_envs_and_config
+from sglang.srt.layers.moe import initialize_moe_config
 from sglang.srt.layers.moe.token_dispatcher.deepep import (
     DeepEPLLDispatchOutput,
     DeepEPNormalDispatchOutput,
 )
-
-# Aliases for backwards compatibility with collector code
-DeepEPLLOutput = DeepEPLLDispatchOutput
-DeepEPNormalOutput = DeepEPNormalDispatchOutput
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import (
@@ -273,13 +270,14 @@ def benchmark_moe_layer_prefill(
                     device=hidden_states_per_token_iter.device,
                     dtype=torch.float32,
                 )
-                dispatch_output = DeepEPNormalOutput(
-                    hidden_states=(hidden_states_fp8_tensor_iter, scale_tensor_iter),
-                    topk_idx=topk_idx_sample.clone(),
+                dispatch_output = DeepEPNormalDispatchOutput(
+                    hidden_states=hidden_states_fp8_tensor_iter,
+                    hidden_states_scale=scale_tensor_iter,
+                    topk_ids=topk_idx_sample.clone(),
                     topk_weights=topk_weights_sample.clone(),
                     num_recv_tokens_per_expert=num_recv_sample,
                 )
-                _ = moe_layer.experts.moe_impl(dispatch_output)
+                _ = moe_layer.experts.run_moe_core(dispatch_output)
 
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
@@ -301,9 +299,10 @@ def benchmark_moe_layer_prefill(
                     device=hidden_states_per_token_iter.device,
                     dtype=torch.float32,
                 )
-                dispatch_output = DeepEPNormalOutput(
-                    hidden_states=(hidden_states_fp8_tensor_iter, scale_tensor_iter),
-                    topk_idx=topk_idx_sample.clone(),
+                dispatch_output = DeepEPNormalDispatchOutput(
+                    hidden_states=hidden_states_fp8_tensor_iter,
+                    hidden_states_scale=scale_tensor_iter,
+                    topk_ids=topk_idx_sample.clone(),
                     topk_weights=topk_weights_sample.clone(),
                     num_recv_tokens_per_expert=num_recv_sample,
                 )
@@ -312,7 +311,7 @@ def benchmark_moe_layer_prefill(
                 end_event = torch.cuda.Event(enable_timing=True)
                 start_event.record()
 
-                _ = moe_layer.experts.moe_impl(dispatch_output)
+                _ = moe_layer.experts.run_moe_core(dispatch_output)
 
                 torch.get_device_module(device).synchronize()
                 end_event.record()
@@ -397,7 +396,7 @@ def benchmark_moe_layer_decode(
 
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
-    top_k = moe_layer.topk.top_k
+    top_k = moe_layer.topk.topk_config.top_k
     num_local_experts = int(num_experts // ep_size)
 
     for case in decode_test_cases:
@@ -487,12 +486,10 @@ def benchmark_moe_layer_decode(
                 hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
                 scale_tensor_copy = scale_tensor.clone()
 
-                output = DeepEPLLOutput(
-                    hidden_states_fp8=(
-                        hidden_states_fp8_tensor_copy,
-                        scale_tensor_copy,
-                    ),
-                    topk_idx=topk_idx_empty,
+                output = DeepEPLLDispatchOutput(
+                    hidden_states=hidden_states_fp8_tensor_copy,
+                    hidden_states_scale=scale_tensor_copy,
+                    topk_ids=topk_idx_empty,
                     topk_weights=topk_weights_empty,
                     masked_m=masked_m,
                     expected_m=int(torch.ceil(masked_m.float().mean()).item()),
@@ -500,31 +497,67 @@ def benchmark_moe_layer_decode(
                 dispatch_output_list.append(output)
 
             for dispatch_output in dispatch_output_list:
-                _ = moe_layer.experts.moe_impl(dispatch_output)
+                _ = moe_layer.experts.run_moe_core(dispatch_output)
 
         torch.get_device_module(device).synchronize()
         torch.cuda.empty_cache()
 
-        dispatch_output_list = []
-        for masked_m in masked_m_list:
-            hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
-            scale_tensor_copy = scale_tensor.clone()
-
-            output = DeepEPLLOutput(
-                hidden_states_fp8=(hidden_states_fp8_tensor_copy, scale_tensor_copy),
-                topk_idx=topk_idx_empty,
-                topk_weights=topk_weights_empty,
-                masked_m=masked_m,
-                expected_m=int(torch.ceil(masked_m.float().mean()).item()),
-            )
-            dispatch_output_list.append(output)
-
         # Use benchmark_with_power for timing
-        from collector.helper import benchmark_with_power
+        from helper import benchmark_with_power
+
+        # Pre-compute expected_m values outside of kernel_func to avoid .item() during CUDA graph capture
+        expected_m_list = [int(torch.ceil(masked_m_item.float().mean()).item()) for masked_m_item in masked_m_list]
+
+        # Pre-clone masked_m tensors (they won't be disposed by run_moe_core)
+        masked_m_clones = [m.clone() for m in masked_m_list]
+
+        # Pre-create enough tensor copies to avoid clone() inside kernel_func
+        # run_moe_core disposes hidden_states and hidden_states_scale via dispose_tensor()
+        # Estimate: kernel_func called ~4 times (warmup 3 + capture 1) in graph mode
+        # Each call iterates len(masked_m_list) times (max 5 for power_law)
+        # Total: 4 * 5 = 20 tensor sets needed, use 50 for safety
+        num_masked_m = len(masked_m_list)
+        num_kernel_calls = 50  # Conservative estimate for kernel_func invocations
+        num_tensor_sets = num_kernel_calls * num_masked_m
+
+        hidden_states_copies = []
+        scale_copies = []
+        for _ in range(num_tensor_sets):
+            hidden_states_copies.append(
+                torch.randn(
+                    num_local_experts,
+                    num_max_dispatch_tokens_per_rank * num_rank,
+                    hidden_size,
+                    dtype=torch.bfloat16,
+                    device=device,
+                ).to(torch.float8_e4m3fn)
+            )
+            scale_copies.append(
+                torch.ones(
+                    num_local_experts,
+                    num_max_dispatch_tokens_per_rank * num_rank,
+                    scale_hidden_size,
+                    device=device,
+                    dtype=torch.float32,
+                )
+            )
+
+        # Use a mutable container to track tensor index across all run_moe_core calls
+        tensor_idx = [0]
 
         def kernel_func():
-            for dispatch_output in dispatch_output_list:  # noqa: F821
-                _ = moe_layer.experts.moe_impl(dispatch_output)
+            for masked_m_clone, expected_m_val in zip(masked_m_clones, expected_m_list):
+                idx = tensor_idx[0] % num_tensor_sets
+                tensor_idx[0] += 1
+                dispatch_output = DeepEPLLDispatchOutput(
+                    hidden_states=hidden_states_copies[idx],
+                    hidden_states_scale=scale_copies[idx],
+                    topk_ids=torch.empty(0, device=device, dtype=torch.int32),
+                    topk_weights=torch.empty(0, device=device, dtype=torch.float32),
+                    masked_m=masked_m_clone,
+                    expected_m=expected_m_val,
+                )
+                _ = moe_layer.experts.run_moe_core(dispatch_output)
 
         with benchmark_with_power(
             device=device,
@@ -598,6 +631,11 @@ def run_moe(
         set_gpu_proc_affinity(server_args.tp_size, server_args.nnodes, tp_rank)
 
     configure_logger(server_args, prefix=f" TP{tp_rank}")
+
+    # Initialize MoE config in subprocess (required for DeepEP + DeepGEMM backend)
+    _set_envs_and_config(server_args)
+    initialize_moe_config(server_args)
+
     rank_print = print if tp_rank == 0 else lambda *args, **kwargs: None
 
     rank_print(f"\n{'=' * 60}")
@@ -626,6 +664,8 @@ def run_moe(
         prefill_test_cases = get_moe_prefill_test_cases(num_rank)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 
+        # Use deepep_mode="normal" for prefill
+        server_args.deepep_mode = "normal"
         benchmark_moe_layer_prefill(
             model_runner,
             server_args,
@@ -646,6 +686,8 @@ def run_moe(
 
         decode_test_cases = get_moe_decode_test_cases()
         rank_print(f"Testing {len(decode_test_cases)} decode configurations...")
+        # Use deepep_mode="low_latency" for decode
+        server_args.deepep_mode = "low_latency"
         benchmark_moe_layer_decode(
             model_runner,
             server_args,
@@ -700,8 +742,9 @@ if __name__ == "__main__":
         tp_size=2,
         trust_remote_code=True,
         mem_fraction_static=0.3,
-        enable_deepep_moe=True,
-        enable_ep_moe=True,
+        moe_a2a_backend="deepep",  # replaced enable_deepep_moe=True
+        moe_runner_backend="deep_gemm",  # use DeepGEMM for MoE
+        deepep_mode="auto",  # Will be set dynamically: "normal" for prefill, "low_latency" for decode
         ep_size=2,
         node_rank=0,
         host="localhost",
@@ -716,6 +759,7 @@ if __name__ == "__main__":
     )
 
     _set_envs_and_config(server_args)
+    # initialize_moe_config(server_args)  # Initialize MoE config (sets moe_a2a_backend, moe_runner_backend, etc.)
     port_args = PortArgs.init_new(server_args)
 
     for num_experts in num_experts_list:
