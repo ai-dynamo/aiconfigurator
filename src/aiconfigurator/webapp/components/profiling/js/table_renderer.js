@@ -49,6 +49,9 @@ function createTable(wrapperId, columns, data, plotType, settings, referencePoin
         },
         createdRow: function(row, data, dataIndex) {
             // Add reference point styling
+            if (refPoints.minLatencyUnderSLA && dataIndex === refPoints.minLatencyUnderSLA.tableIdx) {
+                $(row).addClass("ref-point-min-latency")
+            }
             if (refPoints.maxUnderSLA && dataIndex === refPoints.maxUnderSLA.tableIdx) {
                 $(row).addClass("ref-point-max-under-sla")
             }

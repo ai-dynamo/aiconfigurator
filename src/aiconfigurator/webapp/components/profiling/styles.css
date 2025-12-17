@@ -14,7 +14,7 @@ SPDX-License-Identifier: Apache-2.0
     max-width: 100% !important;
 }
 
-.gradio-container > .main {
+.gradio-container>.main {
     max-width: 100% !important;
 }
 
@@ -25,7 +25,7 @@ SPDX-License-Identifier: Apache-2.0
 }
 
 .tabitem,
-.tab-nav + div,
+.tab-nav+div,
 div[data-testid="tabitem"] {
     width: 100% !important;
     max-width: 100% !important;
@@ -79,12 +79,15 @@ table.dataTable {
 
 /* Hide scrollbars globally */
 * {
-    scrollbar-width: none; /* Firefox */
-    -ms-overflow-style: none; /* IE and Edge */
+    scrollbar-width: none;
+    /* Firefox */
+    -ms-overflow-style: none;
+    /* IE and Edge */
 }
 
 *::-webkit-scrollbar {
-    display: none; /* Chrome, Safari, Opera */
+    display: none;
+    /* Chrome, Safari, Opera */
 }
 
 /* Hide selection input and button (keep in DOM for JS access) */
@@ -103,11 +106,23 @@ table.dataTable {
 }
 
 @keyframes flash {
-    0%, 100% { background-color: transparent; }
-    50% { background-color: rgba(76, 175, 80, 0.5); }
+
+    0%,
+    100% {
+        background-color: transparent;
+    }
+
+    50% {
+        background-color: rgba(76, 175, 80, 0.5);
+    }
 }
 
 /* Reference point row highlighting */
+.ref-point-min-latency {
+    border: 3px dotted rgba(34, 197, 94, 0.9) !important;
+    background-color: rgba(34, 197, 94, 0.08) !important;
+}
+
 .ref-point-max-under-sla {
     border: 3px dotted rgba(255, 0, 0, 0.8) !important;
     background-color: rgba(255, 0, 0, 0.05) !important;
@@ -118,11 +133,20 @@ table.dataTable {
     background-color: rgba(255, 215, 0, 0.05) !important;
 }
 
-/* When both reference points are the same row */
-tr.ref-point-max-under-sla.ref-point-max-overall {
+/* Priority: max-under-sla (red) > max-overall (yellow) > min-latency (green) */
+tr.ref-point-max-under-sla.ref-point-max-overall,
+tr.ref-point-max-under-sla.ref-point-min-latency,
+tr.ref-point-max-under-sla.ref-point-max-overall.ref-point-min-latency {
     border: 3px dotted rgba(255, 0, 0, 0.8) !important;
     background-color: rgba(255, 0, 0, 0.05) !important;
 }
+
+/* When max-overall and min-latency are the same row (but not max-under-sla) */
+tr.ref-point-max-overall.ref-point-min-latency:not(.ref-point-max-under-sla) {
+    border: 3px dotted rgba(255, 215, 0, 0.8) !important;
+    background-color: rgba(255, 215, 0, 0.05) !important;
+}
+
 .chart-container {
     position: relative;
     height: 500px;
@@ -228,7 +252,8 @@ table td button {
 
 .config-action-btn {
     cursor: pointer;
-    margin-bottom: 0 !important;  /* override gradio styles */
+    margin-bottom: 0 !important;
+    /* override gradio styles */
     border: none;
     background: none;
     color: var(--neutral-200);
@@ -249,13 +274,15 @@ table td button {
 }
 
 /* Required/Optional field label styles */
-div.required span:after, fieldset.required span:after {
+div.required span:after,
+fieldset.required span:after {
     content: " *";
     color: var(--primary-500);
     font-weight: bold;
 }
 
-div.optional span:after, fieldset.optional span:after {
+div.optional span:after,
+fieldset.optional span:after {
     content: " (optional)";
     color: var(--body-text-color-subdued);
 }
