@@ -676,6 +676,17 @@ def balanced_logits(num_tokens, num_experts, topk):
 
 
 def sample_power_law(size, alpha, xmin, xmax):
+    """Sample from a power law distribution using inverse CDF method.
+
+    Args:
+        size: Number of samples
+        alpha: Power law exponent
+        xmin: Minimum value
+        xmax: Maximum value
+
+    Returns:
+        torch.Tensor of sampled values
+    """
     import torch
 
     u = torch.rand(size)
@@ -683,28 +694,41 @@ def sample_power_law(size, alpha, xmin, xmax):
     return inv_cdf
 
 
-def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
-    import torch
-    import torch.nn.functional as F
+def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
+    """Core function to generate power law token distribution across experts.
 
+    This is the shared logic used by power_law_logits_v3, power_law_deepep_prefill, and power_law_deepep_decode.
+
+    Args:
+        num_tokens: Number of tokens
+        num_experts: Total number of experts
+        topk: Number of experts per token
+        ep: Expert parallelism size
+        alpha: Power law exponent
+
+    Returns:
+        Tuple of (num_tokens_per_expert, h_selected_experts):
+            - num_tokens_per_expert: Token count per expert (with EP rank 0 having max load)
+            - h_selected_experts: Expert assignments matrix [num_tokens, topk]
+    """
+    import torch
+
+    # Sample initial distribution
     if num_tokens * topk > num_experts:
         num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
     else:
         num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
 
     target_sum = num_tokens * topk
-
     original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
-
     target_distribution = original_distribution * target_sum
-
     num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
 
+    # Adjust to match exact target sum
     current_sum = num_tokens_per_expert.sum().item()
     delta = target_sum - current_sum
     if delta != 0:
         sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-
         if delta > 0:
             for i in range(delta):
                 expert_idx = sorted_indices[i % len(sorted_indices)]
@@ -717,10 +741,12 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
                 else:
                     num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -= 1
 
+    # Validate distribution
     if len(num_tokens_per_expert) > 1:
         sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
         assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
 
+    # Find EP rank with max load and swap to rank 0
     with torch.no_grad():
         conv1d = torch.nn.Conv1d(
             in_channels=1,
@@ -745,78 +771,110 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
         )
         num_tokens_per_expert = num_tokens_per_expert_reshaped.view(-1)
 
+    # Debug output
     aic_debug = int(os.getenv("AIC_DEBUG", "0"))
-    if aic_debug == 1:
+    if aic_debug >= 1:
         print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
 
+    # Generate expert assignments
     _, num_tokens_per_expert_sorted_index = torch.sort(num_tokens_per_expert, descending=True)
     expert_assignments = []
-    num_tokens_per_expert_sorted_index_lists = num_tokens_per_expert_sorted_index.tolist()
-    for expert_id in num_tokens_per_expert_sorted_index_lists:
+    for expert_id in num_tokens_per_expert_sorted_index.tolist():
         expert_assignments.extend([expert_id] * num_tokens_per_expert[expert_id])
 
-    expert_assignments = torch.tensor(expert_assignments, dtype=torch.long)
+    expert_assignments = torch.tensor(expert_assignments, dtype=torch.int64)
     h_selected_experts = expert_assignments.reshape(topk, num_tokens).T
 
+    return num_tokens_per_expert, h_selected_experts
+
+
+def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha):
+    """Generate power law distributed router logits for MoE.
+
+    Used by: sglang/collect_moe.py, vllm/collect_moe.py, trtllm/collect_moe.py
+
+    Args:
+        num_tokens: Number of tokens
+        num_experts: Total number of experts
+        topk: Number of experts per token
+        ep: Expert parallelism size
+        alpha: Power law exponent
+
+    Returns:
+        router_logits: [num_tokens, num_experts] tensor of softmax probabilities
+    """
+    import torch.nn.functional as F
+
+    num_tokens_per_expert, h_selected_experts = _generate_power_law_distribution(
+        num_tokens, num_experts, topk, ep, alpha
+    )
+
+    # Convert to router logits via one-hot encoding and softmax
     expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
     router_logits = F.softmax(expert_map.bfloat16(), dim=1)
     return router_logits
 
 
-# NOTE: power_law_logits_v4 was copied from power_law_logits_v3 and
-# modified to restrict max tokens per expert to be less than num_tokens
-def power_law_logits_v4(num_tokens, num_experts, topk, ep, alpha):
+def power_law_deepep_prefill(num_tokens, num_experts, topk, ep, alpha):
+    """Generate power law distribution for DeepEP MoE prefill phase.
+
+    Used by: sglang/collect_wideep_deepep_moe.py
+
+    Args:
+        num_tokens: Number of tokens
+        num_experts: Total number of experts
+        topk: Number of experts per token
+        ep: Expert parallelism size
+        alpha: Power law exponent
+
+    Returns:
+        Tuple of (topk_idx, topk_weights, num_recv_tokens_per_expert):
+            - topk_idx: [num_tokens, topk] expert indices (-1 for masked)
+            - topk_weights: [num_tokens, topk] expert weights (0.0 for masked)
+            - num_recv_tokens_per_expert: Padded token count per local expert
+    """
     import torch
 
-    """Generate power law distribution for token assignment to experts"""
-    while True:
-        if num_tokens * topk > num_experts:
-            num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
-        else:
-            num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
-        target_sum = num_tokens * topk
+    num_tokens_per_expert, h_selected_experts = _generate_power_law_distribution(
+        num_tokens, num_experts, topk, ep, alpha
+    )
 
-        original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
+    # Convert to DeepEP format: topk_idx, topk_weights, num_recv
+    num_local_experts = num_experts // ep
+    topk_idx = h_selected_experts.clone().contiguous()
+    topk_weights = torch.full_like(topk_idx, 0.1, dtype=torch.float32)
 
-        target_distribution = original_distribution * target_sum
+    # Mask experts not in rank 0
+    mask = topk_idx >= num_local_experts
+    topk_idx[mask] = -1
+    topk_weights[mask] = 0.0
 
-        num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
+    # num_recv for rank 0 experts (padded to 128)
+    num_recv_tokens_per_expert = num_tokens_per_expert[:num_local_experts]
+    num_recv_tokens_per_expert = (num_recv_tokens_per_expert + 127) // 128 * 128
 
-        current_sum = num_tokens_per_expert.sum().item()
-        delta = target_sum - current_sum
-        if delta != 0:
-            sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
+    return topk_idx, topk_weights, num_recv_tokens_per_expert
 
-            if delta > 0:
-                for i in range(delta):
-                    expert_idx = sorted_indices[i % len(sorted_indices)]
-                    num_tokens_per_expert[expert_idx] += 1
-            else:
-                for i in range(-delta):
-                    expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
-                    if num_tokens_per_expert[expert_idx] > 0:
-                        num_tokens_per_expert[expert_idx] -= 1
-                    else:
-                        num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -= 1
 
-        if len(num_tokens_per_expert) > 1:
-            sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
-            assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
+def power_law_deepep_decode(num_tokens, num_experts, topk, ep, alpha):
+    """Generate power law distribution for DeepEP MoE decode phase.
 
-        with torch.no_grad():
-            conv1d = torch.nn.Conv1d(
-                in_channels=1,
-                out_channels=1,
-                kernel_size=num_experts // ep,
-                stride=num_experts // ep,
-                padding=0,
-                bias=False,
-            )
-            conv1d_weights = torch.tensor([1 for _ in range(num_experts // ep)])
-            conv1d.weight.copy_(conv1d_weights)
+    Creates a power law token distribution across all experts, then returns
+    the distribution for the EP rank that has the highest total token count.
 
-        res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
-        max_ep_idx = torch.argmax(res).item()
-        num_tokens_per_expert_rank0 = num_tokens_per_expert.view(ep, num_experts // ep)[max_ep_idx].view(-1)
-        if max(num_tokens_per_expert_rank0) <= num_tokens:
-            return num_tokens_per_expert_rank0
+    Used by: sglang/collect_wideep_deepep_moe.py
+
+    Args:
+        num_tokens: Number of tokens
+        num_experts: Total number of experts
+        topk: Number of experts per token
+        ep: Expert parallelism size
+        alpha: Power law exponent
+
+    Returns:
+        Token count for each local expert on the max-load EP rank (rank 0 after swap)
+    """
+    # Reuse core distribution generation (max-load rank is swapped to rank 0)
+    num_tokens_per_expert, _ = _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha)
+    experts_per_rank = num_experts // ep
+    return num_tokens_per_expert.view(ep, experts_per_rank)[0]

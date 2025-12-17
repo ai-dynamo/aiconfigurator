@@ -19,6 +19,7 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.layers.quantization import Fp8Config
 from sglang.srt.models.deepseek_v2 import DeepseekV2MLP
+from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 
@@ -118,7 +119,7 @@ def cleanup_distributed():
         print(f"Warning: Could not clean up torch.distributed: {e}")
 
 
-def initialize_distributed():
+def initialize_distributed(model_path):
     """Initialize distributed environment for MLP benchmarking"""
     dist_init_method = "tcp://127.0.0.1:29500"
     init_distributed_environment(
@@ -137,6 +138,19 @@ def initialize_distributed():
         duplicate_tp_group=False,
         backend="nccl",
     )
+
+    # Set global server args (required by DeepseekV2MLP)
+    server_args = ServerArgs(
+        model_path=model_path,
+        dtype="auto",
+        device="cuda",
+        load_format="dummy",
+        tp_size=1,
+        trust_remote_code=True,
+        mem_fraction_static=0.5,
+        disable_radix_cache=True,
+    )
+    set_global_server_args_for_scheduler(server_args)
 
 
 def run_mlp_torch(
@@ -178,7 +192,7 @@ def run_mlp_torch(
         input_tensor = torch.randn((num_token, hidden_size), dtype=torch.bfloat16, device=device)
 
         # Import at function level to avoid scoping issues with ruff
-        from collector.helper import benchmark_with_power
+        from helper import benchmark_with_power
 
         if is_context:
             # Context phase: use benchmark_with_power
@@ -283,7 +297,7 @@ if __name__ == "__main__":
     cleanup_distributed()
 
     torch.cuda.empty_cache()
-    initialize_distributed()
+    initialize_distributed(model_path)
 
     for test_case in prefill_test_cases:
         quant_type, num_token, hs, inter_s = test_case

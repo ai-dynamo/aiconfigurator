@@ -16,6 +16,8 @@ from helper import benchmark_with_power, get_sm_version, log_perf
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
+compatible_version = ["0.5.5.post3", "0.5.6.post2"]
+
 
 class Timing(NamedTuple):
     mean: float
@@ -27,6 +29,10 @@ class MockModelConfig:
         self.is_encoder_decoder = False
         self.context_len = 32768
         self.attention_arch = AttentionArch.MHA
+        # Align with newer sglang ModelConfig while remaining harmless on older versions
+        self.is_hybrid_swa = None
+        self.swa_attention_layer_ids = None
+        self.full_attention_layer_ids = None
 
 
 class MockServerArgs:
@@ -54,6 +60,8 @@ class MockModelRunner:
         self.kv_cache_dtype = kv_cache_dtype  # Default
         self.page_size = page_size
         self.is_hybrid = False
+        # Provide compatibility across sglang versions that expect this flag
+        self.is_hybrid_swa = self.model_config.is_hybrid_swa
         self.server_args.kv_cache_dtype = kv_cache_dtype
         self.server_args.page_size = page_size
 

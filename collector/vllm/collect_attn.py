@@ -55,6 +55,8 @@ class MockAttentionLayer:
         self._v_scale_float = 1.0
 
 
+compatible_versions = ["0.11.0", "0.12.0"]
+
 # https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends
 # support MHA GQA MQA fp16 tensor and float16/fp8 kv cache
 

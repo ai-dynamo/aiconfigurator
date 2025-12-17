@@ -51,8 +51,8 @@ class TestMoE:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_moe_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns PerformanceResult (acts as float)."""
-        result = comprehensive_perf_db.query_moe(
+        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
+        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_moe(
             8,
             1024,
             4096,
@@ -65,11 +65,21 @@ class TestMoE:
             database_mode=common.DatabaseMode.SOL_FULL,
         )
 
-        # Should return PerformanceResult that acts as float
-        assert isinstance(result, float)  # PerformanceResult is a float subclass
-        assert float(result) > 0  # Latency should be positive
-        assert hasattr(result, "energy")  # Should have energy attribute
-        assert result.energy == 0.0  # SOL mode has no energy data
+        sol_only = comprehensive_perf_db.query_moe(
+            8,
+            1024,
+            4096,
+            2,
+            8,
+            1,
+            1,
+            common.MoEQuantMode.float16,
+            "uniform",
+            database_mode=common.DatabaseMode.SOL,
+        )
+        assert sol_time > 0
+        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
+        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
     def test_query_moe_non_database_mode(self, comprehensive_perf_db):
         """Test SILICON mode with data lookup."""
@@ -204,16 +214,17 @@ class TestMLABMM:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_mla_bmm_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns PerformanceResult (acts as float)."""
-        result = comprehensive_perf_db.query_mla_bmm(
+        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
+        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_mla_bmm(
             8, 4, common.GEMMQuantMode.float16, True, database_mode=common.DatabaseMode.SOL_FULL
         )
 
-        # Should return PerformanceResult that acts as float
-        assert isinstance(result, float)  # PerformanceResult is a float subclass
-        assert float(result) > 0  # Latency should be positive
-        assert hasattr(result, "energy")  # Should have energy attribute
-        assert result.energy == 0.0  # SOL mode has no energy data
+        sol_only = comprehensive_perf_db.query_mla_bmm(
+            8, 4, common.GEMMQuantMode.float16, True, database_mode=common.DatabaseMode.SOL
+        )
+        assert sol_time > 0
+        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
+        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
     def test_query_mla_bmm_non_database_mode_pre(self, comprehensive_perf_db):
         """Test SILICON mode for pre operation."""
@@ -276,16 +287,17 @@ class TestMemoryOperations:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_mem_op_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns PerformanceResult (acts as float)."""
+        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
         mem_bytes = 500_000
 
-        result = comprehensive_perf_db.query_mem_op(mem_bytes, database_mode=common.DatabaseMode.SOL_FULL)
+        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_mem_op(
+            mem_bytes, database_mode=common.DatabaseMode.SOL_FULL
+        )
 
-        # Should return PerformanceResult that acts as float
-        assert isinstance(result, float)  # PerformanceResult is a float subclass
-        assert float(result) > 0  # Latency should be positive
-        assert hasattr(result, "energy")  # Should have energy attribute
-        assert result.energy == 0.0  # SOL mode has no energy data
+        sol_only = comprehensive_perf_db.query_mem_op(mem_bytes, database_mode=common.DatabaseMode.SOL)
+        assert sol_time > 0
+        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
+        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
     def test_query_mem_op_non_database_mode(self, comprehensive_perf_db):
         """Test SILICON mode with empirical scaling."""
@@ -331,16 +343,17 @@ class TestP2P:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_p2p_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns PerformanceResult (acts as float)."""
+        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
         message_bytes = 500_000
 
-        result = comprehensive_perf_db.query_p2p(message_bytes, database_mode=common.DatabaseMode.SOL_FULL)
+        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_p2p(
+            message_bytes, database_mode=common.DatabaseMode.SOL_FULL
+        )
 
-        # Should return PerformanceResult that acts as float
-        assert isinstance(result, float)  # PerformanceResult is a float subclass
-        assert float(result) > 0  # Latency should be positive
-        assert hasattr(result, "energy")  # Should have energy attribute
-        assert result.energy == 0.0  # SOL mode has no energy data
+        sol_only = comprehensive_perf_db.query_p2p(message_bytes, database_mode=common.DatabaseMode.SOL)
+        assert sol_time > 0
+        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
+        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
     def test_query_p2p_non_database_mode(self, comprehensive_perf_db):
         """Test SILICON mode with P2P latency."""
