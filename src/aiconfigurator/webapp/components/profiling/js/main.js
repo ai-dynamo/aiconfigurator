@@ -65,7 +65,7 @@ function initializeVisualizations(jsonData) {
  * Find reference points for a dataset (prefill/decode plots)
  */
 function findReferencePoints(datasets, targetValue) {
-    if (!targetValue) return { maxUnderSLA: null, maxOverall: null }
+    if (!targetValue) return { maxUnderSLA: null, maxOverall: null, minLatencyUnderSLA: null }
     
     // Flatten all points from all datasets
     const allPoints = []
@@ -90,7 +90,12 @@ function findReferencePoints(datasets, targetValue) {
         !max || point.y > max.y ? point : max
     , null)
     
-    return { maxUnderSLA, maxOverall }
+    // Find latency-optimized: lowest latency (x) among points under SLA
+    const minLatencyUnderSLA = pointsUnderSLA.reduce((min, point) => 
+        !min || point.x < min.x ? point : min
+    , null)
+    
+    return { maxUnderSLA, maxOverall, minLatencyUnderSLA }
 }
 
 /**
@@ -98,7 +103,7 @@ function findReferencePoints(datasets, targetValue) {
  */
 function findCostReferencePoints(datasets, tableData, targetTTFT, targetITL) {
     if (!tableData || tableData.length === 0) {
-        return { maxUnderSLA: null, maxOverall: null }
+        return { maxUnderSLA: null, maxOverall: null, minLatencyUnderSLA: null }
     }
     
     // Flatten all points from all datasets
@@ -144,7 +149,14 @@ function findCostReferencePoints(datasets, tableData, targetTTFT, targetITL) {
         !max || point.decodeThpt > max.decodeThpt ? point : max
     , null)
     
-    return { maxUnderSLA, maxOverall }
+    // Find latency-optimized: lowest combined latency (TTFT + ITL) among points under SLA
+    const minLatencyUnderSLA = pointsUnderSLA.reduce((min, point) => {
+        const latencyScore = point.ttft + point.itl
+        const minScore = min ? min.ttft + min.itl : Infinity
+        return latencyScore < minScore ? point : min
+    }, null)
+    
+    return { maxUnderSLA, maxOverall, minLatencyUnderSLA }
 }
 
 /**
