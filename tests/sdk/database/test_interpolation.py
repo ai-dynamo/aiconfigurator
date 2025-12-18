@@ -46,10 +46,8 @@ class TestInterpolationMethods:
 
     def test_nearest_1d_point_helper_errors(self, comprehensive_perf_db):
         """Test error cases for _nearest_1d_point_helper."""
-        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
-
-        # Empty list raises PerfDataNotAvailableError
-        with pytest.raises(PerfDataNotAvailableError):
+        # Empty list
+        with pytest.raises(AssertionError):
             comprehensive_perf_db._nearest_1d_point_helper(10, [], inner_only=True)
 
         # Single value list
