@@ -2142,13 +2142,8 @@ class PerfDatabase:
         """
         Find the nearest 1d point
         """
-        if values is None or len(values) == 0:
-            raise PerfDataNotAvailableError("No data points available for interpolation (values is None or empty).")
+        assert values is not None and len(values) >= 2, "values is None or len(values) < 2"
         sorted_values = sorted(values)
-
-        # Degenerate grid: only one point available. Treat as constant.
-        if len(sorted_values) == 1:
-            return sorted_values[0], sorted_values[0]
 
         if x < sorted_values[0]:
             if inner_only:
@@ -2341,14 +2336,6 @@ class PerfDatabase:
         # Calculate the weights for the corners
         Q11, Q12, Q21, Q22 = data[x1][y1], data[x1][y2], data[x2][y1], data[x2][y2]  # noqa: N806
 
-        # Handle degenerate rectangles (can happen when a dimension has only one grid point).
-        if x1 == x2 and y1 == y2:
-            return Q11
-        if x1 == x2:
-            return self._interp_1d([y1, y2], [Q11, Q12], y)
-        if y1 == y2:
-            return self._interp_1d([x1, x2], [Q11, Q21], x)
-
         f_x1_y1 = Q11 * (x2 - x) * (y2 - y)
         f_x1_y2 = Q12 * (x2 - x) * (y - y1)
         f_x2_y1 = Q21 * (x - x1) * (y2 - y)
@@ -2406,10 +2393,6 @@ class PerfDatabase:
         """
         x0, x1 = x
         y0, y1 = y
-
-        # Degenerate grid: treat as constant.
-        if x0 == x1:
-            return y0
 
         # Check if values are dicts (new format) or floats (legacy)
         if isinstance(y0, dict) and isinstance(y1, dict):

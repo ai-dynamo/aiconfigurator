@@ -52,10 +52,9 @@ class TestInterpolationMethods:
         with pytest.raises(PerfDataNotAvailableError):
             comprehensive_perf_db._nearest_1d_point_helper(10, [], inner_only=True)
 
-        # Single value list now returns the same point twice (for constant interpolation)
-        left, right = comprehensive_perf_db._nearest_1d_point_helper(10, [5], inner_only=False)
-        assert left == 5
-        assert right == 5
+        # Single value list
+        with pytest.raises(AssertionError):
+            comprehensive_perf_db._nearest_1d_point_helper(10, [5], inner_only=True)
 
         # Value out of range with inner_only=True
         with pytest.raises(ValueError):
