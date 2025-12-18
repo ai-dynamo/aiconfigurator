@@ -93,36 +93,34 @@ python collect_wideep_deepep_moe.py
 
 #### Modify Configuration
 
-**Important**: DeepEP MoE collection requires **at least 2 GPUs** for distributed execution.
+**Single GPU Mode**: The script now supports single GPU execution for collecting all EP configurations.
 
 Edit the configuration at the bottom of the script:
 ```python
 # Configuration variables (modify as needed)
-num_experts=256,             # Number of experts to simulate different EP configurations
+num_experts_list = [128, 64, 32, 16, 8, 4, 2, 1]  # List of expert counts to simulate different EP sizes
 
 # Server arguments
 server_args = ServerArgs(
-    tp_size=2,                   # Tensor parallel size
-    ep_size=2,                   # Expert parallel size
+    tp_size=1,                   # Single GPU mode
+    ep_size=1,                   # Single GPU mode
 )
-
-
 ```
 
 **Simulating Different EP Configurations**:
 
-The `num_experts` parameter in `MoEBenchArgs` is used to simulate different expert parallel (EP) sizes. For example, when using 2 GPUs with `tp_size=2` and `ep_size=2`:
+The `num_experts` parameter is used to simulate different expert parallel (EP) sizes. With `tp_size=1` and `ep_size=1` (single GPU):
 
-- `num_experts=256` → simulates **EP 2** (256 experts / 2 = 128 experts per GPU)
-- `num_experts=128` → simulates **EP 4** (128 experts / 2 = 64 experts per GPU)
-- `num_experts=64` → simulates **EP 8** (64 experts / 2 = 32 experts per GPU)
-- `num_experts=32` → simulates **EP 16** (32 experts / 2 = 16 experts per GPU)
-- `num_experts=16` → simulates **EP 32**
-- `num_experts=8` → simulates **EP 64**
-- `num_experts=4` → simulates **EP 128**
-- `num_experts=2` → simulates **EP 256** (2 experts / 2 = 1 experts per GPU)
+- `num_experts=128` → simulates **EP 2** (256 / 128 = 2)
+- `num_experts=64` → simulates **EP 4** (256 / 64 = 4)
+- `num_experts=32` → simulates **EP 8** (256 / 32 = 8)
+- `num_experts=16` → simulates **EP 16** (256 / 16 = 16)
+- `num_experts=8` → simulates **EP 32** (256 / 8 = 32)
+- `num_experts=4` → simulates **EP 64** (256 / 4 = 64)
+- `num_experts=2` → simulates **EP 128** (256 / 2 = 128)
+- `num_experts=1` → simulates **EP 256** (256 / 1 = 256)
 
-The actual `moe_ep_size` is automatically calculated based on the relationship between `num_experts` and the base EP size (256).
+The simulated EP size is calculated as: `simulated_ep_size = 256 / num_experts * ep_size`
 
 ### Test Parameters
 - Number of experts: Configurable (suggested: 16, 32, 64, 128, 256)
