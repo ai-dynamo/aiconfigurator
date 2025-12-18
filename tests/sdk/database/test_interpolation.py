@@ -46,13 +46,16 @@ class TestInterpolationMethods:
 
     def test_nearest_1d_point_helper_errors(self, comprehensive_perf_db):
         """Test error cases for _nearest_1d_point_helper."""
-        # Empty list
-        with pytest.raises(AssertionError):
+        from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+        # Empty list raises PerfDataNotAvailableError
+        with pytest.raises(PerfDataNotAvailableError):
             comprehensive_perf_db._nearest_1d_point_helper(10, [], inner_only=True)
 
-        # Single value list
-        with pytest.raises(AssertionError):
-            comprehensive_perf_db._nearest_1d_point_helper(10, [5], inner_only=True)
+        # Single value list now returns the same point twice (for constant interpolation)
+        left, right = comprehensive_perf_db._nearest_1d_point_helper(10, [5], inner_only=False)
+        assert left == 5
+        assert right == 5
 
         # Value out of range with inner_only=True
         with pytest.raises(ValueError):
