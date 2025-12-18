@@ -600,7 +600,10 @@ def benchmark_moe_layer_decode(
             # expert size is 256
             base_tokens_per_expert = int(num_token * top_k) * num_rank // 256
             if base_tokens_per_expert == 0:
-                masked_m[: int(num_token * top_k) * num_rank // ep_size] = 1
+                # Each expert that receives tokens gets exactly 1 token
+                # Number of experts with tokens on this card = total_calls / simulated_ep_size
+                # = (num_token * top_k * num_rank) / num_rank = num_token * top_k
+                masked_m[: int(num_token * top_k)] = 1
             else:
                 masked_m[:] = base_tokens_per_expert
             masked_m_list = [masked_m]
@@ -876,21 +879,22 @@ if __name__ == "__main__":
     test_layer = 3
 
     # num_experts list to simulate different EP sizes
-    # num_experts=256 -> EP 2, num_experts=128 -> EP 4, ..., num_experts=2 -> EP 256
-    num_experts_list = [256, 128, 64, 32, 16, 8, 4, 2]
+    # With tp_size=1, ep_size=1:
+    # num_experts=128 -> EP 2, num_experts=64 -> EP 4, ..., num_experts=1 -> EP 256
+    num_experts_list = [128, 64, 32, 16, 8, 4, 2, 1]
 
     server_args = ServerArgs(
         model_path=model_path,
         dtype="auto",
         device="cuda",
         load_format="dummy",
-        tp_size=2,
+        tp_size=1,  # Single GPU mode
         trust_remote_code=True,
         mem_fraction_static=0.3,
         moe_a2a_backend="deepep",  # replaced enable_deepep_moe=True
         moe_runner_backend="deep_gemm",  # use DeepGEMM for MoE
         deepep_mode="auto",  # Will be set dynamically: "normal" for prefill, "low_latency" for decode
-        ep_size=2,
+        ep_size=1,  # Single GPU mode
         node_rank=0,
         host="localhost",
         port=30000,
