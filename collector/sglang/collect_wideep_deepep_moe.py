@@ -151,13 +151,16 @@ def benchmark_moe_layer_prefill(
     tp_rank,
     prefill_test_cases,
     moe_layer,
-    num_experts,
-    ep_size,
-    num_rank,
+    num_local_experts,
+    simulated_ep_size,
     output_path,
 ):
-    """Benchmark MoE layer in prefill phase"""
-    num_local_experts = num_experts // ep_size
+    """Benchmark MoE layer in prefill phase
+
+    Args:
+        num_local_experts: Number of experts on this GPU (= model's n_routed_experts)
+        simulated_ep_size: The EP size being simulated (= 256 / num_local_experts)
+    """
 
     for case in prefill_test_cases:
         # Backward compatible: old format was just an int
@@ -175,7 +178,7 @@ def benchmark_moe_layer_prefill(
 
         # Fake dispatch outputs with random data
         hidden_states_per_token_iter = torch.randn(
-            int(num_token * num_rank),
+            int(num_token * simulated_ep_size),
             model_runner.model.config.hidden_size,
             dtype=torch.bfloat16,
             device=device,
@@ -199,7 +202,7 @@ def benchmark_moe_layer_prefill(
         topk_weights_iter = torch.zeros((num_tokens_iter, topk), device=device, dtype=torch.float32)
 
         if distributed == "uniform":
-            tokens_per_local_expert = int(num_token * topk * num_rank // 256)
+            tokens_per_local_expert = int(num_token * topk * simulated_ep_size // 256)
             rank_print(f"tokens_per_local_expert: {tokens_per_local_expert}")
             if tokens_per_local_expert <= 0:
                 continue
@@ -231,18 +234,18 @@ def benchmark_moe_layer_prefill(
             for i in range(num_tokens_iter):
                 used_mask = topk_idx_iter[i] != -1
                 if used_mask.any():
-                    topk_weights_iter[i, used_mask] = 1.0 / ep_size / (topk // ep_size)
+                    topk_weights_iter[i, used_mask] = 1.0 / topk
 
         elif distributed == "power_law":
-            # Use v3 to generate router logits for local experts, then take per-token top-k
+            # Use power_law_deepep_prefill to generate router logits for local experts
             # Generate multiple samples to avoid outliers from a single sampling
             power_law_samples = []
             for _ in range(5):
                 topk_idx_sample, topk_weights_sample, num_recv_tensor = power_law_deepep_prefill(
                     num_tokens_iter,
-                    num_local_experts * num_rank,
+                    num_local_experts * simulated_ep_size,
                     topk,
-                    num_rank,
+                    simulated_ep_size,
                     power_law_alpha if power_law_alpha is not None else 0.8,
                 )
                 topk_idx_sample = topk_idx_sample.to(device).contiguous()
@@ -330,10 +333,8 @@ def benchmark_moe_layer_prefill(
         if tp_rank == 0:
             try:
                 moe_tp_size = 1
-                moe_ep_size = (
-                    server_args.ep_size if num_experts == 256 else int(server_args.ep_size * 256 // num_experts)
-                )
-                num_tokens_log = num_token * moe_ep_size
+                moe_ep_size = simulated_ep_size
+                num_tokens_log = num_token * simulated_ep_size
                 device_name = torch.cuda.get_device_name(server_args.device)
                 version = pkg_resources.get_distribution("sglang").version
                 perf_filename = os.path.join(output_path, "wideep_context_moe_perf.txt")
@@ -387,17 +388,19 @@ def benchmark_moe_layer_decode(
     tp_rank,
     decode_test_cases,
     moe_layer,
-    num_experts,
-    ep_size,
-    num_rank,
+    num_local_experts,
+    simulated_ep_size,
     output_path=None,
 ):
-    """Benchmark MoE layer in decode phase"""
+    """Benchmark MoE layer in decode phase
 
+    Args:
+        num_local_experts: Number of experts on this GPU (= model's n_routed_experts)
+        simulated_ep_size: The EP size being simulated (= 256 / num_local_experts)
+    """
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
     top_k = moe_layer.topk.topk_config.top_k
-    num_local_experts = int(num_experts // ep_size)
 
     for case in decode_test_cases:
         num_token = case["num_tokens"]
@@ -419,7 +422,7 @@ def benchmark_moe_layer_decode(
 
         hidden_states = torch.randn(
             num_local_experts,
-            num_max_dispatch_tokens_per_rank * num_rank,
+            num_max_dispatch_tokens_per_rank * simulated_ep_size,
             hidden_size,
             dtype=torch.bfloat16,
             device="cuda",
@@ -428,7 +431,7 @@ def benchmark_moe_layer_decode(
         scale_hidden_size = hidden_size // 128
         scale_tensor = torch.ones(
             num_local_experts,
-            num_max_dispatch_tokens_per_rank * num_rank,
+            num_max_dispatch_tokens_per_rank * simulated_ep_size,
             scale_hidden_size,
             device=hidden_states.device,
             dtype=torch.float32,
@@ -441,10 +444,10 @@ def benchmark_moe_layer_decode(
         if distributed == "power_law":
             masked_m_list = [
                 power_law_deepep_decode(
-                    num_token * num_rank,
-                    num_local_experts * num_rank,
+                    num_token * simulated_ep_size,
+                    num_local_experts * simulated_ep_size,
                     top_k,
-                    num_rank,
+                    simulated_ep_size,
                     power_law_alpha,
                 )
                 .to(masked_m.dtype)
@@ -452,8 +455,8 @@ def benchmark_moe_layer_decode(
                 for _ in range(5)
             ]
         elif distributed == "uniform":
-            # expert size is 256
-            base_tokens_per_expert = int(num_token * top_k) * num_rank // 256
+            # Total experts is 256, simulated_ep_size = 256 / num_local_experts
+            base_tokens_per_expert = int(num_token * top_k) * simulated_ep_size // 256
             if base_tokens_per_expert == 0:
                 # Each expert that receives tokens gets exactly 1 token
                 # Number of experts with tokens on this card = total_calls / simulated_ep_size
@@ -470,7 +473,7 @@ def benchmark_moe_layer_decode(
         )
         scale_tensor = torch.ones(
             num_local_experts,
-            num_max_dispatch_tokens_per_rank * num_rank,
+            num_max_dispatch_tokens_per_rank * simulated_ep_size,
             scale_hidden_size,
             device=hidden_states.device,
             dtype=torch.float32,
@@ -529,7 +532,7 @@ def benchmark_moe_layer_decode(
             hidden_states_copies.append(
                 torch.randn(
                     num_local_experts,
-                    num_max_dispatch_tokens_per_rank * num_rank,
+                    num_max_dispatch_tokens_per_rank * simulated_ep_size,
                     hidden_size,
                     dtype=torch.bfloat16,
                     device=device,
@@ -538,7 +541,7 @@ def benchmark_moe_layer_decode(
             scale_copies.append(
                 torch.ones(
                     num_local_experts,
-                    num_max_dispatch_tokens_per_rank * num_rank,
+                    num_max_dispatch_tokens_per_rank * simulated_ep_size,
                     scale_hidden_size,
                     device=device,
                     dtype=torch.float32,
@@ -580,10 +583,8 @@ def benchmark_moe_layer_decode(
         if tp_rank == 0:
             try:
                 moe_tp_size = 1
-                moe_ep_size = (
-                    server_args.ep_size if num_experts == 256 else int(server_args.ep_size * 256 // num_experts)
-                )
-                num_tokens_log = num_token * moe_ep_size
+                moe_ep_size = simulated_ep_size
+                num_tokens_log = num_token * simulated_ep_size
                 device_name = torch.cuda.get_device_name(server_args.device)
                 version = pkg_resources.get_distribution("sglang").version
                 distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
@@ -662,9 +663,12 @@ def run_moe(
 
         server_args.json_model_override_args = original_json_override
 
-        ep_size = server_args.ep_size
-        num_rank = ep_size if actual_num_experts == 256 else int(256 // actual_num_experts * ep_size)
-        prefill_test_cases = get_moe_prefill_test_cases(num_rank)
+        # Calculate simulated EP size: 256 total experts / num_local_experts
+        num_local_experts = actual_num_experts  # With ep_size=1, all experts are local
+        simulated_ep_size = 256 // num_local_experts
+        rank_print(f"Simulating EP size: {simulated_ep_size} (num_local_experts={num_local_experts})")
+
+        prefill_test_cases = get_moe_prefill_test_cases(simulated_ep_size)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 
         # Use deepep_mode="normal" for prefill
@@ -681,9 +685,8 @@ def run_moe(
             tp_rank,
             prefill_test_cases,
             moe_layer,
-            actual_num_experts,
-            ep_size,
-            num_rank,
+            num_local_experts,
+            simulated_ep_size,
             output_path,
         )
 
@@ -703,9 +706,8 @@ def run_moe(
             tp_rank,
             decode_test_cases,
             moe_layer,
-            actual_num_experts,
-            ep_size,
-            num_rank,
+            num_local_experts,
+            simulated_ep_size,
             output_path=output_path,
         )
 
