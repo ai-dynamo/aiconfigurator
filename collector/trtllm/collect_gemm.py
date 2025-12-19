@@ -57,9 +57,9 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
     else:
         qc = None
 
-    repeat_n = 5  # to reduce impact of L2 cache hit
+    outside_loop_count = 5  # to reduce impact of L2 cache hit
     op_list = []
-    for i in range(repeat_n):
+    for i in range(outside_loop_count):
         gemm = Linear(
             k,
             n,
@@ -127,7 +127,9 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         pass
 
     log_perf(
-        item_list=[{"gemm_dtype": gemm_type, "m": m, "n": n, "k": k, "latency": results["latency_ms"]}],
+        item_list=[
+            {"gemm_dtype": gemm_type, "m": m, "n": n, "k": k, "latency": results["latency_ms"] / outside_loop_count}
+        ],
         framework="TRTLLM",
         version=tensorrt_llm.__version__,
         device_name=torch.cuda.get_device_name(device),
