@@ -169,7 +169,7 @@ class TaskConfigFactory:
 
     @staticmethod
     def _base_common_layer(ctx: TaskContext) -> dict:
-        nextn = 1 if ctx.model_name in ["DEEPSEEK_V3", "KIMI_K2"] else 0
+        nextn = 1 if ctx.model_family == "DEEPSEEK" else 0
         return {
             "serving_mode": ctx.serving_mode,
             "model_name": ctx.model_name,
@@ -439,6 +439,7 @@ class TaskConfigFactory:
         cls._apply_quant_modes(
             target_cfg=worker_config,
             model_name=ctx.model_name,
+            model_family=ctx.model_family,
             system=worker_config.system_name,
             backend=worker_config.backend_name,
             version=worker_config.backend_version,
@@ -468,6 +469,7 @@ class TaskConfigFactory:
         cls._apply_quant_modes(
             target_cfg=prefill_cfg,
             model_name=ctx.model_name,
+            model_family=ctx.model_family,
             system=prefill_cfg.system_name,
             backend=prefill_cfg.backend_name,
             version=prefill_cfg.backend_version,
@@ -477,6 +479,7 @@ class TaskConfigFactory:
         cls._apply_quant_modes(
             target_cfg=decode_cfg,
             model_name=ctx.model_name,
+            model_family=ctx.model_family,
             system=decode_cfg.system_name,
             backend=decode_cfg.backend_name,
             version=decode_cfg.backend_version,
@@ -487,6 +490,7 @@ class TaskConfigFactory:
     def _apply_quant_modes(
         target_cfg: DefaultMunch,
         model_name: str,
+        model_family: str,
         system: str,
         backend: str,
         version: str,
@@ -508,6 +512,7 @@ class TaskConfigFactory:
         database = get_database(system=system, backend=backend, version=version)
         defaults = TaskConfigFactory._get_quant_mode(
             model_name=model_name,
+            model_family=model_family,
             backend=backend,
             database=database,
             use_specific_quant_mode=preferred_mode,
@@ -521,13 +526,14 @@ class TaskConfigFactory:
     @staticmethod
     def _get_quant_mode(
         model_name: str,
+        model_family: str,
         backend: str,
         database: PerfDatabase,
         use_specific_quant_mode: str | None = None,
     ) -> tuple[str, str, str, str, str]:
         gemm_quant_mode = "fp8_block"
         kvcache_quant_mode = "fp8"
-        fmha_quant_mode = "float16" if model_name in ["DEEPSEEK_V3", "KIMI_K2"] else "fp8"
+        fmha_quant_mode = "float16" if model_family == "DEEPSEEK" else "fp8"
         comm_quant_mode = "half"
 
         sm_version = database.system_spec["gpu"]["sm_version"]
@@ -570,14 +576,10 @@ class TaskConfigFactory:
             kvcache_quant_mode = "float16"
             fmha_quant_mode = "float16"
 
-        if model_name in ["DEEPSEEK_V3", "KIMI_K2"]:
+        if model_family == "DEEPSEEK":
             fmha_quant_mode = "float16"
 
-        if (
-            any(keyword in model_name for keyword in ["MOE_Mixtral", "QWEN2", "LLAMA"])
-            and sm_version < 100
-            and sm_version >= 89
-        ):
+        if model_family in ["MOE", "LLAMA"] and sm_version < 100 and sm_version >= 89:
             gemm_quant_mode = fp8_gemm_quant
             moe_quant_mode = fp8_gemm_quant
 
