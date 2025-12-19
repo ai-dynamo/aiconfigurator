@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from aiconfigurator.sdk.models import get_model_family
 from aiconfigurator.sdk.perf_database import get_database
 from aiconfigurator.sdk.task import TaskConfig, TaskConfigFactory
 
@@ -18,7 +19,11 @@ def test_l40s_sglang_default_gemm_quant_does_not_use_fp8_block(model_name: str) 
     assert db is not None, "Expected l40s/sglang/0.5.5.post3 database to load in test environment"
 
     gemm, moe, kvcache, fmha, comm = TaskConfigFactory._get_quant_mode(
-        model_name=model_name, backend="sglang", database=db, use_specific_quant_mode=None
+        model_name=model_name,
+        model_family=get_model_family(model_name),
+        backend="sglang",
+        database=db,
+        use_specific_quant_mode=None,
     )
     assert gemm != "fp8_block"
     assert gemm in {"fp8", "float16", "int8_wo"}
