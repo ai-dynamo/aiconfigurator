@@ -387,6 +387,7 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
         return
 
     # Define collection modules - each test type as separate entry
+    # Non-wideep collections (support multi-process parallel)
     collections = [
         # GEMM collection
         {
@@ -449,7 +450,10 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
             "get_func": "get_generation_attention_test_cases",
             "run_func": "run_attention_torch",
         },
-        # Wideep collections - trtllm style interface (direct params, not index)
+    ]
+
+    # Wideep collections - require single process due to NCCL/distributed init conflicts
+    wideep_collections = [
         {
             "name": "sglang",
             "type": "wideep_mla_context",
@@ -486,7 +490,15 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
             "run_func": "run_wideep_moe",
         },
     ]
+
+    # Run non-wideep collections with multi-process
     all_errors = collect_ops(num_processes, collections, ops, version)
+
+    # Run wideep collections with single process (required for NCCL/distributed stability)
+    if ops is None or any(c["type"] in ops for c in wideep_collections):
+        logger.info("Running wideep collections with single process (required for stability)")
+        wideep_errors = collect_ops(1, wideep_collections, ops, version)
+        all_errors.extend(wideep_errors)
 
     generate_collection_summary(all_errors, "sglang", version)
 
@@ -754,12 +766,6 @@ def main():
         default=1.0,
         help="Minimum duration for kernel runs when power measurement is enabled (default: 1.0s)",
     )
-    parser.add_argument(
-        "--num-processes",
-        type=int,
-        default=None,
-        help="Number of parallel GPU processes (default: use all GPUs). Use 1 for sequential execution.",
-    )
     args = parser.parse_args()
     ops = args.ops
 
@@ -770,7 +776,7 @@ def main():
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
 
-    num_processes = args.num_processes if args.num_processes else torch.cuda.device_count()
+    num_processes = torch.cuda.device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
 
     # Set environment variables for worker processes
