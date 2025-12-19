@@ -449,6 +449,42 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
             "get_func": "get_generation_attention_test_cases",
             "run_func": "run_attention_torch",
         },
+        # Wideep collections - trtllm style interface (direct params, not index)
+        {
+            "name": "sglang",
+            "type": "wideep_mla_context",
+            "module": "collector.sglang.collect_wideep_attn",
+            "get_func": "get_wideep_mla_context_test_cases",
+            "run_func": "run_wideep_mla_context",
+        },
+        {
+            "name": "sglang",
+            "type": "wideep_mla_generation",
+            "module": "collector.sglang.collect_wideep_attn",
+            "get_func": "get_wideep_mla_generation_test_cases",
+            "run_func": "run_wideep_mla_generation",
+        },
+        {
+            "name": "sglang",
+            "type": "wideep_mlp_context",
+            "module": "collector.sglang.collect_wideep_mlp",
+            "get_func": "get_wideep_mlp_context_test_cases",
+            "run_func": "run_wideep_mlp_context",
+        },
+        {
+            "name": "sglang",
+            "type": "wideep_mlp_generation",
+            "module": "collector.sglang.collect_wideep_mlp",
+            "get_func": "get_wideep_mlp_generation_test_cases",
+            "run_func": "run_wideep_mlp_generation",
+        },
+        {
+            "name": "sglang",
+            "type": "wideep_moe",
+            "module": "collector.sglang.collect_wideep_deepep_moe",
+            "get_func": "get_wideep_moe_test_cases",
+            "run_func": "run_wideep_moe",
+        },
     ]
     all_errors = collect_ops(num_processes, collections, ops, version)
 
@@ -697,6 +733,11 @@ def main():
             "mla_bmm_gen_pre",
             "mla_bmm_gen_post",
             "moe",
+            "wideep_mla_context",
+            "wideep_mla_generation",
+            "wideep_mlp_context",
+            "wideep_mlp_generation",
+            "wideep_moe",
         ],
         help="Run only specified collection items. Leave empty to run all. "
         "Available ops vary by backend - see backend-specific collectors for details.",
@@ -713,6 +754,12 @@ def main():
         default=1.0,
         help="Minimum duration for kernel runs when power measurement is enabled (default: 1.0s)",
     )
+    parser.add_argument(
+        "--num-processes",
+        type=int,
+        default=None,
+        help="Number of parallel GPU processes (default: use all GPUs). Use 1 for sequential execution.",
+    )
     args = parser.parse_args()
     ops = args.ops
 
@@ -723,7 +770,7 @@ def main():
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
 
-    num_processes = torch.cuda.device_count()
+    num_processes = args.num_processes if args.num_processes else torch.cuda.device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
 
     # Set environment variables for worker processes

@@ -17,7 +17,7 @@ from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.sampling.sampling_params import SamplingParams
 
 # SGLang imports
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils import BumpAllocator, suppress_other_loggers
 from torch.profiler import ProfilerActivity, profile, record_function
@@ -67,8 +67,12 @@ def get_attention_prefill_test_cases():
         for head_num in head_nums:
             for batch_size in sorted(context_batch_sizes):
                 for seq_length in sorted(context_seq_lengths):
-                    # Memory limit checks for context
-                    if batch_size * seq_length > 1024 * 2048:
+                    # Memory limit checks for context - reduced to avoid CUDA OOM/illegal access
+                    # batch*seq limit: 128K tokens (was 2M, but large configs cause GPU errors)
+                    if batch_size * seq_length > 128 * 1024:
+                        continue
+                    # Also skip very large individual seq_lengths with larger batches
+                    if seq_length >= 8192 and batch_size > 8:
                         continue
                     test_cases.append([batch_size, seq_length, attention_backend, head_num, True])
 
@@ -92,8 +96,12 @@ def get_attention_decode_test_cases():
         for head_num in head_nums:
             for batch_size in sorted(generation_batch_sizes):
                 for seq_length in sorted(generation_seq_lengths):
-                    # Memory limit checks for generation
-                    if batch_size * seq_length > 1024 * 2048:
+                    # Memory limit checks for generation - reduced to avoid CUDA OOM/illegal access
+                    # batch*seq limit: 256K tokens (generation is less memory intensive)
+                    if batch_size * seq_length > 256 * 1024:
+                        continue
+                    # Also skip very large individual seq_lengths with larger batches
+                    if seq_length >= 8192 and batch_size > 16:
                         continue
                     test_cases.append([batch_size, seq_length, attention_backend, head_num, False])
 
@@ -106,7 +114,18 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
     - SGLANG_TEST_NUM_LAYERS=2  # Load only 2 layers
     - SGLANG_LOAD_FORMAT=dummy  # Use dummy weights
     """
+    import random
+
     suppress_other_loggers()
+
+    # Extract gpu_id from device string (e.g., "cuda:3" -> 3)
+    device_str = str(device)
+    if ":" in device_str:
+        gpu_id = int(device_str.split(":")[-1])
+        device_base = "cuda"  # ServerArgs expects just "cuda"
+    else:
+        gpu_id = tp_rank
+        device_base = device_str
 
     num_layers = int(os.environ.get("SGLANG_TEST_NUM_LAYERS", "2"))
     load_format = os.environ.get("SGLANG_LOAD_FORMAT", "dummy")
@@ -114,7 +133,7 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
     server_args = ServerArgs(
         model_path=model_path,
         dtype=dtype,
-        device=device,
+        device=device_base,
         load_format=load_format,
         tp_size=1,
         trust_remote_code=True,
@@ -123,7 +142,7 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
     )
 
     server_args.attention_backend = attention_backend
-    print(f"Using attention backend: {attention_backend}")
+    print(f"Using attention backend: {attention_backend}, gpu_id: {gpu_id}")
 
     if num_layers > 0 and load_format == "dummy":
         override_args = {"num_hidden_layers": num_layers}
@@ -133,19 +152,22 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
 
     _set_envs_and_config(server_args)
 
-    port_args = PortArgs.init_new(server_args)
+    # Use random nccl_port instead of PortArgs.init_new() to avoid distributed timeout
+    # when running in parallel with collect.py framework
+    nccl_port = 29500 + random.randint(0, 10000) + gpu_id * 100
+
     model_config = ModelConfig.from_server_args(server_args)
     model_runner = ModelRunner(
         model_config=model_config,
         mem_fraction_static=0.5,
-        gpu_id=tp_rank,
-        tp_rank=tp_rank,
+        gpu_id=gpu_id,
+        tp_rank=gpu_id,
         tp_size=server_args.tp_size,
         pp_rank=0,
         pp_size=1,
         moe_ep_rank=0,
         moe_ep_size=1,
-        nccl_port=port_args.nccl_port,
+        nccl_port=nccl_port,
         server_args=server_args,
     )
 
@@ -303,8 +325,13 @@ def run_attention_torch(
                 avg_time_ms = np.mean(cuda_times)
                 # Save via log_perf
                 try:
-                    perf_filename = os.path.join(output_path, "wideep_context_mla_perf.txt")
-                    os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                    perf_filename = (
+                        "wideep_context_mla_perf.txt"
+                        if output_path is None
+                        else os.path.join(output_path, "wideep_context_mla_perf.txt")
+                    )
+                    if output_path is not None:
+                        os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                     device_name = torch.cuda.get_device_name(device)
                     version = pkg_resources.get_distribution("sglang").version
                     log_perf(
@@ -482,8 +509,13 @@ def run_attention_torch(
                 torch.cuda.empty_cache()
                 # Save via log_perf
                 try:
-                    perf_filename = os.path.join(output_path, "wideep_generation_mla_perf.txt")
-                    os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                    perf_filename = (
+                        "wideep_generation_mla_perf.txt"
+                        if output_path is None
+                        else os.path.join(output_path, "wideep_generation_mla_perf.txt")
+                    )
+                    if output_path is not None:
+                        os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                     device_name = torch.cuda.get_device_name(device)
                     version = pkg_resources.get_distribution("sglang").version
                     log_perf(
@@ -533,67 +565,126 @@ def run_attention_torch(
                 continue
 
 
-if __name__ == "__main__":
-    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
-    model_path = DEEPSEEK_MODEL_PATH
-    test_layer = 0
-    num_warmup = 3
-    num_iterations = 10
-    dtype = "auto"
-    device = "cuda"
-    enable_profiler = False
+# ============================================================================
+# Functions for collect.py framework (trtllm style: direct params, not index)
+# ============================================================================
+
+
+def get_wideep_mla_context_test_cases():
+    """Returns list of (attention_backend, head_num, perf_filename) tuples."""
+    backends = ["flashinfer", "fa3"]
+    head_nums = [128, 64, 32, 16]
+    return [[backend, head_num, "wideep_context_mla_perf.txt"] for backend in backends for head_num in head_nums]
+
+
+def get_wideep_mla_generation_test_cases():
+    """Returns list of (attention_backend, head_num, perf_filename) tuples."""
+    backends = ["flashinfer", "fa3"]
+    head_nums = [128, 64, 32, 16]
+    return [[backend, head_num, "wideep_generation_mla_perf.txt"] for backend in backends for head_num in head_nums]
+
+
+def run_wideep_mla_context(attention_backend, head_num, perf_filename, device="cuda:0"):
+    """Run wideep MLA context benchmark for a specific (backend, head_num) config.
+
+    Compatible with collect.py framework - accepts direct params like trtllm collectors.
+    """
+    device_str = str(device) if not isinstance(device, str) else device
+    torch.cuda.set_device(device_str)
+
+    # Get all prefill cases for this (backend, head_num) config
+    all_cases = get_attention_prefill_test_cases()
+    cases = [tc for tc in all_cases if tc[2] == attention_backend and tc[3] == head_num]
+
+    print(f"\n{'=' * 60}")
+    print(f"MLA Context: backend={attention_backend}, head_num={head_num}")
+    print(f"Test cases: {len(cases)}")
+    print(f"{'=' * 60}")
 
     cleanup_distributed()
+    torch.cuda.empty_cache()
 
-    print(f"Loading model from {model_path}...")
-    print("\nTip: To test with dummy weights and limited layers, use:")
-    print("  SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 python collect_attn.py")
+    model_runner = load_model_runner(
+        DEEPSEEK_MODEL_PATH, attention_backend, head_num, test_layer=0, dtype="auto", device=device_str
+    )
 
-    # Get prefill and decode test cases separately
-    prefill_test_cases = get_attention_prefill_test_cases()
-    decode_test_cases = get_attention_decode_test_cases()
-    test_cases = prefill_test_cases + decode_test_cases
+    run_attention_torch(
+        model_runner,
+        cases,
+        attention_backend,
+        head_num,
+        test_layer=0,
+        num_warmup=3,
+        num_iterations=10,
+        enable_profiler=False,
+        device=device_str,
+        output_path=None,
+    )
 
-    grouped_cases = {}
-    for test_case in test_cases:
-        batch_size, seq_length, attention_backend, head_num, is_prefill = test_case
-        key = (attention_backend, head_num)
-        if key not in grouped_cases:
-            grouped_cases[key] = []
-        grouped_cases[key].append(test_case)
+    del model_runner
+    cleanup_distributed()
+    torch.cuda.empty_cache()
 
-    for (attention_backend, head_num), cases in grouped_cases.items():
-        print(f"\n{'=' * 60}")
-        print(f"TESTING: Attention Backend={attention_backend}, Head Num={head_num}")
-        print(f"Test cases: {len(cases)}")
-        print(f"{'=' * 60}")
-        cleanup_distributed()
 
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass  # Ignore if CUDA context is corrupted
-        model_runner = load_model_runner(model_path, attention_backend, head_num, test_layer, dtype, device)
+def run_wideep_mla_generation(attention_backend, head_num, perf_filename, device="cuda:0"):
+    """Run wideep MLA generation benchmark for a specific (backend, head_num) config.
 
-        run_attention_torch(
-            model_runner,
-            cases,
-            attention_backend,
-            head_num,
-            test_layer,
-            num_warmup,
-            num_iterations,
-            enable_profiler,
-            device,
-            output_path,
-        )
+    Compatible with collect.py framework - accepts direct params like trtllm collectors.
+    """
+    device_str = str(device) if not isinstance(device, str) else device
+    torch.cuda.set_device(device_str)
 
-        del model_runner
-        cleanup_distributed()
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass  # Ignore if CUDA context is corrupted
+    # Get all decode cases for this (backend, head_num) config
+    all_cases = get_attention_decode_test_cases()
+    cases = [tc for tc in all_cases if tc[2] == attention_backend and tc[3] == head_num]
+
+    print(f"\n{'=' * 60}")
+    print(f"MLA Generation: backend={attention_backend}, head_num={head_num}")
+    print(f"Test cases: {len(cases)}")
+    print(f"{'=' * 60}")
+
+    cleanup_distributed()
+    torch.cuda.empty_cache()
+
+    model_runner = load_model_runner(
+        DEEPSEEK_MODEL_PATH, attention_backend, head_num, test_layer=0, dtype="auto", device=device_str
+    )
+
+    run_attention_torch(
+        model_runner,
+        cases,
+        attention_backend,
+        head_num,
+        test_layer=0,
+        num_warmup=3,
+        num_iterations=10,
+        enable_profiler=False,
+        device=device_str,
+        output_path=None,
+    )
+
+    del model_runner
+    cleanup_distributed()
+    torch.cuda.empty_cache()
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SGLang Wideep MLA Benchmark")
+    parser.add_argument("--output-path", default=None, help="Output directory for perf files")
+    parser.add_argument("--device", default="cuda:0", help="CUDA device (e.g., cuda:0)")
+    args = parser.parse_args()
+
+    print(f"Loading model from {DEEPSEEK_MODEL_PATH}...")
+    print("\nTip: SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 python collect_wideep_attn.py")
+
+    # Run all context and generation test cases
+    for test_case in get_wideep_mla_context_test_cases():
+        run_wideep_mla_context(*test_case, device=args.device)
+
+    for test_case in get_wideep_mla_generation_test_cases():
+        run_wideep_mla_generation(*test_case, device=args.device)
 
     print("\n" + "=" * 50)
     print("ALL TESTS COMPLETED")

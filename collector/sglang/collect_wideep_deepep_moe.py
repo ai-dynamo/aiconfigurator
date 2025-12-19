@@ -337,8 +337,13 @@ def benchmark_moe_layer_prefill(
                 num_tokens_log = num_token * simulated_ep_size
                 device_name = torch.cuda.get_device_name(server_args.device)
                 version = pkg_resources.get_distribution("sglang").version
-                perf_filename = os.path.join(output_path, "wideep_context_moe_perf.txt")
-                os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                perf_filename = (
+                    "wideep_context_moe_perf.txt"
+                    if output_path is None
+                    else os.path.join(output_path, "wideep_context_moe_perf.txt")
+                )
+                if output_path is not None:
+                    os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                 distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
                 log_perf(
                     item_list=[
@@ -588,8 +593,13 @@ def benchmark_moe_layer_decode(
                 device_name = torch.cuda.get_device_name(server_args.device)
                 version = pkg_resources.get_distribution("sglang").version
                 distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
-                perf_filename = os.path.join(output_path, "wideep_generation_moe_perf.txt")
-                os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                perf_filename = (
+                    "wideep_generation_moe_perf.txt"
+                    if output_path is None
+                    else os.path.join(output_path, "wideep_generation_moe_perf.txt")
+                )
+                if output_path is not None:
+                    os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                 log_perf(
                     item_list=[
                         {
@@ -728,85 +738,96 @@ def run_moe(
     rank_print(f"{'=' * 60}")
 
 
-if __name__ == "__main__":
-    model_path = DEEPSEEK_MODEL_PATH
-    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
-    num_warmup = 3
-    num_iterations = 10
-    test_layer = 3
+# ============================================================================
+# Functions for collect.py framework (trtllm style: direct params, not index)
+# ============================================================================
 
-    # num_experts list to simulate different EP sizes
-    # With tp_size=1, ep_size=1:
-    # num_experts=128 -> EP 2, num_experts=64 -> EP 4, ..., num_experts=1 -> EP 256
-    num_experts_list = [128, 64, 32, 16, 8, 4, 2, 1]
+
+def get_wideep_moe_test_cases():
+    """Returns list of [num_experts, perf_filename] for MOE collection.
+
+    num_experts=128 simulates EP=2, num_experts=1 simulates EP=256
+    """
+    return [[n, "wideep_moe_perf.txt"] for n in [128, 64, 32, 16, 8, 4, 2, 1]]
+
+
+def run_wideep_moe(num_experts, perf_filename, device="cuda:0"):
+    """Run wideep DeepEP MOE benchmark.
+
+    Compatible with collect.py framework - accepts direct params like trtllm collectors.
+    """
+
+    device_str = str(device) if not isinstance(device, str) else device
+    torch.cuda.set_device(device_str)
+
+    # Extract gpu_id from device string
+    if ":" in device_str:
+        gpu_id = int(device_str.split(":")[-1])
+    else:
+        gpu_id = 0
 
     server_args = ServerArgs(
-        model_path=model_path,
+        model_path=DEEPSEEK_MODEL_PATH,
         dtype="auto",
         device="cuda",
         load_format="dummy",
-        tp_size=1,  # Single GPU mode
+        tp_size=1,
         trust_remote_code=True,
         mem_fraction_static=0.3,
-        moe_a2a_backend="deepep",  # replaced enable_deepep_moe=True
-        moe_runner_backend="deep_gemm",  # use DeepGEMM for MoE
-        deepep_mode="auto",  # Will be set dynamically: "normal" for prefill, "low_latency" for decode
-        ep_size=1,  # Single GPU mode
+        moe_a2a_backend="deepep",
+        moe_runner_backend="deep_gemm",
+        deepep_mode="auto",
+        ep_size=1,
         node_rank=0,
         host="localhost",
-        port=30000,
+        port=30000 + gpu_id * 100,  # Unique port per GPU
         cuda_graph_max_bs=4,
         disable_cuda_graph=True,
     )
 
-    logging.basicConfig(
-        level=getattr(logging, server_args.log_level.upper()),
-        format="%(message)s",
-    )
-
+    logging.basicConfig(level=getattr(logging, server_args.log_level.upper()), format="%(message)s")
     _set_envs_and_config(server_args)
-    # initialize_moe_config(server_args)  # Initialize MoE config (sets moe_a2a_backend, moe_runner_backend, etc.)
+
+    # Use PortArgs.init_new() since we need it for multiprocessing
+    # The subprocess isolation should prevent timeout issues
     port_args = PortArgs.init_new(server_args)
 
-    for num_experts in num_experts_list:
-        simulated_ep_size = 256 // num_experts * server_args.ep_size
-        print("\n" + "=" * 60)
-        print(f"Testing num_experts={num_experts} (simulating EP size {simulated_ep_size})")
-        print("=" * 60)
+    simulated_ep_size = 256 // num_experts * server_args.ep_size
+    print("\n" + "=" * 60)
+    print(f"Testing num_experts={num_experts} (simulating EP size {simulated_ep_size})")
+    print("=" * 60)
 
-        workers = []
-        for tp_rank in range(server_args.tp_size):
-            proc = multiprocessing.Process(
-                target=run_moe,
-                args=(
-                    server_args,
-                    port_args,
-                    num_warmup,
-                    num_iterations,
-                    test_layer,
-                    num_experts,
-                    tp_rank,
-                    output_path,
-                ),
-            )
-            proc.start()
-            workers.append(proc)
+    # Run in subprocess for proper model initialization
+    proc = multiprocessing.Process(
+        target=run_moe,
+        args=(server_args, port_args, 3, 10, 3, num_experts, 0, None),
+    )
+    proc.start()
+    proc.join()
 
-        for proc in workers:
-            proc.join()
+    if proc.exitcode != 0:
+        print(f"Process failed with exit code {proc.exitcode}")
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=5)
+        if proc.is_alive():
+            proc.kill()
 
-        for i, proc in enumerate(workers):
-            if proc.exitcode != 0:
-                print(f"Process {i} (tp_rank={i}) failed with exit code {proc.exitcode}")
+    print(f"Completed testing num_experts={num_experts} (EP size {simulated_ep_size})")
 
-        for proc in workers:
-            if proc.is_alive():
-                proc.terminate()
-                proc.join(timeout=5)
-                if proc.is_alive():
-                    proc.kill()
 
-        print(f"Completed testing num_experts={num_experts} (EP size {simulated_ep_size})")
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SGLang Wideep DeepEP MOE Benchmark")
+    parser.add_argument("--output-path", default=None, help="Output directory for perf files")
+    args = parser.parse_args()
+
+    print(f"Model path: {DEEPSEEK_MODEL_PATH}")
+
+    # Run all MOE test cases
+    for test_case in get_wideep_moe_test_cases():
+        run_wideep_moe(*test_case)
 
     print("\n" + "=" * 60)
     print("SCRIPT COMPLETED SUCCESSFULLY")

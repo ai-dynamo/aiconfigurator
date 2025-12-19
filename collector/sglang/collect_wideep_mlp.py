@@ -119,9 +119,9 @@ def cleanup_distributed():
         print(f"Warning: Could not clean up torch.distributed: {e}")
 
 
-def initialize_distributed(model_path):
+def initialize_distributed(model_path, port=29500):
     """Initialize distributed environment for MLP benchmarking"""
-    dist_init_method = "tcp://127.0.0.1:29500"
+    dist_init_method = f"tcp://127.0.0.1:{port}"
     init_distributed_environment(
         backend="nccl",
         world_size=1,
@@ -210,7 +210,11 @@ def run_mlp_torch(
 
             avg_time = results["latency_ms"]
             power_stats = results["power_stats"]
-            perf_filename = os.path.join(output_path, "wideep_context_mlp_perf.txt")
+            perf_filename = (
+                "wideep_context_mlp_perf.txt"
+                if output_path is None
+                else os.path.join(output_path, "wideep_context_mlp_perf.txt")
+            )
             kernel_source = "deepseek_v3"
 
             print(f"  {phase} MLP time: {avg_time:.3f} ms")
@@ -230,14 +234,19 @@ def run_mlp_torch(
 
             avg_time = results["latency_ms"]
             power_stats = results["power_stats"]
-            perf_filename = os.path.join(output_path, "wideep_generation_mlp_perf.txt")
+            perf_filename = (
+                "wideep_generation_mlp_perf.txt"
+                if output_path is None
+                else os.path.join(output_path, "wideep_generation_mlp_perf.txt")
+            )
             kernel_source = "deepseek_v3"
 
             print(f"  {phase} MLP time: {avg_time:.3f} ms")
 
         # Save via log_perf
         try:
-            os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+            if output_path is not None:
+                os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
             device_name = torch.cuda.get_device_name(device)
             version = pkg_resources.get_distribution("sglang").version
             log_perf(
@@ -269,79 +278,112 @@ def run_mlp_torch(
         print("  Skipping this configuration...")
 
 
-if __name__ == "__main__":
-    output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.0/"
-    model_path = DEEPSEEK_MODEL_PATH
-    hidden_size = 7168
-    intermediate_size = 2048
-    num_warmup = 3
-    num_iterations = 10
-    dtype = "auto"
-    device = "cuda:0"
+# ============================================================================
+# Functions for collect.py framework (trtllm style: direct params, not index)
+# ============================================================================
 
-    cleanup_distributed()
+
+def get_wideep_mlp_context_test_cases():
+    """Returns list of [quant_type, num_tokens_list, hidden_size, inter_size, perf_filename]."""
+    # Group all num_tokens into one test case per quant_type (like trtllm moe pattern)
+    num_tokens = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+    return [["fp8_block", num_tokens, 7168, 2048, "wideep_context_mlp_perf.txt"]]
+
+
+def get_wideep_mlp_generation_test_cases():
+    """Returns list of [quant_type, num_tokens_list, hidden_size, inter_size, perf_filename]."""
+    num_tokens = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+    return [["fp8_block", num_tokens, 7168, 2048, "wideep_generation_mlp_perf.txt"]]
+
+
+def run_wideep_mlp_context(quant_type, num_tokens_list, hidden_size, intermediate_size, perf_filename, device="cuda:0"):
+    """Run wideep MLP context benchmark.
+
+    Compatible with collect.py framework - accepts direct params like trtllm collectors.
+    """
+    device_str = str(device) if not isinstance(device, str) else device
+    torch.cuda.set_device(device_str)
+
+    print(f"\n{'=' * 60}")
+    print(f"MLP Context: quant={quant_type}, tokens={len(num_tokens_list)} configs")
+    print(f"{'=' * 60}")
+
+    # Initialize distributed with device-specific port
+    if not torch.distributed.is_initialized():
+        cleanup_distributed()
+        device_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
+        initialize_distributed(DEEPSEEK_MODEL_PATH, port=29500 + device_id)
+
+    for num_token in num_tokens_list:
+        run_mlp_torch(
+            quant_type,
+            num_token,
+            hidden_size,
+            intermediate_size,
+            is_context=True,
+            num_warmup=3,
+            num_iterations=10,
+            device=device_str,
+            output_path=None,
+        )
+
+
+def run_wideep_mlp_generation(
+    quant_type, num_tokens_list, hidden_size, intermediate_size, perf_filename, device="cuda:0"
+):
+    """Run wideep MLP generation benchmark.
+
+    Compatible with collect.py framework - accepts direct params like trtllm collectors.
+    """
+    device_str = str(device) if not isinstance(device, str) else device
+    torch.cuda.set_device(device_str)
+
+    print(f"\n{'=' * 60}")
+    print(f"MLP Generation: quant={quant_type}, tokens={len(num_tokens_list)} configs")
+    print(f"{'=' * 60}")
+
+    # Initialize distributed with device-specific port
+    if not torch.distributed.is_initialized():
+        cleanup_distributed()
+        device_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
+        initialize_distributed(DEEPSEEK_MODEL_PATH, port=29500 + device_id)
+
+    for num_token in num_tokens_list:
+        run_mlp_torch(
+            quant_type,
+            num_token,
+            hidden_size,
+            intermediate_size,
+            is_context=False,
+            num_warmup=3,
+            num_iterations=10,
+            device=device_str,
+            output_path=None,
+        )
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SGLang Wideep MLP Benchmark")
+    parser.add_argument("--output-path", default=None, help="Output directory for perf files")
+    parser.add_argument("--device", default="cuda:0", help="CUDA device")
+    args = parser.parse_args()
 
     print("Starting SGLang MLP Benchmark")
-    print(f"Model path: {model_path}")
+    print(f"Model path: {DEEPSEEK_MODEL_PATH}")
     print(f"Device: {torch.cuda.get_device_name()}")
 
-    prefill_test_cases = get_mlp_prefill_test_cases()
-    decode_test_cases = get_mlp_decode_test_cases()
-    print(f"Running {len(prefill_test_cases)} prefill test cases and {len(decode_test_cases)} decode test cases...")
+    # Run all context and generation test cases
+    for test_case in get_wideep_mlp_context_test_cases():
+        run_wideep_mlp_context(*test_case, device=args.device)
 
-    # Process prefill test cases
-    print(f"\n{'=' * 60}")
-    print("TESTING PREFILL")
-    print(f"Test cases: {len(prefill_test_cases)}")
-    print(f"{'=' * 60}")
-    cleanup_distributed()
-
-    torch.cuda.empty_cache()
-    initialize_distributed(model_path)
-
-    for test_case in prefill_test_cases:
-        quant_type, num_token, hs, inter_s = test_case
-        run_mlp_torch(
-            quant_type,
-            num_token,
-            hs,
-            inter_s,
-            True,
-            num_warmup,
-            num_iterations,
-            device,
-            output_path,
-        )
-
-    # Process decode test cases
-    print(f"\n{'=' * 60}")
-    print("TESTING DECODE")
-    print(f"Test cases: {len(decode_test_cases)}")
-    print(f"{'=' * 60}")
-
-    torch.cuda.empty_cache()
-
-    for test_case in decode_test_cases:
-        quant_type, num_token, hs, inter_s = test_case
-        run_mlp_torch(
-            quant_type,
-            num_token,
-            hs,
-            inter_s,
-            False,
-            num_warmup,
-            num_iterations,
-            device,
-            output_path,
-        )
+    for test_case in get_wideep_mlp_generation_test_cases():
+        run_wideep_mlp_generation(*test_case, device=args.device)
 
     cleanup_distributed()
     torch.cuda.empty_cache()
 
     print("\n" + "=" * 50)
     print("MLP BENCHMARK COMPLETED")
-    print("=" * 50)
-    print("Output files saved to:")
-    print(f"  - Context results: {os.path.join(output_path, 'wideep_context_mlp_perf.txt')}")
-    print(f"  - Generation results: {os.path.join(output_path, 'wideep_generation_mlp_perf.txt')}")
     print("=" * 50)
