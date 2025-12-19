@@ -70,22 +70,22 @@ def test_query_custom_allreduce_database_mode_calculation(perf_db):
 
 def test_query_custom_allreduce_sol_full_returns_full_tuple(perf_db):
     """
-    When database_mode == SOL_FULL, query_custom_allreduce returns PerformanceResult (acts as float).
-    The latency value should match the calculated SOL time.
+    When database_mode == SOL_FULL, query_custom_allreduce returns (sol_time, sol_math, sol_mem).
+    The sol_time value should match the calculated SOL time.
     """
     size = 1024
     tp_size = 2
     quant_mode = "float16"
 
-    result = perf_db.query_custom_allreduce(quant_mode, tp_size, size, database_mode=common.DatabaseMode.SOL_FULL)
+    sol_time, sol_math, sol_mem = perf_db.query_custom_allreduce(
+        quant_mode, tp_size, size, database_mode=common.DatabaseMode.SOL_FULL
+    )
     # The get_sol function calculates: sol_time = 2 * size * 2 / tp_size * (tp_size - 1) / p2p_bw * 1000
     expected_sol_time = (2 * size * 2 / tp_size * (tp_size - 1) / perf_db.system_spec["node"]["inter_node_bw"]) * 1000
 
-    # Should return PerformanceResult that acts as float
-    assert isinstance(result, float)  # PerformanceResult is a float subclass
-    assert math.isclose(float(result), expected_sol_time)
-    assert hasattr(result, "energy")  # Should have energy attribute
-    assert result.energy == 0.0  # SOL mode has no energy data
+    assert math.isclose(sol_time, expected_sol_time)
+    assert math.isclose(sol_math, 0.0)
+    assert math.isclose(sol_mem, 0.0)
 
 
 def test_query_custom_allreduce_non_database_mode_uses_custom_latency(perf_db):

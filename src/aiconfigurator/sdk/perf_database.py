@@ -869,117 +869,6 @@ def load_mla_bmm_data(mla_bmm_file):
     return mla_bmm_data
 
 
-def load_wideep_mlp_data(wideep_context_mlp_file, wideep_generation_mlp_file):
-    """
-    Load the SGLang MLP data from context_ds_mlp_perf.txt and generation_ds_mlp_perf.txt
-    with power support (backward compatible).
-
-    Returns:
-        tuple: (wideep_context_mlp_data, wideep_generation_mlp_data) where leaf values
-               are dicts with 'latency' and 'power' keys.
-    """
-
-    if not os.path.exists(wideep_context_mlp_file) or not os.path.exists(wideep_generation_mlp_file):
-        logger.warning(
-            f"SGLang wideep MLP data files {wideep_context_mlp_file} and {wideep_generation_mlp_file} not found."
-        )
-        return None, None
-
-    wideep_context_mlp_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-    wideep_generation_mlp_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-
-    with open(wideep_context_mlp_file, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
-        # Check if power columns exist (backward compatibility)
-        has_power = len(rows) > 0 and "power" in rows[0]
-        if not has_power:
-            logger.debug(f"Legacy database format detected in {wideep_context_mlp_file} - power will default to 0.0")
-
-        for row in rows:
-            quant_type, num_token, hidden_size, intermediate_size, avg_ms = (
-                row["quant_type"],
-                row["num_token"],
-                row["hidden_size"],
-                row["intermediate_size"],
-                row["avg_ms"],
-            )
-
-            num_token = int(num_token)
-            hidden_size = int(hidden_size)
-            intermediate_size = int(intermediate_size)
-            avg_ms = float(avg_ms)
-            quant_mode = common.MoEQuantMode[quant_type]
-
-            # NEW: Read power with backward compatibility
-            power = float(row.get("power", 0.0))
-
-            # NEW: Calculate energy from power and latency
-            energy = power * avg_ms  # watt-milliseconds
-
-            try:
-                # Check for conflict
-                wideep_context_mlp_data[quant_mode][hidden_size][intermediate_size][num_token]
-                logger.debug(
-                    f"value conflict in SGLang wideep context MLP data: {quant_mode} {hidden_size} "
-                    f"{intermediate_size} {num_token}"
-                )
-            except KeyError:
-                # Store all three values
-                wideep_context_mlp_data[quant_mode][hidden_size][intermediate_size][num_token] = {
-                    "latency": avg_ms,
-                    "power": power,
-                    "energy": energy,  # NEW: precomputed energy
-                }
-
-    with open(wideep_generation_mlp_file, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
-        # Check if power columns exist (backward compatibility)
-        has_power = len(rows) > 0 and "power" in rows[0]
-        if not has_power:
-            logger.debug(f"Legacy database format detected in {wideep_generation_mlp_file} - power will default to 0.0")
-
-        for row in rows:
-            quant_type, num_token, hidden_size, intermediate_size, avg_ms = (
-                row["quant_type"],
-                row["num_token"],
-                row["hidden_size"],
-                row["intermediate_size"],
-                row["avg_ms"],
-            )
-            num_token = int(num_token)
-            hidden_size = int(hidden_size)
-            intermediate_size = int(intermediate_size)
-            avg_ms = float(avg_ms)
-            quant_mode = common.MoEQuantMode[quant_type]
-
-            # NEW: Read power with backward compatibility
-            power = float(row.get("power", 0.0))
-
-            # NEW: Calculate energy from power and latency
-            energy = power * avg_ms  # watt-milliseconds
-
-            try:
-                # Check for conflict
-                wideep_generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token]
-                logger.debug(
-                    f"value conflict in SGLang wideep generation MLP data: {quant_mode} {hidden_size} "
-                    f"{intermediate_size} {num_token}"
-                )
-            except KeyError:
-                # Store all three values
-                wideep_generation_mlp_data[quant_mode][hidden_size][intermediate_size][num_token] = {
-                    "latency": avg_ms,
-                    "power": power,
-                    "energy": energy,  # NEW: precomputed energy
-                }
-
-    return wideep_context_mlp_data, wideep_generation_mlp_data
-
-
 def load_wideep_context_moe_data(wideep_context_moe_file):
     """
     Load the SGLang wideep context MoE data from wideep_context_moe_perf.txt
@@ -1407,8 +1296,6 @@ class PerfDatabase:
         _wideep_generation_moe_data (dict): the wideep generation moe data
         _wideep_context_mla_data (dict): the wideep context mla data
         _wideep_generation_mla_data (dict): the wideep generation mla data
-        _wideep_context_mlp_data (dict): the wideep context mlp data
-        _wideep_generation_mlp_data (dict): the wideep generation mlp data
         _wideep_deepep_normal_data (dict): the wideep deepep normal data
         _wideep_deepep_ll_data (dict): the wideep deepep ll data
 
@@ -1450,7 +1337,7 @@ class PerfDatabase:
         )
 
         if backend == "sglang":
-            # For SGLang, only load MoE and MLP data and provide empty structures for other data
+            # For SGLang, only load MoE data and provide empty structures for other data
             # regular path
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1486,10 +1373,6 @@ class PerfDatabase:
             )
             self._wideep_generation_mla_data = load_wideep_generation_mla_data(
                 os.path.join(data_dir, common.PerfDataFilename.wideep_generation_mla.value)
-            )
-            self._wideep_context_mlp_data, self._wideep_generation_mlp_data = load_wideep_mlp_data(
-                os.path.join(data_dir, common.PerfDataFilename.wideep_context_mlp.value),
-                os.path.join(data_dir, common.PerfDataFilename.wideep_generation_mlp.value),
             )
             self._wideep_deepep_normal_data = load_wideep_deepep_normal_data(
                 os.path.join(data_dir, common.PerfDataFilename.wideep_deepep_normal.value)
@@ -1982,12 +1865,6 @@ class PerfDatabase:
                 for kv_cache_dtype in (self._wideep_generation_mla_data or {})[kernel_source]:
                     wideep_generation_mla_modes.add(kv_cache_dtype.name)
 
-            wideep_mlp_modes = set()
-            for quant_mode in self._wideep_context_mlp_data:
-                wideep_mlp_modes.add(quant_mode.name)
-            for quant_mode in self._wideep_generation_mlp_data:
-                wideep_mlp_modes.add(quant_mode.name)
-
             self.supported_quant_mode = {
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
@@ -1999,9 +1876,6 @@ class PerfDatabase:
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
                 "wideep_context_mla": list(wideep_context_mla_modes),
                 "wideep_generation_mla": list(wideep_generation_mla_modes),
-                "wideep_context_mlp": [key.name for key in self._wideep_context_mlp_data],
-                "wideep_generation_mlp": [key.name for key in self._wideep_generation_mlp_data],
-                "wideep_mlp": list(wideep_mlp_modes),
             }
         elif self.backend == "trtllm":
             self.supported_quant_mode = {
@@ -2573,7 +2447,7 @@ class PerfDatabase:
         k: int,
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query GEMM operation latency and energy.
 
@@ -2620,9 +2494,7 @@ class PerfDatabase:
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(m, n, k, quant_mode)
-            # SOL_FULL returns tuple - use first element as latency
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(m, n, k, quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0)
         else:
@@ -2668,7 +2540,7 @@ class PerfDatabase:
         database_mode: Optional[common.DatabaseMode] = None,
         window_size: int = 0,
         head_size: int = 128,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query context (prefill) attention latency and energy.
 
@@ -2754,8 +2626,7 @@ class PerfDatabase:
             sol_latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(
                 b,
@@ -2833,7 +2704,7 @@ class PerfDatabase:
         database_mode: Optional[common.DatabaseMode] = None,
         window_size: int = 0,
         head_size: int = 128,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query generation (decode) attention latency and energy.
 
@@ -2912,8 +2783,7 @@ class PerfDatabase:
             sol_latency = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
@@ -2960,7 +2830,7 @@ class PerfDatabase:
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query context MLA (Multi-head Latent Attention) latency and energy.
 
@@ -3023,8 +2893,7 @@ class PerfDatabase:
             sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
@@ -3066,7 +2935,7 @@ class PerfDatabase:
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query generation MLA (Multi-head Latent Attention) latency and energy.
 
@@ -3122,8 +2991,7 @@ class PerfDatabase:
             sol_latency = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(b, s, num_heads, kvcache_quant_mode)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(b, s, num_heads, kvcache_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
@@ -3165,7 +3033,7 @@ class PerfDatabase:
         fmha_quant_mode: common.FMHAQuantMode,
         attention_backend: str | None = None,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query the generation mla data for SGLang backend with SOL calculation
         """
@@ -3254,11 +3122,12 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            return PerformanceResult(sol_time, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
+            return PerformanceResult(get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode), energy=0.0)
         else:
             try:
                 if self._wideep_generation_mla_data is None:
@@ -3280,6 +3149,7 @@ class PerfDatabase:
                 mla_dict = attn_data[kvcache_quant_mode]
                 result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
                 latency = result["latency"]
+                energy = result.get("energy", 0.0)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -3287,13 +3157,14 @@ class PerfDatabase:
                         f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
                     )
                     latency = get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
+                    energy = 0.0
                 else:
                     logger.exception(
                         f"Failed to query wideep generation mla data for {b=}, {s=}, {tp_size=}, \
                         {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
-            return latency
+            return PerformanceResult(latency, energy=energy)
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_context_mla(
@@ -3306,7 +3177,7 @@ class PerfDatabase:
         fmha_quant_mode: common.FMHAQuantMode,
         attention_backend: str | None = None,
         database_mode: common.DatabaseMode | None = None,
-    ) -> float:
+    ) -> PerformanceResult | tuple[float, float, float]:
         def get_sol(
             b: int,
             s: int,
@@ -3389,11 +3260,15 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
-            return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+            return PerformanceResult(sol_time, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
+            return PerformanceResult(
+                get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode),
+                energy=0.0,
+            )
         else:
             try:
                 if self._wideep_context_mla_data is None:
@@ -3418,6 +3293,7 @@ class PerfDatabase:
                 prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
                 result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
                 latency = result["latency"] * prefix_correction
+                energy = result.get("energy", 0.0) * prefix_correction
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -3425,13 +3301,14 @@ class PerfDatabase:
                         f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
                     )
                     latency = get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
+                    energy = 0.0
                 else:
                     logger.exception(
                         f"Failed to query wideep context mla data for {b=}, {s=}, {prefix=}, {tp_size=}, \
                         {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
                     )
                     raise
-            return latency
+            return PerformanceResult(latency, energy=energy)
 
     # to simplify, we no longer support allreduce_strategy
     @functools.lru_cache(maxsize=32768)
@@ -3441,7 +3318,7 @@ class PerfDatabase:
         tp_size: int,
         size: int,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query custom AllReduce operation latency and energy.
 
@@ -3489,8 +3366,7 @@ class PerfDatabase:
             sol_latency = get_sol(quant_mode, tp_size, size)[0]
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(quant_mode, tp_size, size)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(quant_mode, tp_size, size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(quant_mode, tp_size, size)
             return PerformanceResult(emp_latency, energy=0.0)
@@ -3562,7 +3438,7 @@ class PerfDatabase:
         operation: str,
         message_size: int,  # element number
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query NCCL collective communication latency and energy.
 
@@ -3618,8 +3494,7 @@ class PerfDatabase:
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(dtype, num_gpus, operation, message_size)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(dtype, num_gpus, operation, message_size)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(dtype, num_gpus, operation, message_size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(dtype, num_gpus, operation, message_size), energy=0.0)
         else:
@@ -3701,7 +3576,7 @@ class PerfDatabase:
         is_context: bool = True,
         moe_backend: str | None = None,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query MoE (Mixture of Experts) layer latency and energy.
 
@@ -3805,7 +3680,7 @@ class PerfDatabase:
             )[0]
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(
+            return get_sol(
                 num_tokens,
                 hidden_size,
                 inter_size,
@@ -3816,7 +3691,6 @@ class PerfDatabase:
                 quant_mode,
                 workload_distribution,
             )
-            return PerformanceResult(sol_result[0], energy=0.0)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(
                 num_tokens,
@@ -3882,37 +3756,35 @@ class PerfDatabase:
                     # aligned with trtllm, kernel source selection.
                     if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
                         try:
-                            if workload_distribution in self._moe_low_latency_data[quant_mode]:
-                                moe_dict = self._moe_low_latency_data[quant_mode][workload_distribution][topk][
-                                    num_experts
-                                ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
-                            else:
-                                moe_dict = self._moe_low_latency_data[quant_mode]["uniform"][topk][num_experts][
-                                    hidden_size
-                                ][inter_size][moe_tp_size][moe_ep_size]
+                            used_workload_distribution = (
+                                workload_distribution
+                                if workload_distribution in self._moe_low_latency_data[quant_mode]
+                                else "uniform"
+                            )
+                            moe_dict = self._moe_low_latency_data[quant_mode][used_workload_distribution][topk][
+                                num_experts
+                            ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
                             logger.debug(
                                 f"trying to find low latency data for moe {quant_mode} "
                                 f"{workload_distribution} {topk} {num_experts} {hidden_size} "
                                 f"{inter_size} {moe_tp_size} {moe_ep_size} but failed."
                             )
                         except:
-                            if workload_distribution in self._moe_data[quant_mode]:
-                                moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][
-                                    hidden_size
-                                ][inter_size][moe_tp_size][moe_ep_size]
-                            else:
-                                moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][
-                                    inter_size
-                                ][moe_tp_size][moe_ep_size]
-                    else:
-                        if workload_distribution in self._moe_data[quant_mode]:
-                            moe_dict = self._moe_data[quant_mode][workload_distribution][topk][num_experts][
+                            used_workload_distribution = (
+                                workload_distribution
+                                if workload_distribution in self._moe_data[quant_mode]
+                                else "uniform"
+                            )
+                            moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
                                 hidden_size
                             ][inter_size][moe_tp_size][moe_ep_size]
-                        else:
-                            moe_dict = self._moe_data[quant_mode]["uniform"][topk][num_experts][hidden_size][
-                                inter_size
-                            ][moe_tp_size][moe_ep_size]
+                    else:
+                        used_workload_distribution = (
+                            workload_distribution if workload_distribution in self._moe_data[quant_mode] else "uniform"
+                        )
+                        moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
+                            hidden_size
+                        ][inter_size][moe_tp_size][moe_ep_size]
 
                     num_left, num_right = self._nearest_1d_point_helper(
                         num_tokens,
@@ -3995,7 +3867,7 @@ class PerfDatabase:
         quant_mode: common.GEMMQuantMode,
         if_pre: bool = True,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query MLA batch matrix multiply latency and energy.
 
@@ -4043,8 +3915,7 @@ class PerfDatabase:
             sol_latency = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
             return PerformanceResult(sol_latency, energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(num_tokens, num_heads, quant_mode, if_pre)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(num_tokens, num_heads, quant_mode, if_pre)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
             return PerformanceResult(emp_latency, energy=0.0)
@@ -4092,7 +3963,9 @@ class PerfDatabase:
                     raise
 
     @functools.lru_cache(maxsize=32768)
-    def query_mem_op(self, mem_bytes: int, database_mode: common.DatabaseMode | None = None) -> PerformanceResult:
+    def query_mem_op(
+        self, mem_bytes: int, database_mode: common.DatabaseMode | None = None
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query memory operation latency and energy.
 
@@ -4127,8 +4000,7 @@ class PerfDatabase:
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(mem_bytes)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(mem_bytes)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(mem_bytes)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
         else:
@@ -4136,7 +4008,9 @@ class PerfDatabase:
             return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
 
     @functools.lru_cache(maxsize=32768)
-    def query_p2p(self, message_bytes: int, database_mode: common.DatabaseMode | None = None) -> PerformanceResult:
+    def query_p2p(
+        self, message_bytes: int, database_mode: common.DatabaseMode | None = None
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query P2P (point-to-point) communication latency and energy.
 
@@ -4170,92 +4044,12 @@ class PerfDatabase:
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(message_bytes)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(message_bytes)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(message_bytes)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(message_bytes), energy=0.0)
         else:
             # hybrid and silicon modes have same logic
             return PerformanceResult(get_empirical(message_bytes), energy=0.0)
-
-    @functools.lru_cache(maxsize=32768)
-    def query_wideep_mlp(
-        self,
-        num_tokens: int,
-        hidden_size: int,
-        intermediate_size: int,
-        quant_mode: common.MoEQuantMode,
-        is_context: bool = True,
-        database_mode: Optional[common.DatabaseMode] = None,
-    ) -> float:
-        """
-        Query the SGLang MLP data for DeepSeek shared expert operations
-        """
-
-        def get_sol(
-            num_tokens: int,
-            hidden_size: int,
-            intermediate_size: int,
-            quant_mode: common.MoEQuantMode,
-        ) -> tuple[float, float, float]:
-            ops = 2 * num_tokens * hidden_size * intermediate_size * 3
-            mem_bytes = quant_mode.value.memory * (
-                num_tokens * hidden_size * 3  # input + output + intermediate
-                + num_tokens * intermediate_size * 3  # intermediate
-                + hidden_size * intermediate_size * 3  # weights for up + down projections
-            )
-            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
-            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
-            sol_time = max(sol_math, sol_mem)
-            return sol_time, sol_math, sol_mem
-
-        def get_empirical(
-            num_tokens: int,
-            hidden_size: int,
-            intermediate_size: int,
-            quant_mode: common.MoEQuantMode,
-        ) -> float:
-            """
-            Get the hybrid time
-            """
-            latency = get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)[0]
-            scale_factor = 0.7
-            return latency / scale_factor
-
-        if database_mode is None:
-            database_mode = self._default_database_mode
-        if database_mode == common.DatabaseMode.SOL:
-            return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)[0]
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(num_tokens, hidden_size, intermediate_size, quant_mode)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            return get_empirical(num_tokens, hidden_size, intermediate_size, quant_mode)
-        else:
-            try:
-                # Query the actual performance data
-                if is_context:
-                    mlp_data = self._wideep_context_mlp_data
-                else:
-                    mlp_data = self._wideep_generation_mlp_data
-
-                mlp_dict = mlp_data[quant_mode][hidden_size][intermediate_size]
-                num_left, num_right = self._nearest_1d_point_helper(num_tokens, list(mlp_dict.keys()), inner_only=False)
-                result = self._interp_1d([num_left, num_right], [mlp_dict[num_left], mlp_dict[num_right]], num_tokens)
-                lat = result["latency"] if isinstance(result, dict) else result
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query wideep mlp data for {num_tokens=}, {hidden_size=}, "
-                        f"{intermediate_size=}, {quant_mode=}, using empirical mode"
-                    )
-                    lat = get_empirical(num_tokens, hidden_size, intermediate_size, quant_mode)
-                else:
-                    logger.exception(
-                        f"Failed to query wideep mlp data for {num_tokens=}, {hidden_size=}, \
-                        {intermediate_size=}, {quant_mode=}, {database_mode=}"
-                    )
-                    raise
-            return lat
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_deepep_ll(
@@ -4266,7 +4060,7 @@ class PerfDatabase:
         topk: int,
         hidden_size: int,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query the DeepEP LL operation data
         """
@@ -4284,8 +4078,7 @@ class PerfDatabase:
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(num_tokens, topk, num_experts)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(num_tokens, topk, num_experts)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(num_tokens, topk, num_experts)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0)
         else:
@@ -4306,7 +4099,7 @@ class PerfDatabase:
         hidden_size: int,
         sms: int,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query the DeepEP normal operation data
         """
@@ -4324,8 +4117,7 @@ class PerfDatabase:
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(num_tokens, num_experts, topk, hidden_size)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
-            sol_result = get_sol(num_tokens, num_experts, topk, hidden_size)
-            return PerformanceResult(sol_result[0], energy=0.0)
+            return get_sol(num_tokens, num_experts, topk, hidden_size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0)
         else:

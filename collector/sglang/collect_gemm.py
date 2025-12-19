@@ -14,7 +14,7 @@ from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_qua
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
-compatible_sglang_versions = ["0.5.5.post2", "0.5.5.post3"]
+compatible_versions = ["0.5.5.post2", "0.5.5.post3"]
 
 
 def get_gemm_test_cases():
@@ -206,6 +206,7 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
     nvtx_tag = f"{gemm_type}_m{M}_n{N}_k{K}"
     torch.cuda.nvtx.range_push(nvtx_tag)
 
+    # TODO: to study repeat_n impact, whether it can avoid L2 cache hit
     with benchmark_with_power(
         device=device,
         kernel_func=gemm_op,
