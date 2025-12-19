@@ -467,19 +467,19 @@ class SGLANGBackend(BaseBackend):
         # ==== SGLANG backend specific memory calculations ====
         # SGLANG typically has higher activation memory due to Python overhead
         # and dynamic execution patterns
-        if "GPT" in model.model_name:
+        if model.model_family == "GPT":
             c_dict = {1: 13, 2: 8, 4: 6.5, 8: 6.5}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 90 * 1024 * 1024)  # Higher minimum for SGLANG
-        elif "LLAMA" in model.model_name:
+        elif model.model_family == "LLAMA":
             c_dict = {1: 14, 2: 8.5, 4: 6.5, 8: 6.5}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 90 * 1024 * 1024)  # Higher minimum for SGLANG
-        elif "MOE" in model.model_name:
+        elif model.model_family == "MOE":
             c_dict = {1: 28, 2: 17, 4: 13, 8: 13}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 90 * 1024 * 1024)  # Higher minimum for SGLANG
-        elif "DEEPSEEK" in model.model_name:
+        elif model.model_family == "DEEPSEEK":
             c_dict = {1: 28, 2: 17, 4: 13, 8: 13}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations += (
@@ -505,7 +505,7 @@ class SGLANGBackend(BaseBackend):
         activations += sglang_overhead
 
         # ==== KV Cache calculation - SGLANG specific ====
-        if "DEEPSEEK" in model.model_name:
+        if model.model_family == "DEEPSEEK":
             kvcache_per_token = model._num_layers * 576
         else:
             num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size
