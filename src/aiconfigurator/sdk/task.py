@@ -881,52 +881,46 @@ class TaskConfig:
                 return None
             return value.name if hasattr(value, "name") else str(value)
 
-        def _validate_kvcache_for_attention(wc: object) -> None:
-            kv = _to_name(getattr(wc, "kvcache_quant_mode", None))
-            fmha = _to_name(getattr(wc, "fmha_quant_mode", None))
-            if kv is None:
-                return
-            # generation_attention: keyed by KV cache dtype
-            gen = getattr(database, "_generation_attention_data", None)
-            if gen:
-                allowed = sorted([k.name for k in gen])
-                if allowed and kv not in allowed:
-                    raise ValueError(
-                        f"Unsupported generation_attention kv_cache_dtype '{kv}' for system='{self.system_name}', "
-                        f"backend='{self.backend_name}', version='{self.backend_version}'. "
-                        f"Supported kv_cache_dtype: {allowed}"
-                    )
-            # context_attention: keyed by fmha then KV cache dtype
-            ctx = getattr(database, "_context_attention_data", None)
-            if ctx and fmha is not None:
-                try:
-                    fmha_enum = common.FMHAQuantMode[fmha]
-                except Exception:
-                    return
-                if fmha_enum in ctx:
-                    allowed = sorted([k.name for k in ctx[fmha_enum]])
-                    if allowed and kv not in allowed:
-                        raise ValueError(
-                            f"Unsupported context_attention kv_cache_dtype '{kv}' for fmha='{fmha}' "
-                            f"on system='{self.system_name}', backend='{self.backend_name}', "
-                            f"version='{self.backend_version}'. Supported kv_cache_dtype: {allowed}"
-                        )
+        is_deepseek = get_model_family(self.model_name) == "DEEPSEEK"
+        enable_wideep = bool(getattr(self.config, "enable_wideep", self.enable_wideep))
+        moe_backend = getattr(self.config, "moe_backend", None)
+
+        # DeepSeek uses MLA perf tables; others use attention perf tables.
+        if is_deepseek:
+            if self.backend_name == "sglang" and enable_wideep:
+                context_attn_key = "wideep_context_mla"
+                generation_attn_key = "wideep_generation_mla"
+            else:
+                context_attn_key = "context_mla"
+                generation_attn_key = "generation_mla"
+        else:
+            context_attn_key = "context_attention"
+            generation_attn_key = "generation_attention"
+
+        def _validate_worker_config(wc: object, *, validate_context: bool, validate_generation: bool) -> None:
+            _supported_or_raise("gemm", _to_name(getattr(wc, "gemm_quant_mode", None)))
+
+            moe_mode = _to_name(getattr(wc, "moe_quant_mode", None))
+            if self.backend_name == "sglang" and enable_wideep and moe_backend == "deepep_moe":
+                if validate_context:
+                    _supported_or_raise("wideep_context_moe", moe_mode)
+                if validate_generation:
+                    _supported_or_raise("wideep_generation_moe", moe_mode)
+            else:
+                _supported_or_raise("moe", moe_mode)
+
+            if validate_context:
+                _supported_or_raise(context_attn_key, _to_name(getattr(wc, "fmha_quant_mode", None)))
+
+            if validate_generation:
+                _supported_or_raise(generation_attn_key, _to_name(getattr(wc, "kvcache_quant_mode", None)))
 
         # agg/disagg worker configs use the same field names
         if self.config.serving_mode == "agg":
-            wc = self.config.worker_config
-            _supported_or_raise("gemm", _to_name(getattr(wc, "gemm_quant_mode", None)))
-            _supported_or_raise("moe", _to_name(getattr(wc, "moe_quant_mode", None)))
-            _supported_or_raise("context_attention", _to_name(getattr(wc, "fmha_quant_mode", None)))
-            _supported_or_raise("generation_attention", _to_name(getattr(wc, "fmha_quant_mode", None)))
-            _validate_kvcache_for_attention(wc)
+            _validate_worker_config(self.config.worker_config, validate_context=True, validate_generation=True)
         elif self.config.serving_mode == "disagg":
-            for wc in (self.config.prefill_worker_config, self.config.decode_worker_config):
-                _supported_or_raise("gemm", _to_name(getattr(wc, "gemm_quant_mode", None)))
-                _supported_or_raise("moe", _to_name(getattr(wc, "moe_quant_mode", None)))
-                _supported_or_raise("context_attention", _to_name(getattr(wc, "fmha_quant_mode", None)))
-                _supported_or_raise("generation_attention", _to_name(getattr(wc, "fmha_quant_mode", None)))
-                _validate_kvcache_for_attention(wc)
+            _validate_worker_config(self.config.prefill_worker_config, validate_context=True, validate_generation=False)
+            _validate_worker_config(self.config.decode_worker_config, validate_context=False, validate_generation=True)
 
     def pretty(self) -> str:
         def _convert(obj: Any) -> Any:

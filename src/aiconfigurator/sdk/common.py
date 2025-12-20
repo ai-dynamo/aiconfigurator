@@ -372,8 +372,6 @@ class PerfDataFilename(Enum):
     wideep_generation_mla = "wideep_generation_mla_perf.txt"
     wideep_context_moe = "wideep_context_moe_perf.txt"
     wideep_generation_moe = "wideep_generation_moe_perf.txt"
-    wideep_context_mlp = "wideep_context_mlp_perf.txt"
-    wideep_generation_mlp = "wideep_generation_mlp_perf.txt"
     wideep_deepep_normal = "wideep_deepep_normal_perf.txt"
     wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
 
@@ -417,9 +415,9 @@ class FMHAQuantMode(Enum):
     FMHA quant mode.
     """
 
-    float16 = QuantMapping(0, 1, "float16")
-    fp8 = QuantMapping(0, 2, "fp8")
-    fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for sglang
+    float16 = QuantMapping(2, 1, "float16")
+    fp8 = QuantMapping(1, 2, "fp8")
+    fp8_block = QuantMapping(1, 2, "fp8_block")  # FIXME: specific for sglang wideep
 
 
 class KVCacheQuantMode(Enum):

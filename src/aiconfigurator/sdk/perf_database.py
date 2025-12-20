@@ -1878,6 +1878,8 @@ class PerfDatabase:
                 "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
+                "wideep_context_moe": _enum_key_names(getattr(self, "_wideep_context_moe_data", None)),
+                "wideep_generation_moe": _enum_key_names(getattr(self, "_wideep_generation_moe_data", None)),
                 "wideep_context_mla": list(wideep_context_mla_modes),
                 "wideep_generation_mla": list(wideep_generation_mla_modes),
             }
@@ -1892,7 +1894,7 @@ class PerfDatabase:
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
             }
-        elif self.backend == "vllm":  # TODO: add support for moe and deepseek
+        elif self.backend == "vllm":  # TODO: deepseek
             self.supported_quant_mode = {
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
@@ -1901,7 +1903,7 @@ class PerfDatabase:
                 "context_mla": [],
                 "generation_mla": [],
                 "mla_bmm": [],
-                "moe": [],
+                "moe": _enum_key_names(getattr(self, "_moe_data", None)),
             }
 
     def is_inter_node(self, num_gpus: int) -> bool:
