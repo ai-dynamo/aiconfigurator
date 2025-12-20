@@ -351,11 +351,6 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     model_config = param_values.get("ModelConfig", {})
     if model_config.get("is_moe"):
         context["is_moe"] = model_config["is_moe"]
-    if model_config.get("nextn"):
-        context["is_speculative"] = True
-        context["nextn"] = model_config["nextn"]
-    if model_config.get("nextn_accept_rates"):
-        context["nextn_accept_rates"] = model_config["nextn_accept_rates"]
 
     # Extract unified service configuration
     service_config = param_values.get("service", {})

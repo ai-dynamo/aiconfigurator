@@ -11,3 +11,7 @@ agg max_num_tokens = (max_batch_size or 0) + (SlaConfig.isl or 0) + 1500
 when (ModelConfig.prefix or 0) > 0:
     disable_prefix_cache = false
 
+when (ModelConfig.nextn or 0) > 0:
+    speculative_decoding_type = "mtp"
+    num_nextn_predict_layers = ModelConfig.nextn
+
