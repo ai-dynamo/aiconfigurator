@@ -471,21 +471,22 @@ def _run_attn_for_backend(
             latent_cache=latent_cache,
         )
     else:
+        num_tokens = generation_seq_len_q * len(context_sequence_lengths)
         compressed_kv = torch.randn(
-            [generation_seq_len_q * len(context_sequence_lengths), kv_lora_rank],
+            [num_tokens, kv_lora_rank],
             dtype=dtype,
             device=device,
         )
 
         k_pe = torch.randn(
-            [generation_seq_len_q * len(context_sequence_lengths), qk_rope_head_dim],
+            [num_tokens, qk_rope_head_dim],
             dtype=dtype,
             device=device,
         )
 
         fused_q = torch.randn(
             [
-                generation_seq_len_q * len(context_sequence_lengths),
+                num_tokens,
                 num_heads * (kv_lora_rank + qk_rope_head_dim),
             ],
             dtype=dtype,
@@ -493,21 +494,69 @@ def _run_attn_for_backend(
         )
 
         q_pe = torch.randn(
-            [generation_seq_len_q * len(context_sequence_lengths), num_heads, qk_rope_head_dim],
+            [num_tokens, num_heads, qk_rope_head_dim],
             dtype=dtype,
             device=device,
         )
 
         latent_cache = torch.cat([compressed_kv, k_pe], dim=-1)
-        attn_mla.forward(
-            fused_q,
-            None,
-            None,
-            attn_metadata,
-            attention_input_type=AttentionInputType.generation_only,
-            latent_cache=latent_cache,
-            q_pe=q_pe,
-        )
+
+        if tensorrt_llm.__version__ > "1.2.0rc2":
+            num_seqs = len(context_sequence_lengths)
+            cu_q_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
+            cu_kv_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
+            fmha_scheduler_counter = torch.empty(1, dtype=torch.uint32, device=device)
+
+            has_fp8_kv_cache = attn_mla.has_fp8_kv_cache if hasattr(attn_mla, "has_fp8_kv_cache") else False
+            if has_fp8_kv_cache:
+                mla_bmm1_scale = torch.empty(2, dtype=torch.float32, device=device)
+                mla_bmm2_scale = torch.empty(1, dtype=torch.float32, device=device)
+                quant_q_buffer = torch.empty(
+                    num_tokens, num_heads * (kv_lora_rank + qk_rope_head_dim), dtype=torch.uint8, device=device
+                )
+            else:
+                mla_bmm1_scale = None
+                mla_bmm2_scale = None
+                quant_q_buffer = None
+
+            # Call mla_rope_generation before forward
+            attn_mla.mla_rope_generation(
+                fused_q,
+                q_pe,
+                latent_cache,
+                attn_metadata,
+                cu_q_seqlens,
+                cu_kv_seqlens,
+                fmha_scheduler_counter,
+                mla_bmm1_scale,
+                mla_bmm2_scale,
+                quant_q_buffer,
+            )
+            attn_mla.forward(
+                fused_q,
+                None,
+                None,
+                attn_metadata,
+                attention_input_type=AttentionInputType.generation_only,
+                latent_cache=latent_cache,
+                q_pe=q_pe,
+                cu_q_seqlens=cu_q_seqlens,
+                cu_kv_seqlens=cu_kv_seqlens,
+                fmha_scheduler_counter=fmha_scheduler_counter,
+                mla_bmm1_scale=mla_bmm1_scale,
+                mla_bmm2_scale=mla_bmm2_scale,
+                quant_q_buffer=quant_q_buffer,
+            )
+        else:
+            attn_mla.forward(
+                fused_q,
+                None,
+                None,
+                attn_metadata,
+                attention_input_type=AttentionInputType.generation_only,
+                latent_cache=latent_cache,
+                q_pe=q_pe,
+            )
 
     # Use benchmark_with_power context manager
     def kernel_func():
@@ -521,15 +570,44 @@ def _run_attn_for_backend(
                 latent_cache=latent_cache,
             )
         else:
-            attn_mla.forward(
-                fused_q,
-                None,
-                None,
-                attn_metadata,
-                attention_input_type=AttentionInputType.generation_only,
-                latent_cache=latent_cache,
-                q_pe=q_pe,
-            )
+            if tensorrt_llm.__version__ > "1.2.0rc2":
+                attn_mla.mla_rope_generation(
+                    fused_q,
+                    q_pe,
+                    latent_cache,
+                    attn_metadata,
+                    cu_q_seqlens,
+                    cu_kv_seqlens,
+                    fmha_scheduler_counter,
+                    mla_bmm1_scale,
+                    mla_bmm2_scale,
+                    quant_q_buffer,
+                )
+                attn_mla.forward(
+                    fused_q,
+                    None,
+                    None,
+                    attn_metadata,
+                    attention_input_type=AttentionInputType.generation_only,
+                    latent_cache=latent_cache,
+                    q_pe=q_pe,
+                    cu_q_seqlens=cu_q_seqlens,
+                    cu_kv_seqlens=cu_kv_seqlens,
+                    fmha_scheduler_counter=fmha_scheduler_counter,
+                    mla_bmm1_scale=mla_bmm1_scale,
+                    mla_bmm2_scale=mla_bmm2_scale,
+                    quant_q_buffer=quant_q_buffer,
+                )
+            else:
+                attn_mla.forward(
+                    fused_q,
+                    None,
+                    None,
+                    attn_metadata,
+                    attention_input_type=AttentionInputType.generation_only,
+                    latent_cache=latent_cache,
+                    q_pe=q_pe,
+                )
 
     with benchmark_with_power(
         device=device,
