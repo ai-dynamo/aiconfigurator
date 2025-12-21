@@ -62,21 +62,42 @@ def run_attention_torch(
         # set a reasonable minimum
         8192,
     )
-
-    # Let vllm choose the backend.
-    backend = current_platform.get_attn_backend_cls(
-        None,
-        head_dim,
-        dtype,
-        kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-        block_size=block_size,
-        use_v1=True,
-        use_mla=True,
-        has_sink=False,
-        use_sparse=False,
-    )
-    backend_name = _Backend[resolve_obj_by_qualname(backend).get_name()]
-    print(f"VLLM chose MLA backend: {backend_name}")
+    try:
+        # Let vllm choose the backend.
+        # defautl for vllm 0.11.0
+        backend = current_platform.get_attn_backend_cls(
+            None,
+            head_dim,
+            dtype,
+            kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+            block_size=block_size,
+            use_v1=True,
+            use_mla=True,
+            has_sink=False,
+            use_sparse=False,
+        )
+    except TypeError:
+        # in the case of vllm 0.12.0 use_v1 is removed
+        backend = current_platform.get_attn_backend_cls(
+            None,
+            head_dim,
+            dtype,
+            kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+            block_size=block_size,
+            use_mla=True,
+            has_sink=False,
+            use_sparse=False,
+        )
+    if _Backend is not None:
+        backend_name = _Backend[resolve_obj_by_qualname(backend).get_name()]
+        print(f"VLLM chose MLA backend: {backend_name}")
+        builder_cls, impl_cls = get_attention_backend(backend_name)
+    else:
+        backend_cls = resolve_obj_by_qualname(backend)
+        backend_name = backend_cls.get_name()
+        print(f"VLLM chose MLA backend: {backend_name}")
+        builder_cls = backend_cls.get_builder_cls()
+        impl_cls = backend_cls.get_impl_cls()
 
     if is_context_phase:
         batch_spec = BatchSpec(
@@ -151,7 +172,6 @@ def run_attention_torch(
     )
 
     # Build metadata
-    builder_cls, impl_cls = get_attention_backend(backend_name)
     layer_names = ["placeholder"]
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
     attn_metadata = builder.build(
