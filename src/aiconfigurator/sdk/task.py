@@ -169,7 +169,7 @@ class TaskConfigFactory:
 
     @staticmethod
     def _base_common_layer(ctx: TaskContext) -> dict:
-        nextn = 1 if ctx.model_name in ["DEEPSEEK_V3", "KIMI_K2"] else 0
+        nextn = 1 if ctx.model_family == "DEEPSEEK" else 0
         return {
             "serving_mode": ctx.serving_mode,
             "model_name": ctx.model_name,
@@ -439,6 +439,7 @@ class TaskConfigFactory:
         cls._apply_quant_modes(
             target_cfg=worker_config,
             model_name=ctx.model_name,
+            model_family=ctx.model_family,
             system=worker_config.system_name,
             backend=worker_config.backend_name,
             version=worker_config.backend_version,
@@ -468,6 +469,7 @@ class TaskConfigFactory:
         cls._apply_quant_modes(
             target_cfg=prefill_cfg,
             model_name=ctx.model_name,
+            model_family=ctx.model_family,
             system=prefill_cfg.system_name,
             backend=prefill_cfg.backend_name,
             version=prefill_cfg.backend_version,
@@ -477,6 +479,7 @@ class TaskConfigFactory:
         cls._apply_quant_modes(
             target_cfg=decode_cfg,
             model_name=ctx.model_name,
+            model_family=ctx.model_family,
             system=decode_cfg.system_name,
             backend=decode_cfg.backend_name,
             version=decode_cfg.backend_version,
@@ -487,6 +490,7 @@ class TaskConfigFactory:
     def _apply_quant_modes(
         target_cfg: DefaultMunch,
         model_name: str,
+        model_family: str,
         system: str,
         backend: str,
         version: str,
@@ -508,6 +512,7 @@ class TaskConfigFactory:
         database = get_database(system=system, backend=backend, version=version)
         defaults = TaskConfigFactory._get_quant_mode(
             model_name=model_name,
+            model_family=model_family,
             backend=backend,
             database=database,
             use_specific_quant_mode=preferred_mode,
@@ -521,33 +526,48 @@ class TaskConfigFactory:
     @staticmethod
     def _get_quant_mode(
         model_name: str,
+        model_family: str,
         backend: str,
         database: PerfDatabase,
         use_specific_quant_mode: str | None = None,
     ) -> tuple[str, str, str, str, str]:
         gemm_quant_mode = "fp8_block"
         kvcache_quant_mode = "fp8"
-        fmha_quant_mode = "float16" if model_name in ["DEEPSEEK_V3", "KIMI_K2"] else "fp8"
+        fmha_quant_mode = "float16" if model_family == "DEEPSEEK" else "fp8"
         comm_quant_mode = "half"
 
         sm_version = database.system_spec["gpu"]["sm_version"]
+
+        supported = getattr(database, "supported_quant_mode", {}) or {}
+        supported_gemm = set(supported.get("gemm", []) or [])
+        supported_moe = set(supported.get("moe", []) or [])
+        # Note: attention support is more complex (depends on kv_cache_dtype etc),
+        # so we validate/pick those using the underlying perf tables instead.
+
+        def _pick(preferred: list[str], supported_set: set[str], fallback: str) -> str:
+            for m in preferred:
+                if not supported_set or m in supported_set:
+                    return m
+            return fallback
 
         if backend == "vllm":
             # TODO: collect fp8_block quant mode data for vllm
             fp8_gemm_quant = "fp8"
             fp8_fhma_quant = "float16"
         else:
-            fp8_gemm_quant = "fp8_block"
-            fp8_fhma_quant = "fp8"
+            # fp8_block GEMM requires SM90+ (TMA). On SM89 (e.g., L40S) we use fp8 instead.
+            fp8_gemm_quant = "fp8_block" if sm_version >= 90 else "fp8"
+            # FP8 attention is effectively SM90+ only; on SM89 prefer float16/bf16.
+            fp8_fhma_quant = "fp8" if sm_version >= 90 else "float16"
 
         if sm_version >= 100:
-            gemm_quant_mode = "nvfp4"
-            moe_quant_mode = "nvfp4"
+            gemm_quant_mode = _pick(["nvfp4", "fp8_block", "fp8", "float16"], supported_gemm, "nvfp4")
+            moe_quant_mode = _pick(["nvfp4", "fp8_block", "float16"], supported_moe, "nvfp4")
             kvcache_quant_mode = "fp8"
             fmha_quant_mode = fp8_fhma_quant
         elif sm_version >= 89:
-            gemm_quant_mode = fp8_gemm_quant
-            moe_quant_mode = fp8_gemm_quant
+            gemm_quant_mode = _pick([fp8_gemm_quant, "fp8", "float16"], supported_gemm, fp8_gemm_quant)
+            moe_quant_mode = _pick([fp8_gemm_quant, "float16"], supported_moe, fp8_gemm_quant)
             fmha_quant_mode = fp8_fhma_quant
             kvcache_quant_mode = "fp8"
         else:
@@ -556,14 +576,10 @@ class TaskConfigFactory:
             kvcache_quant_mode = "float16"
             fmha_quant_mode = "float16"
 
-        if model_name in ["DEEPSEEK_V3", "KIMI_K2"]:
+        if model_family == "DEEPSEEK":
             fmha_quant_mode = "float16"
 
-        if (
-            any(keyword in model_name for keyword in ["MOE_Mixtral", "QWEN2", "LLAMA"])
-            and sm_version < 100
-            and sm_version >= 89
-        ):
+        if model_family in ["MOE", "LLAMA"] and sm_version < 100 and sm_version >= 89:
             gemm_quant_mode = fp8_gemm_quant
             moe_quant_mode = fp8_gemm_quant
 
@@ -571,6 +587,29 @@ class TaskConfigFactory:
             if use_specific_quant_mode != "w4afp8":
                 gemm_quant_mode = use_specific_quant_mode
             moe_quant_mode = use_specific_quant_mode
+
+        # Pick a KV-cache dtype that is actually present in the attention perf tables.
+        # On l40s/sglang, attention tables are often only collected for kv_cache_dtype=float16.
+        available_kv: set[str] = set()
+        try:
+            if getattr(database, "_generation_attention_data", None):
+                available_kv |= {k.name for k in database._generation_attention_data}
+        except Exception:
+            pass
+        try:
+            if getattr(database, "_context_attention_data", None):
+                fmha_enum = common.FMHAQuantMode[fmha_quant_mode]
+                if fmha_enum in database._context_attention_data:
+                    available_kv |= {k.name for k in database._context_attention_data[fmha_enum]}
+        except Exception:
+            pass
+
+        if available_kv and kvcache_quant_mode not in available_kv:
+            kvcache_quant_mode = _pick(
+                [kvcache_quant_mode, "float16", "bf16", "fp8"],
+                available_kv,
+                kvcache_quant_mode,
+            )
 
         return (
             gemm_quant_mode,
@@ -817,6 +856,79 @@ class TaskConfig:
         # TODO: add more support matrix based validation
         if self.backend_name == "vllm" and get_model_family(self.model_name) == "DEEPSEEK":
             raise NotImplementedError("AIConfigurator does not yet support DEEPSEEK models for VLLM backend.")
+
+        # Validate requested quant modes against available perf data early, to avoid
+        # late interpolation/assert failures and to provide actionable guidance.
+        try:
+            database = get_database(system=self.system_name, backend=self.backend_name, version=self.backend_version)
+        except Exception:
+            # If database can't be loaded at all, let downstream handle/report it.
+            return
+
+        supported = getattr(database, "supported_quant_mode", {}) or {}
+
+        def _supported_or_raise(op: str, mode_name: str | None) -> None:
+            if mode_name is None:
+                return
+            supported_modes = supported.get(op, []) or []
+            if supported_modes and mode_name not in supported_modes:
+                raise ValueError(
+                    f"Unsupported {op} quant mode '{mode_name}' for system='{self.system_name}', "
+                    f"backend='{self.backend_name}', version='{self.backend_version}'. "
+                    f"Supported {op} modes: {sorted(supported_modes)}"
+                )
+
+        def _to_name(value: object) -> str | None:
+            if value is None:
+                return None
+            return value.name if hasattr(value, "name") else str(value)
+
+        def _validate_kvcache_for_attention(wc: object) -> None:
+            kv = _to_name(getattr(wc, "kvcache_quant_mode", None))
+            fmha = _to_name(getattr(wc, "fmha_quant_mode", None))
+            if kv is None:
+                return
+            # generation_attention: keyed by KV cache dtype
+            gen = getattr(database, "_generation_attention_data", None)
+            if gen:
+                allowed = sorted([k.name for k in gen])
+                if allowed and kv not in allowed:
+                    raise ValueError(
+                        f"Unsupported generation_attention kv_cache_dtype '{kv}' for system='{self.system_name}', "
+                        f"backend='{self.backend_name}', version='{self.backend_version}'. "
+                        f"Supported kv_cache_dtype: {allowed}"
+                    )
+            # context_attention: keyed by fmha then KV cache dtype
+            ctx = getattr(database, "_context_attention_data", None)
+            if ctx and fmha is not None:
+                try:
+                    fmha_enum = common.FMHAQuantMode[fmha]
+                except Exception:
+                    return
+                if fmha_enum in ctx:
+                    allowed = sorted([k.name for k in ctx[fmha_enum]])
+                    if allowed and kv not in allowed:
+                        raise ValueError(
+                            f"Unsupported context_attention kv_cache_dtype '{kv}' for fmha='{fmha}' "
+                            f"on system='{self.system_name}', backend='{self.backend_name}', "
+                            f"version='{self.backend_version}'. Supported kv_cache_dtype: {allowed}"
+                        )
+
+        # agg/disagg worker configs use the same field names
+        if self.config.serving_mode == "agg":
+            wc = self.config.worker_config
+            _supported_or_raise("gemm", _to_name(getattr(wc, "gemm_quant_mode", None)))
+            _supported_or_raise("moe", _to_name(getattr(wc, "moe_quant_mode", None)))
+            _supported_or_raise("context_attention", _to_name(getattr(wc, "fmha_quant_mode", None)))
+            _supported_or_raise("generation_attention", _to_name(getattr(wc, "fmha_quant_mode", None)))
+            _validate_kvcache_for_attention(wc)
+        elif self.config.serving_mode == "disagg":
+            for wc in (self.config.prefill_worker_config, self.config.decode_worker_config):
+                _supported_or_raise("gemm", _to_name(getattr(wc, "gemm_quant_mode", None)))
+                _supported_or_raise("moe", _to_name(getattr(wc, "moe_quant_mode", None)))
+                _supported_or_raise("context_attention", _to_name(getattr(wc, "fmha_quant_mode", None)))
+                _supported_or_raise("generation_attention", _to_name(getattr(wc, "fmha_quant_mode", None)))
+                _validate_kvcache_for_attention(wc)
 
     def pretty(self) -> str:
         def _convert(obj: Any) -> Any:
