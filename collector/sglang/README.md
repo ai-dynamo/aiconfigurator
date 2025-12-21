@@ -56,28 +56,39 @@ Use the `collect.py` framework for integrated collection with other operators:
 ```bash
 cd /path/to/collector/
 
+# Run ALL sglang operators (13 total: 8 non-wideep + 5 wideep)
+python collect.py --backend sglang
+
 # Run wideep collectors only
 python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generation
 
 # Run all wideep operators
 python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generation \
-    wideep_mla_prefill wideep_mla_decode wideep_moe_context wideep_moe_generation
+    wideep_mla_context wideep_mla_generation wideep_moe
 
 # Mixed: non-wideep (multi-GPU) + wideep (single-GPU)
 python collect.py --backend sglang --ops mla_bmm_gen_pre wideep_mlp_context
 ```
 
-**Available wideep operators:**
-| Operator | Description |
-|----------|-------------|
-| `wideep_mlp_context` | MLP prefill phase |
-| `wideep_mlp_generation` | MLP decode phase |
-| `wideep_mla_prefill` | MLA prefill phase |
-| `wideep_mla_decode` | MLA decode phase |
-| `wideep_moe_context` | MoE prefill phase |
-| `wideep_moe_generation` | MoE decode phase |
+**All available operators (when no `--ops` specified):**
 
-**Note:** Wideep collectors are automatically executed in single-process mode to prevent NCCL/distributed initialization conflicts, while non-wideep collectors can run in parallel across multiple GPUs.
+| Category | Operator | Description |
+|----------|----------|-------------|
+| Non-wideep | `gemm` | GEMM matrix multiplication |
+| Non-wideep | `mla_context` | MLA prefill phase |
+| Non-wideep | `mla_generation` | MLA decode phase |
+| Non-wideep | `mla_bmm_gen_pre` | MLA BMM gen pre |
+| Non-wideep | `mla_bmm_gen_post` | MLA BMM gen post |
+| Non-wideep | `moe` | MOE operator |
+| Non-wideep | `attention_context` | Standard Attention prefill |
+| Non-wideep | `attention_generation` | Standard Attention decode |
+| Wideep | `wideep_mla_context` | Wideep MLA prefill |
+| Wideep | `wideep_mla_generation` | Wideep MLA decode |
+| Wideep | `wideep_mlp_context` | Wideep MLP prefill |
+| Wideep | `wideep_mlp_generation` | Wideep MLP decode |
+| Wideep | `wideep_moe` | Wideep MOE |
+
+**Note:** Non-wideep operators run in parallel across multiple GPUs. Wideep operators are automatically executed in single-process mode to prevent NCCL/distributed initialization conflicts.
 
 ## General Configuration
 
@@ -105,7 +116,7 @@ python collect_wideep_attn.py --device cuda:0 --output-path /path/to/output/
 
 #### Framework Mode
 ```bash
-python collect.py --backend sglang --ops wideep_mla_prefill wideep_mla_decode
+python collect.py --backend sglang --ops wideep_mla_context wideep_mla_generation
 ```
 
 #### Environment Variables
@@ -149,7 +160,7 @@ python collect_wideep_deepep_moe.py --device cuda:0 --output-path /path/to/outpu
 
 #### Framework Mode
 ```bash
-python collect.py --backend sglang --ops wideep_moe_context wideep_moe_generation
+python collect.py --backend sglang --ops wideep_moe
 ```
 
 #### Environment Variables
