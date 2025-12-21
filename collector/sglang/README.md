@@ -26,6 +26,59 @@ docker run -itd --shm-size 32g --gpus all --ipc=host --network=host --name sglan
 ```
 - DeepSeek model config (or use dummy weights)
 
+## Execution Modes
+
+The wideep collectors support two execution modes:
+
+### Mode 1: Direct Execution
+
+Run scripts directly with command-line arguments for single GPU collection:
+
+```bash
+# MLP
+python collect_wideep_mlp.py --device cuda:0 --output-path /path/to/output/
+
+# Attention (MLA)
+python collect_wideep_attn.py --device cuda:0 --output-path /path/to/output/
+
+# MoE
+python collect_wideep_deepep_moe.py --device cuda:0 --output-path /path/to/output/
+```
+
+**Arguments:**
+- `--device`: CUDA device (e.g., `cuda:0`, `cuda:1`)
+- `--output-path`: Directory to save performance data files
+
+### Mode 2: Framework Execution (collect.py)
+
+Use the `collect.py` framework for integrated collection with other operators:
+
+```bash
+cd /path/to/collector/
+
+# Run wideep collectors only
+python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generation
+
+# Run all wideep operators
+python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generation \
+    wideep_mla_prefill wideep_mla_decode wideep_moe_context wideep_moe_generation
+
+# Mixed: non-wideep (multi-GPU) + wideep (single-GPU)
+python collect.py --backend sglang --ops mla_bmm_gen_pre wideep_mlp_context
+```
+
+**Available wideep operators:**
+| Operator | Description |
+|----------|-------------|
+| `wideep_mlp_context` | MLP prefill phase |
+| `wideep_mlp_generation` | MLP decode phase |
+| `wideep_mla_prefill` | MLA prefill phase |
+| `wideep_mla_decode` | MLA decode phase |
+| `wideep_moe_context` | MoE prefill phase |
+| `wideep_moe_generation` | MoE decode phase |
+
+**Note:** Wideep collectors are automatically executed in single-process mode to prevent NCCL/distributed initialization conflicts, while non-wideep collectors can run in parallel across multiple GPUs.
+
 ## General Configuration
 
 All scripts save results to the same output directory. Modify `output_path` in each script to your desired location:
@@ -44,11 +97,17 @@ output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0
 
 ### Usage
 
-#### Basic Run with dummy weight
+#### Direct Mode
 ```bash
 export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python collect_wideep_attn.py
+python collect_wideep_attn.py --device cuda:0 --output-path /path/to/output/
 ```
+
+#### Framework Mode
+```bash
+python collect.py --backend sglang --ops wideep_mla_prefill wideep_mla_decode
+```
+
 #### Environment Variables
 - `DEEPSEEK_MODEL_PATH`: Path to DeepSeek model 
 - `SGLANG_LOAD_FORMAT`: Load format, set to `dummy` to skip weight loading
@@ -82,10 +141,15 @@ framework,version,device,op_name,kernel_source,mla_dtype,kv_cache_dtype,num_head
 
 ### Usage
 
-#### Basic Run
+#### Direct Mode
 ```bash
 export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python collect_wideep_deepep_moe.py
+python collect_wideep_deepep_moe.py --device cuda:0 --output-path /path/to/output/
+```
+
+#### Framework Mode
+```bash
+python collect.py --backend sglang --ops wideep_moe_context wideep_moe_generation
 ```
 
 #### Environment Variables
@@ -146,10 +210,15 @@ framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,
 
 ### Usage
 
-#### Basic Run
+#### Direct Mode
 ```bash
 export DEEPSEEK_MODEL_PATH=/path/to/deepseek-v3
-python collect_wideep_mlp.py
+python collect_wideep_mlp.py --device cuda:0 --output-path /path/to/output/
+```
+
+#### Framework Mode
+```bash
+python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generation
 ```
 
 #### Environment Variables
