@@ -21,7 +21,6 @@ exp_disagg_wideep:
   system_name: "h200_sxm" 
   decode_system_name: "h200_sxm" 
   backend_name: "sglang" 
-  backend_version: "0.5.1.post1" 
   isl: 1000 # input sequence length, optional, default to 4000
   osl: 100 # output sequence length, optional, default to 1000
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
@@ -77,7 +76,6 @@ exp_disagg_non_wideep:
   system_name: "h200_sxm" 
   decode_system_name: "h200_sxm" 
   backend_name: "sglang" 
-  backend_version: "0.5.1.post1" 
   isl: 1000 # input sequence length, optional, default to 4000
   osl: 100 # output sequence length, optional, default to 1000
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
