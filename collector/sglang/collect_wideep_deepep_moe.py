@@ -162,222 +162,228 @@ def benchmark_moe_layer_prefill(
     """
 
     for case in prefill_test_cases:
-        # Backward compatible: old format was just an int
-        if isinstance(case, dict):
-            num_token = case["num_tokens"]
-            distributed = case.get("distributed", "uniform")
-            power_law_alpha = case.get("power_law_alpha", 0.8) if distributed == "power_law" else None
-        else:
-            num_token = int(case)
-            distributed = "uniform"
-            power_law_alpha = None
+        try:
+            # Backward compatible: old format was just an int
+            if isinstance(case, dict):
+                num_token = case["num_tokens"]
+                distributed = case.get("distributed", "uniform")
+                power_law_alpha = case.get("power_law_alpha", 0.8) if distributed == "power_law" else None
+            else:
+                num_token = int(case)
+                distributed = "uniform"
+                power_law_alpha = None
 
-        model_runner.req_to_token_pool.clear()
-        model_runner.token_to_kv_pool_allocator.clear()
+            model_runner.req_to_token_pool.clear()
+            model_runner.token_to_kv_pool_allocator.clear()
 
-        # Fake dispatch outputs with random data
-        hidden_states_per_token_iter = torch.randn(
-            int(num_token * simulated_ep_size),
-            model_runner.model.config.hidden_size,
-            dtype=torch.bfloat16,
-            device=device,
-        )
+            # Fake dispatch outputs with random data
+            hidden_states_per_token_iter = torch.randn(
+                int(num_token * simulated_ep_size),
+                model_runner.model.config.hidden_size,
+                dtype=torch.bfloat16,
+                device=device,
+            )
 
-        if hidden_states_per_token_iter.shape[1] % 128 != 0:
-            pad_size = 128 - (hidden_states_per_token_iter.shape[1] % 128)
-            hidden_states_per_token_iter = torch.nn.functional.pad(hidden_states_per_token_iter, (0, pad_size))
+            if hidden_states_per_token_iter.shape[1] % 128 != 0:
+                pad_size = 128 - (hidden_states_per_token_iter.shape[1] % 128)
+                hidden_states_per_token_iter = torch.nn.functional.pad(hidden_states_per_token_iter, (0, pad_size))
 
-        hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
-        scale_tensor_iter = torch.ones(
-            hidden_states_per_token_iter.shape[0],
-            hidden_states_per_token_iter.shape[1] // 128,
-            device=hidden_states_per_token_iter.device,
-            dtype=torch.float32,
-        )
+            hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
+            scale_tensor_iter = torch.ones(
+                hidden_states_per_token_iter.shape[0],
+                hidden_states_per_token_iter.shape[1] // 128,
+                device=hidden_states_per_token_iter.device,
+                dtype=torch.float32,
+            )
 
-        num_tokens_iter = hidden_states_per_token_iter.shape[0]
-        topk = 8
-        topk_idx_iter = torch.full((num_tokens_iter, topk), -1, device=device, dtype=torch.int32)
-        topk_weights_iter = torch.zeros((num_tokens_iter, topk), device=device, dtype=torch.float32)
+            num_tokens_iter = hidden_states_per_token_iter.shape[0]
+            topk = 8
+            topk_idx_iter = torch.full((num_tokens_iter, topk), -1, device=device, dtype=torch.int32)
+            topk_weights_iter = torch.zeros((num_tokens_iter, topk), device=device, dtype=torch.float32)
 
-        if distributed == "uniform":
-            tokens_per_local_expert = int(num_token * topk * simulated_ep_size // 256)
-            rank_print(f"tokens_per_local_expert: {tokens_per_local_expert}")
-            if tokens_per_local_expert <= 0:
-                continue
-            num_recv = [tokens_per_local_expert] * num_local_experts
+            if distributed == "uniform":
+                tokens_per_local_expert = int(num_token * topk * simulated_ep_size // 256)
+                rank_print(f"tokens_per_local_expert: {tokens_per_local_expert}")
+                if tokens_per_local_expert <= 0:
+                    continue
+                num_recv = [tokens_per_local_expert] * num_local_experts
 
-            total_valid_positions = sum(num_recv)
-            expert_indices_list = []
-            for expert_id in range(num_local_experts):
-                expert_indices_list.extend([expert_id] * tokens_per_local_expert)
+                total_valid_positions = sum(num_recv)
+                expert_indices_list = []
+                for expert_id in range(num_local_experts):
+                    expert_indices_list.extend([expert_id] * tokens_per_local_expert)
 
-            expert_indices_tensor = torch.tensor(expert_indices_list, device=device, dtype=torch.int32)
-            shuffled_indices = torch.randperm(len(expert_indices_tensor), device=device)
-            expert_indices_tensor = expert_indices_tensor[shuffled_indices]
+                expert_indices_tensor = torch.tensor(expert_indices_list, device=device, dtype=torch.int32)
+                shuffled_indices = torch.randperm(len(expert_indices_tensor), device=device)
+                expert_indices_tensor = expert_indices_tensor[shuffled_indices]
 
-            positions_per_row = total_valid_positions // num_tokens_iter
-            extra_positions = total_valid_positions % num_tokens_iter
+                positions_per_row = total_valid_positions // num_tokens_iter
+                extra_positions = total_valid_positions % num_tokens_iter
 
-            valid_positions_count = 0
-            for i in range(num_tokens_iter):
-                current_row_positions = positions_per_row + (1 if i < extra_positions else 0)
-                for j in range(current_row_positions):
-                    if valid_positions_count < total_valid_positions:
-                        topk_idx_iter[i, j % topk] = expert_indices_tensor[valid_positions_count]
-                        valid_positions_count += 1
-                    else:
-                        break
+                valid_positions_count = 0
+                for i in range(num_tokens_iter):
+                    current_row_positions = positions_per_row + (1 if i < extra_positions else 0)
+                    for j in range(current_row_positions):
+                        if valid_positions_count < total_valid_positions:
+                            topk_idx_iter[i, j % topk] = expert_indices_tensor[valid_positions_count]
+                            valid_positions_count += 1
+                        else:
+                            break
 
-            # Uniform weights across used columns
-            for i in range(num_tokens_iter):
-                used_mask = topk_idx_iter[i] != -1
-                if used_mask.any():
-                    topk_weights_iter[i, used_mask] = 1.0 / topk
+                # Uniform weights across used columns
+                for i in range(num_tokens_iter):
+                    used_mask = topk_idx_iter[i] != -1
+                    if used_mask.any():
+                        topk_weights_iter[i, used_mask] = 1.0 / topk
 
-        elif distributed == "power_law":
-            # Use power_law_deepep_prefill to generate router logits for local experts
-            # Generate multiple samples to avoid outliers from a single sampling
-            power_law_samples = []
-            for _ in range(5):
-                topk_idx_sample, topk_weights_sample, num_recv_tensor = power_law_deepep_prefill(
-                    num_tokens_iter,
-                    num_local_experts * simulated_ep_size,
-                    topk,
-                    simulated_ep_size,
-                    power_law_alpha if power_law_alpha is not None else 0.8,
-                )
-                topk_idx_sample = topk_idx_sample.to(device).contiguous()
-                topk_weights_sample = topk_weights_sample.to(device).contiguous()
-                topk_weights_sample = torch.nan_to_num(topk_weights_sample, nan=0.0, posinf=0.0, neginf=0.0)
-                num_recv = num_recv_tensor.tolist()
-                power_law_samples.append((topk_idx_sample, topk_weights_sample, num_recv))
+            elif distributed == "power_law":
+                # Use power_law_deepep_prefill to generate router logits for local experts
+                # Generate multiple samples to avoid outliers from a single sampling
+                power_law_samples = []
+                for _ in range(5):
+                    topk_idx_sample, topk_weights_sample, num_recv_tensor = power_law_deepep_prefill(
+                        num_tokens_iter,
+                        num_local_experts * simulated_ep_size,
+                        topk,
+                        simulated_ep_size,
+                        power_law_alpha if power_law_alpha is not None else 0.8,
+                    )
+                    topk_idx_sample = topk_idx_sample.to(device).contiguous()
+                    topk_weights_sample = topk_weights_sample.to(device).contiguous()
+                    topk_weights_sample = torch.nan_to_num(topk_weights_sample, nan=0.0, posinf=0.0, neginf=0.0)
+                    num_recv = num_recv_tensor.tolist()
+                    power_law_samples.append((topk_idx_sample, topk_weights_sample, num_recv))
 
-        else:
-            raise ValueError(f"Unsupported distributed mode: {distributed}")
+            else:
+                raise ValueError(f"Unsupported distributed mode: {distributed}")
 
-        # For uniform distribution, create a single-element list for unified processing
-        if distributed == "uniform":
-            # Safety clamp for weights
-            topk_weights_iter = torch.nan_to_num(topk_weights_iter, nan=0.0, posinf=0.0, neginf=0.0)
-            power_law_samples = [(topk_idx_iter, topk_weights_iter, num_recv)]
+            # For uniform distribution, create a single-element list for unified processing
+            if distributed == "uniform":
+                # Safety clamp for weights
+                topk_weights_iter = torch.nan_to_num(topk_weights_iter, nan=0.0, posinf=0.0, neginf=0.0)
+                power_law_samples = [(topk_idx_iter, topk_weights_iter, num_recv)]
 
-        # Warmup
-        for _ in range(num_warmup):
-            for topk_idx_sample, topk_weights_sample, num_recv_sample in power_law_samples:
-                hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
-                scale_tensor_iter = torch.ones(
-                    hidden_states_per_token_iter.shape[0],
-                    hidden_states_per_token_iter.shape[1] // 128,
-                    device=hidden_states_per_token_iter.device,
-                    dtype=torch.float32,
-                )
-                dispatch_output = DeepEPNormalDispatchOutput(
-                    hidden_states=hidden_states_fp8_tensor_iter,
-                    hidden_states_scale=scale_tensor_iter,
-                    topk_ids=topk_idx_sample.clone(),
-                    topk_weights=topk_weights_sample.clone(),
-                    num_recv_tokens_per_expert=num_recv_sample,
-                )
-                _ = moe_layer.experts.run_moe_core(dispatch_output)
+            # Warmup
+            for _ in range(num_warmup):
+                for topk_idx_sample, topk_weights_sample, num_recv_sample in power_law_samples:
+                    hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
+                    scale_tensor_iter = torch.ones(
+                        hidden_states_per_token_iter.shape[0],
+                        hidden_states_per_token_iter.shape[1] // 128,
+                        device=hidden_states_per_token_iter.device,
+                        dtype=torch.float32,
+                    )
+                    dispatch_output = DeepEPNormalDispatchOutput(
+                        hidden_states=hidden_states_fp8_tensor_iter,
+                        hidden_states_scale=scale_tensor_iter,
+                        topk_ids=topk_idx_sample.clone(),
+                        topk_weights=topk_weights_sample.clone(),
+                        num_recv_tokens_per_expert=num_recv_sample,
+                    )
+                    _ = moe_layer.experts.run_moe_core(dispatch_output)
 
-        torch.get_device_module(device).synchronize()
-        torch.cuda.empty_cache()
+            torch.get_device_module(device).synchronize()
+            torch.cuda.empty_cache()
 
-        gemm_latencies = []
+            gemm_latencies = []
 
-        # Use profiler for synchronization
-        profiler = torch.profiler.profile(
-            with_stack=True,
-        )
-        profiler.start()
+            # Use profiler for synchronization
+            profiler = torch.profiler.profile(
+                with_stack=True,
+            )
+            profiler.start()
 
-        for i in range(num_iterations):
-            for topk_idx_sample, topk_weights_sample, num_recv_sample in power_law_samples:
-                hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
-                scale_tensor_iter = torch.ones(
-                    hidden_states_per_token_iter.shape[0],
-                    hidden_states_per_token_iter.shape[1] // 128,
-                    device=hidden_states_per_token_iter.device,
-                    dtype=torch.float32,
-                )
-                dispatch_output = DeepEPNormalDispatchOutput(
-                    hidden_states=hidden_states_fp8_tensor_iter,
-                    hidden_states_scale=scale_tensor_iter,
-                    topk_ids=topk_idx_sample.clone(),
-                    topk_weights=topk_weights_sample.clone(),
-                    num_recv_tokens_per_expert=num_recv_sample,
-                )
-                torch.get_device_module(device).synchronize()
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
-                start_event.record()
+            for i in range(num_iterations):
+                for topk_idx_sample, topk_weights_sample, num_recv_sample in power_law_samples:
+                    hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
+                    scale_tensor_iter = torch.ones(
+                        hidden_states_per_token_iter.shape[0],
+                        hidden_states_per_token_iter.shape[1] // 128,
+                        device=hidden_states_per_token_iter.device,
+                        dtype=torch.float32,
+                    )
+                    dispatch_output = DeepEPNormalDispatchOutput(
+                        hidden_states=hidden_states_fp8_tensor_iter,
+                        hidden_states_scale=scale_tensor_iter,
+                        topk_ids=topk_idx_sample.clone(),
+                        topk_weights=topk_weights_sample.clone(),
+                        num_recv_tokens_per_expert=num_recv_sample,
+                    )
+                    torch.get_device_module(device).synchronize()
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    start_event.record()
 
-                _ = moe_layer.experts.run_moe_core(dispatch_output)
+                    _ = moe_layer.experts.run_moe_core(dispatch_output)
 
-                torch.get_device_module(device).synchronize()
-                end_event.record()
-                latency_ms = start_event.elapsed_time(end_event)
-                if i > 2:
-                    gemm_latencies.append(latency_ms)
+                    torch.get_device_module(device).synchronize()
+                    end_event.record()
+                    latency_ms = start_event.elapsed_time(end_event)
+                    if i > 2:
+                        gemm_latencies.append(latency_ms)
 
-        profiler.stop()
-        torch.cuda.empty_cache()
+            profiler.stop()
+            torch.cuda.empty_cache()
 
-        avg_latency_ms = np.mean(gemm_latencies)
+            avg_latency_ms = np.mean(gemm_latencies)
 
-        if tp_rank == 0:
-            rank_print("DeepEP MoE GEMM Results (Prefill):")
-            rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
-        if tp_rank == 0:
-            try:
-                moe_tp_size = 1
-                moe_ep_size = simulated_ep_size
-                num_tokens_log = num_token * simulated_ep_size
-                device_name = torch.cuda.get_device_name(server_args.device)
-                version = pkg_resources.get_distribution("sglang").version
-                perf_filename = (
-                    "wideep_context_moe_perf.txt"
-                    if output_path is None
-                    else os.path.join(output_path, "wideep_context_moe_perf.txt")
-                )
-                if output_path is not None:
-                    os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
-                distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
-                log_perf(
-                    item_list=[
-                        {
-                            "moe_dtype": "fp8_block",
-                            "num_tokens": num_tokens_log,
-                            "hidden_size": 7168,
-                            "inter_size": 2048,
-                            "topk": 8,
-                            "num_experts": 256,
-                            "moe_tp_size": moe_tp_size,
-                            "moe_ep_size": moe_ep_size,
-                            "distribution": distribution_str,
-                            "latency": avg_latency_ms,
-                        }
-                    ],
-                    framework="SGLang",
-                    version=version,
-                    device_name=device_name,
-                    op_name="moe_context",
-                    kernel_source="deepepmoe",
-                    perf_filename=perf_filename,
-                )
-            except Exception as e:
-                rank_print(f"  Warning: failed to log prefill MoE metrics: {e}")
-        del (
-            hidden_states_per_token_iter,
-            hidden_states_fp8_tensor_iter,
-            scale_tensor_iter,
-            topk_idx_iter,
-            topk_weights_iter,
-            num_recv,
-            dispatch_output,
-        )
-        torch.cuda.empty_cache()
+            if tp_rank == 0:
+                rank_print("DeepEP MoE GEMM Results (Prefill):")
+                rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
+            if tp_rank == 0:
+                try:
+                    moe_tp_size = 1
+                    moe_ep_size = simulated_ep_size
+                    num_tokens_log = num_token * simulated_ep_size
+                    device_name = torch.cuda.get_device_name(server_args.device)
+                    version = pkg_resources.get_distribution("sglang").version
+                    perf_filename = (
+                        "wideep_context_moe_perf.txt"
+                        if output_path is None
+                        else os.path.join(output_path, "wideep_context_moe_perf.txt")
+                    )
+                    if output_path is not None:
+                        os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                    distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
+                    log_perf(
+                        item_list=[
+                            {
+                                "moe_dtype": "fp8_block",
+                                "num_tokens": num_tokens_log,
+                                "hidden_size": 7168,
+                                "inter_size": 2048,
+                                "topk": 8,
+                                "num_experts": 256,
+                                "moe_tp_size": moe_tp_size,
+                                "moe_ep_size": moe_ep_size,
+                                "distribution": distribution_str,
+                                "latency": avg_latency_ms,
+                            }
+                        ],
+                        framework="SGLang",
+                        version=version,
+                        device_name=device_name,
+                        op_name="moe_context",
+                        kernel_source="deepepmoe",
+                        perf_filename=perf_filename,
+                    )
+                except Exception as e:
+                    rank_print(f"  Warning: failed to log prefill MoE metrics: {e}")
+            del (
+                hidden_states_per_token_iter,
+                hidden_states_fp8_tensor_iter,
+                scale_tensor_iter,
+                topk_idx_iter,
+                topk_weights_iter,
+                num_recv,
+                dispatch_output,
+            )
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            rank_print(f"Prefill case failed: {e}, skipping...")
+            torch.cuda.empty_cache()
+            continue
 
 
 def benchmark_moe_layer_decode(
@@ -407,225 +413,232 @@ def benchmark_moe_layer_decode(
     top_k = moe_layer.topk.topk_config.top_k
 
     for case in decode_test_cases:
-        num_token = case["num_tokens"]
-        distributed = case["distributed"]
-        power_law_alpha = case.get("power_law_alpha", 0.8) if distributed == "power_law" else None
-        num_max_dispatch_tokens_per_rank = 128
+        try:
+            num_token = case["num_tokens"]
+            distributed = case["distributed"]
+            power_law_alpha = case.get("power_law_alpha", 0.8) if distributed == "power_law" else None
+            num_max_dispatch_tokens_per_rank = 128
 
-        if num_token > num_max_dispatch_tokens_per_rank:
-            print(
-                f"num_token {num_token} > num_max_dispatch_tokens_per_rank {num_max_dispatch_tokens_per_rank}, skipping"
-            )
-            continue
-
-        hidden_size = model_runner.model.config.hidden_size
-
-        if hidden_size % 128 != 0:
-            pad_size = 128 - (hidden_size % 128)
-            hidden_size += pad_size
-
-        hidden_states = torch.randn(
-            num_local_experts,
-            num_max_dispatch_tokens_per_rank * simulated_ep_size,
-            hidden_size,
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
-
-        scale_hidden_size = hidden_size // 128
-        scale_tensor = torch.ones(
-            num_local_experts,
-            num_max_dispatch_tokens_per_rank * simulated_ep_size,
-            scale_hidden_size,
-            device=hidden_states.device,
-            dtype=torch.float32,
-        )
-        hidden_states_fp8_tensor = hidden_states.to(torch.float8_e4m3fn)
-
-        masked_m = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
-
-        # support two distributed mode: power_law and uniform
-        if distributed == "power_law":
-            masked_m_list = [
-                power_law_deepep_decode(
-                    num_token * simulated_ep_size,
-                    num_local_experts * simulated_ep_size,
-                    top_k,
-                    simulated_ep_size,
-                    power_law_alpha,
+            if num_token > num_max_dispatch_tokens_per_rank:
+                print(
+                    f"num_token {num_token} > num_max_dispatch_tokens_per_rank "
+                    f"{num_max_dispatch_tokens_per_rank}, skipping"
                 )
-                .to(masked_m.dtype)
-                .to(torch.device(device))
-                for _ in range(5)
-            ]
-        elif distributed == "uniform":
-            # Total experts is 256, simulated_ep_size = 256 / num_local_experts
-            base_tokens_per_expert = int(num_token * top_k) * simulated_ep_size // 256
-            if base_tokens_per_expert == 0:
-                # Each expert that receives tokens gets exactly 1 token
-                # Number of experts with tokens on this card = total_calls / simulated_ep_size
-                # = (num_token * top_k * num_rank) / num_rank = num_token * top_k
-                masked_m[: int(num_token * top_k)] = 1
+                continue
+
+            hidden_size = model_runner.model.config.hidden_size
+
+            if hidden_size % 128 != 0:
+                pad_size = 128 - (hidden_size % 128)
+                hidden_size += pad_size
+
+            hidden_states = torch.randn(
+                num_local_experts,
+                num_max_dispatch_tokens_per_rank * simulated_ep_size,
+                hidden_size,
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+
+            scale_hidden_size = hidden_size // 128
+            scale_tensor = torch.ones(
+                num_local_experts,
+                num_max_dispatch_tokens_per_rank * simulated_ep_size,
+                scale_hidden_size,
+                device=hidden_states.device,
+                dtype=torch.float32,
+            )
+            hidden_states_fp8_tensor = hidden_states.to(torch.float8_e4m3fn)
+
+            masked_m = torch.zeros(num_local_experts, device=device, dtype=torch.int32)
+
+            # support two distributed mode: power_law and uniform
+            if distributed == "power_law":
+                masked_m_list = [
+                    power_law_deepep_decode(
+                        num_token * simulated_ep_size,
+                        num_local_experts * simulated_ep_size,
+                        top_k,
+                        simulated_ep_size,
+                        power_law_alpha,
+                    )
+                    .to(masked_m.dtype)
+                    .to(torch.device(device))
+                    for _ in range(5)
+                ]
+            elif distributed == "uniform":
+                # Total experts is 256, simulated_ep_size = 256 / num_local_experts
+                base_tokens_per_expert = int(num_token * top_k) * simulated_ep_size // 256
+                if base_tokens_per_expert == 0:
+                    # Each expert that receives tokens gets exactly 1 token
+                    # Number of experts with tokens on this card = total_calls / simulated_ep_size
+                    # = (num_token * top_k * num_rank) / num_rank = num_token * top_k
+                    masked_m[: int(num_token * top_k)] = 1
+                else:
+                    masked_m[:] = base_tokens_per_expert
+                masked_m_list = [masked_m]
             else:
-                masked_m[:] = base_tokens_per_expert
-            masked_m_list = [masked_m]
-        else:
-            raise ValueError(f"Unsupported distributed mode: {distributed}")
-        max_masked_m = int(torch.stack([mm.max() for mm in masked_m_list]).max().item())
-        assert max_masked_m <= hidden_states.shape[1], (
-            f"max(masked_m_list) {max_masked_m} > hidden_states.shape[1] {hidden_states.shape[1]}"
-        )
-        scale_tensor = torch.ones(
-            num_local_experts,
-            num_max_dispatch_tokens_per_rank * simulated_ep_size,
-            scale_hidden_size,
-            device=hidden_states.device,
-            dtype=torch.float32,
-        )
-        hidden_states_fp8_tensor = hidden_states.to(torch.float8_e4m3fn)
-
-        topk_idx_empty = torch.empty(0, device=device, dtype=torch.int32)
-        topk_weights_empty = torch.empty(0, device=device, dtype=torch.float32)
-
-        torch.get_device_module(device).synchronize()
-        torch.cuda.empty_cache()
-
-        for _ in range(num_warmup):
-            dispatch_output_list = []
-            for masked_m in masked_m_list:
-                hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
-                scale_tensor_copy = scale_tensor.clone()
-
-                output = DeepEPLLDispatchOutput(
-                    hidden_states=hidden_states_fp8_tensor_copy,
-                    hidden_states_scale=scale_tensor_copy,
-                    topk_ids=topk_idx_empty,
-                    topk_weights=topk_weights_empty,
-                    masked_m=masked_m,
-                    expected_m=int(torch.ceil(masked_m.float().mean()).item()),
-                )
-                dispatch_output_list.append(output)
-
-            for dispatch_output in dispatch_output_list:
-                _ = moe_layer.experts.run_moe_core(dispatch_output)
-
-        torch.get_device_module(device).synchronize()
-        torch.cuda.empty_cache()
-
-        # Use benchmark_with_power for timing
-        from helper import benchmark_with_power
-
-        # Pre-compute expected_m values outside of kernel_func to avoid .item() during CUDA graph capture
-        expected_m_list = [int(torch.ceil(masked_m_item.float().mean()).item()) for masked_m_item in masked_m_list]
-
-        # Pre-clone masked_m tensors (they won't be disposed by run_moe_core)
-        masked_m_clones = [m.clone() for m in masked_m_list]
-
-        # Pre-create enough tensor copies to avoid clone() inside kernel_func
-        # run_moe_core disposes hidden_states and hidden_states_scale via dispose_tensor()
-        # Estimate: kernel_func called ~4 times (warmup 3 + capture 1) in graph mode
-        # Each call iterates len(masked_m_list) times (max 5 for power_law)
-        # Total: 4 * 5 = 20 tensor sets needed, use 50 for safety
-        num_masked_m = len(masked_m_list)
-        num_kernel_calls = 20  # Conservative estimate for kernel_func invocations
-        num_tensor_sets = num_kernel_calls * num_masked_m
-
-        hidden_states_copies = []
-        scale_copies = []
-        for _ in range(num_tensor_sets):
-            hidden_states_copies.append(
-                torch.randn(
-                    num_local_experts,
-                    num_max_dispatch_tokens_per_rank * simulated_ep_size,
-                    hidden_size,
-                    dtype=torch.bfloat16,
-                    device=device,
-                ).to(torch.float8_e4m3fn)
+                raise ValueError(f"Unsupported distributed mode: {distributed}")
+            max_masked_m = int(torch.stack([mm.max() for mm in masked_m_list]).max().item())
+            assert max_masked_m <= hidden_states.shape[1], (
+                f"max(masked_m_list) {max_masked_m} > hidden_states.shape[1] {hidden_states.shape[1]}"
             )
-            scale_copies.append(
-                torch.ones(
-                    num_local_experts,
-                    num_max_dispatch_tokens_per_rank * simulated_ep_size,
-                    scale_hidden_size,
-                    device=device,
-                    dtype=torch.float32,
-                )
+            scale_tensor = torch.ones(
+                num_local_experts,
+                num_max_dispatch_tokens_per_rank * simulated_ep_size,
+                scale_hidden_size,
+                device=hidden_states.device,
+                dtype=torch.float32,
             )
+            hidden_states_fp8_tensor = hidden_states.to(torch.float8_e4m3fn)
 
-        # Use a mutable container to track tensor index across all run_moe_core calls
-        tensor_idx = [0]
+            topk_idx_empty = torch.empty(0, device=device, dtype=torch.int32)
+            topk_weights_empty = torch.empty(0, device=device, dtype=torch.float32)
 
-        def kernel_func():
-            for masked_m_clone, expected_m_val in zip(masked_m_clones, expected_m_list):
-                idx = tensor_idx[0] % num_tensor_sets
-                tensor_idx[0] += 1
-                dispatch_output = DeepEPLLDispatchOutput(
-                    hidden_states=hidden_states_copies[idx],
-                    hidden_states_scale=scale_copies[idx],
-                    topk_ids=torch.empty(0, device=device, dtype=torch.int32),
-                    topk_weights=torch.empty(0, device=device, dtype=torch.float32),
-                    masked_m=masked_m_clone,
-                    expected_m=expected_m_val,
+            torch.get_device_module(device).synchronize()
+            torch.cuda.empty_cache()
+
+            for _ in range(num_warmup):
+                dispatch_output_list = []
+                for masked_m in masked_m_list:
+                    hidden_states_fp8_tensor_copy = hidden_states_fp8_tensor.clone()
+                    scale_tensor_copy = scale_tensor.clone()
+
+                    output = DeepEPLLDispatchOutput(
+                        hidden_states=hidden_states_fp8_tensor_copy,
+                        hidden_states_scale=scale_tensor_copy,
+                        topk_ids=topk_idx_empty,
+                        topk_weights=topk_weights_empty,
+                        masked_m=masked_m,
+                        expected_m=int(torch.ceil(masked_m.float().mean()).item()),
+                    )
+                    dispatch_output_list.append(output)
+
+                for dispatch_output in dispatch_output_list:
+                    _ = moe_layer.experts.run_moe_core(dispatch_output)
+
+            torch.get_device_module(device).synchronize()
+            torch.cuda.empty_cache()
+
+            # Use benchmark_with_power for timing
+            from helper import benchmark_with_power
+
+            # Pre-compute expected_m values outside of kernel_func to avoid .item() during CUDA graph capture
+            expected_m_list = [int(torch.ceil(masked_m_item.float().mean()).item()) for masked_m_item in masked_m_list]
+
+            # Pre-clone masked_m tensors (they won't be disposed by run_moe_core)
+            masked_m_clones = [m.clone() for m in masked_m_list]
+
+            # Pre-create enough tensor copies to avoid clone() inside kernel_func
+            # run_moe_core disposes hidden_states and hidden_states_scale via dispose_tensor()
+            # Estimate: kernel_func called ~4 times (warmup 3 + capture 1) in graph mode
+            # Each call iterates len(masked_m_list) times (max 5 for power_law)
+            # Total: 4 * 5 = 20 tensor sets needed, use 50 for safety
+            num_masked_m = len(masked_m_list)
+            num_kernel_calls = 20  # Conservative estimate for kernel_func invocations
+            num_tensor_sets = num_kernel_calls * num_masked_m
+
+            hidden_states_copies = []
+            scale_copies = []
+            for _ in range(num_tensor_sets):
+                hidden_states_copies.append(
+                    torch.randn(
+                        num_local_experts,
+                        num_max_dispatch_tokens_per_rank * simulated_ep_size,
+                        hidden_size,
+                        dtype=torch.bfloat16,
+                        device=device,
+                    ).to(torch.float8_e4m3fn)
                 )
-                _ = moe_layer.experts.run_moe_core(dispatch_output)
-
-        with benchmark_with_power(
-            device=device,
-            kernel_func=kernel_func,
-            num_warmups=3,
-            num_runs=num_iterations,
-            repeat_n=1,
-        ) as results:
-            pass
-
-        avg_latency_ms = results["latency_ms"] / len(masked_m_list)
-        power_stats = results["power_stats"]
-
-        if tp_rank == 0:
-            rank_print("DeepEP MoE GEMM Results (Decode) - CUDA Graph Enabled:")
-            rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
-        if tp_rank == 0:
-            try:
-                moe_tp_size = 1
-                moe_ep_size = simulated_ep_size
-                num_tokens_log = num_token * simulated_ep_size
-                device_name = torch.cuda.get_device_name(server_args.device)
-                version = pkg_resources.get_distribution("sglang").version
-                distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
-                perf_filename = (
-                    "wideep_generation_moe_perf.txt"
-                    if output_path is None
-                    else os.path.join(output_path, "wideep_generation_moe_perf.txt")
+                scale_copies.append(
+                    torch.ones(
+                        num_local_experts,
+                        num_max_dispatch_tokens_per_rank * simulated_ep_size,
+                        scale_hidden_size,
+                        device=device,
+                        dtype=torch.float32,
+                    )
                 )
-                if output_path is not None:
-                    os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
-                log_perf(
-                    item_list=[
-                        {
-                            "moe_dtype": "fp8_block",
-                            "num_tokens": num_tokens_log,
-                            "hidden_size": 7168,
-                            "inter_size": 2048,
-                            "topk": 8,
-                            "num_experts": 256,
-                            "moe_tp_size": moe_tp_size,
-                            "moe_ep_size": moe_ep_size,
-                            "distribution": distribution_str,
-                            "latency": avg_latency_ms,
-                        }
-                    ],
-                    framework="SGLang",
-                    version=version,
-                    device_name=device_name,
-                    op_name="moe_generation",
-                    kernel_source="deepepmoe",
-                    perf_filename=perf_filename,
-                    power_stats=power_stats,
-                )
-            except Exception as e:
-                rank_print(f"  Warning: failed to log decode MoE metrics: {e}")
-        del hidden_states, hidden_states_fp8_tensor, scale_tensor, dispatch_output_list
-        torch.cuda.empty_cache()
+
+            # Use a mutable container to track tensor index across all run_moe_core calls
+            tensor_idx = [0]
+
+            def kernel_func():
+                for masked_m_clone, expected_m_val in zip(masked_m_clones, expected_m_list):
+                    idx = tensor_idx[0] % num_tensor_sets
+                    tensor_idx[0] += 1
+                    dispatch_output = DeepEPLLDispatchOutput(
+                        hidden_states=hidden_states_copies[idx],
+                        hidden_states_scale=scale_copies[idx],
+                        topk_ids=torch.empty(0, device=device, dtype=torch.int32),
+                        topk_weights=torch.empty(0, device=device, dtype=torch.float32),
+                        masked_m=masked_m_clone,
+                        expected_m=expected_m_val,
+                    )
+                    _ = moe_layer.experts.run_moe_core(dispatch_output)
+
+            with benchmark_with_power(
+                device=device,
+                kernel_func=kernel_func,
+                num_warmups=3,
+                num_runs=num_iterations,
+                repeat_n=1,
+            ) as results:
+                pass
+
+            avg_latency_ms = results["latency_ms"] / len(masked_m_list)
+            power_stats = results["power_stats"]
+
+            if tp_rank == 0:
+                rank_print("DeepEP MoE GEMM Results (Decode) - CUDA Graph Enabled:")
+                rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
+            if tp_rank == 0:
+                try:
+                    moe_tp_size = 1
+                    moe_ep_size = simulated_ep_size
+                    num_tokens_log = num_token * simulated_ep_size
+                    device_name = torch.cuda.get_device_name(server_args.device)
+                    version = pkg_resources.get_distribution("sglang").version
+                    distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
+                    perf_filename = (
+                        "wideep_generation_moe_perf.txt"
+                        if output_path is None
+                        else os.path.join(output_path, "wideep_generation_moe_perf.txt")
+                    )
+                    if output_path is not None:
+                        os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
+                    log_perf(
+                        item_list=[
+                            {
+                                "moe_dtype": "fp8_block",
+                                "num_tokens": num_tokens_log,
+                                "hidden_size": 7168,
+                                "inter_size": 2048,
+                                "topk": 8,
+                                "num_experts": 256,
+                                "moe_tp_size": moe_tp_size,
+                                "moe_ep_size": moe_ep_size,
+                                "distribution": distribution_str,
+                                "latency": avg_latency_ms,
+                            }
+                        ],
+                        framework="SGLang",
+                        version=version,
+                        device_name=device_name,
+                        op_name="moe_generation",
+                        kernel_source="deepepmoe",
+                        perf_filename=perf_filename,
+                        power_stats=power_stats,
+                    )
+                except Exception as e:
+                    rank_print(f"  Warning: failed to log decode MoE metrics: {e}")
+            del hidden_states, hidden_states_fp8_tensor, scale_tensor, dispatch_output_list
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            rank_print(f"Decode case failed: {e}, skipping...")
+            torch.cuda.empty_cache()
+            continue
 
 
 def run_moe(
