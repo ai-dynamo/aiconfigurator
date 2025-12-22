@@ -527,7 +527,7 @@ def benchmark_moe_layer_decode(
         # Each call iterates len(masked_m_list) times (max 5 for power_law)
         # Total: 4 * 5 = 20 tensor sets needed, use 50 for safety
         num_masked_m = len(masked_m_list)
-        num_kernel_calls = 50  # Conservative estimate for kernel_func invocations
+        num_kernel_calls = 20  # Conservative estimate for kernel_func invocations
         num_tensor_sets = num_kernel_calls * num_masked_m
 
         hidden_states_copies = []
