@@ -484,9 +484,11 @@ def benchmark_moe_layer_decode(
             else:
                 raise ValueError(f"Unsupported distributed mode: {distributed}")
             max_masked_m = int(torch.stack([mm.max() for mm in masked_m_list]).max().item())
-            assert max_masked_m <= hidden_states.shape[1], (
-                f"max(masked_m_list) {max_masked_m} > hidden_states.shape[1] {hidden_states.shape[1]}"
-            )
+            if max_masked_m > hidden_states.shape[1]:
+                print(
+                    f"  Skipping: max(masked_m_list) {max_masked_m} > hidden_states.shape[1] {hidden_states.shape[1]}"
+                )
+                continue
             scale_tensor = torch.ones(
                 num_local_experts,
                 num_max_dispatch_tokens_per_rank * simulated_ep_size,
