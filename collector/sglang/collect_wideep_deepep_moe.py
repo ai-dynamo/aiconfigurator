@@ -745,7 +745,17 @@ def run_moe(
 def get_wideep_moe_test_cases():
     """Returns list of [num_experts, perf_filename] for MOE collection.
 
-    num_experts=128 simulates EP=2, num_experts=1 simulates EP=256
+    Each num_experts value simulates a different EP size:
+    - num_experts=128 → EP=2
+    - num_experts=64 → EP=4
+    - num_experts=32 → EP=8
+    - num_experts=16 → EP=16
+    - num_experts=8 → EP=32
+    - num_experts=4 → EP=64
+    - num_experts=2 → EP=128
+    - num_experts=1 → EP=256
+
+    Formula: simulated_ep_size = 256 / num_experts
     """
     return [[n, "wideep_moe_perf.txt"] for n in [128, 64, 32, 16, 8, 4, 2, 1]]
 
