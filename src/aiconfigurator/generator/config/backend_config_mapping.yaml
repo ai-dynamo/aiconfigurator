@@ -155,9 +155,14 @@ parameters:
 
 # speculative decoding
 - param_key: speculative_decoding_type
-  vllm: speculative-config
+  vllm: speculative_config.method
   sglang: speculative-algorithm
   trtllm: speculative_config.decoding_type
+
+- param_key: num_nextn_predict_layers
+  vllm: speculative_config.num_speculative_tokens
+  sglang: speculative-num-steps
+  trtllm: speculative_config.num_nextn_predict_layers
 
 # Others
 - param_key: disable_overlap_scheduler
