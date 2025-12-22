@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# This experiment file compares different database modes for performance estimation.
+# Database modes:
+#   - SILICON: Uses actual silicon data (default, most accurate when data is available)
+#   - HYBRID: Uses silicon data when available, otherwise falls back to SOL+empirical factor
+#   - EMPIRICAL: Uses SOL (Speed of Light) + empirical factor for all estimations
+
+exps:
+  - exp_silicon
+  - exp_hybrid
+  - exp_empirical
+
+# Experiment using SILICON mode (default) - uses actual measured silicon data
+exp_silicon:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "QWEN3_32B"
+  total_gpus: 8
+  system_name: "h200_sxm"
+  backend_name: "trtllm"
+  database_mode: "SILICON"
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 30.0
+
+# Experiment using HYBRID mode - uses silicon data when available, otherwise empirical
+exp_hybrid:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "QWEN3_32B"
+  total_gpus: 8
+  system_name: "h200_sxm"
+  backend_name: "trtllm"
+  database_mode: "HYBRID"
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 30.0
+
+# Experiment using EMPIRICAL mode - uses SOL + empirical factor for all estimations
+exp_empirical:
+  mode: "patch"
+  serving_mode: "agg"
+  model_name: "QWEN3_32B"
+  total_gpus: 8
+  system_name: "h200_sxm"
+  backend_name: "trtllm"
+  database_mode: "EMPIRICAL"
+  isl: 4000
+  osl: 1000
+  ttft: 1000.0
+  tpot: 30.0
+

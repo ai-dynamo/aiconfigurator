@@ -36,6 +36,8 @@ jobs:
             tests/cli/e2e_validation/test_e2e_sweep.py::TestE2ESweep::test_e2e_configuration_sweep[MODEL_QWEN3_32B__SYSTEM_h200_sxm__GPU_32__ISL_4000__OSL_1000__PREFIX_0__TTFT_5000__TPOT_10__BACKEND_vllm] \
             tests/cli/workflow \
             tests/sdk \
+            tests/cli/e2e_validation/test_request_latency.py \
+            tests/cli/e2e_validation/test_exps.py \
             -v --tb=short --maxfail=1 --timeout=600 \
             -n 4 \
             --md-report --md-report-verbose=1 --md-report-flavor gfm --md-report-output test_report.md
