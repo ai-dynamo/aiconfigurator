@@ -35,8 +35,6 @@ import pkg_resources
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 
-aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
-
 
 def get_moe_prefill_test_cases(rank):
     """Get test cases for MoE prefill phase including distribution and alpha.
