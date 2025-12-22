@@ -323,15 +323,14 @@ def run_attention_torch(
                         print(f"  Warning: Profiler failed: {e!s}")
 
                 avg_time_ms = np.mean(cuda_times)
-                # Save via log_perf
+                # Save via log_perf - save to collector/ directory to match non-wideep behavior
                 try:
+                    collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     perf_filename = (
-                        "wideep_context_mla_perf.txt"
+                        os.path.join(collector_dir, "wideep_context_mla_perf.txt")
                         if output_path is None
                         else os.path.join(output_path, "wideep_context_mla_perf.txt")
                     )
-                    if output_path is not None:
-                        os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                     device_name = torch.cuda.get_device_name(device)
                     version = pkg_resources.get_distribution("sglang").version
                     log_perf(
@@ -505,15 +504,14 @@ def run_attention_torch(
                         print(f"  Warning: Profiler failed: {e!s}")
 
                 torch.cuda.empty_cache()
-                # Save via log_perf
+                # Save via log_perf - save to collector/ directory to match non-wideep behavior
                 try:
+                    collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     perf_filename = (
-                        "wideep_generation_mla_perf.txt"
+                        os.path.join(collector_dir, "wideep_generation_mla_perf.txt")
                         if output_path is None
                         else os.path.join(output_path, "wideep_generation_mla_perf.txt")
                     )
-                    if output_path is not None:
-                        os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                     device_name = torch.cuda.get_device_name(device)
                     version = pkg_resources.get_distribution("sglang").version
                     log_perf(

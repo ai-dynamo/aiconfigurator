@@ -285,12 +285,6 @@ def benchmark_moe_layer_prefill(
 
             gemm_latencies = []
 
-            # Use profiler for synchronization
-            profiler = torch.profiler.profile(
-                with_stack=True,
-            )
-            profiler.start()
-
             for i in range(num_iterations):
                 for topk_idx_sample, topk_weights_sample, num_recv_sample in power_law_samples:
                     hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
@@ -314,13 +308,12 @@ def benchmark_moe_layer_prefill(
 
                     _ = moe_layer.experts.run_moe_core(dispatch_output)
 
-                    torch.get_device_module(device).synchronize()
                     end_event.record()
+                    end_event.synchronize()
                     latency_ms = start_event.elapsed_time(end_event)
                     if i > 2:
                         gemm_latencies.append(latency_ms)
 
-            profiler.stop()
             torch.cuda.empty_cache()
 
             avg_latency_ms = np.mean(gemm_latencies)
@@ -335,13 +328,13 @@ def benchmark_moe_layer_prefill(
                     num_tokens_log = num_token * simulated_ep_size
                     device_name = torch.cuda.get_device_name(server_args.device)
                     version = pkg_resources.get_distribution("sglang").version
+                    # Save to collector/ directory to match non-wideep behavior
+                    collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     perf_filename = (
-                        "wideep_context_moe_perf.txt"
+                        os.path.join(collector_dir, "wideep_context_moe_perf.txt")
                         if output_path is None
                         else os.path.join(output_path, "wideep_context_moe_perf.txt")
                     )
-                    if output_path is not None:
-                        os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                     distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
                     log_perf(
                         item_list=[
@@ -380,7 +373,20 @@ def benchmark_moe_layer_prefill(
 
         except Exception as e:
             rank_print(f"Prefill case failed: {e}, skipping...")
-            torch.cuda.empty_cache()
+            # Check if this is a CUDA error - if so, the context is corrupted and we should exit
+            if "CUDA error" in str(e) or "illegal memory access" in str(e).lower():
+                rank_print("CUDA error detected, exiting prefill benchmark early to avoid cascading failures")
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                break
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                # If empty_cache fails, CUDA context is corrupted
+                rank_print("CUDA context corrupted, exiting prefill benchmark early")
+                break
             continue
 
 
@@ -598,13 +604,13 @@ def benchmark_moe_layer_decode(
                     device_name = torch.cuda.get_device_name(server_args.device)
                     version = pkg_resources.get_distribution("sglang").version
                     distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
+                    # Save to collector/ directory to match non-wideep behavior
+                    collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     perf_filename = (
-                        "wideep_generation_moe_perf.txt"
+                        os.path.join(collector_dir, "wideep_generation_moe_perf.txt")
                         if output_path is None
                         else os.path.join(output_path, "wideep_generation_moe_perf.txt")
                     )
-                    if output_path is not None:
-                        os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
                     log_perf(
                         item_list=[
                             {
@@ -635,7 +641,20 @@ def benchmark_moe_layer_decode(
 
         except Exception as e:
             rank_print(f"Decode case failed: {e}, skipping...")
-            torch.cuda.empty_cache()
+            # Check if this is a CUDA error - if so, the context is corrupted and we should exit
+            if "CUDA error" in str(e) or "illegal memory access" in str(e).lower():
+                rank_print("CUDA error detected, exiting decode benchmark early to avoid cascading failures")
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                break
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                # If empty_cache fails, CUDA context is corrupted
+                rank_print("CUDA context corrupted, exiting decode benchmark early")
+                break
             continue
 
 

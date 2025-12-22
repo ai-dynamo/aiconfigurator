@@ -210,10 +210,10 @@ def run_mlp_torch(
 
             avg_time = results["latency_ms"]
             power_stats = results["power_stats"]
-            # Save to script directory (sglang/) to match MLA/MOE behavior
-            script_dir = os.path.dirname(os.path.abspath(__file__))
+            # Save to collector/ directory (parent of sglang/) to match non-wideep behavior
+            collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             perf_filename = (
-                os.path.join(script_dir, "wideep_context_mlp_perf.txt")
+                os.path.join(collector_dir, "wideep_context_mlp_perf.txt")
                 if output_path is None
                 else os.path.join(output_path, "wideep_context_mlp_perf.txt")
             )
@@ -236,10 +236,10 @@ def run_mlp_torch(
 
             avg_time = results["latency_ms"]
             power_stats = results["power_stats"]
-            # Save to script directory (sglang/) to match MLA/MOE behavior
-            script_dir = os.path.dirname(os.path.abspath(__file__))
+            # Save to collector/ directory (parent of sglang/) to match non-wideep behavior
+            collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             perf_filename = (
-                os.path.join(script_dir, "wideep_generation_mlp_perf.txt")
+                os.path.join(collector_dir, "wideep_generation_mlp_perf.txt")
                 if output_path is None
                 else os.path.join(output_path, "wideep_generation_mlp_perf.txt")
             )
