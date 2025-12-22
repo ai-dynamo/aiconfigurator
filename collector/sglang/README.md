@@ -66,7 +66,7 @@ python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generatio
 python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generation \
     wideep_mla_context wideep_mla_generation wideep_moe
 
-# Mixed: non-wideep (multi-GPU) + wideep (single-GPU)
+# Mixed: non-wideep + wideep (all run in parallel across GPUs)
 python collect.py --backend sglang --ops mla_bmm_gen_pre wideep_mlp_context
 ```
 
@@ -88,7 +88,7 @@ python collect.py --backend sglang --ops mla_bmm_gen_pre wideep_mlp_context
 | Wideep | `wideep_mlp_generation` | Wideep MLP decode |
 | Wideep | `wideep_moe` | Wideep MOE |
 
-**Note:** Non-wideep operators run in parallel across multiple GPUs. Wideep operators are automatically executed in single-process mode to prevent NCCL/distributed initialization conflicts.
+**Note:** Both non-wideep and wideep operators run in parallel across multiple GPUs. Wideep operators use subprocess-based GPU isolation (via `CUDA_VISIBLE_DEVICES`) to prevent NCCL/distributed initialization conflicts while maintaining parallel execution.
 
 ## General Configuration
 
@@ -168,17 +168,17 @@ python collect.py --backend sglang --ops wideep_moe
 
 #### Modify Configuration
 
-**Single GPU Mode**: The script now supports single GPU execution for collecting all EP configurations.
+**Multi-GPU Parallel Mode**: The script supports parallel execution across multiple GPUs using subprocess isolation. Each GPU runs a different EP configuration simultaneously.
 
 Edit the configuration at the bottom of the script:
 ```python
 # Configuration variables (modify as needed)
 num_experts_list = [128, 64, 32, 16, 8, 4, 2, 1]  # List of expert counts to simulate different EP sizes
 
-# Server arguments
+# Server arguments (per-GPU subprocess)
 server_args = ServerArgs(
-    tp_size=1,                   # Single GPU mode
-    ep_size=1,                   # Single GPU mode
+    tp_size=1,                   # Each subprocess uses 1 GPU
+    ep_size=1,                   # Each subprocess uses 1 GPU
 )
 ```
 

@@ -494,10 +494,10 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
     # Run non-wideep collections with multi-process
     all_errors = collect_ops(num_processes, collections, ops, version)
 
-    # Run wideep collections with single process (required for NCCL/distributed stability)
+    # Run wideep collections - now supports multi-process with proper port isolation
     if ops is None or any(c["type"] in ops for c in wideep_collections):
-        logger.info("Running wideep collections with single process (required for stability)")
-        wideep_errors = collect_ops(1, wideep_collections, ops, version)
+        logger.info(f"Running wideep collections with {num_processes} processes")
+        wideep_errors = collect_ops(num_processes, wideep_collections, ops, version)
         all_errors.extend(wideep_errors)
 
     generate_collection_summary(all_errors, "sglang", version)

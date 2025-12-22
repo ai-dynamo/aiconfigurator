@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 import logging
-import multiprocessing
 import os
 
 import numpy as np
@@ -751,21 +750,16 @@ def get_wideep_moe_test_cases():
     return [[n, "wideep_moe_perf.txt"] for n in [128, 64, 32, 16, 8, 4, 2, 1]]
 
 
-def run_wideep_moe(num_experts, perf_filename, device="cuda:0"):
-    """Run wideep DeepEP MOE benchmark.
+def run_moe_benchmark(num_experts, gpu_id, output_path=None):
+    """Run MOE benchmark - called in subprocess with CUDA_VISIBLE_DEVICES set.
 
-    Compatible with collect.py framework - accepts direct params like trtllm collectors.
+    This function contains all the initialization logic that must happen
+    after CUDA_VISIBLE_DEVICES is set.
     """
+    # In subprocess, always use cuda:0 since CUDA_VISIBLE_DEVICES isolates the GPU
+    torch.cuda.set_device("cuda:0")
 
-    device_str = str(device) if not isinstance(device, str) else device
-    torch.cuda.set_device(device_str)
-
-    # Extract gpu_id from device string
-    if ":" in device_str:
-        gpu_id = int(device_str.split(":")[-1])
-    else:
-        gpu_id = 0
-
+    server_port = 30000 + gpu_id * 100
     server_args = ServerArgs(
         model_path=DEEPSEEK_MODEL_PATH,
         dtype="auto",
@@ -780,7 +774,7 @@ def run_wideep_moe(num_experts, perf_filename, device="cuda:0"):
         ep_size=1,
         node_rank=0,
         host="localhost",
-        port=30000 + gpu_id * 100,  # Unique port per GPU
+        port=server_port,
         cuda_graph_max_bs=4,
         disable_cuda_graph=True,
     )
@@ -788,32 +782,71 @@ def run_wideep_moe(num_experts, perf_filename, device="cuda:0"):
     logging.basicConfig(level=getattr(logging, server_args.log_level.upper()), format="%(message)s")
     _set_envs_and_config(server_args)
 
-    # Use PortArgs.init_new() since we need it for multiprocessing
-    # The subprocess isolation should prevent timeout issues
+    # PortArgs.init_new() must be called in subprocess for proper isolation
     port_args = PortArgs.init_new(server_args)
 
     simulated_ep_size = 256 // num_experts * server_args.ep_size
+    print(f"\n{'=' * 60}")
+    print(f"MOE Benchmark: num_experts={num_experts}, EP_size={simulated_ep_size}, GPU={gpu_id}")
+    print(f"{'=' * 60}")
+
+    # Run the actual benchmark
+    run_moe(server_args, port_args, 3, 10, 3, num_experts, 0, output_path)
+
+    torch.cuda.empty_cache()
+    print(f"Completed num_experts={num_experts} (EP size {simulated_ep_size})")
+
+
+def _run_moe_subprocess(num_experts, gpu_id, output_path=None):
+    """Helper to run MOE in subprocess with CUDA_VISIBLE_DEVICES isolation."""
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    code = f'''
+import sys
+sys.path.insert(0, "{os.path.dirname(os.path.abspath(__file__))}")
+from collect_wideep_deepep_moe import run_moe_benchmark
+run_moe_benchmark({num_experts}, {gpu_id}, {output_path!r})
+'''
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+
+    try:
+        stdout, _ = proc.communicate(timeout=600)  # 10 min timeout per MOE config
+        if stdout:
+            print(stdout.decode("utf-8", errors="replace"))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        print(f"MOE subprocess timed out for num_experts={num_experts}")
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"MOE subprocess failed with exit code {proc.returncode}")
+
+
+def run_wideep_moe(num_experts, perf_filename, device="cuda:0"):
+    """Run wideep DeepEP MOE benchmark.
+
+    Compatible with collect.py framework - uses subprocess for GPU isolation.
+    """
+    device_str = str(device) if not isinstance(device, str) else device
+    gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
+
+    simulated_ep_size = 256 // num_experts
     print("\n" + "=" * 60)
-    print(f"Testing num_experts={num_experts} (simulating EP size {simulated_ep_size})")
+    print(f"MOE: num_experts={num_experts} (EP size {simulated_ep_size}), GPU={gpu_id}")
     print("=" * 60)
 
-    # Run in subprocess for proper model initialization
-    proc = multiprocessing.Process(
-        target=run_moe,
-        args=(server_args, port_args, 3, 10, 3, num_experts, 0, None),
-    )
-    proc.start()
-    proc.join()
-
-    if proc.exitcode != 0:
-        print(f"Process failed with exit code {proc.exitcode}")
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(timeout=5)
-        if proc.is_alive():
-            proc.kill()
-
-    print(f"Completed testing num_experts={num_experts} (EP size {simulated_ep_size})")
+    _run_moe_subprocess(num_experts, gpu_id, None)
 
 
 if __name__ == "__main__":

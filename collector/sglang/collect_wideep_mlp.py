@@ -312,7 +312,8 @@ def run_wideep_mlp_context(quant_type, num_tokens_list, hidden_size, intermediat
     if not torch.distributed.is_initialized():
         cleanup_distributed()
         device_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
-        initialize_distributed(DEEPSEEK_MODEL_PATH, port=29500 + device_id)
+        port = 29500 + device_id
+        initialize_distributed(DEEPSEEK_MODEL_PATH, port=port)
 
     for num_token in num_tokens_list:
         run_mlp_torch(

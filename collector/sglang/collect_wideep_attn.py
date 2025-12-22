@@ -23,13 +23,13 @@ from sglang.srt.utils import BumpAllocator, suppress_other_loggers
 from torch.profiler import ProfilerActivity, profile, record_function
 
 try:
-    from helper import log_perf
+    from helper import benchmark_with_power, log_perf
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import log_perf
+    from helper import benchmark_with_power, log_perf
 import pkg_resources
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
@@ -456,8 +456,6 @@ def run_attention_torch(
                 get_attn_tp_context().set_attn_inputs(attn_inputs_decode)
 
                 # Use benchmark_with_power for timing
-                from helper import benchmark_with_power
-
                 def kernel_func():
                     _ = attention_module(
                         positions=decode_positions,
@@ -584,20 +582,26 @@ def get_wideep_mla_generation_test_cases():
     return [[backend, head_num, "wideep_generation_mla_perf.txt"] for backend in backends for head_num in head_nums]
 
 
-def run_wideep_mla_context(attention_backend, head_num, perf_filename, device="cuda:0"):
-    """Run wideep MLA context benchmark for a specific (backend, head_num) config.
+def run_mla(attention_backend, head_num, is_prefill, gpu_id, output_path=None):
+    """Run MLA benchmark - shared logic for both context and generation.
 
-    Compatible with collect.py framework - accepts direct params like trtllm collectors.
+    This function is called in a subprocess with CUDA_VISIBLE_DEVICES set.
     """
-    device_str = str(device) if not isinstance(device, str) else device
-    torch.cuda.set_device(device_str)
+    # In subprocess, gpu_id=0 since CUDA_VISIBLE_DEVICES isolates the GPU
+    torch.cuda.set_device("cuda:0")
 
-    # Get all prefill cases for this (backend, head_num) config
-    all_cases = get_attention_prefill_test_cases()
+    # Get test cases based on phase
+    if is_prefill:
+        all_cases = get_attention_prefill_test_cases()
+        phase_name = "Context"
+    else:
+        all_cases = get_attention_decode_test_cases()
+        phase_name = "Generation"
+
     cases = [tc for tc in all_cases if tc[2] == attention_backend and tc[3] == head_num]
 
     print(f"\n{'=' * 60}")
-    print(f"MLA Context: backend={attention_backend}, head_num={head_num}")
+    print(f"MLA {phase_name}: backend={attention_backend}, head_num={head_num}, GPU={gpu_id}")
     print(f"Test cases: {len(cases)}")
     print(f"{'=' * 60}")
 
@@ -605,7 +609,7 @@ def run_wideep_mla_context(attention_backend, head_num, perf_filename, device="c
     torch.cuda.empty_cache()
 
     model_runner = load_model_runner(
-        DEEPSEEK_MODEL_PATH, attention_backend, head_num, test_layer=0, dtype="auto", device=device_str
+        DEEPSEEK_MODEL_PATH, attention_backend, head_num, test_layer=0, dtype="auto", device="cuda:0"
     )
 
     run_attention_torch(
@@ -617,55 +621,79 @@ def run_wideep_mla_context(attention_backend, head_num, perf_filename, device="c
         num_warmup=3,
         num_iterations=10,
         enable_profiler=False,
-        device=device_str,
-        output_path=None,
+        device="cuda:0",
+        output_path=output_path,
     )
 
     del model_runner
     cleanup_distributed()
     torch.cuda.empty_cache()
+
+
+def _run_mla_subprocess(attention_backend, head_num, is_prefill, gpu_id):
+    """Helper to run MLA in subprocess with CUDA_VISIBLE_DEVICES isolation."""
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    phase = "context" if is_prefill else "generation"
+    code = f'''
+import sys
+sys.path.insert(0, "{os.path.dirname(os.path.abspath(__file__))}")
+from collect_wideep_attn import run_mla
+run_mla("{attention_backend}", {head_num}, {is_prefill}, {gpu_id}, None)
+'''
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+
+    try:
+        stdout, _ = proc.communicate(timeout=300)
+        if stdout:
+            print(stdout.decode("utf-8", errors="replace"))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"MLA {phase} subprocess failed with exit code {proc.returncode}")
+
+
+def run_wideep_mla_context(attention_backend, head_num, perf_filename, device="cuda:0"):
+    """Run wideep MLA context benchmark for a specific (backend, head_num) config.
+
+    Compatible with collect.py framework - uses subprocess for GPU isolation.
+    """
+    device_str = str(device) if not isinstance(device, str) else device
+    gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
+
+    print("\n" + "=" * 60)
+    print(f"MLA Context: backend={attention_backend}, head_num={head_num}, GPU={gpu_id}")
+    print("=" * 60)
+
+    _run_mla_subprocess(attention_backend, head_num, True, gpu_id)
 
 
 def run_wideep_mla_generation(attention_backend, head_num, perf_filename, device="cuda:0"):
     """Run wideep MLA generation benchmark for a specific (backend, head_num) config.
 
-    Compatible with collect.py framework - accepts direct params like trtllm collectors.
+    Compatible with collect.py framework - uses subprocess for GPU isolation.
     """
     device_str = str(device) if not isinstance(device, str) else device
-    torch.cuda.set_device(device_str)
+    gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
 
-    # Get all decode cases for this (backend, head_num) config
-    all_cases = get_attention_decode_test_cases()
-    cases = [tc for tc in all_cases if tc[2] == attention_backend and tc[3] == head_num]
+    print("\n" + "=" * 60)
+    print(f"MLA Generation: backend={attention_backend}, head_num={head_num}, GPU={gpu_id}")
+    print("=" * 60)
 
-    print(f"\n{'=' * 60}")
-    print(f"MLA Generation: backend={attention_backend}, head_num={head_num}")
-    print(f"Test cases: {len(cases)}")
-    print(f"{'=' * 60}")
-
-    cleanup_distributed()
-    torch.cuda.empty_cache()
-
-    model_runner = load_model_runner(
-        DEEPSEEK_MODEL_PATH, attention_backend, head_num, test_layer=0, dtype="auto", device=device_str
-    )
-
-    run_attention_torch(
-        model_runner,
-        cases,
-        attention_backend,
-        head_num,
-        test_layer=0,
-        num_warmup=3,
-        num_iterations=10,
-        enable_profiler=False,
-        device=device_str,
-        output_path=None,
-    )
-
-    del model_runner
-    cleanup_distributed()
-    torch.cuda.empty_cache()
+    _run_mla_subprocess(attention_backend, head_num, False, gpu_id)
 
 
 if __name__ == "__main__":
