@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import json
-import logging
 import os
+from importlib.metadata import version as get_version
 
 import numpy as np
 import torch
@@ -30,10 +30,8 @@ except ModuleNotFoundError:
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from helper import benchmark_with_power, log_perf
-import pkg_resources
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
-logger = logging.getLogger(__name__)
 
 
 def cleanup_distributed():
@@ -332,7 +330,7 @@ def run_attention_torch(
                         else os.path.join(output_path, "wideep_context_mla_perf.txt")
                     )
                     device_name = torch.cuda.get_device_name(device)
-                    version = pkg_resources.get_distribution("sglang").version
+                    version = get_version("sglang")
                     log_perf(
                         item_list=[
                             {
@@ -513,7 +511,7 @@ def run_attention_torch(
                         else os.path.join(output_path, "wideep_generation_mla_perf.txt")
                     )
                     device_name = torch.cuda.get_device_name(device)
-                    version = pkg_resources.get_distribution("sglang").version
+                    version = get_version("sglang")
                     log_perf(
                         item_list=[
                             {

@@ -31,7 +31,7 @@ except ModuleNotFoundError:
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from helper import log_perf, power_law_deepep_decode, power_law_deepep_prefill
-import pkg_resources
+from importlib.metadata import version as get_version
 
 DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
 
@@ -327,7 +327,7 @@ def benchmark_moe_layer_prefill(
                     moe_ep_size = simulated_ep_size
                     num_tokens_log = num_token * simulated_ep_size
                     device_name = torch.cuda.get_device_name(server_args.device)
-                    version = pkg_resources.get_distribution("sglang").version
+                    version = get_version("sglang")
                     # Save to collector/ directory to match non-wideep behavior
                     collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     perf_filename = (
@@ -604,7 +604,7 @@ def benchmark_moe_layer_decode(
                     moe_ep_size = simulated_ep_size
                     num_tokens_log = num_token * simulated_ep_size
                     device_name = torch.cuda.get_device_name(server_args.device)
-                    version = pkg_resources.get_distribution("sglang").version
+                    version = get_version("sglang")
                     distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
                     # Save to collector/ directory to match non-wideep behavior
                     collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

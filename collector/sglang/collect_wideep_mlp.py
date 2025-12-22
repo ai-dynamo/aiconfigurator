@@ -12,7 +12,8 @@ except ModuleNotFoundError:
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from helper import log_perf
-import pkg_resources
+from importlib.metadata import version as get_version
+
 from sglang.srt.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -252,7 +253,7 @@ def run_mlp_torch(
             if output_path is not None:
                 os.makedirs(os.path.dirname(perf_filename), exist_ok=True)
             device_name = torch.cuda.get_device_name(device)
-            version = pkg_resources.get_distribution("sglang").version
+            version = get_version("sglang")
             log_perf(
                 item_list=[
                     {
