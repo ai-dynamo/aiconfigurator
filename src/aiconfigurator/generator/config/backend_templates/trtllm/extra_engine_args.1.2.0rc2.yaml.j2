@@ -43,10 +43,10 @@ cuda_graph_config:
 disable_overlap_scheduler: {{ disable_overlap_scheduler | default(true) }}
 print_iter_log: {{ print_iter_log | default(false) }}
 
-{% if is_speculative is defined %}  # speculative decoding
+{% if speculative_config.decoding_type is defined %}  # speculative decoding
 speculative_config:
   decoding_type: {{ speculative_config.decoding_type }}
-  {% if decoding_type == 'MTP' %}
+  {% if speculative_config.decoding_type == 'MTP' %}
   num_nextn_predict_layers: {{ num_nextn_predict_layers }}
   {% endif %}
 {% endif %}
