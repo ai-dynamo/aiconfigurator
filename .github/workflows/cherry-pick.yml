@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Cherry-pick to Release Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Commit SHA to cherry-pick from main"
+        required: true
+        type: string
+      target_branch:
+        description: "Target release branch"
+        required: true
+        type: choice
+        options:
+          - release/0.5.0
+      create_pr:
+        description: "Create a pull request after cherry-pick"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  cherry-pick:
+    name: Cherry-pick Commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate commit exists on main
+        run: |
+          if ! git branch -r --contains ${{ github.event.inputs.commit_sha }} | grep -q "origin/main"; then
+            echo "Error: Commit ${{ github.event.inputs.commit_sha }} is not on main branch"
+            exit 1
+          fi
+          echo "✓ Commit verified on main branch"
+
+      - name: Get commit info
+        id: commit-info
+        run: |
+          COMMIT_MSG=$(git log -1 --format="%s" ${{ github.event.inputs.commit_sha }})
+          COMMIT_SHORT=$(echo "${{ github.event.inputs.commit_sha }}" | cut -c1-7)
+          echo "commit_msg=${COMMIT_MSG}" >> $GITHUB_OUTPUT
+          echo "commit_short=${COMMIT_SHORT}" >> $GITHUB_OUTPUT
+          echo "branch_name=cherry-pick/${COMMIT_SHORT}-to-$(echo ${{ github.event.inputs.target_branch }} | sed 's/\//-/g')" >> $GITHUB_OUTPUT
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout target branch and cherry-pick
+        id: cherry-pick
+        run: |
+          # Checkout the target release branch
+          git checkout ${{ github.event.inputs.target_branch }}
+
+          # Create a new branch for the cherry-pick
+          git checkout -b ${{ steps.commit-info.outputs.branch_name }}
+
+          # Cherry-pick the commit
+          if git cherry-pick ${{ github.event.inputs.commit_sha }}; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✓ Cherry-pick successful"
+          else
+            echo "status=conflict" >> $GITHUB_OUTPUT
+            echo "⚠ Cherry-pick has conflicts"
+            git cherry-pick --abort
+            exit 1
+          fi
+
+      - name: Push branch
+        if: steps.cherry-pick.outputs.status == 'success'
+        run: |
+          git push origin ${{ steps.commit-info.outputs.branch_name }}
+
+      - name: Create Pull Request
+        if: steps.cherry-pick.outputs.status == 'success' && github.event.inputs.create_pr == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base ${{ github.event.inputs.target_branch }} \
+            --head ${{ steps.commit-info.outputs.branch_name }} \
+            --title "[Cherry-pick] ${{ steps.commit-info.outputs.commit_msg }}" \
+            --body "## Cherry-pick from main
+
+          This PR cherry-picks commit [${{ steps.commit-info.outputs.commit_short }}](https://github.com/${{ github.repository }}/commit/${{ github.event.inputs.commit_sha }}) to \`${{ github.event.inputs.target_branch }}\`.
+
+          ### Original commit
+          - **SHA:** \`${{ github.event.inputs.commit_sha }}\`
+          - **Message:** ${{ steps.commit-info.outputs.commit_msg }}
+
+          ---
+          *This PR was automatically created by the Cherry-pick workflow.*"
+
+      - name: Summary
+        run: |
+          echo "## Cherry-pick Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Source Commit | \`${{ github.event.inputs.commit_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target Branch | \`${{ github.event.inputs.target_branch }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| New Branch | \`${{ steps.commit-info.outputs.branch_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ steps.cherry-pick.outputs.status == 'success' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+
