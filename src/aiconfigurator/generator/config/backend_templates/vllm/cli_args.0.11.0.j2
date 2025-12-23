@@ -13,4 +13,14 @@
 
 
 {%- if vllm['no-enable-prefix-caching'] -%}{%- set _ = args.append('--no-enable-prefix-caching') -%}{%- endif -%}
+{%- set spec_cfg = namespace(value={}) -%}
+{%- if speculative_config.method is defined and speculative_config.method -%}
+    {%- set _ = spec_cfg.value.update({'method': speculative_config.method}) -%}
+{%- endif -%}
+{%- if speculative_config.num_speculative_tokens is defined and speculative_config.num_speculative_tokens is not none -%}
+    {%- set _ = spec_cfg.value.update({'num_speculative_tokens': speculative_config.num_speculative_tokens}) -%}
+{%- endif -%}
+{%- if spec_cfg.value -%}
+    {%- set _ = args.append('--speculative-config \'' ~ (spec_cfg.value | tojson) ~ '\'') -%}
+{%- endif -%}
 {{ args | join(' ') }}

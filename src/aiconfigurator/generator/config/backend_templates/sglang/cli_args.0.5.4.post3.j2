@@ -13,6 +13,8 @@
 {%- if sglang['moe-dense-tp-size'] is defined -%}{%- set _ = args.append('--moe-dense-tp-size "' ~ sglang['moe-dense-tp-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['disable-cuda-graph'] -%}{%- set _ = args.append('--disable-cuda-graph') -%}{%- endif -%}
 {%- if sglang['cuda-graph-bs'] is defined -%}{%- set _ = args.append('--cuda-graph-bs ' ~ (sglang['cuda-graph-bs'] | join(' '))) -%}{%- endif -%}
+{%- if sglang['speculative-algorithm'] is defined -%}{%- set _ = args.append('--speculative-algorithm "' ~ sglang['speculative-algorithm'] ~ '"') -%}{%- endif -%}
+{%- if sglang['speculative-num-steps'] is defined -%}{%- set _ = args.append('--speculative-num-steps "' ~ sglang['speculative-num-steps'] ~ '"') -%}{%- endif -%}
 {%- if sglang['disable-cuda-graph-padding'] -%}{%- set _ = args.append('--disable-cuda-graph-padding') -%}{%- endif -%}
 {%- if sglang['cuda-graph-max-bs'] is defined -%}{%- set _ = args.append('--cuda-graph-max-bs "' ~ sglang['cuda-graph-max-bs'] ~ '"') -%}{%- endif -%}
 {{ args | join(' ') }}
