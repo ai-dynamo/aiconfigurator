@@ -23,6 +23,10 @@ databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
 
+class PerfDataNotAvailableError(RuntimeError):
+    """Raised when required performance data is missing or unsupported for a requested mode."""
+
+
 def get_system_config_path():
     """
     Get the system config path
@@ -1836,53 +1840,70 @@ class PerfDatabase:
         """
         Update the support matrix
         """
+
+        def _enum_key_names(data: dict | None) -> list[str]:
+            """
+            Safely extract Enum key names from a mapping.
+
+            Many perf tables are optional and loaders return None when data files
+            are missing. Treat missing/empty tables as supporting no modes.
+            """
+            if not data:
+                return []
+            names: list[str] = []
+            for key in data:
+                names.append(key.name if hasattr(key, "name") else str(key))
+            return names
+
         # For sglang backend, context_mla_data and generation_mla_data have kernel_source as first
         # level
         # We need to collect quant_modes from the nested structure
         if self.backend == "sglang":
             wideep_context_mla_modes = set()
-            for kernel_source in self._wideep_context_mla_data:
-                for quant_mode in self._wideep_context_mla_data[kernel_source]:
+            for kernel_source in self._wideep_context_mla_data or {}:
+                for quant_mode in (self._wideep_context_mla_data or {})[kernel_source]:
                     wideep_context_mla_modes.add(quant_mode.name)
 
             wideep_generation_mla_modes = set()
-            for kernel_source in self._wideep_generation_mla_data:
-                for kv_cache_dtype in self._wideep_generation_mla_data[kernel_source]:
+            for kernel_source in self._wideep_generation_mla_data or {}:
+                for kv_cache_dtype in (self._wideep_generation_mla_data or {})[kernel_source]:
                     wideep_generation_mla_modes.add(kv_cache_dtype.name)
 
             self.supported_quant_mode = {
-                "gemm": [key.name for key in self._moe_data],
-                "context_attention": [key.name for key in self._context_attention_data],
-                "generation_attention": [key.name for key in self._generation_attention_data],
-                "context_mla": [key.name for key in self._context_mla_data],
-                "generation_mla": [key.name for key in self._generation_mla_data],
-                "mla_bmm": [key.name for key in self._mla_bmm_data],
-                "nccl": [key.name for key in self._nccl_data],
-                "moe": [key.name for key in self._moe_data],
+                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
+                "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
+                "context_mla": _enum_key_names(getattr(self, "_context_mla_data", None)),
+                "generation_mla": _enum_key_names(getattr(self, "_generation_mla_data", None)),
+                "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
+                "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
+                "moe": _enum_key_names(getattr(self, "_moe_data", None)),
+                "wideep_context_moe": _enum_key_names(getattr(self, "_wideep_context_moe_data", None)),
+                "wideep_generation_moe": _enum_key_names(getattr(self, "_wideep_generation_moe_data", None)),
                 "wideep_context_mla": list(wideep_context_mla_modes),
                 "wideep_generation_mla": list(wideep_generation_mla_modes),
             }
         elif self.backend == "trtllm":
             self.supported_quant_mode = {
-                "gemm": [key.name for key in self._gemm_data],
-                "context_attention": [key.name for key in self._context_attention_data],
-                "generation_attention": [key.name for key in self._generation_attention_data],
-                "context_mla": [key.name for key in self._context_mla_data],
-                "generation_mla": [key.name for key in self._generation_mla_data],
-                "mla_bmm": [key.name for key in self._mla_bmm_data],
-                "nccl": [key.name for key in self._nccl_data],
-                "moe": [key.name for key in self._moe_data],
+                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
+                "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
+                "context_mla": _enum_key_names(getattr(self, "_context_mla_data", None)),
+                "generation_mla": _enum_key_names(getattr(self, "_generation_mla_data", None)),
+                "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
+                "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
+                "moe": _enum_key_names(getattr(self, "_moe_data", None)),
             }
-        elif self.backend == "vllm":  # TODO: add support for moe and deepseek
+        elif self.backend == "vllm":  # TODO: deepseek
             self.supported_quant_mode = {
-                "gemm": [key.name for key in self._gemm_data],
-                "context_attention": [key.name for key in self._context_attention_data],
-                "generation_attention": [key.name for key in self._generation_attention_data],
-                "nccl": [key.name for key in self._nccl_data],
+                "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
+                "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
+                "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
+                "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
                 "context_mla": [],
                 "generation_mla": [],
                 "mla_bmm": [],
-                "moe": [],
+                "moe": _enum_key_names(getattr(self, "_moe_data", None)),
             }
 
     def is_inter_node(self, num_gpus: int) -> bool:
@@ -2316,6 +2337,7 @@ class PerfDatabase:
         y1, y2 = y_list
         # Calculate the weights for the corners
         Q11, Q12, Q21, Q22 = data[x1][y1], data[x1][y2], data[x2][y1], data[x2][y2]  # noqa: N806
+
         f_x1_y1 = Q11 * (x2 - x) * (y2 - y)
         f_x1_y2 = Q12 * (x2 - x) * (y - y1)
         f_x2_y1 = Q21 * (x - x1) * (y2 - y)
@@ -2484,6 +2506,20 @@ class PerfDatabase:
         else:
             # SILICON or HYBRID mode - use database
             try:
+                if self._gemm_data is None:
+                    msg = (
+                        "GEMM perf table is missing for "
+                        f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
+                    )
+                    raise PerfDataNotAvailableError(msg)
+                if quant_mode not in self._gemm_data:
+                    supported = sorted([k.name for k in self._gemm_data])
+                    raise PerfDataNotAvailableError(
+                        "GEMM perf data not available for requested quant mode. "
+                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                        f"quant_mode='{quant_mode.name}'. "
+                        f"Supported gemm modes: {supported}"
+                    )
                 result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
                 # Result is dict: {"latency": ..., "power": ..., "energy": ...}
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
@@ -2612,6 +2648,12 @@ class PerfDatabase:
             return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
+                if self._context_attention_data is None:
+                    raise PerfDataNotAvailableError(
+                        f"Context attention perf table is missing for system='{self.system}', "
+                        f"backend='{self.backend}', version='{self.version}'. "
+                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                    )
                 full_s = s + prefix
                 prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
                 # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
@@ -2623,7 +2665,7 @@ class PerfDatabase:
                 latency = result["latency"] * prefix_correction
                 energy = result.get("energy", 0.0) * prefix_correction
                 return PerformanceResult(latency, energy=energy)
-            except:
+            except Exception as e:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
                         f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, {n_kv=}, "
@@ -2642,11 +2684,19 @@ class PerfDatabase:
                     )
                     return PerformanceResult(latency, energy=0.0)
                 else:
-                    logger.exception(
-                        f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, "
-                        f"{n_kv=}, {head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}. "
-                        "Please consider Hybrid mode."
-                    )
+                    # Missing perf data is expected for some system/backend/mode combinations.
+                    # Avoid spamming full tracebacks during Pareto enumeration.
+                    if isinstance(e, PerfDataNotAvailableError):
+                        logger.debug(
+                            f"Missing context attention perf data for {b=}, {s=}, {prefix=}, {n=}, {n_kv=}, "
+                            f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}"
+                        )
+                    else:
+                        logger.exception(
+                            f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, "
+                            f"{n_kv=}, {head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}. "
+                            "Please consider Hybrid mode."
+                        )
                     raise
 
     @functools.lru_cache(maxsize=32768)
@@ -2745,6 +2795,12 @@ class PerfDatabase:
             return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
+                if self._generation_attention_data is None:
+                    raise PerfDataNotAvailableError(
+                        f"Generation attention perf table is missing for system='{self.system}', "
+                        f"backend='{self.backend}', version='{self.version}'. "
+                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                    )
                 # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
                 if n_kv == n:
                     n_kv = 0
@@ -2849,6 +2905,12 @@ class PerfDatabase:
             return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
+                if self._context_mla_data is None:
+                    raise PerfDataNotAvailableError(
+                        f"Context MLA perf table is missing for system='{self.system}', "
+                        f"backend='{self.backend}', version='{self.version}'. "
+                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                    )
                 full_s = s + prefix
                 prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
                 mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
@@ -2941,6 +3003,12 @@ class PerfDatabase:
             return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
+                if self._generation_mla_data is None:
+                    raise PerfDataNotAvailableError(
+                        f"Generation MLA perf table is missing for system='{self.system}', "
+                        f"backend='{self.backend}', version='{self.version}'. "
+                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                    )
                 mla_dict = self._generation_mla_data[kvcache_quant_mode]
                 result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
                 latency = result["latency"]
@@ -3068,6 +3136,12 @@ class PerfDatabase:
             return PerformanceResult(get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode), energy=0.0)
         else:
             try:
+                if self._wideep_generation_mla_data is None:
+                    raise PerfDataNotAvailableError(
+                        f"WiDeep generation MLA perf table is missing for system='{self.system}', "
+                        f"backend='{self.backend}', version='{self.version}'. "
+                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                    )
                 if attention_backend is None:
                     attention_backend = "flashinfer"
                 if attention_backend == "flashinfer":
@@ -3203,6 +3277,12 @@ class PerfDatabase:
             )
         else:
             try:
+                if self._wideep_context_mla_data is None:
+                    raise PerfDataNotAvailableError(
+                        f"WiDeep context MLA perf table is missing for system='{self.system}', "
+                        f"backend='{self.backend}', version='{self.version}'. "
+                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                    )
                 if attention_backend is None:
                     attention_backend = "flashinfer"
                 if attention_backend == "flashinfer":
@@ -3303,6 +3383,13 @@ class PerfDatabase:
                 if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
                     # on GB200, we only have custom all reduce for up to tp4.
                     return self.query_nccl(quant_mode, tp_size, "all_reduce", size)
+
+                if self._custom_allreduce_data is None:
+                    raise PerfDataNotAvailableError(
+                        f"Custom allreduce perf table is missing for system='{self.system}', "
+                        f"backend='{self.backend}', version='{self.version}'. "
+                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                    )
 
                 comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
                     "AUTO"
@@ -3420,6 +3507,13 @@ class PerfDatabase:
             try:
                 if num_gpus == 1:
                     return PerformanceResult(0.0, energy=0.0)
+
+                if self._nccl_data is None:
+                    raise PerfDataNotAvailableError(
+                        f"NCCL perf table is missing for system='{self.system}', "
+                        f"backend='{self.backend}', version='{self.version}'. "
+                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                    )
 
                 max_num_gpus = max(self._nccl_data[dtype][operation].keys())
                 nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
@@ -3628,6 +3722,13 @@ class PerfDatabase:
                     else:
                         moe_data = self._moe_data
 
+                    if moe_data is None:
+                        raise PerfDataNotAvailableError(
+                            f"MoE perf table is missing for system='{self.system}', "
+                            f"backend='{self.backend}', version='{self.version}', moe_backend='{moe_backend}'. "
+                            "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                        )
+
                     used_workload_distribution = (
                         workload_distribution if workload_distribution in moe_data[quant_mode] else "uniform"
                     )
@@ -3652,6 +3753,12 @@ class PerfDatabase:
                         energy = 0.0
                     return PerformanceResult(lat, energy=energy)
                 elif self.backend == common.BackendName.trtllm.value:
+                    if self._moe_data is None and self._moe_low_latency_data is None:
+                        raise PerfDataNotAvailableError(
+                            f"MoE perf table is missing for system='{self.system}', "
+                            f"backend='{self.backend}', version='{self.version}'. "
+                            "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                        )
                     # aligned with trtllm, kernel source selection.
                     if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
                         try:
@@ -3703,6 +3810,12 @@ class PerfDatabase:
                         energy = 0.0
                     return PerformanceResult(lat, energy=energy)
                 elif self.backend == common.BackendName.vllm.value:
+                    if self._moe_data is None:
+                        raise PerfDataNotAvailableError(
+                            f"MoE perf table is missing for system='{self.system}', "
+                            f"backend='{self.backend}', version='{self.version}'. "
+                            "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                        )
                     used_workload_distribution = (
                         workload_distribution if workload_distribution in self._moe_data[quant_mode] else "uniform"
                     )
@@ -3814,6 +3927,12 @@ class PerfDatabase:
             return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
+                if self._mla_bmm_data is None:
+                    raise PerfDataNotAvailableError(
+                        f"MLA BMM perf table is missing for system='{self.system}', "
+                        f"backend='{self.backend}', version='{self.version}'. "
+                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                    )
                 if quant_mode not in self._mla_bmm_data:
                     quant_mode = common.GEMMQuantMode.float16
                 mla_bmm_dict = self._mla_bmm_data[quant_mode]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]

@@ -27,6 +27,7 @@
 {%- if sglang['disable-cuda-graph-padding'] -%}{%- set _ = args.append('--disable-cuda-graph-padding') -%}{%- endif -%}
 {%- if sglang['cuda-graph-max-bs'] is defined -%}{%- set _ = args.append('--cuda-graph-max-bs "' ~ sglang['cuda-graph-max-bs'] ~ '"') -%}{%- endif -%}
 {%- if sglang['speculative-algorithm'] is defined -%}{%- set _ = args.append('--speculative-algorithm "' ~ sglang['speculative-algorithm'] ~ '"') -%}{%- endif -%}
+{%- if sglang['speculative-num-steps'] is defined -%}{%- set _ = args.append('--speculative-num-steps "' ~ sglang['speculative-num-steps'] ~ '"') -%}{%- endif -%}
 {%- if sglang['disable-overlap-schedule'] -%}{%- set _ = args.append('--disable-overlap-schedule') -%}{%- endif -%}
 {%- if sglang['load-balance-method'] is defined -%}{%- set _ = args.append('--load-balance-method "' ~ sglang['load-balance-method'] ~ '"') -%}{%- endif -%}
 {{ args | join(' ') }}
