@@ -92,6 +92,7 @@ SAVE_DIR_HOST="${SAVE_DIR_HOST:-$PWD/aiconf_save}"
 # HF token is optional; forward if present
 : "${HF_TOKEN:=}"
 
+
 ensure_model_local() {
   if [[ "${ENABLE_MODEL_DOWNLOAD,,}" != "true" ]]; then
     log "Model download disabled by config."
@@ -249,8 +250,6 @@ aiconfigurator eval \
   default \
   --model "$MODEL" \
   --total_gpus "$TOTAL_GPUS" \
-  --head_node_ip "$HEAD_NODE_IP" \
-  --port "$PORT" \
   --system "$SYSTEM" \
   --backend_version "$VERSION" \
   --generated_config_version "$GENERATED_CONFIG_VERSION" \
@@ -278,11 +277,30 @@ run_inside_container() {
     python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
     (cd "$SRC_ROOT_INNER" && python3 -m pip install -e . --break-system-packages)
 
-    # Prepare uv virtualenv for aiperf
-    uv venv "$VENV_PATH"
-    source "$VENV_PATH/bin/activate"
-    uv pip install aiperf
-    deactivate
+    # Prepare virtualenv for aiperf (prefer uv if available)
+    if command -v uv >/dev/null 2>&1; then
+      uv venv "$VENV_PATH"
+      source "$VENV_PATH/bin/activate"
+      uv pip install aiperf
+      deactivate
+    else
+      # Try stdlib venv first; if it fails (ensurepip missing), fall back to virtualenv
+      python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+      if python3 -m venv "$VENV_PATH" >/dev/null 2>&1; then
+        source "$VENV_PATH/bin/activate"
+        python3 -m pip install --upgrade pip
+        python3 -m pip install aiperf
+        deactivate
+      else
+        # Fallback: use virtualenv (avoid upgrading Debian-managed pip)
+        python3 -m pip install --break-system-packages virtualenv || python3 -m pip install virtualenv
+        python3 -m virtualenv "$VENV_PATH"
+        source "$VENV_PATH/bin/activate"
+        python -m pip install --upgrade pip
+        python -m pip install aiperf
+        deactivate
+      fi
+    fi
   fi
 
   log "Eval command:\n$EVAL_CMD"
@@ -316,11 +334,29 @@ if ! command -v aiconfigurator >/dev/null 2>&1; then
   cd "$AICONF_SRC"
   python3 -m pip install -e . --break-system-packages
 
-  # Prepare uv virtualenv for aiperf
-  uv venv "$VENV_PATH"
-  source "$VENV_PATH/bin/activate"
-  uv pip install aiperf
-  deactivate
+  # Prepare virtualenv for aiperf (prefer uv if available)
+  if command -v uv >/dev/null 2>&1; then
+    uv venv "$VENV_PATH"
+    source "$VENV_PATH/bin/activate"
+    uv pip install aiperf
+    deactivate
+  else
+    # Try stdlib venv first; if it fails (ensurepip missing), fall back to virtualenv
+    python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+    if python3 -m venv "$VENV_PATH" >/dev/null 2>&1; then
+      source "$VENV_PATH/bin/activate"
+      python3 -m pip install --upgrade pip
+      python3 -m pip install aiperf
+      deactivate
+    else
+      python3 -m pip install --break-system-packages virtualenv || python3 -m pip install virtualenv
+      python3 -m virtualenv "$VENV_PATH"
+      source "$VENV_PATH/bin/activate"
+      python -m pip install --upgrade pip
+      python -m pip install aiperf
+      deactivate
+    fi
+  fi
 fi
 
 # ---- EVAL_CMD will be appended below ----
