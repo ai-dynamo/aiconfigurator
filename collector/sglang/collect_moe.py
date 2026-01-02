@@ -82,14 +82,6 @@ def get_moe_test_cases():
         num_tokens_list = [num_tokens for num_tokens in common_moe_testcase.num_tokens_list if num_tokens <= 20480]
 
         for moe_type, num_tokens in itertools.product(moe_list, num_tokens_list):
-            if moe_type == "nvfp4":
-                # FlashInfer CuteDSL MOE (NVFP4) requires dimensions to be multiples of 128
-                shard_inter = common_moe_testcase.inter_size // common_moe_testcase.tp
-                # For MoE, n = shard_inter // 2 (since it's gated)
-                # For CuteDSL, both n and k (hidden_size) should be aligned
-                if (shard_inter // 2) % 128 != 0 or common_moe_testcase.hidden_size % 128 != 0:
-                    continue
-
             test_cases.append(
                 [
                     moe_type,
@@ -179,8 +171,6 @@ def benchmark_config(
         w1_bs = w1_sf.view(torch.float8_e4m3fn).reshape(num_experts, shard_intermediate_size, -1).contiguous()
         w2 = w2_fp4.reshape(num_experts, hidden_size, shard_intermediate_size // 4)
         w2_bs = w2_sf.view(torch.float8_e4m3fn).reshape(num_experts, hidden_size, -1).contiguous()
-
-        x_dispatched = torch.randn(num_experts, num_tokens * topk, hidden_size, device=device, dtype=dtype)
 
         def get_masked_m(logits):
             _, topk_idx = torch.topk(torch.softmax(logits, dim=1), topk, dim=-1)
