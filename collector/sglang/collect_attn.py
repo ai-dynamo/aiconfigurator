@@ -85,7 +85,7 @@ def create_req_to_token_pool(batch_size, total_len, page_size, torch_device, dev
 def get_context_attention_test_cases():
     test_cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    s_list = [16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 262144]
+    s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 262144]
     n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
     n_kv_list = [0, 1, 2, 4, 8]
 
