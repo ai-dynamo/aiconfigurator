@@ -222,24 +222,7 @@ def _get_mla_common_test_cases(is_context: bool):
 
     if is_context:
         b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-        s_list = [
-            16,
-            32,
-            64,
-            128,
-            256,
-            512,
-            1024,
-            1536,
-            2048,
-            3072,
-            4096,
-            6144,
-            8192,
-            10240,
-            12288,
-            16384,
-        ]
+        s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
     else:
         b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
         s_list = [
@@ -275,7 +258,7 @@ def _get_mla_common_test_cases(is_context: bool):
         model_config_list,
     ):
         if is_context:
-            if b * s > 32768:
+            if b * s > 65536:
                 continue
         else:
             if b * s > 1024 * 4096 * 2 * 2:

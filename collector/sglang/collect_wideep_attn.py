@@ -56,7 +56,7 @@ def get_attention_prefill_test_cases():
     test_cases = []
 
     context_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    context_seq_lengths = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    context_seq_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 
     attention_backends = ["flashinfer", "fa3"]
     head_nums = [128, 64, 32, 16]
@@ -85,7 +85,7 @@ def get_attention_decode_test_cases():
     test_cases = []
 
     generation_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    generation_seq_lengths = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    generation_seq_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 
     attention_backends = ["flashinfer", "fa3"]
     head_nums = [128, 64, 32, 16]

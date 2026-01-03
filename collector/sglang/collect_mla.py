@@ -121,30 +121,13 @@ def get_context_mla_test_cases():
     test_cases = []
     n_list = [64, 128]
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    s_list = [
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        10240,
-        12288,
-        16384,
-    ]
+    s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
     for n in n_list:
         for b in b_list:
             for s in s_list:
                 for dtype in dtype_list:
                     for tp_size in [1, 2, 4, 8, 16, 32, 64]:
-                        if b * s > 32768:
+                        if b * s > 65536:
                             continue
                         test_cases.append(
                             [

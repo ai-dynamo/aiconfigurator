@@ -1726,7 +1726,7 @@ class PerfDatabase:
                     # it will be difficult to do square interpolation.
                     # Use more points to do the approximation
                     target_y_list = (
-                        [16, 32, 64, 128, 256, 512, 1024, 2048]
+                        [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
                         + [4096 + i * 2048 for i in range(14)]
                         + [32768 + 16384 * i for i in range(6)]
                         + [131072 + 32768 * i for i in range(12)]

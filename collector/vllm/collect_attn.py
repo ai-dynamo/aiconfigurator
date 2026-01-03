@@ -352,6 +352,7 @@ def get_context_attention_test_cases(if_unit_test=False):
     if not if_unit_test:
         b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
         s_list = [
+            1,
             16,
             32,
             64,
