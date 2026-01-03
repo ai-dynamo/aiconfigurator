@@ -224,9 +224,8 @@ class BaseModel:
                 f"Currently we're nothing to correct this."
             )
 
-        assert self._num_heads % model_config.tp_size == 0 and self._num_heads // model_config.tp_size >= 4, (
+        assert self._num_heads % model_config.tp_size == 0, (
             f"num_heads {self._num_heads} should be divisible by tp_size {model_config.tp_size} "
-            f"and the division result should be >= 4"
         )
 
         self._nextn = model_config.nextn
