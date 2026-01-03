@@ -115,15 +115,12 @@ def get_moe_test_cases():
 
             min_latency_mode_options = [False]
 
-            if moe_type == "nvfp4":
-                if inter_s // moe_tp % 128 != 0:
-                    continue
+            if moe_type == "nvfp4" and get_sm_version() == 100 and common_moe_testcase.num_experts <= 256:
                 # FIXME: recent version only supports SM100 for min-latency mode.
                 # current support, DS router only support up to 256 experts.
                 # Renormalize router only support <=128 experts. trtllmgen kernels only
                 # support renormalize, ds and llama router.
-                if get_sm_version() == 100 and common_moe_testcase.num_experts <= 256:
-                    min_latency_mode_options.append(True)
+                min_latency_mode_options.append(True)
 
             for min_latency_mode in min_latency_mode_options:
                 test_cases.append(
