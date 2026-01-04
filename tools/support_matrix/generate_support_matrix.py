@@ -14,10 +14,12 @@ import logging
 import os
 import sys
 
-# Add tests directory to path for support_matrix module
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tests"))
+# Ensure local repo paths are importable when running as a standalone script.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
+sys.path.insert(0, _REPO_ROOT)
 
-from sdk.support_matrix.suppport_matrix import SupportMatrix
+from tests.e2e.support_matrix.support_matrix import SupportMatrix
 
 
 def main():
