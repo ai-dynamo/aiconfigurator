@@ -17,12 +17,16 @@ pytestmark = pytest.mark.unit
 
 
 def _find_repo_root(start: Path) -> Path:
-    """Find repository root by looking for pyproject.toml + src/."""
+    """Find repository root.
+
+    In the Docker test image we copy `src/` and `tests/` into `/workspace/` but do
+    not copy `pyproject.toml`, so we detect the repo root via `src/aiconfigurator/`.
+    """
     start = start.resolve()
     for parent in [start, *start.parents]:
-        if (parent / "pyproject.toml").exists() and (parent / "src").is_dir():
+        if (parent / "src" / "aiconfigurator").is_dir():
             return parent
-    raise RuntimeError("Cannot find repository root (expected pyproject.toml and src/)")
+    raise RuntimeError("Cannot find repository root (expected src/aiconfigurator/)")
 
 
 class TestSupportedSystems:
