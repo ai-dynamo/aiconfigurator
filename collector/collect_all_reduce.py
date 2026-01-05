@@ -4,7 +4,7 @@
 """
 Gneeral-purpose AllReduce Performance Collector
 
-Suppported Backends:
+Supported Backends:
     TensorRT-LLM
     vLLM
 

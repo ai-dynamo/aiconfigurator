@@ -21,7 +21,6 @@
 /src/aiconfigurator/sdk/perf_database.py @Arsene12358 @YijiaZhao @ilyasher @xutizhou @AichenF @tianhaox @jasonqinzhou
 /src/aiconfigurator/sdk/task.py @tianhaox @jasonqinzhou @ilyasher @Arsene12358
 /src/aiconfigurator/sdk/utils.py @tianhaox @jasonqinzhou @simone-chen @Arsene12358
-/src/aiconfigurator/sdk/suppport_matrix.py @Harrilee @tianhaox @jasonqinzhou @Arsene12358
 
 # cli
 /src/aiconfigurator/cli @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
@@ -67,7 +66,7 @@
 /docker @jasonqinzhou @anish-shanbhag @ilyasher @ai-dynamo/Devops @tianhaox @Arsene12358
 
 # tests
-/tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @ai-dynamo/Devops
+/tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @Harrilee @ai-dynamo/Devops
 
 # tools
 /tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358
