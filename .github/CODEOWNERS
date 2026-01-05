@@ -21,7 +21,7 @@
 /src/aiconfigurator/sdk/perf_database.py @Arsene12358 @YijiaZhao @ilyasher @xutizhou @AichenF @tianhaox @jasonqinzhou
 /src/aiconfigurator/sdk/task.py @tianhaox @jasonqinzhou @ilyasher @Arsene12358
 /src/aiconfigurator/sdk/utils.py @tianhaox @jasonqinzhou @simone-chen @Arsene12358
-/src/aiconfigurator/sdk/suppport_matrix.py @Harrilee @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/sdk/suppport_matrix.py @Harrilee
 
 # cli
 /src/aiconfigurator/cli @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
@@ -31,7 +31,7 @@
 
 # webapp
 /src/aiconfigurator/webapp @tianhaox @jasonqinzhou @Arsene12358 @Harrilee
-/src/aiconfigurator/webapp/components/profiling @Harrilee @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/webapp/components/profiling @Harrilee
 
 # systems & data files
 /src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen @Arsene12358
@@ -73,7 +73,8 @@
 /tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358
 /tools/sanity_check @tianhaox @YijiaZhao @jasonqinzhou @Arsene12358
 /tools/simple_sdk_demo @tianhaox @jasonqinzhou @Arsene12358
-/tools/support_matrix/generate_support_matrix.py @Harrilee @tianhaox @jasonqinzhou @Arsene12358
+/tools/support_matrix/generate_support_matrix.py @Harrilee
+
 # misc
 /ATTRIBUTIONS.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358
 /CODE_OF_CONDUCT.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358
