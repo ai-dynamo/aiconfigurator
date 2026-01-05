@@ -5,8 +5,28 @@ import os
 from typing import NamedTuple
 
 import pkg_resources
+import sglang.srt.layers.dp_attention as dp_attention
 import torch
 from sglang.srt.configs.model_config import AttentionArch
+
+# Initialize DP attention variables globally for FlashInfer backend compatibility
+dp_attention.get_attention_tp_size = lambda: 1
+dp_attention.get_attention_tp_rank = lambda: 0
+dp_attention.get_attention_dp_size = lambda: 1
+dp_attention.get_attention_dp_rank = lambda: 0
+dp_attention.get_local_attention_dp_size = lambda: 1
+dp_attention.get_local_attention_dp_rank = lambda: 0
+dp_attention.is_dp_attention_enabled = lambda: False
+dp_attention._ENABLE_DP_ATTENTION_FLAG = False
+
+# Also set the private variables to be safe
+dp_attention._ATTN_TP_SIZE = 1
+dp_attention._ATTN_TP_RANK = 0
+dp_attention._ATTN_DP_SIZE = 1
+dp_attention._ATTN_DP_RANK = 0
+dp_attention._LOCAL_ATTN_DP_SIZE = 1
+dp_attention._LOCAL_ATTN_DP_RANK = 0
+
 from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
@@ -25,14 +45,29 @@ class Timing(NamedTuple):
 
 # Mock objects to satisfy RadixAttention dependencies
 class MockModelConfig:
-    def __init__(self):
+    def __init__(self, num_attention_heads, num_key_value_heads, head_dim):
         self.is_encoder_decoder = False
         self.context_len = 32768
         self.attention_arch = AttentionArch.MHA
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.head_dim = head_dim
         # Align with newer sglang ModelConfig while remaining harmless on older versions
-        self.is_hybrid_swa = None
-        self.swa_attention_layer_ids = None
-        self.full_attention_layer_ids = None
+        self.is_hybrid_swa = False
+        self.swa_attention_layer_ids = []
+        self.full_attention_layer_ids = []
+        self.is_multimodal = False
+        self.hidden_size = num_attention_heads * head_dim
+
+        class MockHFConfig:
+            def __init__(self):
+                self.architectures = ["LlamaForCausalLM"]
+
+        self.hf_config = MockHFConfig()
+        self.dtype = torch.bfloat16
+
+    def get_num_kv_heads(self, tp_size):
+        return self.num_key_value_heads // tp_size
 
 
 class MockServerArgs:
@@ -43,10 +78,24 @@ class MockServerArgs:
         self.speculative_eagle_topk = 0
         self.speculative_num_draft_tokens = 0
         self.page_size = page_size
+        self.multi_item_scoring_delimiter = None
+        self.dllm_algorithm = None
+        self.dllm_algorithm_config = None
+        self.enable_piecewise_cuda_graph = False
+        self.model_path = None
+        self.revision = None
 
 
 class MockModelRunner:
-    def __init__(self, device, kv_cache_dtype="auto", page_size: int = 64):
+    def __init__(
+        self,
+        device,
+        kv_cache_dtype="auto",
+        page_size: int = 64,
+        num_heads=None,
+        num_kv_heads=None,
+        head_dim=None,
+    ):
         self.device = device
         self.req_to_token_pool = None
         self.token_to_kv_pool = None
@@ -56,10 +105,13 @@ class MockModelRunner:
         self.model_is_mrope = False
         self.sliding_window_size = None
         self.attention_chunk_size = None
-        self.model_config = MockModelConfig()
+        # FlashInferIndicesUpdaterPrefill expects an allocator; keep None for mock.
+        self.token_to_kv_pool_allocator = None
+        self.model_config = MockModelConfig(num_heads, num_kv_heads, head_dim)
         self.kv_cache_dtype = kv_cache_dtype  # Default
         self.page_size = page_size
         self.is_hybrid = False
+        self.dtype = torch.bfloat16
         # Provide compatibility across sglang versions that expect this flag
         self.is_hybrid_swa = self.model_config.is_hybrid_swa
         self.server_args.kv_cache_dtype = kv_cache_dtype
@@ -226,10 +278,14 @@ def run_attention_torch(
 
     torch_device = torch.device(device)
     device_str = str(torch_device)
+
     model_runner = MockModelRunner(
         torch_device,
         kv_cache_dtype="fp8" if use_fp8_kv_cache else "auto",
         page_size=page_size,
+        num_heads=num_heads,
+        num_kv_heads=num_key_value_heads,
+        head_dim=head_dim,
     )
     model_runner.kv_cache_dtype = kvtype
 
@@ -260,7 +316,19 @@ def run_attention_torch(
     )
     model_runner.token_to_kv_pool = kv_pool
 
-    attn_backend = FlashAttentionBackend(model_runner)
+    sm_version = get_sm_version()
+    if sm_version >= 100:
+        try:
+            from sglang.srt.layers.attention.trtllm_mha_backend import (
+                TRTLLMHAAttnBackend,
+            )
+
+            attn_backend = TRTLLMHAAttnBackend(model_runner)
+        except ImportError:
+            attn_backend = FlashAttentionBackend(model_runner)
+    else:
+        attn_backend = FlashAttentionBackend(model_runner)
+
     model_runner.attn_backend = attn_backend
 
     layer = RadixAttention(
@@ -434,7 +502,7 @@ def run_attention_torch(
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name=op_name,
-        kernel_source="flash_attention",
+        kernel_source="trtllm_mha" if get_sm_version() >= 100 else "flash_attention",
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )
