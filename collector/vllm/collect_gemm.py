@@ -7,9 +7,9 @@ import torch
 from common_test_cases import get_gemm_common_test_cases
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    maybe_post_process_fp8_weight_block,
-)
+# from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+#     maybe_post_process_fp8_weight_block,
+# )
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
@@ -65,7 +65,11 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)
-    torch.cuda.set_device(device)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
+    elif torch.xpu.is_available():
+        # device = "xpu:" + device.split(":")[-1]
+        torch.xpu.set_device(device)
 
     x = torch.randn((m, k), dtype=dtype, device=torch.device(device))
 
@@ -107,26 +111,26 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
             # transpose to (1,128) for fp8 cutlass limit
             gemm.weight = torch.nn.Parameter(new_weight)
             # print("after fix, weight stride:", gemm.weight.data.stride())
-        elif gemm_type == "fp8_block":
-            block_n, block_k = FP8_BLOCK_SHAPE
-            with torch.no_grad():
-                # Blockwise quantize a random weight to provide valid scales.
-                raw_weight = torch.randn((n, k), dtype=torch.float32, device=device)
-                q_weight, weight_scale = per_block_cast_to_fp8(raw_weight, [block_n, block_k], use_ue8m0=False)
-                if hasattr(gemm, "weight"):
-                    gemm.weight.copy_(q_weight)
-                if hasattr(gemm, "weight_scale_inv"):
-                    gemm.weight_scale_inv.copy_(weight_scale.contiguous().to(torch.float32))
-                    # Some versions expect `weight_scale` even for block quant.
-                    if not hasattr(gemm, "weight_scale"):
-                        gemm.weight_scale = gemm.weight_scale_inv
+        # elif gemm_type == "fp8_block":
+        #     block_n, block_k = FP8_BLOCK_SHAPE
+        #     with torch.no_grad():
+        #         # Blockwise quantize a random weight to provide valid scales.
+        #         raw_weight = torch.randn((n, k), dtype=torch.float32, device=device)
+        #         q_weight, weight_scale = per_block_cast_to_fp8(raw_weight, [block_n, block_k], use_ue8m0=False)
+        #         if hasattr(gemm, "weight"):
+        #             gemm.weight.copy_(q_weight)
+        #         if hasattr(gemm, "weight_scale_inv"):
+        #             gemm.weight_scale_inv.copy_(weight_scale.contiguous().to(torch.float32))
+        #             # Some versions expect `weight_scale` even for block quant.
+        #             if not hasattr(gemm, "weight_scale"):
+        #                 gemm.weight_scale = gemm.weight_scale_inv
 
-                # Support both old (layer-only) and new (layer, cutlass_supported)
-                # signatures for maybe_post_process_fp8_weight_block.
-                try:
-                    maybe_post_process_fp8_weight_block(gemm)
-                except TypeError:
-                    maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
+        #         # Support both old (layer-only) and new (layer, cutlass_supported)
+        #         # signatures for maybe_post_process_fp8_weight_block.
+        #         try:
+        #             maybe_post_process_fp8_weight_block(gemm)
+        #         except TypeError:
+        #             maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
 
         gemm.forward(x)  # dry run to init
 
@@ -141,6 +145,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         for op in op_list:
             op.forward(x)
 
+    # if torch.cuda.is_available() or True:
     with benchmark_with_power(
         device=device,
         kernel_func=kernel_func,
@@ -149,6 +154,30 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         repeat_n=1,
     ) as results:
         pass
+    # elif torch.xpu.is_available():
+    #     num_warmups = 3
+    #     num_runs = 6
+    #     # repeat_n = 5
+    #     # Warmup outside of graph capture
+    #     torch.xpu.synchronize()
+    #     for _ in range(num_warmups):
+    #         kernel_func()
+    #     torch.xpu.synchronize()
+
+    #     # Time the graph replay
+    #     start_event = torch.xpu.Event(enable_timing=True)
+    #     end_event = torch.xpu.Event(enable_timing=True)
+    #     start_event.record()
+    #     for i in range(num_runs):
+    #         kernel_func()
+    #     end_event.record()
+    #     torch.xpu.synchronize()
+
+    
+    # if torch.cuda.is_available():
+    #     latency = results["latency_ms"]
+    # else:
+    #     latency = start_event.elapsed_time(end_event) / num_runs
 
     log_perf(
         item_list=[
@@ -162,9 +191,9 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         ],
         framework="VLLM",
         version=vllm_version,
-        device_name=torch.cuda.get_device_name(device),
+        device_name=torch.cuda.get_device_name(device) if torch.cuda.is_available() else torch.xpu.get_device_name(device),
         op_name="gemm",
         kernel_source="vllm_default",
         perf_filename=perf_filename,
-        power_stats=results["power_stats"],
+        power_stats=results["power_stats"] if torch.cuda.is_available() else None,
     )

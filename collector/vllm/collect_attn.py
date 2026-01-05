@@ -72,8 +72,11 @@ def run_attention_torch(
     perf_filename,
     device="cuda:0",
 ):
-    torch.cuda.set_device(device)
-
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
+    elif torch.xpu.is_available():
+        # device = "xpu:" + device.split(":")[-1]
+        torch.xpu.set_device(device)
     dtype = torch.float16
     model = os.path.join(os.path.dirname(__file__), "fake_hf_model")
     block_size = 64
@@ -107,17 +110,31 @@ def run_attention_torch(
                 use_sparse=False,
             )
         except TypeError:
-            backend = current_platform.get_attn_backend_cls(
-                None,
-                head_dim,
-                dtype,
-                kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-                block_size=block_size,
-                use_mla=False,
-                has_sink=False,
-                use_sparse=False,
-                use_v1=True,
-            )
+            try:
+                backend = current_platform.get_attn_backend_cls(
+                    None,
+                    head_dim,
+                    dtype,
+                    kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                    block_size=block_size,
+                    use_mla=False,
+                    has_sink=False,
+                    use_sparse=False,
+                    use_v1=True,
+                )
+            except TypeError: # for xpu
+                backend = current_platform.get_attn_backend_cls(
+                    None,
+                    head_dim,
+                    dtype,
+                    kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                    block_size=block_size,
+                    use_mla=False,
+                    has_sink=False,
+                    # use_sparse=False,
+                    use_v1=True,
+                )
+
 
     backend_name_obj = resolve_obj_by_qualname(backend)
     backend_name_str = backend_name_obj.get_name()
@@ -338,11 +355,11 @@ def run_attention_torch(
         ],
         framework="VLLM",
         version=vllm_version,
-        device_name=torch.cuda.get_device_name(device),
+        device_name=torch.cuda.get_device_name(device) if torch.cuda.is_available() else torch.xpu.get_device_name(device),
         op_name=op_name,
         kernel_source=kernel_source,
         perf_filename=perf_filename,
-        power_stats=results["power_stats"],
+        power_stats=results["power_stats"] if torch.cuda.is_available() else None,
     )
 
 

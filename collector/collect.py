@@ -55,6 +55,9 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         test_cases = get_test_cases_func()
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
         # Run collection
+        # TODO sihan: remove the limit
+        test_cases = test_cases[:10]
+        print(f"Only select {len(test_cases)} case")
         errors = parallel_run(test_cases, run_func, num_processes, full_name)
 
         return errors
@@ -81,8 +84,13 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     setup_signal_handlers(device_id, error_queue)
 
     # Setup device
-    device = torch.device(f"cuda:{device_id}")
-    torch.cuda.set_device(device_id)
+    
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{device_id}")
+        torch.cuda.set_device(device)
+    elif torch.xpu.is_available():
+        device = torch.device(f"xpu:{device_id}")
+        torch.xpu.set_device(device)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
     # Process tasks
@@ -520,14 +528,16 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
     collections = [
         # GEMM collections
         # vllm GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
-        {
-            "name": "vllm",
-            "type": "gemm",
-            "module": "collector.vllm.collect_gemm",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
+        # TODO sihan: gemm already ok
+        # {
+        #     "name": "vllm",
+        #     "type": "gemm",
+        #     "module": "collector.vllm.collect_gemm",
+        #     "get_func": "get_gemm_test_cases",
+        #     "run_func": "run_gemm",
+        # },
         # Attention collections - separate entries for context and generation
+        # TODO sihan: uncomment these cases
         {
             "name": "vllm",
             "type": "attention_context",
@@ -535,34 +545,34 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
             "get_func": "get_context_attention_test_cases",
             "run_func": "run_attention_torch",
         },
-        {
-            "name": "vllm",
-            "type": "attention_generation",
-            "module": "collector.vllm.collect_attn",
-            "get_func": "get_generation_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "moe",
-            "module": "collector.vllm.collect_moe",
-            "get_func": "get_moe_test_cases",
-            "run_func": "run_moe_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "mla_context",
-            "module": "collector.vllm.collect_mla",
-            "get_func": "get_context_mla_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "mla_generation",
-            "module": "collector.vllm.collect_mla",
-            "get_func": "get_generation_mla_test_cases",
-            "run_func": "run_attention_torch",
-        },
+        # {
+        #     "name": "vllm",
+        #     "type": "attention_generation",
+        #     "module": "collector.vllm.collect_attn",
+        #     "get_func": "get_generation_attention_test_cases",
+        #     "run_func": "run_attention_torch",
+        # },
+        # {
+        #     "name": "vllm",
+        #     "type": "moe",
+        #     "module": "collector.vllm.collect_moe",
+        #     "get_func": "get_moe_test_cases",
+        #     "run_func": "run_moe_torch",
+        # },
+        # {
+        #     "name": "vllm",
+        #     "type": "mla_context",
+        #     "module": "collector.vllm.collect_mla",
+        #     "get_func": "get_context_mla_test_cases",
+        #     "run_func": "run_attention_torch",
+        # },
+        # {
+        #     "name": "vllm",
+        #     "type": "mla_generation",
+        #     "module": "collector.vllm.collect_mla",
+        #     "get_func": "get_generation_mla_test_cases",
+        #     "run_func": "run_attention_torch",
+        # },
     ]
 
     all_errors = collect_ops(num_processes, collections, ops, version)
@@ -777,6 +787,9 @@ def main():
         setup_logging(debug=args.debug)
 
     num_processes = torch.cuda.device_count()
+    if num_processes == 0:
+        if torch.xpu.is_available():
+            num_processes = torch.xpu.device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
 
     # Set environment variables for worker processes
