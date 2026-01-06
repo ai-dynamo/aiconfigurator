@@ -27,4 +27,4 @@ jobs:
       - name: Run support matrix tests in container
         run: |
           docker run --name aic-support-matrix --env TEST_SUPPORT_MATRIX=true aiconfigurator:test \
-            pytest tests/e2e/support_matrix/test_support_matrix.py -v --tb=short
+            pytest tests/e2e/support_matrix/test_support_matrix.py -v --tb=short --timeout=3600
