@@ -367,30 +367,57 @@ def get_context_attention_test_cases(if_unit_test=False):
     test_cases = []
 
     if not if_unit_test:
-        b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-        s_list = [
-            16,
-            32,
-            64,
-            128,
-            256,
-            512,
-            1024,
-            1536,
-            2048,
-            3072,
-            4096,
-            6144,
-            8192,
-            10240,
-            12288,
-            16384,
-            262144,
-        ]
-        n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
-        n_kv_list = [0, 1, 2, 4, 8]
-        # n_kv_list = [64]
+        if torch.cuda.is_available():
+            b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+            s_list = [
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                1536,
+                2048,
+                3072,
+                4096,
+                6144,
+                8192,
+                10240,
+                12288,
+                16384,
+                262144,
+            ]
+            n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
+            n_kv_list = [0, 1, 2, 4, 8]
+            # n_kv_list = [64]
+        elif torch.xpu.is_available():
+            # FIXME narrow down the search space for available xpu
+            b_list = [1, 2, 4, 8, 16, 32]
+            s_list = [
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                1536,
+                2048,
+                3072,
+                4096,
+                6144,
+                8192,
+                10240,
+                12288,
+                16384,
+            ]
+            n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
+            n_kv_list = [1, 2, 4, 8] # no zero here, influence logics below
+
+        
     else:
+        breakpoint()
         b_list = [1]
         s_list = [64]
         n_list = [4]

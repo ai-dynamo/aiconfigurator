@@ -3,7 +3,7 @@
 import dataclasses
 import itertools
 from typing import Optional
-
+import torch
 
 @dataclasses.dataclass
 class MoeCommonTestCase:
@@ -183,7 +183,10 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
         10240,
         12288,
     ]
-    nk_list_ext = [16384, 65536]  # for coverage and interp purpose
+    if torch.cuda.is_available():
+        nk_list_ext = [16384, 65536]  # for coverage and interp purpose
+    elif torch.xpu.is_available(): # FIXME narrow down the search space for available xpu
+        nk_list_ext = []
 
     test_cases = []
     # x_list_orig+add+ext  <==> nk_list+ext

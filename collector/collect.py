@@ -56,8 +56,9 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
         # Run collection
         # TODO sihan: remove the limit
-        test_cases = test_cases[:10]
+        test_cases = test_cases[:]
         print(f"Only select {len(test_cases)} case")
+        # print(f"cases are: {test_cases}")
         errors = parallel_run(test_cases, run_func, num_processes, full_name)
 
         return errors
@@ -529,22 +530,22 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         # GEMM collections
         # vllm GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
         # TODO sihan: gemm already ok
-        # {
-        #     "name": "vllm",
-        #     "type": "gemm",
-        #     "module": "collector.vllm.collect_gemm",
-        #     "get_func": "get_gemm_test_cases",
-        #     "run_func": "run_gemm",
-        # },
-        # Attention collections - separate entries for context and generation
-        # TODO sihan: uncomment these cases
         {
             "name": "vllm",
-            "type": "attention_context",
-            "module": "collector.vllm.collect_attn",
-            "get_func": "get_context_attention_test_cases",
-            "run_func": "run_attention_torch",
+            "type": "gemm",
+            "module": "collector.vllm.collect_gemm",
+            "get_func": "get_gemm_test_cases",
+            "run_func": "run_gemm",
         },
+        # Attention collections - separate entries for context and generation
+        # TODO sihan: uncomment these cases
+        # {
+        #     "name": "vllm",
+        #     "type": "attention_context",
+        #     "module": "collector.vllm.collect_attn",
+        #     "get_func": "get_context_attention_test_cases",
+        #     "run_func": "run_attention_torch",
+        # },
         # {
         #     "name": "vllm",
         #     "type": "attention_generation",
