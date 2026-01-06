@@ -75,7 +75,6 @@ def run_attention_torch(
     if torch.cuda.is_available():
         torch.cuda.set_device(device)
     elif torch.xpu.is_available():
-        # device = "xpu:" + device.split(":")[-1]
         torch.xpu.set_device(device)
     dtype = torch.float16
     model = os.path.join(os.path.dirname(__file__), "fake_hf_model")

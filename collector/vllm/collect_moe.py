@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from common_test_cases import get_common_moe_test_cases
 from vllm.model_executor.layers.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+# from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
@@ -91,7 +91,10 @@ def run_moe_torch(
     device="cuda:0",
 ):
     """Run vLLM MoE performance benchmarking"""
-    torch.cuda.set_device(device)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
+    elif torch.xpu.is_available():
+        torch.xpu.set_device(device)
     torch.set_default_device(device)
 
     # Configure quantization parameters
@@ -129,40 +132,40 @@ def run_moe_torch(
         device=device,
     )
 
-    if moe_type in ["fp8", "fp8_block"]:
-        dtype = torch.float8_e4m3fn
-        if moe_type == "fp8_block":
-            block_shape = [128, 128]
+    # if moe_type in ["fp8", "fp8_block"]:
+    #     dtype = torch.float8_e4m3fn
+    #     if moe_type == "fp8_block":
+    #         block_shape = [128, 128]
 
-            if per_block_cast_to_fp8 is None:
-                raise ImportError("per_block_cast_to_fp8 is unavailable; fp8_block requires a newer vLLM build.")
+    #         if per_block_cast_to_fp8 is None:
+    #             raise ImportError("per_block_cast_to_fp8 is unavailable; fp8_block requires a newer vLLM build.")
 
-            w1_scale_list = []
-            w2_scale_list = []
-            w1_q = torch.empty_like(w1, dtype=dtype)
-            w2_q = torch.empty_like(w2, dtype=dtype)
-            for i in range(local_num_experts):
-                w1_q[i], w1_scale_i = per_block_cast_to_fp8(w1[i], block_size=block_shape, use_ue8m0=True)
-                w2_q[i], w2_scale_i = per_block_cast_to_fp8(w2[i], block_size=block_shape, use_ue8m0=True)
-                w1_scale_list.append(w1_scale_i)
-                w2_scale_list.append(w2_scale_i)
-            w1 = w1_q
-            w2 = w2_q
-            w1_scale = torch.stack(w1_scale_list)
-            w2_scale = torch.stack(w2_scale_list)
-        else:
-            w1_scale = torch.randn(local_num_experts, dtype=torch.float32, device=device)
-            w2_scale = torch.randn(local_num_experts, dtype=torch.float32, device=device)
-            a1_scale = torch.randn(1, dtype=torch.float32, device=device)
-            a2_scale = torch.randn(1, dtype=torch.float32, device=device)
+    #         w1_scale_list = []
+    #         w2_scale_list = []
+    #         w1_q = torch.empty_like(w1, dtype=dtype)
+    #         w2_q = torch.empty_like(w2, dtype=dtype)
+    #         for i in range(local_num_experts):
+    #             w1_q[i], w1_scale_i = per_block_cast_to_fp8(w1[i], block_size=block_shape, use_ue8m0=True)
+    #             w2_q[i], w2_scale_i = per_block_cast_to_fp8(w2[i], block_size=block_shape, use_ue8m0=True)
+    #             w1_scale_list.append(w1_scale_i)
+    #             w2_scale_list.append(w2_scale_i)
+    #         w1 = w1_q
+    #         w2 = w2_q
+    #         w1_scale = torch.stack(w1_scale_list)
+    #         w2_scale = torch.stack(w2_scale_list)
+    #     else:
+    #         w1_scale = torch.randn(local_num_experts, dtype=torch.float32, device=device)
+    #         w2_scale = torch.randn(local_num_experts, dtype=torch.float32, device=device)
+    #         a1_scale = torch.randn(1, dtype=torch.float32, device=device)
+    #         a2_scale = torch.randn(1, dtype=torch.float32, device=device)
 
-        quant_config = fp8_w8a8_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-            block_shape=block_shape,
-        )
+    #     quant_config = fp8_w8a8_moe_quant_config(
+    #         w1_scale=w1_scale,
+    #         w2_scale=w2_scale,
+    #         a1_scale=a1_scale,
+    #         a2_scale=a2_scale,
+    #         block_shape=block_shape,
+    #     )
 
     if dtype == torch.float8_e4m3fn:
         w1 = w1.to(dtype)
@@ -222,8 +225,8 @@ def run_moe_torch(
                         w2,
                         tw,
                         ti,
-                        inplace=True,
-                        quant_config=quant_config,
+                        inplace=False, # vllm::inplace_fused_experts/vllm::outplace_fused_experts are not impl on xpu, also not possible using PYTORCH_ENABLE_XPU_FALLBACK=1
+                        # quant_config=quant_config,
                         global_num_experts=num_experts,
                         expert_map=expert_map,
                     )
@@ -235,7 +238,7 @@ def run_moe_torch(
                     topk_weights,
                     topk_ids,
                     inplace=True,
-                    quant_config=quant_config,
+                    # quant_config=quant_config,
                     global_num_experts=num_experts,
                     expert_map=expert_map,
                 )
@@ -282,7 +285,7 @@ def run_moe_torch(
             ],
             framework="VLLM",
             version=vllm_version,
-            device_name=torch.cuda.get_device_name(device),
+            device_name=torch.cuda.get_device_name(device) if torch.cuda.is_available() else torch.xpu.get_device_name(device),
             op_name="moe",
             kernel_source=source,
             perf_filename=perf_filename,

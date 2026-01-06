@@ -55,8 +55,8 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         test_cases = get_test_cases_func()
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
         # Run collection
-        # TODO sihan: remove the limit
-        test_cases = test_cases[:]
+        # FIXME sihan: remove the limit to get all data
+        test_cases = test_cases[:1]
         print(f"Only select {len(test_cases)} case")
         # print(f"cases are: {test_cases}")
         errors = parallel_run(test_cases, run_func, num_processes, full_name)
@@ -529,16 +529,14 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
     collections = [
         # GEMM collections
         # vllm GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
-        # TODO sihan: gemm already ok
-        {
-            "name": "vllm",
-            "type": "gemm",
-            "module": "collector.vllm.collect_gemm",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
+        # {
+        #     "name": "vllm",
+        #     "type": "gemm",
+        #     "module": "collector.vllm.collect_gemm",
+        #     "get_func": "get_gemm_test_cases",
+        #     "run_func": "run_gemm",
+        # },
         # Attention collections - separate entries for context and generation
-        # TODO sihan: uncomment these cases
         # {
         #     "name": "vllm",
         #     "type": "attention_context",
@@ -553,6 +551,7 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         #     "get_func": "get_generation_attention_test_cases",
         #     "run_func": "run_attention_torch",
         # },
+        # TODO sihan: uncomment cases below, recheck whether supported
         # {
         #     "name": "vllm",
         #     "type": "moe",
@@ -567,13 +566,13 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         #     "get_func": "get_context_mla_test_cases",
         #     "run_func": "run_attention_torch",
         # },
-        # {
-        #     "name": "vllm",
-        #     "type": "mla_generation",
-        #     "module": "collector.vllm.collect_mla",
-        #     "get_func": "get_generation_mla_test_cases",
-        #     "run_func": "run_attention_torch",
-        # },
+        {
+            "name": "vllm",
+            "type": "mla_generation",
+            "module": "collector.vllm.collect_mla",
+            "get_func": "get_generation_mla_test_cases",
+            "run_func": "run_attention_torch",
+        },
     ]
 
     all_errors = collect_ops(num_processes, collections, ops, version)
