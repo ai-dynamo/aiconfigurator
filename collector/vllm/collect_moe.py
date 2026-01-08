@@ -25,6 +25,13 @@ except Exception:
 
 from helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
+if torch.xpu.is_available():
+    try:
+        from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+    except Exception as e:
+        print(f"Please refer to vllm_xpu_kernels for MoE on XPU, \n{e}")
+
+
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 compatible_version = ["0.11.0", "0.12.0"]
@@ -217,19 +224,34 @@ def run_moe_torch(
 
         def run_single_iteration():
             if distributed == "power_law":
-                for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
-                    local_num_tokens = tw.shape[0]
-                    _ = fused_experts(
-                        hidden_states[:local_num_tokens],
-                        w1,
-                        w2,
-                        tw,
-                        ti,
-                        inplace=False, # vllm::inplace_fused_experts/vllm::outplace_fused_experts are not impl on xpu, also not possible using PYTORCH_ENABLE_XPU_FALLBACK=1
-                        # quant_config=quant_config,
-                        global_num_experts=num_experts,
-                        expert_map=expert_map,
-                    )
+                if torch.cuda.is_available():
+                    for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
+                        local_num_tokens = tw.shape[0]
+                        _ = fused_experts(
+                            hidden_states[:local_num_tokens],
+                            w1,
+                            w2,
+                            tw,
+                            ti,
+                            inplace=True, # vllm::inplace_fused_experts/vllm::outplace_fused_experts are not impl on xpu, also not possible using PYTORCH_ENABLE_XPU_FALLBACK=1
+                            quant_config=quant_config,
+                            global_num_experts=num_experts,
+                            expert_map=expert_map,
+                        )
+                elif torch.xpu.is_available():
+                    for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
+                        local_num_tokens = tw.shape[0]
+                        # args check https://github.com/vllm-project/vllm-xpu-kernels/blob/main/tests/fused_moe/test_fused_moe.py
+                        _ = xpu_fused_moe(hidden_states=hidden_states[:local_num_tokens],
+                                          w13=w1,
+                                          w13_bias=None,
+                                          w2=w2,
+                                          w2_bias=None,
+                                          topk_weights=tw,
+                                          topk_ids=ti,
+                                          n_experts_per_token=topk,
+                                          activation="silu",
+                                          num_experts=local_num_experts,)
             else:
                 _ = fused_experts(
                     hidden_states,
@@ -238,7 +260,7 @@ def run_moe_torch(
                     topk_weights,
                     topk_ids,
                     inplace=True,
-                    # quant_config=quant_config,
+                    quant_config=quant_config,
                     global_num_experts=num_experts,
                     expert_map=expert_map,
                 )

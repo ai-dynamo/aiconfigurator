@@ -31,26 +31,26 @@ def get_common_moe_test_cases():
         64,
         80,
         96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        12288,
-        16384,
-        20480,
-        32768,
-        65536,
+        # 128,    # crash here? FIXME check why exceed 24GB
+        # 160,
+        # 192,
+        # 256,
+        # 320,
+        # 384,
+        # 512,
+        # 768,
+        # 1024,
+        # 1536,
+        # 2048,
+        # 3072,
+        # 4096,
+        # 6144,
+        # 8192,
+        # 12288,
+        # 16384,
+        # 20480,
+        # 32768,
+        # 65536,
     ]
     tp_list = [1, 2, 4, 8, 16, 32]
     ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -70,17 +70,21 @@ def get_common_moe_test_cases():
     # [2048,1408,4,60], #qwen1.5_moe
     # [2048,1408,6,64], #deepseekv1_moe
     # [5120,1536,6,160], #deepseekv2
-    model_config_list = [
-        [4096, 14336, 2, 8, "MOE_Mixtral8x7B"],  # mixtral_8x7b
-        [6144, 16384, 2, 8, "MOE_Mixtral8x22B"],  # mixtral_8x22b
-        [7168, 2048, 8, 256, "DEEPSEEK_V3"],  # deepseekv3, will have 1 shared expert
-        [2048, 768, 8, 128, "QWEN3_30B_A3B"],  # qwen3-moe, 30b-a3b
-        [4096, 1536, 8, 128, "QWEN3_235B"],  # qwen3-moe, 235b-a22b
-        [6144, 2560, 8, 160, "QWEN3_480B"],  # qwen3-moe, 480b-a35b
-        [7168, 2048, 8, 384, "KIMI_K2"],  # kimi k2
-        [2880, 2880, 4, 128, "GPT_OSS_120B"],
-        [2880, 2880, 4, 32, "GPT_OSS_20B"],
-    ]
+    if torch.cuda.is_available():
+        model_config_list = [
+            [4096, 14336, 2, 8, "MOE_Mixtral8x7B"],  # mixtral_8x7b
+            [6144, 16384, 2, 8, "MOE_Mixtral8x22B"],  # mixtral_8x22b
+            [7168, 2048, 8, 256, "DEEPSEEK_V3"],  # deepseekv3, will have 1 shared expert
+            [2048, 768, 8, 128, "QWEN3_30B_A3B"],  # qwen3-moe, 30b-a3b
+            [4096, 1536, 8, 128, "QWEN3_235B"],  # qwen3-moe, 235b-a22b
+            [6144, 2560, 8, 160, "QWEN3_480B"],  # qwen3-moe, 480b-a35b
+            [7168, 2048, 8, 384, "KIMI_K2"],  # kimi k2
+            [2880, 2880, 4, 128, "GPT_OSS_120B"],
+            [2880, 2880, 4, 32, "GPT_OSS_20B"],
+        ]
+    elif torch.xpu.is_available():
+        # FIXME sihan: firstly try this on xpu
+        model_config_list = [[2048,1408,4,60,"QWEN1.5_MOE"]] #qwen1.5_moe
 
     test_cases: list[MoeCommonTestCase] = []
 

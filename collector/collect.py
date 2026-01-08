@@ -56,9 +56,9 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
         # Run collection
         # FIXME sihan: remove the limit to get all data
-        test_cases = test_cases[:1]
+        test_cases = test_cases[:]
         print(f"Only select {len(test_cases)} case")
-        # print(f"cases are: {test_cases}")
+        print(f"first 10 cases are: {test_cases[:10]}")
         errors = parallel_run(test_cases, run_func, num_processes, full_name)
 
         return errors
@@ -552,13 +552,13 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         #     "run_func": "run_attention_torch",
         # },
         # TODO sihan: uncomment cases below, recheck whether supported
-        # {
-        #     "name": "vllm",
-        #     "type": "moe",
-        #     "module": "collector.vllm.collect_moe",
-        #     "get_func": "get_moe_test_cases",
-        #     "run_func": "run_moe_torch",
-        # },
+        {
+            "name": "vllm",
+            "type": "moe",
+            "module": "collector.vllm.collect_moe",
+            "get_func": "get_moe_test_cases",
+            "run_func": "run_moe_torch",
+        },
         # {
         #     "name": "vllm",
         #     "type": "mla_context",
@@ -566,13 +566,13 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         #     "get_func": "get_context_mla_test_cases",
         #     "run_func": "run_attention_torch",
         # },
-        {
-            "name": "vllm",
-            "type": "mla_generation",
-            "module": "collector.vllm.collect_mla",
-            "get_func": "get_generation_mla_test_cases",
-            "run_func": "run_attention_torch",
-        },
+        # {
+        #     "name": "vllm",
+        #     "type": "mla_generation",
+        #     "module": "collector.vllm.collect_mla",
+        #     "get_func": "get_generation_mla_test_cases",
+        #     "run_func": "run_attention_torch",
+        # },
     ]
 
     all_errors = collect_ops(num_processes, collections, ops, version)
