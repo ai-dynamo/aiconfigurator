@@ -502,12 +502,12 @@ class Pipeline:
 
     def _get_agg_gpu_count(self, workers_info: dict[str, int]) -> int:
         """Simple helper to get GPU count for agg service_mode."""
-        return workers_info.get("AGG_GPU_COUNT", 1) * workers_info.get("AGG_WORKERS", 1)
+        return workers_info.get("AGG_GPU_COUNT", 1)
 
     def _extract_workers_from_start_script(self, service_dir: Path) -> dict[str, int]:
         """
         For disagg, read disagg/node_0_run.sh and extract worker/GPU info.
-        For agg, extract GPU count from agg_config.yaml and replicas from generator_config.yaml.
+        For agg, extract GPU count from agg_config.yaml.
         """
         if self.cfg.service_mode == "disagg":
             start_rel = self.cfg.start_script.strip() or "disagg/run_0.sh"
@@ -518,34 +518,14 @@ class Pipeline:
         else:
             # For agg service_mode, extract GPU count from config
             agg_gpu_count = self._extract_agg_gpu_count_from_config(service_dir)
-            agg_workers = self._extract_agg_workers_from_config(service_dir)
             return {
                 "PREFILL_GPU": -1,
                 "PREFILL_WORKERS": 0,
                 "DECODE_GPU": -1,
                 "DECODE_WORKERS": 0,
-                "AGG_WORKERS": agg_workers,
+                "AGG_WORKERS": 1,
                 "AGG_GPU_COUNT": agg_gpu_count,
             }
-
-    def _extract_agg_workers_from_config(self, service_dir: Path) -> int:
-        """Extract agg worker count from generator_config.yaml."""
-        try:
-            config_path = service_dir / "agg" / "generator_config.yaml"
-            if not config_path.exists():
-                LOG.warning(f"Generator config not found at {config_path}, defaulting to 1 worker")
-                return 1
-
-            with config_path.open() as f:
-                config = yaml.safe_load(f) or {}
-
-            workers = config.get("workers", {}).get("agg_workers", 1)
-            LOG.info(f"Extracted agg worker count: {workers}")
-            return int(workers)
-
-        except Exception as e:
-            LOG.warning(f"Failed to extract agg worker count: {e}")
-            return 1
 
     def _extract_agg_gpu_count_from_config(self, service_dir: Path) -> int:
         """Extract GPU count from agg config file (TP * PP for TRT-LLM)."""
@@ -601,9 +581,6 @@ class Pipeline:
         service_dir = Path(self.cfg.service_dir)
         _ = self._copy_backend_configs(self.last_config_dir, service_dir)
 
-        # Worker info from script (disagg) or default (agg)
-        workers_info = self._extract_workers_from_start_script(service_dir)
-
         # Load optimal configurations from the saved results with TPOT filtering
         target_tpot = getattr(args, "tpot", None)
         optimal_configs = self._load_optimal_configs(self.last_config_dir, target_tpot)
@@ -619,11 +596,8 @@ class Pipeline:
                 conc_list = [1, 2, 4, 8, 16, 32]
                 LOG.warning("Auto concurrency: max_batch_size not found -> fallback %s", conc_list)
             else:
-                total_mbs = int(mbs)
-                if self.cfg.service_mode == "agg":
-                    total_mbs *= workers_info.get("AGG_WORKERS", 1)
-                conc_list = self._auto_concurrency_values(total_mbs)
-                LOG.info("Auto concurrency from total_max_batch_size=%s -> %s", total_mbs, conc_list)
+                conc_list = self._auto_concurrency_values(int(mbs))
+                LOG.info("Auto concurrency from max_batch_size=%s -> %s", mbs, conc_list)
 
         # prepare log path
         log_dir = Path(args.save_dir).resolve() / "log"
@@ -636,6 +610,8 @@ class Pipeline:
         # artifacts root
         self.art_root = self._ensure_art_root(save_dir, run_name)
 
+        # Worker info from script (disagg) or default (agg)
+        workers_info = self._extract_workers_from_start_script(service_dir)
         write_json(self.art_root / "workers_extracted.json", workers_info)
 
         # GPU monitoring (conditional)
