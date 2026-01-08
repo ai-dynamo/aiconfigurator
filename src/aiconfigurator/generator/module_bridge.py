@@ -7,11 +7,10 @@ from typing import Any
 
 import pandas as pd
 
-from aiconfigurator.sdk.task import TaskConfig
 from aiconfigurator.sdk.perf_database import get_database
+from aiconfigurator.sdk.task import TaskConfig
 
 from .aggregators import collect_generator_params
-from .rendering import apply_defaults
 from .rendering import apply_defaults
 
 
