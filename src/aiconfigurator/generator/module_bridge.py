@@ -169,6 +169,26 @@ def task_config_to_generator_config(
         prefill_params, prefill_workers = _build_worker_params("(p)", worker_overrides.get("prefill"))
         decode_params, decode_workers = _build_worker_params("(d)", worker_overrides.get("decode"))
 
+        # Scale disagg workers based on total_gpus (similar to agg mode)
+        if task_config.total_gpus and prefill_params and decode_params:
+            p_tp = prefill_params.get("tensor_parallel_size", 1)
+            p_pp = prefill_params.get("pipeline_parallel_size", 1)
+            p_dp = prefill_params.get("data_parallel_size", 1)
+            prefill_gpus_per_worker = p_tp * p_pp * p_dp
+
+            d_tp = decode_params.get("tensor_parallel_size", 1)
+            d_pp = decode_params.get("pipeline_parallel_size", 1)
+            d_dp = decode_params.get("data_parallel_size", 1)
+            decode_gpus_per_worker = d_tp * d_pp * d_dp
+
+            # Each replica uses prefill_workers_per_replica prefill workers + decode_workers_per_replica decode workers
+            # For simplicity, assume 1:1 prefill:decode ratio per replica
+            gpus_per_replica = (prefill_workers * prefill_gpus_per_worker) + (decode_workers * decode_gpus_per_worker)
+            if gpus_per_replica > 0:
+                replicas = task_config.total_gpus // gpus_per_replica
+                prefill_workers = replicas * prefill_workers
+                decode_workers = replicas * decode_workers
+
     if agg_params:
         agg_workers = _safe_int(worker_count_overrides.get("agg_workers"), agg_workers)
     if prefill_params:
