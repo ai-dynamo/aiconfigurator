@@ -421,7 +421,7 @@ class MoEDispatch(Operation):
         elif database.backend == common.BackendName.sglang.value:
             if self._moe_backend == "deepep_moe":
                 logger.debug("MoEDispatch: In SGLang DeepEP execution path")
-                num_tokens = num_tokens//self._scale_num_tokens
+                num_tokens = num_tokens // self._scale_num_tokens
                 if self._is_context:
                     comm_latency = database.query_wideep_deepep_normal(
                         node_num=_node_num,
