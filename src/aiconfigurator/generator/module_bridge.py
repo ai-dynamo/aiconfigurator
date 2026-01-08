@@ -8,8 +8,10 @@ from typing import Any
 import pandas as pd
 
 from aiconfigurator.sdk.task import TaskConfig
+from aiconfigurator.sdk.perf_database import get_database
 
 from .aggregators import collect_generator_params
+from .rendering import apply_defaults
 from .rendering import apply_defaults
 
 
@@ -107,6 +109,19 @@ def task_config_to_generator_config(
     prefix_tokens = _safe_int(_series_val(result_df, "prefix", runtime_cfg.prefix), runtime_cfg.prefix)
     config_obj = task_config.config
 
+    # Fetch num_gpus_per_node from system config
+    num_gpus_per_node = 8
+    try:
+        db = get_database(
+            system=task_config.system_name,
+            backend=task_config.backend_name,
+            version=task_config.backend_version,
+        )
+        if db and "node" in db.system_spec:
+            num_gpus_per_node = db.system_spec["node"].get("num_gpus_per_node", 8)
+    except Exception:
+        pass
+
     service_cfg = {
         "model_name": task_config.model_name,
         "served_model_name": task_config.model_name,
@@ -142,6 +157,12 @@ def task_config_to_generator_config(
 
     if task_config.serving_mode == "agg":
         agg_params, agg_workers = _build_worker_params("", worker_overrides.get("agg"))
+        if task_config.total_gpus:
+            tp = agg_params.get("tensor_parallel_size", 1)
+            pp = agg_params.get("pipeline_parallel_size", 1)
+            dp = agg_params.get("data_parallel_size", 1)
+            gpus_per_replica = tp * pp * dp
+            agg_workers = task_config.total_gpus // gpus_per_replica
         prefill_params, prefill_workers = None, 0
         decode_params, decode_workers = None, 0
     else:
@@ -173,6 +194,7 @@ def task_config_to_generator_config(
         prefill_workers=prefill_workers if prefill_params else 0,
         decode_workers=decode_workers if decode_params else 0,
         agg_workers=agg_workers if agg_params else 0,
+        num_gpus_per_node=num_gpus_per_node,
         sla=sla_cfg,
         dyn_config=dyn_cfg,
         backend=backend_name,

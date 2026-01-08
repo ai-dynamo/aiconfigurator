@@ -93,3 +93,8 @@ inputs:
   - key: ModelConfig.prefix
     required: false
     default: 0
+
+  # NodeConfig
+  - key: NodeConfig.num_gpus_per_node
+    required: false
+    default: 8
