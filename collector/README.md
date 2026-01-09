@@ -41,6 +41,7 @@ Prepare a clean env with the target framework and nccl lib installed.
 
 # Collect comm data
 ```bash
+export PATH=$PATH:${NCCL_TEST_BIN_PATH}/
 collect_comm.sh #all_reduce data will be collected using default trtllm backend
 collect_comm.sh --all_reduce_backend vllm #all_reduce data will be collected using vllm backend
 ```
