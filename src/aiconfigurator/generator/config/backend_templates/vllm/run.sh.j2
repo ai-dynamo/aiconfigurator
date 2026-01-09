@@ -3,6 +3,7 @@ set -e
 trap 'echo "Cleaning up..."; kill 0 2>/dev/null || true' EXIT INT TERM
 
 export MODEL=${MODEL:-"{{ service.model_path }}"}
+export HF_TOKEN=${HF_TOKEN:-"{{ service.hf_token }}"}
 python3 -m dynamo.frontend --http-port "{{ service.port }}" &
 
 {% if k8s.mode == 'agg' %}
