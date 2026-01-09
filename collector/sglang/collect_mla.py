@@ -323,14 +323,18 @@ def run_mla(
     qk_rope_head_dim = QK_ROPE_HEAD_DIM
     qk_nope_head_dim = QK_NOPE_HEAD_DIM
 
-    if is_context_phase:
-        # Prefill: Non-absorbed, standard projected heads
-        # q_nope (128) + q_rope (64) = 192
-        v_head_dim = qk_nope_head_dim
-        head_dim_total = qk_nope_head_dim + qk_rope_head_dim
+    if is_blackwell_dev:
+        if is_context_phase:
+            # Prefill: Non-absorbed, standard projected heads
+            # q_nope (128) + q_rope (64) = 192
+            v_head_dim = qk_nope_head_dim
+            head_dim_total = qk_nope_head_dim + qk_rope_head_dim
+        else:
+            # Decode: Weight absorbed
+            # latent (512) + rope (64) = 576
+            v_head_dim = kv_lora_rank
+            head_dim_total = kv_lora_rank + qk_rope_head_dim
     else:
-        # Decode: Weight absorbed
-        # latent (512) + rope (64) = 576
         v_head_dim = kv_lora_rank
         head_dim_total = kv_lora_rank + qk_rope_head_dim
 
