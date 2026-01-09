@@ -136,6 +136,8 @@ with benchmark_with_power(
 - Only opt-in when needed for specific use cases
 
 ## For TensorRT-LLM
+If you need to use w4a16_mxfp4 kernel, install the triton according to https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/models/core/gpt_oss#using-openai-triton-kernels-for-moe
+
 ```bash
 python3 collect.py --backend trtllm
 ```
