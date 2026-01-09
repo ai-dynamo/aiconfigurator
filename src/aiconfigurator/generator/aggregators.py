@@ -33,6 +33,7 @@ def collect_generator_params(
     prefill_workers: int = 1,
     decode_workers: int = 1,
     agg_workers: int = 1,
+    num_gpus_per_node: int = 8,
     sla: Optional[dict[str, Any]] = None,
     dyn_config: Optional[dict[str, Any]] = None,
     backend: Optional[str] = None,
@@ -98,6 +99,7 @@ def collect_generator_params(
         "service": service_payload,
         "k8s": k8s_payload,
         "workers": workers_dict,
+        "num_gpus_per_node": int(num_gpus_per_node),
         "params": {
             "prefill": prefill_params,
             "decode": decode_params,
@@ -190,6 +192,8 @@ def generate_config_from_input_dict(
                 dest = ".".join(["service"] + rest)
             elif group == "DynConfig":
                 dest = ".".join(["dyn_config"] + rest)
+            elif group == "NodeConfig":
+                dest = ".".join(["node_config"] + rest)
             else:
                 dest = None
             if dest:
@@ -200,6 +204,7 @@ def generate_config_from_input_dict(
     target.setdefault("params", {})
     target.setdefault("sla", {})
     target.setdefault("dyn_config", {})
+    target.setdefault("node_config", {})
     try:
         default_mapping = os.path.join(os.path.dirname(__file__), "config", "backend_config_mapping.yaml")
         allowed_keys = set(get_param_keys(default_mapping))
@@ -222,6 +227,7 @@ def generate_config_from_input_dict(
         prefill_workers=int(target.get("workers", {}).get("prefill_workers", 1)),
         decode_workers=int(target.get("workers", {}).get("decode_workers", 1)),
         agg_workers=int(target.get("workers", {}).get("agg_workers", 1)),
+        num_gpus_per_node=int(target.get("node_config", {}).get("num_gpus_per_node", 8)),
         sla=target.get("sla", {}),
         dyn_config=target.get("dyn_config", {}),
         backend=backend_key,

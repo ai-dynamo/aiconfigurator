@@ -4,12 +4,19 @@ trap 'echo "Cleaning up..."; kill 0 2>/dev/null || true' EXIT INT TERM
 
 export MODEL=${MODEL:-"{{ service.model_path }}"}
 export HF_TOKEN=${HF_TOKEN:-"{{ service.hf_token }}"}
-python3 -m dynamo.frontend --http-port "{{ service.port }}" &
+python3 -m dynamo.frontend --http-port "{{ service.port }}" 2>&1 | sed "s/^/[Frontend] /" &
 
 {% if k8s.mode == 'agg' %}
-python3 -m dynamo.vllm \
-  --model "$MODEL" \
-  {{ agg_cli_args }} &
+AGG_GPU={{ agg_gpu }}
+AGG_WORKERS={{ agg_workers }}
+AGG_GPU_OFFSET={{ agg_gpu_offset | default(0) }}
+for ((w=0; w<AGG_WORKERS; w++)); do
+  BASE=$(( AGG_GPU_OFFSET + w * AGG_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+AGG_GPU-1)))
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.vllm \
+    --model "$MODEL" \
+    {{ agg_cli_args }} 2>&1 | sed "s/^/[Worker $w] /" ) &
+done
 wait
 {% else %}
 {% if prefill_workers|int > 0 %}
@@ -20,12 +27,12 @@ PREFILL_SIDE_CHANNEL_PORT={{ service.vllm_nixl_side_channel_port }}
 for ((w=0; w<PREFILL_WORKERS; w++)); do
   BASE=$(( w * PREFILL_GPU ))
   GPU_LIST=$(seq -s, $BASE $((BASE+PREFILL_GPU-1)))
-  DYN_VLLM_KV_EVENT_PORT=$PREFILL_EVENT_PORT \
+  ( DYN_VLLM_KV_EVENT_PORT=$PREFILL_EVENT_PORT \
   VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
   CUDA_VISIBLE_DEVICES=$GPU_LIST \
     python3 -m dynamo.vllm \
       --model "$MODEL" \
-      {{ prefill_cli_args }} --is-prefill-worker &
+      {{ prefill_cli_args }} --is-prefill-worker 2>&1 | sed "s/^/[Prefill $w] /" ) &
 done
 {% endif %}
 
@@ -36,10 +43,10 @@ DECODE_GPU_OFFSET={{ decode_gpu_offset | default(0) }}
 for ((w=0; w<DECODE_WORKERS; w++)); do
   BASE=$(( DECODE_GPU_OFFSET + w * DECODE_GPU ))
   GPU_LIST=$(seq -s, $BASE $((BASE+DECODE_GPU-1)))
-  CUDA_VISIBLE_DEVICES=$GPU_LIST \
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST \
     python3 -m dynamo.vllm \
       --model "$MODEL" \
-      {{ decode_cli_args }} --is-decode-worker &
+      {{ decode_cli_args }} --is-decode-worker 2>&1 | sed "s/^/[Decode $w] /" ) &
 done
 {% endif %}
 wait

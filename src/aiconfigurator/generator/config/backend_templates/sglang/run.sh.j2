@@ -19,18 +19,32 @@ DECODE_SYSTEM_PORT_BASE=${DECODE_SYSTEM_PORT_BASE:-$((PREFILL_SYSTEM_PORT_BASE +
 {% set mode = k8s.mode %}
 {% if service.include_frontend %}
 OTEL_SERVICE_NAME=dynamo-frontend \
-python3 -m dynamo.frontend --http-port "{{ service.port }}" &
+python3 -m dynamo.frontend --http-port "{{ service.port }}" 2>&1 | sed "s/^/[Frontend] /" &
 {% endif %}
 
 {% if mode == 'agg' %}
-OTEL_SERVICE_NAME=dynamo-worker \
-DYN_SYSTEM_PORT="${AGG_SYSTEM_PORT}" \
-python3 -m dynamo.sglang \
-  --model-path "$MODEL_PATH" \
-  --served-model-name "$SERVED_MODEL_NAME" \
-  {{ agg_cli_args }} \
-  --host "0.0.0.0" \
-  --enable-metrics &
+AGG_GPU={{ agg_gpu }}
+AGG_WORKERS={{ agg_workers }}
+AGG_GPU_OFFSET={{ agg_gpu_offset | default(0) }}
+for ((w=0; w<AGG_WORKERS; w++)); do
+  BASE=$(( AGG_GPU_OFFSET + w * AGG_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+AGG_GPU-1)))
+  WORKER_IDX=$(( w + 1 ))
+  SYSTEM_PORT=$(( AGG_SYSTEM_PORT + w ))
+  WORKER_NAME="dynamo-worker"
+  if (( AGG_WORKERS > 1 )); then
+    WORKER_NAME="${WORKER_NAME}-${WORKER_IDX}"
+  fi
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST \
+  OTEL_SERVICE_NAME="${WORKER_NAME}" \
+  DYN_SYSTEM_PORT="${SYSTEM_PORT}" \
+  python3 -m dynamo.sglang \
+    --model-path "$MODEL_PATH" \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    {{ agg_cli_args }} \
+    --host "0.0.0.0" \
+    --enable-metrics 2>&1 | sed "s/^/[Worker $w] /" ) &
+done
 wait
 {% else %}
 {% if prefill_workers|int > 0 %}
@@ -44,7 +58,7 @@ for ((w=0; w<PREFILL_WORKERS; w++)); do
   if (( PREFILL_WORKERS > 1 )); then
     WORKER_NAME="${WORKER_NAME}-${WORKER_IDX}"
   fi
-  CUDA_VISIBLE_DEVICES=$GPU_LIST \
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST \
   OTEL_SERVICE_NAME="${WORKER_NAME}" \
   DYN_SYSTEM_PORT="${SYSTEM_PORT}" \
     python3 -m dynamo.sglang \
@@ -52,7 +66,7 @@ for ((w=0; w<PREFILL_WORKERS; w++)); do
       --served-model-name "$SERVED_MODEL_NAME" \
       {{ prefill_cli_args }} --disaggregation-mode prefill \
       --host "0.0.0.0" \
-      --enable-metrics &
+      --enable-metrics 2>&1 | sed "s/^/[Prefill $w] /" ) &
 done
 {% endif %}
 
@@ -68,7 +82,7 @@ for ((w=0; w<DECODE_WORKERS; w++)); do
   if (( DECODE_WORKERS > 1 )); then
     WORKER_NAME="${WORKER_NAME}-${WORKER_IDX}"
   fi
-  CUDA_VISIBLE_DEVICES=$GPU_LIST \
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST \
   OTEL_SERVICE_NAME="${WORKER_NAME}" \
   DYN_SYSTEM_PORT="${SYSTEM_PORT}" \
     python3 -m dynamo.sglang \
@@ -76,7 +90,7 @@ for ((w=0; w<DECODE_WORKERS; w++)); do
       --served-model-name "$SERVED_MODEL_NAME" \
       {{ decode_cli_args }} --disaggregation-mode decode \
       --host "0.0.0.0" \
-      --enable-metrics &
+      --enable-metrics 2>&1 | sed "s/^/[Decode $w] /" ) &
 done
 {% endif %}
 wait
