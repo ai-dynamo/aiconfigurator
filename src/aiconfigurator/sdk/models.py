@@ -1344,6 +1344,7 @@ class WideEPDeepSeekModel(BaseModel):
                     sms=sms,
                     moe_backend=moe_backend,
                     is_context=True,
+                    scale_num_tokens=tp_size,
                 )
             ]
         )

@@ -275,6 +275,7 @@ class MoEDispatch(Operation):
         self._sms = kwargs.get("sms", 12)
         self._moe_backend = kwargs.get("moe_backend")
         self._is_context = kwargs.get("is_context", True)
+        self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         num_tokens = kwargs.get("x")
@@ -418,11 +419,9 @@ class MoEDispatch(Operation):
                     volume * self._attention_dp_size,
                 )
         elif database.backend == common.BackendName.sglang.value:
-            assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
-                "We don't enable the path for SGLang to support TP>1 and DP>1 for attn simultaneously"
-            )
             if self._moe_backend == "deepep_moe":
                 logger.debug("MoEDispatch: In SGLang DeepEP execution path")
+                num_tokens = num_tokens // self._scale_num_tokens
                 if self._is_context:
                     comm_latency = database.query_wideep_deepep_normal(
                         node_num=_node_num,
@@ -441,6 +440,10 @@ class MoEDispatch(Operation):
                         hidden_size=self._hidden_size,
                     )
             else:
+                assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
+                    "We don't enable the path for non-wideep SGLang to support TP>1 and DP>1 for attn simultaneously"
+                )
+                # TODO: support TP+DP
                 logger.debug("MoEDispatch: In SGLang non-DeepEP execution path")
                 if self._pre_dispatch:
                     if self._attention_tp_size > 1:  # tp>1, use allreduce
