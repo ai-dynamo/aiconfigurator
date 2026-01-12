@@ -440,7 +440,7 @@ class MoEDispatch(Operation):
                         hidden_size=self._hidden_size,
                     )
             else:
-                assert self._attention_tp_size == 1 and self._attention_dp_size == 1, (
+                assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
                     "We don't enable the path for non-wideep SGLang to support TP>1 and DP>1 for attn simultaneously"
                 )
                 # TODO: support TP+DP
