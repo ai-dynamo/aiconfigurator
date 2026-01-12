@@ -16,7 +16,7 @@ import os
 import sys
 from typing import Any, Optional
 
-from api import (
+from .api import (
     generate_backend_artifacts,
     generate_backend_config,
     parse_cli_params,
