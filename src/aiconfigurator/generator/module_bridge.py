@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from aiconfigurator.sdk.perf_database import get_database
 from aiconfigurator.sdk.task import TaskConfig
 
 from .aggregators import collect_generator_params
@@ -107,6 +108,19 @@ def task_config_to_generator_config(
     prefix_tokens = _safe_int(_series_val(result_df, "prefix", runtime_cfg.prefix), runtime_cfg.prefix)
     config_obj = task_config.config
 
+    # Fetch num_gpus_per_node from system config
+    num_gpus_per_node = 8
+    try:
+        db = get_database(
+            system=task_config.system_name,
+            backend=task_config.backend_name,
+            version=task_config.backend_version,
+        )
+        if db and "node" in db.system_spec:
+            num_gpus_per_node = db.system_spec["node"].get("num_gpus_per_node", 8)
+    except Exception:
+        pass
+
     service_cfg = {
         "model_name": task_config.model_name,
         "served_model_name": task_config.model_name,
@@ -142,12 +156,38 @@ def task_config_to_generator_config(
 
     if task_config.serving_mode == "agg":
         agg_params, agg_workers = _build_worker_params("", worker_overrides.get("agg"))
+        if task_config.total_gpus:
+            tp = agg_params.get("tensor_parallel_size", 1)
+            pp = agg_params.get("pipeline_parallel_size", 1)
+            dp = agg_params.get("data_parallel_size", 1)
+            gpus_per_replica = tp * pp * dp
+            agg_workers = task_config.total_gpus // gpus_per_replica
         prefill_params, prefill_workers = None, 0
         decode_params, decode_workers = None, 0
     else:
         agg_params, agg_workers = None, 0
         prefill_params, prefill_workers = _build_worker_params("(p)", worker_overrides.get("prefill"))
         decode_params, decode_workers = _build_worker_params("(d)", worker_overrides.get("decode"))
+
+        # Scale disagg workers based on total_gpus (similar to agg mode)
+        if task_config.total_gpus and prefill_params and decode_params:
+            p_tp = prefill_params.get("tensor_parallel_size", 1)
+            p_pp = prefill_params.get("pipeline_parallel_size", 1)
+            p_dp = prefill_params.get("data_parallel_size", 1)
+            prefill_gpus_per_worker = p_tp * p_pp * p_dp
+
+            d_tp = decode_params.get("tensor_parallel_size", 1)
+            d_pp = decode_params.get("pipeline_parallel_size", 1)
+            d_dp = decode_params.get("data_parallel_size", 1)
+            decode_gpus_per_worker = d_tp * d_pp * d_dp
+
+            # Each replica uses prefill_workers_per_replica prefill workers + decode_workers_per_replica decode workers
+            # For simplicity, assume 1:1 prefill:decode ratio per replica
+            gpus_per_replica = (prefill_workers * prefill_gpus_per_worker) + (decode_workers * decode_gpus_per_worker)
+            if gpus_per_replica > 0:
+                replicas = task_config.total_gpus // gpus_per_replica
+                prefill_workers = replicas * prefill_workers
+                decode_workers = replicas * decode_workers
 
     if agg_params:
         agg_workers = _safe_int(worker_count_overrides.get("agg_workers"), agg_workers)
@@ -173,6 +213,7 @@ def task_config_to_generator_config(
         prefill_workers=prefill_workers if prefill_params else 0,
         decode_workers=decode_workers if decode_params else 0,
         agg_workers=agg_workers if agg_params else 0,
+        num_gpus_per_node=num_gpus_per_node,
         sla=sla_cfg,
         dyn_config=dyn_cfg,
         backend=backend_name,
