@@ -1328,13 +1328,16 @@ class PerfDatabase:
         self._extracted_metrics_cache = {}
 
         data_dir = os.path.join(systems_dir, self.system_spec["data_dir"], backend, version)
-        nccl_data_dir = os.path.join(
-            systems_dir,
-            self.system_spec["data_dir"],
-            "nccl",
-            self.system_spec["misc"]["nccl_version"],
-            common.PerfDataFilename.nccl.value,
-        )
+        if "misc" in self.system_spec:
+            nccl_data_dir = os.path.join(
+                systems_dir,
+                self.system_spec["data_dir"],
+                "nccl",
+                self.system_spec["misc"]["nccl_version"],
+                common.PerfDataFilename.nccl.value,
+            )
+        else:
+            nccl_data_dir = ""
 
         if backend == "sglang":
             # For SGLang, only load MoE data and provide empty structures for other data
@@ -3378,6 +3381,7 @@ class PerfDatabase:
             return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
+
                 if tp_size == 1:
                     return PerformanceResult(0.0, energy=0.0)
                 if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
@@ -3390,7 +3394,6 @@ class PerfDatabase:
                         f"backend='{self.backend}', version='{self.version}'. "
                         "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
                     )
-
                 comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
                     "AUTO"
                 ]  # use AUTO for allreduce strategy

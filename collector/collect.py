@@ -529,13 +529,13 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
     collections = [
         # GEMM collections
         # vllm GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
-        # {
-        #     "name": "vllm",
-        #     "type": "gemm",
-        #     "module": "collector.vllm.collect_gemm",
-        #     "get_func": "get_gemm_test_cases",
-        #     "run_func": "run_gemm",
-        # },
+        {
+            "name": "vllm",
+            "type": "gemm",
+            "module": "collector.vllm.collect_gemm",
+            "get_func": "get_gemm_test_cases",
+            "run_func": "run_gemm",
+        },
         # Attention collections - separate entries for context and generation
         # {
         #     "name": "vllm",
@@ -552,13 +552,13 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         #     "run_func": "run_attention_torch",
         # },
         # TODO sihan: uncomment cases below, recheck whether supported
-        {
-            "name": "vllm",
-            "type": "moe",
-            "module": "collector.vllm.collect_moe",
-            "get_func": "get_moe_test_cases",
-            "run_func": "run_moe_torch",
-        },
+        # {
+        #     "name": "vllm",
+        #     "type": "moe",
+        #     "module": "collector.vllm.collect_moe",
+        #     "get_func": "get_moe_test_cases",
+        #     "run_func": "run_moe_torch",
+        # },
         # {
         #     "name": "vllm",
         #     "type": "mla_context",
