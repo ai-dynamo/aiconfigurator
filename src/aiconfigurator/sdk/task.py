@@ -583,6 +583,9 @@ class TaskConfigFactory:
             gemm_quant_mode = fp8_gemm_quant
             moe_quant_mode = fp8_gemm_quant
 
+        if model_name in ["GPT_OSS_120B", "GPT_OSS_20B"]:
+            moe_quant_mode = "w4a16_mxfp4"
+
         if use_specific_quant_mode is not None:
             if use_specific_quant_mode != "w4afp8":
                 gemm_quant_mode = use_specific_quant_mode
