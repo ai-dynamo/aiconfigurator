@@ -152,7 +152,7 @@ how many files are needed accordingly.
 SGLang requires a **hybrid collection approach**:
 
 ### 1. Run unified collectors (GEMM, MLA, MoE, Normal Attention)
-Suggest to start from lmsysorg docker image. Say, for 0.5.5.post3, we can use lmsysorg/sglang:v0.5.5.post3-cu126
+Suggest to start from lmsysorg docker image. Say, for 0.5.6.post2, we can use lmsysorg/sglang:v0.5.6.post2-cu126
 ```bash
 python3 collect.py --backend sglang
 ```
@@ -215,4 +215,4 @@ of the GPU system and kernel optimization.
 aiconfigurator 0.1.0
 trtllm: 0.20.0, 1.0.0rc3 on Hopper GPUs
 vllm: NA
-sglang: 0.5.5.post2, 0.5.5.post3 on Hopper GPUs
+sglang: 0.5.6.post2 on Hopper GPUs
