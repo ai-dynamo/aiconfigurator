@@ -89,6 +89,7 @@ def task_config_to_generator_config(
             "tensor_parallel_size": tp,
             "pipeline_parallel_size": pp,
             "data_parallel_size": dp,
+            "gpus_per_worker": tp * pp * dp,
             "moe_tensor_parallel_size": moe_tp,
             "moe_expert_parallel_size": moe_ep,
             "max_batch_size": bs,

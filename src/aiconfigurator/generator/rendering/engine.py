@@ -316,27 +316,67 @@ def render_backend_templates(
                 # Simple greedy allocation
                 def _allocate_disagg_nodes(p_worker: int, p_gpu: int, d_worker: int, d_gpu: int, gpu_per_node: int):
                     nodes = []
-                    for _ in range(p_worker):
-                        placed = False
-                        for n in nodes:
-                            if n["used"] + p_gpu <= gpu_per_node:
-                                n["p_worker"] += 1
-                                n["used"] += p_gpu
-                                placed = True
-                                break
-                        if not placed:
-                            nodes.append({"p_worker": 1, "d_worker": 0, "used": p_gpu})
-                    for _ in range(d_worker):
-                        placed = False
-                        for n in nodes:
-                            if n["used"] + d_gpu <= gpu_per_node:
-                                n["d_worker"] += 1
-                                n["used"] += d_gpu
-                                placed = True
-                                break
-                        if not placed:
-                            nodes.append({"p_worker": 0, "d_worker": 1, "used": d_gpu})
-                    return [{"p_worker": n["p_worker"], "d_worker": n["d_worker"]} for n in nodes]
+
+                    # Interleave allocation to balance prefill and decode workers across nodes
+                    # We try to keep p_worker/d_worker ratio consistent across nodes
+                    if p_worker > 0 and d_worker > 0:
+                        import math
+
+                        gcd = math.gcd(p_worker, d_worker)
+                        p_unit = p_worker // gcd
+                        d_unit = d_worker // gcd
+
+                        p_rem, d_rem = p_worker, d_worker
+                        while p_rem > 0 or d_rem > 0:
+                            # Allocate p_unit prefill
+                            for _ in range(min(p_unit, p_rem)):
+                                placed = False
+                                for n in nodes:
+                                    if n["used"] + p_gpu <= gpu_per_node:
+                                        n["p_worker"] += 1
+                                        n["used"] += p_gpu
+                                        placed = True
+                                        break
+                                if not placed:
+                                    nodes.append({"p_worker": 1, "d_worker": 0, "used": p_gpu})
+                                p_rem -= 1
+
+                            # Allocate d_unit decode
+                            for _ in range(min(d_unit, d_rem)):
+                                placed = False
+                                for n in nodes:
+                                    if n["used"] + d_gpu <= gpu_per_node:
+                                        n["d_worker"] += 1
+                                        n["used"] += d_gpu
+                                        placed = True
+                                        break
+                                if not placed:
+                                    nodes.append({"p_worker": 0, "d_worker": 1, "used": d_gpu})
+                                d_rem -= 1
+                    else:
+                        # Fallback for simple cases where one type is missing
+                        for _ in range(p_worker):
+                            placed = False
+                            for n in nodes:
+                                if n["used"] + p_gpu <= gpu_per_node:
+                                    n["p_worker"] += 1
+                                    n["used"] += p_gpu
+                                    placed = True
+                                    break
+                            if not placed:
+                                nodes.append({"p_worker": 1, "d_worker": 0, "used": p_gpu})
+                        for _ in range(d_worker):
+                            placed = False
+                            for n in nodes:
+                                if n["used"] + d_gpu <= gpu_per_node:
+                                    n["d_worker"] += 1
+                                    n["used"] += d_gpu
+                                    placed = True
+                                    break
+                            if not placed:
+                                nodes.append({"p_worker": 0, "d_worker": 1, "used": d_gpu})
+
+                    return [{"p_worker": n.get("p_worker", 0), "d_worker": n.get("d_worker", 0)} for n in nodes]
 
                 plan = _allocate_disagg_nodes(
                     prefill_workers, prefill_gpu, decode_workers, decode_gpu, num_gpus_per_node
@@ -377,6 +417,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context = {}
 
     # Extract ModelConfig (is_moe, nextn, etc.)
+    context["num_gpus_per_node"] = param_values.get("num_gpus_per_node", 8)
     model_config = param_values.get("ModelConfig", {})
     if model_config.get("is_moe"):
         context["is_moe"] = model_config["is_moe"]
@@ -431,6 +472,9 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["prefill_gpus_per_worker"] = workers.get("prefill_gpus_per_worker")
     context["decode_gpus_per_worker"] = workers.get("decode_gpus_per_worker")
     context["agg_gpus_per_worker"] = workers.get("agg_gpus_per_worker")
+    context["prefill_gpu"] = context["prefill_gpus_per_worker"]
+    context["decode_gpu"] = context["decode_gpus_per_worker"]
+    context["agg_gpu"] = context["agg_gpus_per_worker"]
 
     fr = 1 if (context.get("include_frontend") is True) else 0
     context["frontend_replicas"] = fr
