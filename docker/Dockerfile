@@ -34,3 +34,8 @@ COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/
 COPY src/ /workspace/src/
 COPY tools/ /workspace/tools/
+
+# Convenience runtime image for launching the Gradio webapp.
+# Build with: docker build --target runtime-webapp -t aiconfigurator:webapp .
+FROM runtime AS runtime-webapp
+RUN uv pip install "gradio==5.47.1"

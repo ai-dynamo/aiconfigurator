@@ -102,6 +102,16 @@ def _add_default_mode_arguments(parser):
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
+    parser.add_argument(
+        "--static_quant_mode",
+        action="store_true",
+        help="Enable static quantization modeling for GEMM (subtract compute_scale overhead).",
+    )
+    parser.add_argument(
+        "--lowbit_input",
+        action="store_true",
+        help="Assume FP8/lowbit inputs for key GEMMs (also subtract scale_matrix overhead).",
+    )
 
 
 def _add_experiments_mode_arguments(parser):
@@ -164,6 +174,16 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
     disagg_kwargs["decode_system_name"] = decode_system
     disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
     task_configs["disagg"] = disagg_task
+
+    static_quant_mode = bool(getattr(args, "static_quant_mode", False))
+    lowbit_input = bool(getattr(args, "lowbit_input", False))
+    if static_quant_mode or lowbit_input:
+        agg_task.config.worker_config.static_quant_mode = static_quant_mode
+        agg_task.config.worker_config.lowbit_input = lowbit_input
+        disagg_task.config.prefill_worker_config.static_quant_mode = static_quant_mode
+        disagg_task.config.prefill_worker_config.lowbit_input = lowbit_input
+        disagg_task.config.decode_worker_config.static_quant_mode = static_quant_mode
+        disagg_task.config.decode_worker_config.lowbit_input = lowbit_input
 
     return task_configs
 

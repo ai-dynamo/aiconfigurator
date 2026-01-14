@@ -175,6 +175,8 @@ class EventFn:
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        static_quant_mode,
+        lowbit_input,
         nextn,
         nextn_accept_rates,
         enable_wideep,
@@ -206,6 +208,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
+                    static_quant_mode=bool(static_quant_mode),
+                    lowbit_input=bool(lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -274,6 +278,8 @@ class EventFn:
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        static_quant_mode,
+        lowbit_input,
         nextn,
         nextn_accept_rates,
         enable_wideep,
@@ -302,6 +308,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
+                    static_quant_mode=bool(static_quant_mode),
+                    lowbit_input=bool(lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -385,6 +393,8 @@ class EventFn:
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        static_quant_mode,
+        lowbit_input,
         nextn,
         nextn_accept_rates,
         enable_wideep,
@@ -409,6 +419,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
+                    static_quant_mode=bool(static_quant_mode),
+                    lowbit_input=bool(lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -537,6 +549,8 @@ class EventFn:
         prefill_fmha_quant_mode,
         prefill_moe_quant_mode,
         prefill_comm_quant_mode,
+        prefill_static_quant_mode,
+        prefill_lowbit_input,
         prefill_latency_correction_scale,
         decode_system_name,
         decode_backend_name,
@@ -554,6 +568,8 @@ class EventFn:
         decode_fmha_quant_mode,
         decode_moe_quant_mode,
         decode_comm_quant_mode,
+        decode_static_quant_mode,
+        decode_lowbit_input,
         decode_latency_correction_scale,
         num_gpu_list,
         max_num_gpu,
@@ -579,7 +595,7 @@ class EventFn:
                 assert prefill_database is not None
                 assert decode_database is not None
                 prefill_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
-                decode_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
+                decode_database.set_default_database_mode(common.DatabaseMode[decode_database_mode])
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 prefill_model_config = config.ModelConfig(
                     tp_size=prefill_tp_size,
@@ -592,6 +608,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[prefill_fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[prefill_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
+                    static_quant_mode=bool(prefill_static_quant_mode),
+                    lowbit_input=bool(prefill_lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -609,6 +627,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[decode_fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[decode_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
+                    static_quant_mode=bool(decode_static_quant_mode),
+                    lowbit_input=bool(decode_lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -783,6 +803,8 @@ class EventFn:
         prefill_fmha_quant_mode,
         prefill_moe_quant_mode,
         prefill_comm_quant_mode,
+        prefill_static_quant_mode,
+        prefill_lowbit_input,
         decode_system_name,
         decode_backend_name,
         decode_version,
@@ -797,6 +819,8 @@ class EventFn:
         decode_fmha_quant_mode,
         decode_moe_quant_mode,
         decode_comm_quant_mode,
+        decode_static_quant_mode,
+        decode_lowbit_input,
     ):
         def create_scatter_plot(df, x_col, y_col, target_x, x_label, title):
             fig = go.Figure()
@@ -874,6 +898,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[prefill_fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[prefill_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
+                    static_quant_mode=bool(prefill_static_quant_mode),
+                    lowbit_input=bool(prefill_lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -891,6 +917,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[decode_fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[decode_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
+                    static_quant_mode=bool(decode_static_quant_mode),
+                    lowbit_input=bool(decode_lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -1225,10 +1253,48 @@ class EventFn:
         )
 
     @staticmethod
+    def update_backend_choices_with_quant_toggles(system_name):
+        backend_update, version_update = EventFn.update_backend_choices(system_name)
+        # Quant overhead toggles are only meaningful for TRTLLM; disable until backend is selected.
+        return (
+            backend_update,
+            version_update,
+            gr.update(value=False, interactive=False),
+            gr.update(value=False, interactive=False),
+        )
+
+    @staticmethod
     def update_version_choices(system_name, backend_name):
         database_dict = get_all_databases()
         version_choices = sorted(database_dict[system_name][backend_name].keys(), reverse=True)
         return gr.update(choices=version_choices, value=None, interactive=True)
+
+    @staticmethod
+    def update_version_choices_with_quant_toggles(system_name, backend_name):
+        if not backend_name:
+            # Backend not selected yet.
+            return (
+                gr.update(choices=None, value=None, interactive=True),
+                gr.update(value=False, interactive=False),
+                gr.update(value=False, interactive=False),
+            )
+
+        version_update = EventFn.update_version_choices(system_name, backend_name)
+
+        # Quant overhead toggles are currently TRTLLM-only.
+        if str(backend_name).lower() == common.BackendName.trtllm.value:
+            return (
+                version_update,
+                gr.update(interactive=True),
+                gr.update(interactive=True),
+            )
+
+        # Non-TRTLLM backends: force off and disable to avoid missing-table errors.
+        return (
+            version_update,
+            gr.update(value=False, interactive=False),
+            gr.update(value=False, interactive=False),
+        )
 
     @staticmethod
     def update_model_related_components(model_name):

@@ -410,6 +410,118 @@ def load_gemm_data(gemm_file):
     return gemm_data
 
 
+def load_compute_scale_data(compute_scale_file):
+    """
+    Load the compute scale data with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure {quant_mode: {m: {k: {latency, power, energy}}}}
+              For old database formats without power, defaults to power=0.0 and energy=0.0.
+    """
+    if not os.path.exists(compute_scale_file):
+        logger.warning(f"Compute scale data file {compute_scale_file} not found.")
+        return None
+    compute_scale_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+
+    with open(compute_scale_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug(f"Legacy database format detected in {compute_scale_file} - power will default to 0.0")
+
+    for row in rows:
+        quant_mode, m, k, latency = (
+            row["quant_dtype"],
+            row["m"],
+            row["k"],
+            row["latency"],
+        )
+        m = int(m)
+        k = int(k)
+        latency = float(latency)
+
+        # Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds (W·ms)
+
+        quant_mode = common.GEMMQuantMode[quant_mode]
+
+        try:
+            # Check for conflict
+            compute_scale_data[quant_mode][m][k]
+            logger.debug(f"value conflict in compute_scale data: {quant_mode} {m} {k}")
+        except KeyError:
+            # Store all three values
+            compute_scale_data[quant_mode][m][k] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+
+    return compute_scale_data
+
+
+def load_scale_matrix_data(scale_matrix_file):
+    """
+    Load the scale matrix data with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure {quant_mode: {m: {k: {latency, power, energy}}}}
+              For old database formats without power, defaults to power=0.0 and energy=0.0.
+    """
+    if not os.path.exists(scale_matrix_file):
+        logger.warning(f"Scale matrix data file {scale_matrix_file} not found.")
+        return None
+    scale_matrix_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+
+    with open(scale_matrix_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug(f"Legacy database format detected in {scale_matrix_file} - power will default to 0.0")
+
+    for row in rows:
+        quant_mode, m, k, latency = (
+            row["quant_dtype"],
+            row["m"],
+            row["k"],
+            row["latency"],
+        )
+        m = int(m)
+        k = int(k)
+        latency = float(latency)
+
+        # Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds (W·ms)
+
+        quant_mode = common.GEMMQuantMode[quant_mode]
+
+        try:
+            # Check for conflict
+            scale_matrix_data[quant_mode][m][k]
+            logger.debug(f"value conflict in scale_matrix data: {quant_mode} {m} {k}")
+        except KeyError:
+            # Store all three values
+            scale_matrix_data[quant_mode][m][k] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+
+    return scale_matrix_data
+
+
 def load_moe_data(moe_file):
     """
     Load the moe data with power support (backward compatible).
@@ -1380,6 +1492,8 @@ class PerfDatabase:
             self._wideep_deepep_ll_data = load_wideep_deepep_ll_data(
                 os.path.join(data_dir, common.PerfDataFilename.wideep_deepep_ll.value)
             )
+            self._compute_scale_data = None
+            self._scale_matrix_data = None
         elif backend == "vllm":
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1400,6 +1514,8 @@ class PerfDatabase:
             self._generation_mla_data = load_generation_mla_data(
                 os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
             )
+            self._compute_scale_data = None
+            self._scale_matrix_data = None
         else:  # TRTLLM
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1422,6 +1538,12 @@ class PerfDatabase:
             )
             self._nccl_data = load_nccl_data(nccl_data_dir)
             self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
+            self._compute_scale_data = load_compute_scale_data(
+                os.path.join(data_dir, common.PerfDataFilename.compute_scale.value)
+            )
+            self._scale_matrix_data = load_scale_matrix_data(
+                os.path.join(data_dir, common.PerfDataFilename.scale_matrix.value)
+            )
 
         # pre-correction
         self._correct_data()
@@ -2530,6 +2652,162 @@ class PerfDatabase:
                 else:
                     logger.exception(
                         f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
+
+    @functools.lru_cache(maxsize=32768)
+    def query_compute_scale(
+        self,
+        m: int,
+        k: int,
+        quant_mode: common.GEMMQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """
+        Query compute scale latency (dynamic quantization - static quantization).
+
+        Args:
+            m: Number of rows in input matrix
+            k: Number of columns in input matrix
+            quant_mode: Quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
+        """
+
+        def get_sol(m: int, k: int) -> tuple[float, float, float]:
+            """
+            Get the sol time, sol math and sol mem
+            """
+            sol_mem = 2 * m * k / self.system_spec["gpu"]["mem_bw"] * 1000.0
+            sol_time = sol_mem
+            return sol_time, 0, sol_mem
+
+        def get_empirical(m: int, k: int) -> float:
+            """
+            Get the empirical time
+            """
+            sol_time = get_sol(m, k)[0]
+            scale_factor = 0.8
+            return sol_time / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        if database_mode == common.DatabaseMode.SOL:
+            return PerformanceResult(get_sol(m, k)[0], energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(m, k)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return PerformanceResult(get_empirical(m, k), energy=0.0)
+        else:
+            # SILICON or HYBRID mode - use database
+            try:
+                if self._compute_scale_data is None:
+                    msg = (
+                        "Compute scale perf table is missing for "
+                        f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
+                    )
+                    raise PerfDataNotAvailableError(msg)
+                if quant_mode not in self._compute_scale_data:
+                    supported = sorted([k.name for k in self._compute_scale_data])
+                    raise PerfDataNotAvailableError(
+                        "Compute scale perf data not available for requested quant mode. "
+                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                        f"quant_mode='{quant_mode.name}'. "
+                        f"Supported modes: {supported}"
+                    )
+                result = self._interp_2d_linear(m, k, self._compute_scale_data[quant_mode])
+                return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query compute_scale data for {m=}, {k=}, {quant_mode=}, using empirical mode"
+                    )
+                    return PerformanceResult(get_empirical(m, k), energy=0.0)
+                else:
+                    logger.exception(
+                        f"Failed to query compute_scale data for {m=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
+
+    @functools.lru_cache(maxsize=32768)
+    def query_scale_matrix(
+        self,
+        m: int,
+        k: int,
+        quant_mode: common.GEMMQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """
+        Query scale matrix (static quantization) latency.
+
+        Args:
+            m: Number of rows in input matrix
+            k: Number of columns in input matrix
+            quant_mode: Quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
+        """
+
+        def get_sol(m: int, k: int) -> tuple[float, float, float]:
+            """
+            Get the sol time, sol math and sol mem
+            """
+            sol_mem = 3 * m * k / self.system_spec["gpu"]["mem_bw"] * 1000.0
+            sol_time = sol_mem
+            return sol_time, 0, sol_mem
+
+        def get_empirical(m: int, k: int) -> float:
+            """
+            Get the empirical time
+            """
+            sol_time = get_sol(m, k)[0]
+            scale_factor = 0.8
+            return sol_time / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        if database_mode == common.DatabaseMode.SOL:
+            return PerformanceResult(get_sol(m, k)[0], energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(m, k)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return PerformanceResult(get_empirical(m, k), energy=0.0)
+        else:
+            # SILICON or HYBRID mode - use database
+            try:
+                if self._scale_matrix_data is None:
+                    msg = (
+                        "Scale matrix perf table is missing for "
+                        f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
+                    )
+                    raise PerfDataNotAvailableError(msg)
+                if quant_mode not in self._scale_matrix_data:
+                    supported = sorted([k.name for k in self._scale_matrix_data])
+                    raise PerfDataNotAvailableError(
+                        "Scale matrix perf data not available for requested quant mode. "
+                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                        f"quant_mode='{quant_mode.name}'. "
+                        f"Supported modes: {supported}"
+                    )
+                result = self._interp_2d_linear(m, k, self._scale_matrix_data[quant_mode])
+                return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query scale_matrix data for {m=}, {k=}, {quant_mode=}, using empirical mode"
+                    )
+                    return PerformanceResult(get_empirical(m, k), energy=0.0)
+                else:
+                    logger.exception(
+                        f"Failed to query scale_matrix data for {m=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
                     )
                     raise
 

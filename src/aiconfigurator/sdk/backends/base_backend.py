@@ -78,7 +78,17 @@ class BaseBackend(ABC):
             for op in model.context_ops:
                 # query latency and store the latency
                 x = batch_size * isl if "logits_gemm" not in op._name else batch_size
-                result = op.query(database, x=x, batch_size=batch_size, beam_width=1, s=isl, prefix=prefix)
+                result = op.query(
+                    database,
+                    x=x,
+                    batch_size=batch_size,
+                    beam_width=1,
+                    s=isl,
+                    prefix=prefix,
+                    model_name=getattr(model, "model_name", ""),
+                    static_quant_mode=getattr(model.config, "static_quant_mode", False),
+                    lowbit_input=getattr(model.config, "lowbit_input", False),
+                )
 
                 # ✅ IMMEDIATELY extract values - do NOT use PerformanceResult arithmetic!
                 latency_ms = float(result)  # Extract latency in milliseconds
@@ -117,6 +127,9 @@ class BaseBackend(ABC):
                         batch_size=batch_size,
                         beam_width=beam_width,
                         s=isl + i + 1,
+                        model_name=getattr(model, "model_name", ""),
+                        static_quant_mode=getattr(model.config, "static_quant_mode", False),
+                        lowbit_input=getattr(model.config, "lowbit_input", False),
                     )
 
                     # ✅ IMMEDIATELY extract values - do NOT accumulate PerformanceResult objects!

@@ -147,6 +147,17 @@ def create_model_quant_config(app_config):
                 visible=False,
                 interactive=True,
             )
+        with gr.Row():
+            static_quant_mode = gr.Checkbox(
+                label="static quant mode",
+                value=False,
+                interactive=True,
+            )
+            lowbit_input = gr.Checkbox(
+                label="lowbit input",
+                value=False,
+                interactive=True,
+            )
 
     return {
         "gemm_quant_mode": gemm_quant_mode,
@@ -154,6 +165,8 @@ def create_model_quant_config(app_config):
         "fmha_quant_mode": fmha_quant_mode,
         "moe_quant_mode": moe_quant_mode,
         "comm_quant_mode": comm_quant_mode,
+        "static_quant_mode": static_quant_mode,
+        "lowbit_input": lowbit_input,
     }
 
 
