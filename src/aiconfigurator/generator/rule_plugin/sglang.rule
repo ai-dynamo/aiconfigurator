@@ -4,7 +4,8 @@ agg_decode max_batch_size = (max_batch_size if max_batch_size else 128)
 agg_prefill_decode max_prefill_tokens = SlaConfig.isl + 1500
 
 
-agg_prefill_decode cuda_graph_batch_sizes = ((range(1, max_batch_size + 1) | list) if max_batch_size else [])
+agg_prefill_decode cuda_graph_enable_padding = true
+agg_prefill_decode cuda_graph_batch_sizes = ((([1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768] | select('le', max_batch_size) | list) + ([max_batch_size] if max_batch_size not in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768] else [])) if max_batch_size else [])
 
 # GPUs per worker follow the same TP/PP/DP product that SGLang expects
 agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_parallel_size or 1) * (data_parallel_size or 1)
