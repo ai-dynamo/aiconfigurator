@@ -1,5 +1,13 @@
+#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+"""
+Support matrix generation and validation utilities.
+
+This module provides the SupportMatrix class for generating and validating
+the model/system/backend/version support matrix for AIConfigurator.
+"""
 
 import csv
 import logging
@@ -26,8 +34,6 @@ TPOT = 50.0
 class SupportMatrix:
     """
     Helper to generate and validate the model/system/backend/version support matrix.
-
-    Lives under `tests/e2e/` because it drives an E2E-style sweep via TaskRunner.
     """
 
     def __init__(self):
