@@ -129,6 +129,17 @@ def apply_rule_plugins(param_values: dict[str, Any], backend: str, dsl_dir: Opti
     with open(rule_path, encoding="utf-8") as f:
         content = f.read().splitlines()
 
+    # Ensure agg_prefill_decode has data so default_scope eval can access tp/ep, etc.
+    params_obj = param_values.setdefault("params", {})
+    if "agg_prefill_decode" not in params_obj:
+        merged: dict[str, Any] = {}
+        for sc in ("agg", "prefill", "decode"):
+            sc_val = params_obj.get(sc)
+            if isinstance(sc_val, dict):
+                merged.update(sc_val)
+        if merged:
+            params_obj["agg_prefill_decode"] = merged
+
     default_scope = "agg_prefill_decode" if backend in ("trtllm", "vllm", "sglang") else None
     cond_stack: list[tuple[int, bool]] = []
     for idx, line in enumerate(content, start=1):
