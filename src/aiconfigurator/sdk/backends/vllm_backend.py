@@ -417,8 +417,8 @@ class VLLMBackend(BaseBackend):
                     ctx_tokens=ctx_tokens,
                 )
 
-                # if summary.check_oom(): # FIXME not check_oom now
-                #     break  # larger ctx tokens will cause oom
+                if summary.check_oom():
+                    break  # larger ctx tokens will cause oom
                 result_dict = summary.get_result_dict()
                 if result_dict and result_dict["tpot"] <= tpot and result_dict["ttft"] <= ttft:
                     results_dict_list.append(result_dict)

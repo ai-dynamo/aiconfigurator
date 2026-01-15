@@ -374,7 +374,6 @@ def _execute_task_configs(
                 maximize_x=not use_request_latency,
                 maximize_y=True,
             )
-            # pareto_frontier_df = pareto_df # plot all points
         else:
             pareto_frontier_df = pd.DataFrame()
             x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"

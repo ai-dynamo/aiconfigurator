@@ -218,14 +218,13 @@ def run_attention_torch(
             logits_soft_cap=None,
             attn_type="decoder",
             kv_sharing_target_layer_name=None,
-            # These params are illegal for XPU backends but critical for mla!!!!!!!!! FIXME sihan: recheck whether xpu mla supported
-            # q_lora_rank=q_lora_rank,
-            # kv_lora_rank=kv_lora_rank,
-            # qk_nope_head_dim=qk_nope_head_dim,
-            # qk_rope_head_dim=qk_rope_head_dim,
-            # qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
-            # v_head_dim=v_head_dim,
-            # kv_b_proj=mock_kv_b_proj,
+            q_lora_rank=q_lora_rank,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            kv_b_proj=mock_kv_b_proj,
         )
 
     # Process weights to create W_UK_T and W_UV attributes needed by MLA

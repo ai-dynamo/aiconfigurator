@@ -3381,7 +3381,6 @@ class PerfDatabase:
             return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
-
                 if tp_size == 1:
                     return PerformanceResult(0.0, energy=0.0)
                 if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
@@ -3394,6 +3393,7 @@ class PerfDatabase:
                         f"backend='{self.backend}', version='{self.version}'. "
                         "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
                     )
+
                 comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
                     "AUTO"
                 ]  # use AUTO for allreduce strategy

@@ -34,6 +34,11 @@ import torch
 import torch.distributed as dist
 from helper import PowerMonitor, log_perf
 
+def sync_device():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif torch.xpu.is_available():
+        torch.xpu.synchronize()
 
 def get_input_shape_and_comm_size(size, token_dim=4096):
     """Convert size to appropriate input shape for AllReduce operations"""
@@ -292,16 +297,17 @@ def setup_vllm_distributed(world_size, rank, use_slurm):
         print(f"  Local rank: {local_rank}")
 
         try:
-            dist.init_process_group(
-               backend="xccl",
-                init_method="env://",
-            )
+            if torch.xpu.is_available():
+                dist.init_process_group(
+                backend="xccl",
+                    init_method="env://",
+                )
             vllm_mods["init_distributed_environment"](
                 world_size=world_size,
                 rank=rank,
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank,
-                backend="xccl",
+                backend="xccl" if torch.xpu.is_available() else "nccl",
             )
         except Exception as e:
             print(f"\nERROR: Failed to initialize distributed environment: {e}")
@@ -351,7 +357,8 @@ def benchmark_vllm_allreduce(
         input_shape = get_input_shape_and_comm_size(size)
 
         # Test both graph capture and eager mode
-        for use_graph in [False]:
+        flag_lst = [False] if torch.xpu.is_available() else [True, False]
+        for use_graph in [flag_lst]:
             mode_str = "graph" if use_graph else "eager"
 
             if use_graph:
@@ -360,35 +367,31 @@ def benchmark_vllm_allreduce(
                     # Create input tensors
                     input_tensors = []
                     for _ in range(repeat_n):
-                        inp = torch.ones(input_shape, dtype=torch_dtype, device="xpu")
+                        inp = torch.ones(input_shape, dtype=torch_dtype, device="cuda")
                         input_tensors.append(inp)
 
-                    torch.xpu.synchronize()
-                    # graph = torch.xpu.CUDAGraph()
+                    torch.cuda.synchronize()
+                    graph = torch.cuda.CUDAGraph()
 
-                    # with torch.xpu.graph(graph, stream=graph_capture_context.stream):
-                    #     outputs = []
-                    #     for inp in input_tensors:
-                    #         out = vllm_mods["tensor_model_parallel_all_reduce"](inp)
-                    #         outputs.append(out)
-                    outputs = []
-                    for inp in input_tensors:
-                        out = vllm_mods["tensor_model_parallel_all_reduce"](inp)
-                        outputs.append(out)
+                    with torch.cuda.graph(graph, stream=graph_capture_context.stream):
+                        outputs = []
+                        for inp in input_tensors:
+                            out = vllm_mods["tensor_model_parallel_all_reduce"](inp)
+                            outputs.append(out)
 
                 # Adaptive num_runs calculation for power measurement
                 actual_num_runs = num_runs
                 if measure_power:
                     # Estimate single iteration time
-                    start_warmup = torch.xpu.Event(enable_timing=True)
-                    end_warmup = torch.xpu.Event(enable_timing=True)
+                    start_warmup = torch.cuda.Event(enable_timing=True)
+                    end_warmup = torch.cuda.Event(enable_timing=True)
 
-                    torch.xpu.synchronize()
+                    torch.cuda.synchronize()
                     start_warmup.record()
                     for i in range(num_warmups):
                         graph.replay()
                     end_warmup.record()
-                    torch.xpu.synchronize()
+                    torch.cuda.synchronize()
 
                     single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
                     actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
@@ -430,27 +433,27 @@ def benchmark_vllm_allreduce(
                 actual_num_runs = num_runs
                 if measure_power:
                     # Estimate single iteration time
-                    start_warmup = torch.xpu.Event(enable_timing=True)
-                    end_warmup = torch.xpu.Event(enable_timing=True)
+                    start_warmup = torch.cuda.Event(enable_timing=True)
+                    end_warmup = torch.cuda.Event(enable_timing=True)
 
-                    torch.xpu.synchronize()
+                    torch.cuda.synchronize()
                     start_warmup.record()
                     for _ in range(num_warmups):
                         for _ in range(repeat_n):
                             _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
                     end_warmup.record()
-                    torch.xpu.synchronize()
+                    torch.cuda.synchronize()
 
                     single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
                     actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
                     actual_num_runs = min(actual_num_runs, 1000)
                 else:
                     # Normal warmup
-                    torch.xpu.synchronize()
+                    sync_device()
                     for _ in range(num_warmups):
                         for _ in range(repeat_n):
                             _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
-                    torch.xpu.synchronize()
+                    sync_device()
 
                 # Initialize power monitoring
                 power_monitor = None
@@ -461,15 +464,19 @@ def benchmark_vllm_allreduce(
                         power_monitor = None
 
                 # Timing
-                start_event = torch.xpu.Event(enable_timing=True)
-                end_event = torch.xpu.Event(enable_timing=True)
+                if torch.cuda.is_available():
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                elif torch.xpu.is_available():
+                    start_event = torch.xpu.Event(enable_timing=True)
+                    end_event = torch.xpu.Event(enable_timing=True)
 
                 start_event.record()
                 for _ in range(actual_num_runs):
                     for _ in range(repeat_n):
                         _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
                 end_event.record()
-                torch.xpu.synchronize()
+                sync_device()
 
                 # Stop power monitoring
                 if power_monitor:
@@ -502,7 +509,7 @@ def benchmark_vllm_allreduce(
                     ],
                     framework="vLLM",
                     version=vllm_version,
-                    device_name=torch.xpu.get_device_name(),
+                    device_name=torch.xpu.get_device_name() if torch.xpu.is_available() else torch.cuda.get_device_name(),
                     op_name="all_reduce",
                     kernel_source=f"vLLM_custom_{mode_str}",
                     perf_filename=perf_filename,
@@ -512,7 +519,7 @@ def benchmark_vllm_allreduce(
         size *= ratio
 
     # Synchronize all ranks before cleanup
-    torch.xpu.synchronize()
+    sync_device()
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
 
@@ -590,7 +597,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--range",
         "-r",
-        default="128,268435456,2", #"128,1073741824,2",  # 128B to 1024MB
+        default="128,268435456,2" if torch.xpu.is_available() else "128,1073741824,2",  # 128B to 1024MB
         help="min_size,max_size,multiplicative_ratio",
     )
     parser.add_argument("--use-slurm", action="store_true", help="Use SLURM environment variables")

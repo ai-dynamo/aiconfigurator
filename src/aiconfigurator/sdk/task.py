@@ -465,14 +465,15 @@ class TaskConfigFactory:
                 raise ValueError(f"total_gpus must be greater than 2 for disagg, got {ctx.total_gpus}")
             replica_cfg.max_gpu_per_replica = min(ctx.total_gpus, replica_cfg.get("max_gpu_per_replica"))
             logger.debug("Using max gpu per replica %s", replica_cfg.max_gpu_per_replica)
+            # Prefill/Decode num_gpu_per_worker should be strictly smaller than total_gpus
             prefill_cfg.num_gpu_per_worker = [
-                num for num in prefill_cfg.num_gpu_per_worker if num <= ctx.total_gpus // 2 # FIXME here div by 2
+                num for num in prefill_cfg.num_gpu_per_worker if num <= ctx.total_gpus
             ]
-            logger.debug("Overwriting num gpu per worker to %s", prefill_cfg.num_gpu_per_worker)
+            logger.debug("Overwriting num gpu per prefill worker to %s", prefill_cfg.num_gpu_per_worker)
             decode_cfg.num_gpu_per_worker = [
-                num for num in decode_cfg.num_gpu_per_worker if num <= ctx.total_gpus // 2 # FIXME here div by 2
+                num for num in decode_cfg.num_gpu_per_worker if num <= ctx.total_gpus
             ]
-            logger.debug("Overwriting num gpu per worker to %s", decode_cfg.num_gpu_per_worker)
+            logger.debug("Overwriting num gpu per decode worker to %s", decode_cfg.num_gpu_per_worker)
 
         cls._apply_quant_modes(
             target_cfg=prefill_cfg,
@@ -1039,7 +1040,7 @@ class TaskRunner:
             osl=task_config.runtime_config.osl,
             prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
-            tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)), # FIXME need to check tpot hardcode here
+            tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
             request_latency=getattr(task_config.runtime_config, "request_latency", None),
         )
         logger.info("Task %s: Setting up database", task_config.task_name)
@@ -1121,7 +1122,7 @@ class TaskRunner:
             osl=task_config.runtime_config.osl,
             prefix=task_config.runtime_config.prefix,
             ttft=task_config.runtime_config.ttft,
-            tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)), # FIXME need to check tpot hardcode here
+            tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
             request_latency=getattr(task_config.runtime_config, "request_latency", None),
         )
 
@@ -1280,10 +1281,8 @@ class TaskRunner:
         )
         try:
             if serving_mode == "agg":
-                print(task_config.config)
                 result = self.run_agg(task_config.config)
             elif serving_mode == "disagg":
-                print(task_config.config)
                 result = self.run_disagg(task_config.config)
             else:
                 raise ValueError(f"Invalid serving mode: {serving_mode}")

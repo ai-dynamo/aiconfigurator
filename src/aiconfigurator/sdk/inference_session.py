@@ -509,14 +509,13 @@ class DisaggInferenceSession:
                             runtime_config=overwritten_runtime_config,
                             latency_correction_scale=latency_correction_scale,
                         )
-                        if True or not summary.check_oom(): # FIXME here, vLLM will schedule the based on avilable blocks, not cause an OOM
+                        if not summary.check_oom(): # TODO check here, schedule into different batches instead of OOM?
                             summary_df = pd.concat(
                                 [summary_df, summary.get_summary_df()],
                                 axis=0,
                                 ignore_index=True,
                             )
                         else:  # larger b will always OOM
-                            print("OOM! check your bs and model config")
                             break
                 except Exception as e:
                     logger.exception(
@@ -577,7 +576,7 @@ class DisaggInferenceSession:
                 .reset_index(drop=True)
                 .head(MAX_PREFILL_WORKERS)
             )
-            # print(f"Decode candidates fall into (0,{tpot * DECODE_FILTER_RATIO_MAX})")
+
             decode_candidates = decode_summary_df[
                 (decode_summary_df["tpot"] < tpot * DECODE_FILTER_RATIO_MAX)
                 & (decode_summary_df["tpot"] > tpot * DECODE_FILTER_RATIO_MIN)
@@ -625,10 +624,10 @@ class DisaggInferenceSession:
                     best_result = max(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]))
                     all_category_results.append(best_result)
                 else:
-                    print(f"No matched result for decode parallel {parallel_value}.")
+                    logger.debug(f"No matched result for decode parallel {parallel_value}.")
 
             if not all_category_results:
-                print("No disagg summary found after applying constraints.")
+                logger.debug("No disagg summary found after applying constraints.")
                 return None
 
             disagg_summary_df = pd.DataFrame(all_category_results, columns=common.ColumnsDisagg).round(3)
@@ -722,7 +721,6 @@ class DisaggInferenceSession:
                 disagg_summary_df = pd.concat(
                     [disagg_summary_df, filtered_disagg_summary_df], axis=0, ignore_index=True
                 )
-
         if len(disagg_summary_df) == 0:
             logger.debug(f"No disagg result found for {model_name} with given constraints.")
             return disagg_summary
