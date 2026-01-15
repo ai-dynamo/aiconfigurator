@@ -86,26 +86,29 @@ jobs:
           cat diff_output/diff.json | jq -r '.pr_description' > pr_body.md
           rm -rf diff_output
 
-      - name: Close existing PR if any
-        if: steps.compare.outputs.needs_pr == 'true'
+      - name: Close existing PR if no changes
+        if: steps.compare.outputs.needs_pr == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          EXISTING_PR=$(gh pr list --state open --search "fix: update support matrix (CI workflow)" --json number --jq '.[0].number' || echo "")
+          PR_TITLE="fix: update support matrix [${{ github.ref_name }}]"
+          EXISTING_PR=$(gh pr list --state open --search "in:title ${PR_TITLE}" --json number --jq '.[0].number' || echo "")
           if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
-            echo "Closing existing PR #$EXISTING_PR"
-            gh pr close "$EXISTING_PR" --comment "Closing in favor of new automated update"
+            echo "No changes detected. Closing existing PR #$EXISTING_PR"
+            gh pr close "$EXISTING_PR" --comment "Closing: support matrix is now up to date with ${{ github.ref_name }}"
+            git push origin --delete automated/update-support-matrix-${{ github.ref_name }} 2>/dev/null || true
           fi
 
-      - name: Create Pull Request
+      - name: Create or Update Pull Request
         if: steps.compare.outputs.needs_pr == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "fix: update support matrix"
-          title: "fix: update support matrix (CI workflow)"
+          title: "fix: update support matrix [${{ github.ref_name }}]"
           body-path: pr_body.md
-          branch: automated/update-support-matrix
+          branch: automated/update-support-matrix-${{ github.ref_name }}
+          base: ${{ github.ref_name }}
           delete-branch: true
           add-paths: |
             src/aiconfigurator/systems/support_matrix.csv
@@ -118,9 +121,9 @@ jobs:
           if [ "${{ steps.compare.outputs.has_changes }}" == "true" ]; then
             echo "## Support Matrix Update" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Changes detected in support matrix. A PR has been created." >> $GITHUB_STEP_SUMMARY
+            echo "Changes detected in support matrix. A PR has been created or updated." >> $GITHUB_STEP_SUMMARY
           else
             echo "## Support Matrix Update" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "No changes detected. Support matrix is up to date." >> $GITHUB_STEP_SUMMARY
+            echo "No changes detected. Support matrix is up to date. Any existing PR has been closed." >> $GITHUB_STEP_SUMMARY
           fi
