@@ -343,6 +343,19 @@ We welcome contributions from the community! Check out the below resources to ge
 ### How To Add A New Model
 Adding a new model will require modifying the source code and perhaps collecting new data for the model. Please refer to [How to Add a New Model](docs/add_a_new_model.md).
 
+## Citation
+
+If you use AIConfigurator for your research, please cite our paper:
+
+```bibtex
+@article{xu2026aiconfigurator,
+  title={AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework LLM Serving},
+  author={Tianhao Xu and Yiming Liu and Xianglong Lu and Yijia Zhao and Xuting Zhou and Aichen Feng and Yiyi Chen and Yi Shen and Qin Zhou and Xumeng Chen and Ilya Sherstyuk and Haorui Li and Rishi Thakkar and Ben Hamm and Yuanzhe Li and Xue Huang and Wenpeng Wu and Anish Shanbhag and Harry Kim and Chuan Chen and Junjie Lai},
+  journal={arXiv preprint arXiv:2601.06288},
+  year={2026}
+}
+```
+
 ## Known Issues
 
 1. Memory estimation for the backends needs to be studied more.
