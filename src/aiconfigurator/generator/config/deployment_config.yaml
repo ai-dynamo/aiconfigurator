@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 inputs:
@@ -14,6 +14,9 @@ inputs:
   # ServiceConfig (required minimal)
   - key: ServiceConfig.model_path
     required: true
+    default: ""
+  - key: ServiceConfig.hf_token
+    required: false
     default: ""
   - key: ServiceConfig.served_model_name
     required: true
@@ -93,3 +96,8 @@ inputs:
   - key: ModelConfig.prefix
     required: false
     default: 0
+
+  # NodeConfig
+  - key: NodeConfig.num_gpus_per_node
+    required: false
+    default: 8

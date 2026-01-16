@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import os
@@ -71,7 +71,6 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
     if torch.cuda.is_available():
         torch.cuda.set_device(device)
     elif torch.xpu.is_available():
-        # device = "xpu:" + device.split(":")[-1]
         torch.xpu.set_device(device)
 
     x = torch.randn((m, k), dtype=dtype, device=torch.device(device))

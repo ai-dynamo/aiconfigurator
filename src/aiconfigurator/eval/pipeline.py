@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -87,7 +87,34 @@ class Pipeline:
         """
         copied: dict[str, Path] = {}
 
+        def _copy_engine_yaml_to_runtime(disagg_dst: Path, agg_dst: Path | None) -> None:
+            runtime_engine_dir = Path("/workspace/engine_configs")
+            try:
+                runtime_engine_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                LOG.warning("Failed to create engine dir %s: %s", runtime_engine_dir, e)
+                return
+
+            def _safe_copy(src: Path, dst: Path) -> None:
+                try:
+                    if src.exists():
+                        shutil.copyfile(src, dst)
+                        LOG.info("Synced engine config: %s -> %s", src, dst)
+                    else:
+                        LOG.warning("Engine config missing, skip: %s", src)
+                except Exception as e:
+                    LOG.warning("Failed to copy %s -> %s: %s", src, dst, e)
+
+            # Disagg configs
+            _safe_copy(disagg_dst / "decode_config.yaml", runtime_engine_dir / "decode_config.yaml")
+            _safe_copy(disagg_dst / "prefill_config.yaml", runtime_engine_dir / "prefill_config.yaml")
+
+            # Agg config (optional)
+            if agg_dst is not None:
+                _safe_copy(agg_dst / "agg_config.yaml", runtime_engine_dir / "agg_config.yaml")
+
         def pick_src(service_mode: str) -> Path:
+            # inner = service_mode
             src = run_dir / service_mode / "top1"
             if not src.exists():
                 raise FileNotFoundError(f"Expected path not found for service_mode '{service_mode}': {src}")
@@ -108,6 +135,14 @@ class Pipeline:
             shutil.copytree(src, dst)
             copied[service_mode] = dst
             LOG.info("Copied %s backend configs: %s -> %s", service_mode, src, dst)
+
+        # After copying into service_dir, mirror engine YAMLs into the runtime location
+        disagg_dst = copied.get("disagg")
+        agg_dst = copied.get("agg")
+        if disagg_dst is not None:
+            _copy_engine_yaml_to_runtime(disagg_dst, agg_dst)
+        else:
+            LOG.warning("Disagg backend configs not copied; engine YAML sync skipped.")
 
         if not copied:
             raise FileNotFoundError(f"No backend config folders found to copy under {run_dir}")
@@ -213,7 +248,7 @@ class Pipeline:
 
     def _start_service(self, service_dir: Path, log_file: Path) -> ServiceManager:
         start_rel = self.cfg.start_script.strip() or (
-            "disagg/node_0_run.sh" if self.cfg.service_mode == "disagg" else "agg/node_0_run.sh"
+            "disagg/run_0.sh" if self.cfg.service_mode == "disagg" else "agg/run_0.sh"
         )
         sm = ServiceManager(
             workdir=service_dir,
@@ -344,6 +379,28 @@ class Pipeline:
         served_model_name = str(getattr(args, "served_model_name", ""))
         venv_dir = str(getattr(args, "venv_dir", "/workspace/aic"))
 
+        # Fallback: pull values from generator overrides when not present as top-level args.
+        # The eval pipeline reuses the CLI parser which exposes generator overrides under
+        # --generator-set/--generator-config, so top-level args like model_path may be empty.
+        if not model_path or not served_model_name:
+            try:
+                from aiconfigurator.generator.api import load_generator_overrides_from_args
+
+                overrides = load_generator_overrides_from_args(args) or {}
+                svc = overrides.get("ServiceConfig", {}) if isinstance(overrides, dict) else {}
+                if not model_path:
+                    # Prefer an explicit model_path override; fall back to served_model_name if provided there.
+                    candidate = svc.get("model_path") or svc.get("served_model_name")
+                    if isinstance(candidate, str):
+                        model_path = candidate
+                if not served_model_name:
+                    candidate = svc.get("served_model_name") or svc.get("model_name")
+                    if isinstance(candidate, str):
+                        served_model_name = candidate
+            except Exception:
+                # Best-effort fallback only; keep existing empty defaults if anything goes wrong
+                pass
+
         cfg = {
             "name": "genai_perf_eval",
             "base_folder": str(art_dir),
@@ -445,15 +502,15 @@ class Pipeline:
 
     def _get_agg_gpu_count(self, workers_info: dict[str, int]) -> int:
         """Simple helper to get GPU count for agg service_mode."""
-        return workers_info.get("AGG_GPU_COUNT", 1)
+        return workers_info.get("AGG_GPU_COUNT", 1) * workers_info.get("AGG_WORKERS", 1)
 
     def _extract_workers_from_start_script(self, service_dir: Path) -> dict[str, int]:
         """
         For disagg, read disagg/node_0_run.sh and extract worker/GPU info.
-        For agg, extract GPU count from agg_config.yaml.
+        For agg, extract GPU count from agg_config.yaml and replicas from generator_config.yaml.
         """
         if self.cfg.service_mode == "disagg":
-            start_rel = self.cfg.start_script.strip() or "disagg/node_0_run.sh"
+            start_rel = self.cfg.start_script.strip() or "disagg/run_0.sh"
             script = service_dir / start_rel
             vals = parse_disagg_start_script(script)
             LOG.info("Parsed workers from %s: %s", script, vals)
@@ -461,14 +518,34 @@ class Pipeline:
         else:
             # For agg service_mode, extract GPU count from config
             agg_gpu_count = self._extract_agg_gpu_count_from_config(service_dir)
+            agg_workers = self._extract_agg_workers_from_config(service_dir)
             return {
                 "PREFILL_GPU": -1,
                 "PREFILL_WORKERS": 0,
                 "DECODE_GPU": -1,
                 "DECODE_WORKERS": 0,
-                "AGG_WORKERS": 1,
+                "AGG_WORKERS": agg_workers,
                 "AGG_GPU_COUNT": agg_gpu_count,
             }
+
+    def _extract_agg_workers_from_config(self, service_dir: Path) -> int:
+        """Extract agg worker count from generator_config.yaml."""
+        try:
+            config_path = service_dir / "agg" / "generator_config.yaml"
+            if not config_path.exists():
+                LOG.warning(f"Generator config not found at {config_path}, defaulting to 1 worker")
+                return 1
+
+            with config_path.open() as f:
+                config = yaml.safe_load(f) or {}
+
+            workers = config.get("workers", {}).get("agg_workers", 1)
+            LOG.info(f"Extracted agg worker count: {workers}")
+            return int(workers)
+
+        except Exception as e:
+            LOG.warning(f"Failed to extract agg worker count: {e}")
+            return 1
 
     def _extract_agg_gpu_count_from_config(self, service_dir: Path) -> int:
         """Extract GPU count from agg config file (TP * PP for TRT-LLM)."""
@@ -524,6 +601,9 @@ class Pipeline:
         service_dir = Path(self.cfg.service_dir)
         _ = self._copy_backend_configs(self.last_config_dir, service_dir)
 
+        # Worker info from script (disagg) or default (agg)
+        workers_info = self._extract_workers_from_start_script(service_dir)
+
         # Load optimal configurations from the saved results with TPOT filtering
         target_tpot = getattr(args, "tpot", None)
         optimal_configs = self._load_optimal_configs(self.last_config_dir, target_tpot)
@@ -539,8 +619,11 @@ class Pipeline:
                 conc_list = [1, 2, 4, 8, 16, 32]
                 LOG.warning("Auto concurrency: max_batch_size not found -> fallback %s", conc_list)
             else:
-                conc_list = self._auto_concurrency_values(int(mbs))
-                LOG.info("Auto concurrency from max_batch_size=%s -> %s", mbs, conc_list)
+                total_mbs = int(mbs)
+                if self.cfg.service_mode == "agg":
+                    total_mbs *= workers_info.get("AGG_WORKERS", 1)
+                conc_list = self._auto_concurrency_values(total_mbs)
+                LOG.info("Auto concurrency from total_max_batch_size=%s -> %s", total_mbs, conc_list)
 
         # prepare log path
         log_dir = Path(args.save_dir).resolve() / "log"
@@ -553,8 +636,6 @@ class Pipeline:
         # artifacts root
         self.art_root = self._ensure_art_root(save_dir, run_name)
 
-        # Worker info from script (disagg) or default (agg)
-        workers_info = self._extract_workers_from_start_script(service_dir)
         write_json(self.art_root / "workers_extracted.json", workers_info)
 
         # GPU monitoring (conditional)

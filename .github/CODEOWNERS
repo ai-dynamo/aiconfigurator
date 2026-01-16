@@ -21,7 +21,6 @@
 /src/aiconfigurator/sdk/perf_database.py @Arsene12358 @YijiaZhao @ilyasher @xutizhou @AichenF @tianhaox @jasonqinzhou
 /src/aiconfigurator/sdk/task.py @tianhaox @jasonqinzhou @ilyasher @Arsene12358
 /src/aiconfigurator/sdk/utils.py @tianhaox @jasonqinzhou @simone-chen @Arsene12358
-/src/aiconfigurator/sdk/suppport_matrix.py @Harrilee
 
 # cli
 /src/aiconfigurator/cli @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
@@ -31,7 +30,7 @@
 
 # webapp
 /src/aiconfigurator/webapp @tianhaox @jasonqinzhou @Arsene12358 @Harrilee
-/src/aiconfigurator/webapp/components/profiling @Harrilee
+/src/aiconfigurator/webapp/components/profiling @Harrilee @tianhaox @jasonqinzhou @Arsene12358
 
 # systems & data files
 /src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen @Arsene12358
@@ -67,13 +66,13 @@
 /docker @jasonqinzhou @anish-shanbhag @ilyasher @ai-dynamo/Devops @tianhaox @Arsene12358
 
 # tests
-/tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @ai-dynamo/Devops
+/tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @Harrilee @ai-dynamo/Devops
 
 # tools
 /tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358
 /tools/sanity_check @tianhaox @YijiaZhao @jasonqinzhou @Arsene12358
 /tools/simple_sdk_demo @tianhaox @jasonqinzhou @Arsene12358
-/tools/support_matrix/generate_support_matrix.py @Harrilee
+/tools/support_matrix/generate_support_matrix.py @Harrilee @tianhaox @jasonqinzhou @Arsene12358
 
 # misc
 /ATTRIBUTIONS.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358

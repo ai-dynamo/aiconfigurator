@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 
@@ -369,6 +369,7 @@ def get_context_attention_test_cases(if_unit_test=False):
         if torch.cuda.is_available():
             b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
             s_list = [
+                1,
                 16,
                 32,
                 64,
@@ -394,6 +395,7 @@ def get_context_attention_test_cases(if_unit_test=False):
             # FIXME narrow down the search space for available xpu
             b_list = [1, 2, 4, 8, 16, 32]
             s_list = [
+                1,
                 16,
                 32,
                 64,

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -16,7 +16,7 @@ import os
 import sys
 from typing import Any, Optional
 
-from api import (
+from .api import (
     generate_backend_artifacts,
     generate_backend_config,
     parse_cli_params,

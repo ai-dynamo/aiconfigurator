@@ -104,8 +104,11 @@ This project uses [pytest](https://docs.pytest.org/en/stable/) for testing.
 pytest tests
 
 # Run tests for a specific component
-pytest tests/sdk
-pytest tests/cli
+pytest tests/unit
+pytest tests/e2e
+
+# GitHub PR / build subset (unit + a small stable E2E subset)
+pytest -m "unit or build"
 ```
 
 ## Data Collection (Advanced)

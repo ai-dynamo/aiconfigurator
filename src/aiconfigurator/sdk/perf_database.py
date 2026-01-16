@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -1729,7 +1729,7 @@ class PerfDatabase:
                     # it will be difficult to do square interpolation.
                     # Use more points to do the approximation
                     target_y_list = (
-                        [16, 32, 64, 128, 256, 512, 1024, 2048]
+                        [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
                         + [4096 + i * 2048 for i in range(14)]
                         + [32768 + 16384 * i for i in range(6)]
                         + [131072 + 32768 * i for i in range(12)]
@@ -2330,6 +2330,33 @@ class PerfDatabase:
             logger.warning(f"Maximum depth ({max_depth}) exceeded in _get_sample_leaf_value")
 
         return current
+
+    def _get_p2p_bandwidth(self, num_gpus: int) -> float:
+        """
+        Get the appropriate point-to-point bandwidth based on the number of GPUs.
+
+        Three-tier bandwidth selection:
+        - num_gpus <= num_gpus_per_node: intra_node_bw (NVLink within node)
+        - num_gpus <= num_gpus_per_rack: inter_node_bw (NVLink via NVSwitch within rack)
+        - num_gpus > num_gpus_per_rack: inter_rack_bw (InfiniBand between racks)
+
+        Args:
+            num_gpus: Number of GPUs involved in the communication
+
+        Returns:
+            Bandwidth in Bytes/s
+        """
+        node_spec = self.system_spec["node"]
+        num_gpus_per_node = node_spec["num_gpus_per_node"]
+        num_gpus_per_rack = node_spec.get("num_gpus_per_rack", float("inf"))
+
+        if num_gpus <= num_gpus_per_node:
+            return node_spec["intra_node_bw"]
+        elif num_gpus <= num_gpus_per_rack:
+            return node_spec["inter_node_bw"]
+        else:
+            # Inter-rack communication, fallback to inter_node_bw if inter_rack_bw not defined
+            return node_spec.get("inter_rack_bw", node_spec["inter_node_bw"])
 
     def _bilinear_interpolation(self, x_list: list[int], y_list: list[int], x: int, y: int, data: dict) -> float:
         """
@@ -3349,11 +3376,7 @@ class PerfDatabase:
             if tp_size == 1:
                 return 0, 0, 0
             # count, not size in bytes
-            p2p_bw = (
-                self.system_spec["node"]["inter_node_bw"]
-                if tp_size > self.system_spec["node"]["num_gpus_per_node"]
-                else self.system_spec["node"]["intra_node_bw"]
-            )
+            p2p_bw = self._get_p2p_bandwidth(tp_size)
 
             # assume all are ring allreduce, ignore constant latency
             # (~1us for hopper, ~2us for two-die blackwell)
@@ -3408,18 +3431,17 @@ class PerfDatabase:
                     lat = result
                     energy = 0.0
 
-                if tp_size > 8:  # FIXME, to collect real data, use inter-node and intra-node data seperately
-                    if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
-                        scale_factor = (
-                            (tp_size - 1)
-                            / tp_size
-                            * 8
-                            / 7
-                            * self.system_spec["node"]["intra_node_bw"]
-                            / self.system_spec["node"]["inter_node_bw"]
-                        )
-                    else:
-                        scale_factor = (tp_size - 1) / tp_size * 8 / 7
+                if tp_size > self.system_spec["node"]["num_gpus_per_node"]:
+                    base_bw = self._get_p2p_bandwidth(self.system_spec["node"]["num_gpus_per_node"])
+                    target_bw = self._get_p2p_bandwidth(tp_size)
+                    scale_factor = (
+                        (tp_size - 1)
+                        / tp_size
+                        * self.system_spec["node"]["num_gpus_per_node"]
+                        / (self.system_spec["node"]["num_gpus_per_node"] - 1)
+                        * base_bw
+                        / target_bw
+                    )
                     lat = lat * scale_factor
                     energy = energy * scale_factor
 
@@ -3478,11 +3500,7 @@ class PerfDatabase:
             message_size: element number
             """
             sol_time = 0.0
-            p2p_bw = (
-                self.system_spec["node"]["inter_node_bw"]
-                if num_gpus > self.system_spec["node"]["num_gpus_per_node"]
-                else self.system_spec["node"]["intra_node_bw"]
-            )
+            p2p_bw = self._get_p2p_bandwidth(num_gpus)
 
             if operation == "all_gather" or operation == "alltoall" or operation == "reduce_scatter":
                 sol_time = dtype.value.memory * message_size * (num_gpus - 1) / num_gpus / p2p_bw * 1000
@@ -3541,14 +3559,10 @@ class PerfDatabase:
 
                 if num_gpus > max_num_gpus:  # need to do some correction
                     logger.debug(f"nccl num_gpus {num_gpus} > max_num_gpus {max_num_gpus}, need to do some correction")
-                    if max_num_gpus > self.system_spec["node"]["num_gpus_per_node"]:  # all inter node
-                        scale_factor = 1
-                    elif num_gpus > self.system_spec["node"]["num_gpus_per_node"]:
-                        scale_factor = (
-                            self.system_spec["node"]["intra_node_bw"] / self.system_spec["node"]["inter_node_bw"]
-                        )
-                    else:  # all intra node
-                        scale_factor = 1
+                    # Scale factor based on bandwidth ratio between measured and target GPU counts
+                    max_num_gpus_bw = self._get_p2p_bandwidth(max_num_gpus)
+                    num_gpus_bw = self._get_p2p_bandwidth(num_gpus)
+                    scale_factor = max_num_gpus_bw / num_gpus_bw
                     # Apply the same scaling formula to both latency and energy
                     scaling_formula = (num_gpus - 1) / num_gpus * max_num_gpus / (max_num_gpus - 1) * scale_factor
                     lat = lat * scaling_formula

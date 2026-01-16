@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import os
@@ -274,6 +274,7 @@ def get_context_attention_test_cases():
     test_cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     s_list = [
+        1,
         16,
         32,
         64,

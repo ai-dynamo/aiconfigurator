@@ -12,6 +12,9 @@ TPOT (Time per Output Token), optimizing throughput at a given latency becomes e
 `aiconfigurator` helps you find a strong starting configuration for disaggregated serving. Given your model, GPU
 count, and GPU type, it searches the configuration space and generates configuration files you can use for deployment with Dynamo.
 
+For a technical deep dive into the design and methodology of AIConfigurator, please refer to our paper:  
+[**AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework LLM Serving**](https://arxiv.org/abs/2601.06288).
+
 The tool models LLM inference using collected data for a target machine and framework. It evaluates thousands of
 configurations and runs anywhere via the CLI and the web app.
 
@@ -318,8 +321,8 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 | System | Framework(Version) | Status |
 |--------|-------------------|--------|
-| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.5.post2, 0.5.5.post3), vLLM(0.11.0) | ✅ |
-| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.5.post2, 0.5.5.post3), vLLM(0.11.0) | ✅ |
+| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.6.post2), vLLM(0.11.0) | ✅ |
+| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.6.post2), vLLM(0.11.0) | ✅ |
 | b200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | gb200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | a100_sxm | TRTLLM(1.0.0) | ✅ |

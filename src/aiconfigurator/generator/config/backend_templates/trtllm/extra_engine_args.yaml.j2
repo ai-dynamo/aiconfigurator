@@ -33,7 +33,7 @@ kv_cache_config:
   enable_block_reuse: {{ kv_cache_config.enable_block_reuse | default(false) }}
 
 cache_transceiver_config:
-  backend: {{ cache_transceiver_config.backend | default('default') }}
+  backend: {{ cache_transceiver_config.backend | default('DEFAULT') }}
   max_tokens_in_buffer: {{ k8s.max_tokens_in_buffer | default(1024) }}
 
 cuda_graph_config:

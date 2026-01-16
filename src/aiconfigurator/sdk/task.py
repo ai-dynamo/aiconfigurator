@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -591,6 +591,9 @@ class TaskConfigFactory:
         if model_family in ["MOE", "LLAMA"] and sm_version < 100 and sm_version >= 89:
             gemm_quant_mode = fp8_gemm_quant
             moe_quant_mode = fp8_gemm_quant
+
+        if model_name in ["GPT_OSS_120B", "GPT_OSS_20B"]:
+            moe_quant_mode = "w4a16_mxfp4"
 
         if use_specific_quant_mode is not None:
             if use_specific_quant_mode != "w4afp8":

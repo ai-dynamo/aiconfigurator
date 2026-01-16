@@ -11,6 +11,10 @@ agg max_num_tokens = max_batch_size + SlaConfig.isl + 1500
 
 agg_prefill_decode cuda_graph_batch_sizes = ((range(1, max_batch_size + 1) | list) if max_batch_size else [])
 
+# Enforce TensorRT-LLM MoE parallelism: moe_tp × moe_ep = tp
+when ModelConfig.is_moe and (moe_tensor_parallel_size and moe_expert_parallel_size):
+    agg_prefill_decode tensor_parallel_size = moe_tensor_parallel_size * moe_expert_parallel_size
+
 # GPUs per worker (fallback to 1 if any dimension missing)
 agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_parallel_size or 1) * (data_parallel_size or 1)
 
