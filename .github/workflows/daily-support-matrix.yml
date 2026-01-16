@@ -1,4 +1,4 @@
-name: "Daily Support Matrix Test"
+name: "Daily Support Matrix Update"
 
 on:
   schedule:
@@ -7,11 +7,19 @@ on:
   workflow_dispatch: # Allow manual trigger (with no inputs)
 
 jobs:
-  test-support-matrix:
-    name: Test Support Matrix
+  update-support-matrix:
+    name: Update Support Matrix
     runs-on: ubuntu-latest
     timeout-minutes: 480 # 8 hours
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
+      - name: Clean workspace
+        run: |
+          rm -rf ${{ github.workspace }}/*
+          rm -rf ${{ github.workspace }}/.[!.]*
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -20,11 +28,102 @@ jobs:
       - name: Git LFS Pull
         run: git lfs pull
 
-      - name: Build test container
+      - name: Build container
         run: |
-          docker build -f docker/Dockerfile -t aiconfigurator:test --target test .
+          docker build -f docker/Dockerfile -t aiconfigurator:matrix --target test .
 
-      - name: Run support matrix tests in container
+      - name: Backup old support matrix
         run: |
-          docker run --name aic-support-matrix --env TEST_SUPPORT_MATRIX=true aiconfigurator:test \
-            pytest tests/e2e/support_matrix/test_support_matrix.py -v --tb=short --timeout=3600
+          cp src/aiconfigurator/systems/support_matrix.csv src/aiconfigurator/systems/support_matrix_old.csv
+
+      - name: Generate new support matrix
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/src/aiconfigurator/systems:/app/src/aiconfigurator/systems \
+            aiconfigurator:matrix \
+            python3 tools/support_matrix/generate_support_matrix.py \
+              --output /app/src/aiconfigurator/systems/support_matrix.csv
+
+      - name: Compare support matrices
+        id: compare
+        run: |
+          mkdir -p diff_output
+
+          set +e
+          docker run --rm \
+            -v ${{ github.workspace }}/src/aiconfigurator/systems:/app/src/aiconfigurator/systems \
+            -v ${{ github.workspace }}/diff_output:/app/diff_output \
+            aiconfigurator:matrix \
+            python3 tools/support_matrix/compare_support_matrix.py \
+              --old /app/src/aiconfigurator/systems/support_matrix_old.csv \
+              --new /app/src/aiconfigurator/systems/support_matrix.csv \
+              --output-diff /app/diff_output/diff.json
+          EXIT_CODE=$?
+          set -e
+
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "needs_pr=false" >> $GITHUB_OUTPUT
+          elif [ $EXIT_CODE -eq 1 ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "needs_pr=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "needs_pr=false" >> $GITHUB_OUTPUT
+            echo "::error::Validation errors detected in support matrix"
+            exit 1
+          fi
+
+      - name: Cleanup old support matrix backup
+        run: |
+          rm -f src/aiconfigurator/systems/support_matrix_old.csv
+
+      - name: Extract PR description
+        if: steps.compare.outputs.needs_pr == 'true'
+        run: |
+          cat diff_output/diff.json | jq -r '.pr_description' > pr_body.md
+          rm -rf diff_output
+
+      - name: Close existing PR if no changes
+        if: steps.compare.outputs.needs_pr == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_TITLE="fix: update support matrix [${{ github.ref_name }}]"
+          EXISTING_PR=$(gh pr list --state open --search "in:title ${PR_TITLE}" --json number --jq '.[0].number' || echo "")
+          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
+            echo "No changes detected. Closing existing PR #$EXISTING_PR"
+            gh pr close "$EXISTING_PR" --comment "Closing: support matrix is now up to date with ${{ github.ref_name }}"
+            git push origin --delete automated/update-support-matrix-${{ github.ref_name }} 2>/dev/null || true
+          fi
+
+      - name: Create or Update Pull Request
+        if: steps.compare.outputs.needs_pr == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "fix: update support matrix"
+          title: "fix: update support matrix [${{ github.ref_name }}]"
+          body-path: pr_body.md
+          branch: automated/update-support-matrix-${{ github.ref_name }}
+          base: ${{ github.ref_name }}
+          delete-branch: true
+          add-paths: |
+            src/aiconfigurator/systems/support_matrix.csv
+          labels: |
+            automated
+            support-matrix
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.compare.outputs.has_changes }}" == "true" ]; then
+            echo "## Support Matrix Update" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Changes detected in support matrix. A PR has been created or updated." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Support Matrix Update" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No changes detected. Support matrix is up to date. Any existing PR has been closed." >> $GITHUB_STEP_SUMMARY
+          fi
