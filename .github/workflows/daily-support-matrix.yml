@@ -9,7 +9,7 @@ on:
 jobs:
   update-support-matrix:
     name: Update Support Matrix
-    runs-on: self-hosted
+    runs-on: cpu-arm-r8g-4xlarge
     timeout-minutes: 480 # 8 hours
     permissions:
       contents: write
@@ -27,19 +27,6 @@ jobs:
 
       - name: Git LFS Pull
         run: git lfs pull
-
-      - name: Check and install Docker
-        run: |
-          if ! command -v docker &> /dev/null; then
-            echo "Docker not found. Installing..."
-            curl -fsSL https://get.docker.com -o get-docker.sh
-            sudo sh get-docker.sh
-            sudo usermod -aG docker $USER
-            rm get-docker.sh
-            echo "Docker installed successfully"
-          else
-            echo "Docker is already installed: $(docker --version)"
-          fi
 
       - name: Build container
         run: |
