@@ -56,11 +56,11 @@ inputs:
     default: "dynamo"
   - key: K8sConfig.k8s_image
     required: false
-    default: &default_trtllm_image "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.1"
+    default: &default_trtllm_image "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0"
     backend_defaults:
       trtllm: *default_trtllm_image
-      vllm: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.7.1"
-      sglang: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.1"
+      vllm: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0"
+      sglang: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.0"
   - key: K8sConfig.k8s_image_pull_secret
     required: false
     default: ""
