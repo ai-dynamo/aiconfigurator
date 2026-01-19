@@ -109,6 +109,11 @@ parameters:
   sglang: max-prefill-tokens
   trtllm: null
 
+- param_key: enable_mix_chunk
+  vllm: null
+  sglang: enable-mix-chunk
+  trtllm: null
+
 - param_key: max_num_tokens
   vllm: max-num-batched-tokens
   sglang: null
