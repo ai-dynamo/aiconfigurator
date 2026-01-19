@@ -5,7 +5,7 @@
 {%- if sglang['page-size'] is defined -%}{%- set _ = args.append('--page-size "' ~ sglang['page-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['kv-cache-dtype'] is defined -%}{%- set _ = args.append('--kv-cache-dtype "' ~ sglang['kv-cache-dtype'] ~ '"') -%}{%- endif -%}
 {%- if sglang['max-prefill-tokens'] is defined -%}{%- set _ = args.append('--max-prefill-tokens "' ~ sglang['max-prefill-tokens'] ~ '"') -%}{%- endif -%}
-{%- if sglang['enable-mix-chunk'] is defined -%}{%- set _ = args.append('--enable-mix-chunk') -%}{%- endif -%}
+{%- if sglang['enable-mixed-chunk'] is defined -%}{%- set _ = args.append('--enable-mixed-chunk') -%}{%- endif -%}
 {%- if sglang['context-length'] is defined -%}{%- set _ = args.append('--context-length "' ~ sglang['context-length'] ~ '"') -%}{%- endif -%}
 {%- if sglang['max-running-requests'] is defined -%}{%- set _ = args.append('--max-running-requests "' ~ sglang['max-running-requests'] ~ '"') -%}{%- endif -%}
 {%- if sglang['skip-tokenizer-init'] -%}{%- set _ = args.append('--skip-tokenizer-init') -%}{%- endif -%}
