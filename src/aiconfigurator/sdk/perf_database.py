@@ -2729,7 +2729,9 @@ class PerfDatabase:
                     return PerformanceResult(get_empirical(m, k), energy=0.0)
                 else:
                     logger.exception(
-                        f"Failed to query compute_scale data for {m=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
+                        "Failed to query compute_scale data for "
+                        f"{m=}, {k=}, {quant_mode=}. "
+                        "Please consider Hybrid mode."
                     )
                     raise
 

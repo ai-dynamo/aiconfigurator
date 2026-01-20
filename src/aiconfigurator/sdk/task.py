@@ -862,11 +862,11 @@ class TaskConfig:
             return str(backend_name).lower() == common.BackendName.trtllm.value
 
         def _validate_quant_overhead_toggles(worker_cfg: DefaultMunch, target: str) -> None:
-            static_quant_mode = bool(getattr(worker_cfg, "static_quant_mode", False))
-            lowbit_input = bool(getattr(worker_cfg, "lowbit_input", False))
+            static_quant_mode = bool(worker_cfg.get("static_quant_mode", False))
+            lowbit_input = bool(worker_cfg.get("lowbit_input", False))
             if not (static_quant_mode or lowbit_input):
                 return
-            backend_name = getattr(worker_cfg, "backend_name", None)
+            backend_name = worker_cfg.get("backend_name", None)
             if not _is_trtllm_backend(backend_name):
                 raise ValueError(
                     f"{target}: static_quant_mode/lowbit_input are currently only supported for backend "
@@ -1086,8 +1086,8 @@ class TaskRunner:
             fmha_quant_mode=task_config.worker_config.fmha_quant_mode,
             moe_quant_mode=task_config.worker_config.moe_quant_mode,
             comm_quant_mode=task_config.worker_config.comm_quant_mode,
-            static_quant_mode=bool(getattr(task_config.worker_config, "static_quant_mode", False)),
-            lowbit_input=bool(getattr(task_config.worker_config, "lowbit_input", False)),
+            static_quant_mode=bool(task_config.worker_config.get("static_quant_mode", False)),
+            lowbit_input=bool(task_config.worker_config.get("lowbit_input", False)),
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
             moe_backend=task_config.moe_backend,  # sglang wideep only
@@ -1173,8 +1173,8 @@ class TaskRunner:
             fmha_quant_mode=task_config.prefill_worker_config.fmha_quant_mode,
             moe_quant_mode=task_config.prefill_worker_config.moe_quant_mode,
             comm_quant_mode=task_config.prefill_worker_config.comm_quant_mode,
-            static_quant_mode=bool(getattr(task_config.prefill_worker_config, "static_quant_mode", False)),
-            lowbit_input=bool(getattr(task_config.prefill_worker_config, "lowbit_input", False)),
+            static_quant_mode=bool(task_config.prefill_worker_config.get("static_quant_mode", False)),
+            lowbit_input=bool(task_config.prefill_worker_config.get("lowbit_input", False)),
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
             moe_backend=task_config.moe_backend,  # sglang wideep only
@@ -1234,8 +1234,8 @@ class TaskRunner:
             fmha_quant_mode=task_config.decode_worker_config.fmha_quant_mode,
             moe_quant_mode=task_config.decode_worker_config.moe_quant_mode,
             comm_quant_mode=task_config.decode_worker_config.comm_quant_mode,
-            static_quant_mode=bool(getattr(task_config.decode_worker_config, "static_quant_mode", False)),
-            lowbit_input=bool(getattr(task_config.decode_worker_config, "lowbit_input", False)),
+            static_quant_mode=bool(task_config.decode_worker_config.get("static_quant_mode", False)),
+            lowbit_input=bool(task_config.decode_worker_config.get("lowbit_input", False)),
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
             moe_backend=task_config.moe_backend,  # sglang wideep only
