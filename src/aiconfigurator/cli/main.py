@@ -178,6 +178,11 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
     static_quant_mode = bool(getattr(args, "static_quant_mode", False))
     lowbit_input = bool(getattr(args, "lowbit_input", False))
     if static_quant_mode or lowbit_input:
+        if str(args.backend).lower() != common.BackendName.trtllm.value:
+            raise ValueError(
+                "static_quant_mode/lowbit_input are currently only supported for backend "
+                f"'{common.BackendName.trtllm.value}', but got backend='{args.backend}'."
+            )
         agg_task.config.worker_config.static_quant_mode = static_quant_mode
         agg_task.config.worker_config.lowbit_input = lowbit_input
         disagg_task.config.prefill_worker_config.static_quant_mode = static_quant_mode

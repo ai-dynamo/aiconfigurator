@@ -454,6 +454,8 @@ class EventHandler:
                 model_quant_components["kvcache_quant_mode"],
                 model_quant_components["fmha_quant_mode"],
                 model_quant_components["moe_quant_mode"],
+                model_quant_components["static_quant_mode"],
+                model_quant_components["lowbit_input"],
             ],
         )
 
@@ -471,7 +473,16 @@ class EventHandler:
                 model_quant_components["kvcache_quant_mode"],
                 model_quant_components["fmha_quant_mode"],
                 model_quant_components["moe_quant_mode"],
+                model_quant_components["static_quant_mode"],
+                model_quant_components["lowbit_input"],
             ],
+        )
+
+        # Quant overhead toggles are only meaningful for fp8 GEMM on TRTLLM.
+        model_quant_components["gemm_quant_mode"].change(
+            fn=EventFn.update_quant_overhead_toggles,
+            inputs=[model_system_components["backend"], model_quant_components["gemm_quant_mode"]],
+            outputs=[model_quant_components["static_quant_mode"], model_quant_components["lowbit_input"]],
         )
 
     @staticmethod

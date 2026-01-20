@@ -155,6 +155,20 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
 
 class EventFn:
     @staticmethod
+    def update_quant_overhead_toggles(backend_name, gemm_quant_mode):
+        backend_ok = str(backend_name).lower() == common.BackendName.trtllm.value
+        gemm_ok = str(gemm_quant_mode).lower() == common.GEMMQuantMode.fp8.name
+        if backend_ok and gemm_ok:
+            return (
+                gr.update(interactive=True),
+                gr.update(interactive=True),
+            )
+        return (
+            gr.update(value=False, interactive=False),
+            gr.update(value=False, interactive=False),
+        )
+
+    @staticmethod
     def run_estimation_static(
         model_name,
         system_name,
@@ -1175,6 +1189,8 @@ class EventFn:
                 gr.update(choices=[], value=None, interactive=True),
                 gr.update(choices=[], value=None, interactive=True),
                 gr.update(choices=[], value=None, interactive=True),
+                gr.update(value=False, interactive=False),
+                gr.update(value=False, interactive=False),
             )
         database_dict = get_all_databases()
         supported_quant_mode = database_dict[system_name][backend_name][version].supported_quant_mode
@@ -1217,10 +1233,14 @@ class EventFn:
             moe_quant_mode_choices if len(moe_quant_mode_choices) > 0 else [common.MoEQuantMode.float16.name]
         )
 
+        default_gemm_quant_mode = gemm_quant_mode_choices[0]
+        static_quant_mode_update, lowbit_input_update = EventFn.update_quant_overhead_toggles(
+            backend_name, default_gemm_quant_mode
+        )
         return (
             gr.update(
                 choices=gemm_quant_mode_choices,
-                value=gemm_quant_mode_choices[0],
+                value=default_gemm_quant_mode,
                 interactive=True,
             ),
             gr.update(
@@ -1238,6 +1258,8 @@ class EventFn:
                 value=moe_quant_mode_choices[0],
                 interactive=True,
             ),
+            static_quant_mode_update,
+            lowbit_input_update,
         )
 
     @staticmethod
@@ -1280,16 +1302,7 @@ class EventFn:
             )
 
         version_update = EventFn.update_version_choices(system_name, backend_name)
-
-        # Quant overhead toggles are currently TRTLLM-only.
-        if str(backend_name).lower() == common.BackendName.trtllm.value:
-            return (
-                version_update,
-                gr.update(interactive=True),
-                gr.update(interactive=True),
-            )
-
-        # Non-TRTLLM backends: force off and disable to avoid missing-table errors.
+        # Always disable here; toggles are enabled only when gemm quant mode is fp8.
         return (
             version_update,
             gr.update(value=False, interactive=False),

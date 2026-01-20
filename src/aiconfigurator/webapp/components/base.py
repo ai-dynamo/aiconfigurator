@@ -111,11 +111,14 @@ def create_model_quant_config(app_config):
 
     with gr.Accordion("Quantization config"):
         with gr.Row():
+            default_gemm_quant_mode = (
+                "fp8_block" if "fp8_block" in gemm_quant_mode_choices else gemm_quant_mode_choices[0]
+            )
             gemm_quant_mode = gr.Dropdown(
                 choices=gemm_quant_mode_choices,
                 label="gemm quant mode",
                 allow_custom_value=False,
-                value="fp8_block" if "fp8_block" in gemm_quant_mode_choices else gemm_quant_mode_choices[0],
+                value=default_gemm_quant_mode,
                 interactive=True,
             )
             kvcache_quant_mode = gr.Dropdown(
@@ -148,15 +151,16 @@ def create_model_quant_config(app_config):
                 interactive=True,
             )
         with gr.Row():
+            enable_overhead_toggles = default_backend == "trtllm" and default_gemm_quant_mode == "fp8"
             static_quant_mode = gr.Checkbox(
                 label="static quant mode",
                 value=False,
-                interactive=True,
+                interactive=enable_overhead_toggles,
             )
             lowbit_input = gr.Checkbox(
                 label="lowbit input",
                 value=False,
-                interactive=True,
+                interactive=enable_overhead_toggles,
             )
 
     return {
