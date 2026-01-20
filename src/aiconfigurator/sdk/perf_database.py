@@ -1662,6 +1662,19 @@ class PerfDatabase:
                     262144,
                 ]  # to fit vocab gemm
                 target_z_list = target_y_list
+
+                # qwen3-32b
+                list1 = [i for i in range(1, 32)]
+                list2 = [i for i in range(32, 512, 8)] + [i+1 for i in range(32, 512, 8)]
+                list3 = [i for i in range(512, 2048, 16)] + [i+1 for i in range(512, 2048, 16)]
+                list4 = [i for i in range(2048, 4096, 32)] + [i+1 for i in range(2048, 4096, 32)]
+                list5 = [i for i in range(4096, 8193, 128)] + [i+1 for i in range(4096, 8193, 128)]
+                append_list = sorted(set(list1 + list2 + list3 + list4  + list5))
+
+                target_x_list = list(set(target_x_list + append_list))
+                target_y_list = list(set(target_y_list + [5120, 8192, 25600, 51200]))
+                target_z_list = list(set(target_z_list + [5120, 8192, 25600, 51200]))
+
                 self._extrapolate_data_grid(
                     data_dict=data_dict,
                     target_x_list=target_x_list,
@@ -2520,9 +2533,22 @@ class PerfDatabase:
                         f"quant_mode='{quant_mode.name}'. "
                         f"Supported gemm modes: {supported}"
                     )
-                result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
-                # Result is dict: {"latency": ..., "power": ..., "energy": ...}
-                return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+                # EXPERIMENT: do NOT interpolate on n/k (and keep it simple: nearest lookup only).
+                # This avoids failures on sparse (m,n,k) grids during quick experiments.
+                table = self._gemm_data[quant_mode]  # table[m][n][k] -> {"latency","power","energy"} (or float legacy)
+
+                def nearest_key(target: int, keys: list[int]) -> int:
+                    if not keys:
+                        raise PerfDataNotAvailableError("GEMM perf table is missing an axis (empty keys).")
+                    return min(keys, key=lambda x: abs(x - target))
+
+                m_sel = nearest_key(m, list(table.keys()))
+                n_sel = nearest_key(n, list(table[m_sel].keys()))
+                k_sel = nearest_key(k, list(table[m_sel][n_sel].keys()))
+                leaf = table[m_sel][n_sel][k_sel]
+                if isinstance(leaf, dict):
+                    return PerformanceResult(float(leaf["latency"]), energy=float(leaf.get("energy", 0.0)))
+                return PerformanceResult(float(leaf), energy=0.0)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}, using empirical mode")

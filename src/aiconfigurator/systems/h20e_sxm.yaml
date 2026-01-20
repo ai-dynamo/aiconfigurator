@@ -1,0 +1,28 @@
+data_dir: data/h20e_sxm # relative to systems_dir
+gpu:
+  mem_bw: 4800000000000 # 4800GB/s
+  mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_capacity: 151397597184 # 141GiB
+  float16_tc_flops: 146500000000000 # 146.5TFLOPS
+  int8_tc_flops: 293000000000000 # 293TFLOPS
+  fp8_tc_flops: 293000000000000 # 293TFLOPS
+  power: 500  # 500 Watt
+  sm_version: 90
+
+node:
+  num_gpus_per_node: 8
+  inter_node_bw: 25000000000  # single direction, 25GB/s, 1:1 CX7 per node
+  intra_node_bw: 450000000000  # single direction, 450GB/s
+  pcie_bw: 64000000000  # single direction, pcie 5.0
+  p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
+
+misc:
+  nccl_mem: # some nonofficial correction based on observations, you should try to modify based on your own observations
+  nccl_mem:
+    1: 0
+    2: 358612992 # 342MB
+    4: 411041792 # 392MB
+    8: 411041792 # 392MB
+  other_mem: 577765376 # 551MB
+  nccl_version: '2.23'

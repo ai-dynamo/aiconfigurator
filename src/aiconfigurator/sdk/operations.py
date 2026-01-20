@@ -157,6 +157,7 @@ class GEMM(Operation):
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
         # Query with energy
+        print(f"Querying GEMM: {x}, {self._n}, {self._k}, {quant_mode}")
         result = database.query_gemm(x, self._n, self._k, quant_mode)
 
         # Return PerformanceResult: scale BOTH latency and energy
@@ -546,6 +547,7 @@ class ContextAttention(Operation):
         fmha_quant_mode: common.FMHAQuantMode,
         window_size: int = 0,
         head_size: int = 128,
+        use_qk_norm: bool = False,
     ) -> None:
         super().__init__(name, scale_factor)
         self._n = n
@@ -555,6 +557,7 @@ class ContextAttention(Operation):
         self._fmha_quant_mode = fmha_quant_mode
         self._window_size = window_size
         self._head_size = head_size
+        self._use_qk_norm = use_qk_norm
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query context attention latency with energy data."""
@@ -573,6 +576,19 @@ class ContextAttention(Operation):
             window_size=self._window_size,
             head_size=self._head_size,
         )
+        q_num = self._n * self._head_size
+        k_num = self._n_kv * self._head_size
+        v_num = self._n_kv * self._head_size
+        extra_latency = 0
+        if self._use_qk_norm:
+            qk_norm_latency = 2 * database.query_mem_op(q_num*2) + 2 * database.query_mem_op(k_num*2)
+            extra_latency += qk_norm_latency * 2 # elementwise before norm
+        apply_rope_latency = 2 * database.query_mem_op(q_num*2 + k_num*2)  # apply rope
+
+        kv_write_latency = database.query_mem_op(k_num*self._fmha_quant_mode.value.memory) + database.query_mem_op(v_num*self._fmha_quant_mode.value.memory)
+        extra_latency += apply_rope_latency + kv_write_latency
+        result += extra_latency*1.1 # correction factor for extra latency
+
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
@@ -593,6 +609,7 @@ class GenerationAttention(Operation):
         kv_cache_dtype: common.KVCacheQuantMode,
         window_size: int = 0,
         head_size: int = 128,
+        use_qk_norm: bool = False,
     ) -> None:
         super().__init__(name, scale_factor)
         self._n = n
@@ -601,6 +618,7 @@ class GenerationAttention(Operation):
         self._kv_cache_dtype = kv_cache_dtype
         self._window_size = window_size
         self._head_size = head_size
+        self._use_qk_norm = use_qk_norm
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query generation attention latency with energy data."""

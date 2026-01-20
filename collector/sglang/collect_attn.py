@@ -32,7 +32,23 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
-from helper import benchmark_with_power, get_sm_version, log_perf
+try:
+    from helper import (
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+    )
+except ModuleNotFoundError:
+    import os
+    import sys
+
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    from helper import (
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+    )
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
@@ -255,6 +271,56 @@ def get_generation_attention_test_cases():
                     # FP8 attention - requires SM90+ (Hopper)
                     if not skip_fp8:
                         test_cases.append([b, s, n, n_kv, 128, True, False, False, "generation_attention_perf.txt"])
+
+    # Qwen3-32b
+    test_cases_ = []
+    list1 = [i for i in range(1, 32)]
+    list2 = [i for i in range(32, 512, 8)] + [i+1 for i in range(32, 512, 8)]
+    list3 = [i for i in range(512, 2048, 16)] + [i+1 for i in range(512, 2048, 16)]
+    list4 = [i for i in range(2048, 4096, 32)] + [i+1 for i in range(2048, 4096, 32)]
+    list6 = [i for i in range(4096, 8193, 128)] + [i+1 for i in range(4096, 8193, 128)]
+    b_list = sorted(set(list1 + list2 + list3 + list4 + list6))
+
+    s_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+    s_list += [i for i in range(256, 4096, 128)] + [i+1 for i in range(256, 4096, 128)] 
+    s_list += [i for i in range(4096, 8192, 256)] + [i+1 for i in range(4096, 8192, 256)] 
+
+    s_list = list(set(s_list))
+
+    n_list_xqa = [64]
+    n_kv_list = [8]
+
+    for n in sorted(n_list_xqa, reverse=True):
+        b_s_dict = {}
+        s_b_dict = {}
+        for s in s_list:
+            for b in b_list:
+                if s*b > 8192*8192:
+                    continue
+                if s not in s_b_dict:
+                    s_b_dict[s] = {b}
+                else:
+                    s_b_dict[s].add(b)
+        for s, b_set in s_b_dict.items():
+            for b in b_set:
+                if b not in b_s_dict:
+                    b_s_dict[b] = {s - 1}
+                b_s_dict[b].add(s - 1)
+
+        for b, s_list_limited in b_s_dict.items():
+            target_s_list = sorted(s_list_limited)
+            if b >= 256:
+                target_s_list = target_s_list[:-1]
+            for n_kv in n_kv_list:
+                if n_kv >= n:
+                    continue
+                for s in target_s_list:
+                    test_cases_.append([b, s, n, n_kv, 128, False, False, False, "generation_attention_perf.txt"])
+                    if not skip_fp8:
+                        test_cases_.append([b, s, n, n_kv, 128, True, False, False, "generation_attention_perf.txt"])
+    test_cases += test_cases_
+    # Deduplicate while keeping list-form testcases (lists are unhashable).
+    test_cases = [list(t) for t in set(map(tuple, test_cases))]
     return test_cases
 
 
@@ -508,3 +574,7 @@ def run_attention_torch(
     )
 
     return Timing(latency * 1e-3)
+
+if __name__ == "__main__":
+    run_attention_torch(*[895, 299, 64, 8, 128, True, False, False, 'generation_attention_perf.txt'], device="cuda:0")
+    run_attention_torch(*[895, 299, 64, 8, 128, False, False, False, 'generation_attention_perf.txt'], device="cuda:0")

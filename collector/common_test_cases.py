@@ -194,6 +194,23 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
                     continue
                 test_cases.append(GemmCommonTestCase(x=x, n=n, k=k))
 
+    #qwen3-32b
+    list1 = [i for i in range(1, 32)]
+    list2 = [i for i in range(32, 512, 8)] + [i+1 for i in range(32, 512, 8)]
+    list3 = [i for i in range(512, 2048, 16)] + [i+1 for i in range(512, 2048, 16)]
+    list4 = [i for i in range(2048, 4096, 32)] + [i+1 for i in range(2048, 4096, 32)]
+    list6 = [i for i in range(4096, 8193, 128)] + [i+1 for i in range(4096, 8193, 128)]
+    x_list = sorted(set(list1 + list2 + list3 + list4 + list6))
+    for x in sorted(x_list, reverse=True):
+        test_cases.append(GemmCommonTestCase(x=x, n=10240, k=5120))
+        test_cases.append(GemmCommonTestCase(x=x, n=5120, k=8192))
+        test_cases.append(GemmCommonTestCase(x=x, n=51200, k=5120))
+        test_cases.append(GemmCommonTestCase(x=x, n=5120, k=25600))
+
+        test_cases.append(GemmCommonTestCase(x=x, n=5120, k=10240))
+        test_cases.append(GemmCommonTestCase(x=x, n=8192, k=5120))
+        test_cases.append(GemmCommonTestCase(x=x, n=5120, k=51200))
+        test_cases.append(GemmCommonTestCase(x=x, n=25600, k=5120))
     return test_cases
 
 

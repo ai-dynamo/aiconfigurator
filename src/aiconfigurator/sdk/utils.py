@@ -274,7 +274,8 @@ def _parse_hf_config_json(config: dict) -> list:
         ValueError: If a required field is missing from the config or the architecture is not supported
     """
     try:
-        model_family = ARCHITECTURE_TO_MODEL_FAMILY[config["architectures"][0]]
+        architecture = config["architectures"][0]
+        model_family = ARCHITECTURE_TO_MODEL_FAMILY[architecture]
     except KeyError as e:
         raise ValueError(
             f"The model's architecture {config['architectures'][0]} is not supported. "
@@ -291,6 +292,11 @@ def _parse_hf_config_json(config: dict) -> list:
     topk = config.get("num_experts_per_tok", 0)
     num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
     moe_inter_size = config.get("moe_intermediate_size", 0)
+    # Qwen-family attention may include additional Q/K (and sometimes KV) normalization.
+    # HF configs are not consistent across releases, so we infer sensible defaults by architecture.
+    use_qk_norm = bool(config.get("use_qk_norm", False)) or architecture in {"Qwen3ForCausalLM", "Qwen3MoeForCausalLM"}
+    extra_params = {"architecture": architecture, "use_qk_norm": use_qk_norm}
+
     logger.info(
         f"Model architecture: model_family={model_family}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "
         f"hidden_size={hidden_size}, inter_size={inter_size}, vocab={vocab}, context={context}, "
@@ -309,7 +315,7 @@ def _parse_hf_config_json(config: dict) -> list:
         topk,
         num_experts,
         moe_inter_size,
-        None,
+        extra_params,
     ]
 
 
