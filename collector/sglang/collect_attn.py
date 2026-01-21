@@ -287,7 +287,7 @@ def get_generation_attention_test_cases():
 
     s_list = list(set(s_list))
 
-    n_list_xqa = [64]
+    n_list_xqa = [32, 64]
     n_kv_list = [8]
 
     for n in sorted(n_list_xqa, reverse=True):

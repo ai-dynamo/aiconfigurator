@@ -1672,8 +1672,8 @@ class PerfDatabase:
                 append_list = sorted(set(list1 + list2 + list3 + list4  + list5))
 
                 target_x_list = list(set(target_x_list + append_list))
-                target_y_list = list(set(target_y_list + [5120, 8192, 25600, 51200]))
-                target_z_list = list(set(target_z_list + [5120, 8192, 25600, 51200]))
+                target_y_list = list(set(target_y_list + [5120, 8192, 25600, 51200] + [6144, 4096, 12288, 24576]))
+                target_z_list = list(set(target_z_list + [5120, 8192, 25600, 51200] + [6144, 4096, 12288, 24576]))
 
                 self._extrapolate_data_grid(
                     data_dict=data_dict,
@@ -2832,9 +2832,25 @@ class PerfDatabase:
                     n_kv = 0
 
                 attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
-                result = self._interp_3d(n, b, s, attention_dict, "bilinear")
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
+                # Decode batches often contain a mix of sequence lengths around the nominal KV length `s`.
+                # Using a single point (n,b,s) can be noisy/inaccurate. Smooth it by sampling a range.
+                # Sample 8 points from [0.9*s, 1.1*s] and average.
+                s_min = max(1, int(s * 0.9))
+                s_max = max(s_min, int(s * 1.1))
+                sample_cnt = 5
+                s_samples = [
+                    s_min + (s_max - s_min) * i // (sample_cnt - 1) for i in range(sample_cnt)
+                ]
+
+                latency_sum = 0.0
+                energy_sum = 0.0
+                for s_i in s_samples:
+                    r = self._interp_3d(n, b, s_i, attention_dict, "bilinear")
+                    latency_sum += float(r["latency"])
+                    energy_sum += float(r.get("energy", 0.0))
+
+                latency = latency_sum / sample_cnt
+                energy = energy_sum / sample_cnt
                 return PerformanceResult(latency, energy=energy)
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
