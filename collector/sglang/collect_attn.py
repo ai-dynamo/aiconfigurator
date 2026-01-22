@@ -282,7 +282,7 @@ def get_generation_attention_test_cases():
     b_list = sorted(set(list1 + list2 + list3 + list4 + list6))
 
     s_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
-    s_list += [i for i in range(256, 4096, 128)] + [i+1 for i in range(256, 4096, 128)] 
+    s_list += [i-2 for i in range(256, 4096, 128)] + [i-1 for i in range(256, 4096, 128)] + [i for i in range(256, 4096, 128)] + [i+1 for i in range(256, 4096, 128)] + [i+2 for i in range(256, 4096, 128)] 
     s_list += [i for i in range(4096, 8192, 256)] + [i+1 for i in range(4096, 8192, 256)] 
 
     s_list = list(set(s_list))
