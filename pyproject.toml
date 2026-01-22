@@ -68,7 +68,8 @@ dev = [
     "pytest-mock>=3.14.0",
     "pytest-split>=0.10.0",
     "pytest-timeout>=2.3.1",
-    "pytest-xdist==3.8.0"
+    "pytest-xdist==3.8.0",
+    "import-ipynb==0.2",
 ]
 webapp = [
     "gradio==5.47.1"
