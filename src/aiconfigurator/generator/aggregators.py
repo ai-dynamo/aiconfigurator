@@ -51,6 +51,10 @@ def collect_generator_params(
     is_kv = bool(enable_router)
     router_mode = "kv" if is_kv else ""
     mode_tag = "agg" if mode_value == "agg" else "disagg"
+    if backend_key == "sglang" and mode_tag == "disagg":
+        for params in (prefill_params, decode_params):
+            if params.get("kv_transfer_backend") is None:
+                params["kv_transfer_backend"] = "nixl"
     name_prefix = k8s.get("name_prefix") or "dynamo"
     name = f"{name_prefix}-{mode_tag}{('-router' if is_kv else '')}"
     use_engine_cm = k8s.get("k8s_engine_mode", "inline") == "configmap"
