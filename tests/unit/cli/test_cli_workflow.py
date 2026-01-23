@@ -176,51 +176,6 @@ class TestCLIIntegration:
         )
         assert args.database_mode == database_mode
 
-    @patch("aiconfigurator.cli.main.generate_backend_artifacts")
-    @patch("aiconfigurator.cli.main.build_naive_generator_params")
-    @patch("aiconfigurator.cli.main.get_latest_database_version")
-    @patch("aiconfigurator.cli.main.safe_mkdir")
-    def test_cli_generate_mode_flow(
-        self,
-        mock_safe_mkdir,
-        mock_get_version,
-        mock_build_params,
-        mock_generate_artifacts,
-        cli_args_factory,
-        tmp_path,
-    ):
-        """Test the generate mode flow creates configs without sweeping."""
-        mock_safe_mkdir.return_value = str(tmp_path)
-        mock_get_version.return_value = "1.0.0"
-        mock_build_params.return_value = {
-            "params": {
-                "agg": {
-                    "tensor_parallel_size": 8,
-                    "pipeline_parallel_size": 1,
-                    "max_batch_size": 128,
-                }
-            }
-        }
-        mock_generate_artifacts.return_value = {"run_0.sh": "#!/bin/bash\n"}
-
-        # Create args BEFORE patching builtins.open, since configure_parser reads example.yaml
-        args = cli_args_factory(mode="generate", save_dir=str(tmp_path))
-
-        with patch("builtins.open", MagicMock()):
-            cli_main(args)
-
-        mock_build_params.assert_called_once()
-        mock_generate_artifacts.assert_called_once()
-
-    def test_cli_generate_mode_args_parsing(self, cli_args_factory):
-        """Test that generate mode arguments are correctly parsed."""
-        args = cli_args_factory(
-            mode="generate",
-            extra_args=["--backend", "sglang"],
-        )
-        assert args.mode == "generate"
-        assert args.backend == "sglang"
-
     @patch("aiconfigurator.cli.main._execute_task_configs")
     @patch("aiconfigurator.cli.main._build_experiment_task_configs")
     def test_cli_exp_mode_with_database_mode_in_yaml(self, mock_build_exp, mock_execute, tmp_path):

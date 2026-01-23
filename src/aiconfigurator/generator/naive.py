@@ -9,14 +9,42 @@ aggressive parallelism settings (TP=gpus_per_node, PP=1) to maximize
 the chance of fitting large models into memory without SLA optimization.
 """
 
+import logging
+import os
+from importlib import resources as pkg_resources
 from typing import Any
 
-# Default GPUs per node for common systems
-# gb200_sxm has 4 GPUs per node, most others have 8
-_GPUS_PER_NODE_DEFAULTS = {
-    "gb200_sxm": 4,
-}
+import yaml
+
+logger = logging.getLogger(__name__)
+
+# Default fallback if system config cannot be read
 _DEFAULT_GPUS_PER_NODE = 8
+
+
+def _get_gpus_per_node(system_name: str) -> int:
+    """
+    Read num_gpus_per_node from the system YAML config file.
+
+    Args:
+        system_name: Name of the system (e.g., 'h200_sxm', 'gb200_sxm').
+
+    Returns:
+        Number of GPUs per node for the system, or default of 8 if not found.
+    """
+    try:
+        systems_dir = pkg_resources.files("aiconfigurator") / "systems"
+        system_yaml_path = os.path.join(str(systems_dir), f"{system_name}.yaml")
+
+        if os.path.isfile(system_yaml_path):
+            with open(system_yaml_path) as f:
+                system_spec = yaml.safe_load(f)
+            gpus_per_node = system_spec.get("node", {}).get("num_gpus_per_node", _DEFAULT_GPUS_PER_NODE)
+            return int(gpus_per_node)
+    except Exception as e:
+        logger.warning(f"Could not read system config for {system_name}: {e}")
+
+    return _DEFAULT_GPUS_PER_NODE
 
 
 def build_naive_generator_params(
@@ -52,8 +80,8 @@ def build_naive_generator_params(
             }
         }
     """
-    # Get GPUs per node for this system
-    gpus_per_node = _GPUS_PER_NODE_DEFAULTS.get(system_name, _DEFAULT_GPUS_PER_NODE)
+    # Get GPUs per node from system config
+    gpus_per_node = _get_gpus_per_node(system_name)
 
     # Use aggressive parallelism: TP = gpus_per_node, PP = 1
     tensor_parallel_size = min(gpus_per_node, total_gpus)

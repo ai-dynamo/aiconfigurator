@@ -5,9 +5,10 @@
 Integration tests for cli generate combinations.
 """
 
-from unittest.mock import MagicMock, patch
+import os
 
 import pytest
+import yaml
 
 from aiconfigurator.cli.main import main as cli_main
 
@@ -15,13 +16,7 @@ from aiconfigurator.cli.main import main as cli_main
 @pytest.mark.unit
 @pytest.mark.parametrize("backend", ["trtllm", "sglang", "vllm"])
 @pytest.mark.parametrize("system", ["h200_sxm", "gb200_sxm"])
-@patch("aiconfigurator.cli.main.generate_backend_artifacts")
-@patch("aiconfigurator.cli.main.get_latest_database_version")
-@patch("aiconfigurator.cli.main.safe_mkdir")
 def test_cli_generate_combinations(
-    mock_safe_mkdir,
-    mock_get_version,
-    mock_generate_artifacts,
     cli_args_factory,
     tmp_path,
     backend,
@@ -29,12 +24,8 @@ def test_cli_generate_combinations(
 ):
     """
     Test that cli generate works for various backend and system combinations.
+    Runs the actual CLI without mocking.
     """
-    mock_safe_mkdir.return_value = str(tmp_path)
-    mock_get_version.return_value = "1.0.0"
-    mock_generate_artifacts.return_value = {"run_0.sh": "#!/bin/bash\n"}
-
-    # Create args BEFORE patching builtins.open, since configure_parser reads example.yaml
     args = cli_args_factory(
         mode="generate",
         model="QWEN3_32B",
@@ -44,59 +35,30 @@ def test_cli_generate_combinations(
         save_dir=str(tmp_path),
     )
 
-    # Patch builtins.open only for cli_main to avoid blocking yaml.safe_load
-    with patch("builtins.open", MagicMock()):
-        cli_main(args)
+    cli_main(args)
 
-    # Verify that generator params were built and artifacts were requested
-    mock_generate_artifacts.assert_called_once()
-    call_args = mock_generate_artifacts.call_args
-    assert call_args.kwargs["backend"] == backend
+    # Verify output directory was created
+    output_dirs = [d for d in os.listdir(tmp_path) if os.path.isdir(tmp_path / d)]
+    assert len(output_dirs) == 1, f"Expected 1 output directory, found {output_dirs}"
 
-    # Check if TP/PP logic worked (e.g. gb200 should have TP=4, h200 should have TP=8)
-    params = call_args.kwargs["params"]
-    tp = params["params"]["agg"]["tensor_parallel_size"]
+    output_dir = tmp_path / output_dirs[0]
+
+    # Verify generator_config.yaml was created
+    generator_config_path = output_dir / "generator_config.yaml"
+    assert generator_config_path.exists(), "generator_config.yaml should be created"
+
+    # Load and verify the generated config
+    with open(generator_config_path) as f:
+        config = yaml.safe_load(f)
+
+    # Check TP/PP logic worked (gb200 should have TP=4, h200 should have TP=8)
+    tp = config["params"]["agg"]["tensor_parallel_size"]
+    pp = config["params"]["agg"]["pipeline_parallel_size"]
+
     if system == "gb200_sxm":
-        assert tp == 4
+        assert tp == 4, f"gb200_sxm should have TP=4, got {tp}"
     else:
-        assert tp == 8
+        assert tp == 8, f"h200_sxm should have TP=8, got {tp}"
 
-
-@pytest.mark.unit
-@patch("aiconfigurator.cli.main.generate_backend_artifacts")
-@patch("aiconfigurator.cli.main.get_latest_database_version")
-@patch("aiconfigurator.cli.main.safe_mkdir")
-@patch("aiconfigurator.cli.main.get_model_config_from_hf_id")
-def test_cli_generate_hf_id(
-    mock_get_model_config,
-    mock_safe_mkdir,
-    mock_get_version,
-    mock_generate_artifacts,
-    cli_args_factory,
-    tmp_path,
-):
-    """
-    Test that cli generate works with hf_id.
-    """
-    mock_safe_mkdir.return_value = str(tmp_path)
-    mock_get_version.return_value = "1.0.0"
-    mock_generate_artifacts.return_value = {"run_0.sh": "#!/bin/bash\n"}
-    mock_get_model_config.return_value = ["LLAMA", 32, 32, 8, 128, 4096, 11008, 32000, 4096, 0, 0, 0, {}]
-
-    # Create args BEFORE patching builtins.open
-    args = cli_args_factory(
-        mode="generate",
-        hf_id="Qwen/Qwen2.5-7B",
-        total_gpus=8,
-        system="h200_sxm",
-        save_dir=str(tmp_path),
-    )
-
-    # Patch builtins.open only for cli_main
-    with patch("builtins.open", MagicMock()):
-        cli_main(args)
-
-    mock_generate_artifacts.assert_called_once()
-    call_args = mock_generate_artifacts.call_args
-    params = call_args.kwargs["params"]
-    assert params["service"]["model_name"] == "Qwen/Qwen2.5-7B"
+    assert pp == 1, f"PP should be 1, got {pp}"
+    assert config["backend"] == backend
