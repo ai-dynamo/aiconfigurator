@@ -9,7 +9,7 @@ aggressive parallelism settings (TP=gpus_per_node, PP=1) to maximize
 the chance of fitting large models into memory without SLA optimization.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 # Default GPUs per node for common systems
 # gb200_sxm has 4 GPUs per node, most others have 8
@@ -24,7 +24,6 @@ def build_naive_generator_params(
     total_gpus: int,
     system_name: str,
     backend_name: str,
-    model_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Build generator parameters for naive configuration generation.
@@ -37,7 +36,6 @@ def build_naive_generator_params(
         total_gpus: Total number of GPUs available.
         system_name: Name of the system (e.g., 'h200_sxm', 'gb200_sxm').
         backend_name: Name of the backend (e.g., 'trtllm', 'sglang', 'vllm').
-        model_path: Optional path to the model weights.
 
     Returns:
         Dictionary containing generator parameters with the structure:
@@ -69,7 +67,7 @@ def build_naive_generator_params(
         "service": {
             "model_name": model_name,
             "served_model_name": model_name,
-            "model_path": model_path or model_name,
+            "model_path": model_name,
         },
         "k8s": {
             "system_name": system_name,

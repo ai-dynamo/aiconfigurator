@@ -153,12 +153,6 @@ def _add_generate_mode_arguments(parser):
         default=common.BackendName.trtllm.value,
         help="Backend name (default: trtllm).",
     )
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default=None,
-        help="Path to model weights. Defaults to model name.",
-    )
 
 
 def configure_parser(parser):
@@ -495,7 +489,6 @@ def _run_generate_mode(args):
         total_gpus=args.total_gpus,
         system_name=args.system,
         backend_name=args.backend,
-        model_path=args.model_path,
     )
 
     # Determine backend version
