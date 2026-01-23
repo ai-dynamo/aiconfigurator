@@ -357,10 +357,23 @@ def _parse_hf_config_json(config: dict) -> list:
     num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
     moe_inter_size = config.get("moe_intermediate_size", 0)
 
-    # Parse Nemotron-style block_configs if present
+    # Handle NemotronH-specific configuration (only fields unique to NemotronH)
     extra_params = None
-    if "block_configs" in config:
-        extra_params = _parse_nemotron_block_configs(config["block_configs"])
+    if architecture == "NemotronHForCausalLM":
+        extra_params = common.NemotronHConfig(
+            hybrid_override_pattern=config["hybrid_override_pattern"],
+            mamba_num_heads=config["mamba_num_heads"],
+            mamba_head_dim=config["mamba_head_dim"],
+            ssm_state_size=config["ssm_state_size"],
+            conv_kernel=config["conv_kernel"],
+            n_groups=config["n_groups"],
+            chunk_size=config["chunk_size"],
+            moe_shared_expert_intermediate_size=config["moe_shared_expert_intermediate_size"],
+        )
+        logger.info(
+            f"NemotronH hybrid config: pattern={extra_params.hybrid_override_pattern}, "
+            f"mamba_heads={extra_params.mamba_num_heads}"
+        )
 
     logger.info(
         f"Model architecture: architecture={architecture}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "
