@@ -10,10 +10,10 @@ agg_prefill_decode cuda_graph_batch_sizes = ((range(1, max_batch_size + 1) | lis
 agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_parallel_size or 1) * (data_parallel_size or 1)
 
 agg_prefill_decode kv_cache_dtype = ("fp8_e4m3" if kv_cache_dtype == "fp8" else kv_cache_dtype)
+prefill_decode kv_transfer_backend = (kv_transfer_backend if kv_transfer_backend else "nixl")
 
 when (ModelConfig.prefix or 0) > 0:
     disable_prefix_cache = false
-    DynConfig.enable_router = true
 
 when (ModelConfig.nextn or 0) > 0:
     speculative_decoding_type = "NEXTN"
