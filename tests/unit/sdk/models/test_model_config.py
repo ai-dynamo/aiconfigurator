@@ -34,12 +34,15 @@ class TestSupportedModels:
         """Test that model configurations have the expected structure."""
         for model_name, config in common.SupportedModels.items():
             assert isinstance(config, (list, tuple))
-            assert len(config) >= 1  # At least model family
+            assert len(config) >= 1  # At least architecture
 
-            # First element should be model family string
-            model_family = config[0]
-            assert isinstance(model_family, str)
-            assert model_family in common.ModelFamily
+            # First element should be architecture string that maps to a valid model family
+            architecture = config[0]
+            assert isinstance(architecture, str)
+            assert architecture in common.ARCHITECTURE_TO_MODEL_FAMILY, (
+                f"Model {model_name} has unknown architecture: {architecture}. "
+                f"Supported architectures: {list(common.ARCHITECTURE_TO_MODEL_FAMILY.keys())}"
+            )
 
     @pytest.mark.parametrize(
         "model_name,is_moe_expected",
