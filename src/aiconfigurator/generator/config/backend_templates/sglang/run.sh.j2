@@ -2,10 +2,10 @@
 set -e
 trap 'echo "Cleaning up..."; kill 0 2>/dev/null || true' EXIT INT TERM
 
-export MODEL_PATH=${MODEL_PATH:-"{{ service.model_path }}"}
-export HF_TOKEN=${HF_TOKEN:-"{{ service.hf_token }}"}
-export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"{{ service.served_model_name }}"}
-export HEAD_NODE_IP=${HEAD_NODE_IP:-"{{ service.head_node_ip }}"}
+export MODEL_PATH=${MODEL_PATH:-"{{ ServiceConfig.model_path }}"}
+export HF_TOKEN=${HF_TOKEN:-"{{ ServiceConfig.hf_token }}"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"{{ ServiceConfig.served_model_name }}"}
+export HEAD_NODE_IP=${HEAD_NODE_IP:-"{{ ServiceConfig.head_node_ip }}"}
 export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
 export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
 
@@ -16,10 +16,10 @@ DECODE_WORKERS={{ decode_workers | default(0) | int }}
 PREFILL_SYSTEM_PORT_BASE=${PREFILL_SYSTEM_PORT_BASE:-8082}
 DECODE_SYSTEM_PORT_BASE=${DECODE_SYSTEM_PORT_BASE:-$((PREFILL_SYSTEM_PORT_BASE + PREFILL_WORKERS))}
 
-{% set mode = k8s.mode %}
-{% if service.include_frontend %}
+{% set mode = DynConfig.mode | default('disagg') %}
+{% if ServiceConfig.include_frontend %}
 OTEL_SERVICE_NAME=dynamo-frontend \
-python3 -m dynamo.frontend --http-port "{{ service.port }}" 2>&1 | sed "s/^/[Frontend] /" &
+python3 -m dynamo.frontend --http-port "{{ ServiceConfig.port }}" 2>&1 | sed "s/^/[Frontend] /" &
 {% endif %}
 
 {% if mode == 'agg' %}

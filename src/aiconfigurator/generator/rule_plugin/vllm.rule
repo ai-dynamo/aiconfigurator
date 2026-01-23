@@ -12,6 +12,7 @@ agg max_seq_len = (SlaConfig.isl or 0) + (SlaConfig.osl or 0) + 1500
 
 when (ModelConfig.prefix or 0) > 0:
     disable_prefix_cache = false
+    DynConfig.enable_router = true
 
 when (ModelConfig.nextn or 0) > 0:
     speculative_decoding_type = "mtp"

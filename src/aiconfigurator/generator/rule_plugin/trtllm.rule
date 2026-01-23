@@ -22,6 +22,8 @@ agg_prefill_decode enable_attention_dp = ((data_parallel_size or 1) > 1) and Mod
 
 when (ModelConfig.prefix or 0) > 0:
     agg_prefill_decode disable_prefix_cache = false
+    DynConfig.enable_router = true
+
 
 # Speculative decoding
 when (ModelConfig.nextn or 0) > 0:
