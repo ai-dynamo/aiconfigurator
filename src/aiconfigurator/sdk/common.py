@@ -168,8 +168,6 @@ SupportedSystems = {
     "gb200_sxm",
     "a100_sxm",
     "l40s",
-    "gh200_all2all",
-    "gh200_deepep",
 }
 
 """
