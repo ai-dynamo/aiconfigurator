@@ -28,12 +28,9 @@ class TestCLIArgumentParsing:
         required_actions = [action for action in default_parser._actions if getattr(action, "required", False)]
         required_args = [action.dest for action in required_actions]
 
+        assert "model_path" in required_args
         assert "total_gpus" in required_args
         assert "system" in required_args
-
-        assert len(default_parser._mutually_exclusive_groups) == 1
-        assert "model" in [action.dest for action in default_parser._mutually_exclusive_groups[0]._group_actions]
-        assert "hf_id" in [action.dest for action in default_parser._mutually_exclusive_groups[0]._group_actions]
 
     def test_exp_mode_required_args(self, cli_parser):
         """Test that exp mode requires the yaml_path argument."""

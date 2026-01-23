@@ -43,7 +43,7 @@ def cli_args_factory():
         if mode == "default":
             base_args.update(
                 {
-                    "model": "QWEN3_32B",
+                    "model_path": "Qwen/Qwen3-32B",
                     "total_gpus": 8,
                     "system": "h200_sxm",
                 }
@@ -106,7 +106,7 @@ def mock_exp_yaml_path(tmp_path):
     yaml_content = """
     my_exp:
         serving_mode: "agg"
-        model_path: "QWEN3_32B"
+        model_path: "Qwen/Qwen3-32B"
         system_name: "h200_sxm"
         total_gpus: 8
     """
