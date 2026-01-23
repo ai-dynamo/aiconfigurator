@@ -15,13 +15,19 @@ import yaml
 
 from aiconfigurator import __version__
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
-from aiconfigurator.generator.api import add_generator_override_arguments, generator_cli_helper
+from aiconfigurator.generator.api import (
+    add_generator_override_arguments,
+    generate_backend_artifacts,
+    generator_cli_helper,
+)
+from aiconfigurator.generator.naive import build_naive_generator_params
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_request_latency_constraint,
     get_best_configs_under_tpot_constraint,
     get_pareto_front,
 )
+from aiconfigurator.sdk.perf_database import get_latest_database_version
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 from aiconfigurator.sdk.utils import get_model_config_from_hf_id, safe_mkdir
 
@@ -478,12 +484,7 @@ def _execute_task_configs(
 
 def _run_generate_mode(args):
     """Run the generate mode to create a naive agg config without sweeping."""
-    import os
     import random
-
-    from aiconfigurator.generator.api import generate_backend_artifacts
-    from aiconfigurator.generator.naive import build_naive_generator_params
-    from aiconfigurator.sdk.perf_database import get_latest_database_version
 
     model_name = args.model or args.hf_id
     logger.info("Generating naive agg configuration for %s on %d GPUs", model_name, args.total_gpus)
