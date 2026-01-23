@@ -45,7 +45,10 @@ def run_attention_torch(
     device="cuda:0",
 ):
     setup_distributed(device)
-    torch.cuda.set_device(device)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
+    elif torch.xpu.is_available():
+        torch.xpu.set_device(device)
 
     assert num_heads % tp_size == 0, "num_heads must be divisible by tp_size"
     num_heads = num_heads // tp_size
@@ -78,16 +81,29 @@ def run_attention_torch(
         )
     except TypeError:
         # in the case of vllm 0.12.0 use_v1 is removed
-        backend = current_platform.get_attn_backend_cls(
-            None,
-            head_dim,
-            dtype,
-            kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-            block_size=block_size,
-            use_mla=True,
-            has_sink=False,
-            use_sparse=False,
-        )
+        try:
+            backend = current_platform.get_attn_backend_cls(
+                None,
+                head_dim,
+                dtype,
+                kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                block_size=block_size,
+                use_mla=True,
+                has_sink=False,
+                use_sparse=False,
+            )
+        except TypeError: # for xpu
+            backend = current_platform.get_attn_backend_cls(
+                None,
+                head_dim,
+                dtype,
+                kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                block_size=block_size,
+                use_mla=True,
+                has_sink=False,
+                # use_sparse=False,
+                use_v1=True,
+            )
     if _Backend is not None:
         backend_name = _Backend[resolve_obj_by_qualname(backend).get_name()]
         print(f"VLLM chose MLA backend: {backend_name}")
@@ -284,7 +300,7 @@ def run_attention_torch(
         ],
         framework="VLLM",
         version=vllm_version,
-        device_name=torch.cuda.get_device_name(device),
+        device_name=torch.cuda.get_device_name(device) if torch.cuda.is_available() else torch.xpu.get_device_name(device),
         op_name=op_name,
         kernel_source=kernel_source,
         perf_filename=perf_filename,

@@ -72,8 +72,10 @@ def run_attention_torch(
     perf_filename,
     device="cuda:0",
 ):
-    torch.cuda.set_device(device)
-
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
+    elif torch.xpu.is_available():
+        torch.xpu.set_device(device)
     dtype = torch.float16
     model = os.path.join(os.path.dirname(__file__), "fake_hf_model")
     block_size = 64
@@ -107,17 +109,31 @@ def run_attention_torch(
                 use_sparse=False,
             )
         except TypeError:
-            backend = current_platform.get_attn_backend_cls(
-                None,
-                head_dim,
-                dtype,
-                kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-                block_size=block_size,
-                use_mla=False,
-                has_sink=False,
-                use_sparse=False,
-                use_v1=True,
-            )
+            try:
+                backend = current_platform.get_attn_backend_cls(
+                    None,
+                    head_dim,
+                    dtype,
+                    kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                    block_size=block_size,
+                    use_mla=False,
+                    has_sink=False,
+                    use_sparse=False,
+                    use_v1=True,
+                )
+            except TypeError: # for xpu
+                backend = current_platform.get_attn_backend_cls(
+                    None,
+                    head_dim,
+                    dtype,
+                    kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                    block_size=block_size,
+                    use_mla=False,
+                    has_sink=False,
+                    # use_sparse=False,
+                    use_v1=True,
+                )
+
 
     backend_name_obj = resolve_obj_by_qualname(backend)
     backend_name_str = backend_name_obj.get_name()
@@ -338,11 +354,11 @@ def run_attention_torch(
         ],
         framework="VLLM",
         version=vllm_version,
-        device_name=torch.cuda.get_device_name(device),
+        device_name=torch.cuda.get_device_name(device) if torch.cuda.is_available() else torch.xpu.get_device_name(device),
         op_name=op_name,
         kernel_source=kernel_source,
         perf_filename=perf_filename,
-        power_stats=results["power_stats"],
+        power_stats=results["power_stats"] if torch.cuda.is_available() else None,
     )
 
 
@@ -350,30 +366,57 @@ def get_context_attention_test_cases(if_unit_test=False):
     test_cases = []
 
     if not if_unit_test:
-        b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-        s_list = [
-            1,
-            16,
-            32,
-            64,
-            128,
-            256,
-            512,
-            1024,
-            1536,
-            2048,
-            3072,
-            4096,
-            6144,
-            8192,
-            10240,
-            12288,
-            16384,
-            262144,
-        ]
-        n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
-        n_kv_list = [0, 1, 2, 4, 8]
-        # n_kv_list = [64]
+        if torch.cuda.is_available():
+            b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+            s_list = [
+                1,
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                1536,
+                2048,
+                3072,
+                4096,
+                6144,
+                8192,
+                10240,
+                12288,
+                16384,
+                262144,
+            ]
+            n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
+            n_kv_list = [0, 1, 2, 4, 8]
+            # n_kv_list = [64]
+        elif torch.xpu.is_available():
+            # FIXME narrow down the search space for available xpu
+            b_list = [1, 2, 4, 8, 16, 32]
+            s_list = [
+                1,
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                1536,
+                2048,
+                3072,
+                4096,
+                6144,
+                8192,
+                10240,
+                12288,
+                16384,
+            ]
+            n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
+            n_kv_list = [1, 2, 4, 8] # no zero here, influence logics below
+
+        
     else:
         b_list = [1]
         s_list = [64]

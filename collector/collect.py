@@ -81,8 +81,13 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     setup_signal_handlers(device_id, error_queue)
 
     # Setup device
-    device = torch.device(f"cuda:{device_id}")
-    torch.cuda.set_device(device_id)
+    
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{device_id}")
+        torch.cuda.set_device(device)
+    elif torch.xpu.is_available():
+        device = torch.device(f"xpu:{device_id}")
+        torch.xpu.set_device(device)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
     # Process tasks
@@ -549,6 +554,7 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
             "get_func": "get_moe_test_cases",
             "run_func": "run_moe_torch",
         },
+        # TODO sihan: recheck whether MLA supported on XPU
         {
             "name": "vllm",
             "type": "mla_context",
@@ -769,6 +775,9 @@ def main():
         setup_logging(debug=args.debug)
 
     num_processes = torch.cuda.device_count()
+    if num_processes == 0:
+        if torch.xpu.is_available():
+            num_processes = torch.xpu.device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
 
     # Set environment variables for worker processes
