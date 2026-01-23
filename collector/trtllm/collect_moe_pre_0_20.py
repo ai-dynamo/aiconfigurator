@@ -57,7 +57,7 @@ def get_moe_test_cases():
             continue
 
         for moe_type in moe_list:
-            if model_name in ["GPT_OSS_20B", "GPT_OSS_120B"]:
+            if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
                 if moe_type != "w4a16_mxfp4":
                     continue
             else:

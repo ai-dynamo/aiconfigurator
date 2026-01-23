@@ -67,9 +67,8 @@ def collect_generator_params(
     service_payload = dict(service)
     service_payload.update(
         {
-            "model_path": service.get("model_path"),
-            "served_model_name": service.get("served_model_name"),
-            "model_name": service.get("model_name") or service.get("served_model_name"),
+            "model_path": service.get("model_path") or service.get("served_model_path"),
+            "served_model_path": service.get("served_model_path"),
             "head_node_ip": service.get("head_node_ip"),
             "port": coerce_int(service.get("port")),
             "include_frontend": coerce_bool(service.get("include_frontend")),

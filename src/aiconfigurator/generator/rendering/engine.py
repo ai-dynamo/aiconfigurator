@@ -424,9 +424,9 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
 
     # Extract unified service configuration
     service_config = param_values.get("service", {})
-    context["model_name"] = service_config.get("model_name") or service_config.get("served_model_name", "")
+    context["model_path"] = service_config.get("model_path") or service_config.get("served_model_path", "")
     context["model_path"] = service_config.get("model_path")
-    context["served_model_name"] = service_config.get("served_model_name")
+    context["served_model_path"] = service_config.get("served_model_path")
     context["service"] = dict(service_config)
 
     # Extract K8s configuration

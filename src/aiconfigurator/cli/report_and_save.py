@@ -256,7 +256,7 @@ def log_final_summary(
     summary_box.append("  " + "-" * 76)
     summary_box.append("  Input Configuration & SLA Target:")
     summary_box.append(
-        f"    Model: {task_configs[chosen_exp].config.model_name} (is_moe: {task_configs[chosen_exp].config.is_moe})"
+        f"    Model: {task_configs[chosen_exp].config.model_path} (is_moe: {task_configs[chosen_exp].config.is_moe})"
     )
     summary_box.append(f"    Total GPUs: {task_configs[chosen_exp].total_gpus}")
     if mode == "default":
@@ -319,7 +319,7 @@ def log_final_summary(
                 "label": f"{chosen_exp} best",
             }
         pareto_plot_buf = draw_pareto_to_string(
-            f"{task_configs[chosen_exp].config.model_name} Pareto Frontier",
+            f"{task_configs[chosen_exp].config.model_path} Pareto Frontier",
             series_payload,
             highlight=highlight_series,
             x_label=target_x_axis,
@@ -381,7 +381,7 @@ def save_results(
     first_task_config = task_configs[first_exp_name].config
 
     result_prefix = (
-        f"{first_task_config.model_name}_isl{first_task_config.runtime_config.isl}_"
+        f"{first_task_config.model_path}_isl{first_task_config.runtime_config.isl}_"
         f"osl{first_task_config.runtime_config.osl}_ttft{int(first_task_config.runtime_config.ttft)}_"
         f"tpot{int(first_task_config.runtime_config.tpot)}"
     )
@@ -404,7 +404,7 @@ def save_results(
         all_request_latency = bool(pareto_axis) and all(axis == "request_latency" for axis in pareto_axis.values())
         global_x_axis = "request_latency" if all_request_latency else "tokens/s/user"
         maximize_x = not all_request_latency
-        plt.title(f"{first_task_config.model_name} tokens/s/gpu vs {global_x_axis}")
+        plt.title(f"{first_task_config.model_path} tokens/s/gpu vs {global_x_axis}")
         colors = [
             "blue",
             "red",

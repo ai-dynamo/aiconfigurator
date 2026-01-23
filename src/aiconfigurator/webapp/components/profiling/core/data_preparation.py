@@ -49,7 +49,7 @@ def _compute_parato(x, y):
 
 def prepare_prefill_table_data(
     prefill_results,
-    model_name: str,
+    model_path: str,
     system: str,
     backend: str,
     version: str,
@@ -61,7 +61,7 @@ def prepare_prefill_table_data(
 
     Args:
         prefill_results: Tuple of (num_gpus_list, ttft_list, thpt_per_gpu_list)
-        model_name: Model name
+        model_path: Model name
         system: System name
         backend: Backend name
         version: Backend version
@@ -75,7 +75,7 @@ def prepare_prefill_table_data(
     rows = []
     for num_gpus, ttft, thpt in zip(num_gpus_list, ttft_list, thpt_per_gpu_list):
         config_yaml = generate_config_yaml(
-            model_name=model_name,
+            model_path=model_path,
             system=system,
             backend=backend,
             version=version,
@@ -90,7 +90,7 @@ def prepare_prefill_table_data(
 
 def prepare_decode_table_data(
     decode_results,
-    model_name: str,
+    model_path: str,
     system: str,
     backend: str,
     version: str,
@@ -102,7 +102,7 @@ def prepare_decode_table_data(
 
     Args:
         decode_results: List of tuples (num_gpus, itl_list, thpt_list, batch_size_list)
-        model_name: Model name
+        model_path: Model name
         system: System name
         backend: Backend name
         version: Backend version
@@ -121,7 +121,7 @@ def prepare_decode_table_data(
 
         for itl, thpt, batch_size in zip(itl_list, thpt_list, batch_size_list):
             config_yaml = generate_config_yaml(
-                model_name=model_name,
+                model_path=model_path,
                 system=system,
                 backend=backend,
                 version=version,
@@ -139,7 +139,7 @@ def prepare_cost_table_data(
     osl,
     prefill_results,
     decode_results,
-    model_name: str,
+    model_path: str,
     system: str,
     backend: str,
     version: str,
@@ -152,7 +152,7 @@ def prepare_cost_table_data(
         osl: Output sequence length
         prefill_results: Tuple of (num_gpus, ttft, thpt_per_gpu) for prefill
         decode_results: List of tuples (num_gpus, itl_list, thpt_per_gpu_list, batch_size_list) for decode
-        model_name: Model name
+        model_path: Model name
         system: System name
         backend: Backend name
         version: Backend version
@@ -210,7 +210,7 @@ def prepare_cost_table_data(
             batch_size = d_batch_sizes[i] if i < len(d_batch_sizes) else 1
             # For cost table, use decode GPU config as the representative config
             config_yaml = generate_config_yaml(
-                model_name=model_name,
+                model_path=model_path,
                 system=system,
                 backend=backend,
                 version=version,

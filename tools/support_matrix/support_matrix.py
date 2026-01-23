@@ -43,15 +43,12 @@ class SupportMatrix:
         self.databases: dict[str, dict[str, dict[str, str]]] = self.load_databases()
 
     def get_models(self):
-        return set[str](common.SupportedModels.keys())
+        """Get the set of models to test - uses DefaultHFModels (models with cached configs)."""
+        return set[str](common.DefaultHFModels)
 
-    def get_architecture(self, model: str) -> str:
+    def get_architecture(self, huggingface_id: str) -> str:
         """Get the HuggingFace architecture for a model."""
-        return _get_model_info(model)[0]
-
-    def get_huggingface_id(self, model: str) -> str:
-        """Get the HuggingFace model ID for an internal model name."""
-        return common.MODEL_NAME_TO_HF_ID.get(model, model)
+        return _get_model_info(huggingface_id)[0]
 
     def get_systems(self):
         return set(common.SupportedSystems)
@@ -115,7 +112,7 @@ class SupportMatrix:
                 # Create TaskConfig for the test
                 task_config_kwargs = {
                     "serving_mode": mode,
-                    "model_name": model,
+                    "model_path": model,
                     "system_name": system,
                     "backend_name": backend,
                     "backend_version": version,
@@ -210,16 +207,17 @@ class SupportMatrix:
             desc="Testing support matrix",
             unit="config",
         ):
+            # model is already a HuggingFace ID (e.g., 'meta-llama/Llama-2-7b-hf')
+            huggingface_id = model
             success_dict, error_dict = self.run_single_test(
-                model=model,
+                model=huggingface_id,
                 system=system,
                 backend=backend,
                 version=version,
             )
 
-            # Get the HuggingFace ID and architecture for this model
-            huggingface_id = self.get_huggingface_id(model)
-            architecture = self.get_architecture(model)
+            # Get the architecture for this model
+            architecture = self.get_architecture(huggingface_id)
 
             # Add separate entries for agg and disagg modes
             for mode in success_dict:

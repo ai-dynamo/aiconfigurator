@@ -4,21 +4,23 @@
 import gradio as gr
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.common import SupportedModels
+from aiconfigurator.sdk.common import get_default_models
 from aiconfigurator.sdk.perf_database import get_all_databases
 
 
-def create_model_name_config(app_config):
+def create_model_path_config(app_config):
     """create model name config components"""
+    default_models = sorted(get_default_models())
+    default_model = "deepseek-ai/DeepSeek-V3" if "deepseek-ai/DeepSeek-V3" in default_models else default_models[0]
     with gr.Accordion("Model"):
-        model_name = gr.Dropdown(
-            choices=list(SupportedModels.keys()),
+        model_path = gr.Dropdown(
+            choices=default_models,
             label="model name",
-            value="DEEPSEEK_V3",
+            value=default_model,
             interactive=True,
         )
 
-    return {"model_name": model_name}
+    return {"model_path": model_path}
 
 
 def create_system_config(app_config, gpu_config=False):

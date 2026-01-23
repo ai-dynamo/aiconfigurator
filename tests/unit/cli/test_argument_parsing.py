@@ -53,32 +53,28 @@ class TestCLIArgumentParsing:
         action = next(action for action in cli_parser._actions if action.dest == "mode")
         assert set(action.choices.keys()) == {"default", "exp"}
 
-    @pytest.mark.parametrize(
-        "param_name,expected_choices",
-        [
-            ("model", list(common.SupportedModels.keys())),
-            ("backend", [backend.value for backend in common.BackendName]),
-        ],
-    )
-    def test_argument_choices_validation(self, cli_parser, param_name, expected_choices):
-        """Test that arguments validate against supported choices."""
+    def test_backend_choices_validation(self, cli_parser):
+        """Test that backend argument validates against supported choices."""
         subparser_action = next(action for action in cli_parser._actions if action.dest == "mode")
         default_parser = subparser_action.choices["default"]
-        action = next(action for action in default_parser._actions if action.dest == param_name)
+        action = next(action for action in default_parser._actions if action.dest == "backend")
+        expected_choices = [backend.value for backend in common.BackendName]
         assert sorted(action.choices) == sorted(expected_choices)
 
     @pytest.mark.parametrize("system_value", ["h200_sxm", "b200_sxm", "gb200_sxm"])
     def test_supported_systems_parse_successfully(self, cli_parser, system_value):
         """System flag should accept supported platforms including b200 and gb200."""
         args = cli_parser.parse_args(
-            ["default", "--model", "QWEN3_32B", "--total_gpus", "16", "--system", system_value]
+            ["default", "--model_path", "Qwen/Qwen3-32B", "--total_gpus", "16", "--system", system_value]
         )
 
         assert args.system == system_value
 
     def test_default_values_are_set(self, cli_parser):
         """Test that default values are properly set for optional arguments."""
-        args = cli_parser.parse_args(["default", "--model", "QWEN3_32B", "--total_gpus", "8", "--system", "h200_sxm"])
+        args = cli_parser.parse_args(
+            ["default", "--model_path", "Qwen/Qwen3-32B", "--total_gpus", "8", "--system", "h200_sxm"]
+        )
 
         assert args.backend == common.BackendName.trtllm.value
         assert args.backend_version is None
@@ -99,8 +95,8 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(
             [
                 "default",
-                "--model",
-                "QWEN3_32B",
+                "--model_path",
+                "Qwen/Qwen3-32B",
                 "--total_gpus",
                 "8",
                 "--system",
@@ -116,8 +112,8 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(
             [
                 "default",
-                "--model",
-                "QWEN3_32B",
+                "--model_path",
+                "Qwen/Qwen3-32B",
                 "--total_gpus",
                 "8",
                 "--system",
@@ -145,8 +141,8 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(
             [
                 "default",
-                "--model",
-                "QWEN3_32B",
+                "--model_path",
+                "Qwen/Qwen3-32B",
                 "--total_gpus",
                 "8",
                 "--system",
@@ -162,14 +158,16 @@ class TestCLIArgumentParsing:
 
     def test_decode_system_defaults_to_system(self, cli_parser):
         """Decode system defaults to system when omitted and can be overridden."""
-        args = cli_parser.parse_args(["default", "--model", "QWEN3_32B", "--total_gpus", "8", "--system", "h200_sxm"])
+        args = cli_parser.parse_args(
+            ["default", "--model_path", "Qwen/Qwen3-32B", "--total_gpus", "8", "--system", "h200_sxm"]
+        )
         assert args.decode_system is None
 
         args_with_decode = cli_parser.parse_args(
             [
                 "default",
-                "--model",
-                "QWEN3_32B",
+                "--model_path",
+                "Qwen/Qwen3-32B",
                 "--total_gpus",
                 "8",
                 "--system",
@@ -180,12 +178,12 @@ class TestCLIArgumentParsing:
         )
         assert args_with_decode.decode_system == "gb200_sxm"
 
-    def test_hf_id_as_alternative_to_model(self, cli_parser):
-        """Test that --hf_id can be used instead of --model."""
+    def test_model_path_accepts_huggingface_id(self, cli_parser):
+        """Test that --model_path accepts a HuggingFace model ID."""
         args = cli_parser.parse_args(
             [
                 "default",
-                "--hf_id",
+                "--model_path",
                 "Qwen/Qwen2.5-7B",
                 "--total_gpus",
                 "8",
@@ -193,25 +191,7 @@ class TestCLIArgumentParsing:
                 "h200_sxm",
             ]
         )
-        assert args.hf_id == "Qwen/Qwen2.5-7B"
-        assert args.model is None
-
-    def test_model_and_hf_id_are_mutually_exclusive(self, cli_parser):
-        """Test that --model and --hf_id cannot be used together."""
-        with pytest.raises(SystemExit):
-            cli_parser.parse_args(
-                [
-                    "default",
-                    "--model",
-                    "QWEN3_32B",
-                    "--hf_id",
-                    "Qwen/Qwen2.5-7B",
-                    "--total_gpus",
-                    "8",
-                    "--system",
-                    "h200_sxm",
-                ]
-            )
+        assert args.model_path == "Qwen/Qwen2.5-7B"
 
     @pytest.mark.parametrize(
         "database_mode_value",
@@ -222,8 +202,8 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(
             [
                 "default",
-                "--model",
-                "QWEN3_32B",
+                "--model_path",
+                "Qwen/Qwen3-32B",
                 "--total_gpus",
                 "8",
                 "--system",
@@ -240,8 +220,8 @@ class TestCLIArgumentParsing:
             cli_parser.parse_args(
                 [
                     "default",
-                    "--model",
-                    "QWEN3_32B",
+                    "--model_path",
+                    "Qwen/Qwen3-32B",
                     "--total_gpus",
                     "8",
                     "--system",

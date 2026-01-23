@@ -376,27 +376,27 @@ class Pipeline:
     def _run_benchmark(self, art_dir: Path, url: str, isl: int, osl: int, concurrency: list[int]) -> Path:
         args = self.cfg.cli_args
         model_path = str(getattr(args, "model_path", ""))
-        served_model_name = str(getattr(args, "served_model_name", ""))
+        served_model_path = str(getattr(args, "served_model_path", ""))
         venv_dir = str(getattr(args, "venv_dir", "/workspace/aic"))
 
         # Fallback: pull values from generator overrides when not present as top-level args.
         # The eval pipeline reuses the CLI parser which exposes generator overrides under
         # --generator-set/--generator-config, so top-level args like model_path may be empty.
-        if not model_path or not served_model_name:
+        if not model_path or not served_model_path:
             try:
                 from aiconfigurator.generator.api import load_generator_overrides_from_args
 
                 overrides = load_generator_overrides_from_args(args) or {}
                 svc = overrides.get("ServiceConfig", {}) if isinstance(overrides, dict) else {}
                 if not model_path:
-                    # Prefer an explicit model_path override; fall back to served_model_name if provided there.
-                    candidate = svc.get("model_path") or svc.get("served_model_name")
+                    # Prefer an explicit model_path override; fall back to served_model_path if provided there.
+                    candidate = svc.get("model_path") or svc.get("served_model_path")
                     if isinstance(candidate, str):
                         model_path = candidate
-                if not served_model_name:
-                    candidate = svc.get("served_model_name") or svc.get("model_name")
+                if not served_model_path:
+                    candidate = svc.get("served_model_path") or svc.get("model_path")
                     if isinstance(candidate, str):
-                        served_model_name = candidate
+                        served_model_path = candidate
             except Exception:
                 # Best-effort fallback only; keep existing empty defaults if anything goes wrong
                 pass
@@ -405,7 +405,7 @@ class Pipeline:
             "name": "genai_perf_eval",
             "base_folder": str(art_dir),
             "result_folder": "bench",
-            "model": served_model_name or "unknown-model",
+            "model": served_model_path or "unknown-model",
             "tokenizer": model_path or "unknown-tokenizer",
             "url": url,
             "endpoint_type": "chat",

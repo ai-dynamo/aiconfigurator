@@ -71,15 +71,15 @@ def get_common_moe_test_cases():
     # [2048,1408,6,64], #deepseekv1_moe
     # [5120,1536,6,160], #deepseekv2
     model_config_list = [
-        [4096, 14336, 2, 8, "MOE_Mixtral8x7B"],  # mixtral_8x7b
-        [6144, 16384, 2, 8, "MOE_Mixtral8x22B"],  # mixtral_8x22b
-        [7168, 2048, 8, 256, "DEEPSEEK_V3"],  # deepseekv3, will have 1 shared expert
-        [2048, 768, 8, 128, "QWEN3_30B_A3B"],  # qwen3-moe, 30b-a3b
-        [4096, 1536, 8, 128, "QWEN3_235B"],  # qwen3-moe, 235b-a22b
-        [6144, 2560, 8, 160, "QWEN3_480B"],  # qwen3-moe, 480b-a35b
-        [7168, 2048, 8, 384, "KIMI_K2"],  # kimi k2
-        [2880, 2880, 4, 128, "GPT_OSS_120B"],
-        [2880, 2880, 4, 32, "GPT_OSS_20B"],
+        [4096, 14336, 2, 8, "mistralai/Mixtral-8x7B-v0.1"],  # mixtral_8x7b
+        [6144, 16384, 2, 8, "mistralai/Mixtral-8x22B-v0.1"],  # mixtral_8x22b
+        [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3"],  # deepseekv3, will have 1 shared expert
+        [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],  # qwen3-moe, 30b-a3b
+        [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B"],  # qwen3-moe, 235b-a22b
+        [6144, 2560, 8, 160, "Qwen/Qwen3-Coder-480B-A35B-Instruct"],  # qwen3-moe, 480b-a35b
+        [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2
+        [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
+        [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
     ]
 
     test_cases: list[MoeCommonTestCase] = []
@@ -99,8 +99,8 @@ def get_common_moe_test_cases():
     ):
         hs, inter_s, topk, num_experts, model_name = model_config
 
-        # QWEN3_30B_A3B: exclude tp >= 8 as they are not used for actual deployments
-        if model_name == "QWEN3_30B_A3B" and tp >= 8:
+        # Qwen3-30B-A3B: exclude tp >= 8 as they are not used for actual deployments
+        if model_name == "Qwen/Qwen3-30B-A3B" and tp >= 8:
             continue
 
         if tp * ep != num_gpu:
@@ -217,7 +217,7 @@ def _get_mla_common_test_cases(is_context: bool):
 
     # num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim
     model_config_list = [
-        [128, 1536, 512, 128, 64, 128, "DEEPSEEK_V3"],
+        [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-V3"],
     ]
 
     if is_context:

@@ -183,7 +183,7 @@ class TestCLIIntegration:
         yaml_content = """
 exp_with_db_mode:
     serving_mode: "agg"
-    model_name: "QWEN3_32B"
+    model_path: "QWEN3_32B"
     system_name: "h200_sxm"
     total_gpus: 8
     database_mode: "HYBRID"

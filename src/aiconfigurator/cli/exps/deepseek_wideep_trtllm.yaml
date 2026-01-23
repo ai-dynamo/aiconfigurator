@@ -9,7 +9,7 @@ exps:
 gb200_wideep_agg:
   mode: "patch"
   serving_mode: "agg"
-  model_name: "DEEPSEEK_V3"
+  model_path: "deepseek-ai/DeepSeek-V3"
   total_gpus: 512
   system_name: "gb200_sxm"
   enable_wideep: true # enable wide ep for prefill/decode
@@ -24,7 +24,7 @@ gb200_wideep_agg:
 gb200_wideep_disagg:
   mode: "patch"
   serving_mode: "disagg"
-  model_name: "DEEPSEEK_V3"
+  model_path: "deepseek-ai/DeepSeek-V3"
   total_gpus: 512
   system_name: "gb200_sxm"
   enable_wideep: true # enable wide ep for prefill/decode

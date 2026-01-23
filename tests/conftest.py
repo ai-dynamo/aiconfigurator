@@ -106,7 +106,7 @@ def mock_exp_yaml_path(tmp_path):
     yaml_content = """
     my_exp:
         serving_mode: "agg"
-        model_name: "QWEN3_32B"
+        model_path: "QWEN3_32B"
         system_name: "h200_sxm"
         total_gpus: 8
     """

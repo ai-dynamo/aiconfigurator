@@ -47,7 +47,7 @@ def get_moe_test_cases():
             continue
 
         model_name = common_moe_testcase.model_name
-        if model_name in ["GPT_OSS_20B", "GPT_OSS_120B"]:
+        if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
             continue
 
         # vllm does not support TP when EP is enabled.

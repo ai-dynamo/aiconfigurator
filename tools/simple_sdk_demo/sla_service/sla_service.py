@@ -14,7 +14,7 @@ from fastapi import Body, FastAPI, Response
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends.factory import get_backend
-from aiconfigurator.sdk.common import SupportedModels
+from aiconfigurator.sdk.common import get_default_models
 from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
 from aiconfigurator.sdk.inference_session import InferenceSession
 from aiconfigurator.sdk.models import check_is_moe, get_model
@@ -39,9 +39,9 @@ app = FastAPI(
 
 
 @app.get("/sla/supported_models")
-def get_supported_models():
+def list_supported_models():
     return Response(
-        content=orjson.dumps({"model list:": list(SupportedModels.keys())}),
+        content=orjson.dumps({"model list:": sorted(get_default_models())}),
         media_type="application/json",
     )
 
@@ -51,7 +51,7 @@ def post_sla(
     system: str = Body("h200_sxm", description="hardware name, h200_sxm, h100_sxm, b200_sxm, gb200_sxm, a100_sxm"),
     backend: str = Body("trtllm", description="backend name, trtllm, sglang, vllm"),
     version: str = Body("0.20.0", description="trtllm version, 0.20.0"),
-    model_name: str = Body("QWEN3_32B", description="model name"),
+    model_path: str = Body("QWEN3_32B", description="model name"),
     isl: int = Body(4000, description="input sequence length"),
     osl: int = Body(500, description="output sequence length"),
     ttft: int = Body(300, description="first token latency limit"),
@@ -73,7 +73,7 @@ def post_sla(
         backend_instance = get_backend(backend)
 
         # dense model
-        is_moe = check_is_moe(model_name)
+        is_moe = check_is_moe(model_path)
         agg_parallel_config_list = enumerate_parallel_config(
             num_gpu_list=[1, 2, 4, 8],
             tp_list=[1, 2, 4, 8],
@@ -118,7 +118,7 @@ def post_sla(
             overwritten_model_config.moe_tp_size = moe_tp_size
             overwritten_model_config.moe_ep_size = moe_ep_size
             overwritten_model_config.attention_dp_size = dp_size
-            model = get_model(model_name=model_name, model_config=overwritten_model_config, backend_name=backend)
+            model = get_model(model_path=model_path, model_config=overwritten_model_config, backend_name=backend)
             sess = InferenceSession(model, database, backend_instance)
 
             for cc in cc_list:

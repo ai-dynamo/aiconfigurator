@@ -13,7 +13,7 @@ exps:
 vllm_agg:
   mode: "patch"
   serving_mode: "agg" # required
-  model_name: "QWEN3_32B" # required
+  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "h200_sxm" # required, for prefill
   backend_name: "vllm"
@@ -25,7 +25,7 @@ vllm_agg:
 vllm_disagg:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_name: "QWEN3_32B" # required
+  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "h200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
@@ -38,7 +38,7 @@ vllm_disagg:
 sglang_agg:
   mode: "patch"
   serving_mode: "agg" # required
-  model_name: "QWEN3_32B" # required
+  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "h200_sxm" # required, for prefill
   backend_name: "sglang"
@@ -50,7 +50,7 @@ sglang_agg:
 sglang_disagg:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_name: "QWEN3_32B" # required
+  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "h200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
@@ -63,7 +63,7 @@ sglang_disagg:
 trtllm_agg:
   mode: "patch"
   serving_mode: "agg" # required
-  model_name: "QWEN3_32B" # required
+  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "h200_sxm" # required, for prefill
   backend_name: "trtllm"
@@ -75,7 +75,7 @@ trtllm_agg:
 trtllm_disagg:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_name: "QWEN3_32B" # required
+  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "h200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.

@@ -14,7 +14,7 @@ import pytest
 from aiconfigurator.sdk.utils import (
     _parse_hf_config_json,
     enumerate_ttft_tpot_constraints,
-    get_model_config_from_hf_id,
+    get_model_config_from_model_path,
 )
 
 pytestmark = pytest.mark.unit
@@ -130,7 +130,7 @@ class TestGetModelConfigFromHFID:
         }
         mock_download.return_value = mock_config
 
-        result = get_model_config_from_hf_id("Qwen/Qwen3-32B-FP8")
+        result = get_model_config_from_model_path("Qwen/Qwen3-32B-FP8")
 
         assert result[0] == "LLAMA"
         mock_download.assert_called_once_with("Qwen/Qwen3-32B-FP8")
