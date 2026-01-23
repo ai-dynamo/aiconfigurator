@@ -203,8 +203,10 @@ class TestCLIIntegration:
         }
         mock_generate_artifacts.return_value = {"run_0.sh": "#!/bin/bash\n"}
 
+        # Create args BEFORE patching builtins.open, since configure_parser reads example.yaml
+        args = cli_args_factory(mode="generate", save_dir=str(tmp_path))
+
         with patch("builtins.open", MagicMock()):
-            args = cli_args_factory(mode="generate", save_dir=str(tmp_path))
             cli_main(args)
 
         mock_build_params.assert_called_once()
