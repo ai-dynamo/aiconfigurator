@@ -19,12 +19,12 @@
         limits:
           gpu: "{{ gpu }}"
       extraPodSpec:
-        {% if k8s.k8s_image_pull_secret %}
+        {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
-          - name: {{ k8s.k8s_image_pull_secret }}
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
         {% endif %}
         mainContainer:
-          image: {{ k8s.k8s_image }}
+          image: {{ K8sConfig.k8s_image }}
           workingDir: {{ runtime_working_dir }}
           imagePullPolicy: IfNotPresent
           command:
@@ -33,7 +33,7 @@
             - dynamo.vllm
           args:
             - --model
-            - "{{ service.model_path }}"
+            - "{{ ServiceConfig.model_path }}"
             {% for arg in parsed_args %}
             - {{ arg | tojson }}
             {% endfor %}
@@ -48,7 +48,7 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: {{ name }}
-  namespace: {{ k8s.k8s_namespace }}
+  namespace: {{ K8sConfig.k8s_namespace }}
 spec:
   services:
     Frontend:
@@ -56,15 +56,15 @@ spec:
       componentType: frontend
       replicas: {{ frontend_replicas | default(1) }}
       extraPodSpec:
-        {% if k8s.k8s_image_pull_secret %}
+        {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
-          - name: {{ k8s.k8s_image_pull_secret }}
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
         {% endif %}
         mainContainer:
-          image: {{ k8s.k8s_image }}
+          image: {{ K8sConfig.k8s_image }}
           imagePullPolicy: IfNotPresent
 
-    {% if k8s.mode == 'agg' %}
+    {% if DynConfig.mode | default('disagg') == 'agg' %}
 {{ render_worker(
     "VllmDecodeWorker",
     "decode",

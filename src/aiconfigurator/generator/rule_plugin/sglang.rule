@@ -13,6 +13,7 @@ agg_prefill_decode kv_cache_dtype = ("fp8_e4m3" if kv_cache_dtype == "fp8" else 
 
 when (ModelConfig.prefix or 0) > 0:
     disable_prefix_cache = false
+    DynConfig.enable_router = true
 
 when (ModelConfig.nextn or 0) > 0:
     speculative_decoding_type = "NEXTN"

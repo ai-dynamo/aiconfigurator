@@ -34,7 +34,7 @@ kv_cache_config:
 
 cache_transceiver_config:
   backend: {{ cache_transceiver_config.backend | default('DEFAULT') }}
-  max_tokens_in_buffer: {{ k8s.max_tokens_in_buffer | default(1024) }}
+  max_tokens_in_buffer: {{ K8sConfig.max_tokens_in_buffer | default(1024) }}
 
 cuda_graph_config:
   enable_padding: {{ cuda_graph_config.enable_padding | default(false) }}
@@ -43,7 +43,7 @@ cuda_graph_config:
                     {{- s }}{{ ',' if not loop.last else '' }} {%- endfor %}]
 
 disable_overlap_scheduler: {{ disable_overlap_scheduler | default(true) }}
-print_iter_log: {{ service.print_iter_log | default(false) }}
+print_iter_log: {{ ServiceConfig.print_iter_log | default(false) }}
 
 {% if speculative_config.decoding_type is defined %}  # speculative decoding
 speculative_config:
