@@ -51,7 +51,22 @@ class TestCLIArgumentParsing:
     def test_mode_choices(self, cli_parser):
         """Ensure supported CLI modes are exposed."""
         action = next(action for action in cli_parser._actions if action.dest == "mode")
-        assert set(action.choices.keys()) == {"default", "exp"}
+        assert set(action.choices.keys()) == {"default", "exp", "generate"}
+
+    def test_generate_mode_required_args(self, cli_parser):
+        """Test that generate mode requires the correct arguments."""
+        subparsers = [action for action in cli_parser._actions if action.dest == "mode"]
+        assert len(subparsers) == 1
+
+        subparser_action = subparsers[0]
+        generate_parser = subparser_action.choices["generate"]
+
+        required_actions = [action for action in generate_parser._actions if getattr(action, "required", False)]
+        required_args = [action.dest for action in required_actions]
+
+        assert "model" in required_args
+        assert "total_gpus" in required_args
+        assert "system" in required_args
 
     @pytest.mark.parametrize(
         "param_name,expected_choices",

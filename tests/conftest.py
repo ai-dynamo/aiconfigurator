@@ -40,7 +40,7 @@ def cli_args_factory():
         base_args: dict[str, Any] = {}
         temp_file: Path | None = None
 
-        if mode == "default":
+        if mode == "default" or mode == "generate":
             base_args.update(
                 {
                     "model": "QWEN3_32B",
