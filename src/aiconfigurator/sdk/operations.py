@@ -589,6 +589,10 @@ class ContextAttention(Operation):
         extra_latency += apply_rope_latency + kv_write_latency
         result += extra_latency*1.1 # correction factor for extra latency
 
+        seq_imbalance_correction_scale = float(kwargs.get("seq_imbalance_correction_scale", 1.0))
+        if seq_imbalance_correction_scale != 1.0:
+            result = result * seq_imbalance_correction_scale
+
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):

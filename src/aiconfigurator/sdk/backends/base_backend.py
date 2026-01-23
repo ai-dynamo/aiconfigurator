@@ -78,7 +78,15 @@ class BaseBackend(ABC):
             for op in model.context_ops:
                 # query latency and store the latency
                 x = batch_size * isl if "logits_gemm" not in op._name else batch_size
-                result = op.query(database, x=x, batch_size=batch_size, beam_width=1, s=isl, prefix=prefix)
+                result = op.query(
+                    database,
+                    x=x,
+                    batch_size=batch_size,
+                    beam_width=1,
+                    s=isl,
+                    prefix=prefix,
+                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+                )
 
                 # ✅ IMMEDIATELY extract values - do NOT use PerformanceResult arithmetic!
                 latency_ms = float(result)  # Extract latency in milliseconds

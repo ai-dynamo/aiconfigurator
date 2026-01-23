@@ -48,3 +48,4 @@ class RuntimeConfig:
     ttft: float = None
     tpot: Union[float, list] = None
     request_latency: float = None  # it works together with ttft. 1. <= req_lat 2. <= req_lat and <= ttft
+    seq_imbalance_correction_scale: float = 1.0
