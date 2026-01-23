@@ -539,7 +539,7 @@ class Pipeline:
             with config_path.open() as f:
                 config = yaml.safe_load(f) or {}
 
-            workers = config.get("workers", {}).get("agg_workers", 1)
+            workers = config.get("WorkerConfig", {}).get("agg_workers", 1)
             LOG.info(f"Extracted agg worker count: {workers}")
             return int(workers)
 

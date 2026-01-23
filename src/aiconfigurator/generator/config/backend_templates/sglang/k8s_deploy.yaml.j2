@@ -1,6 +1,4 @@
-{%- set router_mode = k8s.router_mode | default('') -%}
-{%- set enable_router = k8s.enable_router | default(router_mode == 'kv') -%}
-{%- set is_kv = enable_router -%}
+{%- set enable_router = DynConfig.enable_router | default(false) -%}
 {%- set runtime_working_dir = working_dir or '/workspace/components/backends/sglang' -%}
 
 {%- macro render_worker(component_name, role, replicas, gpu, cli_args) -%}
@@ -16,12 +14,12 @@
         limits:
           gpu: "{{ gpu }}"
       extraPodSpec:
-        {% if k8s.k8s_image_pull_secret %}
+        {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
-          - name: {{ k8s.k8s_image_pull_secret }}
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
         {% endif %}
         mainContainer:
-          image: {{ k8s.k8s_image }}
+          image: {{ K8sConfig.k8s_image }}
           workingDir: {{ runtime_working_dir }}
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash","-c"]
@@ -29,11 +27,11 @@
             - |
               set -euo pipefail
               args=(
-                --model-path "{{ service.model_path }}"
-                --served-model-name "{{ service.served_model_name }}"
+                --model-path "{{ ServiceConfig.model_path }}"
+                --served-model-name "{{ ServiceConfig.served_model_name }}"
                 {{ cli_args }}
               )
-              {% if k8s.mode != 'agg' %}
+              {% if DynConfig.mode | default('disagg') != 'agg' %}
               args+=(--host "0.0.0.0")
               {% endif %}
               {% if role == 'prefill' %}
@@ -48,7 +46,7 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: {{ name }}
-  namespace: {{ k8s.k8s_namespace }}
+  namespace: {{ K8sConfig.k8s_namespace }}
 spec:
   services:
     Frontend:
@@ -56,20 +54,20 @@ spec:
       componentType: frontend
       replicas: {{ frontend_replicas | default(1) }}
       extraPodSpec:
-        {% if k8s.k8s_image_pull_secret %}
+        {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
-          - name: {{ k8s.k8s_image_pull_secret }}
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
         {% endif %}
         mainContainer:
-          image: {{ k8s.k8s_image }}
+          image: {{ K8sConfig.k8s_image }}
           imagePullPolicy: IfNotPresent
-      {% if is_kv %}
+      {% if enable_router %}
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
       {% endif %}
 
-    {% if k8s.mode == 'agg' %}
+    {% if DynConfig.mode | default('disagg') == 'agg' %}
 {{ render_worker(
     "SGLangWorker",
     None,

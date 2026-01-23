@@ -30,19 +30,32 @@ def _get_scope(pv: dict[str, Any], scope: str) -> Optional[dict[str, Any]]:
 def _eval(expr: str, scope: str, pv: dict[str, Any]) -> Any:
     ctx: dict[str, Any] = {}
     ctx.update(pv)
-    ctx.update(pv.get("service", {}))
-    ctx.update(pv.get("k8s", {}))
+    service_cfg = pv.get("ServiceConfig", {})
+    ctx.update(service_cfg)
+    if isinstance(service_cfg, dict):
+        ctx.setdefault("ServiceConfig", service_cfg)
+    k8s_cfg = pv.get("K8sConfig", {})
+    ctx.update(k8s_cfg)
+    if isinstance(k8s_cfg, dict):
+        ctx.setdefault("K8sConfig", k8s_cfg)
+    node_cfg = pv.get("NodeConfig", {})
+    if isinstance(node_cfg, dict):
+        ctx.update(node_cfg)
+        ctx.setdefault("NodeConfig", node_cfg)
+    dyn_cfg = pv.get("DynConfig")
+    if isinstance(dyn_cfg, dict):
+        ctx.setdefault("DynConfig", dyn_cfg)
     # Provide structured aliases for DSL compatibility
     if "SlaConfig" not in ctx:
-        sla_cfg = pv.get("sla")
+        sla_cfg = pv.get("SlaConfig")
         if isinstance(sla_cfg, dict):
             ctx["SlaConfig"] = sla_cfg
     sc = pv.get("params", {}).get(scope, {})
     ctx.update(sc)
     # Alias ModelConfig.is_moe -> is_moe for convenience
     mc = pv.get("ModelConfig") or pv.get("model") or pv.get("model_config") or {}
-    if not mc and "service" in pv and isinstance(pv["service"], dict):
-        svc = pv["service"]
+    if not mc and "ServiceConfig" in pv and isinstance(pv["ServiceConfig"], dict):
+        svc = pv["ServiceConfig"]
         modeled: dict[str, Any] = {}
         if "is_moe" in svc:
             modeled["is_moe"] = svc.get("is_moe")
@@ -89,6 +102,29 @@ def _apply_line(
     default_scope: Optional[str],
 ) -> None:
     scope, name, expr = assign
+    if "." in name:
+        prefix, remainder = name.split(".", 1)
+        config_targets = {
+            "DynConfig": "DynConfig",
+            "K8sConfig": "K8sConfig",
+            "ServiceConfig": "ServiceConfig",
+            "ModelConfig": "ModelConfig",
+            "NodeConfig": "NodeConfig",
+            "SlaConfig": "SlaConfig",
+        }
+        target_key = config_targets.get(prefix)
+        if target_key:
+            target = pv.setdefault(target_key, {})
+            if isinstance(target, dict):
+                value = _eval(expr, default_scope or "prefill", pv)
+                parts = remainder.split(".")
+                cur = target
+                for part in parts[:-1]:
+                    if part not in cur or not isinstance(cur[part], dict):
+                        cur[part] = {}
+                    cur = cur[part]
+                cur[parts[-1]] = value
+            return
     sc = scope or default_scope
     if not sc:
         return
