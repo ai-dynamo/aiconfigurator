@@ -148,12 +148,6 @@ def _add_generate_mode_arguments(parser):
         default=None,
         help="Path to model weights. Defaults to model name.",
     )
-    parser.add_argument(
-        "--backend_version",
-        type=str,
-        default=None,
-        help="Backend version for generated artifacts. Defaults to latest.",
-    )
 
 
 def configure_parser(parser):
@@ -499,10 +493,7 @@ def _run_generate_mode(args):
     )
 
     # Determine backend version
-    if args.backend_version:
-        backend_version = args.backend_version
-    else:
-        backend_version = get_latest_database_version(system=args.system, backend=args.backend)
+    backend_version = get_latest_database_version(system=args.system, backend=args.backend)
     logger.info("Using backend version: %s", backend_version)
 
     # Create output directory

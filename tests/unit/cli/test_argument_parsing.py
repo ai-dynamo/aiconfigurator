@@ -68,6 +68,15 @@ class TestCLIArgumentParsing:
         assert "total_gpus" in required_args
         assert "system" in required_args
 
+    def test_generate_mode_defaults(self, cli_parser):
+        """Test that generate mode has correct defaults."""
+        args = cli_parser.parse_args(
+            ["generate", "--model", "QWEN3_32B", "--total_gpus", "8", "--system", "h200_sxm"]
+        )
+        assert args.mode == "generate"
+        assert args.backend == common.BackendName.trtllm.value
+        assert not hasattr(args, "backend_version")
+
     @pytest.mark.parametrize(
         "param_name,expected_choices",
         [
