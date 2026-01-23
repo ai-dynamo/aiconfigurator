@@ -245,7 +245,9 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
         lines.append(
             "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
         )
-        lines.append("|---------------|--------------|--------|---------|---------|------|-----------------|------------|")
+        lines.append(
+            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
+        )
         for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:
             row = (
                 f"| {huggingface_id} | {architecture} | {system} | {backend} "

@@ -223,10 +223,9 @@ class SupportMatrix:
 
             # Add separate entries for agg and disagg modes
             for mode in success_dict:
-                results.append((
-                    huggingface_id, architecture, system, backend, version,
-                    mode, success_dict[mode], error_dict[mode]
-                ))
+                results.append(
+                    (huggingface_id, architecture, system, backend, version, mode, success_dict[mode], error_dict[mode])
+                )
 
         # Sort results by (huggingface_id, architecture, system, backend, version, mode)
         results.sort(key=lambda x: (x[0], x[1], x[2], x[3], Version(x[4]), x[5]))
