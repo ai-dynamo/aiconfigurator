@@ -64,9 +64,14 @@ class TestCLIArgumentParsing:
         required_actions = [action for action in generate_parser._actions if getattr(action, "required", False)]
         required_args = [action.dest for action in required_actions]
 
-        assert "model" in required_args
         assert "total_gpus" in required_args
         assert "system" in required_args
+
+        # Check mutual exclusion for model/hf_id
+        assert len(generate_parser._mutually_exclusive_groups) == 1
+        group_actions = [action.dest for action in generate_parser._mutually_exclusive_groups[0]._group_actions]
+        assert "model" in group_actions
+        assert "hf_id" in group_actions
 
     def test_generate_mode_defaults(self, cli_parser):
         """Test that generate mode has correct defaults."""
@@ -76,6 +81,14 @@ class TestCLIArgumentParsing:
         assert args.mode == "generate"
         assert args.backend == common.BackendName.trtllm.value
         assert not hasattr(args, "backend_version")
+
+    def test_generate_mode_hf_id(self, cli_parser):
+        """Test that generate mode accepts hf_id."""
+        args = cli_parser.parse_args(
+            ["generate", "--hf_id", "Qwen/Qwen2.5-7B", "--total_gpus", "8", "--system", "h200_sxm"]
+        )
+        assert args.hf_id == "Qwen/Qwen2.5-7B"
+        assert args.model is None
 
     @pytest.mark.parametrize(
         "param_name,expected_choices",

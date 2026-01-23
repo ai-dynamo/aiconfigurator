@@ -41,9 +41,11 @@ def cli_args_factory():
         temp_file: Path | None = None
 
         if mode == "default" or mode == "generate":
+            if "model" not in overrides and "hf_id" not in overrides:
+                base_args["model"] = "QWEN3_32B"
+
             base_args.update(
                 {
-                    "model": "QWEN3_32B",
                     "total_gpus": 8,
                     "system": "h200_sxm",
                 }

@@ -115,12 +115,17 @@ def _add_experiments_mode_arguments(parser):
 
 def _add_generate_mode_arguments(parser):
     """Add arguments for the generate mode (naive config generation)."""
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--model",
         choices=common.SupportedModels.keys(),
         type=str,
-        required=True,
         help="Model name.",
+    )
+    group.add_argument(
+        "--hf_id",
+        type=_validate_hf_model,
+        help="HuggingFace model ID. e.g. Qwen/Qwen2.5-7B",
     )
     parser.add_argument(
         "--total_gpus",
@@ -481,11 +486,12 @@ def _run_generate_mode(args):
     from aiconfigurator.sdk.perf_database import get_latest_database_version
     from aiconfigurator.sdk.utils import safe_mkdir
 
-    logger.info("Generating naive agg configuration for %s on %d GPUs", args.model, args.total_gpus)
+    model_name = args.model or args.hf_id
+    logger.info("Generating naive agg configuration for %s on %d GPUs", model_name, args.total_gpus)
 
     # Build generator parameters
     generator_params = build_naive_generator_params(
-        model_name=args.model,
+        model_name=model_name,
         total_gpus=args.total_gpus,
         system_name=args.system,
         backend_name=args.backend,
@@ -498,9 +504,10 @@ def _run_generate_mode(args):
 
     # Create output directory
     save_dir = args.save_dir or "./output"
+    model_name_safe = model_name.replace("/", "_")
     result_dir = os.path.join(
         save_dir,
-        f"{args.model}_naive_tp{generator_params['params']['agg']['tensor_parallel_size']}"
+        f"{model_name_safe}_naive_tp{generator_params['params']['agg']['tensor_parallel_size']}"
         f"_pp{generator_params['params']['agg']['pipeline_parallel_size']}_{random.randint(0, 999999):06d}",
     )
     safe_result_dir = safe_mkdir(result_dir, exist_ok=True)
@@ -534,7 +541,7 @@ def _run_generate_mode(args):
     print("\n" + "=" * 60)
     print("  Naive Configuration Generated Successfully")
     print("=" * 60)
-    print(f"  Model:           {args.model}")
+    print(f"  Model:           {model_name}")
     print(f"  System:          {args.system}")
     print(f"  Backend:         {args.backend} ({backend_version})")
     print(f"  Total GPUs:      {args.total_gpus} (using {total_used})")
