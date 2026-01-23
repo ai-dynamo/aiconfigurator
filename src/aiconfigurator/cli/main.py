@@ -182,7 +182,7 @@ def configure_parser(parser):
 
     # Generate mode - naive config without sweeping
     generate_parser = subparsers.add_parser(
-        "generate",git
+        "generate",
         parents=[common_cli_parser],
         help="Generate naive agg config without SLA optimization (no sweeping).",
         description=(
