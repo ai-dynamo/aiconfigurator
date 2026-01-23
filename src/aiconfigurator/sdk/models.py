@@ -20,6 +20,23 @@ def _get_model_info(model_name: str) -> list:
     return get_model_config_from_hf_id(model_name)
 
 
+def _architecture_to_model_family(architecture: str) -> str:
+    """
+    Convert architecture name to model family.
+    Handles both HuggingFace architecture names (e.g., 'LlamaForCausalLM')
+    and internal model family names (e.g., 'LLAMA').
+    """
+    if architecture in common.ARCHITECTURE_TO_MODEL_FAMILY:
+        return common.ARCHITECTURE_TO_MODEL_FAMILY[architecture]
+    if architecture in common.ModelFamily:
+        return architecture
+    raise ValueError(
+        f"Unknown architecture or model family: {architecture}. "
+        f"Supported architectures: {', '.join(common.ARCHITECTURE_TO_MODEL_FAMILY.keys())}. "
+        f"Supported model families: {', '.join(common.ModelFamily)}."
+    )
+
+
 def get_model(
     model_name: str,
     model_config: config.ModelConfig,
@@ -29,7 +46,7 @@ def get_model(
     Get model.
     """
     (
-        model_family,
+        architecture,
         layers,
         n,
         n_kv,
@@ -43,7 +60,8 @@ def get_model(
         moe_inter_size,
         extra_params,
     ) = _get_model_info(model_name)
-    assert model_family in common.ModelFamily, "model is not in ModelFamily(GPT, LLAMA, MOE, DEEPSEEK, NEMOTRONNAS)"
+    # Convert architecture (e.g., 'LlamaForCausalLM') to model family (e.g., 'LLAMA')
+    model_family = _architecture_to_model_family(architecture)
 
     if model_config.overwrite_num_layers > 0:
         layers = model_config.overwrite_num_layers
@@ -154,8 +172,10 @@ def get_model(
 def get_model_family(model_name: str) -> str:
     """
     Get model family.
+    Converts architecture name to model family if needed.
     """
-    return _get_model_info(model_name)[0]
+    architecture = _get_model_info(model_name)[0]
+    return _architecture_to_model_family(architecture)
 
 
 def check_is_moe(model_name: str) -> bool:
