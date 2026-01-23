@@ -75,9 +75,7 @@ class TestCLIArgumentParsing:
 
     def test_generate_mode_defaults(self, cli_parser):
         """Test that generate mode has correct defaults."""
-        args = cli_parser.parse_args(
-            ["generate", "--model", "QWEN3_32B", "--total_gpus", "8", "--system", "h200_sxm"]
-        )
+        args = cli_parser.parse_args(["generate", "--model", "QWEN3_32B", "--total_gpus", "8", "--system", "h200_sxm"])
         assert args.mode == "generate"
         assert args.backend == common.BackendName.trtllm.value
         assert not hasattr(args, "backend_version")
