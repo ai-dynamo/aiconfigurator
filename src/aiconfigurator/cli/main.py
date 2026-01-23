@@ -528,8 +528,8 @@ def _run_generate_mode(args):
             output_dir=safe_result_dir,
         )
         logger.info("Generated %d artifacts", len(artifacts))
-    except Exception as exc:
-        logger.error("Failed to generate backend artifacts: %s", exc)
+    except Exception:
+        logger.exception("Failed to generate backend artifacts")
         raise
 
     # Print summary
