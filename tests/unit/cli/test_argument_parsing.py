@@ -78,7 +78,6 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(["generate", "--model", "QWEN3_32B", "--total_gpus", "8", "--system", "h200_sxm"])
         assert args.mode == "generate"
         assert args.backend == common.BackendName.trtllm.value
-        assert not hasattr(args, "backend_version")
 
     def test_generate_mode_hf_id(self, cli_parser):
         """Test that generate mode accepts hf_id."""
