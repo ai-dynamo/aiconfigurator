@@ -23,7 +23,7 @@ from aiconfigurator.sdk.pareto_analysis import (
     get_pareto_front,
 )
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-from aiconfigurator.sdk.utils import get_model_config_from_hf_id
+from aiconfigurator.sdk.utils import get_model_config_from_hf_id, safe_mkdir
 
 logger = logging.getLogger(__name__)
 
@@ -484,7 +484,6 @@ def _run_generate_mode(args):
     from aiconfigurator.generator.api import generate_backend_artifacts
     from aiconfigurator.generator.naive import build_naive_generator_params
     from aiconfigurator.sdk.perf_database import get_latest_database_version
-    from aiconfigurator.sdk.utils import safe_mkdir
 
     model_name = args.model or args.hf_id
     logger.info("Generating naive agg configuration for %s on %d GPUs", model_name, args.total_gpus)
