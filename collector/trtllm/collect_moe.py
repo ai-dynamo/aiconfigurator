@@ -11,8 +11,12 @@ from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
 from tensorrt_llm._torch.modules.fused_moe import RenormalizeMoeRoutingMethod, create_moe
+from tensorrt_llm._torch.utils import ActivationType
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
+
+# Models that use non-gated MoE (Relu2 activation instead of SwiGLU)
+NON_GATED_MOE_MODELS = ["NEMOTRON_3_NANO"]
 
 try:
     from common_test_cases import get_common_moe_test_cases
@@ -215,6 +219,17 @@ def run_moe_torch(
     swiglu_beta = None
     swiglu_limit = None
 
+
+    # Determine activation type based on model
+    # NemotronH uses non-gated MoE with Relu2 activation
+    # Other models (DeepSeek, Qwen, Mixtral) use gated MoE with SwiGLU activation
+    if model_name in NON_GATED_MOE_MODELS:
+        activation_type = ActivationType.Relu2
+        is_gated = False
+    else:
+        activation_type = ActivationType.Swiglu
+        is_gated = True
+
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
         # use triton backend for best performance on Hopper
         model_config.moe_backend = "triton"
@@ -266,6 +281,7 @@ def run_moe_torch(
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
         swiglu_limit=swiglu_limit,
+        activation_type=activation_type,
     )
     moe.to(torch.device(device))
 
@@ -411,8 +427,10 @@ def run_moe_torch(
 
         if min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
+        elif not is_gated:
+            source = "moe_torch_flow_nongated"  # non-gated MoE (relu2)
         else:
-            source = "moe_torch_flow"  # cutlass
+            source = "moe_torch_flow"  # cutlass (gated SwiGLU)
 
         log_perf(
             item_list=[
