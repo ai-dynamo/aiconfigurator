@@ -19,4 +19,5 @@
 {%- if sglang['speculative-num-steps'] is defined -%}{%- set _ = args.append('--speculative-num-steps "' ~ sglang['speculative-num-steps'] ~ '"') -%}{%- endif -%}
 {%- if sglang['disable-cuda-graph-padding'] -%}{%- set _ = args.append('--disable-cuda-graph-padding') -%}{%- endif -%}
 {%- if sglang['cuda-graph-max-bs'] is defined -%}{%- set _ = args.append('--cuda-graph-max-bs "' ~ sglang['cuda-graph-max-bs'] ~ '"') -%}{%- endif -%}
+{%- if sglang['disaggregation-transfer-backend'] is defined -%}{%- set _ = args.append('--disaggregation-transfer-backend "' ~ sglang['disaggregation-transfer-backend'] ~ '"') -%}{%- endif -%}
 {{ args | join(' ') }}

@@ -47,10 +47,13 @@ class TestSupportedModels:
             assert isinstance(config, (list, tuple))
             assert len(config) >= 1  # At least architecture
 
-            # First element should be architecture string
+            # First element should be architecture string that maps to a valid model family
             architecture = config[0]
             assert isinstance(architecture, str)
-            assert architecture in common.ARCHITECTURE_TO_MODEL_FAMILY
+            assert architecture in common.ARCHITECTURE_TO_MODEL_FAMILY, (
+                f"Model {hf_id} has unknown architecture: {architecture}. "
+                f"Supported architectures: {list(common.ARCHITECTURE_TO_MODEL_FAMILY.keys())}"
+            )
 
     @pytest.mark.parametrize(
         "hf_id,is_moe_expected",

@@ -48,11 +48,9 @@ def collect_generator_params(
 
     mode_value = dyn_cfg.get("mode") or "disagg"
     enable_router = coerce_bool(dyn_cfg.get("enable_router"))
-    is_kv = bool(enable_router)
-    router_mode = "kv" if is_kv else ""
     mode_tag = "agg" if mode_value == "agg" else "disagg"
     name_prefix = k8s.get("name_prefix") or "dynamo"
-    name = f"{name_prefix}-{mode_tag}{('-router' if is_kv else '')}"
+    name = f"{name_prefix}-{mode_tag}{('-router' if enable_router else '')}"
     use_engine_cm = k8s.get("k8s_engine_mode", "inline") == "configmap"
     _mc_raw = k8s.get("k8s_model_cache")
     k8s_model_cache = _mc_raw.strip() if isinstance(_mc_raw, str) else ""
@@ -78,10 +76,6 @@ def collect_generator_params(
     k8s_payload.update(
         {
             "name_prefix": name_prefix,
-            "mode": mode_value,
-            "router_mode": router_mode,
-            "is_kv": is_kv,
-            "enable_router": is_kv,
             "name": name,
             "k8s_namespace": k8s.get("k8s_namespace"),
             "k8s_image": k8s.get("k8s_image"),
@@ -95,16 +89,17 @@ def collect_generator_params(
         }
     )
     return {
-        "service": service_payload,
-        "k8s": k8s_payload,
-        "workers": workers_dict,
-        "num_gpus_per_node": int(num_gpus_per_node),
+        "ServiceConfig": service_payload,
+        "K8sConfig": k8s_payload,
+        "DynConfig": dict(dyn_cfg),
+        "WorkerConfig": workers_dict,
+        "SlaConfig": sla or {},
+        "NodeConfig": {"num_gpus_per_node": int(num_gpus_per_node)},
         "params": {
             "prefill": prefill_params,
             "decode": decode_params,
             "agg": agg_params,
         },
-        "sla": sla or {},
     }
 
 
@@ -174,9 +169,9 @@ def generate_config_from_input_dict(
             group = parts[0]
             rest = parts[1:]
             if group == "ServiceConfig":
-                dest = ".".join(["service"] + rest)
+                dest = ".".join(["ServiceConfig"] + rest)
             elif group == "K8sConfig":
-                dest = ".".join(["k8s"] + rest)
+                dest = ".".join(["K8sConfig"] + rest)
             elif group == "Workers":
                 if len(rest) >= 2:
                     role = rest[0]
@@ -184,26 +179,26 @@ def generate_config_from_input_dict(
                 else:
                     dest = None
             elif group in {"WorkerCounts", "WorkerConfig"}:
-                dest = ".".join(["workers"] + rest)
+                dest = ".".join(["WorkerConfig"] + rest)
             elif group == "SlaConfig":
-                dest = ".".join(["sla"] + rest)
+                dest = ".".join(["SlaConfig"] + rest)
             elif group == "ModelConfig":
-                dest = ".".join(["service"] + rest)
+                dest = ".".join(["ModelConfig"] + rest)
             elif group == "DynConfig":
-                dest = ".".join(["dyn_config"] + rest)
+                dest = ".".join(["DynConfig"] + rest)
             elif group == "NodeConfig":
-                dest = ".".join(["node_config"] + rest)
+                dest = ".".join(["NodeConfig"] + rest)
             else:
                 dest = None
             if dest:
                 _set_by_path(target, dest, val)
-    target.setdefault("service", {})
-    target.setdefault("k8s", {})
-    target.setdefault("workers", {})
+    target.setdefault("ServiceConfig", {})
+    target.setdefault("K8sConfig", {})
+    target.setdefault("WorkerConfig", {})
     target.setdefault("params", {})
-    target.setdefault("sla", {})
-    target.setdefault("dyn_config", {})
-    target.setdefault("node_config", {})
+    target.setdefault("SlaConfig", {})
+    target.setdefault("DynConfig", {})
+    target.setdefault("NodeConfig", {})
     try:
         default_mapping = os.path.join(os.path.dirname(__file__), "config", "backend_config_mapping.yaml")
         allowed_keys = set(get_param_keys(default_mapping))
@@ -217,17 +212,20 @@ def generate_config_from_input_dict(
             if filtered:
                 for k, v in filtered.items():
                     _set_by_path(target, f"params.{role}.{k}", v)
-    return collect_generator_params(
-        service=target.get("service", {}),
-        k8s=target.get("k8s", {}),
+    params = collect_generator_params(
+        service=target.get("ServiceConfig", {}),
+        k8s=target.get("K8sConfig", {}),
         prefill_params=target.get("params", {}).get("prefill"),
         decode_params=target.get("params", {}).get("decode"),
         agg_params=target.get("params", {}).get("agg"),
-        prefill_workers=int(target.get("workers", {}).get("prefill_workers", 1)),
-        decode_workers=int(target.get("workers", {}).get("decode_workers", 1)),
-        agg_workers=int(target.get("workers", {}).get("agg_workers", 1)),
-        num_gpus_per_node=int(target.get("node_config", {}).get("num_gpus_per_node", 8)),
-        sla=target.get("sla", {}),
-        dyn_config=target.get("dyn_config", {}),
+        prefill_workers=int(target.get("WorkerConfig", {}).get("prefill_workers", 1)),
+        decode_workers=int(target.get("WorkerConfig", {}).get("decode_workers", 1)),
+        agg_workers=int(target.get("WorkerConfig", {}).get("agg_workers", 1)),
+        num_gpus_per_node=int(target.get("NodeConfig", {}).get("num_gpus_per_node", 8)),
+        sla=target.get("SlaConfig", {}),
+        dyn_config=target.get("DynConfig", {}),
         backend=backend_key,
     )
+    if target.get("ModelConfig"):
+        params["ModelConfig"] = target.get("ModelConfig", {})
+    return params

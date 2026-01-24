@@ -46,6 +46,23 @@ def _architecture_to_model_family(architecture: str) -> str:
     )
 
 
+def _architecture_to_model_family(architecture: str) -> str:
+    """
+    Convert architecture name to model family.
+    Handles both HuggingFace architecture names (e.g., 'LlamaForCausalLM')
+    and internal model family names (e.g., 'LLAMA').
+    """
+    if architecture in common.ARCHITECTURE_TO_MODEL_FAMILY:
+        return common.ARCHITECTURE_TO_MODEL_FAMILY[architecture]
+    if architecture in common.ModelFamily:
+        return architecture
+    raise ValueError(
+        f"Unknown architecture or model family: {architecture}. "
+        f"Supported architectures: {', '.join(common.ARCHITECTURE_TO_MODEL_FAMILY.keys())}. "
+        f"Supported model families: {', '.join(common.ModelFamily)}."
+    )
+
+
 def get_model(
     model_path: str,
     model_config: config.ModelConfig,

@@ -18,6 +18,7 @@ from aiconfigurator.sdk.models import check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
 from aiconfigurator.sdk.perf_database import (
     PerfDatabase,
+    PerfDataNotAvailableError,
     get_database,
     get_latest_database_version,
 )
@@ -510,6 +511,10 @@ class TaskConfigFactory:
             return
 
         database = get_database(system=system, backend=backend, version=version)
+        if database is None:
+            raise PerfDataNotAvailableError(
+                f"Missing perf database for system={system} backend={backend} version={version}."
+            )
         defaults = TaskConfigFactory._get_quant_mode(
             model_path=model_path,
             model_family=model_family,

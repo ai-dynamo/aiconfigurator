@@ -132,7 +132,7 @@ aiconfigurator cli default \
   --head_node_ip x.x.x.x
 ````
 
-To customize parameters per worker type, override the `Workers.<role>` keys with `--generator-set`. For example:
+To customize parameters per worker type, override the `Workers.<role>` keys with `--generator-set`. To set worker counts, use `WorkerConfig.*` (e.g., `WorkerConfig.prefill_workers=2`). For example:
 
 Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
 

@@ -16,7 +16,7 @@ import yaml
 from aiconfigurator import __version__
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
 from aiconfigurator.generator.api import add_generator_override_arguments, generator_cli_helper
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_request_latency_constraint,
     get_best_configs_under_tpot_constraint,
@@ -157,8 +157,48 @@ def configure_parser(parser):
     _add_experiments_mode_arguments(experiments_parser)
 
 
+def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str) -> str | None:
+    systems_dir = perf_database.get_system_config_path()
+    system_yaml = os.path.join(systems_dir, f"{system_name}.yaml")
+    if not os.path.exists(system_yaml):
+        return None
+    with open(system_yaml, encoding="utf-8") as fh:
+        system_spec = yaml.safe_load(fh) or {}
+    data_dir = system_spec.get("data_dir")
+    if not data_dir:
+        return None
+    return os.path.join(systems_dir, data_dir, backend_name, backend_version)
+
+
+def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str) -> None:
+    supported = perf_database.get_supported_databases()
+    versions = supported.get(system_name, {}).get(backend_name, [])
+    if backend_version in versions:
+        return
+
+    logger.error(
+        "No perf database for system=%s backend=%s version=%s.",
+        system_name,
+        backend_name,
+        backend_version,
+    )
+    data_path = _get_backend_data_path(system_name, backend_name, backend_version)
+    if data_path:
+        logger.error("Searched: %s", data_path)
+    if versions:
+        logger.error("Available versions: %s", ", ".join(versions))
+    else:
+        logger.error("Available versions: none")
+    logger.error("Fix: remove --backend_version to use the latest, or provide one of the available versions.")
+    raise SystemExit(1)
+
+
 def _build_default_task_configs(args) -> dict[str, TaskConfig]:
     decode_system = args.decode_system or args.system
+    if args.backend_version:
+        _ensure_backend_version_available(args.system, args.backend, args.backend_version)
+        if decode_system != args.system:
+            _ensure_backend_version_available(decode_system, args.backend, args.backend_version)
     common_kwargs: dict[str, Any] = {
         "model_path": args.model_path,
         "system_name": args.system,
@@ -300,6 +340,9 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
         }
 
         if backend_version is not None:
+            _ensure_backend_version_available(system_name, backend_name, backend_version)
+            if serving_mode == "disagg" and inferred_decode_system and inferred_decode_system != system_name:
+                _ensure_backend_version_available(inferred_decode_system, backend_name, backend_version)
             task_kwargs["backend_version"] = backend_version
 
         if serving_mode == "disagg":
