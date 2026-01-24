@@ -28,7 +28,7 @@ def test_cli_generate_combinations(
     """
     args = cli_args_factory(
         mode="generate",
-        model="QWEN3_32B",
+        model_path="Qwen/Qwen3-32B",
         total_gpus=16,
         system=system,
         backend=backend,

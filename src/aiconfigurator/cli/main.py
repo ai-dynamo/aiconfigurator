@@ -17,19 +17,17 @@ from aiconfigurator import __version__
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
 from aiconfigurator.generator.api import (
     add_generator_override_arguments,
-    generate_backend_artifacts,
+    generate_naive_config,
     generator_cli_helper,
 )
-from aiconfigurator.generator.naive import build_naive_generator_params
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_request_latency_constraint,
     get_best_configs_under_tpot_constraint,
     get_pareto_front,
 )
-from aiconfigurator.sdk.perf_database import get_latest_database_version
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-from aiconfigurator.sdk.utils import get_model_config_from_model_path, safe_mkdir
+from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -534,74 +532,44 @@ def _execute_task_configs(
 
 def _run_generate_mode(args):
     """Run the generate mode to create a naive agg config without sweeping."""
-    import random
+    model_path = args.model_path
+    logger.info("Generating naive agg configuration for %s on %d GPUs", model_path, args.total_gpus)
 
-    model_name = args.model_path
-    logger.info("Generating naive agg configuration for %s on %d GPUs", model_name, args.total_gpus)
-
-    # Build generator parameters
-    generator_params = build_naive_generator_params(
-        model_name=model_name,
+    # Use the public API function
+    result = generate_naive_config(
+        model_path=model_path,
         total_gpus=args.total_gpus,
-        system_name=args.system,
-        backend_name=args.backend,
+        system=args.system,
+        backend=args.backend,
+        output_dir=args.save_dir or "./output",
     )
 
-    # Determine backend version
-    backend_version = get_latest_database_version(system=args.system, backend=args.backend)
-    logger.info("Using backend version: %s", backend_version)
-
-    # Create output directory
-    save_dir = args.save_dir or "./output"
-    model_name_safe = model_name.replace("/", "_")
-    result_dir = os.path.join(
-        save_dir,
-        f"{model_name_safe}_naive_tp{generator_params['params']['agg']['tensor_parallel_size']}"
-        f"_pp{generator_params['params']['agg']['pipeline_parallel_size']}_{random.randint(0, 999999):06d}",
-    )
-    safe_result_dir = safe_mkdir(result_dir, exist_ok=True)
-    logger.info("Saving results to %s", safe_result_dir)
-
-    # Save generator config
-    generator_config_path = os.path.join(safe_result_dir, "generator_config.yaml")
-    with open(generator_config_path, "w") as f:
-        yaml.safe_dump(generator_params, f, sort_keys=False)
-    logger.info("Saved generator config to %s", generator_config_path)
-
-    # Generate backend artifacts
-    try:
-        artifacts = generate_backend_artifacts(
-            params=generator_params,
-            backend=args.backend,
-            backend_version=backend_version,
-            output_dir=safe_result_dir,
-        )
-        logger.info("Generated %d artifacts", len(artifacts))
-    except Exception:
-        logger.exception("Failed to generate backend artifacts")
-        raise
+    # Extract result data for CLI output
+    generator_params = result["generator_params"]
+    backend_version = result["backend_version"]
+    output_dir = result["output_dir"]
+    parallelism = result["parallelism"]
+    tp = parallelism["tp"]
+    pp = parallelism["pp"]
+    replicas = parallelism["replicas"]
+    gpus_used = parallelism["gpus_used"]
 
     # Print summary
-    tp = generator_params["params"]["agg"]["tensor_parallel_size"]
-    pp = generator_params["params"]["agg"]["pipeline_parallel_size"]
-    replicas = args.total_gpus // tp
-    total_used = tp * replicas
-
     print("\n" + "=" * 60)
     print("  Naive Configuration Generated Successfully")
     print("=" * 60)
-    print(f"  Model:           {model_name}")
+    print(f"  Model:           {model_path}")
     print(f"  System:          {args.system}")
     print(f"  Backend:         {args.backend} ({backend_version})")
-    print(f"  Total GPUs:      {args.total_gpus} (using {total_used})")
+    print(f"  Total GPUs:      {args.total_gpus} (using {gpus_used})")
     print(f"  Parallelism:     TP={tp}, PP={pp}")
-    print(f"  Replicas:        {replicas} (each using {tp} GPUs)")
+    print(f"  Replicas:        {replicas} (each using {tp * pp} GPUs)")
     print(f"  Max Batch Size:  {generator_params['params']['agg']['max_batch_size']}")
-    print(f"  Output:          {safe_result_dir}")
+    print(f"  Output:          {output_dir}")
     print("=" * 60)
     print("\nGenerated files:")
-    for filename in sorted(os.listdir(safe_result_dir)):
-        filepath = os.path.join(safe_result_dir, filename)
+    for filename in sorted(os.listdir(output_dir)):
+        filepath = os.path.join(output_dir, filename)
         if os.path.isfile(filepath):
             print(f"  - {filename}")
         elif os.path.isdir(filepath):

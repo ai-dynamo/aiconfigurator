@@ -533,6 +533,136 @@ from .aggregators import (
 from .aggregators import (
     generate_config_from_yaml as generate_config_from_yaml,
 )
+from .naive import build_naive_generator_params
+
+
+def generate_naive_config(
+    model_path: str,
+    total_gpus: int,
+    system: str,
+    backend: str = "trtllm",
+    output_dir: str | None = None,
+    backend_version: str | None = None,
+) -> dict[str, Any]:
+    """
+    Generate a naive agg configuration without SLA optimization.
+
+    Uses aggressive parallelism (TP=gpus_per_node, PP=1) to maximize
+    the chance of fitting large models into memory. No parameter sweeping
+    or memory validation is performed.
+
+    Args:
+        model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or
+            local path to directory containing config.json.
+        total_gpus: Total number of GPUs for deployment.
+        system: System name (GPU type), e.g., 'h200_sxm', 'gb200_sxm'.
+        backend: Backend name ('trtllm', 'vllm', 'sglang'). Defaults to 'trtllm'.
+        output_dir: Directory to save generated artifacts. If None, artifacts
+            are generated but not saved to disk.
+        backend_version: Optional backend version for version-specific templates.
+            If None, uses the latest available version.
+
+    Returns:
+        Dictionary containing:
+            - 'generator_params': The generator parameter configuration
+            - 'artifacts': Dict mapping artifact names to their content
+            - 'output_dir': Path where artifacts were saved (if output_dir provided)
+            - 'backend_version': The backend version used
+            - 'parallelism': Dict with 'tp', 'pp', 'replicas' info
+
+    Example:
+        >>> from aiconfigurator.generator.api import generate_naive_config
+        >>> result = generate_naive_config(
+        ...     model_path="Qwen/Qwen3-32B",
+        ...     total_gpus=8,
+        ...     system="h200_sxm",
+        ...     backend="trtllm",
+        ...     output_dir="./output",
+        ... )
+        >>> print(result['parallelism'])
+        {'tp': 8, 'pp': 1, 'replicas': 1, 'gpus_used': 8}
+    """
+    from aiconfigurator.sdk.perf_database import get_latest_database_version
+    from aiconfigurator.sdk.utils import safe_mkdir
+
+    logger = logging.getLogger(__name__)
+
+    # Build generator parameters
+    generator_params = build_naive_generator_params(
+        model_name=model_path,
+        total_gpus=total_gpus,
+        system_name=system,
+        backend_name=backend,
+    )
+
+    # Determine backend version
+    if backend_version is None:
+        backend_version = get_latest_database_version(system=system, backend=backend)
+    logger.info("Using backend version: %s", backend_version)
+
+    # Prepare output directory if provided
+    actual_output_dir = None
+    if output_dir:
+        import random
+
+        model_name_safe = model_path.replace("/", "_")
+        tp = generator_params["params"]["agg"]["tensor_parallel_size"]
+        pp = generator_params["params"]["agg"]["pipeline_parallel_size"]
+        result_dir = os.path.join(
+            output_dir,
+            f"{model_name_safe}_naive_tp{tp}_pp{pp}_{random.randint(0, 999999):06d}",
+        )
+        actual_output_dir = safe_mkdir(result_dir, exist_ok=True)
+        logger.info("Saving results to %s", actual_output_dir)
+
+        # Save generator config
+        generator_config_path = os.path.join(actual_output_dir, "generator_config.yaml")
+        with open(generator_config_path, "w") as f:
+            yaml.safe_dump(generator_params, f, sort_keys=False)
+        logger.info("Saved generator config to %s", generator_config_path)
+
+    # Generate backend artifacts
+    artifacts = render_backend_templates(
+        generator_params, backend, None, backend_version
+    )
+
+    if actual_output_dir:
+        params_obj = generator_params.get("params", {})
+        has_prefill = bool(params_obj.get("prefill"))
+        has_decode = bool(params_obj.get("decode"))
+        has_agg = bool(params_obj.get("agg"))
+        prefer_disagg = has_prefill and has_decode
+        writer = ArtifactWriter(
+            output_dir=os.path.abspath(actual_output_dir),
+            prefer_disagg=prefer_disagg,
+            has_agg_role=has_agg,
+        )
+        try:
+            writer.write(artifacts)
+        except OSError:
+            logger.exception("Failed to write artifacts")
+
+    logger.info("Generated %d artifacts", len(artifacts))
+
+    # Build result metadata
+    tp = generator_params["params"]["agg"]["tensor_parallel_size"]
+    pp = generator_params["params"]["agg"]["pipeline_parallel_size"]
+    replicas = total_gpus // (tp * pp)
+    gpus_used = tp * pp * replicas
+
+    return {
+        "generator_params": generator_params,
+        "artifacts": artifacts,
+        "output_dir": actual_output_dir,
+        "backend_version": backend_version,
+        "parallelism": {
+            "tp": tp,
+            "pp": pp,
+            "replicas": replicas,
+            "gpus_used": gpus_used,
+        },
+    }
+
 
 __all__ = [
     "add_generator_override_arguments",
@@ -541,6 +671,7 @@ __all__ = [
     "generate_backend_config",
     "generate_config_from_input_dict",
     "generate_config_from_yaml",
+    "generate_naive_config",
     "generator_cli_helper",
     "load_generator_overrides",
     "load_generator_overrides_from_args",
