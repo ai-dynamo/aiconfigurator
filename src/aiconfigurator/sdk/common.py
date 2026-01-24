@@ -30,8 +30,8 @@ class BlockConfig:
     num_inst: int = 0
 
 
-def _get_support_matrix_path() -> Path:
-    """Get the path to support_matrix.csv"""
+def _get_support_matrix_resource():
+    """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
 
 
@@ -43,12 +43,14 @@ def get_default_models() -> set[str]:
     Returns:
         set[str]: Set of unique HuggingFace model IDs that are supported.
     """
-    csv_path = _get_support_matrix_path()
+    csv_resource = _get_support_matrix_resource()
     models = set()
-    with open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            models.add(row["HuggingFaceID"])
+    # Use as_file() context manager for proper package resource access
+    with pkg_resources.as_file(csv_resource) as csv_path:
+        with open(csv_path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                models.add(row["HuggingFaceID"])
     return models
 
 
