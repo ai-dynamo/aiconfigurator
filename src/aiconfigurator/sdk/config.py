@@ -24,6 +24,9 @@ class ModelConfig:
     moe_ep_size: int = None
     attention_dp_size: int = 1
     workload_distribution: str = "power_law"
+    # quantization options
+    static_quant_mode: bool = False  # use static quantization instead of dynamic
+    lowbit_input: bool = False  # fp8 input mode, enables scale_matrix optimization
     nextn: int = 0  # at most mtp5
     nextn_accept_rates: list = None
     overwrite_num_layers: int = 0

@@ -155,6 +155,20 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
 
 class EventFn:
     @staticmethod
+    def update_quant_overhead_toggles(backend_name, gemm_quant_mode):
+        backend_ok = str(backend_name).lower() == common.BackendName.trtllm.value
+        gemm_ok = str(gemm_quant_mode).lower() == common.GEMMQuantMode.fp8.name
+        if backend_ok and gemm_ok:
+            return (
+                gr.update(interactive=True),
+                gr.update(interactive=True),
+            )
+        return (
+            gr.update(value=False, interactive=False),
+            gr.update(value=False, interactive=False),
+        )
+
+    @staticmethod
     def run_estimation_static(
         model_name,
         system_name,
@@ -175,6 +189,8 @@ class EventFn:
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        static_quant_mode,
+        lowbit_input,
         nextn,
         nextn_accept_rates,
         enable_wideep,
@@ -206,6 +222,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
+                    static_quant_mode=bool(static_quant_mode),
+                    lowbit_input=bool(lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -274,6 +292,8 @@ class EventFn:
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        static_quant_mode,
+        lowbit_input,
         nextn,
         nextn_accept_rates,
         enable_wideep,
@@ -302,6 +322,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
+                    static_quant_mode=bool(static_quant_mode),
+                    lowbit_input=bool(lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -385,6 +407,8 @@ class EventFn:
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        static_quant_mode,
+        lowbit_input,
         nextn,
         nextn_accept_rates,
         enable_wideep,
@@ -409,6 +433,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
+                    static_quant_mode=bool(static_quant_mode),
+                    lowbit_input=bool(lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -537,6 +563,8 @@ class EventFn:
         prefill_fmha_quant_mode,
         prefill_moe_quant_mode,
         prefill_comm_quant_mode,
+        prefill_static_quant_mode,
+        prefill_lowbit_input,
         prefill_latency_correction_scale,
         decode_system_name,
         decode_backend_name,
@@ -554,6 +582,8 @@ class EventFn:
         decode_fmha_quant_mode,
         decode_moe_quant_mode,
         decode_comm_quant_mode,
+        decode_static_quant_mode,
+        decode_lowbit_input,
         decode_latency_correction_scale,
         num_gpu_list,
         max_num_gpu,
@@ -579,7 +609,7 @@ class EventFn:
                 assert prefill_database is not None
                 assert decode_database is not None
                 prefill_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
-                decode_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
+                decode_database.set_default_database_mode(common.DatabaseMode[decode_database_mode])
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 prefill_model_config = config.ModelConfig(
                     tp_size=prefill_tp_size,
@@ -592,6 +622,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[prefill_fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[prefill_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
+                    static_quant_mode=bool(prefill_static_quant_mode),
+                    lowbit_input=bool(prefill_lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -609,6 +641,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[decode_fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[decode_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
+                    static_quant_mode=bool(decode_static_quant_mode),
+                    lowbit_input=bool(decode_lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -783,6 +817,8 @@ class EventFn:
         prefill_fmha_quant_mode,
         prefill_moe_quant_mode,
         prefill_comm_quant_mode,
+        prefill_static_quant_mode,
+        prefill_lowbit_input,
         decode_system_name,
         decode_backend_name,
         decode_version,
@@ -797,6 +833,8 @@ class EventFn:
         decode_fmha_quant_mode,
         decode_moe_quant_mode,
         decode_comm_quant_mode,
+        decode_static_quant_mode,
+        decode_lowbit_input,
     ):
         def create_scatter_plot(df, x_col, y_col, target_x, x_label, title):
             fig = go.Figure()
@@ -874,6 +912,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[prefill_fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[prefill_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
+                    static_quant_mode=bool(prefill_static_quant_mode),
+                    lowbit_input=bool(prefill_lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -891,6 +931,8 @@ class EventFn:
                     fmha_quant_mode=common.FMHAQuantMode[decode_fmha_quant_mode],
                     moe_quant_mode=common.MoEQuantMode[decode_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
+                    static_quant_mode=bool(decode_static_quant_mode),
+                    lowbit_input=bool(decode_lowbit_input),
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
@@ -1147,6 +1189,8 @@ class EventFn:
                 gr.update(choices=[], value=None, interactive=True),
                 gr.update(choices=[], value=None, interactive=True),
                 gr.update(choices=[], value=None, interactive=True),
+                gr.update(value=False, interactive=False),
+                gr.update(value=False, interactive=False),
             )
         database_dict = get_all_databases()
         supported_quant_mode = database_dict[system_name][backend_name][version].supported_quant_mode
@@ -1189,10 +1233,14 @@ class EventFn:
             moe_quant_mode_choices if len(moe_quant_mode_choices) > 0 else [common.MoEQuantMode.float16.name]
         )
 
+        default_gemm_quant_mode = gemm_quant_mode_choices[0]
+        static_quant_mode_update, lowbit_input_update = EventFn.update_quant_overhead_toggles(
+            backend_name, default_gemm_quant_mode
+        )
         return (
             gr.update(
                 choices=gemm_quant_mode_choices,
-                value=gemm_quant_mode_choices[0],
+                value=default_gemm_quant_mode,
                 interactive=True,
             ),
             gr.update(
@@ -1210,6 +1258,8 @@ class EventFn:
                 value=moe_quant_mode_choices[0],
                 interactive=True,
             ),
+            static_quant_mode_update,
+            lowbit_input_update,
         )
 
     @staticmethod
@@ -1225,10 +1275,39 @@ class EventFn:
         )
 
     @staticmethod
+    def update_backend_choices_with_quant_toggles(system_name):
+        backend_update, version_update = EventFn.update_backend_choices(system_name)
+        # Quant overhead toggles are only meaningful for TRTLLM; disable until backend is selected.
+        return (
+            backend_update,
+            version_update,
+            gr.update(value=False, interactive=False),
+            gr.update(value=False, interactive=False),
+        )
+
+    @staticmethod
     def update_version_choices(system_name, backend_name):
         database_dict = get_all_databases()
         version_choices = sorted(database_dict[system_name][backend_name].keys(), reverse=True)
         return gr.update(choices=version_choices, value=None, interactive=True)
+
+    @staticmethod
+    def update_version_choices_with_quant_toggles(system_name, backend_name):
+        if not backend_name:
+            # Backend not selected yet.
+            return (
+                gr.update(choices=None, value=None, interactive=True),
+                gr.update(value=False, interactive=False),
+                gr.update(value=False, interactive=False),
+            )
+
+        version_update = EventFn.update_version_choices(system_name, backend_name)
+        # Always disable here; toggles are enabled only when gemm quant mode is fp8.
+        return (
+            version_update,
+            gr.update(value=False, interactive=False),
+            gr.update(value=False, interactive=False),
+        )
 
     @staticmethod
     def update_model_related_components(model_name):
