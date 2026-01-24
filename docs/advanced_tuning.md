@@ -2,7 +2,7 @@
 In aiconfigurator, the inference framework and serving modeling is relatively complicated compared with the most simplified CLI entrypoint.  
 For example, behind the command,
 ```bash
-  aiconfigurator cli default --model QWEN3_32B --total_gpus 512 --system h200_sxm
+  aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 512 --system h200_sxm
 ```
 We hide a lot of default settings of the execution. Such as the quantization of each component, the matrix multiply, attention, moe, etc. We  
 also hide the parallel config for how we search possible combinations.  
@@ -18,7 +18,7 @@ Let's take a look at example.yaml
 exp_agg_full:
   mode: "patch" # patch or replace the config section, required
   serving_mode: "agg" # required
-  model_name: "DEEPSEEK_V3" # required
+  model_path: "deepseek-ai/DeepSeek-V3" # required
   total_gpus: 8 # required
   system_name: "h200_sxm" # required
   backend_name: "trtllm" # optional, default to trtllm
@@ -49,7 +49,7 @@ exp_agg_full:
 exp_disagg_full:
   mode: "patch" # patch or replace the config section, required
   serving_mode: "disagg" # required
-  model_name: "DEEPSEEK_V3" # required
+  model_path: "deepseek-ai/DeepSeek-V3" # required
   total_gpus: 32 # required
   system_name: "h200_sxm" # required
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.

@@ -18,6 +18,7 @@ from packaging.version import Version
 from tqdm import tqdm
 
 from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk.models import _get_model_info
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,16 @@ class SupportMatrix:
         self.databases: dict[str, dict[str, dict[str, str]]] = self.load_databases()
 
     def get_models(self):
-        return set[str](common.SupportedModels.keys())
+        """Get the set of models to test - uses DefaultHFModels (models with cached configs)."""
+        return set[str](common.DefaultHFModels)
+
+    def get_architecture(self, huggingface_id: str) -> str:
+        """Get the HuggingFace architecture for a model."""
+        return _get_model_info(huggingface_id)[0]
+
+    def get_huggingface_id(self, model: str) -> str:
+        """Get the HuggingFace model ID for an internal model name."""
+        return common.MODEL_NAME_TO_HF_ID.get(model, model)
 
     def get_systems(self):
         return set(common.SupportedSystems)
@@ -106,7 +116,7 @@ class SupportMatrix:
                 # Create TaskConfig for the test
                 task_config_kwargs = {
                     "serving_mode": mode,
-                    "model_name": model,
+                    "model_path": model,
                     "system_name": system,
                     "backend_name": backend,
                     "backend_version": version,
@@ -170,13 +180,13 @@ class SupportMatrix:
                     error_messages[mode] = None
         return results, error_messages
 
-    def test_support_matrix(self) -> list[tuple[str, str, str, str, str, bool, str | None]]:
+    def test_support_matrix(self) -> list[tuple[str, str, str, str, str, str, bool, str | None]]:
         """
         Test whether each combination is supported by AIC.
         Tests both agg and disagg modes for each combination and captures error messages.
 
         Returns:
-            List of tuples (model, system, backend, version, mode, success, err_msg)
+            List of tuples (huggingface_id, architecture, system, backend, version, mode, success, err_msg)
             Returns separate entries for agg and disagg modes
         """
         # Print configuration
@@ -201,29 +211,36 @@ class SupportMatrix:
             desc="Testing support matrix",
             unit="config",
         ):
+            # model is already a HuggingFace ID (e.g., 'meta-llama/Llama-2-7b-hf')
+            huggingface_id = model
             success_dict, error_dict = self.run_single_test(
-                model=model,
+                model=huggingface_id,
                 system=system,
                 backend=backend,
                 version=version,
             )
 
+            # Get the architecture for this model
+            architecture = self.get_architecture(huggingface_id)
+
             # Add separate entries for agg and disagg modes
             for mode in success_dict:
-                results.append((model, system, backend, version, mode, success_dict[mode], error_dict[mode]))
+                results.append(
+                    (huggingface_id, architecture, system, backend, version, mode, success_dict[mode], error_dict[mode])
+                )
 
-        # Sort results by (model, system, backend, version, mode)
-        results.sort(key=lambda x: (x[0], x[1], x[2], Version(x[3]), x[4]))
+        # Sort results by (huggingface_id, architecture, system, backend, version, mode)
+        results.sort(key=lambda x: (x[0], x[1], x[2], x[3], Version(x[4]), x[5]))
 
         # Print results summary
         self._print_results_summary(results)
 
         return results
 
-    def _print_results_summary(self, results: list[tuple[str, str, str, str, str, bool, str | None]]) -> None:
+    def _print_results_summary(self, results: list[tuple[str, str, str, str, str, str, bool, str | None]]) -> None:
         """Print summary of test results."""
         total_tests = len(results)
-        passed = sum(1 for _, _, _, _, _, success, _ in results if success)
+        passed = sum(1 for _, _, _, _, _, _, success, _ in results if success)
         failed = total_tests - passed
 
         print("\n" + "=" * 80)
@@ -238,8 +255,8 @@ class SupportMatrix:
         passed_configs = []
         failed_configs = []
 
-        for model, system, backend, version, mode, success, _ in results:
-            config = (model, system, backend, version, mode)
+        for huggingface_id, architecture, system, backend, version, mode, success, _ in results:
+            config = (huggingface_id, architecture, system, backend, version, mode)
             if success:
                 passed_configs.append(config)
             else:
@@ -248,30 +265,31 @@ class SupportMatrix:
         # Print passed configurations
         if passed_configs:
             print(f"\n✓ Passed Configurations ({len(passed_configs)}):")
-            for model, system, backend, version, mode in sorted(passed_configs):
-                print(f"  • {model} on {system} with {backend} v{version} ({mode})")
+            for huggingface_id, architecture, system, backend, version, mode in sorted(passed_configs):
+                print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode})")
 
         # Print failed configurations
         if failed_configs:
             print(f"\n✗ Failed Configurations ({len(failed_configs)}):")
-            for model, system, backend, version, mode in sorted(failed_configs):
-                print(f"  • {model} on {system} with {backend} v{version} ({mode})")
+            for huggingface_id, architecture, system, backend, version, mode in sorted(failed_configs):
+                print(f"  • {huggingface_id} ({architecture}) on {system} with {backend} v{version} ({mode})")
 
     def save_results_to_csv(
-        self, results: list[tuple[str, str, str, str, str, bool, str | None]], output_file: str
+        self, results: list[tuple[str, str, str, str, str, str, bool, str | None]], output_file: str
     ) -> None:
         """
         Save test results to a CSV file.
 
         Args:
-            results: List of tuples (model, system, backend, version, mode, success, err_msg)
+            results: List of tuples (huggingface_id, architecture, system, backend, version, mode, success, err_msg)
             output_file: Path to the output CSV file
         """
 
         with open(output_file, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["Model", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"])
-            for model, system, backend, version, mode, success, err_msg in results:
+            header = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
+            writer.writerow(header)
+            for huggingface_id, architecture, system, backend, version, mode, success, err_msg in results:
                 status = "PASS" if success else "FAIL"
-                writer.writerow([model, system, backend, version, mode, status, err_msg or ""])
+                writer.writerow([huggingface_id, architecture, system, backend, version, mode, status, err_msg or ""])
         print(f"\nResults saved to: {output_file}")

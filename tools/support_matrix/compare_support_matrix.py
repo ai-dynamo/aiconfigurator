@@ -70,7 +70,7 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
         List of error messages (empty if all checks pass)
     """
     errors = []
-    expected_header = ["Model", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
+    expected_header = ["HuggingFaceID", "Architecture", "System", "Backend", "Version", "Mode", "Status", "ErrMsg"]
 
     if header != expected_header:
         errors.append(f"Invalid header: expected {expected_header}, got {header}")
@@ -85,11 +85,11 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
             errors.append(f"Row {i} has {len(row)} columns, expected {len(expected_header)}")
             continue
 
-        mode = row[4]
+        mode = row[5]
         if mode not in ["agg", "disagg"]:
             errors.append(f"Row {i}: Invalid mode '{mode}', expected 'agg' or 'disagg'")
 
-        status = row[5]
+        status = row[6]
         if status not in ["PASS", "FAIL"]:
             errors.append(f"Row {i}: Invalid status '{status}', expected 'PASS' or 'FAIL'")
 
@@ -112,13 +112,16 @@ def check_range_matches_database(data_rows: list[list[str]]) -> list[str]:
     expected_base_combinations = set(support_matrix.generate_combinations())
 
     # Each base combination should have both agg and disagg entries
+    # Note: generate_combinations returns (huggingface_id, system, backend, version)
+    # Models are identified by HuggingFace IDs from DefaultHFModels
     expected_combinations = set()
-    for model, system, backend, version in expected_base_combinations:
-        expected_combinations.add((model, system, backend, version, "agg"))
-        expected_combinations.add((model, system, backend, version, "disagg"))
+    for huggingface_id, system, backend, version in expected_base_combinations:
+        architecture = support_matrix.get_architecture(huggingface_id)
+        expected_combinations.add((huggingface_id, architecture, system, backend, version, "agg"))
+        expected_combinations.add((huggingface_id, architecture, system, backend, version, "disagg"))
 
-    # Extract actual combinations from CSV
-    actual_combinations = {(row[0], row[1], row[2], row[3], row[4]) for row in data_rows}
+    # Extract actual combinations from CSV (huggingface_id, architecture, system, backend, version, mode)
+    actual_combinations = {(row[0], row[1], row[2], row[3], row[4], row[5]) for row in data_rows}
 
     missing = expected_combinations - actual_combinations
     extra = actual_combinations - expected_combinations
@@ -152,13 +155,14 @@ def compare_csv_files(
 
     Returns:
         Tuple of (added_rows, removed_rows, changed_rows)
-        - added_rows: List of (model, system, backend, version, mode, status) tuples
-        - removed_rows: List of (model, system, backend, version, mode, status) tuples
-        - changed_rows: List of (model, system, backend, version, mode, old_status, new_status) tuples
+        - added_rows: List of (huggingface_id, architecture, system, backend, version, mode, status) tuples
+        - removed_rows: List of (huggingface_id, architecture, system, backend, version, mode, status) tuples
+        - changed_rows: List of (huggingface_id, architecture, system, backend, version,
+            mode, old_status, new_status) tuples
     """
-    # Build dicts: key = (model, system, backend, version, mode) -> status
-    old_status_map = {(row[0], row[1], row[2], row[3], row[4]): row[5] for row in old_data_rows}
-    new_status_map = {(row[0], row[1], row[2], row[3], row[4]): row[5] for row in new_data_rows}
+    # Build dicts: key = (huggingface_id, architecture, system, backend, version, mode) -> status
+    old_status_map = {(row[0], row[1], row[2], row[3], row[4], row[5]): row[6] for row in old_data_rows}
+    new_status_map = {(row[0], row[1], row[2], row[3], row[4], row[5]): row[6] for row in new_data_rows}
 
     old_keys = set(old_status_map.keys())
     new_keys = set(new_status_map.keys())
@@ -166,16 +170,16 @@ def compare_csv_files(
     # Find added rows (in new but not in old)
     added_rows = []
     for key in sorted(new_keys - old_keys):
-        model, system, backend, version, mode = key
+        huggingface_id, architecture, system, backend, version, mode = key
         status = new_status_map[key]
-        added_rows.append((model, system, backend, version, mode, status))
+        added_rows.append((huggingface_id, architecture, system, backend, version, mode, status))
 
     # Find removed rows (in old but not in new)
     removed_rows = []
     for key in sorted(old_keys - new_keys):
-        model, system, backend, version, mode = key
+        huggingface_id, architecture, system, backend, version, mode = key
         status = old_status_map[key]
-        removed_rows.append((model, system, backend, version, mode, status))
+        removed_rows.append((huggingface_id, architecture, system, backend, version, mode, status))
 
     # Find changed rows (in both, but status changed)
     changed_rows = []
@@ -183,8 +187,8 @@ def compare_csv_files(
         old_status = old_status_map[key]
         new_status = new_status_map[key]
         if old_status != new_status:
-            model, system, backend, version, mode = key
-            changed_rows.append((model, system, backend, version, mode, old_status, new_status))
+            huggingface_id, architecture, system, backend, version, mode = key
+            changed_rows.append((huggingface_id, architecture, system, backend, version, mode, old_status, new_status))
 
     return added_rows, removed_rows, changed_rows
 
@@ -210,10 +214,11 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     lines.append(f"### 1. Added the following {len(added_rows)} rows")
     if added_rows:
         lines.append("")
-        lines.append("| Model | System | Backend | Version | Mode | Status |")
-        lines.append("|-------|--------|---------|---------|------|--------|")
-        for model, system, backend, version, mode, status in added_rows:
-            lines.append(f"| {model} | {system} | {backend} | {version} | {mode} | {status} |")
+        lines.append("| HuggingFaceID | Architecture | System | Backend | Version | Mode | Status |")
+        lines.append("|---------------|--------------|--------|---------|---------|------|--------|")
+        for huggingface_id, architecture, system, backend, version, mode, status in added_rows:
+            row = f"| {huggingface_id} | {architecture} | {system} | {backend} | {version} | {mode} | {status} |"
+            lines.append(row)
     else:
         lines.append("")
         lines.append("*No rows added*")
@@ -223,10 +228,11 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     lines.append(f"### 2. Removed the following {len(removed_rows)} rows")
     if removed_rows:
         lines.append("")
-        lines.append("| Model | System | Backend | Version | Mode | Status |")
-        lines.append("|-------|--------|---------|---------|------|--------|")
-        for model, system, backend, version, mode, status in removed_rows:
-            lines.append(f"| {model} | {system} | {backend} | {version} | {mode} | {status} |")
+        lines.append("| HuggingFaceID | Architecture | System | Backend | Version | Mode | Status |")
+        lines.append("|---------------|--------------|--------|---------|---------|------|--------|")
+        for huggingface_id, architecture, system, backend, version, mode, status in removed_rows:
+            row = f"| {huggingface_id} | {architecture} | {system} | {backend} | {version} | {mode} | {status} |"
+            lines.append(row)
     else:
         lines.append("")
         lines.append("*No rows removed*")
@@ -236,10 +242,18 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     lines.append(f"### 3. Changed the following {len(changed_rows)} rows")
     if changed_rows:
         lines.append("")
-        lines.append("| Model | System | Backend | Version | Mode | Previous Status | New Status |")
-        lines.append("|-------|--------|---------|---------|------|-----------------|------------|")
-        for model, system, backend, version, mode, old_status, new_status in changed_rows:
-            lines.append(f"| {model} | {system} | {backend} | {version} | {mode} | {old_status} | {new_status} |")
+        lines.append(
+            "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
+        )
+        lines.append(
+            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
+        )
+        for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:
+            row = (
+                f"| {huggingface_id} | {architecture} | {system} | {backend} "
+                f"| {version} | {mode} | {old_status} | {new_status} |"
+            )
+            lines.append(row)
     else:
         lines.append("")
         lines.append("*No rows changed*")

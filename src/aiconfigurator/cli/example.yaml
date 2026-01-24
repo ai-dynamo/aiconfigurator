@@ -12,7 +12,7 @@ exps:
 exp_agg_full:
   mode: "patch" # patch or replace the config section, required
   serving_mode: "agg" # required
-  model_name: "DEEPSEEK_V3" # required
+  model_path: "deepseek-ai/DeepSeek-V3" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "h200_sxm" # required
   backend_name: "trtllm" # optional, default to trtllm
@@ -45,7 +45,7 @@ exp_agg_full:
 exp_agg_simplified:
   mode: "patch" # patch or replace the config section, required
   serving_mode: "agg" # required
-  model_name: "DEEPSEEK_V3" # required
+  model_path: "deepseek-ai/DeepSeek-V3" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "h200_sxm" # required
   config: # optional, would like to overwrite moe quant
@@ -56,7 +56,7 @@ exp_agg_simplified:
 exp_disagg_full:
   mode: "patch" # patch or replace the config section, required
   serving_mode: "disagg" # required
-  model_name: "DEEPSEEK_V3" # required
+  model_path: "deepseek-ai/DeepSeek-V3" # required, HuggingFace model ID
   total_gpus: 32 # required
   system_name: "h200_sxm" # required
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
@@ -120,7 +120,7 @@ exp_disagg_full:
 exp_disagg_simplified:
   mode: "patch"
   serving_mode: "disagg"
-  model_name: "DEEPSEEK_V3"
+  model_path: "DEEPSEEK_V3"
   total_gpus: 512
   system_name: "gb200_sxm"
   enable_wideep: false # enable wide ep for prefill/decode, default to false, optional

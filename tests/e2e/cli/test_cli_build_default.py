@@ -10,7 +10,7 @@ pytestmark = [pytest.mark.e2e, pytest.mark.build]
 _DEFAULT_BUILD_CASES = [
     pytest.param(
         {
-            "model": "QWEN3_32B",
+            "model_path": "Qwen/Qwen3-32B",
             "system": "h200_sxm",
             "backend": "trtllm",
             "total_gpus": 32,
@@ -23,7 +23,7 @@ _DEFAULT_BUILD_CASES = [
     ),
     pytest.param(
         {
-            "model": "DEEPSEEK_V3",
+            "model_path": "deepseek-ai/DeepSeek-V3",
             "system": "h200_sxm",
             "backend": "trtllm",
             "total_gpus": 32,
@@ -36,7 +36,7 @@ _DEFAULT_BUILD_CASES = [
     ),
     pytest.param(
         {
-            "model": "QWEN3_32B",
+            "model_path": "Qwen/Qwen3-32B",
             "system": "h200_sxm",
             "backend": "sglang",
             "total_gpus": 32,
@@ -49,7 +49,7 @@ _DEFAULT_BUILD_CASES = [
     ),
     pytest.param(
         {
-            "model": "DEEPSEEK_V3",
+            "model_path": "deepseek-ai/DeepSeek-V3",
             "system": "h200_sxm",
             "backend": "sglang",
             "total_gpus": 32,
@@ -62,7 +62,7 @@ _DEFAULT_BUILD_CASES = [
     ),
     pytest.param(
         {
-            "model": "QWEN3_32B",
+            "model_path": "Qwen/Qwen3-32B",
             "system": "h200_sxm",
             "backend": "vllm",
             "total_gpus": 32,
@@ -78,7 +78,7 @@ _DEFAULT_BUILD_CASES = [
 
 def _build_default_cmd(
     *,
-    model: str,
+    model_path: str,
     system: str,
     backend: str,
     total_gpus: int,
@@ -92,8 +92,8 @@ def _build_default_cmd(
         "aiconfigurator",
         "cli",
         "default",
-        "--model",
-        model,
+        "--model_path",
+        model_path,
         "--system",
         system,
         "--backend",
@@ -131,5 +131,5 @@ def test_cli_default_build_subset(case: dict):
 
     combined_output = f"{completed.stdout}\n{completed.stderr}"
     assert "Dynamo aiconfigurator Final Results" in combined_output
-    assert f"Model: {case['model']}" in combined_output
+    assert f"Model: {case['model_path']}" in combined_output
     assert f"Total GPUs: {case['total_gpus']}" in combined_output

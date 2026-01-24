@@ -67,9 +67,9 @@ def render_backend_templates(
     }
     wd = backend_dirs.get(backend)
     if wd:
-        # k8s.working_dir used in k8s_deploy templates, also expose top-level
-        context.setdefault("k8s", {})
-        context["k8s"]["working_dir"] = wd
+        # K8sConfig.working_dir used in k8s_deploy templates, also expose top-level
+        context.setdefault("K8sConfig", {})
+        context["K8sConfig"]["working_dir"] = wd
         context["working_dir"] = wd
 
     # Determine generation mode by params presence
@@ -198,7 +198,7 @@ def render_backend_templates(
             logger.warning(f"Failed to render engine template {engine_template_file.name}: {e}")
 
     # Inject inline engine args content into context for k8s template
-    # These are used when k8s.k8s_engine_mode == 'inline'
+    # These are used when K8sConfig.k8s_engine_mode == 'inline'
     context["prefill_engine_args_inline"] = rendered_templates.get("extra_engine_args_prefill.yaml", "")
     context["decode_engine_args_inline"] = rendered_templates.get("extra_engine_args_decode.yaml", "")
     context["agg_engine_args_inline"] = rendered_templates.get("extra_engine_args_agg.yaml", "")
@@ -268,13 +268,14 @@ def render_backend_templates(
             tmpl = env.get_template("run.sh.j2")
 
             # Determine mode
-            mode = context.get("k8s", {}).get("mode", "disagg")
+            mode = context.get("DynConfig", {}).get("mode", "disagg")
 
             if mode == "agg":
                 # Use GPU counts injected earlier from rule outputs
                 agg_gpu = int(context.get("agg_gpu", 1))
                 agg_workers = int(context.get("agg_workers", 1))
-                num_gpus_per_node = int(context.get("num_gpus_per_node", 8))
+                node_cfg = context.get("NodeConfig", {})
+                num_gpus_per_node = int(node_cfg.get("num_gpus_per_node", 8))
 
                 # Simple greedy allocation
                 def _allocate_agg_nodes(workers: int, gpu: int, gpu_per_node: int):
@@ -295,10 +296,10 @@ def render_backend_templates(
 
                 for idx, cnt in enumerate(plan):
                     node_ctx = dict(context)
-                    # Ensure nested service dict exists and set include_frontend
-                    svc = dict(node_ctx.get("service", {}))
+                    # Ensure nested ServiceConfig dict exists and set include_frontend
+                    svc = dict(node_ctx.get("ServiceConfig", {}))
                     svc["include_frontend"] = idx == 0
-                    node_ctx["service"] = svc
+                    node_ctx["ServiceConfig"] = svc
                     node_ctx["agg_gpu"] = agg_gpu
                     node_ctx["agg_workers"] = int(cnt["workers"])
                     node_ctx["agg_gpu_offset"] = 0
@@ -311,7 +312,8 @@ def render_backend_templates(
 
                 prefill_workers = int(context.get("prefill_workers", 1))
                 decode_workers = int(context.get("decode_workers", 1))
-                num_gpus_per_node = int(context.get("num_gpus_per_node", 8))
+                node_cfg = context.get("NodeConfig", {})
+                num_gpus_per_node = int(node_cfg.get("num_gpus_per_node", 8))
 
                 # Simple greedy allocation
                 def _allocate_disagg_nodes(p_worker: int, p_gpu: int, d_worker: int, d_gpu: int, gpu_per_node: int):
@@ -384,9 +386,9 @@ def render_backend_templates(
 
                 for idx, cnt in enumerate(plan):
                     node_ctx = dict(context)
-                    svc = dict(node_ctx.get("service", {}))
+                    svc = dict(node_ctx.get("ServiceConfig", {}))
                     svc["include_frontend"] = idx == 0
-                    node_ctx["service"] = svc
+                    node_ctx["ServiceConfig"] = svc
                     node_ctx["prefill_gpu"] = prefill_gpu
                     node_ctx["decode_gpu"] = decode_gpu
                     node_ctx["prefill_workers"] = int(cnt.get("p_worker", 0))
@@ -417,41 +419,38 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context = {}
 
     # Extract ModelConfig (is_moe, nextn, etc.)
-    context["num_gpus_per_node"] = param_values.get("num_gpus_per_node", 8)
     model_config = param_values.get("ModelConfig", {})
     if model_config.get("is_moe"):
         context["is_moe"] = model_config["is_moe"]
 
     # Extract unified service configuration
-    service_config = param_values.get("service", {})
-    context["model_name"] = service_config.get("model_name") or service_config.get("served_model_name", "")
-    context["model_path"] = service_config.get("model_path")
-    context["served_model_name"] = service_config.get("served_model_name")
-    context["service"] = dict(service_config)
+    service_config = param_values.get("ServiceConfig", {})
+    context["model_path"] = service_config.get("model_path") or service_config.get("served_model_path", "")
+    context["served_model_path"] = service_config.get("served_model_path")
+    context["ServiceConfig"] = dict(service_config)
 
     # Extract K8s configuration
-    k8s_config = param_values.get("k8s", {})
+    k8s_config = param_values.get("K8sConfig", {})
     context["name_prefix"] = k8s_config.get("name_prefix")
-    context["mode"] = k8s_config.get("mode")
     context["k8s_namespace"] = k8s_config.get("k8s_namespace")
     context["k8s_image"] = k8s_config.get("k8s_image")
     context["k8s_image_pull_secret"] = k8s_config.get("k8s_image_pull_secret")
     context["working_dir"] = k8s_config.get("working_dir")
     context["k8s_engine_mode"] = k8s_config.get("k8s_engine_mode")
     context["k8s_model_cache"] = k8s_config.get("k8s_model_cache")
-    enable_router = bool(k8s_config.get("enable_router"))
-    context["router_mode"] = "kv" if enable_router else ""
-    context["is_kv"] = enable_router
-    context["enable_router"] = enable_router
-    name_suffix = "agg" if context["mode"] == "agg" else "disagg"
+
+    # Extract DynConfig for mode/router decisions
+    dyn_config = param_values.get("DynConfig", {})
+    if isinstance(dyn_config, dict):
+        context["DynConfig"] = dyn_config
+    mode_value = dyn_config.get("mode") if isinstance(dyn_config, dict) else None
+    mode_value = mode_value or "disagg"
+    enable_router = bool(dyn_config.get("enable_router")) if isinstance(dyn_config, dict) else False
+    name_suffix = "agg" if mode_value == "agg" else "disagg"
     router_suffix = "-router" if enable_router else ""
     full_name = f"{context['name_prefix']}-{name_suffix}{router_suffix}"
     context["name"] = k8s_config.get("name") or full_name
-    k8s_copy = dict(k8s_config)
-    k8s_copy["router_mode"] = context["router_mode"]
-    k8s_copy["is_kv"] = enable_router
-    k8s_copy["enable_router"] = enable_router
-    context["k8s"] = k8s_copy
+    context["K8sConfig"] = dict(k8s_config)
 
     # Runtime is part of service
     context["head_node_ip"] = service_config.get("head_node_ip")
@@ -465,7 +464,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["agg_params"] = worker_params.get("agg", {})
 
     # Extract worker counts
-    workers = param_values.get("workers", {})
+    workers = param_values.get("WorkerConfig", {})
     context["prefill_workers"] = workers.get("prefill_workers", 1)
     context["decode_workers"] = workers.get("decode_workers", 1)
     context["agg_workers"] = workers.get("agg_workers", 1)
@@ -478,6 +477,10 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
 
     fr = 1 if (context.get("include_frontend") is True) else 0
     context["frontend_replicas"] = fr
+
+    node_config = param_values.get("NodeConfig", {})
+    if isinstance(node_config, dict):
+        context["NodeConfig"] = dict(node_config)
 
     # Load backend_config_mapping.yaml to understand parameter mappings
     mapping_data = load_yaml_mapping(_BACKEND_MAPPING_FILE)

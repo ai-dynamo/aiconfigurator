@@ -57,8 +57,8 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
   ```
   aiconfigurator cli default \
     --backend sglang \
-    --backend_version 0.5.1.post1 \
-    --model QWEN3_32B \
+    --backend_version 0.5.6.post2 \
+    --model_path Qwen/Qwen3-32B \
     --system h200_sxm \
     --total_gpus 8 \
     --isl 5000 --osl 1000 --ttft 2000 --tpot 50 \
@@ -93,7 +93,7 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
             "mode": "disagg",
             "enable_router": True,
             "k8s_namespace": "dynamo",
-            "k8s_image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0",
+            "k8s_image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0",
             "k8s_engine_mode": "configmap",
             "k8s_model_cache": "pvc:model-cache-7b",
         },
@@ -105,9 +105,9 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
     }
 
     params = generate_config_from_input_dict(input_params, backend="trtllm")
-    artifacts = generate_backend_artifacts(params, backend="trtllm", output_dir="./results/sample", backend_version="1.2.0rc3")
+    artifacts = generate_backend_artifacts(params, backend="trtllm", output_dir="./results/sample", backend_version="1.2.0rc5")
     ```
-  - Command line: `python -m aiconfigurator.generator.main render-artifacts --backend trtllm --version 1.2.0rc3 --config sample_input.yaml --output ./results`
+  - Command line: `python -m aiconfigurator.generator.main render-artifacts --backend trtllm --version 1.2.0rc5 --config sample_input.yaml --output ./results`
     ```
     # Sample sample_input.yaml
     
@@ -118,7 +118,7 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
       port: 8000
     K8sConfig:
       k8s_namespace: dynamo
-      k8s_image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.1
+      k8s_image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
     WorkerConfig:
       prefill_workers: 1
       decode_workers: 1

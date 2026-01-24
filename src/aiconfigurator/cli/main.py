@@ -21,7 +21,7 @@ from aiconfigurator.generator.api import (
     generator_cli_helper,
 )
 from aiconfigurator.generator.naive import build_naive_generator_params
-from aiconfigurator.sdk import common
+from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_request_latency_constraint,
     get_best_configs_under_tpot_constraint,
@@ -29,7 +29,7 @@ from aiconfigurator.sdk.pareto_analysis import (
 )
 from aiconfigurator.sdk.perf_database import get_latest_database_version
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-from aiconfigurator.sdk.utils import get_model_config_from_hf_id, safe_mkdir
+from aiconfigurator.sdk.utils import get_model_config_from_model_path, safe_mkdir
 
 logger = logging.getLogger(__name__)
 
@@ -42,28 +42,46 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
     return common_parser
 
 
-def _validate_hf_model(hf_id: str) -> str:
-    if hf_id in common.CachedHFModels:
-        return hf_id
+def _validate_model_path(model_path: str) -> str:
+    """
+    Validate model_path which can be:
+    1. A HuggingFace model path (e.g., "Qwen/Qwen3-32B")
+    2. A local path containing a config.json file
+    """
+    import os
+
+    # Check if it's a local path with config.json
+    if os.path.isdir(model_path):
+        config_path = os.path.join(model_path, "config.json")
+        if os.path.isfile(config_path):
+            return model_path
+        raise argparse.ArgumentTypeError(f"Directory '{model_path}' does not contain a config.json file.")
+
+    # Check if it's a file path to config.json directly
+    if os.path.isfile(model_path) and model_path.endswith("config.json"):
+        return os.path.dirname(model_path) or model_path
+
+    # Otherwise treat as HuggingFace model path
+    if model_path in common.DefaultHFModels:
+        return model_path
+
+    # Try to fetch from HuggingFace
     try:
-        get_model_config_from_hf_id(hf_id)
-        return hf_id
+        get_model_config_from_model_path(model_path)
+        return model_path
     except Exception as e:
-        raise argparse.ArgumentTypeError(str(e)) from e
+        raise argparse.ArgumentTypeError(
+            f"'{model_path}' is not a valid HuggingFace model path or local path with config.json. Error: {e}"
+        ) from e
 
 
 def _add_default_mode_arguments(parser):
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--model",
-        choices=common.SupportedModels.keys(),
-        type=str,
-        help="Model name.",
-    )
-    group.add_argument(
-        "--hf_id",
-        type=_validate_hf_model,
-        help="HuggingFace model ID. e.g. Qwen/Qwen2.5-7B",
+    parser.add_argument(
+        "--model_path",
+        type=_validate_model_path,
+        required=True,
+        help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
+        "local path to directory containing config.json.",
     )
     parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")
     parser.add_argument(
@@ -121,17 +139,12 @@ def _add_experiments_mode_arguments(parser):
 
 def _add_generate_mode_arguments(parser):
     """Add arguments for the generate mode (naive config generation)."""
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--model",
-        choices=common.SupportedModels.keys(),
-        type=str,
-        help="Model name.",
-    )
-    group.add_argument(
-        "--hf_id",
-        type=_validate_hf_model,
-        help="HuggingFace model ID. e.g. Qwen/Qwen2.5-7B",
+    parser.add_argument(
+        "--model_path",
+        type=_validate_model_path,
+        required=True,
+        help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
+        "local path to directory containing config.json.",
     )
     parser.add_argument(
         "--total_gpus",
@@ -194,10 +207,50 @@ def configure_parser(parser):
     _add_generate_mode_arguments(generate_parser)
 
 
+def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str) -> str | None:
+    systems_dir = perf_database.get_system_config_path()
+    system_yaml = os.path.join(systems_dir, f"{system_name}.yaml")
+    if not os.path.exists(system_yaml):
+        return None
+    with open(system_yaml, encoding="utf-8") as fh:
+        system_spec = yaml.safe_load(fh) or {}
+    data_dir = system_spec.get("data_dir")
+    if not data_dir:
+        return None
+    return os.path.join(systems_dir, data_dir, backend_name, backend_version)
+
+
+def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str) -> None:
+    supported = perf_database.get_supported_databases()
+    versions = supported.get(system_name, {}).get(backend_name, [])
+    if backend_version in versions:
+        return
+
+    logger.error(
+        "No perf database for system=%s backend=%s version=%s.",
+        system_name,
+        backend_name,
+        backend_version,
+    )
+    data_path = _get_backend_data_path(system_name, backend_name, backend_version)
+    if data_path:
+        logger.error("Searched: %s", data_path)
+    if versions:
+        logger.error("Available versions: %s", ", ".join(versions))
+    else:
+        logger.error("Available versions: none")
+    logger.error("Fix: remove --backend_version to use the latest, or provide one of the available versions.")
+    raise SystemExit(1)
+
+
 def _build_default_task_configs(args) -> dict[str, TaskConfig]:
     decode_system = args.decode_system or args.system
+    if args.backend_version:
+        _ensure_backend_version_available(args.system, args.backend, args.backend_version)
+        if decode_system != args.system:
+            _ensure_backend_version_available(decode_system, args.backend, args.backend_version)
     common_kwargs: dict[str, Any] = {
-        "model_name": args.model or args.hf_id,
+        "model_path": args.model_path,
         "system_name": args.system,
         "backend_name": args.backend,
         "backend_version": args.backend_version,
@@ -226,7 +279,7 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
 _EXPERIMENT_RESERVED_KEYS = {
     "mode",
     "serving_mode",
-    "model_name",
+    "model_path",
     "system_name",
     "decode_system_name",
     "backend_name",
@@ -293,9 +346,9 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             config_section = copy.deepcopy(config_section)
 
         serving_mode = exp_config["serving_mode"]
-        model_name = exp_config["model_name"]
-        if serving_mode not in {"agg", "disagg"} or not model_name:
-            logger.warning("Skipping experiment '%s': missing serving_mode or model_name.", exp_name)
+        model_path = exp_config["model_path"]
+        if serving_mode not in {"agg", "disagg"} or not model_path:
+            logger.warning("Skipping experiment '%s': missing serving_mode or model_path.", exp_name)
             continue
 
         # system
@@ -329,7 +382,7 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
 
         task_kwargs: dict[str, Any] = {
             "serving_mode": serving_mode,
-            "model_name": model_name,
+            "model_path": model_path,
             "system_name": system_name,
             "backend_name": backend_name,
             "total_gpus": total_gpus,
@@ -337,6 +390,9 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
         }
 
         if backend_version is not None:
+            _ensure_backend_version_available(system_name, backend_name, backend_version)
+            if serving_mode == "disagg" and inferred_decode_system and inferred_decode_system != system_name:
+                _ensure_backend_version_available(inferred_decode_system, backend_name, backend_version)
             task_kwargs["backend_version"] = backend_version
 
         if serving_mode == "disagg":
@@ -480,7 +536,7 @@ def _run_generate_mode(args):
     """Run the generate mode to create a naive agg config without sweeping."""
     import random
 
-    model_name = args.model or args.hf_id
+    model_name = args.model_path
     logger.info("Generating naive agg configuration for %s on %d GPUs", model_name, args.total_gpus)
 
     # Build generator parameters

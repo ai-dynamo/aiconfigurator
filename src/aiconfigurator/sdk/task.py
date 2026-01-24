@@ -18,6 +18,7 @@ from aiconfigurator.sdk.models import check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
 from aiconfigurator.sdk.perf_database import (
     PerfDatabase,
+    PerfDataNotAvailableError,
     get_database,
     get_latest_database_version,
 )
@@ -49,7 +50,7 @@ class ConfigLayer:
 @dataclass
 class TaskContext:
     serving_mode: Literal["agg", "disagg"]
-    model_name: str
+    model_path: str
     model_family: str
     system_name: str
     decode_system_name: str | None
@@ -70,7 +71,7 @@ class TaskContext:
 
     @property
     def is_moe(self) -> bool:
-        return check_is_moe(self.model_name)
+        return check_is_moe(self.model_path)
 
     def resolved_backend_version_for(self, system_name: str) -> str:
         if self.backend_version is not None:
@@ -142,8 +143,8 @@ class TaskConfigFactory:
 
         config = DefaultMunch.fromDict(config_dict, DefaultMunch)
 
-        if config.model_name != ctx.model_name:
-            raise ValueError(f"Model name mismatch: base {ctx.model_name} vs. merged {config.model_name}")
+        if config.model_path != ctx.model_path:
+            raise ValueError(f"Model name mismatch: base {ctx.model_path} vs. merged {config.model_path}")
 
         if ctx.serving_mode == "agg":
             cls._finalize_agg(config, ctx)
@@ -172,7 +173,7 @@ class TaskConfigFactory:
         nextn = 1 if ctx.model_family == "DEEPSEEK" else 0
         return {
             "serving_mode": ctx.serving_mode,
-            "model_name": ctx.model_name,
+            "model_path": ctx.model_path,
             "nextn": nextn,
             "nextn_accept_rates": [0.85, 0, 0, 0, 0],
             "runtime_config": {
@@ -438,7 +439,7 @@ class TaskConfigFactory:
 
         cls._apply_quant_modes(
             target_cfg=worker_config,
-            model_name=ctx.model_name,
+            model_path=ctx.model_path,
             model_family=ctx.model_family,
             system=worker_config.system_name,
             backend=worker_config.backend_name,
@@ -468,7 +469,7 @@ class TaskConfigFactory:
 
         cls._apply_quant_modes(
             target_cfg=prefill_cfg,
-            model_name=ctx.model_name,
+            model_path=ctx.model_path,
             model_family=ctx.model_family,
             system=prefill_cfg.system_name,
             backend=prefill_cfg.backend_name,
@@ -478,7 +479,7 @@ class TaskConfigFactory:
 
         cls._apply_quant_modes(
             target_cfg=decode_cfg,
-            model_name=ctx.model_name,
+            model_path=ctx.model_path,
             model_family=ctx.model_family,
             system=decode_cfg.system_name,
             backend=decode_cfg.backend_name,
@@ -489,7 +490,7 @@ class TaskConfigFactory:
     @staticmethod
     def _apply_quant_modes(
         target_cfg: DefaultMunch,
-        model_name: str,
+        model_path: str,
         model_family: str,
         system: str,
         backend: str,
@@ -510,8 +511,12 @@ class TaskConfigFactory:
             return
 
         database = get_database(system=system, backend=backend, version=version)
+        if database is None:
+            raise PerfDataNotAvailableError(
+                f"Missing perf database for system={system} backend={backend} version={version}."
+            )
         defaults = TaskConfigFactory._get_quant_mode(
-            model_name=model_name,
+            model_path=model_path,
             model_family=model_family,
             backend=backend,
             database=database,
@@ -525,7 +530,7 @@ class TaskConfigFactory:
 
     @staticmethod
     def _get_quant_mode(
-        model_name: str,
+        model_path: str,
         model_family: str,
         backend: str,
         database: PerfDatabase,
@@ -583,7 +588,7 @@ class TaskConfigFactory:
             gemm_quant_mode = fp8_gemm_quant
             moe_quant_mode = fp8_gemm_quant
 
-        if model_name in ["GPT_OSS_120B", "GPT_OSS_20B"]:
+        if model_path in ["GPT_OSS_120B", "GPT_OSS_20B"]:
             moe_quant_mode = "w4a16_mxfp4"
 
         if use_specific_quant_mode is not None:
@@ -683,7 +688,7 @@ class TaskConfig:
     def __init__(
         self,
         serving_mode: str,
-        model_name: str,
+        model_path: str,
         system_name: str,
         decode_system_name: str | None = None,
         backend_name: str = "trtllm",
@@ -714,7 +719,7 @@ class TaskConfig:
 
         Args:
             serving_mode: The serving mode of the task.
-            model_name: The name of the model.
+            model_path: The name of the model.
             system_name: The name of the system.
             decode_system_name: The name of the decode system.
             backend_name: The name of the backend.
@@ -731,7 +736,7 @@ class TaskConfig:
             yaml_config: The YAML configuration.
         """
         self.serving_mode = serving_mode
-        self.model_name = model_name
+        self.model_path = model_path
         self.system_name = system_name
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
@@ -744,7 +749,7 @@ class TaskConfig:
         if yaml_config is not None:
             logger.info(
                 "Task %s: Overwriting config from YAML: %s",
-                f"{serving_mode}_{model_name}",
+                f"{serving_mode}_{model_path}",
                 yaml_config,
             )
             yaml_mode = yaml_config.get("mode", "patch")
@@ -758,8 +763,8 @@ class TaskConfig:
 
         ctx = TaskContext(
             serving_mode=serving_mode,
-            model_name=model_name,
-            model_family=get_model_family(model_name),
+            model_path=model_path,
+            model_family=get_model_family(model_path),
             system_name=system_name,
             decode_system_name=decode_system_name,
             backend_name=backend_name,
@@ -783,7 +788,7 @@ class TaskConfig:
         self.config.database_mode = database_mode  # Store in config for TaskRunner access
 
         self.serving_mode = serving_mode
-        self.model_name = model_name
+        self.model_path = model_path
         self.system_name = system_name
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
@@ -813,11 +818,11 @@ class TaskConfig:
 
         self.task_name = (
             (
-                f"{serving_mode}_{model_name}_{system_name}_{decode_system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{prefix}_{ttft}_{tpot}"
+                f"{serving_mode}_{model_path}_{system_name}_{decode_system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{prefix}_{ttft}_{tpot}"
             )
             if serving_mode == "disagg"
             else (
-                f"{serving_mode}_{model_name}_{system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{prefix}_{ttft}_{tpot}"
+                f"{serving_mode}_{model_path}_{system_name}_{backend_name}_{effective_backend_version}_{isl}_{osl}_{prefix}_{ttft}_{tpot}"
             )
         )
         self.config.task_name = self.task_name
@@ -857,7 +862,7 @@ class TaskConfig:
         """
 
         # TODO: add more support matrix based validation
-        if self.backend_name == "vllm" and get_model_family(self.model_name) == "DEEPSEEK":
+        if self.backend_name == "vllm" and get_model_family(self.model_path) == "DEEPSEEK":
             raise NotImplementedError("AIConfigurator does not yet support DEEPSEEK models for VLLM backend.")
 
         # Validate requested quant modes against available perf data early, to avoid
@@ -886,7 +891,7 @@ class TaskConfig:
                 return None
             return value.name if hasattr(value, "name") else str(value)
 
-        is_deepseek = get_model_family(self.model_name) == "DEEPSEEK"
+        is_deepseek = get_model_family(self.model_path) == "DEEPSEEK"
         enable_wideep = bool(getattr(self.config, "enable_wideep", self.enable_wideep))
         moe_backend = getattr(self.config, "moe_backend", None)
 
@@ -942,7 +947,7 @@ class TaskConfig:
         printable: dict[str, Any] = {
             "mode": self.yaml_mode,
             "serving_mode": self.serving_mode,
-            "model_name": self.model_name,
+            "model_path": self.model_path,
             "total_gpus": self.total_gpus,
             "system_name": self.system_name,
         }
@@ -1084,7 +1089,7 @@ class TaskRunner:
                 dp_list=task_config.worker_config.dp_list,
                 moe_tp_list=task_config.worker_config.moe_tp_list,
                 moe_ep_list=task_config.worker_config.moe_ep_list,
-                is_moe=check_is_moe(task_config.model_name),
+                is_moe=check_is_moe(task_config.model_path),
                 backend=common.BackendName(task_config.worker_config.backend_name),
                 enable_wideep=task_config.enable_wideep,
             )
@@ -1098,7 +1103,7 @@ class TaskRunner:
             return None
         logger.info("Task %s: Running agg pareto", task_config.task_name)
         result_df = pa.agg_pareto(
-            model_name=task_config.model_name,
+            model_path=task_config.model_path,
             runtime_config=runtime_config,
             database=database,
             backend_name=task_config.worker_config.backend_name,
@@ -1170,7 +1175,7 @@ class TaskRunner:
                 dp_list=task_config.prefill_worker_config.dp_list,
                 moe_tp_list=task_config.prefill_worker_config.moe_tp_list,
                 moe_ep_list=task_config.prefill_worker_config.moe_ep_list,
-                is_moe=check_is_moe(task_config.model_name),
+                is_moe=check_is_moe(task_config.model_path),
                 backend=common.BackendName(task_config.prefill_worker_config.backend_name),
                 enable_wideep=task_config.enable_wideep,
             )
@@ -1229,7 +1234,7 @@ class TaskRunner:
                 dp_list=task_config.decode_worker_config.dp_list,
                 moe_tp_list=task_config.decode_worker_config.moe_tp_list,
                 moe_ep_list=task_config.decode_worker_config.moe_ep_list,
-                is_moe=check_is_moe(task_config.model_name),
+                is_moe=check_is_moe(task_config.model_path),
                 backend=common.BackendName(task_config.decode_worker_config.backend_name),
                 enable_wideep=task_config.enable_wideep,
             )
@@ -1244,7 +1249,7 @@ class TaskRunner:
 
         logger.info("Task %s: Running disagg pareto", task_config.task_name)
         result_df = pa.disagg_pareto(
-            model_name=task_config.model_name,
+            model_path=task_config.model_path,
             runtime_config=runtime_config,
             prefill_database=prefill_database,
             prefill_backend_name=task_config.prefill_worker_config.backend_name,
@@ -1298,7 +1303,7 @@ class TaskRunner:
 if __name__ == "__main__":
     task_agg = TaskConfig(
         serving_mode="agg",
-        model_name="QWEN3_32B",
+        model_path="QWEN3_32B",
         system_name="h200_sxm",
         ttft=600,
         tpot=20,
@@ -1318,7 +1323,7 @@ if __name__ == "__main__":
 
     task_disagg = TaskConfig(
         serving_mode="disagg",
-        model_name="QWEN3_32B",
+        model_path="QWEN3_32B",
         system_name="h200_sxm",
         ttft=600,
         tpot=20,

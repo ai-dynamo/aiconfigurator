@@ -285,7 +285,7 @@ class TRTLLMBackend(BaseBackend):
             mem = memory["total"]
 
             result_dict = {
-                "model": model.model_name,
+                "model": model.model_path,
                 "isl": isl,
                 "osl": osl,
                 "prefix": prefix,
@@ -514,7 +514,7 @@ class TRTLLMBackend(BaseBackend):
             * model.config.kvcache_quant_mode.value.memory
             * kvcache_per_token
         )
-        # if 'DEEPSEEK' in model.model_name or 'MOE' in model.model_name:
+        # if 'DEEPSEEK' in model.model_path or 'MOE' in model.model_path:
         #    kvcache = kvcache * model.config.attention_dp_size # this is incorrect. tp will
         #    duplicate the kvcache while attn_dp will not.
 

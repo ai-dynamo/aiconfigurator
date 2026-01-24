@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import csv
 from collections import namedtuple
 from dataclasses import dataclass
 from enum import Enum
+from functools import cache
+from importlib import resources as pkg_resources
 
 
 @dataclass(frozen=True)
@@ -26,106 +29,35 @@ class BlockConfig:
     num_inst: int = 0
 
 
+def _get_support_matrix_resource():
+    """Get the support_matrix.csv as a Traversable resource."""
+    return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
+
+
+@cache
+def get_default_models() -> set[str]:
+    """
+    Get the set of supported HuggingFace model IDs from support_matrix.csv.
+
+    Returns:
+        set[str]: Set of unique HuggingFace model IDs that are supported.
+    """
+    csv_resource = _get_support_matrix_resource()
+    models = set()
+    # Use as_file() context manager for proper package resource access
+    with pkg_resources.as_file(csv_resource) as csv_path, open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            models.add(row["HuggingFaceID"])
+    return models
+
+
 """
-Supported models
-    model name: model_family,l,n,n_kv,d,hidden_size,inter_size,vocab,context,
-                topk,num_experts,moe_inter_size,extra_params
+Cached HuggingFace model configs - these are pre-downloaded and stored in model_configs/
+Model parameters are parsed from these configs via get_model_config_from_model_path() in utils.py
+The list of default models for testing is derived from support_matrix.csv via get_default_models()
 """
-SupportedModels = {
-    #'GPT_7B':['GPT',32,32,32,128,32*128,32*128*4,50527,2048, 0, 0, 0, None],
-    #'GPT_13B':['GPT',40,40,40,128,40*128,40*128*4,50527,2048, 0, 0, 0, None],
-    #'GPT_30B':['GPT',48,56,56,128,56*128,56*128*4,50527,2048, 0, 0, 0, None],
-    #'GPT_66B':['GPT',64,72,72,128,72*128,72*128*4,50527,2048, 0, 0, 0, None],
-    #'GPT_175B':['GPT',96,96,96,128,96*128,96*128*4,50527,2048, 0, 0, 0, None],
-    "LLAMA2_7B": ["LLAMA", 32, 32, 32, 128, 32 * 128, 11008, 32000, 2048, 0, 0, 0, None],
-    "LLAMA2_13B": ["LLAMA", 40, 40, 40, 128, 40 * 128, 13824, 32000, 4096, 0, 0, 0, None],
-    "LLAMA2_70B": ["LLAMA", 80, 64, 8, 128, 64 * 128, 28672, 32000, 4096, 0, 0, 0, None],
-    "LLAMA3.1_8B": ["LLAMA", 32, 32, 8, 128, 32 * 128, 14336, 128256, 131072, 0, 0, 0, None],
-    "LLAMA3.1_70B": ["LLAMA", 80, 64, 8, 128, 64 * 128, 28672, 128256, 131072, 0, 0, 0, None],
-    "LLAMA3.1_405B": ["LLAMA", 126, 128, 8, 128, 128 * 128, 53248, 128256, 131072, 0, 0, 0, None],
-    "MOE_Mixtral8x7B": ["MOE", 32, 32, 8, 128, 32 * 128, 14336, 32000, 32768, 2, 8, 14336, None],
-    "MOE_Mixtral8x22B": ["MOE", 56, 48, 8, 128, 48 * 128, 16384, 32000, 65536, 2, 8, 16384, None],
-    # "MOE_GPT_1.8T": ["MOE", 120, 120, 1, 128, 30720, 50247, 4096, 2, 16, 0, None],
-    # "MOE_GPT_1.8T_FineGrained": ["MOE", 120, 120, 1, 128, 3840, 50247, 4096, 16, 128, 0, None],
-    # "MOE_Deepseek_16B_Base": ["MOE", 28, 16, 16, 128, 2816, 102400, 4096, 6, 64, 1408, None],
-    # # using MLA, not standard attention
-    # "MOE_Deepseek_V2": ["MOE", 60, 128, 128, 40, 3072, 102400, 163840, 6, 160, 1536, None],
-    "DEEPSEEK_V3": [
-        # using MLA, not standard attention, 3 of 61 are dense layers using intersize 18432, others
-        # using 2048
-        "DEEPSEEK",
-        61,
-        128,
-        128,
-        56,
-        128 * 56,
-        18432,
-        129280,
-        4096,
-        8,
-        256,
-        2048,
-        None,
-    ],
-    # FIXME: not enabled due to e2e failure
-    # "KIMI_K2": [
-    #     "DEEPSEEK", 61, 128, 128, 56, 128 * 56, 18432, 163840, 131072, 8, 384, 2048, None
-    # ],
-    # "MOE_Qwen1.5_A2.7B": ["MOE", 24, 16, 16, 128, 5632, 151936, 32768, 4, 60, 1408, None],
-    # "MOE_Qwen2_57B_A14B": ["MOE", 28, 28, 4, 128, 20480, 151936, 32768, 8, 64, 2560, None],
-    "QWEN2.5_1.5B": ["LLAMA", 28, 12, 2, 128, 12 * 128, 8960, 151936, 131072, 0, 0, 0, None],
-    "QWEN2.5_7B": ["LLAMA", 28, 28, 4, 128, 28 * 128, 18944, 152064, 131072, 0, 0, 0, None],
-    "QWEN2.5_32B": ["LLAMA", 64, 40, 8, 128, 40 * 128, 27648, 152064, 32768, 0, 0, 0, None],
-    "QWEN2.5_72B": ["LLAMA", 80, 64, 8, 128, 64 * 128, 29568, 152064, 32768, 0, 0, 0, None],
-    "QWEN3_32B": [
-        "LLAMA",
-        64,
-        64,
-        8,
-        128,
-        5120,
-        25600,
-        151936,
-        40960,
-        0,
-        0,
-        0,
-        None,
-    ],  # qwen3 is not using hiddensize=headdim*numheads.
-    "QWEN3_0.6B": ["LLAMA", 28, 16, 8, 128, 1024, 3072, 151936, 40960, 0, 0, 0, None],
-    "QWEN3_1.7B": ["LLAMA", 28, 16, 8, 128, 16 * 128, 6144, 151936, 40960, 0, 0, 0, None],
-    "QWEN3_8B": ["LLAMA", 36, 32, 8, 128, 32 * 128, 12288, 151936, 40960, 0, 0, 0, None],
-    "QWEN3_30B_A3B": ["MOE", 48, 32, 4, 128, 2048, 6144, 151936, 40960, 8, 128, 768, None],
-    "QWEN3_235B": ["MOE", 94, 64, 4, 128, 4096, 12288, 151936, 40960, 8, 128, 1536, None],
-    "QWEN3_480B": ["MOE", 62, 96, 8, 128, 6144, 8192, 151936, 262144, 8, 160, 2560, None],
-    "Nemotron_super_v1.1": [
-        "NEMOTRONNAS",
-        80,
-        64,
-        0,
-        128,
-        8192,
-        0,
-        128256,
-        131072,
-        0,
-        0,
-        0,
-        [
-            BlockConfig(8, False, 5.25, False, 48),
-            BlockConfig(None, True, 1.3125, False, 10),
-            BlockConfig(None, True, 1.0, False, 8),
-            BlockConfig(None, True, 0.5, False, 6),
-            BlockConfig(None, True, 2.625, False, 5),
-            BlockConfig(8, False, 2.625, False, 1),
-            BlockConfig(None, True, 3.28125, False, 1),
-            BlockConfig(None, True, 5.25, False, 1),
-        ],
-    ],
-    "GPT_OSS_120B": ["MOE", 36, 64, 8, 64, 2880, 2880, 201088, 131072, 4, 128, 2880, None],
-    "GPT_OSS_20B": ["MOE", 24, 64, 8, 64, 2880, 2880, 201088, 131072, 4, 32, 2880, None],
-}
-CachedHFModels = {
+DefaultHFModels = {
     # Llama 2 Models
     "meta-llama/Llama-2-7b-hf",
     "meta-llama/Llama-2-13b-hf",
@@ -149,6 +81,7 @@ CachedHFModels = {
     "Qwen/Qwen3-1.7B",
     "Qwen/Qwen3-8B",
     "Qwen/Qwen3-32B",
+    "Qwen/Qwen3-30B-A3B",
     "Qwen/Qwen3-235B-A22B",
     "Qwen/Qwen3-Coder-480B-A35B-Instruct",
     # GPT-OSS Models
@@ -159,9 +92,54 @@ CachedHFModels = {
 }
 
 """
+Mapping from internal model names to HuggingFace model IDs.
+This allows the support matrix and other tools to use canonical HuggingFace paths.
+"""
+MODEL_NAME_TO_HF_ID = {
+    # Llama 2 Models
+    "LLAMA2_7B": "meta-llama/Llama-2-7b-hf",
+    "LLAMA2_13B": "meta-llama/Llama-2-13b-hf",
+    "LLAMA2_70B": "meta-llama/Llama-2-70b-hf",
+    # Llama 3.1 Models
+    "LLAMA3.1_8B": "meta-llama/Meta-Llama-3.1-8B",
+    "LLAMA3.1_70B": "meta-llama/Meta-Llama-3.1-70B",
+    "LLAMA3.1_405B": "meta-llama/Meta-Llama-3.1-405B",
+    # Mixtral Models
+    "MOE_Mixtral8x7B": "mistralai/Mixtral-8x7B-v0.1",
+    "MOE_Mixtral8x22B": "mistralai/Mixtral-8x22B-v0.1",
+    # DeepSeek Models
+    "DEEPSEEK_V3": "deepseek-ai/DeepSeek-V3",
+    # Qwen 2.5 Models
+    "QWEN2.5_1.5B": "Qwen/Qwen2.5-1.5B",
+    "QWEN2.5_7B": "Qwen/Qwen2.5-7B",
+    "QWEN2.5_32B": "Qwen/Qwen2.5-32B",
+    "QWEN2.5_72B": "Qwen/Qwen2.5-72B",
+    # Qwen 3 Models
+    "QWEN3_0.6B": "Qwen/Qwen3-0.6B",
+    "QWEN3_1.7B": "Qwen/Qwen3-1.7B",
+    "QWEN3_8B": "Qwen/Qwen3-8B",
+    "QWEN3_32B": "Qwen/Qwen3-32B",
+    "QWEN3_30B_A3B": "Qwen/Qwen3-30B-A3B",
+    "QWEN3_235B": "Qwen/Qwen3-235B-A22B",
+    "QWEN3_480B": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    # GPT-OSS Models
+    "GPT_OSS_120B": "openai/gpt-oss-120b",
+    "GPT_OSS_20B": "openai/gpt-oss-20b",
+    # NVIDIA Nemotron
+    "Nemotron_super_v1.1": "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
+}
+
+"""
 Supported systems (GPU types)
 """
-SupportedSystems = {"h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm", "l40s"}
+SupportedSystems = {
+    "h100_sxm",
+    "h200_sxm",
+    "b200_sxm",
+    "gb200_sxm",
+    "a100_sxm",
+    "l40s",
+}
 
 """
 Model family for model definition

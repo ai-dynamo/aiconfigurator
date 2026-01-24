@@ -156,7 +156,7 @@ def create_scatter_plot(df, x_col, y_col, title, is_disagg=False):
 class EventFn:
     @staticmethod
     def run_estimation_static(
-        model_name,
+        model_path,
         system_name,
         backend_name,
         version,
@@ -214,7 +214,7 @@ class EventFn:
                 )
                 runtime_config = config.RuntimeConfig(batch_size=batch_size, isl=isl, osl=osl, prefix=prefix)
 
-                model = get_model(model_name, model_config, backend_name)
+                model = get_model(model_path, model_config, backend_name)
                 stride = (osl + 8 - 1) // 8  # run at most 8 steps
                 backend = get_backend(backend_name)
                 session = InferenceSession(model, database, backend)
@@ -254,7 +254,7 @@ class EventFn:
 
     @staticmethod
     def run_estimation_agg(
-        model_name,
+        model_path,
         system_name,
         backend_name,
         version,
@@ -310,7 +310,7 @@ class EventFn:
                 )
                 runtime_config = config.RuntimeConfig(isl=isl, osl=osl, prefix=prefix, ttft=ttft, tpot=tpot)
 
-                is_moe = check_is_moe(model_name)
+                is_moe = check_is_moe(model_path)
                 parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=[tp_size * pp_size * dp_size],
                     tp_list=[tp_size],
@@ -330,14 +330,14 @@ class EventFn:
                         logger.info(f"enumerated config: tp {tp} pp {pp}")
                 if len(parallel_config_list) == 0:
                     logger.error(
-                        f"No valid parallel config found for {model_name} with {tp_size} GPUs. "
+                        f"No valid parallel config found for {model_path} with {tp_size} GPUs. "
                         "Please double check your parallel configs."
                     )
 
                 results_df = None
 
                 backend = get_backend(backend_name)
-                model = get_model(model_name, model_config, backend_name)
+                model = get_model(model_path, model_config, backend_name)
                 session = InferenceSession(model, database, backend)
                 summary = session.find_best_agg_result_under_constraints(
                     runtime_config=runtime_config, top_k=10, max_batch_size=512, ctx_stride=512
@@ -346,7 +346,7 @@ class EventFn:
 
                 if results_df is None or results_df.size == 0:
                     logger.error(
-                        f"No result for {model_name} with {tp_size} GPUs under this restriction "
+                        f"No result for {model_path} with {tp_size} GPUs under this restriction "
                         f"ttft {ttft}ms, tpot {tpot} ms and memory size. Try to set a larger "
                         f"ttft/tpot limit and use more GPUs."
                     )
@@ -364,7 +364,7 @@ class EventFn:
 
     @staticmethod
     def run_estimation_agg_pareto(
-        model_name,
+        model_path,
         system_name,
         backend_name,
         version,
@@ -424,7 +424,7 @@ class EventFn:
                     request_latency=request_latency if request_latency and request_latency > 0 else None,
                 )
 
-                is_moe = check_is_moe(model_name)
+                is_moe = check_is_moe(model_path)
                 parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=num_gpus,
                     tp_list=tp_size,
@@ -445,12 +445,12 @@ class EventFn:
 
                 if len(parallel_config_list) == 0:
                     logger.error(
-                        f"No valid parallel config found for {model_name} with {tp_size} GPUs. "
+                        f"No valid parallel config found for {model_path} with {tp_size} GPUs. "
                         "Please double check your parallel configs."
                     )
 
                 results_df = pareto_analysis.agg_pareto(
-                    model_name=model_name,
+                    model_path=model_path,
                     runtime_config=runtime_config,
                     database=database,
                     backend_name=backend_name,
@@ -470,7 +470,7 @@ class EventFn:
                 results_df = results_df.reset_index(drop=True).reset_index()
                 if results_df.size == 0:
                     logger.error(
-                        f"No result for {model_name} with {tp_size} GPUs under this restriction "
+                        f"No result for {model_path} with {tp_size} GPUs under this restriction "
                         f"ttft {ttft}ms and memory size. Try to set a larger ttft limit and use "
                         "more GPUs."
                     )
@@ -480,7 +480,7 @@ class EventFn:
                     else f"_ttft{runtime_config.ttft}"
                 )
                 title = (
-                    f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}"
+                    f"{model_path}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}"
                     f"{latency_info}_{system_name}_{backend_name}_{version}_"
                     f"{model_config.gemm_quant_mode}_{model_config.kvcache_quant_mode}_"
                     f"{model_config.fmha_quant_mode}_{model_config.moe_quant_mode}_"
@@ -512,7 +512,7 @@ class EventFn:
 
     @staticmethod
     def run_estimation_disagg_pareto(
-        model_name,
+        model_path,
         isl,
         osl,
         prefix,
@@ -624,7 +624,7 @@ class EventFn:
                     request_latency=request_latency if request_latency and request_latency > 0 else None,
                 )
 
-                is_moe = check_is_moe(model_name)
+                is_moe = check_is_moe(model_path)
 
                 prefill_parallel_config_list = enumerate_parallel_config(
                     num_gpu_list=prefill_num_gpus,
@@ -669,7 +669,7 @@ class EventFn:
 
                 if len(prefill_parallel_config_list) == 0 or len(decode_parallel_config_list) == 0:
                     logger.error(
-                        f"No valid parallel config found for {model_name} in the prefill or decode "
+                        f"No valid parallel config found for {model_path} in the prefill or decode "
                         "system. Please double check your parallel configs."
                     )
 
@@ -685,7 +685,7 @@ class EventFn:
                 num_gpu_list = [int(x) for x in num_gpu_list.split(",")] if len(num_gpu_list) > 0 else None
                 # logger.info(f"target num_gpu_list in the disagg system: {num_gpu_list}")
                 results_df = pareto_analysis.disagg_pareto(
-                    model_name=model_name,
+                    model_path=model_path,
                     runtime_config=runtime_config,
                     prefill_database=prefill_database,
                     prefill_backend_name=prefill_backend_name,
@@ -717,7 +717,7 @@ class EventFn:
                 results_df = results_df.reset_index(drop=True).reset_index()
                 if results_df.size == 0:
                     logger.error(
-                        f"No result for {model_name} under this restriction ttft {ttft}ms and "
+                        f"No result for {model_path} under this restriction ttft {ttft}ms and "
                         "memory size. Try to set a larger ttft limit and use more GPUs."
                     )
                 latency_info = (
@@ -726,7 +726,7 @@ class EventFn:
                     else f"_ttft{runtime_config.ttft}"
                 )
                 title = (
-                    f"{model_name}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}"
+                    f"{model_path}_isl{runtime_config.isl}_osl{runtime_config.osl}_prefix{runtime_config.prefix}"
                     f"{latency_info}_prefill_{prefill_system_name}_{prefill_backend_name}_"
                     f"{prefill_version}_{prefill_database_mode}_{prefill_gemm_quant_mode}_"
                     f"{prefill_kvcache_quant_mode}_{prefill_fmha_quant_mode}_{prefill_moe_quant_mode}_"
@@ -760,7 +760,7 @@ class EventFn:
 
     @staticmethod
     def run_estimation_disagg_pd_ratio(
-        model_name,
+        model_path,
         isl,
         osl,
         prefix,
@@ -902,7 +902,7 @@ class EventFn:
                 decode_stride = (osl + 8 - 1) // 8
 
                 # prefill
-                prefill_model = get_model(model_name, prefill_model_config, prefill_backend_name)
+                prefill_model = get_model(model_path, prefill_model_config, prefill_backend_name)
                 prefill_database = copy.deepcopy(
                     get_database(prefill_system_name, prefill_backend_name, prefill_version)
                 )
@@ -924,7 +924,7 @@ class EventFn:
                         prefill_target_bs = b * prefill_dp_size  # global_bs
                 prefill_results_df = prefill_results_df.reset_index(drop=True).reset_index()
                 title = (
-                    f"{model_name}_isl{isl}_osl{osl}_prefix{prefix}_prefill_{prefill_system_name}_"
+                    f"{model_path}_isl{isl}_osl{osl}_prefix{prefix}_prefill_{prefill_system_name}_"
                     f"{prefill_backend_name}_{prefill_version}_{prefill_database_mode}_"
                     f"{prefill_gemm_quant_mode}_{prefill_kvcache_quant_mode}_"
                     f"{prefill_fmha_quant_mode}_{prefill_moe_quant_mode}_{prefill_comm_quant_mode}_"
@@ -940,7 +940,7 @@ class EventFn:
                 )
 
                 # decode
-                decode_model = get_model(model_name, decode_model_config, decode_backend_name)
+                decode_model = get_model(model_path, decode_model_config, decode_backend_name)
                 decode_database = copy.deepcopy(get_database(decode_system_name, decode_backend_name, decode_version))
                 assert decode_database is not None
                 decode_database.set_default_database_mode(common.DatabaseMode[decode_database_mode])
@@ -972,7 +972,7 @@ class EventFn:
                         break
                 decode_results_df = decode_results_df.reset_index(drop=True).reset_index()
                 title = (
-                    f"{model_name}_isl{isl}_osl{osl}_decode_{decode_system_name}_"
+                    f"{model_path}_isl{isl}_osl{osl}_decode_{decode_system_name}_"
                     f"{decode_backend_name}_{decode_version}_{decode_database_mode}_"
                     f"{decode_gemm_quant_mode}_{decode_kvcache_quant_mode}_"
                     f"{decode_fmha_quant_mode}_{decode_moe_quant_mode}_{decode_comm_quant_mode}_"
@@ -1140,7 +1140,7 @@ class EventFn:
     # common functions
     # system change func and event
     @staticmethod
-    def update_quant_mode_choices(model_name, system_name, backend_name, version, enable_wideep):
+    def update_quant_mode_choices(model_path, system_name, backend_name, version, enable_wideep):
         if version is None:
             return (
                 gr.update(choices=[], value=None, interactive=True),
@@ -1151,7 +1151,7 @@ class EventFn:
         database_dict = get_all_databases()
         supported_quant_mode = database_dict[system_name][backend_name][version].supported_quant_mode
 
-        if get_model_family(model_name) != "DEEPSEEK":
+        if get_model_family(model_path) != "DEEPSEEK":
             gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
             kvcache_quant_mode_choices = sorted(supported_quant_mode["generation_attention"])
             fmha_quant_mode_choices = sorted(supported_quant_mode["context_attention"])
@@ -1213,7 +1213,7 @@ class EventFn:
         )
 
     @staticmethod
-    def update_system_value(model_name):
+    def update_system_value(model_path):
         return gr.update(value=None, interactive=True)
 
     @staticmethod
@@ -1231,9 +1231,9 @@ class EventFn:
         return gr.update(choices=version_choices, value=None, interactive=True)
 
     @staticmethod
-    def update_model_related_components(model_name):
+    def update_model_related_components(model_path):
         # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
-        if models.get_model_family(model_name) == "DEEPSEEK":
+        if models.get_model_family(model_path) == "DEEPSEEK":
             return (
                 gr.update(value=0, visible=True),
                 gr.update(visible=True),
@@ -1243,7 +1243,7 @@ class EventFn:
                 gr.update(visible=True),
                 gr.update(visible=True),
             )
-        elif models.get_model_family(model_name) == "MOE":
+        elif models.get_model_family(model_path) == "MOE":
             return (
                 gr.update(value=0, visible=False),
                 gr.update(visible=False),

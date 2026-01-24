@@ -28,7 +28,7 @@ constraints.
 Let's take a look at the pareto frontier,
 ```text
   Pareto Frontier:
-              QWEN3_32B Pareto Frontier: tokens/s/gpu vs tokens/s/user          
+              Qwen/Qwen3-32B Pareto Frontier: tokens/s/gpu vs tokens/s/user          
     ┌──────────────────────────────────────────────────────────────────────────┐
 2250┤ •• disagg                                                                │
     │ ff agg                                                                   │
@@ -84,7 +84,7 @@ ISL=4000, OSL=512, TTFT=300ms, TPOT=10ms, optimize tokens/s/gpu
 If you would like to deploy by your own, when running the `aiconfigurator cli exp|default`, engine configuration files and executable scripts are automatically generated under the `--save_dir`, in the `topx` folder. The directory structure is:
 
 ```
-results/QWEN3_32B_isl4000_osl1000_ttft1000_tpot20_904495
+results/Qwen_Qwen3-32B_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
 │   ├── best_config_topn.csv
 │   ├── config.yaml
@@ -120,7 +120,7 @@ Typically, the command is:
 ````bash
 aiconfigurator cli default \
   --system h200_sxm \
-  --model QWEN3_32B \
+  --model_path Qwen/Qwen3-32B \
   --isl 5000 \
   --osl 1000 \
   --ttft 2000 \
@@ -132,14 +132,14 @@ aiconfigurator cli default \
   --head_node_ip x.x.x.x
 ````
 
-To customize parameters per worker type, override the `Workers.<role>` keys with `--generator-set`. For example:
+To customize parameters per worker type, override the `Workers.<role>` keys with `--generator-set`. To set worker counts, use `WorkerConfig.*` (e.g., `WorkerConfig.prefill_workers=2`). For example:
 
 Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
 
 ```bash
 aiconfigurator cli default \
   --system h200_sxm \
-  --model QWEN3_32B \
+  --model_path Qwen/Qwen3-32B \
   --isl 5000 \
   --osl 1000 \
   --ttft 2000 \
@@ -233,7 +233,7 @@ aiconfigurator cli default \
   --ttft 1000 \
   --tpot 10 \
   --save_dir ./ \
-  --model QWEN3_32B \
+  --model_path Qwen/Qwen3-32B \
   --total_gpus 8 \
   --head_node_ip 0.0.0.0 \
   --generated_config_version 1.0.0rc4 \
@@ -244,7 +244,7 @@ aiconfigurator cli default \
   --generator-set Workers.agg.kv_cache_free_gpu_memory_fraction=0.7
 ```
 We use 1.0.0rc3 (our latest data) for aiconfigurator and we can support generate configurations for running with trtllm 1.0.0rc4 worker.  
-*--model* is for aiconfigurator and *--served_model_name* is for dynamo deployment  
+*--model_path* is for aiconfigurator and *--served_model_name* is for dynamo deployment  
 > For other supported configurations, please run `aiconfigurator cli --help`.
 
 ### 3.2 Verify Generated Configuration
@@ -284,7 +284,7 @@ Inside the container:
 cd /workspace/mount_dir/dynamo/components/backends/trtllm
 
 # Copy generated configs from save_dir
-cp -r ${your_save_dir}/QWEN3_32B_isl5000_osl1000_ttft1000_tpot50_*/backend_configs/* ./
+cp -r ${your_save_dir}/Qwen_Qwen3-32B_isl5000_osl1000_ttft1000_tpot50_*/backend_configs/* ./
 
 # Launch dynamo
 bash disagg/node_0_run.sh
@@ -329,7 +329,7 @@ aiconfigurator cli default \
   --ttft 200 \
   --tpot 8 \
   --save_dir ./ \
-  --model QWEN3_32B \
+  --model_path Qwen/Qwen3-32B \
   --total_gpus 16 \
   --head_node_ip NODE_0_IP \
   --generated_config_version 1.0.0rc4 \
@@ -348,7 +348,7 @@ Refer to the single node example to run the container on both node 0 and node 1.
 Inside the container:
 ```bash
 cd /workspace/mount_dir/dynamo/components/backends/trtllm
-cp -r QWEN3_32B_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
+cp -r Qwen_Qwen3-32B_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
 bash disagg/node_0_run.sh
 ```
 
@@ -356,7 +356,7 @@ bash disagg/node_0_run.sh
 Inside the container:
 ```bash
 cd /workspace/mount_dir/dynamo/components/backends/trtllm
-cp -r QWEN3_32B_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
+cp -r Qwen_Qwen3-32B_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
 bash disagg/node_1_run.sh
 ```
 
@@ -398,7 +398,7 @@ aiconfigurator cli default \
   --ttft 200 \
   --tpot 8 \
   --save_dir ./ \
-  --model QWEN3_32B \
+  --model_path Qwen/Qwen3-32B \
   --total_gpus 8 \
   --generated_config_version 1.0.0rc6 \
   --generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8 \

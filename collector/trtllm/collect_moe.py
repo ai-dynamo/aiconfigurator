@@ -102,7 +102,7 @@ def get_moe_test_cases():
         moe_tp = common_moe_testcase.tp
 
         for moe_type in moe_list:
-            if model_name in ["GPT_OSS_20B", "GPT_OSS_120B"]:
+            if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
                 if moe_type != "w4a16_mxfp4":
                     continue
             else:
@@ -215,7 +215,7 @@ def run_moe_torch(
     swiglu_beta = None
     swiglu_limit = None
 
-    if model_name in ["GPT_OSS_120B", "GPT_OSS_20B"]:
+    if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
         # use triton backend for best performance on Hopper
         model_config.moe_backend = "triton"
         swiglu_alpha = torch.tensor([1.702] * (num_experts // moe_ep_size), dtype=torch.float32).to(

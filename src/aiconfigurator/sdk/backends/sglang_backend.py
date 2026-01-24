@@ -284,7 +284,7 @@ class SGLANGBackend(BaseBackend):
             mem = memory["total"]
 
             result_dict = {
-                "model": model.model_name,
+                "model": model.model_path,
                 "isl": isl,
                 "osl": osl,
                 "prefix": prefix,

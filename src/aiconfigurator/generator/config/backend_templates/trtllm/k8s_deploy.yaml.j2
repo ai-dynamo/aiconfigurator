@@ -1,9 +1,7 @@
-{%- set router_mode = k8s.router_mode | default('') -%}
-{%- set enable_router = k8s.enable_router | default(router_mode == 'kv') -%}
-{%- set is_kv = enable_router -%}
-{%- set k8s_engine_mode = k8s.k8s_engine_mode -%}
+{%- set enable_router = DynConfig.enable_router | default(false) -%}
+{%- set k8s_engine_mode = K8sConfig.k8s_engine_mode -%}
 {%- set use_engine_cm = (k8s_engine_mode == 'configmap') -%}
-{%- set model_cache_input = k8s.k8s_model_cache | default('', true) | trim -%}
+{%- set model_cache_input = K8sConfig.k8s_model_cache | default('', true) | trim -%}
 {%- set k8s_use_model_cache = (model_cache_input != '') -%}
 {%- set k8s_model_cache_pvc = (model_cache_input if k8s_use_model_cache else 'model-cache') -%}
 {%- set k8s_model_cache_mount = '/workspace/model_cache' -%}
@@ -86,12 +84,12 @@ readinessProbe:
           gpu: "{{ gpu }}"
       extraPodSpec:
 {{ render_volumes() | indent(8, True) }}
-        {% if k8s.k8s_image_pull_secret %}
+        {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
-          - name: {{ k8s.k8s_image_pull_secret }}
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
         {% endif %}
         mainContainer:
-          image: {{ k8s.k8s_image }}
+          image: {{ K8sConfig.k8s_image }}
           workingDir: {{ runtime_working_dir }}
           imagePullPolicy: IfNotPresent
 {{ render_volume_mounts() | indent(10, True) }}
@@ -106,8 +104,8 @@ readinessProbe:
               YAML
               {% endif %}
               args=(
-                --model-path "{{ service.model_path }}"
-                --served-model-name "{{ service.served_model_name }}"
+                --model-path "{{ ServiceConfig.model_path }}"
+                --served-model-name "{{ ServiceConfig.served_model_name }}"
                 --extra-engine-args "{{ engine_path }}"
               )
               {% if disagg_mode %}
@@ -129,7 +127,7 @@ kind: ConfigMap
 metadata:
   name: {{ engine_cm_name }}
 data:
-  {% if k8s.mode == 'agg' %}
+  {% if DynConfig.mode | default('disagg') == 'agg' %}
   {{ agg_engine_key }}: |
 {{ (agg_engine_args_inline | default('', true) | trim | indent(4, true)) }}
   {% else %}
@@ -145,7 +143,7 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: {{ name }}
-  namespace: {{ k8s.k8s_namespace }}
+  namespace: {{ K8sConfig.k8s_namespace }}
 spec:
   services:
     Frontend:
@@ -159,25 +157,25 @@ spec:
             persistentVolumeClaim:
               claimName: {{ k8s_model_cache_pvc }}
         {% endif %}
-        {% if k8s.k8s_image_pull_secret %}
+        {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
-          - name: {{ k8s.k8s_image_pull_secret }}
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
         {% endif %}
         mainContainer:
-          image: {{ k8s.k8s_image }}
+          image: {{ K8sConfig.k8s_image }}
           imagePullPolicy: IfNotPresent
           {% if k8s_use_model_cache %}
           volumeMounts:
             - name: model-cache
               mountPath: {{ k8s_model_cache_mount }}
           {% endif %}
-      {% if is_kv %}
+      {% if enable_router %}
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
       {% endif %}
 
-    {% if k8s.mode == 'agg' %}
+    {% if DynConfig.mode | default('disagg') == 'agg' %}
 {{ render_worker(
     "TRTLLMWorker",
     None,
@@ -186,7 +184,7 @@ spec:
     agg_engine_args,
     agg_engine_args_inline,
     None,
-    is_kv
+    enable_router
 ) }}
     {% else %}
 {{ render_worker(
@@ -197,7 +195,7 @@ spec:
     prefill_engine_args,
     prefill_engine_args_inline,
     "prefill",
-    is_kv
+    enable_router
 ) }}
 {{ render_worker(
     "TRTLLMDecodeWorker",
@@ -207,7 +205,7 @@ spec:
     decode_engine_args,
     decode_engine_args_inline,
     "decode",
-    is_kv
+    enable_router
 ) }}
     {% endif %}
 {{ '\n' }}
