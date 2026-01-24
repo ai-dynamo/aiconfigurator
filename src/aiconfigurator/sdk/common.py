@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import cache
 from importlib import resources as pkg_resources
-from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -46,11 +45,10 @@ def get_default_models() -> set[str]:
     csv_resource = _get_support_matrix_resource()
     models = set()
     # Use as_file() context manager for proper package resource access
-    with pkg_resources.as_file(csv_resource) as csv_path:
-        with open(csv_path, newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                models.add(row["HuggingFaceID"])
+    with pkg_resources.as_file(csv_resource) as csv_path, open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            models.add(row["HuggingFaceID"])
     return models
 
 
