@@ -4,6 +4,10 @@
 {%- else -%}
 {%- set runtime_working_dir = _default_vllm_workdir -%}
 {%- endif -%}
+{%- set model_cache_input = K8sConfig.k8s_model_cache | default('', true) | trim -%}
+{%- set k8s_use_model_cache = (model_cache_input != '') -%}
+{%- set k8s_model_cache_pvc = (model_cache_input if k8s_use_model_cache else 'model-cache') -%}
+{%- set k8s_model_cache_mount = '/workspace/model_cache' -%}
 
 {%- macro render_worker(component_name, role, replicas, gpu, cli_args_list) -%}
     {%- set parsed_args = cli_args_list | default([]) -%}
@@ -19,6 +23,12 @@
         limits:
           gpu: "{{ gpu }}"
       extraPodSpec:
+        {% if k8s_use_model_cache %}
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: {{ k8s_model_cache_pvc }}
+        {% endif %}      
         {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
           - name: {{ K8sConfig.k8s_image_pull_secret }}
@@ -27,6 +37,11 @@
           image: {{ K8sConfig.k8s_image }}
           workingDir: {{ runtime_working_dir }}
           imagePullPolicy: IfNotPresent
+          {% if k8s_use_model_cache %}
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ k8s_model_cache_mount }}
+          {% endif %}
           command:
             - python3
             - -m
