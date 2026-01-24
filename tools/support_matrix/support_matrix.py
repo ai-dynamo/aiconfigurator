@@ -50,10 +50,6 @@ class SupportMatrix:
         """Get the HuggingFace architecture for a model."""
         return _get_model_info(huggingface_id)[0]
 
-    def get_architecture(self, model: str) -> str:
-        """Get the HuggingFace architecture for a model."""
-        return _get_model_info(model)[0]
-
     def get_huggingface_id(self, model: str) -> str:
         """Get the HuggingFace model ID for an internal model name."""
         return common.MODEL_NAME_TO_HF_ID.get(model, model)
