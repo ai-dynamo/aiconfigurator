@@ -622,9 +622,7 @@ def generate_naive_config(
         logger.info("Saved generator config to %s", generator_config_path)
 
     # Generate backend artifacts
-    artifacts = render_backend_templates(
-        generator_params, backend, None, backend_version
-    )
+    artifacts = render_backend_templates(generator_params, backend, None, backend_version)
 
     if actual_output_dir:
         params_obj = generator_params.get("params", {})
