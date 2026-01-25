@@ -1,9 +1,5 @@
-agg_decode cuda_graph_batch_sizes = ((range(1, 16 + 1, 1) | list) + (range(16, 32 + 1, 4) | list) + (range(32, 64 + 1, 8) | list) + (range(64, 128 + 1, 16) | list) + (range(128, 256 + 1, 32) | list) + (range(256, 512 + 1, 64) | list) + (range((1 if (max_batch_size or 0) <= 8 else (max_batch_size or 0) - 8), (max_batch_size or 0) + 8 + 1, 1) | list))
-
-agg_decode cuda_graph_enable_padding = true
-
 prefill max_batch_size = (max_batch_size if max_batch_size else 1)
-agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
+agg_decode max_batch_size = (max_batch_size if max_batch_size else 128)
 
 prefill disable_overlap_scheduler = true
 decode disable_overlap_scheduler = false
@@ -12,6 +8,8 @@ agg disable_overlap_scheduler = false
 prefill max_num_tokens = SlaConfig.isl + 1500
 decode max_num_tokens = max_batch_size
 agg max_num_tokens = max_batch_size + SlaConfig.isl + 1500
+
+agg_prefill_decode cuda_graph_batch_sizes = ((range(1, max_batch_size + 1) | list) if max_batch_size else [])
 
 # Enforce TensorRT-LLM MoE parallelism: moe_tp × moe_ep = tp
 when ModelConfig.is_moe and (moe_tensor_parallel_size and moe_expert_parallel_size):
