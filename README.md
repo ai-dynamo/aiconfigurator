@@ -194,7 +194,7 @@ This feature bridges the gap between configuration and Dynamo deployment.
 The folder structure looks like this:
 
 ```text
-results/QWEN3_32B_isl4000_osl1000_ttft1000_tpot20_904495
+results/QWEN3_32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
 │   ├── best_config_topn.csv
 │   ├── config.yaml
