@@ -66,47 +66,36 @@ Use the newly generated data by collect_moe.py `moe_perf.txt` to replace the inh
 
 Now let's revisit how to add a new model in aiconfigurator. There are 3 situations:
 
-### Situation 1: Simple Variant to Supported Model Without New Operations
+### Situation 1: Simple Variant Without New Operations
 
-Check the supported model list in [`common.py`](../src/aiconfigurator/sdk/common.py), defined in **SupportedModels**.
+If the model is a simple variant of an existing architecture (for example, it's similar to Qwen3 32B and only has slight differences, such as different positional embedding, different q/k/v heads of GQA, different number of layers, different hidden size), these are treated as **simple variants**.
 
-If the model is a simple variant of one of the supported models (for example, it's similar to Qwen3 32B and only has slight differences, such as different positional embedding, different q/k/v heads of GQA, different number of layers, different hidden size), these are treated as **simple variants**. 
-
-In this case, the only thing you need to do is add one line in **SupportedModels**:
+In this case, you just need to ensure the architecture is supported in **ARCHITECTURE_TO_MODEL_FAMILY** in [`common.py`](../src/aiconfigurator/sdk/common.py):
 
 ```python
-'NEW_MODEL': ['LLAMA', 128, 64, 4, 128, 64*128, 8192, 152064, 32768, 0, 0, 0, None]
+"YourModelForCausalLM": "LLAMA",  # or "MOE", "DEEPSEEK", etc.
 ```
 
-This defines a new model similar to 'LLAMA' with:
-- 128 layers
-- 64 q heads and 4 kv heads of GQA
-- Hidden dimension = 64*128
-- Intermediate size = 8192
-- Vocabulary size = 152064
-- Context size = 32768  
+AIConfigurator will automatically download the model's `config.json` from HuggingFace when you run with `--model_path your-org/Your-New-Model`. The model config is parsed to extract layer count, hidden size, attention heads, etc.
 
-Here 'LLAMA' is of the model families defined as **ModelFamily** in [`common.py`](../src/aiconfigurator/sdk/common.py)
+**Note**: If the architecture already exists in `ARCHITECTURE_TO_MODEL_FAMILY` (e.g., `LlamaForCausalLM`, `Qwen3ForCausalLM`, `MixtralForCausalLM`), no changes are needed - just use the model directly.
+
+Here 'LLAMA', 'MOE', 'DEEPSEEK' are the model families defined in **ModelFamily** in [`common.py`](../src/aiconfigurator/sdk/common.py)
 
 
-### Situation 2: Variant to Supported Model but Requires Additional Data
+### Situation 2: Model Requires Additional Performance Data
 
 This typically refers to a MoE model, as the MoE operation of a new model usually has different `num_experts` and `topk` values, etc. This difference is captured by different data points in aiconfigurator.
 
-As mentioned above, you need to follow several steps to support this model:
+You need to follow several steps:
 
 1. Define a new MoE operation test case in `collect_moe.py` and follow the collector [README](../collector/README.md) to collect the MoE data points for your model.
 
 2. Update the inherited database such as `src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt` with the `moe_perf.txt` file you get in step 1.
 
-3. Define the model similar to **Situation 1**, such as QWEN3_235B, it's a new model of model family **'MOE'**:
-   ```python
-   'QWEN3_235B': ['MOE', 94, 64, 4, 128, 4096, 12288, 151936, 40960, 8, 128, 1536, None]
-   ```
-   
-   Please follow the comment lines in `common.py` to ensure the correct key values.
+3. Ensure the architecture mapping exists in **ARCHITECTURE_TO_MODEL_FAMILY** (see **Situation 1**).
 
-Models with different MLA operations also follow a similar process. For example, if it's a variant to model familiy 'DEEPSEEK' and has different definition of MLA, you need to collect new MLA data points.
+Models with different MLA operations also follow a similar process. For example, if it's a variant to model family 'DEEPSEEK' and has different definition of MLA, you need to collect new MLA data points.
 
 ### Situation 3: Model Needs New Operation Support
 
@@ -134,15 +123,15 @@ Rebuild & reinstall aiconfigurator to add this model's support.
 ```mermaid
 flowchart TD
     A[Does the model belong to an existing model_family?]
-    A --> |YES| B([Simple dense, moe variants like <i><b>QWEN3_32B</b></i> can directly use the existing <i><b>LLAMA</b></i> or <i><b>MOE</b></i> model_family])
-    B --> C[Add the model's config in the <i><b>SupprotedModels</b></i> of <i><b>sdk/common.py</b></i> using an existing model_family]
+    A --> |YES| B([Simple dense, moe variants like <i><b>Qwen/Qwen3-32B</b></i> can directly use the existing <i><b>LLAMA</b></i> or <i><b>MOE</b></i> model_family])
+    B --> C[Ensure architecture exists in <i><b>ARCHITECTURE_TO_MODEL_FAMILY</b></i>, then use directly with <i><b>--model_path</b></i>]
     A --> |NO| D([Each layer in <i><b>Nemotron</b></i> can have a different <i><b>inter_size</b></i>, so we defined a new class for this model])
     D --> E[Does the model need new operations?]
     E --> |YES| F([for instance, new model might have covolution, which isn't defined in sdk/operations.py])
     F --> G[Define your operations in <b><i>sdk/operations.py</b></i>]
     G --> H[Define the model as a new model class in <i><b>sdk/models.py</b></i> using OPs defined in <i><b>sdk/operations.py</b></i>]
     E --> |NO|H
-    H --> i[Add the model's config in the <i><b>SupportedModels</b></i> of <i><b>sdk/common.py</b></i> using the newly defined model class as the model_family]
+    H --> i[Add architecture mapping to <i><b>ARCHITECTURE_TO_MODEL_FAMILY</b></i>]
     i --> j[Do you need to collect performance data for the new model?]
     C --> j
     j --> |YES|K([Some common cases in which you will need to collect new data])

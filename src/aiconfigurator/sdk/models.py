@@ -8,16 +8,42 @@ from functools import cache
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.utils import get_model_config_from_hf_id
+from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
 
 @cache
-def _get_model_info(model_name: str) -> list:
-    if model_name in common.SupportedModels:
-        return common.SupportedModels[model_name]
-    return get_model_config_from_hf_id(model_name)
+def _get_model_info(model_path: str) -> list:
+    """
+    Get model configuration info from model path.
+
+    Args:
+        model_path: HuggingFace model path (e.g., 'meta-llama/Llama-2-7b-hf') or local path
+
+    Returns:
+        list: Model configuration parameters
+              [architecture, layers, n, n_kv, d, hidden_size, inter_size, vocab, context,
+               topk, num_experts, moe_inter_size, extra_params]
+    """
+    return get_model_config_from_model_path(model_path)
+
+
+def _architecture_to_model_family(architecture: str) -> str:
+    """
+    Convert architecture name to model family.
+    Handles both HuggingFace architecture names (e.g., 'LlamaForCausalLM')
+    and internal model family names (e.g., 'LLAMA').
+    """
+    if architecture in common.ARCHITECTURE_TO_MODEL_FAMILY:
+        return common.ARCHITECTURE_TO_MODEL_FAMILY[architecture]
+    if architecture in common.ModelFamily:
+        return architecture
+    raise ValueError(
+        f"Unknown architecture or model family: {architecture}. "
+        f"Supported architectures: {', '.join(common.ARCHITECTURE_TO_MODEL_FAMILY.keys())}. "
+        f"Supported model families: {', '.join(common.ModelFamily)}."
+    )
 
 
 def _architecture_to_model_family(architecture: str) -> str:
@@ -38,7 +64,7 @@ def _architecture_to_model_family(architecture: str) -> str:
 
 
 def get_model(
-    model_name: str,
+    model_path: str,
     model_config: config.ModelConfig,
     backend_name: str,
 ) -> BaseModel:
@@ -59,7 +85,7 @@ def get_model(
         num_experts,
         moe_inter_size,
         extra_params,
-    ) = _get_model_info(model_name)
+    ) = _get_model_info(model_path)
     # Convert architecture (e.g., 'LlamaForCausalLM') to model family (e.g., 'LLAMA')
     model_family = _architecture_to_model_family(architecture)
 
@@ -68,8 +94,9 @@ def get_model(
 
     if model_family == "GPT":
         model = GPTModel(
-            model_name,
+            model_path,
             model_family,
+            architecture,
             layers,
             n,
             n_kv,
@@ -82,8 +109,9 @@ def get_model(
         )
     elif model_family == "LLAMA":
         model = LLAMAModel(
-            model_name,
+            model_path,
             model_family,
+            architecture,
             layers,
             n,
             n_kv,
@@ -100,8 +128,9 @@ def get_model(
             topk,
             num_experts,
             moe_inter_size,
-            model_name,
+            model_path,
             model_family,
+            architecture,
             layers,
             n,
             n_kv,
@@ -114,13 +143,14 @@ def get_model(
         )
     elif model_family == "DEEPSEEK":
         if backend_name == "sglang" and model_config.enable_wideep:
-            logger.debug(f"WideEP is enabled for model {model_name} with backend {backend_name}")
+            logger.debug(f"WideEP is enabled for model {model_path} with backend {backend_name}")
             model = WideEPDeepSeekModel(
                 topk,
                 num_experts,
                 moe_inter_size,
-                model_name,
+                model_path,
                 model_family,
+                architecture,
                 layers,
                 n,
                 n_kv,
@@ -132,13 +162,14 @@ def get_model(
                 model_config,
             )
         else:
-            logger.debug(f"WideEP is not enabled for model {model_name} with backend {backend_name}")
+            logger.debug(f"WideEP is not enabled for model {model_path} with backend {backend_name}")
             model = DeepSeekModel(
                 topk,
                 num_experts,
                 moe_inter_size,
-                model_name,
+                model_path,
                 model_family,
+                architecture,
                 layers,
                 n,
                 n_kv,
@@ -151,8 +182,9 @@ def get_model(
             )
     elif model_family == "NEMOTRONNAS":
         model = NemotronNas(
-            model_name,
+            model_path,
             model_family,
+            architecture,
             layers,
             n,
             n_kv,
@@ -169,20 +201,20 @@ def get_model(
     return model
 
 
-def get_model_family(model_name: str) -> str:
+def get_model_family(model_path: str) -> str:
     """
     Get model family.
     Converts architecture name to model family if needed.
     """
-    architecture = _get_model_info(model_name)[0]
+    architecture = _get_model_info(model_path)[0]
     return _architecture_to_model_family(architecture)
 
 
-def check_is_moe(model_name: str) -> bool:
+def check_is_moe(model_path: str) -> bool:
     """
     Check if the model is a MoE model.
     """
-    return get_model_family(model_name) == "MOE" or get_model_family(model_name) == "DEEPSEEK"
+    return get_model_family(model_path) == "MOE" or get_model_family(model_path) == "DEEPSEEK"
 
 
 def calc_expectation(nextn: int, nextn_accept_rates: list[float]) -> float:
@@ -208,8 +240,9 @@ class BaseModel:
 
     def __init__(
         self,
-        model_name: str,
+        model_path: str,
         model_family: str,
+        architecture: str,
         num_layers: int,
         num_heads: int,
         num_kv_heads: int,
@@ -220,8 +253,9 @@ class BaseModel:
         context_length: int,
         model_config: config.ModelConfig,
     ) -> None:
-        self.model_name = model_name
+        self.model_path = model_path
         self.model_family = model_family
+        self.architecture = architecture
         self.config = model_config
         self.context_ops = []
         self.generation_ops = []
@@ -605,7 +639,7 @@ class MOEModel(BaseModel):
             else self.config.workload_distribution
         )
 
-        if self.model_name in ["GPT_OSS_120B", "GPT_OSS_20B"]:
+        if self.architecture == "GptOssForCausalLM":
             attn_scale_factor = 2
             window_size = 128
             self.context_ops.append(
@@ -1492,7 +1526,7 @@ class NemotronNas(BaseModel):
 
         Args:
             *args: Arguments passed to BaseModel constructor including:
-                - model_name (str): Name of the model
+                - model_path (str): Name of the model
                 - model_family (str): Model family (should be "NEMOTRONNAS")
                 - num_layers (int): Number of transformer layers
                 - num_heads (int): Number of attention heads

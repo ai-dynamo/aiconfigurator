@@ -20,14 +20,14 @@ from aiconfigurator.webapp.components.profiling.sdk import (
 DEFAULT_DECODE_INTERPOLATION_GRANULARITY = 6
 
 
-def profile_prefill_performance(database, backend, model_name, profile_num_gpus, isl):
+def profile_prefill_performance(database, backend, model_path, profile_num_gpus, isl):
     """
     Profile prefill performance across different GPU counts.
 
     Args:
         database: Performance database instance
         backend: Backend instance
-        model_name: Model name
+        model_path: Model name
         profile_num_gpus: List of GPU counts to profile
         isl: Input sequence length
 
@@ -57,7 +57,7 @@ def profile_prefill_performance(database, backend, model_name, profile_num_gpus,
         perf_dict = estimate_prefill_perf(
             database,
             backend,
-            model_name,
+            model_path,
             isl,
             tp_size=num_gpus,
             moe_tp_size=moe_tp_size,
@@ -67,7 +67,7 @@ def profile_prefill_performance(database, backend, model_name, profile_num_gpus,
         if not perf_dict:
             raise RuntimeError(
                 f"estimate_prefill_perf returned empty result for num_gpus={num_gpus}, "
-                f"model={model_name}, isl={isl}, moe_tp_size={moe_tp_size}, moe_ep_size={moe_ep_size}"
+                f"model={model_path}, isl={isl}, moe_tp_size={moe_tp_size}, moe_ep_size={moe_ep_size}"
             )
 
         if "context_latency" not in perf_dict:
@@ -80,7 +80,7 @@ def profile_prefill_performance(database, backend, model_name, profile_num_gpus,
 
         if ttft_val <= 0:
             raise ValueError(
-                f"Invalid context_latency={ttft_val} for num_gpus={num_gpus}, model={model_name}, isl={isl}"
+                f"Invalid context_latency={ttft_val} for num_gpus={num_gpus}, model={model_path}, isl={isl}"
             )
 
         # Calculate throughput: tokens/second/GPU
@@ -101,7 +101,7 @@ def profile_prefill_performance(database, backend, model_name, profile_num_gpus,
 def profile_decode_performance(
     database,
     backend,
-    model_name,
+    model_path,
     profile_num_gpus,
     isl,
     osl,
@@ -113,7 +113,7 @@ def profile_decode_performance(
     Args:
         database: Performance database instance
         backend: Backend instance
-        model_name: Model name
+        model_path: Model name
         profile_num_gpus: List of GPU counts to profile
         isl: Input sequence length
         osl: Output sequence length
@@ -141,7 +141,7 @@ def profile_decode_performance(
             )
 
         max_concurrency = get_max_batch_size(
-            database, backend, model_name, isl, osl, tp_size=num_gpus, moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size
+            database, backend, model_path, isl, osl, tp_size=num_gpus, moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size
         )
 
         if max_concurrency is None or max_concurrency <= 0:
@@ -177,7 +177,7 @@ def profile_decode_performance(
             perf_dict = estimate_perf(
                 database,
                 backend,
-                model_name,
+                model_path,
                 isl,
                 osl,
                 num_request,
@@ -190,7 +190,7 @@ def profile_decode_performance(
             if not perf_dict:
                 raise RuntimeError(
                     f"estimate_perf returned empty result for num_gpus={num_gpus}, "
-                    f"num_request={num_request}, model={model_name}, isl={isl}, osl={osl}"
+                    f"num_request={num_request}, model={model_path}, isl={isl}, osl={osl}"
                 )
 
             if "tpot" not in perf_dict:
@@ -224,7 +224,7 @@ def profile_decode_performance(
     if not decode_results:
         error_msg = (
             f"No decode results generated - all GPU configurations were skipped.\n"
-            f"Model: {model_name}, isl={isl}, osl={osl}\n"
+            f"Model: {model_path}, isl={isl}, osl={osl}\n"
             f"Attempted GPU configs: {profile_num_gpus}\n\n"
             f"Skipped configurations:\n"
         )

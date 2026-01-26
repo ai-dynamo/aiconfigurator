@@ -42,7 +42,7 @@ def parse(args):
     parser.add_argument(
         "--model",
         type=str,
-        choices=list(common.SupportedModels.keys()),
+        choices=sorted(common.get_default_models()),
         help="model name, with size",
     )
     parser.add_argument(

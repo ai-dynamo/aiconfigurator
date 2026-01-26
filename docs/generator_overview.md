@@ -58,7 +58,7 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
   aiconfigurator cli default \
     --backend sglang \
     --backend_version 0.5.6.post2 \
-    --model QWEN3_32B \
+    --model_path Qwen/Qwen3-32B \
     --system h200_sxm \
     --total_gpus 8 \
     --isl 5000 --osl 1000 --ttft 2000 --tpot 50 \

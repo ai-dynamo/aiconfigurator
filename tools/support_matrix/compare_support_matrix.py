@@ -112,11 +112,11 @@ def check_range_matches_database(data_rows: list[list[str]]) -> list[str]:
     expected_base_combinations = set(support_matrix.generate_combinations())
 
     # Each base combination should have both agg and disagg entries
-    # Note: generate_combinations returns (model, system, backend, version)
+    # Note: generate_combinations returns (huggingface_id, system, backend, version)
+    # Models are identified by HuggingFace IDs from DefaultHFModels
     expected_combinations = set()
-    for model, system, backend, version in expected_base_combinations:
-        huggingface_id = support_matrix.get_huggingface_id(model)
-        architecture = support_matrix.get_architecture(model)
+    for huggingface_id, system, backend, version in expected_base_combinations:
+        architecture = support_matrix.get_architecture(huggingface_id)
         expected_combinations.add((huggingface_id, architecture, system, backend, version, "agg"))
         expected_combinations.add((huggingface_id, architecture, system, backend, version, "disagg"))
 

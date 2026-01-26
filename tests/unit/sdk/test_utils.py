@@ -14,7 +14,7 @@ import pytest
 from aiconfigurator.sdk.utils import (
     _parse_hf_config_json,
     enumerate_ttft_tpot_constraints,
-    get_model_config_from_hf_id,
+    get_model_config_from_model_path,
 )
 
 pytestmark = pytest.mark.unit
@@ -39,7 +39,7 @@ class TestParseHFConfig:
 
         result = _parse_hf_config_json(config)
 
-        assert result[0] == "LLAMA"  # model_family
+        assert result[0] == "LlamaForCausalLM"  # architecture
         assert result[1] == 32  # num_layers
         assert result[2] == 32  # num_heads
         assert result[3] == 8  # num_kv_heads
@@ -65,7 +65,7 @@ class TestParseHFConfig:
 
         result = _parse_hf_config_json(config)
 
-        assert result[0] == "MOE"  # model_family
+        assert result[0] == "MixtralForCausalLM"  # architecture
         assert result[9] == 2  # topk
         assert result[10] == 8  # num_experts
         assert result[11] == 14336  # moe_inter_size
@@ -88,7 +88,7 @@ class TestParseHFConfig:
 
         result = _parse_hf_config_json(config)
 
-        assert result[0] == "DEEPSEEK"  # model_family
+        assert result[0] == "DeepseekV3ForCausalLM"  # architecture
         assert result[10] == 256  # num_experts from n_routed_experts
 
     def test_parse_config_with_head_dim(self):
@@ -130,9 +130,9 @@ class TestGetModelConfigFromHFID:
         }
         mock_download.return_value = mock_config
 
-        result = get_model_config_from_hf_id("Qwen/Qwen3-32B-FP8")
+        result = get_model_config_from_model_path("Qwen/Qwen3-32B-FP8")
 
-        assert result[0] == "LLAMA"
+        assert result[0] == "LlamaForCausalLM"  # architecture
         mock_download.assert_called_once_with("Qwen/Qwen3-32B-FP8")
 
 
