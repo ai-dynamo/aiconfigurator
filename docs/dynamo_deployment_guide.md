@@ -84,7 +84,7 @@ ISL=4000, OSL=512, TTFT=300ms, TPOT=10ms, optimize tokens/s/gpu
 If you would like to deploy by your own, when running the `aiconfigurator cli exp|default`, engine configuration files and executable scripts are automatically generated under the `--save_dir`, in the `topx` folder. The directory structure is:
 
 ```
-results/Qwen_Qwen3-32B_isl4000_osl1000_ttft1000_tpot20_904495
+results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
 │   ├── best_config_topn.csv
 │   ├── config.yaml
@@ -284,7 +284,7 @@ Inside the container:
 cd /workspace/mount_dir/dynamo/components/backends/trtllm
 
 # Copy generated configs from save_dir
-cp -r ${your_save_dir}/Qwen_Qwen3-32B_isl5000_osl1000_ttft1000_tpot50_*/backend_configs/* ./
+cp -r ${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot50_*/backend_configs/* ./
 
 # Launch dynamo
 bash disagg/node_0_run.sh
@@ -348,7 +348,7 @@ Refer to the single node example to run the container on both node 0 and node 1.
 Inside the container:
 ```bash
 cd /workspace/mount_dir/dynamo/components/backends/trtllm
-cp -r Qwen_Qwen3-32B_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
+cp -r Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
 bash disagg/node_0_run.sh
 ```
 
@@ -356,7 +356,7 @@ bash disagg/node_0_run.sh
 Inside the container:
 ```bash
 cd /workspace/mount_dir/dynamo/components/backends/trtllm
-cp -r Qwen_Qwen3-32B_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
+cp -r Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
 bash disagg/node_1_run.sh
 ```
 
