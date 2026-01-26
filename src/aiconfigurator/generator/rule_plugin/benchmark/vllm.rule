@@ -1,10 +1,11 @@
-agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
 prefill max_batch_size = (max_batch_size if max_batch_size else 1)
-agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
+decode max_batch_size = (max_batch_size if max_batch_size else 128)
 
 
 agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_parallel_size or 1) * (data_parallel_size or 1)
 agg_prefill_decode enable_expert_parallel = ((moe_expert_parallel_size or 1) > 1)
+
+agg_prefill_decode cuda_graph_batch_sizes = ((range(1, max_batch_size + 1) | list) if max_batch_size else [])
 
 prefill max_num_tokens = (SlaConfig.isl or 0) + 1500
 decode max_num_tokens = max_batch_size
@@ -18,4 +19,3 @@ when (ModelConfig.prefix or 0) > 0:
 when (ModelConfig.nextn or 0) > 0:
     speculative_decoding_type = "mtp"
     num_nextn_predict_layers = ModelConfig.nextn
-

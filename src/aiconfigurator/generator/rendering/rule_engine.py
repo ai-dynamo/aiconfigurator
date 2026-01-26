@@ -12,6 +12,21 @@ _ENV = Environment()
 logger = logging.getLogger(__name__)
 _BASE_DIR = Path(__file__).resolve().parent
 _RULES_DIR = (_BASE_DIR.parent / "rule_plugin").resolve()
+_DEFAULT_RULE_PLUGIN = "default"
+
+
+def _resolve_rule_plugin_dir(plugin: Optional[str], base_dir: Optional[str] = None) -> str:
+    base = Path(base_dir).resolve() if base_dir else _RULES_DIR
+    if not plugin or plugin == _DEFAULT_RULE_PLUGIN:
+        return str(base)
+    if os.path.sep in plugin or (os.path.altsep and os.path.altsep in plugin):
+        raise ValueError(f"Rule plugin must be a simple name, got: {plugin!r}")
+    candidate = (base / plugin).resolve()
+    if not candidate.exists() or not candidate.is_dir():
+        raise FileNotFoundError(f"Rule plugin directory not found: {candidate}")
+    if base not in candidate.parents and candidate != base:
+        raise ValueError(f"Rule plugin path escapes base directory: {candidate}")
+    return str(candidate)
 
 
 def _ensure_scope(pv: dict[str, Any], scope: str) -> dict[str, Any]:
@@ -157,8 +172,13 @@ def _load_rule_path(base_dir: str, backend: str) -> Optional[str]:
     return p if os.path.exists(p) else None
 
 
-def apply_rule_plugins(param_values: dict[str, Any], backend: str, dsl_dir: Optional[str] = None) -> dict[str, Any]:
-    base = str(Path(dsl_dir).resolve()) if dsl_dir else str(_RULES_DIR)
+def apply_rule_plugins(
+    param_values: dict[str, Any],
+    backend: str,
+    dsl_dir: Optional[str] = None,
+) -> dict[str, Any]:
+    rule_name = param_values.get("rule")
+    base = _resolve_rule_plugin_dir(rule_name, base_dir=dsl_dir)
     rule_path = _load_rule_path(base, backend)
     if not rule_path:
         return param_values

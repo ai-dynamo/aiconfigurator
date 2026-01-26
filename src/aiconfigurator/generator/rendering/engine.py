@@ -31,7 +31,10 @@ _BACKEND_MAPPING_FILE = str((_CONFIG_DIR / "backend_config_mapping.yaml").resolv
 
 
 def render_backend_templates(
-    param_values: dict[str, Any], backend: str, templates_dir: Optional[str] = None, version: Optional[str] = None
+    param_values: dict[str, Any],
+    backend: str,
+    templates_dir: Optional[str] = None,
+    version: Optional[str] = None,
 ) -> dict[str, str]:
     """
     Render templates for a specific backend with version-specific template selection.

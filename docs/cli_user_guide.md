@@ -161,6 +161,16 @@ Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/Dy
 - `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`
 - `--generator-set K8sConfig.k8s_namespace=dynamo \`
 
+#### Rule Plugin Selection
+You can switch the generator rule set via `--generator-set rule=benchmark`. This selects a rule plugin folder under `src/aiconfigurator/generator/rule_plugin/`.
+
+- **Default (production)**: if `rule` is not provided, the generator uses the default production rules. These are tuned for deployment (e.g., adjusted max batch size and CUDA graph batch sizes).
+- **Benchmark**: `--generator-set rule=benchmark` enables rules designed to align generated configs with AIC sdk results, including:
+  - wider CUDA graph batch size coverage to match simulated results
+  - stricter max batch size that follows the simulated batch size
+
+You can also define your own rule sets by adding a new folder under `src/aiconfigurator/generator/rule_plugin/` and selecting it with `--generator-set rule=<folder_name>`.
+
 Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
 
 The `--generator-help` command supports three section options:
