@@ -126,7 +126,7 @@ Each replica has a system of 4 prefill workers and 1 decode workers. Each prefil
 
 As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save_dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. Here's a stucture of the output folder,
 ```text
-results/Qwen_Qwen3-32B_isl4000_osl1000_ttft1000_tpot20_904495
+results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
 │   ├── best_config_topn.csv
 │   ├── config.yaml

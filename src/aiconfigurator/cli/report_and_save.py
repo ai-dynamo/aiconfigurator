@@ -378,12 +378,13 @@ def save_results(
     """Save the results to a directory."""
 
     first_exp_name = list(task_configs.keys())[0]
-    first_task_config = task_configs[first_exp_name].config
+    first_task = task_configs[first_exp_name]
+    first_task_config = first_task.config
 
     result_prefix = (
-        f"{first_task_config.model_path}_isl{first_task_config.runtime_config.isl}_"
-        f"osl{first_task_config.runtime_config.osl}_ttft{int(first_task_config.runtime_config.ttft)}_"
-        f"tpot{int(first_task_config.runtime_config.tpot)}"
+        f"{first_task_config.model_path}_{first_task.system_name}_{first_task.backend_name}_"
+        f"isl{first_task_config.runtime_config.isl}_osl{first_task_config.runtime_config.osl}_"
+        f"ttft{int(first_task_config.runtime_config.ttft)}_tpot{int(first_task_config.runtime_config.tpot)}"
     )
     result_dir_path = os.path.join(save_dir, f"{result_prefix}_{random.randint(0, 1000000)}")
 
