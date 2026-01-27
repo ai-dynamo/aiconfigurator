@@ -72,7 +72,6 @@ readinessProbe:
 
 {%- macro render_worker(component_name, sub_component_type, replicas, gpu, engine_path, inline_payload, disagg_mode=None, publish_metrics=False) -%}
 {{ "    " ~ component_name ~ ":" }}
-      dynamoNamespace: {{ name }}
       envFromSecret: hf-token-secret
       componentType: worker
       {% if sub_component_type %}
@@ -147,7 +146,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: {{ name }}
       componentType: frontend
       replicas: {{ frontend_replicas }}
       extraPodSpec:
