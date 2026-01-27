@@ -110,17 +110,21 @@ class TestCLIIntegration:
         ],
     )
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    def test_cli_main_build_dispatch(self, mock_execute, mode, build_patch, cli_args_factory):
+    def test_cli_main_build_dispatch(self, mock_execute, mode, build_patch, cli_args_factory, mock_exp_yaml_path):
         """Main should dispatch to the correct builder based on CLI mode."""
         mock_execute.return_value = ("agg", {}, {}, {})
+        mock_task_config = MagicMock(name="TaskConfig")
 
         with patch(build_patch) as mock_builder:
-            mock_builder.return_value = {}
-            args = cli_args_factory(mode=mode)
+            mock_builder.return_value = {"agg": mock_task_config}
+            if mode == "exp":
+                args = cli_args_factory(mode=mode, extra_args=["--yaml_path", str(mock_exp_yaml_path)])
+            else:
+                args = cli_args_factory(mode=mode)
             cli_main(args)
 
         mock_builder.assert_called_once()
-        mock_execute.assert_called_once_with({}, mode)
+        mock_execute.assert_called_once_with({"agg": mock_task_config}, mode)
 
     @pytest.mark.parametrize(
         "builder_patch",
@@ -150,9 +154,10 @@ class TestCLIIntegration:
     def test_cli_main_runtime_failure(self, mock_execute, builder_patch, cli_args_factory, tmp_path):
         """Execution errors propagate as RuntimeError for visibility."""
         mock_execute.side_effect = RuntimeError("failed")
+        mock_task_config = MagicMock(name="TaskConfig")
 
         with patch(builder_patch) as mock_builder:
-            mock_builder.return_value = {}
+            mock_builder.return_value = {"agg": mock_task_config}
 
             if "default" in builder_patch:
                 args = cli_args_factory(mode="default")
