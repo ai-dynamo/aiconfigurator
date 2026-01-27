@@ -86,34 +86,34 @@ If you would like to deploy by your own, when running the `aiconfigurator cli ex
 ```
 results/QWEN3_32B_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
-│   ├── best_config_topn.csv
-│   ├── config.yaml
-│   ├── pareto.csv
-│   ├── top1
-│   │   ├── agg
-│   │   │   ├── agg_config.yaml
-│   │   │   ├── k8s_deploy.yaml
-│   │   │   └── node_0_run.sh 
-│   │   └── generator_config.yaml
-│   ...
+│   ├── best_config_topn.csv
+│   ├── config.yaml
+│   ├── pareto.csv
+│   ├── top1
+│   │   ├── agg
+│   │   │   ├── agg_config.yaml
+│   │   │   ├── k8s_deploy.yaml
+│   │   │   └── run_0.sh 
+│   │   └── generator_config.yaml
+│   ...
 ├── disagg
-│   ├── best_config_topn.csv
-│   ├── config.yaml
-│   ├── pareto.csv
-│   ├── top1
-│   │   ├── disagg
-│   │   │   ├── decode_config.yaml
-│   │   │   ├── k8s_deploy.yaml
-│   │   │   ├── node_0_run.sh
-│   │   │   └── prefill_config.yaml
-│   │   └── generator_config.yaml
-│   ...
+│   ├── best_config_topn.csv
+│   ├── config.yaml
+│   ├── pareto.csv
+│   ├── top1
+│   │   ├── disagg
+│   │   │   ├── decode_config.yaml
+│   │   │   ├── k8s_deploy.yaml
+│   │   │   ├── run_0.sh
+│   │   │   └── prefill_config.yaml
+│   │   └── generator_config.yaml
+│   ...
 └── pareto_frontier.png
 ```
 
-Here, `agg_config.yaml`, `prefill_config.yaml`, and `decode_config.yaml` are TRTLLM engine configuration files, and `node_x_run.sh` are the executable scripts. `k8s_deploy.yaml` is for deployment in k8s. In this guide, we're not using k8s.
+Here, `agg_config.yaml`, `prefill_config.yaml`, and `decode_config.yaml` are TRTLLM engine configuration files, and `run_x.sh` are the executable scripts. `k8s_deploy.yaml` is for deployment in k8s. In this guide, we're not using k8s.
 
-For multi-node setups, there will be multiple `node_x_run.sh` scripts (one per node), each invoking the same TRTLLM engine config file. By default, `node_0_run.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, please specify `--head_node_ip` to indicate the IP address of node0.
+For multi-node setups, there will be multiple `run_x.sh` scripts (one per node), each invoking the same TRTLLM engine config file. By default, `run_0.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, please specify `--head_node_ip` to indicate the IP address of node0.
 
 Typically, the command is:
 
@@ -152,14 +152,23 @@ aiconfigurator cli default \
   --generator-set ServiceConfig.head_node_ip=0.0.0.0
 ```
 
-At runtime, copy the generated `backend_configs` directory to each node and execute the corresponding script:
+At runtime, copy the generated artifacts to each node, set up the engine configs directory, and execute the corresponding script:
 
 ```bash
+# Create the engine_configs directory expected by the run scripts
+mkdir -p /workspace/engine_configs
+
+# Copy engine config files to the expected location (adjust paths as needed)
+# For aggregated mode:
+cp ${your_save_dir}/agg/top1/agg/agg_config.yaml /workspace/engine_configs/
+# For disaggregated mode:
+cp ${your_save_dir}/disagg/top1/disagg/*_config.yaml /workspace/engine_configs/
+
 # On node0
-bash node_0_run.sh
+bash run_0.sh
 
 # On other nodes
-bash node_x_run.sh
+bash run_x.sh
 ```
 
 > Note: The generated configs are for deploying 1 replica instead of the cluster (defined as total_gpus). We'll bridge this gap in future.
@@ -232,11 +241,11 @@ aiconfigurator cli default \
   --osl 1000 \
   --ttft 1000 \
   --tpot 10 \
-  --save_dir ./ \
-  --model QWEN3_32B \
+  --save_dir ./results \
+  --model_path Qwen/Qwen3-32B \
   --total_gpus 8 \
-  --head_node_ip 0.0.0.0 \
   --generated_config_version 1.0.0rc4 \
+  --generator-set ServiceConfig.head_node_ip=0.0.0.0 \
   --generator-set ServiceConfig.model_path=/workspace/model_hub/qwen3-32b-fp8 \
   --generator-set ServiceConfig.served_model_name=Qwen/Qwen3-32B-FP8 \
   --generator-set Workers.prefill.kv_cache_free_gpu_memory_fraction=0.9 \
@@ -249,20 +258,33 @@ We use 1.0.0rc3 (our latest data) for aiconfigurator and we can support generate
 
 ### 3.2 Verify Generated Configuration
 
-engine configuration files and executable scripts are automatically generated under the `--save_dir`, in the `backend_configs` folder. The directory structure is:
+Engine configuration files and executable scripts are automatically generated under the `--save_dir`. The directory structure is:
 
 ````
-backend_configs/
+${save_dir}/
 ├── agg/
-│   ├── agg_config.yaml
-│   └── node_0_run.sh
-└── disagg/
-│   ├── decode_config.yaml
-│   ├── prefill_config.yaml
-│   ├── node_0_run.sh
-│   ├── node_1_run.sh
-│   └── ...
-└──
+│   ├── top1/
+│   │   ├── agg/
+│   │   │   ├── agg_config.yaml
+│   │   │   ├── k8s_deploy.yaml
+│   │   │   └── run_0.sh
+│   │   └── generator_config.yaml
+│   ├── best_config_topn.csv
+│   ├── config.yaml
+│   └── pareto.csv
+├── disagg/
+│   ├── top1/
+│   │   ├── disagg/
+│   │   │   ├── decode_config.yaml
+│   │   │   ├── prefill_config.yaml
+│   │   │   ├── k8s_deploy.yaml
+│   │   │   ├── run_0.sh
+│   │   │   └── run_1.sh  (for multi-node setups)
+│   │   └── generator_config.yaml
+│   ├── best_config_topn.csv
+│   ├── config.yaml
+│   └── pareto.csv
+└── pareto_frontier.png
 ````
 
 ### 3.3 Launch the Dynamo Container
@@ -281,13 +303,21 @@ docker run --gpus all --net=host --ipc=host \
 Inside the container:
 
 ```bash
-cd /workspace/mount_dir/dynamo/components/backends/trtllm
+# Create the engine_configs directory expected by the run scripts
+mkdir -p /workspace/engine_configs
 
-# Copy generated configs from save_dir
-cp -r ${your_save_dir}/QWEN3_32B_isl5000_osl1000_ttft1000_tpot50_*/backend_configs/* ./
+# Copy engine config files to the expected location
+# For disaggregated mode (recommended):
+cp /workspace/mount_dir/${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot10_*/disagg/top1/disagg/*_config.yaml /workspace/engine_configs/
+
+# For aggregated mode:
+# cp /workspace/mount_dir/${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot10_*/agg/top1/agg/agg_config.yaml /workspace/engine_configs/
+
+# Navigate to the generated artifacts directory
+cd /workspace/mount_dir/${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot10_*/disagg/top1/disagg
 
 # Launch dynamo
-bash disagg/node_0_run.sh
+bash run_0.sh
 ```
 
 > **Tip:** If you see a Triton version mismatch error, reinstall Triton:
@@ -340,24 +370,40 @@ aiconfigurator cli default \
   --generator-set Workers.agg.kv_cache_free_gpu_memory_fraction=0.7
 ```
 
-> Note that even if `--total_gpus 16`, the optimal configuration generated by aiconfigurator may not require 16 GPUs. If only 8 GPUs are needed, it may produce just a `node_0_run.sh`, which can then be executed on each node.
+> Note that even if `--total_gpus 16`, the optimal configuration generated by aiconfigurator may not require 16 GPUs. If only 8 GPUs are needed, it may produce just a `run_0.sh`, which can then be executed on each node.
 
 Refer to the single node example to run the container on both node 0 and node 1.
 
 ### 4.2 Deploy on Node 0
 Inside the container:
 ```bash
-cd /workspace/mount_dir/dynamo/components/backends/trtllm
-cp -r QWEN3_32B_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
-bash disagg/node_0_run.sh
+# Create the engine_configs directory expected by the run scripts
+mkdir -p /workspace/engine_configs
+
+# Copy engine config files to the expected location
+cp /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1/disagg/*_config.yaml /workspace/engine_configs/
+
+# Navigate to the generated artifacts directory
+cd /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1/disagg
+
+# Launch dynamo on node 0 (includes frontend)
+bash run_0.sh
 ```
 
 ### 4.3 Deploy on Node 1
 Inside the container:
 ```bash
-cd /workspace/mount_dir/dynamo/components/backends/trtllm
-cp -r QWEN3_32B_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
-bash disagg/node_1_run.sh
+# Create the engine_configs directory expected by the run scripts
+mkdir -p /workspace/engine_configs
+
+# Copy engine config files to the expected location
+cp /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1/disagg/*_config.yaml /workspace/engine_configs/
+
+# Navigate to the generated artifacts directory
+cd /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1/disagg
+
+# Launch dynamo on node 1 (workers only)
+bash run_1.sh
 ```
 
 ### 4.4 Test the Service
