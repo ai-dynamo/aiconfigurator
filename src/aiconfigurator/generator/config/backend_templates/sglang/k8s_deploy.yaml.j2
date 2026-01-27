@@ -7,7 +7,6 @@
 
 {%- macro render_worker(component_name, role, replicas, gpu, cli_args) -%}
 {{ "    " ~ component_name ~ ":" }}
-      dynamoNamespace: {{ name }}
       envFromSecret: hf-token-secret
       componentType: worker
       {% if role %}
@@ -65,7 +64,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: {{ name }}
       componentType: frontend
       replicas: {{ frontend_replicas | default(1) }}
       extraPodSpec:     
