@@ -542,6 +542,11 @@ class TaskConfigFactory:
         comm_quant_mode = "half"
 
         sm_version = database.system_spec["gpu"]["sm_version"]
+        # SM version to GPU type mapping:
+        #   SM 80  = A100
+        #   SM 89  = L40S (Ada Lovelace) - no TMA, limited FP8 support
+        #   SM 90  = H100/H200 (Hopper) - full FP8 and TMA support
+        #   SM 100 = B200/GB200 (Blackwell) - NVFP4 support
 
         supported = getattr(database, "supported_quant_mode", {}) or {}
         supported_gemm = set(supported.get("gemm", []) or [])
