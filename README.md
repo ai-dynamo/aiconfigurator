@@ -64,7 +64,7 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 ```bash
 aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm
 aiconfigurator cli exp --yaml_path exp.yaml
-aiconfigurator cli generate --model_path QWEN3_32B --total_gpus 8 --system h200_sxm
+gaiconfigurator cli generate --model_path QWEN3_32B --total_gpus 8 --system h200_sxm
 ```
 - We have three modes: `default`, `exp`, and `generate`.
 - Use `default` to find the estimated best deployment by searching the configuration space.

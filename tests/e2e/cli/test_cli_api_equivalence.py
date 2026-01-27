@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-End-to-end tests to verify that CLI APIs (cli_default, cli_exp, cli_generate) 
+End-to-end tests to verify that CLI APIs (cli_default, cli_exp, cli_generate)
 are equivalent to running CLI commands via command line.
 
 These tests run real CLI commands via subprocess and compare results with API calls.
