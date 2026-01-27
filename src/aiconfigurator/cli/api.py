@@ -63,9 +63,7 @@ def _execute_and_wrap_result(
     mode: str,
 ) -> CLIResult:
     """Execute task configs using main.py's function and wrap result in CLIResult."""
-    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs_internal(
-        task_configs, mode
-    )
+    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs_internal(task_configs, mode)
 
     return CLIResult(
         chosen_exp=chosen_exp,
