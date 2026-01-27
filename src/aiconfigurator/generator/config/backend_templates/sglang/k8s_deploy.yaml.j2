@@ -8,6 +8,11 @@
 {%- macro render_worker(component_name, role, replicas, gpu, cli_args) -%}
 {{ "    " ~ component_name ~ ":" }}
       envFromSecret: hf-token-secret
+      {% if K8sConfig.k8s_hf_home %}
+      envs:
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+      {% endif %}
       componentType: worker
       {% if role %}
       subComponentType: {{ role }}
@@ -64,6 +69,7 @@ metadata:
 spec:
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       componentType: frontend
       replicas: {{ frontend_replicas | default(1) }}
       extraPodSpec:     
@@ -74,10 +80,16 @@ spec:
         mainContainer:
           image: {{ K8sConfig.k8s_image }}
           imagePullPolicy: IfNotPresent
-      {% if enable_router %}
+      {% if enable_router or K8sConfig.k8s_hf_home %}
       envs:
+        {% if enable_router %}
         - name: DYN_ROUTER_MODE
           value: kv
+        {% endif %}
+        {% if K8sConfig.k8s_hf_home %}
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+        {% endif %}
       {% endif %}
 
     {% if DynConfig.mode | default('disagg') == 'agg' %}
