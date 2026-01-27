@@ -292,25 +292,23 @@ class TestCLIGenerateEquivalence:
         assert api_tp * api_pp * api_replicas == api_gpus_used, "TP * PP * replicas should equal GPUs used"
 
 
+class TestCLISupportEquivalence:
+    """Tests that cli_support API produces same results as CLI command."""
 
-
-class TestCLICheckEquivalence:
-    """Tests that cli_check API produces same results as CLI command."""
-
-    def test_cli_check_api_vs_command_supported_model(self):
-        """cli_check API should return same support status as CLI command for supported model."""
-        from aiconfigurator.cli import cli_check
+    def test_cli_support_api_vs_command(self):
+        """cli_support API should return same support status as CLI command."""
+        from aiconfigurator.cli import cli_support
 
         # Run via Python API
-        api_result = cli_check("Qwen/Qwen3-32B", "h200_sxm")
+        api_result = cli_support("Qwen/Qwen3-32B", "h200_sxm")
 
-        # Run via CLI command and parse output
+        # Run via CLI command
         cmd = [
             sys.executable,
             "-m",
             "aiconfigurator.main",
             "cli",
-            "check",
+            "support",
             "--model_path",
             "Qwen/Qwen3-32B",
             "--system",

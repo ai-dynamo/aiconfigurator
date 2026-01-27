@@ -52,11 +52,11 @@ print(result["parallelism"])  # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8
 
 > **Note:** This is a naive configuration without memory validation or performance optimization. For production deployments, use `aiconfigurator cli default` to run the full parameter sweep with SLA optimization.
 
-### Check mode
+### Support mode
 This mode allows you to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
 
 ```bash
-aiconfigurator cli check --model_path Qwen/Qwen3-32B --system h200_sxm
+aiconfigurator cli support --model_path Qwen/Qwen3-32B --system h200_sxm
 ```
 
 **Required arguments:**
@@ -84,9 +84,9 @@ aiconfigurator cli check --model_path Qwen/Qwen3-32B --system h200_sxm
 
 **Python API equivalent:**
 ```python
-from aiconfigurator.cli import cli_check
+from aiconfigurator.cli import cli_support
 
-agg_supported, disagg_supported = cli_check(
+agg_supported, disagg_supported = cli_support(
     model_path="Qwen/Qwen3-32B",
     system="h200_sxm",
     backend="trtllm"

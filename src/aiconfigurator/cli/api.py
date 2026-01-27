@@ -5,7 +5,7 @@
 Python API for calling CLI workflows programmatically.
 
 This module provides simple function interfaces to the CLI's "default", "exp",
-"generate", and "check" modes, making it easy to use from Python code without going through argparse.
+"generate", and "support" modes, making it easy to use from Python code without going through argparse.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.task import TaskConfig
 
 
-def cli_check(
+def cli_support(
     model_path: str,
     system: str,
     *,
@@ -39,7 +39,7 @@ def cli_check(
     architecture, system, backend, and version in the support matrix.
 
     This is the programmatic equivalent of:
-        aiconfigurator cli check --model_path ... --system ...
+        aiconfigurator cli support --model_path ... --system ...
 
     Args:
         model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
@@ -331,8 +331,8 @@ from aiconfigurator.generator.api import generate_naive_config as cli_generate
 
 __all__ = [
     "CLIResult",
-    "cli_check",
     "cli_default",
     "cli_exp",
     "cli_generate",
+    "cli_support",
 ]

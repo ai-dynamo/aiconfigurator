@@ -166,8 +166,8 @@ def _add_generate_mode_arguments(parser):
     )
 
 
-def _add_check_mode_arguments(parser):
-    """Add arguments for the check mode (support matrix check)."""
+def _add_support_mode_arguments(parser):
+    """Add arguments for the support mode (support matrix check)."""
     parser.add_argument(
         "--model_path",
         type=_validate_model_path,
@@ -235,14 +235,14 @@ def configure_parser(parser):
     )
     _add_generate_mode_arguments(generate_parser)
 
-    # Check mode - support matrix check
-    check_parser = subparsers.add_parser(
-        "check",
+    # Support mode - support matrix check
+    support_parser = subparsers.add_parser(
+        "support",
         parents=[common_cli_parser],
         help="Check if AIC supports the model/hardware combo for (agg, disagg).",
         description="Verify support for a specific model and system combination using the support matrix.",
     )
-    _add_check_mode_arguments(check_parser)
+    _add_support_mode_arguments(support_parser)
 
 
 def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str) -> str | None:
@@ -679,8 +679,8 @@ def _run_generate_mode(args):
     print("=" * 60 + "\n")
 
 
-def _run_check_mode(args):
-    """Run the check mode to see if a model/hardware combo is supported."""
+def _run_support_mode(args):
+    """Run the support mode to see if a model/hardware combo is supported."""
     model = args.model_path
     system = args.system
     backend = args.backend
@@ -750,9 +750,9 @@ def main(args):
         _run_generate_mode(args)
         return
 
-    # Handle check mode separately (no sweeping)
-    if args.mode == "check":
-        _run_check_mode(args)
+    # Handle support mode separately (no sweeping)
+    if args.mode == "support":
+        _run_support_mode(args)
         return
 
     if args.mode == "default":
