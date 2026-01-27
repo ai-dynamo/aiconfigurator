@@ -4,8 +4,8 @@
 """
 Python API for calling CLI workflows programmatically.
 
-This module provides simple function interfaces to the CLI's "default", "exp", and
-"generate" modes, making it easy to use from Python code without going through argparse.
+This module provides simple function interfaces to the CLI's "default", "exp",
+"generate", and "check" modes, making it easy to use from Python code without going through argparse.
 """
 
 from __future__ import annotations
@@ -24,6 +24,43 @@ from aiconfigurator.cli.main import (
 )
 from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.task import TaskConfig
+
+
+def cli_check(
+    model_path: str,
+    system: str,
+    *,
+    backend: str = "trtllm",
+    backend_version: str | None = None,
+) -> tuple[bool, bool]:
+    """
+    Check if AIC supports the model/hardware combo for (agg, disagg).
+    Support is determined by a majority vote of PASS status for the given
+    architecture, system, backend, and version in the support matrix.
+
+    This is the programmatic equivalent of:
+        aiconfigurator cli check --model_path ... --system ...
+
+    Args:
+        model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
+        system: System name (GPU type), e.g., 'h200_sxm', 'b200_sxm'.
+        backend: Optional backend name to filter by ('trtllm', 'sglang', 'vllm').
+        backend_version: Optional backend database version.
+
+    Returns:
+        tuple[bool, bool]: (agg_supported, disagg_supported)
+    """
+    from aiconfigurator.sdk.common import check_support
+    from aiconfigurator.sdk.utils import get_model_config_from_model_path
+
+    try:
+        model_info = get_model_config_from_model_path(model_path)
+        architecture = model_info[0]
+    except Exception:
+        architecture = None
+
+    return check_support(model_path, system, backend, backend_version, architecture=architecture)
+
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +331,7 @@ from aiconfigurator.generator.api import generate_naive_config as cli_generate
 
 __all__ = [
     "CLIResult",
+    "cli_check",
     "cli_default",
     "cli_exp",
     "cli_generate",

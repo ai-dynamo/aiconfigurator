@@ -166,6 +166,37 @@ def _add_generate_mode_arguments(parser):
     )
 
 
+def _add_check_mode_arguments(parser):
+    """Add arguments for the check mode (support matrix check)."""
+    parser.add_argument(
+        "--model_path",
+        type=_validate_model_path,
+        required=True,
+        help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
+        "local path to directory containing config.json.",
+    )
+    parser.add_argument(
+        "--system",
+        choices=common.SupportedSystems,
+        type=str,
+        required=True,
+        help="System name (GPU type).",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=[backend.value for backend in common.BackendName],
+        type=str,
+        default="trtllm",
+        help="Backend name to filter by. Defaults to 'trtllm'.",
+    )
+    parser.add_argument(
+        "--backend_version",
+        type=str,
+        default=None,
+        help="Optional backend version to filter by.",
+    )
+
+
 def configure_parser(parser):
     common_cli_parser = _build_common_cli_parser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -203,6 +234,15 @@ def configure_parser(parser):
         ),
     )
     _add_generate_mode_arguments(generate_parser)
+
+    # Check mode - support matrix check
+    check_parser = subparsers.add_parser(
+        "check",
+        parents=[common_cli_parser],
+        help="Check if AIC supports the model/hardware combo for (agg, disagg).",
+        description="Verify support for a specific model and system combination using the support matrix.",
+    )
+    _add_check_mode_arguments(check_parser)
 
 
 def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str) -> str | None:
@@ -639,6 +679,64 @@ def _run_generate_mode(args):
     print("=" * 60 + "\n")
 
 
+def _run_check_mode(args):
+    """Run the check mode to see if a model/hardware combo is supported."""
+    model = args.model_path
+    system = args.system
+    backend = args.backend
+    version = args.backend_version
+
+    # If no version specified, find the latest version in the support matrix
+    if not version:
+        matrix = common.get_support_matrix()
+        versions_for_combo = [
+            row["Version"]
+            for row in matrix
+            if row["System"] == system and row["Backend"] == backend
+        ]
+        if versions_for_combo:
+            # Sort versions and take the latest (assumes semantic versioning or lexicographic order)
+            version = sorted(set(versions_for_combo), reverse=True)[0]
+
+    logger.info("Checking support for model=%s, system=%s, backend=%s, version=%s", model, system, backend, version)
+
+    # Resolve architecture for better check
+    try:
+        model_info = get_model_config_from_model_path(model)
+        architecture = model_info[0]
+    except Exception:
+        architecture = None
+
+    result = common.check_support(
+        model=model, system=system, backend=backend, version=version, architecture=architecture
+    )
+
+    print("\n" + "=" * 60)
+    print("  AIC Support Check Results")
+    print("=" * 60)
+    print(f"  Model:           {model}")
+    print(f"  System:          {system}")
+    print(f"  Backend:         {backend}")
+    print(f"  Version:         {version}")
+    print("-" * 60)
+    print(f"  Aggregated Support:    {'YES' if result.agg_supported else 'NO'}")
+    print(f"  Disaggregated Support: {'YES' if result.disagg_supported else 'NO'}")
+
+    # Show explanation if support was inferred from architecture majority vote
+    if not result.exact_match and result.architecture:
+        print("-" * 60)
+        print(f"  Note: Model '{model}' not found in support matrix.")
+        print(f"  Support inferred from architecture '{result.architecture}' majority vote:")
+        if result.agg_total_count:
+            p, t = result.agg_pass_count, result.agg_total_count
+            print(f"    Aggregated:    {p}/{t} passed (>{t // 2} required)")
+        if result.disagg_total_count:
+            p, t = result.disagg_pass_count, result.disagg_total_count
+            print(f"    Disaggregated: {p}/{t} passed (>{t // 2} required)")
+
+    print("=" * 60 + "\n")
+
+
 def main(args):
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
@@ -650,6 +748,11 @@ def main(args):
     # Handle generate mode separately (no sweeping)
     if args.mode == "generate":
         _run_generate_mode(args)
+        return
+
+    # Handle check mode separately (no sweeping)
+    if args.mode == "check":
+        _run_check_mode(args)
         return
 
     if args.mode == "default":

@@ -63,3 +63,47 @@ class TestSupportedSystems:
         assert common.SupportedSystems.issubset(data_folder_names), (
             "SupportedSystems set does not match data folders in systems/data directory.\n"
         )
+
+
+class TestSupportMatrix:
+    """Test support matrix functionality."""
+
+    def test_get_support_matrix(self):
+        """Test that get_support_matrix returns a list of dictionaries."""
+        matrix = common.get_support_matrix()
+        assert isinstance(matrix, list)
+        assert len(matrix) > 0
+        assert isinstance(matrix[0], dict)
+        assert "HuggingFaceID" in matrix[0]
+        assert "System" in matrix[0]
+        assert "Mode" in matrix[0]
+        assert "Status" in matrix[0]
+
+    def test_check_support(self):
+        """Test check_support function."""
+        # Test a known supported combination (Qwen3-32B on H200)
+        # These are expected to be PASS in the current support_matrix.csv
+        agg, disagg = common.check_support("Qwen/Qwen3-32B", "h200_sxm")
+        assert agg is True
+        assert disagg is True
+
+        # Test architecture-based support for a model not in the matrix
+        agg, disagg = common.check_support("Qwen/Qwen3-235B-A22B-Thinking-2507", "h200_sxm")
+        assert agg is True
+        assert disagg is True
+
+        # Test with a specific version that should pass
+        # Pick one that is likely to be there, e.g., 1.2.0rc5 for Qwen3-32B on H200
+        agg, disagg = common.check_support("Qwen/Qwen3-32B", "h200_sxm", backend="trtllm", version="1.2.0rc5")
+        assert agg is True
+        assert disagg is True
+
+        # Test an unsupported model
+        agg, disagg = common.check_support("non-existent-model", "h100_sxm")
+        assert agg is False
+        assert disagg is False
+
+        # Test an unsupported system
+        agg, disagg = common.check_support("Qwen/Qwen3-32B", "non-existent-system")
+        assert agg is False
+        assert disagg is False

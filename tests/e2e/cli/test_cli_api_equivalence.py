@@ -290,3 +290,44 @@ class TestCLIGenerateEquivalence:
         assert api_replicas > 0, "Replicas should be positive"
         assert api_gpus_used > 0, "GPUs used should be positive"
         assert api_tp * api_pp * api_replicas == api_gpus_used, "TP * PP * replicas should equal GPUs used"
+
+
+
+
+class TestCLICheckEquivalence:
+    """Tests that cli_check API produces same results as CLI command."""
+
+    def test_cli_check_api_vs_command_supported_model(self):
+        """cli_check API should return same support status as CLI command for supported model."""
+        from aiconfigurator.cli import cli_check
+
+        # Run via Python API
+        api_result = cli_check("Qwen/Qwen3-32B", "h200_sxm")
+
+        # Run via CLI command and parse output
+        cmd = [
+            sys.executable,
+            "-m",
+            "aiconfigurator.main",
+            "cli",
+            "check",
+            "--model_path",
+            "Qwen/Qwen3-32B",
+            "--system",
+            "h200_sxm",
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, f"CLI failed: {result.stderr}"
+
+        # Parse CLI output for support status
+        cli_agg_supported = "Aggregated Support:    YES" in result.stdout
+        cli_disagg_supported = "Disaggregated Support: YES" in result.stdout
+
+        # Compare results
+        assert api_result.agg_supported == cli_agg_supported, (
+            f"Aggregated support mismatch: API={api_result.agg_supported}, CLI={cli_agg_supported}"
+        )
+        assert api_result.disagg_supported == cli_disagg_supported, (
+            f"Disaggregated support mismatch: API={api_result.disagg_supported}, CLI={cli_disagg_supported}"
+        )

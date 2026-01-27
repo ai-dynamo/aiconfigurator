@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from aiconfigurator.cli import CLIResult, cli_exp
+from aiconfigurator.cli import CLIResult, cli_check, cli_exp
 
 pytestmark = pytest.mark.unit
 

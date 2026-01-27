@@ -64,12 +64,14 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 ```bash
 aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm
 aiconfigurator cli exp --yaml_path exp.yaml
-gaiconfigurator cli generate --model_path QWEN3_32B --total_gpus 8 --system h200_sxm
+aiconfigurator cli generate --model_path QWEN3_32B --total_gpus 32 --system h200_sxm
+aiconfigurator cli check --model_path QWEN3_32B --system h200_sxm
 ```
-- We have three modes: `default`, `exp`, and `generate`.
+- We have four modes: `default`, `exp`, `generate`, and `check`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
+- Use `check` to verify if AIC supports a model/hardware combination for agg and disagg modes.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
 - Use `exp`, pass in exp.yaml by `--yaml_path` to customize your experiments and even a heterogenous one.
 - Use `--save_dir DIR` to generate framework configuration files for Dynamo.
@@ -88,7 +90,7 @@ Refer to [CLI User Guide](docs/cli_user_guide.md)
 You can also use `aiconfigurator` programmatically in Python:
 
 ```python
-from aiconfigurator.cli import cli_default, cli_exp, cli_generate
+from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_check
 
 # 1. Run default agg vs disagg comparison
 result = cli_default(model_path="Qwen/Qwen3-32B", total_gpus=32, system="h200_sxm")
@@ -100,6 +102,10 @@ result = cli_exp(yaml_path="my_experiments.yaml")
 # 3. Generate a naive configuration
 result = cli_generate(model_path="Qwen/Qwen3-32B", total_gpus=8, system="h200_sxm")
 print(result["parallelism"]) # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
+
+# 4. Check support for a model/system combination
+agg, disagg = cli_check(model_path="Qwen/Qwen3-32B", system="h200_sxm")
+print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```
 
 An example here, 
