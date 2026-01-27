@@ -219,7 +219,6 @@ def run_moe_torch(
     swiglu_beta = None
     swiglu_limit = None
 
-
     # Determine activation type based on model
     # NemotronH uses non-gated MoE with Relu2 activation
     # Other models (DeepSeek, Qwen, Mixtral) use gated MoE with SwiGLU activation
