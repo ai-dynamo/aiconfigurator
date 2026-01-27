@@ -15,7 +15,11 @@ import yaml
 
 from aiconfigurator import __version__
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
-from aiconfigurator.generator.api import add_generator_override_arguments, generator_cli_helper
+from aiconfigurator.generator.api import (
+    add_generator_override_arguments,
+    generate_naive_config,
+    generator_cli_helper,
+)
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_request_latency_constraint,
@@ -131,6 +135,37 @@ def _add_experiments_mode_arguments(parser):
     )
 
 
+def _add_generate_mode_arguments(parser):
+    """Add arguments for the generate mode (naive config generation)."""
+    parser.add_argument(
+        "--model_path",
+        type=_validate_model_path,
+        required=True,
+        help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
+        "local path to directory containing config.json.",
+    )
+    parser.add_argument(
+        "--total_gpus",
+        type=int,
+        required=True,
+        help="Total GPUs for deployment.",
+    )
+    parser.add_argument(
+        "--system",
+        choices=common.SupportedSystems,
+        type=str,
+        required=True,
+        help="System name (GPU type).",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=[backend.value for backend in common.BackendName],
+        type=str,
+        default=common.BackendName.trtllm.value,
+        help="Backend name (default: trtllm).",
+    )
+
+
 def configure_parser(parser):
     common_cli_parser = _build_common_cli_parser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -155,6 +190,19 @@ def configure_parser(parser):
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_experiments_mode_arguments(experiments_parser)
+
+    # Generate mode - naive config without sweeping
+    generate_parser = subparsers.add_parser(
+        "generate",
+        parents=[common_cli_parser],
+        help="Generate naive agg config without SLA optimization (no sweeping).",
+        description=(
+            "Generate a working agg configuration without running the parameter sweep. "
+            "Calculates the smallest TP that fits the model in memory "
+            "(TP * VRAM/GPU > 1.5 * model_weight). No SLA optimization is performed."
+        ),
+    )
+    _add_generate_mode_arguments(generate_parser)
 
 
 def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str) -> str | None:
@@ -482,6 +530,64 @@ def _execute_task_configs(
     return chosen_exp, best_configs, pareto_fronts, best_throughputs
 
 
+def _run_generate_mode(args):
+    """Run the generate mode to create a naive agg config without sweeping."""
+    model_path = args.model_path
+    logger.info("Generating naive agg configuration for %s on %d GPUs", model_path, args.total_gpus)
+
+    # Use the public API function
+    result = generate_naive_config(
+        model_path=model_path,
+        total_gpus=args.total_gpus,
+        system=args.system,
+        backend=args.backend,
+        output_dir=args.save_dir or "./output",
+    )
+
+    # Extract result data for CLI output
+    generator_params = result["generator_params"]
+    backend_version = result["backend_version"]
+    output_dir = result["output_dir"]
+    parallelism = result["parallelism"]
+    tp = parallelism["tp"]
+    pp = parallelism["pp"]
+    replicas = parallelism["replicas"]
+    gpus_used = parallelism["gpus_used"]
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("  Naive Configuration Generated Successfully")
+    print("=" * 60)
+    print(f"  Model:           {model_path}")
+    print(f"  System:          {args.system}")
+    print(f"  Backend:         {args.backend} ({backend_version})")
+    print(f"  Total GPUs:      {args.total_gpus} (using {gpus_used})")
+    print(f"  Parallelism:     TP={tp}, PP={pp}")
+    print(f"  Replicas:        {replicas} (each using {tp * pp} GPUs)")
+    print(f"  Max Batch Size:  {generator_params['params']['agg']['max_batch_size']}")
+    print(f"  Output:          {output_dir}")
+    print("=" * 60)
+    print("\nGenerated files:")
+    for filename in sorted(os.listdir(output_dir)):
+        filepath = os.path.join(output_dir, filename)
+        if os.path.isfile(filepath):
+            print(f"  - {filename}")
+        elif os.path.isdir(filepath):
+            print(f"  - {filename}/")
+            for subfile in sorted(os.listdir(filepath)):
+                print(f"      - {subfile}")
+    print("\n" + "-" * 60)
+    print("  WARNING: This is a NAIVE configuration generated without")
+    print("  memory validation or performance optimization. It may NOT")
+    print("  work if the model is too large for the available GPU memory.")
+    print("")
+    print("  For production deployments, use 'aiconfigurator cli default'")
+    print("  to run the full parameter sweep with SLA optimization.")
+    print("-" * 60)
+    print("\nTo deploy, run the generated shell script or apply the k8s manifest.")
+    print("=" * 60 + "\n")
+
+
 def main(args):
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
@@ -489,6 +595,11 @@ def main(args):
     )
 
     logger.info(f"Loading Dynamo AIConfigurator version: {__version__}")
+
+    # Handle generate mode separately (no sweeping)
+    if args.mode == "generate":
+        _run_generate_mode(args)
+        return
 
     if args.mode == "default":
         task_configs = _build_default_task_configs(args)

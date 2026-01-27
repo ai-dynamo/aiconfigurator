@@ -48,7 +48,38 @@ class TestCLIArgumentParsing:
     def test_mode_choices(self, cli_parser):
         """Ensure supported CLI modes are exposed."""
         action = next(action for action in cli_parser._actions if action.dest == "mode")
-        assert set(action.choices.keys()) == {"default", "exp"}
+        assert set(action.choices.keys()) == {"default", "exp", "generate"}
+
+    def test_generate_mode_required_args(self, cli_parser):
+        """Test that generate mode requires the correct arguments."""
+        subparsers = [action for action in cli_parser._actions if action.dest == "mode"]
+        assert len(subparsers) == 1
+
+        subparser_action = subparsers[0]
+        generate_parser = subparser_action.choices["generate"]
+
+        required_actions = [action for action in generate_parser._actions if getattr(action, "required", False)]
+        required_args = [action.dest for action in required_actions]
+
+        assert "model_path" in required_args
+        assert "total_gpus" in required_args
+        assert "system" in required_args
+
+    def test_generate_mode_defaults(self, cli_parser):
+        """Test that generate mode has correct defaults."""
+        args = cli_parser.parse_args(
+            ["generate", "--model_path", "Qwen/Qwen3-32B", "--total_gpus", "8", "--system", "h200_sxm"]
+        )
+        assert args.mode == "generate"
+        assert args.model_path == "Qwen/Qwen3-32B"
+        assert args.backend == common.BackendName.trtllm.value
+
+    def test_generate_mode_model_path(self, cli_parser):
+        """Test that generate mode accepts model_path."""
+        args = cli_parser.parse_args(
+            ["generate", "--model_path", "Qwen/Qwen2.5-7B", "--total_gpus", "8", "--system", "h200_sxm"]
+        )
+        assert args.model_path == "Qwen/Qwen2.5-7B"
 
     def test_backend_choices_validation(self, cli_parser):
         """Test that backend argument validates against supported choices."""
