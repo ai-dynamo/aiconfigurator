@@ -675,6 +675,14 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
             else None,
         },
+        # Mamba2 collection
+        {
+            "name": "trtllm",
+            "type": "mamba2",
+            "module": "collector.trtllm.collect_mamba2",
+            "get_func": "get_mamba2_test_cases",
+            "run_func": "run_mamba2_torch",
+        },
     ]
 
     all_errors = collect_ops(num_processes, collections, ops, version)
