@@ -88,7 +88,10 @@ class TestSupportMatrix:
         assert disagg is True
 
         # Test architecture-based support for a model not in the matrix
-        agg, disagg = common.check_support("Qwen/Qwen3-235B-A22B-Thinking-2507", "h200_sxm")
+        # Must pass architecture explicitly since model isn't in the matrix
+        agg, disagg = common.check_support(
+            "Qwen/Qwen3-235B-A22B-Thinking-2507", "h200_sxm", architecture="Qwen3ForCausalLM"
+        )
         assert agg is True
         assert disagg is True
 

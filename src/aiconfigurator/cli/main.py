@@ -689,11 +689,7 @@ def _run_support_mode(args):
     # If no version specified, find the latest version in the support matrix
     if not version:
         matrix = common.get_support_matrix()
-        versions_for_combo = [
-            row["Version"]
-            for row in matrix
-            if row["System"] == system and row["Backend"] == backend
-        ]
+        versions_for_combo = [row["Version"] for row in matrix if row["System"] == system and row["Backend"] == backend]
         if versions_for_combo:
             # Sort versions and take the latest (assumes semantic versioning or lexicographic order)
             version = sorted(set(versions_for_combo), reverse=True)[0]
