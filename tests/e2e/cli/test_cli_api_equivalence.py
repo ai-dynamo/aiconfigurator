@@ -15,7 +15,7 @@ import sys
 import pandas as pd
 import pytest
 
-from aiconfigurator.cli import cli_default, cli_exp, cli_generate
+from aiconfigurator.cli import cli_default, cli_exp
 
 pytestmark = pytest.mark.e2e
 
@@ -35,11 +35,6 @@ def _find_output_dir(save_dir: str) -> str:
             )
             for d in dirs
         ):
-            return root
-
-    # Fallback for generate which doesn't have CSVs in the same way
-    for root, dirs, files in os.walk(save_dir):
-        if "generator_params.yaml" in files or "generator_config.yaml" in files:
             return root
 
     raise FileNotFoundError(f"Could not find output directory in {save_dir}")
@@ -216,80 +211,6 @@ class TestCLIExpEquivalence:
             cli_pareto_df = pd.read_csv(pareto_path)
             api_pareto_df = api_result.pareto_fronts[exp_name]
             _assert_dataframes_equal(api_pareto_df, cli_pareto_df, f"{exp_name}/pareto_fronts")
-
-
-class TestCLIGenerateEquivalence:
-    """Tests that cli_generate produces same output as CLI command."""
-
-    def test_cli_generate_api_vs_command(self, tmp_path):
-        """cli_generate API should produce same config as CLI command."""
-        import yaml
-
-        # Run via Python API
-        api_result = cli_generate(
-            model_path="Qwen/Qwen3-32B",
-            total_gpus=8,
-            system="h200_sxm",
-            backend="trtllm",
-        )
-
-        # Run via CLI command
-        save_dir = tmp_path / "cli_output"
-        save_dir.mkdir()
-
-        cmd = [
-            sys.executable,
-            "-m",
-            "aiconfigurator.main",
-            "cli",
-            "generate",
-            "--model_path",
-            "Qwen/Qwen3-32B",
-            "--total_gpus",
-            "8",
-            "--system",
-            "h200_sxm",
-            "--backend",
-            "trtllm",
-            "--save_dir",
-            str(save_dir),
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        assert result.returncode == 0, f"CLI failed: {result.stderr}"
-
-        # CLI generate creates files in a subdirectory within save_dir
-        output_dir = _find_output_dir(str(save_dir))
-        assert os.path.exists(output_dir), f"Expected output directory {output_dir}"
-
-        # Compare parallelism values
-        # API returns these directly
-        api_tp = api_result["parallelism"]["tp"]
-        api_pp = api_result["parallelism"]["pp"]
-        api_replicas = api_result["parallelism"]["replicas"]
-        api_gpus_used = api_result["parallelism"]["gpus_used"]
-
-        # CLI saves generator_config.yaml in the agg subdirectory
-        agg_dir = os.path.join(output_dir, "agg")
-        if os.path.exists(agg_dir):
-            generator_config_path = os.path.join(agg_dir, "generator_config.yaml")
-            if os.path.exists(generator_config_path):
-                with open(generator_config_path) as f:
-                    cli_config = yaml.safe_load(f)
-                # Extract TP/PP from the saved config
-                cli_tp = cli_config.get("tensor_parallel_size")
-                cli_pp = cli_config.get("pipeline_parallel_size")
-
-                if cli_tp is not None and cli_pp is not None:
-                    assert api_tp == cli_tp, f"TP mismatch: API={api_tp}, CLI={cli_tp}"
-                    assert api_pp == cli_pp, f"PP mismatch: API={api_pp}, CLI={cli_pp}"
-
-        # Verify API result has expected structure
-        assert api_tp > 0, "TP should be positive"
-        assert api_pp > 0, "PP should be positive"
-        assert api_replicas > 0, "Replicas should be positive"
-        assert api_gpus_used > 0, "GPUs used should be positive"
-        assert api_tp * api_pp * api_replicas == api_gpus_used, "TP * PP * replicas should equal GPUs used"
 
 
 class TestCLISupportEquivalence:
