@@ -745,6 +745,7 @@ def main():
             "mla_bmm_gen_pre",
             "mla_bmm_gen_post",
             "moe",
+            "mamba2",
             "wideep_mla_context",
             "wideep_mla_generation",
             "wideep_mlp_context",

@@ -152,7 +152,7 @@ def run_mamba2_context_benchmark(
         try:
             # Input tensor for conv1d: [num_tokens, conv_dim]
             # This is the output of in_proj GEMM
-            xbc_input = torch.randn(num_tokens, conv_dim, dtype=dtype, device=device)
+            xbc_input = torch.randn(1, conv_dim, num_tokens, dtype=dtype, device=device)
 
             # After conv1d, we split xbc into x, B, C and reshape for SSM
             # For benchmarking, we prepare the SSM inputs directly
@@ -162,10 +162,6 @@ def run_mamba2_context_benchmark(
             dt = torch.randn(1, num_tokens, nheads, dtype=dtype, device=device)
             B = torch.randn(1, num_tokens, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
             C = torch.randn(1, num_tokens, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
-
-            # Pre-allocate outputs
-            conv_out = torch.empty_like(xbc_input)
-            ssm_out = torch.empty_like(x)
 
             # Warmup
             torch.cuda.synchronize()
@@ -182,13 +178,12 @@ def run_mamba2_context_benchmark(
                 dt_bias=dt_bias,
                 dt_softplus=True,
                 return_final_states=True,
-                out=ssm_out,
             )
             torch.cuda.synchronize()
 
             # Define benchmark function - Conv1D + SSM scan combined
             # Capture loop variables as default args to satisfy ruff F821
-            def run_conv1d_and_ssm_scan(_xbc=xbc_input, _x=x, _dt=dt, _b=B, _c=C, _out=ssm_out):
+            def run_conv1d_and_ssm_scan(_xbc=xbc_input, _x=x, _dt=dt, _b=B, _c=C):
                 # Step 1: Causal Conv1D
                 causal_conv1d_fn(_xbc, conv_weight, conv_bias, activation="silu")
                 # Step 2: SSM Scan
@@ -204,7 +199,6 @@ def run_mamba2_context_benchmark(
                     dt_bias=dt_bias,
                     dt_softplus=True,
                     return_final_states=True,
-                    out=_out,
                 )
 
             # Benchmark with power measurement
@@ -246,7 +240,7 @@ def run_mamba2_context_benchmark(
             )
 
             # Cleanup
-            del x, dt, B, C, ssm_out, xbc_input, conv_out
+            del x, dt, B, C, xbc_input
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -314,7 +308,7 @@ def run_mamba2_generation_benchmark(
 
         try:
             # Conv1d state: [batch, conv_dim, d_conv]
-            conv_state = torch.randn(batch_size, conv_dim, d_conv, dtype=dtype, device=device)
+            conv_state = torch.randn(batch_size, conv_dim, d_conv - 1, dtype=dtype, device=device)
 
             # SSM state: [batch, nheads, head_dim, d_state]
             ssm_state = torch.randn(batch_size, nheads, head_dim, d_state, dtype=dtype, device=device)
@@ -327,9 +321,6 @@ def run_mamba2_generation_benchmark(
             dt = torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
             B = torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
             C = torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
-
-            # Pre-allocate output
-            y = torch.empty_like(x)
 
             # Warmup
             torch.cuda.synchronize()
@@ -345,14 +336,13 @@ def run_mamba2_generation_benchmark(
                 z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
-                out=y,
             )
             torch.cuda.synchronize()
 
             # Define benchmark function - Conv1D update + SSM state update
             # Capture loop variables as default args to satisfy ruff F821
             def run_conv1d_update_and_state_update(
-                _xbc=xbc_input, _conv_state=conv_state, _ssm_state=ssm_state, _x=x, _dt=dt, _b=B, _c=C, _y=y
+                _xbc=xbc_input, _conv_state=conv_state, _ssm_state=ssm_state, _x=x, _dt=dt, _b=B, _c=C
             ):
                 # Step 1: Causal Conv1D update (processes single token, updates conv_state)
                 causal_conv1d_update(_xbc, _conv_state, conv_weight, conv_bias, activation="silu")
@@ -368,7 +358,6 @@ def run_mamba2_generation_benchmark(
                     z=None,
                     dt_bias=dt_bias,
                     dt_softplus=True,
-                    out=_y,
                 )
 
             # Benchmark with power measurement
@@ -410,7 +399,7 @@ def run_mamba2_generation_benchmark(
             )
 
             # Cleanup
-            del ssm_state, conv_state, x, dt, B, C, y, xbc_input
+            del ssm_state, conv_state, x, dt, B, C, xbc_input
             gc.collect()
             torch.cuda.empty_cache()
 
