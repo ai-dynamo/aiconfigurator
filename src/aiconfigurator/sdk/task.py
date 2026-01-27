@@ -586,7 +586,7 @@ class TaskConfigFactory:
 
         if model_family in ["MOE", "LLAMA"] and sm_version < 100 and sm_version >= 89:
             gemm_quant_mode = fp8_gemm_quant
-            moe_quant_mode = fp8_gemm_quant
+            moe_quant_mode = _pick([fp8_gemm_quant, "float16"], supported_moe, fp8_gemm_quant)
 
         if model_path in ["GPT_OSS_120B", "GPT_OSS_20B"]:
             moe_quant_mode = "w4a16_mxfp4"
