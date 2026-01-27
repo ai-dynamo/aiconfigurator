@@ -547,8 +547,8 @@ def generate_naive_config(
     """
     Generate a naive agg configuration without SLA optimization.
 
-    Uses aggressive parallelism (TP=gpus_per_node, PP=1) to maximize
-    the chance of fitting large models into memory. No parameter sweeping
+    Calculates the smallest TP that fits the model in memory:
+    TP * VRAM_per_GPU > 1.5 * model_weight_size. No parameter sweeping
     or memory validation is performed.
 
     Args:
@@ -580,7 +580,7 @@ def generate_naive_config(
         ...     output_dir="./output",
         ... )
         >>> print(result['parallelism'])
-        {'tp': 8, 'pp': 1, 'replicas': 1, 'gpus_used': 8}
+        {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
     """
     from aiconfigurator.sdk.perf_database import get_latest_database_version
     from aiconfigurator.sdk.utils import safe_mkdir

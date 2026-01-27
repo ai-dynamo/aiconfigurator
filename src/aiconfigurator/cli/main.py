@@ -198,8 +198,8 @@ def configure_parser(parser):
         help="Generate naive agg config without SLA optimization (no sweeping).",
         description=(
             "Generate a working agg configuration without running the parameter sweep. "
-            "Uses aggressive parallelism (TP=gpus_per_node, PP=1) to maximize "
-            "the chance of fitting large models into memory. No SLA optimization is performed."
+            "Calculates the smallest TP that fits the model in memory "
+            "(TP * VRAM/GPU > 1.5 * model_weight). No SLA optimization is performed."
         ),
     )
     _add_generate_mode_arguments(generate_parser)

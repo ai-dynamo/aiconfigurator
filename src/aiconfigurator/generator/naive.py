@@ -248,6 +248,14 @@ def build_naive_generator_params(
     max_batch_size = 128
 
     # Build the generator params structure
+    # Default SLA values for rule engine (used in max_num_tokens calculations)
+    default_isl = 4000
+    default_osl = 1000
+
+    # Calculate number of workers (replicas) and GPUs per worker
+    gpus_per_worker = tensor_parallel_size * pipeline_parallel_size
+    agg_workers = total_gpus // gpus_per_worker
+
     params = {
         "service": {
             "model_name": model_name,
@@ -262,11 +270,23 @@ def build_naive_generator_params(
                 "tensor_parallel_size": tensor_parallel_size,
                 "pipeline_parallel_size": pipeline_parallel_size,
                 "max_batch_size": max_batch_size,
-                "gpus_per_worker": tensor_parallel_size * pipeline_parallel_size,
+                "gpus_per_worker": gpus_per_worker,
             }
         },
-        "dyn_config": {
+        "DynConfig": {
             "mode": "agg",
+        },
+        "SlaConfig": {
+            "isl": default_isl,
+            "osl": default_osl,
+        },
+        "NodeConfig": {
+            "num_gpus_per_node": gpus_per_node,
+        },
+        # WorkerConfig is used by the run script generator
+        "WorkerConfig": {
+            "agg_workers": agg_workers,
+            "agg_gpus_per_worker": gpus_per_worker,
         },
         "backend": backend_name,
     }

@@ -95,3 +95,17 @@ def test_cli_generate_combinations(
 
     assert pp == 1, f"PP should be 1, got {pp}"
     assert config["backend"] == backend
+
+    # Verify correct number of run scripts are generated (one per node)
+    gpus_per_node = 4 if system == "gb200_sxm" else 8
+    gpus_per_worker = tp * pp
+    num_workers = 32 // gpus_per_worker  # total_gpus=32
+    workers_per_node = gpus_per_node // gpus_per_worker
+    expected_nodes = (num_workers + workers_per_node - 1) // workers_per_node  # ceil division
+
+    run_scripts = [f for f in os.listdir(output_dir) if f.startswith("run_") and f.endswith(".sh")]
+    assert len(run_scripts) == expected_nodes, (
+        f"Expected {expected_nodes} run scripts for {num_workers} workers "
+        f"({gpus_per_worker} GPUs each) on {gpus_per_node} GPUs/node, "
+        f"but found {len(run_scripts)}: {run_scripts}"
+    )

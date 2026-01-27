@@ -1,6 +1,56 @@
 # CLI User Guide
 ## Basic Command
-As mentioned in root Readme, CLI supports two modes, `default` and `exp`. We'll go through these two modes one by one.
+As mentioned in root Readme, CLI supports three modes: `default`, `exp`, and `generate`. We'll go through these modes one by one.
+
+### Generate mode (Quick Start)
+This mode generates a working configuration without running the full parameter sweep. It's useful when you want a quick deployment config without SLA optimization.
+
+```bash
+aiconfigurator cli generate --model_path Qwen/Qwen3-32B --total_gpus 8 --system h200_sxm
+```
+
+The `generate` mode calculates the smallest tensor parallel (TP) size that fits the model in memory using the formula: `TP * VRAM_per_GPU > 1.5 * model_weight_size`. This ensures the model fits with room for KV cache and activations.
+
+**Required arguments:**
+- `--model_path`: HuggingFace model path (e.g., `Qwen/Qwen3-32B`) or local path containing `config.json`
+- `--total_gpus`: Total GPUs for deployment
+- `--system`: System name (`h200_sxm`, `gb200_sxm`, `b200_sxm`)
+
+**Optional arguments:**
+- `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
+- `--save_dir`: Directory to save generated artifacts
+
+**Example output:**
+```
+============================================================
+  Naive Configuration Generated Successfully
+============================================================
+  Model:           Qwen/Qwen3-32B
+  System:          h200_sxm
+  Backend:         trtllm (1.2.0rc5)
+  Total GPUs:      8 (using 8)
+  Parallelism:     TP=1, PP=1
+  Replicas:        8 (each using 1 GPUs)
+  Max Batch Size:  128
+  Output:          ./output/Qwen_Qwen3-32B_naive_tp1_pp1_123456
+============================================================
+```
+
+**SDK API equivalent:**
+```python
+from aiconfigurator.generator.api import generate_naive_config
+
+result = generate_naive_config(
+    model_path="Qwen/Qwen3-32B",
+    total_gpus=8,
+    system="h200_sxm",
+    backend="trtllm",
+    output_dir="./output",
+)
+print(result["parallelism"])  # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
+```
+
+> **Note:** This is a naive configuration without memory validation or performance optimization. For production deployments, use `aiconfigurator cli default` to run the full parameter sweep with SLA optimization.
 
 ### Default mode
 This mode is triggered by
@@ -488,4 +538,4 @@ In this example, we use a pre-defined profile to overwrite quantization of Qwen/
 
 You can refer to [src/aiconfigurator/cli/exps](../src/aiconfigurator/cli/exps) to find more reference yaml files.
 
-Use this `exp` mode will allow more flexible experiments and use `default` mode will give you the most convenience. Both modes support generating configs for frameworks automatically by `--save_dir DIR`
+Use `exp` mode for flexible experiments, `default` mode for convenient agg vs disagg comparison with SLA optimization, and `generate` mode for quick config generation without sweeping. All modes support generating configs for frameworks automatically by `--save_dir DIR`.
