@@ -23,7 +23,7 @@ class TestCLIIntegration:
     """Workflow tests for the CLI orchestration layer (builders/executor/save)."""
 
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    @patch("aiconfigurator.cli.main._build_default_task_configs")
+    @patch("aiconfigurator.cli.main.build_default_task_configs")
     def test_cli_main_success_flow(self, mock_build_default, mock_execute, sample_cli_args_with_save_dir):
         """Test successful CLI main execution flow for default mode."""
         mock_task_config = MagicMock(name="TaskConfig")
@@ -58,7 +58,7 @@ class TestCLIIntegration:
 
     @patch("aiconfigurator.cli.main.save_results")
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    @patch("aiconfigurator.cli.main._build_experiment_task_configs")
+    @patch("aiconfigurator.cli.main.build_experiment_task_configs")
     def test_cli_main_success_flow_exp_mode(
         self,
         mock_build_exp,
@@ -105,8 +105,8 @@ class TestCLIIntegration:
     @pytest.mark.parametrize(
         "mode,build_patch",
         [
-            ("default", "aiconfigurator.cli.main._build_default_task_configs"),
-            ("exp", "aiconfigurator.cli.main._build_experiment_task_configs"),
+            ("default", "aiconfigurator.cli.main.build_default_task_configs"),
+            ("exp", "aiconfigurator.cli.main.build_experiment_task_configs"),
         ],
     )
     @patch("aiconfigurator.cli.main._execute_task_configs")
@@ -125,8 +125,8 @@ class TestCLIIntegration:
     @pytest.mark.parametrize(
         "builder_patch",
         [
-            "aiconfigurator.cli.main._build_default_task_configs",
-            "aiconfigurator.cli.main._build_experiment_task_configs",
+            "aiconfigurator.cli.main.build_default_task_configs",
+            "aiconfigurator.cli.main.build_experiment_task_configs",
         ],
     )
     def test_cli_main_unsupported_mode_raises(self, builder_patch, cli_args_factory):
@@ -142,8 +142,8 @@ class TestCLIIntegration:
     @pytest.mark.parametrize(
         "builder_patch",
         [
-            "aiconfigurator.cli.main._build_default_task_configs",
-            "aiconfigurator.cli.main._build_experiment_task_configs",
+            "aiconfigurator.cli.main.build_default_task_configs",
+            "aiconfigurator.cli.main.build_experiment_task_configs",
         ],
     )
     @patch("aiconfigurator.cli.main._execute_task_configs")
@@ -177,7 +177,7 @@ class TestCLIIntegration:
         assert args.database_mode == database_mode
 
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    @patch("aiconfigurator.cli.main._build_experiment_task_configs")
+    @patch("aiconfigurator.cli.main.build_experiment_task_configs")
     def test_cli_exp_mode_with_database_mode_in_yaml(self, mock_build_exp, mock_execute, tmp_path):
         """Test that database_mode from YAML is correctly parsed in exp mode."""
         yaml_content = """
