@@ -71,15 +71,15 @@ def get_common_moe_test_cases():
     # [2048,1408,6,64], #deepseekv1_moe
     # [5120,1536,6,160], #deepseekv2
     model_config_list = [
-        [4096, 14336, 2, 8, "mistralai/Mixtral-8x7B-v0.1"],  # mixtral_8x7b
-        [6144, 16384, 2, 8, "mistralai/Mixtral-8x22B-v0.1"],  # mixtral_8x22b
-        [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3"],  # deepseekv3, will have 1 shared expert
-        [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],  # qwen3-moe, 30b-a3b
-        [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B"],  # qwen3-moe, 235b-a22b
-        [6144, 2560, 8, 160, "Qwen/Qwen3-Coder-480B-A35B-Instruct"],  # qwen3-moe, 480b-a35b
-        [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2
-        [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
-        [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
+        # [4096, 14336, 2, 8, "mistralai/Mixtral-8x7B-v0.1"],  # mixtral_8x7b
+        # [6144, 16384, 2, 8, "mistralai/Mixtral-8x22B-v0.1"],  # mixtral_8x22b
+        # [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3"],  # deepseekv3, will have 1 shared expert
+        # [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],  # qwen3-moe, 30b-a3b
+        # [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B"],  # qwen3-moe, 235b-a22b
+        # [6144, 2560, 8, 160, "Qwen/Qwen3-Coder-480B-A35B-Instruct"],  # qwen3-moe, 480b-a35b
+        # [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2
+        # [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
+        # [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
         [2688, 1856, 6, 128, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"],  # nemotron-3 nano (uses relu2, non-gated)
     ]
 
