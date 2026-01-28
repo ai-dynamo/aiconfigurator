@@ -29,8 +29,13 @@ for ((w=0; w<AGG_WORKERS; w++)); do
   ( DYN_SYSTEM_PORT=$SYSTEM_PORT \
     DYN_VLLM_KV_EVENT_PORT=$EVENT_PORT \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
-    CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.vllm \
+    CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.{{ agg_backend | default('vllm') }} \
+    {% if agg_backend == 'sglang' %}
+    --model-path "$MODEL_PATH" \
+    --served-model-name "{{ ServiceConfig.served_model_name }}" \
+    {% else %}
     --model "$MODEL_PATH" \
+    {% endif %}
     {% if enable_router %}--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${EVENT_PORT}\",\"enable_kv_cache_events\":true}" {% endif %}\
     {{ agg_cli_args }} 2>&1 | sed "s/^/[Worker $w] /" ) &
 done
@@ -57,8 +62,13 @@ for ((w=0; w<PREFILL_WORKERS; w++)); do
   DYN_VLLM_KV_EVENT_PORT=$EVENT_PORT \
   VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
   CUDA_VISIBLE_DEVICES=$GPU_LIST \
-    python3 -m dynamo.vllm \
+    python3 -m dynamo.{{ prefill_backend | default('vllm') }} \
+      {% if prefill_backend == 'sglang' %}
+      --model-path "$MODEL_PATH" \
+      --served-model-name "{{ ServiceConfig.served_model_name }}" \
+      {% else %}
       --model "$MODEL_PATH" \
+      {% endif %}
       {% if enable_router %}--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${EVENT_PORT}\",\"enable_kv_cache_events\":true}" {% endif %}\
       {{ prefill_cli_args }} --is-prefill-worker 2>&1 | sed "s/^/[Prefill $w] /" ) &
 done
@@ -77,8 +87,13 @@ for ((w=0; w<DECODE_WORKERS; w++)); do
   DYN_VLLM_KV_EVENT_PORT=$EVENT_PORT \
   VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
   CUDA_VISIBLE_DEVICES=$GPU_LIST \
-    python3 -m dynamo.vllm \
+    python3 -m dynamo.{{ decode_backend | default('vllm') }} \
+      {% if decode_backend == 'sglang' %}
+      --model-path "$MODEL_PATH" \
+      --served-model-name "{{ ServiceConfig.served_model_name }}" \
+      {% else %}
       --model "$MODEL_PATH" \
+      {% endif %}
       {% if enable_router %}--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${EVENT_PORT}\",\"enable_kv_cache_events\":true}" {% endif %}\
       {{ decode_cli_args }} --is-decode-worker 2>&1 | sed "s/^/[Decode $w] /" ) &
 done

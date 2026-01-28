@@ -6,6 +6,7 @@
 {%- set k8s_model_cache_mount = '/workspace/model_cache' -%}
 
 {%- macro render_worker(component_name, role, replicas, gpu, cli_args) -%}
+{%- set worker_backend = prefill_backend if role == 'prefill' else (decode_backend if role == 'decode' else backend) -%}
 {{ "    " ~ component_name ~ ":" }}
       dynamoNamespace: {{ name }}
       envFromSecret: hf-token-secret
@@ -42,8 +43,12 @@
             - |
               set -euo pipefail
               args=(
+                {% if worker_backend == 'sglang' %}
                 --model-path "{{ ServiceConfig.model_path }}"
                 --served-model-name "{{ ServiceConfig.served_model_name }}"
+                {% else %}
+                --model "{{ ServiceConfig.model_path }}"
+                {% endif %}
                 {{ cli_args }}
               )
               {% if DynConfig.mode | default('disagg') != 'agg' %}
@@ -54,7 +59,14 @@
               {% elif role == 'decode' %}
               args+=(--disaggregation-mode decode)
               {% endif %}
+              
+              {% if worker_backend == 'sglang' %}
               exec python3 -m dynamo.sglang "${args[@]}"
+              {% elif worker_backend == 'trtllm' %}
+              exec python3 -m dynamo.trtllm "${args[@]}"
+              {% else %}
+              exec python3 -m dynamo.vllm "${args[@]}"
+              {% endif %}
 {%- endmacro %}
 
 apiVersion: nvidia.com/v1alpha1

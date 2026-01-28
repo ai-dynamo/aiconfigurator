@@ -99,8 +99,8 @@ def generate_config_yaml(
         params = generate_config_from_input_dict(input_params, backend=backend)
         artifacts = generate_backend_artifacts(
             params=params,
-            backend=backend,
-            backend_version=version,
+            role_backends={"agg": backend},
+            role_versions={"agg": version} if version else None,
         )
     except (FileNotFoundError, ValueError) as exc:
         message = str(exc)

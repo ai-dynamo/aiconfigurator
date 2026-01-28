@@ -22,9 +22,14 @@ AGG_GPU_OFFSET={{ agg_gpu_offset | default(0) }}
 for ((w=0; w<AGG_WORKERS; w++)); do
   BASE=$(( AGG_GPU_OFFSET + w * AGG_GPU ))
   GPU_LIST=$(seq -s, $BASE $((BASE+AGG_GPU-1)))
-  ( CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.trtllm \
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.{{ agg_backend | default('trtllm') }} \
+    {% if agg_backend == 'sglang' %}
     --model-path "$MODEL_PATH" \
     --served-model-name "$SERVED_MODEL_NAME" \
+    {% else %}
+    --model-path "$MODEL_PATH" \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    {% endif %}
     --extra-engine-args "{{ agg_engine_args }}" \
     {% if enable_router %}--publish-events-and-metrics {% endif %} 2>&1 | sed "s/^/[Worker $w] /" ) &
 done
@@ -36,9 +41,13 @@ PREFILL_WORKERS={{ prefill_workers }}
 for ((w=0; w<PREFILL_WORKERS; w++)); do
   BASE=$(( w * PREFILL_GPU ))
   GPU_LIST=$(seq -s, $BASE $((BASE+PREFILL_GPU-1)))
-  ( CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.trtllm \
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.{{ prefill_backend | default('trtllm') }} \
+    {% if prefill_backend == 'vllm' %}
+    --model "$MODEL_PATH" \
+    {% else %}
     --model-path "$MODEL_PATH" \
     --served-model-name "$SERVED_MODEL_NAME" \
+    {% endif %}
     --extra-engine-args "{{ prefill_engine_args }}" \
     --disaggregation-mode prefill \
     {% if enable_router %}--publish-events-and-metrics{% endif %} 2>&1 | sed "s/^/[Prefill $w] /" ) &
@@ -52,9 +61,13 @@ DECODE_GPU_OFFSET={{ decode_gpu_offset | default(0) }}
 for ((w=0; w<DECODE_WORKERS; w++)); do
   BASE=$(( DECODE_GPU_OFFSET + w * DECODE_GPU ))
   GPU_LIST=$(seq -s, $BASE $((BASE+DECODE_GPU-1)))
-  ( CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.trtllm \
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.{{ decode_backend | default('trtllm') }} \
+    {% if decode_backend == 'vllm' %}
+    --model "$MODEL_PATH" \
+    {% else %}
     --model-path "$MODEL_PATH" \
     --served-model-name "$SERVED_MODEL_NAME" \
+    {% endif %}
     --extra-engine-args "{{ decode_engine_args }}" \
     --disaggregation-mode decode 2>&1 | sed "s/^/[Decode $w] /" ) &
 done

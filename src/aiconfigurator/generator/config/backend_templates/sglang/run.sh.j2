@@ -38,9 +38,13 @@ for ((w=0; w<AGG_WORKERS; w++)); do
   ( CUDA_VISIBLE_DEVICES=$GPU_LIST \
   OTEL_SERVICE_NAME="${WORKER_NAME}" \
   DYN_SYSTEM_PORT="${SYSTEM_PORT}" \
-  python3 -m dynamo.sglang \
+  python3 -m dynamo.{{ agg_backend | default('sglang') }} \
+    {% if agg_backend == 'sglang' %}
     --model-path "$MODEL_PATH" \
     --served-model-name "$SERVED_MODEL_NAME" \
+    {% else %}
+    --model "$MODEL_PATH" \
+    {% endif %}
     {{ agg_cli_args }} \
     --host "0.0.0.0" \
     --enable-metrics 2>&1 | sed "s/^/[Worker $w] /" ) &
@@ -61,9 +65,13 @@ for ((w=0; w<PREFILL_WORKERS; w++)); do
   ( CUDA_VISIBLE_DEVICES=$GPU_LIST \
   OTEL_SERVICE_NAME="${WORKER_NAME}" \
   DYN_SYSTEM_PORT="${SYSTEM_PORT}" \
-    python3 -m dynamo.sglang \
+    python3 -m dynamo.{{ prefill_backend | default('sglang') }} \
+      {% if prefill_backend == 'sglang' %}
       --model-path "$MODEL_PATH" \
       --served-model-name "$SERVED_MODEL_NAME" \
+      {% else %}
+      --model "$MODEL_PATH" \
+      {% endif %}
       {{ prefill_cli_args }} --disaggregation-mode prefill \
       --host "0.0.0.0" \
       --enable-metrics 2>&1 | sed "s/^/[Prefill $w] /" ) &
@@ -85,9 +93,13 @@ for ((w=0; w<DECODE_WORKERS; w++)); do
   ( CUDA_VISIBLE_DEVICES=$GPU_LIST \
   OTEL_SERVICE_NAME="${WORKER_NAME}" \
   DYN_SYSTEM_PORT="${SYSTEM_PORT}" \
-    python3 -m dynamo.sglang \
+    python3 -m dynamo.{{ decode_backend | default('sglang') }} \
+      {% if decode_backend == 'sglang' %}
       --model-path "$MODEL_PATH" \
       --served-model-name "$SERVED_MODEL_NAME" \
+      {% else %}
+      --model "$MODEL_PATH" \
+      {% endif %}
       {{ decode_cli_args }} --disaggregation-mode decode \
       --host "0.0.0.0" \
       --enable-metrics 2>&1 | sed "s/^/[Decode $w] /" ) &

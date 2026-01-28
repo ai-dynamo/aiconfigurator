@@ -260,6 +260,71 @@ def _get_backends_to_check(backend: str) -> list[str]:
     return [backend]
 
 
+def _get_effective_backend_version(
+    backend_version: str | None,
+    is_any_backend: bool,
+    backends_to_check: list[str],
+    system: str,
+    decode_system: str | None = None,
+    exp_name: str | None = None,
+) -> str | None:
+    """
+    Determine the effective backend version and validate it if necessary.
+    Handles 'any' backend by ignoring version and logging a warning.
+    """
+    if is_any_backend:
+        if backend_version is not None:
+            if exp_name:
+                logger.warning(
+                    "Ignoring backend_version=%s in experiment '%s' when using backend_name=any. "
+                    "Each backend will use its own latest version.",
+                    backend_version,
+                    exp_name,
+                )
+            else:
+                logger.warning(
+                    "Ignoring --backend_version=%s when using --backend=any. "
+                    "Each backend will use its own latest version.",
+                    backend_version,
+                )
+        return None
+
+    # Validate backend version for single backend
+    if backend_version is not None:
+        for b in backends_to_check:
+            _ensure_backend_version_available(system, b, backend_version)
+            if decode_system and decode_system != system:
+                _ensure_backend_version_available(decode_system, b, backend_version)
+
+    return backend_version
+
+
+def _get_decode_patch_config(
+    decode_backend: str,
+    decode_backend_version: str,
+    base_yaml_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Create or update a yaml_config to patch the decode_worker_config with
+    a specific backend name and version.
+    """
+    if base_yaml_config:
+        yaml_config = copy.deepcopy(base_yaml_config)
+    else:
+        yaml_config = {"mode": "patch", "config": {}}
+
+    if "config" not in yaml_config:
+        yaml_config["config"] = {}
+
+    if "decode_worker_config" not in yaml_config["config"]:
+        yaml_config["config"]["decode_worker_config"] = {}
+
+    yaml_config["config"]["decode_worker_config"]["backend_name"] = decode_backend
+    yaml_config["config"]["decode_worker_config"]["backend_version"] = decode_backend_version
+
+    return yaml_config
+
+
 def build_default_task_configs(
     model_path: str,
     total_gpus: int,
@@ -305,43 +370,36 @@ def build_default_task_configs(
     backends_to_check = _get_backends_to_check(backend)
     is_any_backend = backend == common.BackendName.any.value
 
-    # When using 'any' backend, ignore backend_version since each backend has different versions
-    # Each backend will use its own latest version
-    if is_any_backend:
-        if backend_version:
-            logger.warning(
-                "Ignoring --backend_version=%s when using --backend=any. Each backend will use its own latest version.",
-                backend_version,
-            )
-        effective_backend_version = None
-    else:
-        effective_backend_version = backend_version
-        # Validate backend version for single backend
-        if effective_backend_version:
-            for b in backends_to_check:
-                _ensure_backend_version_available(system, b, effective_backend_version)
-                if decode_system != system:
-                    _ensure_backend_version_available(decode_system, b, effective_backend_version)
+    effective_backend_version = _get_effective_backend_version(
+        backend_version=backend_version,
+        is_any_backend=is_any_backend,
+        backends_to_check=backends_to_check,
+        system=system,
+        decode_system=decode_system,
+    )
 
     task_configs: dict[str, TaskConfig] = {}
 
+    # Build base kwargs for all tasks
+    base_kwargs: dict[str, Any] = {
+        "model_path": model_path,
+        "system_name": system,
+        "backend_version": effective_backend_version,
+        "total_gpus": total_gpus,
+        "isl": isl,
+        "osl": osl,
+        "ttft": ttft,
+        "tpot": tpot,
+        "request_latency": request_latency,
+        "prefix": prefix,
+        "database_mode": database_mode,
+    }
+
     # Build agg task configs
     for agg_backend in backends_to_check:
-        common_kwargs: dict[str, Any] = {
-            "model_path": model_path,
-            "system_name": system,
-            "backend_name": agg_backend,
-            "backend_version": effective_backend_version,
-            "total_gpus": total_gpus,
-            "isl": isl,
-            "osl": osl,
-            "ttft": ttft,
-            "tpot": tpot,
-            "request_latency": request_latency,
-            "prefix": prefix,
-            "database_mode": database_mode,
-        }
-        agg_task = TaskConfig(serving_mode="agg", **common_kwargs)
+        agg_kwargs = base_kwargs.copy()
+        agg_kwargs["backend_name"] = agg_backend
+        agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
         # Always use descriptive name - aggregation unifies to "agg"/"disagg" keys
         task_configs[f"agg_{agg_backend}"] = agg_task
 
@@ -349,21 +407,13 @@ def build_default_task_configs(
     # For 'any' backend, check all prefill/decode combinations (3x3 = 9)
     for prefill_backend in backends_to_check:
         for decode_backend in backends_to_check:
-            disagg_kwargs: dict[str, Any] = {
-                "model_path": model_path,
-                "system_name": system,
-                "backend_name": prefill_backend,
-                "backend_version": effective_backend_version,
-                "total_gpus": total_gpus,
-                "isl": isl,
-                "osl": osl,
-                "ttft": ttft,
-                "tpot": tpot,
-                "request_latency": request_latency,
-                "prefix": prefix,
-                "database_mode": database_mode,
-                "decode_system_name": decode_system,
-            }
+            disagg_kwargs = base_kwargs.copy()
+            disagg_kwargs.update(
+                {
+                    "backend_name": prefill_backend,
+                    "decode_system_name": decode_system,
+                }
+            )
 
             # For disagg mode, we can specify different backends for prefill and decode
             # The TaskConfig uses backend_name for prefill, and we need to override decode
@@ -371,15 +421,10 @@ def build_default_task_configs(
             if prefill_backend != decode_backend:
                 # Get the latest version for the decode backend
                 decode_backend_version = get_latest_database_version(system=decode_system, backend=decode_backend)
-                disagg_kwargs["yaml_config"] = {
-                    "mode": "patch",
-                    "config": {
-                        "decode_worker_config": {
-                            "backend_name": decode_backend,
-                            "backend_version": decode_backend_version,
-                        }
-                    },
-                }
+                disagg_kwargs["yaml_config"] = _get_decode_patch_config(
+                    decode_backend=decode_backend,
+                    decode_backend_version=decode_backend_version,
+                )
 
             disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
             # Always use descriptive name - aggregation unifies to "agg"/"disagg" keys
@@ -516,25 +561,14 @@ def build_experiment_task_configs(
         backends_to_check = _get_backends_to_check(backend_name)
         is_any_backend = backend_name == common.BackendName.any.value
 
-        # When using 'any' backend, ignore backend_version since each backend has different versions
-        # Each backend will use its own latest version
-        if is_any_backend:
-            if backend_version is not None:
-                logger.warning(
-                    "Ignoring backend_version=%s in experiment '%s' when using backend_name=any. "
-                    "Each backend will use its own latest version.",
-                    backend_version,
-                    exp_name,
-                )
-            effective_backend_version = None
-        else:
-            effective_backend_version = backend_version
-            # Validate backend version for single backend
-            if effective_backend_version is not None:
-                for b in backends_to_check:
-                    _ensure_backend_version_available(system_name, b, effective_backend_version)
-                    if serving_mode == "disagg" and inferred_decode_system and inferred_decode_system != system_name:
-                        _ensure_backend_version_available(inferred_decode_system, b, effective_backend_version)
+        effective_backend_version = _get_effective_backend_version(
+            backend_version=backend_version,
+            is_any_backend=is_any_backend,
+            backends_to_check=backends_to_check,
+            system=system_name,
+            decode_system=inferred_decode_system if serving_mode == "disagg" else None,
+            exp_name=exp_name,
+        )
 
         # Build base task kwargs (without backend-specific settings)
         base_task_kwargs: dict[str, Any] = {
@@ -593,25 +627,11 @@ def build_experiment_task_configs(
                         decode_backend_version = get_latest_database_version(
                             system=decode_system_for_version, backend=decode_backend
                         )
-                        if base_yaml_config:
-                            merged_yaml = copy.deepcopy(base_yaml_config)
-                            if "config" not in merged_yaml:
-                                merged_yaml["config"] = {}
-                            if "decode_worker_config" not in merged_yaml["config"]:
-                                merged_yaml["config"]["decode_worker_config"] = {}
-                            merged_yaml["config"]["decode_worker_config"]["backend_name"] = decode_backend
-                            merged_yaml["config"]["decode_worker_config"]["backend_version"] = decode_backend_version
-                            task_kwargs["yaml_config"] = merged_yaml
-                        else:
-                            task_kwargs["yaml_config"] = {
-                                "mode": "patch",
-                                "config": {
-                                    "decode_worker_config": {
-                                        "backend_name": decode_backend,
-                                        "backend_version": decode_backend_version,
-                                    }
-                                },
-                            }
+                        task_kwargs["yaml_config"] = _get_decode_patch_config(
+                            decode_backend=decode_backend,
+                            decode_backend_version=decode_backend_version,
+                            base_yaml_config=base_yaml_config,
+                        )
                     elif base_yaml_config:
                         task_kwargs["yaml_config"] = copy.deepcopy(base_yaml_config)
 
@@ -777,10 +797,10 @@ def _execute_task_configs(
         # If so, skip group_by to get absolute top N across all backends
         # For single backend mode, group_by deduplicates by parallelism config
         has_multiple_backends = "source_experiment" in pareto_df.columns if pareto_df is not None else False
-        if has_multiple_backends:
-            group_by_key = None
+        if task_config.serving_mode == "disagg":
+            group_by_key = ["(d)backend", "(d)parallel"] if has_multiple_backends else "(d)parallel"
         else:
-            group_by_key = "(d)parallel" if task_config.serving_mode == "disagg" else "parallel"
+            group_by_key = ["backend", "parallel"] if has_multiple_backends else "parallel"
 
         if use_request_latency:
             best_config_df = get_best_configs_under_request_latency_constraint(

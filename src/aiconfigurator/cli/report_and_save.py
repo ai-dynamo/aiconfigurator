@@ -637,10 +637,19 @@ def save_results(
                         )
 
                     try:
+                        role_backends = {}
+                        role_versions = {}
+                        if is_disagg:
+                            role_backends = {"prefill": p_backend, "decode": d_backend}
+                            role_versions = {"prefill": p_version, "decode": d_version}
+                        else:
+                            role_backends = {"agg": effective_backend}
+                            role_versions = {"agg": effective_version}
+
                         generate_backend_artifacts(
                             params=cfg,
-                            backend=effective_backend,
-                            backend_version=effective_version,
+                            role_backends=role_backends,
+                            role_versions=role_versions,
                             output_dir=top_config_dir,
                         )
                     except Exception as exc:
