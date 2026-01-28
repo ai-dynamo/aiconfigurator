@@ -13,6 +13,11 @@
     {%- set parsed_args = cli_args_list | default([]) -%}
 {{ "    " ~ component_name ~ ":" }}
       envFromSecret: hf-token-secret
+      {% if K8sConfig.k8s_hf_home %}
+      envs:
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+      {% endif %}
       componentType: worker
       {% if role %}
       subComponentType: {{ role }}
@@ -66,6 +71,12 @@ metadata:
 spec:
   services:
     Frontend:
+      envFromSecret: hf-token-secret
+      {% if K8sConfig.k8s_hf_home %}
+      envs:
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+      {% endif %}
       componentType: frontend
       replicas: {{ frontend_replicas | default(1) }}
       extraPodSpec:
