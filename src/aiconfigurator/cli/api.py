@@ -15,13 +15,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from aiconfigurator.cli.main import (
-    _execute_task_configs as _execute_task_configs_internal,
-)
-from aiconfigurator.cli.main import (
-    build_default_task_configs,
-    build_experiment_task_configs,
-)
+from aiconfigurator.cli.main import run_default_mode, run_exp_mode
 from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.task import TaskConfig
 
@@ -58,26 +52,15 @@ class CLIResult:
         )
 
 
-def _execute_and_wrap_result(
-    task_configs: dict[str, TaskConfig],
-    mode: str,
-    top_n: int = 5,
-) -> CLIResult:
-    """Execute task configs using main.py's function and wrap result in CLIResult."""
-    (
-        chosen_exp,
-        best_configs,
-        pareto_fronts,
-        best_throughputs,
-        effective_task_configs,
-    ) = _execute_task_configs_internal(task_configs, mode, top_n=top_n)
-
+def _wrap_result(result_tuple: tuple) -> CLIResult:
+    """Wrap a result tuple from run_default_mode/run_exp_mode into CLIResult."""
+    chosen_exp, best_configs, pareto_fronts, best_throughputs, task_configs = result_tuple
     return CLIResult(
         chosen_exp=chosen_exp,
         best_configs=best_configs,
         pareto_fronts=pareto_fronts,
         best_throughputs=best_throughputs,
-        task_configs=effective_task_configs,
+        task_configs=task_configs,
         raw_results={},
     )
 
@@ -139,24 +122,24 @@ def cli_default(
         >>> print(result.chosen_exp)  # 'agg' or 'disagg'
         >>> print(result.best_throughputs)
     """
-    # Reuse build_default_task_configs from main.py
-    task_configs = build_default_task_configs(
-        model_path=model_path,
-        total_gpus=total_gpus,
-        system=system,
-        decode_system=decode_system,
-        backend=backend,
-        backend_version=backend_version,
-        database_mode=database_mode,
-        isl=isl,
-        osl=osl,
-        ttft=ttft,
-        tpot=tpot,
-        request_latency=request_latency,
-        prefix=prefix,
+    result = _wrap_result(
+        run_default_mode(
+            model_path=model_path,
+            total_gpus=total_gpus,
+            system=system,
+            decode_system=decode_system,
+            backend=backend,
+            backend_version=backend_version,
+            database_mode=database_mode,
+            isl=isl,
+            osl=osl,
+            ttft=ttft,
+            tpot=tpot,
+            request_latency=request_latency,
+            prefix=prefix,
+            top_n=top_n,
+        )
     )
-
-    result = _execute_and_wrap_result(task_configs, mode="default", top_n=top_n)
 
     if save_dir:
         # Create a mock args object for save_results compatibility
@@ -267,15 +250,7 @@ def cli_exp(
           backend_name: trtllm
           total_gpus: 16
     """
-    task_configs = build_experiment_task_configs(
-        yaml_path=yaml_path,
-        config=config,
-    )
-
-    if not task_configs:
-        raise ValueError("No valid experiments found in configuration.")
-
-    result = _execute_and_wrap_result(task_configs, mode="exp", top_n=top_n)
+    result = _wrap_result(run_exp_mode(yaml_path=yaml_path, config=config, top_n=top_n))
 
     if save_dir:
         # Create a mock args object for save_results compatibility

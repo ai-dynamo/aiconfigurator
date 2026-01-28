@@ -829,6 +829,66 @@ def _execute_task_configs(
     return chosen_exp, best_configs, pareto_fronts, best_throughputs, configs_to_use
 
 
+def run_default_mode(
+    model_path: str,
+    total_gpus: int,
+    system: str,
+    *,
+    decode_system: str | None = None,
+    backend: str = "trtllm",
+    backend_version: str | None = None,
+    database_mode: str = "SILICON",
+    isl: int = 4000,
+    osl: int = 1000,
+    ttft: float = 2000.0,
+    tpot: float = 30.0,
+    request_latency: float | None = None,
+    prefix: int = 0,
+    top_n: int = 5,
+) -> tuple[str, dict, dict, dict, dict]:
+    """Run default mode: compare agg vs disagg serving.
+
+    Returns:
+        Tuple of (chosen_exp, best_configs, pareto_fronts, best_throughputs, task_configs)
+    """
+    task_configs = build_default_task_configs(
+        model_path=model_path,
+        total_gpus=total_gpus,
+        system=system,
+        decode_system=decode_system,
+        backend=backend,
+        backend_version=backend_version,
+        database_mode=database_mode,
+        isl=isl,
+        osl=osl,
+        ttft=ttft,
+        tpot=tpot,
+        request_latency=request_latency,
+        prefix=prefix,
+    )
+    return _execute_task_configs(task_configs, mode="default", top_n=top_n)
+
+
+def run_exp_mode(
+    *,
+    yaml_path: str | None = None,
+    config: dict | None = None,
+    top_n: int = 5,
+) -> tuple[str, dict, dict, dict, dict]:
+    """Run exp mode: execute experiments from YAML or config dict.
+
+    Returns:
+        Tuple of (chosen_exp, best_configs, pareto_fronts, best_throughputs, task_configs)
+
+    Raises:
+        ValueError: If no valid experiments found or invalid input.
+    """
+    task_configs = build_experiment_task_configs(yaml_path=yaml_path, config=config)
+    if not task_configs:
+        raise ValueError("No valid experiments found in configuration.")
+    return _execute_task_configs(task_configs, mode="exp", top_n=top_n)
+
+
 def _run_generate_mode(args):
     """Run the generate mode to create a naive agg config without sweeping."""
     model_path = args.model_path
@@ -901,7 +961,7 @@ def main(args):
         return
 
     if args.mode == "default":
-        task_configs = build_default_task_configs(
+        chosen_exp, best_configs, pareto_fronts, best_throughputs, task_configs = run_default_mode(
             model_path=args.model_path,
             total_gpus=args.total_gpus,
             system=args.system,
@@ -915,37 +975,26 @@ def main(args):
             tpot=args.tpot,
             request_latency=args.request_latency,
             prefix=args.prefix,
+            top_n=args.top_n,
         )
     elif args.mode == "exp":
         try:
-            task_configs = build_experiment_task_configs(yaml_path=args.yaml_path)
+            chosen_exp, best_configs, pareto_fronts, best_throughputs, task_configs = run_exp_mode(
+                yaml_path=args.yaml_path,
+                top_n=args.top_n,
+            )
         except (ValueError, TypeError) as exc:
-            logger.exception("Failed to build experiment task configs")
+            logger.exception("Failed to run experiment mode")
             raise SystemExit(1) from exc
-        if not task_configs:
-            logger.error("No valid experiments found in '%s'.", args.yaml_path)
-            raise SystemExit(1)
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
-
-    (
-        chosen_exp,
-        best_configs,
-        pareto_fronts,
-        best_throughputs,
-        effective_task_configs,
-    ) = _execute_task_configs(
-        task_configs,
-        args.mode,
-        top_n=args.top_n,
-    )
 
     if args.save_dir:
         save_results(
             args=args,
             best_configs=best_configs,
             pareto_fronts=pareto_fronts,
-            task_configs=effective_task_configs,  # Aggregated ("agg"/"disagg") for 'any' mode
+            task_configs=task_configs,
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,
         )

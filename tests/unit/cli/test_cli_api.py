@@ -18,9 +18,8 @@ pytestmark = pytest.mark.unit
 class TestCLIExpUnit:
     """Unit tests for cli_exp API (mocked)."""
 
-    @patch("aiconfigurator.cli.api._execute_task_configs_internal")
-    @patch("aiconfigurator.cli.api.build_experiment_task_configs")
-    def test_cli_exp_dict_config_equivalent_to_example_yaml(self, mock_build, mock_execute):
+    @patch("aiconfigurator.cli.api.run_exp_mode")
+    def test_cli_exp_dict_config_equivalent_to_example_yaml(self, mock_run_exp):
         """cli_exp with dict config should work correctly (mocked).
 
         Equivalent to exp_agg_simplified from src/aiconfigurator/cli/example.yaml:
@@ -33,13 +32,12 @@ class TestCLIExpUnit:
         """
         # Setup mocks
         mock_task_config = MagicMock(name="TaskConfig")
-        mock_build.return_value = {"exp_agg_simplified": mock_task_config}
-        mock_execute.return_value = (
+        mock_run_exp.return_value = (
             "exp_agg_simplified",  # chosen_exp
             {"exp_agg_simplified": pd.DataFrame()},  # best_configs
             {"exp_agg_simplified": pd.DataFrame()},  # pareto_fronts
             {"exp_agg_simplified": 100.0},  # best_throughputs
-            {"exp_agg_simplified": mock_task_config},  # effective_task_configs
+            {"exp_agg_simplified": mock_task_config},  # task_configs
         )
 
         # Simplified version based on example.yaml exp_agg_simplified
@@ -55,11 +53,8 @@ class TestCLIExpUnit:
 
         result = cli_exp(config=config)
 
-        # Verify build_experiment_task_configs was called with correct params
-        mock_build.assert_called_once_with(
-            yaml_path=None,
-            config=config,
-        )
+        # Verify run_exp_mode was called with correct params
+        mock_run_exp.assert_called_once_with(yaml_path=None, config=config, top_n=5)
 
         assert isinstance(result, CLIResult)
         assert "exp_agg_simplified" in result.task_configs
