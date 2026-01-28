@@ -330,6 +330,11 @@ class BackendName(Enum):
     trtllm = "trtllm"
     sglang = "sglang"
     vllm = "vllm"
+    any = "any"  # Meta-backend: AIC will check all backends and find best performance
+
+
+# Concrete backends that can actually run inference (excludes meta-backends like 'any')
+CONCRETE_BACKENDS = [BackendName.trtllm, BackendName.sglang, BackendName.vllm]
 
 
 class PerfDataFilename(Enum):

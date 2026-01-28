@@ -867,6 +867,21 @@ class TaskConfig:
 
         # Validate requested quant modes against available perf data early, to avoid
         # late interpolation/assert failures and to provide actionable guidance.
+        # For disagg mode with heterogeneous backends (different prefill/decode backends),
+        # skip early validation since each backend has its own database.
+        # The actual validation will happen during pareto analysis for each backend.
+        if self.config.serving_mode == "disagg":
+            prefill_backend = self.config.prefill_worker_config.backend_name
+            decode_backend = self.config.decode_worker_config.backend_name
+            if prefill_backend != decode_backend:
+                # Heterogeneous backends - skip early validation, let downstream handle it
+                logger.debug(
+                    "Skipping early quant mode validation for heterogeneous disagg config (prefill=%s, decode=%s)",
+                    prefill_backend,
+                    decode_backend,
+                )
+                return
+
         try:
             database = get_database(system=self.system_name, backend=self.backend_name, version=self.backend_version)
         except Exception:

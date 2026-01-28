@@ -109,13 +109,23 @@ def task_config_to_generator_config(
     prefix_tokens = _safe_int(_series_val(result_df, "prefix", runtime_cfg.prefix), runtime_cfg.prefix)
     config_obj = task_config.config
 
-    # Fetch num_gpus_per_node from system config
+    # Fetch num_gpus_per_node from system config.
+    # Note: num_gpus_per_node is a SYSTEM property (e.g., H200 has 8 GPUs/node),
+    # not backend-specific. We can use any backend's database for this system.
+    # For heterogeneous disagg (prefill=sglang, decode=trtllm), we use the prefill
+    # backend since task_config.backend_name refers to prefill.
     num_gpus_per_node = 8
     try:
+        # For disagg, use prefill worker config; for agg, use worker config
+        if task_config.serving_mode == "disagg":
+            worker_cfg = task_config.config.prefill_worker_config
+        else:
+            worker_cfg = task_config.config.worker_config
+
         db = get_database(
-            system=task_config.system_name,
-            backend=task_config.backend_name,
-            version=task_config.backend_version,
+            system=worker_cfg.system_name,
+            backend=worker_cfg.backend_name,
+            version=worker_cfg.backend_version,
         )
         if db and "node" in db.system_spec:
             num_gpus_per_node = db.system_spec["node"].get("num_gpus_per_node", 8)

@@ -11,6 +11,7 @@
 
 {%- macro render_worker(component_name, role, replicas, gpu, cli_args_list) -%}
     {%- set parsed_args = cli_args_list | default([]) -%}
+    {%- set worker_backend = prefill_backend if role == 'prefill' else (decode_backend if role == 'decode' else backend) -%}
 {{ "    " ~ component_name ~ ":" }}
       dynamoNamespace: {{ name }}
       envFromSecret: hf-token-secret
@@ -45,7 +46,13 @@
           command:
             - python3
             - -m
+            {% if worker_backend == 'sglang' %}
+            - dynamo.sglang
+            {% elif worker_backend == 'trtllm' %}
+            - dynamo.trtllm
+            {% else %}
             - dynamo.vllm
+            {% endif %}
           args:
             - --model
             - "{{ ServiceConfig.model_path }}"

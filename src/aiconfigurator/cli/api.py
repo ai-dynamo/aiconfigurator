@@ -15,13 +15,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from aiconfigurator.cli.main import (
-    _execute_task_configs as _execute_task_configs_internal,
-)
-from aiconfigurator.cli.main import (
-    build_default_task_configs,
-    build_experiment_task_configs,
-)
+from aiconfigurator.cli.main import run_default_mode, run_exp_mode
 from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.task import TaskConfig
 
@@ -58,13 +52,9 @@ class CLIResult:
         )
 
 
-def _execute_and_wrap_result(
-    task_configs: dict[str, TaskConfig],
-    mode: str,
-) -> CLIResult:
-    """Execute task configs using main.py's function and wrap result in CLIResult."""
-    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs_internal(task_configs, mode)
-
+def _wrap_result(result_tuple: tuple) -> CLIResult:
+    """Wrap a result tuple from run_default_mode/run_exp_mode into CLIResult."""
+    chosen_exp, best_configs, pareto_fronts, best_throughputs, task_configs = result_tuple
     return CLIResult(
         chosen_exp=chosen_exp,
         best_configs=best_configs,
@@ -90,6 +80,7 @@ def cli_default(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
+    top_n: int = 5,
     save_dir: str | None = None,
 ) -> CLIResult:
     """
@@ -114,6 +105,7 @@ def cli_default(
         request_latency: Optional end-to-end request latency target (ms).
             Enables request-latency optimization mode.
         prefix: Prefix cache length. Default is 0.
+        top_n: Number of top configurations to return for each mode (agg/disagg). Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
 
     Returns:
@@ -130,24 +122,24 @@ def cli_default(
         >>> print(result.chosen_exp)  # 'agg' or 'disagg'
         >>> print(result.best_throughputs)
     """
-    # Reuse build_default_task_configs from main.py
-    task_configs = build_default_task_configs(
-        model_path=model_path,
-        total_gpus=total_gpus,
-        system=system,
-        decode_system=decode_system,
-        backend=backend,
-        backend_version=backend_version,
-        database_mode=database_mode,
-        isl=isl,
-        osl=osl,
-        ttft=ttft,
-        tpot=tpot,
-        request_latency=request_latency,
-        prefix=prefix,
+    result = _wrap_result(
+        run_default_mode(
+            model_path=model_path,
+            total_gpus=total_gpus,
+            system=system,
+            decode_system=decode_system,
+            backend=backend,
+            backend_version=backend_version,
+            database_mode=database_mode,
+            isl=isl,
+            osl=osl,
+            ttft=ttft,
+            tpot=tpot,
+            request_latency=request_latency,
+            prefix=prefix,
+            top_n=top_n,
+        )
     )
-
-    result = _execute_and_wrap_result(task_configs, mode="default")
 
     if save_dir:
         # Create a mock args object for save_results compatibility
@@ -167,6 +159,7 @@ def cli_default(
         mock_args.tpot = tpot
         mock_args.request_latency = request_latency
         mock_args.generated_config_version = None
+        mock_args.top_n = top_n
 
         save_results(
             args=mock_args,
@@ -184,6 +177,7 @@ def cli_exp(
     *,
     yaml_path: str | None = None,
     config: dict[str, dict] | None = None,
+    top_n: int = 5,
     save_dir: str | None = None,
 ) -> CLIResult:
     """
@@ -198,6 +192,7 @@ def cli_exp(
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
             Keys are experiment names, values are experiment configs.
+        top_n: Number of top configurations to return for each experiment. Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
 
     Returns:
@@ -255,15 +250,7 @@ def cli_exp(
           backend_name: trtllm
           total_gpus: 16
     """
-    task_configs = build_experiment_task_configs(
-        yaml_path=yaml_path,
-        config=config,
-    )
-
-    if not task_configs:
-        raise ValueError("No valid experiments found in configuration.")
-
-    result = _execute_and_wrap_result(task_configs, mode="exp")
+    result = _wrap_result(run_exp_mode(yaml_path=yaml_path, config=config, top_n=top_n))
 
     if save_dir:
         # Create a mock args object for save_results compatibility
@@ -275,6 +262,7 @@ def cli_exp(
         mock_args.mode = "exp"
         mock_args.yaml_path = yaml_path
         mock_args.generated_config_version = None
+        mock_args.top_n = top_n
 
         save_results(
             args=mock_args,

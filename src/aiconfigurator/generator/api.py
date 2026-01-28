@@ -257,26 +257,31 @@ def generate_backend_config(
 
 def generate_backend_artifacts(
     params: dict[str, Any],
-    backend: str,
+    role_backends: dict[str, str],
+    role_versions: Optional[dict[str, str]] = None,
     templates_dir: Optional[str] = None,
     output_dir: Optional[str] = None,
-    backend_version: Optional[str] = None,
 ) -> dict[str, str]:
     """
     Generate complete backend artifacts including run scripts, configs, and k8s YAML.
 
     Args:
         params: Complete parameter configuration
-        backend: Target backend name (e.g., 'trtllm', 'vllm', 'sglang')
+        role_backends: Mapping of role (prefill/decode/agg) to backend name
+        role_versions: Optional mapping of role to version string
         templates_dir: Optional directory containing templates
         output_dir: Optional directory to save generated files
-        backend_version: Optional version string for version-specific template selection
 
     Returns:
         Dictionary mapping artifact names to their content
     """
     logger = logging.getLogger(__name__)
-    artifacts = render_backend_templates(params, backend, templates_dir, backend_version)
+    artifacts = render_backend_templates(
+        params,
+        role_backends=role_backends,
+        role_versions=role_versions,
+        templates_dir=templates_dir,
+    )
 
     if output_dir:
         params_obj = params.get("params", {})
