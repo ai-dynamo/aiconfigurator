@@ -36,16 +36,16 @@ The `generate` mode calculates the smallest tensor parallel (TP) size that fits 
 ============================================================
 ```
 
-**SDK API equivalent:**
+**Python API equivalent:**
 ```python
-from aiconfigurator.generator.api import generate_naive_config
+from aiconfigurator.cli import cli_generate
 
-result = generate_naive_config(
+result = cli_generate(
     model_path="Qwen/Qwen3-32B",
     total_gpus=8,
     system="h200_sxm",
     backend="trtllm",
-    output_dir="./output",
+    save_dir="./output",
 )
 print(result["parallelism"])  # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
 ```
@@ -99,6 +99,23 @@ Let's run `aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 3
     - TPOT: 8.07ms
 ```
 This shows that for model `Qwen/Qwen3-32B` to deploy on 32 H200, if you require your TTFT to be less than 1000ms and TPOT to be less than 10ms, and your problem is isl=3000 osl=512, then disagg will be 1.43x of agg. The target result is shown as Overall Best Configuration.
+
+**Python API equivalent:**
+```python
+from aiconfigurator.cli import cli_default
+
+result = cli_default(
+    model_path="Qwen/Qwen3-32B",
+    total_gpus=32,
+    system="h200_sxm",
+    ttft=1000,
+    tpot=10,
+    isl=3000,
+    osl=512
+)
+# Access the DataFrames
+print(result.best_configs["disagg"])
+```
 
 2. Pareto frontier
 ```
@@ -351,6 +368,25 @@ exp_hybrid:
 
 Hybrid mode is a quick solution to support new models without modeling the operation and collecting the data. 
 Will be leveraged more and more in future.
+
+**Python API equivalent:**
+```python
+from aiconfigurator.cli import cli_exp
+
+# Run experiments from a YAML file
+result = cli_exp(yaml_path="example.yaml")
+
+# Or run experiments from a dictionary
+config = {
+    "my_exp": {
+        "serving_mode": "agg",
+        "model_path": "Qwen/Qwen3-32B",
+        "total_gpus": 8,
+        "system_name": "h200_sxm"
+    }
+}
+result = cli_exp(config=config)
+```
 
 See `src/aiconfigurator/cli/exps/database_mode_comparison.yaml` for an example comparing different database modes.
 
