@@ -110,12 +110,24 @@ def task_config_to_generator_config(
     config_obj = task_config.config
 
     # Fetch num_gpus_per_node from system config
+    # For heterogeneous disagg configs, use prefill backend version since
+    # task_config.backend_version is a concatenated string that doesn't exist
     num_gpus_per_node = 8
     try:
+        # Use prefill version for heterogeneous disagg, otherwise use backend_version
+        if (
+            hasattr(task_config, "prefill_backend_version")
+            and hasattr(task_config, "decode_backend_version")
+            and task_config.prefill_backend_version != task_config.decode_backend_version
+        ):
+            db_version = task_config.prefill_backend_version
+        else:
+            db_version = task_config.backend_version
+
         db = get_database(
             system=task_config.system_name,
             backend=task_config.backend_name,
-            version=task_config.backend_version,
+            version=db_version,
         )
         if db and "node" in db.system_spec:
             num_gpus_per_node = db.system_spec["node"].get("num_gpus_per_node", 8)

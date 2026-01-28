@@ -63,8 +63,13 @@ def _plot_worker_setup_table(
     is_moe: bool,
     request_latency_target: float | None,
     show_power: bool = True,
+    show_backend: bool = False,
 ) -> str:
-    """Plot worker setup table for a single experiment."""
+    """Plot worker setup table for a single experiment.
+
+    Args:
+        show_backend: If True, show backend column(s) for 'any' backend mode.
+    """
     buf = []
 
     if config_df is None or config_df.empty:
@@ -98,7 +103,9 @@ def _plot_worker_setup_table(
     top_configs["replicas"] = total_gpus // top_configs["num_total_gpus"]
     top_configs["total_gpus_used"] = top_configs["num_total_gpus"] * top_configs["replicas"]
 
-    buf.append(f"\n{exp_name} Top Configurations: (Sorted by tokens/s/gpu)")
+    # Capitalize mode name for display (agg -> Agg, disagg -> Disagg)
+    display_name = exp_name.capitalize() if exp_name in ("agg", "disagg") else exp_name
+    buf.append(f"\n{display_name} Top Configurations: (Sorted by tokens/s/gpu)")
     table = PrettyTable()
 
     # Check if it is disagg config by checking for prefill/decode specific columns
@@ -115,15 +122,23 @@ def _plot_worker_setup_table(
             "total_gpus (used)",
             "replicas",
             "gpus/replica",
+        ]
+        if show_backend:
+            field_names.append("(p)backend")
+        field_names.extend([
             "(p)workers",
             "(p)gpus/worker",
             "(p)parallel",
             "(p)bs",
+        ])
+        if show_backend:
+            field_names.append("(d)backend")
+        field_names.extend([
             "(d)workers",
             "(d)gpus/worker",
             "(d)parallel",
             "(d)bs",
-        ]
+        ])
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -168,15 +183,27 @@ def _plot_worker_setup_table(
                     f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
                     f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
                 ),
+            ]
+            if show_backend:
+                # Get prefill backend from (p)backend column
+                p_backend = row.get("(p)backend", "")
+                row_data.append(p_backend)
+            row_data.extend([
                 row["(p)workers"],
                 p_gpus_worker,
                 p_parallel,
                 row["(p)bs"],
+            ])
+            if show_backend:
+                # Get decode backend from (d)backend column
+                d_backend = row.get("(d)backend", "")
+                row_data.append(d_backend)
+            row_data.extend([
                 row["(d)workers"],
                 d_gpus_worker,
                 d_parallel,
                 row["(d)bs"],
-            ]
+            ])
             if show_power:
                 row_data.append(f"{row['power_w']:.1f}W")
             table.add_row(row_data)
@@ -191,10 +218,14 @@ def _plot_worker_setup_table(
             "total_gpus (used)",
             "replicas",
             "gpus/replica",
+        ]
+        if show_backend:
+            field_names.append("backend")
+        field_names.extend([
             "gpus/worker",
             "parallel",
             "bs",
-        ]
+        ])
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -224,10 +255,16 @@ def _plot_worker_setup_table(
                 f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                 row["replicas"],
                 row["num_total_gpus"],
+            ]
+            if show_backend:
+                # Get backend from backend column
+                backend = row.get("backend", "")
+                row_data.append(backend)
+            row_data.extend([
                 gpus_worker,
                 parallel,
                 row["bs"],
-            ]
+            ])
             if show_power:
                 row_data.append(f"{row['power_w']:.1f}W")
             table.add_row(row_data)
@@ -244,6 +281,7 @@ def log_final_summary(
     task_configs: dict[str, TaskConfig],
     mode: str,
     pareto_x_axis: dict[str, str] | None = None,
+    top_n: int = 5,
 ):
     """Log final summary of configuration results"""
 
@@ -351,15 +389,20 @@ def log_final_summary(
     for exp_name, config_df in best_configs.items():
         exp_task_config = task_configs[exp_name].config
         total_gpus = getattr(task_configs[exp_name], "total_gpus", None) or 0
+
+        # Detect 'any' backend mode by checking for source_experiment column
+        is_any_mode = config_df is not None and "source_experiment" in config_df.columns
+
         table_buf = _plot_worker_setup_table(
             exp_name,
             config_df,
             total_gpus,
             exp_task_config.runtime_config.tpot,
-            5,
+            top_n,
             exp_task_config.is_moe,
             exp_task_config.runtime_config.request_latency,
             show_power,
+            show_backend=is_any_mode,
         )
         summary_box.append(table_buf)
 
@@ -375,14 +418,30 @@ def save_results(
     save_dir: str,
     generated_backend_version: str | None = None,
 ):
-    """Save the results to a directory."""
+    """Save the results to a directory.
+
+    Args:
+        args: CLI arguments
+        best_configs: Dict mapping experiment names to best config DataFrames
+        pareto_fronts: Dict mapping experiment names to pareto front DataFrames
+        task_configs: Dict mapping experiment names to TaskConfig objects
+        save_dir: Directory to save results
+        generated_backend_version: Optional backend version for config generation
+    """
 
     first_exp_name = list(task_configs.keys())[0]
     first_task = task_configs[first_exp_name]
     first_task_config = first_task.config
 
+    # Use original backend arg if available (to preserve "any" in directory name)
+    # Otherwise fall back to first task's backend name
+    if hasattr(args, "backend") and args.backend:
+        display_backend = args.backend
+    else:
+        display_backend = first_task.backend_name
+
     result_prefix = (
-        f"{first_task_config.model_path}_{first_task.system_name}_{first_task.backend_name}_"
+        f"{first_task_config.model_path}_{first_task.system_name}_{display_backend}_"
         f"isl{first_task_config.runtime_config.isl}_osl{first_task_config.runtime_config.osl}_"
         f"ttft{int(first_task_config.runtime_config.ttft)}_tpot{int(first_task_config.runtime_config.tpot)}"
     )
@@ -452,33 +511,58 @@ def save_results(
 
             # 3. Save the config for this experiment
             exp_task_config = task_configs[exp_name]
-            effective_generated_version = generated_backend_version or exp_task_config.backend_version
 
-            if generated_backend_version:
-                logger.warning(
-                    "\n" + "=" * 80 + "\n"
-                    "  ⚠️  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
-                    "  Experiment: %s\n"
-                    "  Using generated_config_version: %s\n"
-                    "\n"
-                    "  Config formats differ across backend releases. Please ensure you pass\n"
-                    "  the correct --generated_config_version to match your deployment target!\n" + "=" * 80,
-                    exp_name,
-                    generated_backend_version,
-                )
+            # For heterogeneous disagg configs (different prefill/decode backends),
+            # use the prefill backend version for config generation since backend_version
+            # is a concatenated string that doesn't exist as a real version.
+            if (
+                exp_task_config.serving_mode == "disagg"
+                and hasattr(exp_task_config, "prefill_backend_version")
+                and hasattr(exp_task_config, "decode_backend_version")
+                and exp_task_config.prefill_backend_version != exp_task_config.decode_backend_version
+            ):
+                # Heterogeneous disagg - use prefill version for config generation
+                default_version = exp_task_config.prefill_backend_version
             else:
-                logger.warning(
-                    "\n" + "=" * 80 + "\n"
-                    "  ⚠️  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
-                    "  Experiment: %s\n"
-                    "  --generated_config_version NOT provided\n"
-                    "  Defaulting to backend_version: %s\n"
-                    "\n"
-                    "  Config formats differ across backend releases. If you are targeting\n"
-                    "  a different version, please pass --generated_config_version explicitly!\n" + "=" * 80,
-                    exp_name,
-                    exp_task_config.backend_version,
-                )
+                default_version = exp_task_config.backend_version
+
+            effective_generated_version = generated_backend_version or default_version
+
+            # Check if we're in 'any' backend mode (multiple backends aggregated)
+            is_any_backend_mode = (
+                best_config_df is not None and "source_experiment" in best_config_df.columns
+            )
+
+            # Only show version warning if NOT in 'any' mode (single backend mode)
+            # In 'any' mode, each config has its own backend/version from the result row
+            if not is_any_backend_mode:
+                if generated_backend_version:
+                    logger.warning(
+                        "\n" + "=" * 80 + "\n"
+                        "  ⚠️  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
+                        "  Experiment: %s\n"
+                        "  Using generated_config_version: %s\n"
+                        "\n"
+                        "  Config formats differ across backend releases. Please ensure you pass\n"
+                        "  the correct --generated_config_version to match your deployment target!\n"
+                        + "=" * 80,
+                        exp_name,
+                        generated_backend_version,
+                    )
+                else:
+                    logger.warning(
+                        "\n" + "=" * 80 + "\n"
+                        "  ⚠️  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
+                        "  Experiment: %s\n"
+                        "  --generated_config_version NOT provided\n"
+                        "  Defaulting to backend_version: %s\n"
+                        "\n"
+                        "  Config formats differ across backend releases. If you are targeting\n"
+                        "  a different version, please pass --generated_config_version explicitly!\n"
+                        + "=" * 80,
+                        exp_name,
+                        effective_generated_version,
+                    )
 
             with open(os.path.join(exp_dir, "config.yaml"), "w") as f:  # for future aic repro
                 yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
@@ -486,6 +570,60 @@ def save_results(
             # 4. Save the generated config for this experiment, sub-directory for each best config
             if best_config_df is not None:
                 for i, (idx, result_df) in enumerate(best_config_df.iterrows()):
+                    is_disagg = exp_task_config.serving_mode == "disagg"
+
+                    # Get backend info from result row
+                    if is_disagg:
+                        # For disagg, get prefill and decode backends separately
+                        p_backend = (
+                            result_df.get("(p)backend") if "(p)backend" in result_df.index else None
+                        )
+                        p_version = (
+                            result_df.get("(p)backend_version")
+                            if "(p)backend_version" in result_df.index else None
+                        )
+                        d_backend = (
+                            result_df.get("(d)backend") if "(d)backend" in result_df.index else None
+                        )
+                        d_version = (
+                            result_df.get("(d)backend_version")
+                            if "(d)backend_version" in result_df.index else None
+                        )
+
+                        # Fall back to task config if not in result
+                        if not p_backend:
+                            p_backend = exp_task_config.config.prefill_worker_config.backend_name
+                        if not p_version:
+                            p_version = exp_task_config.config.prefill_worker_config.backend_version
+                        if not d_backend:
+                            d_backend = exp_task_config.config.decode_worker_config.backend_name
+                        if not d_version:
+                            d_version = exp_task_config.config.decode_worker_config.backend_version
+
+                        # Use decode backend for config generation (more constrained for latency)
+                        effective_backend = d_backend
+                        effective_version = generated_backend_version or d_version
+                        backend_info = (
+                            f"prefill={p_backend}({p_version}), decode={d_backend}({d_version})"
+                        )
+                    else:
+                        # For agg, get single backend
+                        result_backend = (
+                            result_df.get("backend") if "backend" in result_df.index else None
+                        )
+                        result_version = (
+                            result_df.get("backend_version")
+                            if "backend_version" in result_df.index else None
+                        )
+
+                        # Fall back to task config if not in result
+                        effective_backend = result_backend or exp_task_config.backend_name
+                        effective_version = (
+                            generated_backend_version or result_version
+                            or exp_task_config.backend_version
+                        )
+                        backend_info = f"{effective_backend}({effective_version})"
+
                     cfg = task_config_to_generator_config(
                         task_config=exp_task_config,
                         result_df=result_df,
@@ -497,11 +635,21 @@ def save_results(
                     with open(os.path.join(top_config_dir, "generator_config.yaml"), "w") as f:
                         yaml.safe_dump(cfg, f, sort_keys=False)
 
+                    # Log which backend this config is for
+                    source_exp = result_df.get("source_experiment") if "source_experiment" in result_df.index else None
+                    if source_exp:
+                        logger.info(
+                            "Generating config for top%d from %s (%s)",
+                            i + 1,
+                            source_exp,
+                            backend_info,
+                        )
+
                     try:
                         generate_backend_artifacts(
                             params=cfg,
-                            backend=exp_task_config.backend_name,
-                            backend_version=effective_generated_version,
+                            backend=effective_backend,
+                            backend_version=effective_version,
                             output_dir=top_config_dir,
                         )
                     except Exception as exc:
