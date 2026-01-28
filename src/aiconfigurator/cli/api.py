@@ -70,7 +70,6 @@ def _execute_and_wrap_result(
         pareto_fronts,
         best_throughputs,
         effective_task_configs,
-        _all_task_configs,  # Not needed - backend info is in result rows
     ) = _execute_task_configs_internal(task_configs, mode, top_n=top_n)
 
     return CLIResult(

@@ -40,7 +40,6 @@ class TestCLIExpUnit:
             {"exp_agg_simplified": pd.DataFrame()},  # pareto_fronts
             {"exp_agg_simplified": 100.0},  # best_throughputs
             {"exp_agg_simplified": mock_task_config},  # effective_task_configs
-            {"exp_agg_simplified": mock_task_config},  # all_task_configs
         )
 
         # Simplified version based on example.yaml exp_agg_simplified

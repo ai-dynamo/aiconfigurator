@@ -717,7 +717,6 @@ def _execute_task_configs(
     dict[str, pd.DataFrame],
     dict[str, float],
     dict[str, TaskConfig],
-    dict[str, TaskConfig],
 ]:
     """Execute the task configs and return the chosen experiment, best configs, results, and best
     throughputs."""
@@ -856,9 +855,7 @@ def _execute_task_configs(
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
 
-    # Return both aggregated configs (for directory structure) and original task_configs
-    # (for config generation in 'any' mode)
-    return chosen_exp, best_configs, pareto_fronts, best_throughputs, configs_for_summary, task_configs
+    return chosen_exp, best_configs, pareto_fronts, best_throughputs, configs_for_summary
 
 
 def _run_generate_mode(args):
@@ -966,7 +963,6 @@ def main(args):
         pareto_fronts,
         best_throughputs,
         effective_task_configs,
-        all_task_configs,
     ) = _execute_task_configs(
         task_configs,
         args.mode,
