@@ -109,25 +109,23 @@ def task_config_to_generator_config(
     prefix_tokens = _safe_int(_series_val(result_df, "prefix", runtime_cfg.prefix), runtime_cfg.prefix)
     config_obj = task_config.config
 
-    # Fetch num_gpus_per_node from system config
-    # For heterogeneous disagg configs, use prefill backend version since
-    # task_config.backend_version is a concatenated string that doesn't exist
+    # Fetch num_gpus_per_node from system config.
+    # Note: num_gpus_per_node is a SYSTEM property (e.g., H200 has 8 GPUs/node),
+    # not backend-specific. We can use any backend's database for this system.
+    # For heterogeneous disagg (prefill=sglang, decode=trtllm), we use the prefill
+    # backend since task_config.backend_name refers to prefill.
     num_gpus_per_node = 8
     try:
-        # Use prefill version for heterogeneous disagg, otherwise use backend_version
-        if (
-            hasattr(task_config, "prefill_backend_version")
-            and hasattr(task_config, "decode_backend_version")
-            and task_config.prefill_backend_version != task_config.decode_backend_version
-        ):
-            db_version = task_config.prefill_backend_version
+        # For disagg, use prefill worker config; for agg, use worker config
+        if task_config.serving_mode == "disagg":
+            worker_cfg = task_config.config.prefill_worker_config
         else:
-            db_version = task_config.backend_version
+            worker_cfg = task_config.config.worker_config
 
         db = get_database(
-            system=task_config.system_name,
-            backend=task_config.backend_name,
-            version=db_version,
+            system=worker_cfg.system_name,
+            backend=worker_cfg.backend_name,
+            version=worker_cfg.backend_version,
         )
         if db and "node" in db.system_spec:
             num_gpus_per_node = db.system_spec["node"].get("num_gpus_per_node", 8)

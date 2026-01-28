@@ -63,13 +63,8 @@ def _plot_worker_setup_table(
     is_moe: bool,
     request_latency_target: float | None,
     show_power: bool = True,
-    show_backend: bool = False,
 ) -> str:
-    """Plot worker setup table for a single experiment.
-
-    Args:
-        show_backend: If True, show backend column(s) for 'any' backend mode.
-    """
+    """Plot worker setup table for a single experiment."""
     buf = []
 
     if config_df is None or config_df.empty:
@@ -122,27 +117,17 @@ def _plot_worker_setup_table(
             "total_gpus (used)",
             "replicas",
             "gpus/replica",
+            "(p)backend",
+            "(p)workers",
+            "(p)gpus/worker",
+            "(p)parallel",
+            "(p)bs",
+            "(d)backend",
+            "(d)workers",
+            "(d)gpus/worker",
+            "(d)parallel",
+            "(d)bs",
         ]
-        if show_backend:
-            field_names.append("(p)backend")
-        field_names.extend(
-            [
-                "(p)workers",
-                "(p)gpus/worker",
-                "(p)parallel",
-                "(p)bs",
-            ]
-        )
-        if show_backend:
-            field_names.append("(d)backend")
-        field_names.extend(
-            [
-                "(d)workers",
-                "(d)gpus/worker",
-                "(d)parallel",
-                "(d)bs",
-            ]
-        )
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -187,31 +172,17 @@ def _plot_worker_setup_table(
                     f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
                     f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
                 ),
+                row.get("(p)backend", ""),
+                row["(p)workers"],
+                p_gpus_worker,
+                p_parallel,
+                row["(p)bs"],
+                row.get("(d)backend", ""),
+                row["(d)workers"],
+                d_gpus_worker,
+                d_parallel,
+                row["(d)bs"],
             ]
-            if show_backend:
-                # Get prefill backend from (p)backend column
-                p_backend = row.get("(p)backend", "")
-                row_data.append(p_backend)
-            row_data.extend(
-                [
-                    row["(p)workers"],
-                    p_gpus_worker,
-                    p_parallel,
-                    row["(p)bs"],
-                ]
-            )
-            if show_backend:
-                # Get decode backend from (d)backend column
-                d_backend = row.get("(d)backend", "")
-                row_data.append(d_backend)
-            row_data.extend(
-                [
-                    row["(d)workers"],
-                    d_gpus_worker,
-                    d_parallel,
-                    row["(d)bs"],
-                ]
-            )
             if show_power:
                 row_data.append(f"{row['power_w']:.1f}W")
             table.add_row(row_data)
@@ -226,16 +197,11 @@ def _plot_worker_setup_table(
             "total_gpus (used)",
             "replicas",
             "gpus/replica",
+            "backend",
+            "gpus/worker",
+            "parallel",
+            "bs",
         ]
-        if show_backend:
-            field_names.append("backend")
-        field_names.extend(
-            [
-                "gpus/worker",
-                "parallel",
-                "bs",
-            ]
-        )
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -265,18 +231,11 @@ def _plot_worker_setup_table(
                 f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                 row["replicas"],
                 row["num_total_gpus"],
+                row.get("backend", ""),
+                gpus_worker,
+                parallel,
+                row["bs"],
             ]
-            if show_backend:
-                # Get backend from backend column
-                backend = row.get("backend", "")
-                row_data.append(backend)
-            row_data.extend(
-                [
-                    gpus_worker,
-                    parallel,
-                    row["bs"],
-                ]
-            )
             if show_power:
                 row_data.append(f"{row['power_w']:.1f}W")
             table.add_row(row_data)
@@ -402,9 +361,6 @@ def log_final_summary(
         exp_task_config = task_configs[exp_name].config
         total_gpus = getattr(task_configs[exp_name], "total_gpus", None) or 0
 
-        # Detect 'any' backend mode by checking for source_experiment column
-        is_any_mode = config_df is not None and "source_experiment" in config_df.columns
-
         table_buf = _plot_worker_setup_table(
             exp_name,
             config_df,
@@ -414,7 +370,6 @@ def log_final_summary(
             exp_task_config.is_moe,
             exp_task_config.runtime_config.request_latency,
             show_power,
-            show_backend=is_any_mode,
         )
         summary_box.append(table_buf)
 

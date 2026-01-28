@@ -765,6 +765,20 @@ def _execute_task_configs(
         use_request_latency = target_request_latency is not None and target_request_latency > 0
         total_gpus = getattr(task_config, "total_gpus", None) or 0
 
+        # Add backend columns for single-backend mode (already added in 'any' mode by aggregator)
+        if pareto_df is not None and not pareto_df.empty and not is_any_mode:
+            pareto_df = pareto_df.copy()
+            if task_config.serving_mode == "agg":
+                pareto_df["backend"] = task_config.config.worker_config.backend_name
+                pareto_df["backend_version"] = task_config.config.worker_config.backend_version
+            else:
+                pareto_df["(p)backend"] = task_config.config.prefill_worker_config.backend_name
+                pareto_df["(p)backend_version"] = task_config.config.prefill_worker_config.backend_version
+                pareto_df["(d)backend"] = task_config.config.decode_worker_config.backend_name
+                pareto_df["(d)backend_version"] = task_config.config.decode_worker_config.backend_version
+            # Update the result dict so downstream uses the updated pareto_df
+            task_result["pareto_df"] = pareto_df
+
         # Compute tokens/s/gpu_cluster for pareto_df
         if pareto_df is not None and not pareto_df.empty:
             pareto_df["tokens/s/gpu_cluster"] = (
