@@ -542,6 +542,11 @@ class TaskConfigFactory:
         comm_quant_mode = "half"
 
         sm_version = database.system_spec["gpu"]["sm_version"]
+        # SM version to GPU type mapping:
+        #   SM 80  = A100
+        #   SM 89  = L40S (Ada Lovelace) - no TMA, limited FP8 support
+        #   SM 90  = H100/H200 (Hopper) - full FP8 and TMA support
+        #   SM 100 = B200/GB200 (Blackwell) - NVFP4 support
 
         supported = getattr(database, "supported_quant_mode", {}) or {}
         supported_gemm = set(supported.get("gemm", []) or [])
@@ -558,10 +563,13 @@ class TaskConfigFactory:
         if backend == "vllm":
             # TODO: collect fp8_block quant mode data for vllm
             fp8_gemm_quant = "fp8"
+            fp8_moe_quant = "fp8"
             fp8_fhma_quant = "float16"
         else:
             # fp8_block GEMM requires SM90+ (TMA). On SM89 (e.g., L40S) we use fp8 instead.
             fp8_gemm_quant = "fp8_block" if sm_version >= 90 else "fp8"
+            # MOE fp8_block uses a different kernel path that works on SM89+.
+            fp8_moe_quant = "fp8_block" if sm_version >= 89 else "fp8"
             # FP8 attention is effectively SM90+ only; on SM89 prefer float16/bf16.
             fp8_fhma_quant = "fp8" if sm_version >= 90 else "float16"
 
@@ -572,7 +580,7 @@ class TaskConfigFactory:
             fmha_quant_mode = fp8_fhma_quant
         elif sm_version >= 89:
             gemm_quant_mode = _pick([fp8_gemm_quant, "fp8", "float16"], supported_gemm, fp8_gemm_quant)
-            moe_quant_mode = _pick([fp8_gemm_quant, "float16"], supported_moe, fp8_gemm_quant)
+            moe_quant_mode = _pick([fp8_moe_quant, "fp8", "float16"], supported_moe, fp8_moe_quant)
             fmha_quant_mode = fp8_fhma_quant
             kvcache_quant_mode = "fp8"
         else:
@@ -586,7 +594,7 @@ class TaskConfigFactory:
 
         if model_family in ["MOE", "LLAMA"] and sm_version < 100 and sm_version >= 89:
             gemm_quant_mode = fp8_gemm_quant
-            moe_quant_mode = fp8_gemm_quant
+            moe_quant_mode = _pick([fp8_moe_quant, "fp8", "float16"], supported_moe, fp8_moe_quant)
 
         if model_name in ["GPT_OSS_120B", "GPT_OSS_20B"]:
             moe_quant_mode = "w4a16_mxfp4"
