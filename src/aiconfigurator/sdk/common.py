@@ -57,7 +57,7 @@ class NemotronHConfig:
     conv_kernel: int
     n_groups: int
     chunk_size: int
-    moe_shared_expert_intermediate_size: int
+    moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
 
 
 def _get_support_matrix_resource():
@@ -120,7 +120,8 @@ DefaultHFModels = {
     "openai/gpt-oss-20b",
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
-    "nvidia/Nemotron-3-Nano",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nvidia/Nemotron-H-56B-Base-8K",
 }
 
 """
@@ -199,6 +200,8 @@ MODEL_NAME_TO_HF_ID = {
     "Nemotron_super_v1.1": "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     # Nemotron 3
     "Nemotron_3_nano": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    # Nemotron H
+    "Nemotron_H_56B": "nvidia/Nemotron-H-56B-Base-8K",
 }
 
 """

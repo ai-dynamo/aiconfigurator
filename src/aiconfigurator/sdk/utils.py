@@ -15,6 +15,23 @@ from aiconfigurator.sdk.common import ARCHITECTURE_TO_MODEL_FAMILY, BlockConfig,
 logger = logging.getLogger(__name__)
 
 
+def _load_json_with_infinity(file_path) -> dict:
+    """
+    Load JSON file with support for JavaScript-style Infinity and NaN values.
+
+    Standard JSON doesn't support Infinity/NaN, but HuggingFace configs may contain them (e.g., Nemotron-H-56B)
+    This function pre-processes the file content to replace these values before parsing.
+    """
+    with open(file_path) as f:
+        content = f.read()
+    # Replace JavaScript-style Infinity/NaN with Python-compatible values
+    # Use regex to match standalone Infinity/-Infinity/NaN (not part of a string)
+    content = re.sub(r"\bInfinity\b", "null", content)
+    content = re.sub(r"-Infinity\b", "null", content)
+    content = re.sub(r"\bNaN\b", "null", content)
+    return json.loads(content)
+
+
 def enumerate_parallel_config(
     num_gpu_list: list[int],
     tp_list: list[int],
@@ -350,7 +367,7 @@ def _parse_hf_config_json(config: dict) -> list:
     # Handle nullable fields (e.g., Nemotron has null for these)
     n_kv = config.get("num_key_value_heads") or 0
     inter_size = config.get("intermediate_size") or 0
-    d = config.get("head_dim") or (hidden_size // n if n > 0 else 0)
+    d = config.get("head_dim") or config.get("attention_head_dim") or (hidden_size // n if n > 0 else 0)
 
     # MoE parameters
     topk = config.get("num_experts_per_tok", 0)
@@ -368,7 +385,8 @@ def _parse_hf_config_json(config: dict) -> list:
             conv_kernel=config["conv_kernel"],
             n_groups=config["n_groups"],
             chunk_size=config["chunk_size"],
-            moe_shared_expert_intermediate_size=config["moe_shared_expert_intermediate_size"],
+            # Optional: 0 for non-MoE NemotronH models (e.g., Nemotron-H-56B)
+            moe_shared_expert_intermediate_size=config.get("moe_shared_expert_intermediate_size", 0),
         )
         logger.info(
             f"NemotronH hybrid config: pattern={extra_params.hybrid_override_pattern}, "
@@ -409,8 +427,7 @@ def _load_pre_downloaded_hf_config(hf_id: str) -> dict:
     config_path = _get_model_config_path() / f"{hf_id.replace('/', '--')}_config.json"
     if not config_path.exists():
         raise ValueError(f"HuggingFace model {hf_id} is not cached in model_configs directory.")
-    with open(config_path) as f:
-        return json.load(f)
+    return _load_json_with_infinity(config_path)
 
 
 def _load_local_config(path: str) -> dict:
@@ -418,8 +435,7 @@ def _load_local_config(path: str) -> dict:
     config_path = Path(path) / "config.json"
     if not config_path.exists():
         raise ValueError(f"config.json not found at {config_path}")
-    with open(config_path) as f:
-        return json.load(f)
+    return _load_json_with_infinity(config_path)
 
 
 def get_model_config_from_model_path(model_path: str) -> list:
