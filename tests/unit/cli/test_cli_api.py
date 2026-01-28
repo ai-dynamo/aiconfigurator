@@ -35,10 +35,12 @@ class TestCLIExpUnit:
         mock_task_config = MagicMock(name="TaskConfig")
         mock_build.return_value = {"exp_agg_simplified": mock_task_config}
         mock_execute.return_value = (
-            "exp_agg_simplified",
-            {"exp_agg_simplified": pd.DataFrame()},
-            {"exp_agg_simplified": pd.DataFrame()},
-            {"exp_agg_simplified": 100.0},
+            "exp_agg_simplified",  # chosen_exp
+            {"exp_agg_simplified": pd.DataFrame()},  # best_configs
+            {"exp_agg_simplified": pd.DataFrame()},  # pareto_fronts
+            {"exp_agg_simplified": 100.0},  # best_throughputs
+            {"exp_agg_simplified": mock_task_config},  # effective_task_configs
+            {"exp_agg_simplified": mock_task_config},  # all_task_configs
         )
 
         # Simplified version based on example.yaml exp_agg_simplified

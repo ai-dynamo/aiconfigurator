@@ -32,11 +32,14 @@ class TestCLIIntegration:
         mock_results_df = MagicMock(name="ResultsDF")
         mock_best_configs = {"agg": MagicMock(name="BestConfigDF")}
         mock_best_throughputs = {"agg": 123.4}
+        mock_effective_configs = {"agg": mock_task_config}
         mock_execute.return_value = (
             "agg",
             mock_best_configs,
             {"agg": mock_results_df},
             mock_best_throughputs,
+            mock_effective_configs,
+            {"agg": mock_task_config},
         )
 
         with patch("aiconfigurator.cli.main.save_results") as mock_save:
@@ -53,7 +56,7 @@ class TestCLIIntegration:
         assert save_kwargs["args"] == sample_cli_args_with_save_dir
         assert save_kwargs["best_configs"] == mock_best_configs
         assert save_kwargs["pareto_fronts"] == {"agg": mock_results_df}
-        assert save_kwargs["task_configs"] == {"agg": mock_task_config}
+        assert save_kwargs["task_configs"] == mock_effective_configs
         assert save_kwargs["save_dir"] == sample_cli_args_with_save_dir.save_dir
 
     @patch("aiconfigurator.cli.main.save_results")
@@ -73,11 +76,14 @@ class TestCLIIntegration:
         mock_results_df = MagicMock(name="ResultsDF")
         mock_best_configs = {"my_exp": MagicMock(name="BestConfigDF")}
         mock_best_throughputs = {"my_exp": 123.4}
+        mock_effective_configs = {"my_exp": mock_task_config}
         mock_execute.return_value = (
             "my_exp",
             mock_best_configs,
             {"my_exp": mock_results_df},
             mock_best_throughputs,
+            mock_effective_configs,
+            {"my_exp": mock_task_config},
         )
 
         args = cli_args_factory(
@@ -99,7 +105,7 @@ class TestCLIIntegration:
         assert save_kwargs["args"] == args
         assert save_kwargs["best_configs"] == mock_best_configs
         assert save_kwargs["pareto_fronts"] == {"my_exp": mock_results_df}
-        assert save_kwargs["task_configs"] == {"my_exp": mock_task_config}
+        assert save_kwargs["task_configs"] == mock_effective_configs
         assert save_kwargs["save_dir"] == str(mock_exp_yaml_path.parent)
 
     @pytest.mark.parametrize(
@@ -112,8 +118,8 @@ class TestCLIIntegration:
     @patch("aiconfigurator.cli.main._execute_task_configs")
     def test_cli_main_build_dispatch(self, mock_execute, mode, build_patch, cli_args_factory, mock_exp_yaml_path):
         """Main should dispatch to the correct builder based on CLI mode."""
-        mock_execute.return_value = ("agg", {}, {}, {})
         mock_task_config = MagicMock(name="TaskConfig")
+        mock_execute.return_value = ("agg", {}, {}, {}, {"agg": mock_task_config}, {"agg": mock_task_config})
 
         with patch(build_patch) as mock_builder:
             mock_builder.return_value = {"agg": mock_task_config}
@@ -124,7 +130,7 @@ class TestCLIIntegration:
             cli_main(args)
 
         mock_builder.assert_called_once()
-        mock_execute.assert_called_once_with({"agg": mock_task_config}, mode)
+        mock_execute.assert_called_once_with({"agg": mock_task_config}, mode, top_n=5)
 
     @pytest.mark.parametrize(
         "builder_patch",
@@ -198,7 +204,14 @@ exp_with_db_mode:
 
         mock_task_config = MagicMock(name="TaskConfig")
         mock_build_exp.return_value = {"exp_with_db_mode": mock_task_config}
-        mock_execute.return_value = ("exp_with_db_mode", {}, {}, {})
+        mock_execute.return_value = (
+            "exp_with_db_mode",
+            {},
+            {},
+            {},
+            {"exp_with_db_mode": mock_task_config},
+            {"exp_with_db_mode": mock_task_config},
+        )
 
         parser = argparse.ArgumentParser()
         configure_parser(parser)

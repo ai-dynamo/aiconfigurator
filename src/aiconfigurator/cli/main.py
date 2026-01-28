@@ -711,7 +711,14 @@ def _execute_task_configs(
     task_configs: dict[str, TaskConfig],
     mode: str,
     top_n: int = 5,
-) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float]]:
+) -> tuple[
+    str,
+    dict[str, pd.DataFrame],
+    dict[str, pd.DataFrame],
+    dict[str, float],
+    dict[str, TaskConfig],
+    dict[str, TaskConfig],
+]:
     """Execute the task configs and return the chosen experiment, best configs, results, and best
     throughputs."""
     results: dict[str, dict[str, pd.DataFrame]] = {}
