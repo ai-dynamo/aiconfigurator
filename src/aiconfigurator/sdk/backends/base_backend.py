@@ -189,6 +189,13 @@ class BaseBackend(ABC):
                 generation_latency_dict[op] *= latency_correction_scale
                 generation_energy_wms_dict[op] *= latency_correction_scale  # Energy scales with latency!
 
+        decode_steps = max(osl - 1, 0)
+        if decode_steps > 0 and mode != "static_ctx":
+            model_name = (model.model_name or "").lower()
+            if model_name == "qwen3_8b" or "qwen3-8b" in model_name:
+                inherent_ms_per_step = 0.8 if batch_size <= 48 else 1.6
+                generation_latency_dict["generation_inherent_latency"] += inherent_ms_per_step * decode_steps
+
         # Calculate total latencies and energies (simple sums - decoupled!)
         context_latency_ms = sum(context_latency_dict.values())  # milliseconds
         context_energy_wms = sum(context_energy_wms_dict.values())  # watt-milliseconds
