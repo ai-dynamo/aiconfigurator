@@ -14,16 +14,22 @@ flowchart TD
 ```
 
 ### Key Components
-- Deployment schema (`config/deployment_config.yaml`):  
+- Deployment schema (`config/deployment_config.yaml`):
   ```
   inputs:
     - key: ServiceConfig.port
     - key: ServiceConfig.served_model_name
     - key: K8sConfig.k8s_image
+    - key: K8sConfig.k8s_model_cache
+    - key: K8sConfig.k8s_hf_home
     - key: WorkerConfig.prefill_workers
     - key: SlaConfig.isl
   ```
-  Defines the deployment-facing inputs beyond backend flags: service ports and names, per-node GPU counts, K8s image/namespace/engine mode, and SLA knobs like ISL/OSL.
+  Defines the deployment-facing inputs beyond backend flags: service ports and names, per-node GPU counts, K8s image/namespace/engine mode, model cache PVC, HuggingFace home directory, and SLA knobs like ISL/OSL.
+
+  **Model Cache Configuration:**
+  - `k8s_model_cache`: Name of the PersistentVolumeClaim (PVC) to mount for caching HuggingFace models. The PVC is mounted at `/workspace/model_cache` in worker pods.
+  - `k8s_hf_home`: (Optional) Path to set as the `HF_HOME` environment variable in worker pods. When `k8s_model_cache` is configured but `k8s_hf_home` is not explicitly set, it automatically defaults to `/workspace/model_cache` (the PVC mount point). This ensures HuggingFace libraries download models to the persistent volume instead of ephemeral storage.
 
 - Backend parameter mapping (`config/backend_config_mapping.yaml`):  
   ```
@@ -96,6 +102,7 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
             "k8s_image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0",
             "k8s_engine_mode": "configmap",
             "k8s_model_cache": "pvc:model-cache-7b",
+            "k8s_hf_home": "/workspace/model_cache",  # Optional: HF_HOME env var for workers (defaults to /workspace/model_cache when k8s_model_cache is set)
         },
         "Workers": {
             "prefill": {"tensor_parallel_size": 4, "max_batch_size": 8},
