@@ -838,15 +838,16 @@ def _execute_task_configs(
 
     chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
 
-    # For 'any' mode, use representative configs for summary/saving
-    configs_for_summary = configs_to_use if is_any_mode else task_configs
+    # configs_to_use is already set correctly:
+    # - 'any' mode: representative_configs (keyed by "agg"/"disagg")
+    # - single backend/exp mode: task_configs (original keys)
 
     log_final_summary(
         chosen_exp=chosen_exp,  # for summary
         best_throughputs=best_throughputs,  # for summary
         best_configs=best_configs,  # for table
         pareto_fronts=pareto_fronts,  # for plotting
-        task_configs=configs_for_summary,  # for info in summary
+        task_configs=configs_to_use,  # for info in summary
         mode=mode,
         pareto_x_axis=pareto_x_axis,
         top_n=top_n,
@@ -855,7 +856,7 @@ def _execute_task_configs(
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
 
-    return chosen_exp, best_configs, pareto_fronts, best_throughputs, configs_for_summary
+    return chosen_exp, best_configs, pareto_fronts, best_throughputs, configs_to_use
 
 
 def _run_generate_mode(args):
