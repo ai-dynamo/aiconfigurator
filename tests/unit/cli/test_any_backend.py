@@ -9,8 +9,8 @@ Tests that the 'any' backend option correctly expands into all concrete backend 
 
 import pytest
 
-from aiconfigurator.sdk import common
 from aiconfigurator.cli.main import _get_backends_to_check, build_default_task_configs
+from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.unit
 
