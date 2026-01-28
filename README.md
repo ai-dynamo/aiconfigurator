@@ -94,8 +94,19 @@ from aiconfigurator.cli import cli_default, cli_exp, cli_generate
 result = cli_default(model_path="Qwen/Qwen3-32B", total_gpus=32, system="h200_sxm")
 print(result.best_configs["disagg"].head())
 
-# 2. Run experiments from a YAML file
+# 2. Run experiments from a YAML file or a dictionary config
 result = cli_exp(yaml_path="my_experiments.yaml")
+# Or use a dictionary config directly
+result = cli_exp(config={
+    "my_exp": {
+        "serving_mode": "disagg",
+        "model_path": "Qwen/Qwen3-32B",
+        "total_gpus": 32,
+        "system_name": "h200_sxm",
+        "isl": 4000,
+        "osl": 1000,
+    }
+})
 
 # 3. Generate a naive configuration
 result = cli_generate(model_path="Qwen/Qwen3-32B", total_gpus=8, system="h200_sxm")
