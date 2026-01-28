@@ -189,6 +189,7 @@ class MoE(Operation):
         workload_distribution: str,
         attention_dp_size: int,
         is_context: bool = True,
+        is_gated: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(name, scale_factor)
@@ -202,16 +203,19 @@ class MoE(Operation):
         self._attention_dp_size = attention_dp_size
         self._workload_distribution = workload_distribution
         self._is_context = is_context
+        self._is_gated = is_gated
         self._moe_backend = kwargs.get("moe_backend")
+        # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down)
+        num_gemms = 3 if is_gated else 2
         self._weights = (
             self._hidden_size
             * self._inter_size
             * self._num_experts
             * quant_mode.value.memory
-            * 3
+            * num_gemms
             // self._moe_ep_size
             // self._moe_tp_size
-        )  # 3 for ffn1,gate,ffn2; 2 for float16
+        )
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query MoE latency with energy data."""
@@ -232,6 +236,7 @@ class MoE(Operation):
             workload_distribution=self._workload_distribution,
             is_context=self._is_context,
             moe_backend=self._moe_backend,
+            is_gated=self._is_gated,
         )
 
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
