@@ -108,9 +108,7 @@ def check_support(
     exact_matches = [
         row
         for row in matrix
-        if row["HuggingFaceID"] == model
-        and row["System"] == system
-        and _matches_filters(row, backend, version)
+        if row["HuggingFaceID"] == model and row["System"] == system and _matches_filters(row, backend, version)
     ]
 
     # Resolve architecture from matrix if model is found anywhere
@@ -132,9 +130,7 @@ def check_support(
     arch_matches = [
         row
         for row in matrix
-        if row["Architecture"] == architecture
-        and row["System"] == system
-        and _matches_filters(row, backend, version)
+        if row["Architecture"] == architecture and row["System"] == system and _matches_filters(row, backend, version)
     ]
 
     agg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "agg"]
