@@ -97,72 +97,63 @@ def check_support(
     """
     matrix = get_support_matrix()
 
-    # 1. Check for exact model+system matches and resolve architecture from matrix if needed
-    agg_exact = []
-    disagg_exact = []
-    matrix_arch = None
+    def _matches_filters(row: dict, backend: str | None, version: str | None) -> bool:
+        if backend and row["Backend"] != backend:
+            return False
+        if version and row["Version"] != version:
+            return False
+        return True
 
-    for row in matrix:
-        if row["HuggingFaceID"] == model:
-            matrix_arch = row["Architecture"]
-            if row["System"] == system:
-                if backend and row["Backend"] != backend:
-                    continue
-                if version and row["Version"] != version:
-                    continue
+    # 1. Check for exact model+system matches
+    exact_matches = [
+        row
+        for row in matrix
+        if row["HuggingFaceID"] == model
+        and row["System"] == system
+        and _matches_filters(row, backend, version)
+    ]
 
-                is_pass = row["Status"] == "PASS"
-                if row["Mode"] == "agg":
-                    agg_exact.append(is_pass)
-                elif row["Mode"] == "disagg":
-                    disagg_exact.append(is_pass)
+    # Resolve architecture from matrix if model is found anywhere
+    matrix_arch = next((row["Architecture"] for row in matrix if row["HuggingFaceID"] == model), None)
 
-    # If we found any entries for this specific model on this specific system, use them
-    if agg_exact or disagg_exact:
+    if exact_matches:
         return SupportResult(
-            agg_supported=any(agg_exact),
-            disagg_supported=any(disagg_exact),
+            agg_supported=any(row["Status"] == "PASS" for row in exact_matches if row["Mode"] == "agg"),
+            disagg_supported=any(row["Status"] == "PASS" for row in exact_matches if row["Mode"] == "disagg"),
             exact_match=True,
         )
 
-    # 2. Fallback to architecture-based majority vote
+    # 2. Fallback to architecture-based inference
     # Use provided architecture or the one found in the matrix
     architecture = architecture or matrix_arch
     if not architecture:
-        return SupportResult(
-            agg_supported=False,
-            disagg_supported=False,
-            exact_match=False,
-        )
+        return SupportResult(agg_supported=False, disagg_supported=False, exact_match=False)
 
-    agg_arch_results = []
-    disagg_arch_results = []
+    arch_matches = [
+        row
+        for row in matrix
+        if row["Architecture"] == architecture
+        and row["System"] == system
+        and _matches_filters(row, backend, version)
+    ]
 
-    for row in matrix:
-        if row["Architecture"] == architecture and row["System"] == system:
-            if backend and row["Backend"] != backend:
-                continue
-            if version and row["Version"] != version:
-                continue
+    agg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "agg"]
+    disagg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "disagg"]
 
-            is_pass = row["Status"] == "PASS"
-            if row["Mode"] == "agg":
-                agg_arch_results.append(is_pass)
-            elif row["Mode"] == "disagg":
-                disagg_arch_results.append(is_pass)
-
-    def is_majority_pass(results):
+    def is_majority_pass(results: list[bool]) -> bool:
+        # We use majority vote to infer support for an untested model of a known architecture.
+        # This provides a balanced estimate: not too optimistic (any) nor too pessimistic (all).
         return sum(results) > len(results) / 2 if results else False
 
     return SupportResult(
-        agg_supported=is_majority_pass(agg_arch_results),
-        disagg_supported=is_majority_pass(disagg_arch_results),
+        agg_supported=is_majority_pass(agg_results),
+        disagg_supported=is_majority_pass(disagg_results),
         exact_match=False,
         architecture=architecture,
-        agg_pass_count=sum(agg_arch_results),
-        agg_total_count=len(agg_arch_results),
-        disagg_pass_count=sum(disagg_arch_results),
-        disagg_total_count=len(disagg_arch_results),
+        agg_pass_count=sum(agg_results),
+        agg_total_count=len(agg_results),
+        disagg_pass_count=sum(disagg_results),
+        disagg_total_count=len(disagg_results),
     )
 
 
