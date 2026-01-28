@@ -233,8 +233,22 @@ def get_model_family(model_path: str) -> str:
 def check_is_moe(model_path: str) -> bool:
     """
     Check if the model is a MoE model.
+
+    For NEMOTRONH models, checks if 'E' (MoE layer) is in hybrid_override_pattern..
+    E.g., Nemotron_H is not an MoE model, but Nemotron_3 is an MoE model.
     """
-    return get_model_family(model_path) == "MOE" or get_model_family(model_path) == "DEEPSEEK"
+    family = get_model_family(model_path)
+    if family in ("MOE", "DEEPSEEK"):
+        return True
+    if family == "NEMOTRONH":
+        model_info = _get_model_info(model_path)
+        extra_params = model_info[-1]  # extra_params is always the last element
+        if extra_params is None or not hasattr(extra_params, "hybrid_override_pattern"):
+            logger.warning(f"NEMOTRONH model {model_path} missing hybrid_override_pattern, defaulting is_moe=False")
+            return False
+        # 'E' in pattern means MoE layers are present
+        return "E" in extra_params.hybrid_override_pattern
+    return False
 
 
 def calc_expectation(nextn: int, nextn_accept_rates: list[float]) -> float:
