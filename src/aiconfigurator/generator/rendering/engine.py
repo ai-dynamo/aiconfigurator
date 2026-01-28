@@ -439,6 +439,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["working_dir"] = k8s_config.get("working_dir")
     context["k8s_engine_mode"] = k8s_config.get("k8s_engine_mode")
     context["k8s_model_cache"] = k8s_config.get("k8s_model_cache")
+    context["k8s_hf_home"] = k8s_config.get("k8s_hf_home")
 
     # Extract DynConfig for mode/router decisions
     dyn_config = param_values.get("DynConfig", {})

@@ -480,6 +480,7 @@ Use `--generator-set K8sConfig.<field>=value` (or place the same keys inside `--
 
 * `K8sConfig.k8s_engine_mode={inline|configmap}` - engine config delivery. **inline** by default.
 * `K8sConfig.k8s_model_cache=<claimName>` - optional model cache PVC mount (mounted at `/workspace/model_cache`). Leave it unset or empty to disable the mount. Specify the PVC name when you want pods to reuse an existing model cache; otherwise, if you directly set something like `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`, the model is downloaded from Hugging Face and no PVC is required.
+* `K8sConfig.k8s_hf_home=<path>` - optional path for the `HF_HOME` environment variable in worker pods. When `k8s_model_cache` is configured but `k8s_hf_home` is not explicitly set, it automatically defaults to `/workspace/model_cache` to ensure HuggingFace libraries use the persistent volume. Set this to a custom path if you have a different volume mount structure.
 * `K8sConfig.k8s_namespace=<ns>` - target namespace. Default **dynamo**.
 * `K8sConfig.k8s_image=<image>` - runtime image. Default **nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0**.
 * `K8sConfig.k8s_image_pull_secret=<secret>` - optional pull secret name.

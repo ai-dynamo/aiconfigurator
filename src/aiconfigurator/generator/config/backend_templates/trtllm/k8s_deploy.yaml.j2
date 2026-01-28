@@ -73,6 +73,11 @@ readinessProbe:
 {%- macro render_worker(component_name, sub_component_type, replicas, gpu, engine_path, inline_payload, disagg_mode=None, publish_metrics=False) -%}
 {{ "    " ~ component_name ~ ":" }}
       envFromSecret: hf-token-secret
+      {% if K8sConfig.k8s_hf_home %}
+      envs:
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+      {% endif %}
       componentType: worker
       {% if sub_component_type %}
       subComponentType: {{ sub_component_type }}
@@ -146,6 +151,7 @@ metadata:
 spec:
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       componentType: frontend
       replicas: {{ frontend_replicas }}
       extraPodSpec:
@@ -167,10 +173,16 @@ spec:
             - name: model-cache
               mountPath: {{ k8s_model_cache_mount }}
           {% endif %}
-      {% if enable_router %}
+      {% if enable_router or K8sConfig.k8s_hf_home %}
       envs:
+        {% if enable_router %}
         - name: DYN_ROUTER_MODE
           value: kv
+        {% endif %}
+        {% if K8sConfig.k8s_hf_home %}
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+        {% endif %}
       {% endif %}
 
     {% if DynConfig.mode | default('disagg') == 'agg' %}
