@@ -16,7 +16,8 @@ from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
 # Models that use non-gated MoE (Relu2 activation instead of SwiGLU)
-NON_GATED_MOE_MODELS = ["NEMOTRON_3_NANO"]
+# These are substring patterns that will be matched against the full model name
+NON_GATED_MOE_MODELS = ["Nemotron-3"]
 
 try:
     from common_test_cases import get_common_moe_test_cases
@@ -220,9 +221,9 @@ def run_moe_torch(
     swiglu_limit = None
 
     # Determine activation type based on model
-    # NemotronH uses non-gated MoE with Relu2 activation
+    # Nemotron-3 Nano uses non-gated MoE with Relu2 activation
     # Other models (DeepSeek, Qwen, Mixtral) use gated MoE with SwiGLU activation
-    if model_name in NON_GATED_MOE_MODELS:
+    if any(pattern in model_name for pattern in NON_GATED_MOE_MODELS):
         activation_type = ActivationType.Relu2
         is_gated = False
     else:
