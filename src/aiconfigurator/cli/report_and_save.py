@@ -125,20 +125,24 @@ def _plot_worker_setup_table(
         ]
         if show_backend:
             field_names.append("(p)backend")
-        field_names.extend([
-            "(p)workers",
-            "(p)gpus/worker",
-            "(p)parallel",
-            "(p)bs",
-        ])
+        field_names.extend(
+            [
+                "(p)workers",
+                "(p)gpus/worker",
+                "(p)parallel",
+                "(p)bs",
+            ]
+        )
         if show_backend:
             field_names.append("(d)backend")
-        field_names.extend([
-            "(d)workers",
-            "(d)gpus/worker",
-            "(d)parallel",
-            "(d)bs",
-        ])
+        field_names.extend(
+            [
+                "(d)workers",
+                "(d)gpus/worker",
+                "(d)parallel",
+                "(d)bs",
+            ]
+        )
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -188,22 +192,26 @@ def _plot_worker_setup_table(
                 # Get prefill backend from (p)backend column
                 p_backend = row.get("(p)backend", "")
                 row_data.append(p_backend)
-            row_data.extend([
-                row["(p)workers"],
-                p_gpus_worker,
-                p_parallel,
-                row["(p)bs"],
-            ])
+            row_data.extend(
+                [
+                    row["(p)workers"],
+                    p_gpus_worker,
+                    p_parallel,
+                    row["(p)bs"],
+                ]
+            )
             if show_backend:
                 # Get decode backend from (d)backend column
                 d_backend = row.get("(d)backend", "")
                 row_data.append(d_backend)
-            row_data.extend([
-                row["(d)workers"],
-                d_gpus_worker,
-                d_parallel,
-                row["(d)bs"],
-            ])
+            row_data.extend(
+                [
+                    row["(d)workers"],
+                    d_gpus_worker,
+                    d_parallel,
+                    row["(d)bs"],
+                ]
+            )
             if show_power:
                 row_data.append(f"{row['power_w']:.1f}W")
             table.add_row(row_data)
@@ -221,11 +229,13 @@ def _plot_worker_setup_table(
         ]
         if show_backend:
             field_names.append("backend")
-        field_names.extend([
-            "gpus/worker",
-            "parallel",
-            "bs",
-        ])
+        field_names.extend(
+            [
+                "gpus/worker",
+                "parallel",
+                "bs",
+            ]
+        )
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -260,11 +270,13 @@ def _plot_worker_setup_table(
                 # Get backend from backend column
                 backend = row.get("backend", "")
                 row_data.append(backend)
-            row_data.extend([
-                gpus_worker,
-                parallel,
-                row["bs"],
-            ])
+            row_data.extend(
+                [
+                    gpus_worker,
+                    parallel,
+                    row["bs"],
+                ]
+            )
             if show_power:
                 row_data.append(f"{row['power_w']:.1f}W")
             table.add_row(row_data)
@@ -529,9 +541,7 @@ def save_results(
             effective_generated_version = generated_backend_version or default_version
 
             # Check if we're in 'any' backend mode (multiple backends aggregated)
-            is_any_backend_mode = (
-                best_config_df is not None and "source_experiment" in best_config_df.columns
-            )
+            is_any_backend_mode = best_config_df is not None and "source_experiment" in best_config_df.columns
 
             # Only show version warning if NOT in 'any' mode (single backend mode)
             # In 'any' mode, each config has its own backend/version from the result row
@@ -544,8 +554,7 @@ def save_results(
                         "  Using generated_config_version: %s\n"
                         "\n"
                         "  Config formats differ across backend releases. Please ensure you pass\n"
-                        "  the correct --generated_config_version to match your deployment target!\n"
-                        + "=" * 80,
+                        "  the correct --generated_config_version to match your deployment target!\n" + "=" * 80,
                         exp_name,
                         generated_backend_version,
                     )
@@ -558,8 +567,7 @@ def save_results(
                         "  Defaulting to backend_version: %s\n"
                         "\n"
                         "  Config formats differ across backend releases. If you are targeting\n"
-                        "  a different version, please pass --generated_config_version explicitly!\n"
-                        + "=" * 80,
+                        "  a different version, please pass --generated_config_version explicitly!\n" + "=" * 80,
                         exp_name,
                         effective_generated_version,
                     )
@@ -575,19 +583,13 @@ def save_results(
                     # Get backend info from result row
                     if is_disagg:
                         # For disagg, get prefill and decode backends separately
-                        p_backend = (
-                            result_df.get("(p)backend") if "(p)backend" in result_df.index else None
-                        )
+                        p_backend = result_df.get("(p)backend") if "(p)backend" in result_df.index else None
                         p_version = (
-                            result_df.get("(p)backend_version")
-                            if "(p)backend_version" in result_df.index else None
+                            result_df.get("(p)backend_version") if "(p)backend_version" in result_df.index else None
                         )
-                        d_backend = (
-                            result_df.get("(d)backend") if "(d)backend" in result_df.index else None
-                        )
+                        d_backend = result_df.get("(d)backend") if "(d)backend" in result_df.index else None
                         d_version = (
-                            result_df.get("(d)backend_version")
-                            if "(d)backend_version" in result_df.index else None
+                            result_df.get("(d)backend_version") if "(d)backend_version" in result_df.index else None
                         )
 
                         # Fall back to task config if not in result
@@ -603,24 +605,18 @@ def save_results(
                         # Use decode backend for config generation (more constrained for latency)
                         effective_backend = d_backend
                         effective_version = generated_backend_version or d_version
-                        backend_info = (
-                            f"prefill={p_backend}({p_version}), decode={d_backend}({d_version})"
-                        )
+                        backend_info = f"prefill={p_backend}({p_version}), decode={d_backend}({d_version})"
                     else:
                         # For agg, get single backend
-                        result_backend = (
-                            result_df.get("backend") if "backend" in result_df.index else None
-                        )
+                        result_backend = result_df.get("backend") if "backend" in result_df.index else None
                         result_version = (
-                            result_df.get("backend_version")
-                            if "backend_version" in result_df.index else None
+                            result_df.get("backend_version") if "backend_version" in result_df.index else None
                         )
 
                         # Fall back to task config if not in result
                         effective_backend = result_backend or exp_task_config.backend_name
                         effective_version = (
-                            generated_backend_version or result_version
-                            or exp_task_config.backend_version
+                            generated_backend_version or result_version or exp_task_config.backend_version
                         )
                         backend_info = f"{effective_backend}({effective_version})"
 

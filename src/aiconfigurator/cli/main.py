@@ -310,8 +310,7 @@ def build_default_task_configs(
     if is_any_backend:
         if backend_version:
             logger.warning(
-                "Ignoring --backend_version=%s when using --backend=any. "
-                "Each backend will use its own latest version.",
+                "Ignoring --backend_version=%s when using --backend=any. Each backend will use its own latest version.",
                 backend_version,
             )
         effective_backend_version = None
@@ -374,9 +373,7 @@ def build_default_task_configs(
             # This requires YAML config to set decode_worker_config.backend_name and backend_version
             if prefill_backend != decode_backend:
                 # Get the latest version for the decode backend
-                decode_backend_version = get_latest_database_version(
-                    system=decode_system, backend=decode_backend
-                )
+                decode_backend_version = get_latest_database_version(system=decode_system, backend=decode_backend)
                 disagg_kwargs["yaml_config"] = {
                     "mode": "patch",
                     "config": {

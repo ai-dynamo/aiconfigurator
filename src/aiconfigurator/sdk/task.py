@@ -876,8 +876,7 @@ class TaskConfig:
             if prefill_backend != decode_backend:
                 # Heterogeneous backends - skip early validation, let downstream handle it
                 logger.debug(
-                    "Skipping early quant mode validation for heterogeneous disagg config "
-                    "(prefill=%s, decode=%s)",
+                    "Skipping early quant mode validation for heterogeneous disagg config (prefill=%s, decode=%s)",
                     prefill_backend,
                     decode_backend,
                 )
