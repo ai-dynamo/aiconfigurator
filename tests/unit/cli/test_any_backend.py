@@ -85,9 +85,10 @@ class TestBuildDefaultTaskConfigsWithAny:
         )
 
         # Should have 1 agg + 1 disagg = 2 total
+        # Uses same naming pattern as 'any' mode for consistency
         assert len(task_configs) == 2
-        assert "agg" in task_configs
-        assert "disagg" in task_configs
+        assert "agg_trtllm" in task_configs
+        assert "disagg_trtllm_trtllm" in task_configs
 
     def test_any_backend_agg_configs_have_correct_backend(self):
         """Test that agg configs have the correct backend name."""

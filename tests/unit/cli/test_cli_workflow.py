@@ -27,9 +27,11 @@ class TestCLIIntegration:
     def test_cli_main_success_flow(self, mock_build_default, mock_execute, sample_cli_args_with_save_dir):
         """Test successful CLI main execution flow for default mode."""
         mock_task_config = MagicMock(name="TaskConfig")
-        mock_build_default.return_value = {"agg": mock_task_config}
+        # Builder now uses consistent naming: agg_{backend}, disagg_{p}_{d}
+        mock_build_default.return_value = {"agg_trtllm": mock_task_config}
 
         mock_results_df = MagicMock(name="ResultsDF")
+        # _execute_task_configs aggregates to "agg"/"disagg" keys
         mock_best_configs = {"agg": MagicMock(name="BestConfigDF")}
         mock_best_throughputs = {"agg": 123.4}
         mock_effective_configs = {"agg": mock_task_config}
@@ -47,7 +49,7 @@ class TestCLIIntegration:
         mock_build_default.assert_called_once()
         mock_execute.assert_called_once()
         builder_args, builder_mode = mock_execute.call_args.args
-        assert builder_args == {"agg": mock_task_config}
+        assert builder_args == {"agg_trtllm": mock_task_config}
         assert builder_mode == "default"
 
         mock_save.assert_called_once()
@@ -107,20 +109,24 @@ class TestCLIIntegration:
         assert save_kwargs["save_dir"] == str(mock_exp_yaml_path.parent)
 
     @pytest.mark.parametrize(
-        "mode,build_patch",
+        "mode,build_patch,builder_key",
         [
-            ("default", "aiconfigurator.cli.main.build_default_task_configs"),
-            ("exp", "aiconfigurator.cli.main.build_experiment_task_configs"),
+            # default mode uses agg_{backend} naming
+            ("default", "aiconfigurator.cli.main.build_default_task_configs", "agg_trtllm"),
+            # exp mode uses custom experiment names
+            ("exp", "aiconfigurator.cli.main.build_experiment_task_configs", "my_exp"),
         ],
     )
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    def test_cli_main_build_dispatch(self, mock_execute, mode, build_patch, cli_args_factory, mock_exp_yaml_path):
+    def test_cli_main_build_dispatch(
+        self, mock_execute, mode, build_patch, builder_key, cli_args_factory, mock_exp_yaml_path
+    ):
         """Main should dispatch to the correct builder based on CLI mode."""
         mock_task_config = MagicMock(name="TaskConfig")
         mock_execute.return_value = ("agg", {}, {}, {}, {"agg": mock_task_config})
 
         with patch(build_patch) as mock_builder:
-            mock_builder.return_value = {"agg": mock_task_config}
+            mock_builder.return_value = {builder_key: mock_task_config}
             if mode == "exp":
                 args = cli_args_factory(mode=mode, extra_args=["--yaml_path", str(mock_exp_yaml_path)])
             else:
@@ -128,7 +134,7 @@ class TestCLIIntegration:
             cli_main(args)
 
         mock_builder.assert_called_once()
-        mock_execute.assert_called_once_with({"agg": mock_task_config}, mode, top_n=5)
+        mock_execute.assert_called_once_with({builder_key: mock_task_config}, mode, top_n=5)
 
     @pytest.mark.parametrize(
         "builder_patch",
@@ -148,20 +154,20 @@ class TestCLIIntegration:
             mock_builder.assert_not_called()
 
     @pytest.mark.parametrize(
-        "builder_patch",
+        "builder_patch,builder_key",
         [
-            "aiconfigurator.cli.main.build_default_task_configs",
-            "aiconfigurator.cli.main.build_experiment_task_configs",
+            ("aiconfigurator.cli.main.build_default_task_configs", "agg_trtllm"),
+            ("aiconfigurator.cli.main.build_experiment_task_configs", "my_exp"),
         ],
     )
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    def test_cli_main_runtime_failure(self, mock_execute, builder_patch, cli_args_factory, tmp_path):
+    def test_cli_main_runtime_failure(self, mock_execute, builder_patch, builder_key, cli_args_factory, tmp_path):
         """Execution errors propagate as RuntimeError for visibility."""
         mock_execute.side_effect = RuntimeError("failed")
         mock_task_config = MagicMock(name="TaskConfig")
 
         with patch(builder_patch) as mock_builder:
-            mock_builder.return_value = {"agg": mock_task_config}
+            mock_builder.return_value = {builder_key: mock_task_config}
 
             if "default" in builder_patch:
                 args = cli_args_factory(mode="default")

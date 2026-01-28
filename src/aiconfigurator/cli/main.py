@@ -342,11 +342,8 @@ def build_default_task_configs(
             "database_mode": database_mode,
         }
         agg_task = TaskConfig(serving_mode="agg", **common_kwargs)
-        # Use descriptive name when checking multiple backends
-        if is_any_backend:
-            task_configs[f"agg_{agg_backend}"] = agg_task
-        else:
-            task_configs["agg"] = agg_task
+        # Always use descriptive name - aggregation unifies to "agg"/"disagg" keys
+        task_configs[f"agg_{agg_backend}"] = agg_task
 
     # Build disagg task configs
     # For 'any' backend, check all prefill/decode combinations (3x3 = 9)
@@ -385,15 +382,8 @@ def build_default_task_configs(
                 }
 
             disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
-
-            # Use descriptive name when checking multiple backends
-            if is_any_backend:
-                task_configs[f"disagg_{prefill_backend}_{decode_backend}"] = disagg_task
-            else:
-                task_configs["disagg"] = disagg_task
-                break  # Only one disagg config for single backend
-        if not is_any_backend:
-            break  # Only one disagg config for single backend
+            # Always use descriptive name - aggregation unifies to "agg"/"disagg" keys
+            task_configs[f"disagg_{prefill_backend}_{decode_backend}"] = disagg_task
 
     return task_configs
 
@@ -631,20 +621,7 @@ def build_experiment_task_configs(
                     except Exception:
                         logger.exception("Failed to build TaskConfig for experiment '%s'", config_name)
 
-                    if not is_any_backend:
-                        break  # Only one config for single backend
-                if not is_any_backend:
-                    break  # Only one config for single backend
-
     return task_configs
-
-
-def _is_any_backend_mode(task_configs: dict[str, TaskConfig]) -> bool:
-    """Check if we're running in 'any' backend mode (multiple agg/disagg backend combinations)."""
-    # If we have multiple configs starting with agg_ or disagg_, we're in 'any' mode
-    agg_count = sum(1 for name in task_configs if name.startswith("agg_"))
-    disagg_count = sum(1 for name in task_configs if name.startswith("disagg_") and "_" in name[7:])
-    return agg_count > 1 or disagg_count > 1
 
 
 def _aggregate_results_by_mode(
@@ -652,7 +629,11 @@ def _aggregate_results_by_mode(
     task_configs: dict[str, TaskConfig],
 ) -> tuple[dict[str, pd.DataFrame], dict[str, TaskConfig]]:
     """
-    Aggregate pareto results by serving mode (agg vs disagg) for 'any' backend mode.
+    Aggregate pareto results by serving mode (agg vs disagg) for default mode.
+
+    Converts results keyed by backend names (e.g., agg_trtllm, disagg_sglang_vllm)
+    into results keyed by serving mode (agg, disagg). Also adds backend/version
+    columns and source_experiment tracking to each pareto_df row.
 
     Returns:
         Tuple of (aggregated_results, representative_task_configs)
@@ -745,15 +726,16 @@ def _execute_task_configs(
         logger.error("No successful experiment runs to compare.")
         raise SystemExit(1)
 
-    # Check if we should aggregate by serving mode (for 'any' backend)
-    is_any_mode = _is_any_backend_mode(task_configs)
-
-    if is_any_mode:
+    # Default mode: aggregate by serving mode (agg/disagg)
+    # Exp mode: preserve custom experiment names
+    if mode == "default":
         # Aggregate results by serving mode (agg vs disagg)
+        # This also adds backend/version columns to the pareto_df
         aggregated_results, representative_configs = _aggregate_results_by_mode(results, task_configs)
         results_to_process = aggregated_results
         configs_to_use = representative_configs
     else:
+        # Exp mode - use results directly with custom experiment names
         results_to_process = results
         configs_to_use = task_configs
 
@@ -770,20 +752,6 @@ def _execute_task_configs(
         target_request_latency = runtime_cfg.request_latency
         use_request_latency = target_request_latency is not None and target_request_latency > 0
         total_gpus = getattr(task_config, "total_gpus", None) or 0
-
-        # Add backend columns for single-backend mode (already added in 'any' mode by aggregator)
-        if pareto_df is not None and not pareto_df.empty and not is_any_mode:
-            pareto_df = pareto_df.copy()
-            if task_config.serving_mode == "agg":
-                pareto_df["backend"] = task_config.config.worker_config.backend_name
-                pareto_df["backend_version"] = task_config.config.worker_config.backend_version
-            else:
-                pareto_df["(p)backend"] = task_config.config.prefill_worker_config.backend_name
-                pareto_df["(p)backend_version"] = task_config.config.prefill_worker_config.backend_version
-                pareto_df["(d)backend"] = task_config.config.decode_worker_config.backend_name
-                pareto_df["(d)backend_version"] = task_config.config.decode_worker_config.backend_version
-            # Update the result dict so downstream uses the updated pareto_df
-            task_result["pareto_df"] = pareto_df
 
         # Compute tokens/s/gpu_cluster for pareto_df
         if pareto_df is not None and not pareto_df.empty:
@@ -805,9 +773,11 @@ def _execute_task_configs(
             pareto_frontier_df = pd.DataFrame()
             x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
 
-        # For 'any' mode, skip group_by to get absolute top 5 across all backends
+        # Check if we have multiple backends to compare (from 'any' mode)
+        # If so, skip group_by to get absolute top N across all backends
         # For single backend mode, group_by deduplicates by parallelism config
-        if is_any_mode:
+        has_multiple_backends = "source_experiment" in pareto_df.columns if pareto_df is not None else False
+        if has_multiple_backends:
             group_by_key = None
         else:
             group_by_key = "(d)parallel" if task_config.serving_mode == "disagg" else "parallel"
