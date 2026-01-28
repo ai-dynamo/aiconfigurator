@@ -80,6 +80,7 @@ def get_common_moe_test_cases():
         [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2
         [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
         [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
+        [2688, 1856, 6, 128, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"],  # nemotron-3 nano (uses relu2, non-gated)
     ]
 
     test_cases: list[MoeCommonTestCase] = []

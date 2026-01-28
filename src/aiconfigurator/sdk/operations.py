@@ -189,6 +189,7 @@ class MoE(Operation):
         workload_distribution: str,
         attention_dp_size: int,
         is_context: bool = True,
+        is_gated: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(name, scale_factor)
@@ -202,16 +203,19 @@ class MoE(Operation):
         self._attention_dp_size = attention_dp_size
         self._workload_distribution = workload_distribution
         self._is_context = is_context
+        self._is_gated = is_gated
         self._moe_backend = kwargs.get("moe_backend")
+        # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down)
+        num_gemms = 3 if is_gated else 2
         self._weights = (
             self._hidden_size
             * self._inter_size
             * self._num_experts
             * quant_mode.value.memory
-            * 3
+            * num_gemms
             // self._moe_ep_size
             // self._moe_tp_size
-        )  # 3 for ffn1,gate,ffn2; 2 for float16
+        )
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query MoE latency with energy data."""
@@ -232,6 +236,7 @@ class MoE(Operation):
             workload_distribution=self._workload_distribution,
             is_context=self._is_context,
             moe_backend=self._moe_backend,
+            is_gated=self._is_gated,
         )
 
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
@@ -880,6 +885,157 @@ class WideEPContextMLA(Operation):
             attention_backend=self._attn_backend,
         )
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
+class Mamba2(Operation):
+    """
+    Mamba2 operation for NemotronH hybrid models.
+
+    Models the Mamba2Mixer layer which consists of:
+    - in_proj: Linear projection (hidden_size -> expanded_size)
+    - conv1d: Causal 1D convolution
+    - SSM: Selective State Space Model (scan operation)
+    - norm: RMSNorm with gating
+    - out_proj: Linear projection back to hidden_size
+
+    This is a SOL-based approximation that models:
+    - Two GEMMs for in_proj and out_proj
+    - Memory operations for conv1d and SSM scan
+
+    The internal state dimension is calculated as:
+    expanded_size = 2 * (nheads * head_dim + 2 * n_groups * d_state)
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        hidden_size: int,
+        nheads: int,
+        head_dim: int,
+        d_state: int,
+        d_conv: int,
+        n_groups: int,
+        chunk_size: int,
+        tp_size: int,
+        quant_mode: common.GEMMQuantMode,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._hidden_size = hidden_size
+        self._nheads = nheads
+        self._head_dim = head_dim
+        self._d_state = d_state
+        self._d_conv = d_conv
+        self._n_groups = n_groups
+        self._chunk_size = chunk_size
+        self._tp_size = tp_size
+        self._quant_mode = quant_mode
+
+        # Calculate dimensions matching TensorRT-LLM mamba2_mixer.py lines 76-78:
+        # d_inner = head_dim * nheads
+        # d_in_proj = 2 * d_inner + 2 * n_groups * d_state + nheads
+        # conv_dim = d_inner + 2 * n_groups * d_state
+        self._d_inner = nheads * head_dim
+        self._conv_dim = self._d_inner + 2 * n_groups * d_state
+        self._in_proj_out_size = 2 * self._d_inner + 2 * n_groups * d_state + nheads
+
+        # Calculate weights (in_proj + conv1d + out_proj + A + D + dt_bias + norm)
+        # in_proj: hidden_size * in_proj_out_size (Linear d_model -> d_in_proj)
+        # conv1d: d_conv * conv_dim (Linear d_conv -> conv_dim, stored as Linear for TP)
+        # out_proj: d_inner * hidden_size (Linear d_inner -> d_model)
+        # A, D, dt_bias: nheads each (small, ignored for weight calculation)
+        # norm: d_inner (small, ignored)
+        self._weights = (
+            (
+                hidden_size * self._in_proj_out_size  # in_proj
+                + d_conv * self._conv_dim  # conv1d
+                + self._d_inner * hidden_size  # out_proj
+            )
+            * quant_mode.value.memory
+            // tp_size
+        )
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """
+        Query Mamba2 latency using SOL-based approximation.
+
+        Models the operation as:
+        1. in_proj GEMM: (x, hidden_size) @ (hidden_size, in_proj_out_size)
+        2. conv1d: Memory-bound operation
+        3. SSM scan: Memory-bound recurrent operation
+        4. out_proj GEMM: (x, d_inner) @ (d_inner, hidden_size)
+        """
+        x = kwargs.get("x")  # num tokens
+
+        # Apply TP sharding (matching TensorRT-LLM mamba2_mixer.py lines 81-84)
+        # tp_nheads = nheads // tp_size
+        # tp_d_inner = d_inner // tp_size
+        # tp_ngroups = n_groups // tp_size
+        # tp_conv_dim = conv_dim // tp_size
+        nheads_per_gpu = self._nheads // self._tp_size
+        d_inner_per_gpu = nheads_per_gpu * self._head_dim
+        n_groups_per_gpu = self._n_groups // self._tp_size
+        conv_dim_per_gpu = d_inner_per_gpu + 2 * n_groups_per_gpu * self._d_state
+        in_proj_out_per_gpu = 2 * d_inner_per_gpu + 2 * n_groups_per_gpu * self._d_state + nheads_per_gpu
+
+        total_latency = 0.0
+        total_energy = 0.0
+
+        # 1. in_proj GEMM: hidden_size -> in_proj_out_size
+        in_proj_result = database.query_gemm(x, in_proj_out_per_gpu, self._hidden_size, self._quant_mode)
+        total_latency += float(in_proj_result)
+        total_energy += in_proj_result.energy
+
+        # 2. conv1d: Memory-bound operation on conv_dim (not just d_inner)
+        # conv1d operates on xbc which has dimension conv_dim
+        # Read: x * conv_dim * d_conv (for conv states) + x * conv_dim (input)
+        # Write: x * conv_dim (output)
+        conv_read_bytes = x * conv_dim_per_gpu * (self._d_conv + 1) * 2  # fp16
+        conv_write_bytes = x * conv_dim_per_gpu * 2
+        conv_result = database.query_mem_op(conv_read_bytes + conv_write_bytes)
+        total_latency += float(conv_result)
+        total_energy += conv_result.energy
+
+        # 3. SSM scan: Memory-bound recurrent operation
+        # For prefill (context), uses chunked scan
+        # For decode (generation), uses selective_state_update
+        # Approximate as memory operation:
+        # Read: x * (d_inner + n_groups * d_state * 2 + nheads) for x, B, C, dt
+        # Write: x * d_inner for output
+        ssm_read_bytes = (
+            x
+            * (
+                d_inner_per_gpu
+                + n_groups_per_gpu * self._d_state * 2  # B and C
+                + nheads_per_gpu  # dt
+            )
+            * 2
+        )
+        ssm_write_bytes = x * d_inner_per_gpu * 2
+        ssm_result = database.query_mem_op(ssm_read_bytes + ssm_write_bytes)
+        total_latency += float(ssm_result)
+        total_energy += ssm_result.energy
+
+        # 4. norm: RMSNormGated on d_inner (TRT-LLM mamba2_mixer.py line 315)
+        # Read SSM output, apply norm with gating, write normalized output
+        norm_read_bytes = x * d_inner_per_gpu * 2  # fp16
+        norm_write_bytes = x * d_inner_per_gpu * 2  # fp16
+        norm_result = database.query_mem_op(norm_read_bytes + norm_write_bytes)
+        total_latency += float(norm_result)
+        total_energy += norm_result.energy
+
+        # 5. out_proj GEMM: d_inner -> hidden_size
+        out_proj_result = database.query_gemm(x, self._hidden_size, d_inner_per_gpu, self._quant_mode)
+        total_latency += float(out_proj_result)
+        total_energy += out_proj_result.energy
+
+        return PerformanceResult(
+            latency=total_latency * self._scale_factor,
+            energy=total_energy * self._scale_factor,
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

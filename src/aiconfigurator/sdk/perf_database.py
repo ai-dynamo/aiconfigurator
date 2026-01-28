@@ -3596,6 +3596,7 @@ class PerfDatabase:
         is_context: bool = True,
         moe_backend: str | None = None,
         database_mode: common.DatabaseMode | None = None,
+        is_gated: bool = True,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query MoE (Mixture of Experts) layer latency and energy.
@@ -3613,6 +3614,8 @@ class PerfDatabase:
             is_context: Whether this is context (prefill) phase
             moe_backend: MoE backend type (for SGLang)
             database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+            is_gated: Whether MoE uses gated activation (SwiGLU=True, Relu2=False).
+                      Low-latency kernel only available for gated MoE.
 
         Returns:
             PerformanceResult: Acts as float (latency in ms).
@@ -3774,7 +3777,13 @@ class PerfDatabase:
                             "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
                         )
                     # aligned with trtllm, kernel source selection.
-                    if num_tokens <= 128 and self._moe_low_latency_data and quant_mode == common.MoEQuantMode.nvfp4:
+                    # Low-latency kernel only available for gated MoE (SwiGLU), not for Relu2
+                    if (
+                        num_tokens <= 128
+                        and self._moe_low_latency_data
+                        and quant_mode == common.MoEQuantMode.nvfp4
+                        and is_gated
+                    ):
                         try:
                             used_workload_distribution = (
                                 workload_distribution

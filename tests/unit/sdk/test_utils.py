@@ -110,6 +110,81 @@ class TestParseHFConfig:
 
         assert result[4] == 80  # head_dim
 
+    def test_parse_nemotronh_config(self):
+        """Test parsing a NemotronH hybrid model config (Mamba + MoE + Transformer)."""
+        config = {
+            "architectures": ["NemotronHForCausalLM"],
+            "num_hidden_layers": 52,
+            "num_key_value_heads": 2,
+            "hidden_size": 2688,
+            "num_attention_heads": 32,
+            "intermediate_size": 1856,
+            "vocab_size": 131072,
+            "max_position_embeddings": 262144,
+            "num_experts_per_tok": 6,
+            "n_routed_experts": 128,
+            "moe_intermediate_size": 1856,
+            "head_dim": 128,
+            # NemotronH-specific fields
+            "hybrid_override_pattern": "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME",
+            "mamba_num_heads": 64,
+            "mamba_head_dim": 64,
+            "ssm_state_size": 128,
+            "conv_kernel": 4,
+            "n_groups": 8,
+            "chunk_size": 128,
+            "moe_shared_expert_intermediate_size": 3712,
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result[0] == "NemotronHForCausalLM"  # architecture
+        assert result[1] == 52  # num_layers
+        assert result[5] == 2688  # hidden_size
+        assert result[9] == 6  # topk (num_experts_per_tok)
+        assert result[10] == 128  # num_experts (n_routed_experts)
+        # extra_params should be NemotronHConfig
+        extra_params = result[-1]
+        assert extra_params is not None
+        assert hasattr(extra_params, "hybrid_override_pattern")
+        assert extra_params.hybrid_override_pattern == "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
+        assert extra_params.mamba_num_heads == 64
+        assert extra_params.moe_shared_expert_intermediate_size == 3712
+
+    def test_parse_nemotronh_without_moe(self):
+        """Test parsing a NemotronH config without MoE layers (no 'E' in pattern)."""
+        config = {
+            "architectures": ["NemotronHForCausalLM"],
+            "num_hidden_layers": 118,
+            "num_key_value_heads": 8,
+            "hidden_size": 8192,
+            "num_attention_heads": 64,
+            "intermediate_size": 32768,
+            "vocab_size": 131072,
+            "max_position_embeddings": 8192,
+            "attention_head_dim": 128,  # Uses attention_head_dim instead of head_dim
+            # NemotronH-specific fields (no MoE)
+            "hybrid_override_pattern": "M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-",
+            "mamba_num_heads": 256,
+            "mamba_head_dim": 64,
+            "ssm_state_size": 256,
+            "conv_kernel": 4,
+            "n_groups": 8,
+            "chunk_size": 128,
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result[0] == "NemotronHForCausalLM"  # architecture
+        assert result[1] == 118  # num_layers
+        assert result[5] == 8192  # hidden_size
+        assert result[4] == 128  # head_dim from attention_head_dim
+        # extra_params should be NemotronHConfig with moe_shared_expert_intermediate_size=0
+        extra_params = result[-1]
+        assert extra_params is not None
+        assert "E" not in extra_params.hybrid_override_pattern  # No MoE layers
+        assert extra_params.moe_shared_expert_intermediate_size == 0
+
 
 class TestGetModelConfigFromHFID:
     """Test getting model config from HuggingFace ID."""
