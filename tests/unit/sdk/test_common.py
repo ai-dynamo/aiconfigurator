@@ -83,60 +83,15 @@ class TestSupportMatrix:
         "model,system,backend,version,architecture,expected_agg,expected_disagg",
         [
             # Known supported combination (Qwen3-32B on H200)
-            pytest.param(
-                "Qwen/Qwen3-32B",
-                "h200_sxm",
-                None,
-                None,
-                None,
-                True,
-                True,
-                id="qwen3_32b_h200_supported",
-            ),
+            ("Qwen/Qwen3-32B", "h200_sxm", None, None, None, True, True),
             # Architecture-based support for a model not in the matrix
-            pytest.param(
-                "Qwen/Qwen3-235B-A22B-Thinking-2507",
-                "h200_sxm",
-                None,
-                None,
-                "Qwen3ForCausalLM",
-                True,
-                True,
-                id="qwen3_architecture_inferred",
-            ),
+            ("Qwen/Qwen3-235B-A22B-Thinking-2507", "h200_sxm", None, None, "Qwen3ForCausalLM", True, True),
             # Specific backend and version that should pass
-            pytest.param(
-                "Qwen/Qwen3-32B",
-                "h200_sxm",
-                "trtllm",
-                "1.2.0rc5",
-                None,
-                True,
-                True,
-                id="qwen3_32b_trtllm_specific_version",
-            ),
+            ("Qwen/Qwen3-32B", "h200_sxm", "trtllm", "1.2.0rc5", None, True, True),
             # Unsupported model
-            pytest.param(
-                "non-existent-model",
-                "h100_sxm",
-                None,
-                None,
-                None,
-                False,
-                False,
-                id="unsupported_model",
-            ),
+            ("non-existent-model", "h100_sxm", None, None, None, False, False),
             # Unsupported system
-            pytest.param(
-                "Qwen/Qwen3-32B",
-                "non-existent-system",
-                None,
-                None,
-                None,
-                False,
-                False,
-                id="unsupported_system",
-            ),
+            ("Qwen/Qwen3-32B", "non-existent-system", None, None, None, False, False),
         ],
     )
     def test_check_support(self, model, system, backend, version, architecture, expected_agg, expected_disagg):
