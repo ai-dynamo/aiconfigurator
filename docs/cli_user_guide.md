@@ -52,6 +52,48 @@ print(result["parallelism"])  # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8
 
 > **Note:** This is a naive configuration without memory validation or performance optimization. For production deployments, use `aiconfigurator cli default` to run the full parameter sweep with SLA optimization.
 
+### Support mode
+This mode allows you to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
+
+```bash
+aiconfigurator cli support --model_path Qwen/Qwen3-32B --system h200_sxm
+```
+
+**Required arguments:**
+- `--model_path`: HuggingFace model path (e.g., `Qwen/Qwen3-32B`) or local path containing `config.json`
+- `--system`: System name (`h200_sxm`, `gb200_sxm`, `b200_sxm`, `h100_sxm`, `a100_sxm`, `l40s`)
+
+**Optional arguments:**
+- `--backend`: Filter by specific backend (`trtllm`, `vllm`, `sglang`). Defaults to `trtllm`.
+- `--backend_version`: Filter by a specific backend version. Defaults to the latest version found in the support matrix for the given model/architecture/system/backend combination.
+
+**Example output:**
+```text
+============================================================
+  AIC Support Check Results
+============================================================
+  Model:           Qwen/Qwen3-32B
+  System:          h200_sxm
+  Backend:         trtllm
+  Version:         0.18.0
+------------------------------------------------------------
+  Aggregated Support:    YES
+  Disaggregated Support: YES
+============================================================
+```
+
+**Python API equivalent:**
+```python
+from aiconfigurator.cli import cli_support
+
+agg_supported, disagg_supported = cli_support(
+    model_path="Qwen/Qwen3-32B",
+    system="h200_sxm",
+    backend="trtllm"
+)
+print(f"Agg: {agg_supported}, Disagg: {disagg_supported}")
+```
+
 ### Default mode
 This mode is triggered by
 ```bash
