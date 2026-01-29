@@ -138,7 +138,31 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
 
 ### Generated Outputs
 - [vllm & sglang] CLI argument strings per role (prefill/decode/agg) for debugging or manual runs.
-- [trtllm] Engine config files (prefill/decode/agg) when the backend provides `extra_engine_args*.j2`.
+- [trtllm] Engine config files (`agg_config.yaml`, `prefill_config.yaml`, `decode_config.yaml`) when the backend provides `extra_engine_args*.j2`.
 - Run scripts (`run_0.sh`, `run_1.sh`, …) that assign workers to nodes and toggle frontend on the first node.
-- Kubernetes manifest (`k8s_deploy.yaml`) with images, namespace, volumes, engine args (inline or ConfigMap), and role-specific settings. 
+- Kubernetes manifest (`k8s_deploy.yaml`) with images, namespace, volumes, engine args (inline or ConfigMap), and role-specific settings.
+
+### TRT-LLM Deployment Notes
+When deploying with TRT-LLM, the generated run scripts (`run_x.sh`) reference engine config files at `/workspace/engine_configs/`. Before executing the run scripts, you must:
+
+1. Create the engine configs directory:
+   ```bash
+   mkdir -p /workspace/engine_configs
+   ```
+
+2. Copy the generated engine config files to this location:
+   ```bash
+   # For aggregated mode:
+   cp agg_config.yaml /workspace/engine_configs/
+   
+   # For disaggregated mode:
+   cp prefill_config.yaml decode_config.yaml /workspace/engine_configs/
+   ```
+
+3. Execute the run script:
+   ```bash
+   bash run_0.sh
+   ```
+
+Refer to the [Dynamo Deployment Guide](dynamo_deployment_guide.md) for detailed deployment instructions. 
 
