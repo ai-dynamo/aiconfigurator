@@ -100,9 +100,7 @@ def check_support(
     def _matches_filters(row: dict, backend: str | None, version: str | None) -> bool:
         if backend and row["Backend"] != backend:
             return False
-        if version and row["Version"] != version:
-            return False
-        return True
+        return not (version and row["Version"] != version)
 
     # 1. Check for exact model+system matches
     exact_matches = [
