@@ -248,7 +248,12 @@ def setup_vllm_distributed(world_size, rank, use_slurm):
             init_distributed_environment,
             initialize_model_parallel,
         )
-        from vllm.utils import get_open_port
+
+        try:
+            from vllm.utils import get_open_port
+        except ImportError:
+            # vllm 0.14.0
+            from vllm.utils.network_utils import get_open_port
 
         vllm_mods = {
             "tensor_model_parallel_all_reduce": tensor_model_parallel_all_reduce,

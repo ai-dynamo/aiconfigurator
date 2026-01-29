@@ -4,7 +4,7 @@
 import os
 
 import torch
-from common_test_cases import get_gemm_common_test_cases
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -13,10 +13,11 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
+from collector.common_test_cases import get_gemm_common_test_cases
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
-from collector.vllm.utils import setup_distributed
+from collector.vllm.utils import setup_distributed, with_exit_stack
 
-compatible_versions = ["0.11.0", "0.12.0"]
+compatible_versions = ["0.11.0", "0.12.0", "0.14.0"]
 
 FP8_BLOCK_SHAPE = (128, 128)
 
@@ -57,7 +58,8 @@ def get_gemm_test_cases():
     return test_cases
 
 
-def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
+@with_exit_stack
+def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
     # Force DeepGEMM path when available to capture the intended kernel.
     os.environ["VLLM_USE_DEEP_GEMM"] = "1"
 
@@ -66,6 +68,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)
     torch.cuda.set_device(device)
+    torch.set_default_device(device)
 
     x = torch.randn((m, k), dtype=dtype, device=torch.device(device))
 
@@ -132,6 +135,8 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
         return gemm
 
+    exit_stack.enter_context(set_current_vllm_config(VllmConfig()))
+
     outside_loop_count = 6
     op_list = []
     for i in range(outside_loop_count):
@@ -168,3 +173,9 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )
+
+
+if __name__ == "__main__":
+    test_cases = get_gemm_test_cases()
+    for test_case in test_cases[:10]:
+        run_gemm(*test_case)

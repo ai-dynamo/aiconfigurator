@@ -6,7 +6,9 @@
 
 import functools
 import os
+from contextlib import ExitStack
 from dataclasses import dataclass
+from functools import wraps
 from typing import Optional, Union
 
 import torch
@@ -221,6 +223,7 @@ def create_vllm_config(
     enable_chunked_prefill: bool = True,
     add_mock_model_methods: bool = True,
     hf_config_override: dict | None = None,
+    use_fp8_kv_cache: bool = False,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
@@ -235,7 +238,7 @@ def create_vllm_config(
 
     cache_config = CacheConfig(
         block_size=block_size,
-        cache_dtype="auto",
+        cache_dtype="fp8" if use_fp8_kv_cache else "auto",
         swap_space=0,
     )
     # Set cache blocks for testing
@@ -548,3 +551,19 @@ def setup_distributed(device):
     os.environ["MASTER_PORT"] = str(port)
     init_distributed_environment()
     ensure_model_parallel_initialized(1, 1)
+
+
+def with_exit_stack(func):
+    """
+    Decorator that creates an ExitStack, passes it as the first argument
+    to the function, and closes it when the function returns.
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # The wrapper handles the safety indentation for you
+        with ExitStack() as stack:
+            # We inject 'stack' as the first argument to your function
+            return func(stack, *args, **kwargs)
+
+    return wrapper
