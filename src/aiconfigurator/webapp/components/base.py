@@ -157,11 +157,6 @@ def create_model_quant_config(app_config):
                 value=False,
                 interactive=enable_overhead_toggles,
             )
-            lowbit_input = gr.Checkbox(
-                label="lowbit input",
-                value=False,
-                interactive=enable_overhead_toggles,
-            )
 
     return {
         "gemm_quant_mode": gemm_quant_mode,
@@ -170,7 +165,6 @@ def create_model_quant_config(app_config):
         "moe_quant_mode": moe_quant_mode,
         "comm_quant_mode": comm_quant_mode,
         "static_quant_mode": static_quant_mode,
-        "lowbit_input": lowbit_input,
     }
 
 

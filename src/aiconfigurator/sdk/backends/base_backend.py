@@ -87,7 +87,6 @@ class BaseBackend(ABC):
                     prefix=prefix,
                     model_name=getattr(model, "model_name", ""),
                     static_quant_mode=getattr(model.config, "static_quant_mode", False),
-                    lowbit_input=getattr(model.config, "lowbit_input", False),
                 )
 
                 # ✅ IMMEDIATELY extract values - do NOT use PerformanceResult arithmetic!
@@ -129,7 +128,6 @@ class BaseBackend(ABC):
                         s=isl + i + 1,
                         model_name=getattr(model, "model_name", ""),
                         static_quant_mode=getattr(model.config, "static_quant_mode", False),
-                        lowbit_input=getattr(model.config, "lowbit_input", False),
                     )
 
                     # ✅ IMMEDIATELY extract values - do NOT accumulate PerformanceResult objects!

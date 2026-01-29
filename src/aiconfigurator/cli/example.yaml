@@ -30,8 +30,7 @@ exp_agg_full:
     nextn_accept_rates: [0.85,0,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
     worker_config: # defines quantization of each component
       gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
-      static_quant_mode: false # if true, subtract compute_scale from gemm latency (static quantize)
-      lowbit_input: false # if true, assume fp8 input for key GEMMs and subtract scale_matrix too
+      static_quant_mode: false # fp8 only; if true, subtract compute_scale from gemm latency (static quantize)
       moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
       kvcache_quant_mode: "float16" # fp8, int8, float16
       fmha_quant_mode: "float16" # fp8, float16
@@ -80,8 +79,7 @@ exp_disagg_full:
     # each prefill worker config
     prefill_worker_config:
       gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
-      static_quant_mode: false # if true, subtract compute_scale from gemm latency (static quantize)
-      lowbit_input: false # if true, assume fp8 input for key GEMMs and subtract scale_matrix too
+      static_quant_mode: false # fp8 only; if true, subtract compute_scale from gemm latency (static quantize)
       moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
       kvcache_quant_mode: "float16" # fp8, int8, float16
       fmha_quant_mode: "float16" # fp8, float16
@@ -95,8 +93,7 @@ exp_disagg_full:
     # each decode worker config
     decode_worker_config:
       gemm_quant_mode: "fp8_block" # fp8, fp8_block, float16
-      static_quant_mode: false # if true, subtract compute_scale from gemm latency (static quantize)
-      lowbit_input: false # if true, assume fp8 input for key GEMMs and subtract scale_matrix too
+      static_quant_mode: false # fp8 only; if true, subtract compute_scale from gemm latency (static quantize)
       moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
       kvcache_quant_mode: "float16" # fp8, int8, float16
       fmha_quant_mode: "float16" # fp8, float16

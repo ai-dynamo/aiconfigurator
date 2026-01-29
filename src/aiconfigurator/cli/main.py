@@ -105,12 +105,7 @@ def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--static_quant_mode",
         action="store_true",
-        help="Enable static quantization modeling for GEMM (subtract compute_scale overhead).",
-    )
-    parser.add_argument(
-        "--lowbit_input",
-        action="store_true",
-        help="Assume FP8/lowbit inputs for key GEMMs (also subtract scale_matrix overhead).",
+        help="Enable static quantization modeling for GEMM (FP8 only).",
     )
 
 
@@ -176,19 +171,36 @@ def _build_default_task_configs(args) -> dict[str, TaskConfig]:
     task_configs["disagg"] = disagg_task
 
     static_quant_mode = bool(getattr(args, "static_quant_mode", False))
-    lowbit_input = bool(getattr(args, "lowbit_input", False))
-    if static_quant_mode or lowbit_input:
+    if static_quant_mode:
         if str(args.backend).lower() != common.BackendName.trtllm.value:
             raise ValueError(
-                "static_quant_mode/lowbit_input are currently only supported for backend "
+                "static_quant_mode is currently only supported for backend "
                 f"'{common.BackendName.trtllm.value}', but got backend='{args.backend}'."
             )
-        agg_task.config.worker_config.static_quant_mode = static_quant_mode
-        agg_task.config.worker_config.lowbit_input = lowbit_input
-        disagg_task.config.prefill_worker_config.static_quant_mode = static_quant_mode
-        disagg_task.config.prefill_worker_config.lowbit_input = lowbit_input
-        disagg_task.config.decode_worker_config.static_quant_mode = static_quant_mode
-        disagg_task.config.decode_worker_config.lowbit_input = lowbit_input
+
+        def _is_fp8(mode: object) -> bool:
+            name = mode.name if hasattr(mode, "name") else str(mode)
+            return str(name).lower() == common.GEMMQuantMode.fp8.name
+
+        if not _is_fp8(agg_task.config.worker_config.gemm_quant_mode):
+            raise ValueError(
+                "static_quant_mode requires gemm_quant_mode='fp8' for TRTLLM in default mode, "
+                f"but got gemm_quant_mode='{agg_task.config.worker_config.gemm_quant_mode}'."
+            )
+        if not _is_fp8(disagg_task.config.prefill_worker_config.gemm_quant_mode):
+            raise ValueError(
+                "static_quant_mode requires gemm_quant_mode='fp8' for TRTLLM in default mode, "
+                f"but got prefill gemm_quant_mode='{disagg_task.config.prefill_worker_config.gemm_quant_mode}'."
+            )
+        if not _is_fp8(disagg_task.config.decode_worker_config.gemm_quant_mode):
+            raise ValueError(
+                "static_quant_mode requires gemm_quant_mode='fp8' for TRTLLM in default mode, "
+                f"but got decode gemm_quant_mode='{disagg_task.config.decode_worker_config.gemm_quant_mode}'."
+            )
+
+        agg_task.config.worker_config.static_quant_mode = True
+        disagg_task.config.prefill_worker_config.static_quant_mode = True
+        disagg_task.config.decode_worker_config.static_quant_mode = True
 
     return task_configs
 
