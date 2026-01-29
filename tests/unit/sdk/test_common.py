@@ -79,34 +79,68 @@ class TestSupportMatrix:
         assert "Mode" in matrix[0]
         assert "Status" in matrix[0]
 
-    def test_check_support(self):
-        """Test check_support function."""
-        # Test a known supported combination (Qwen3-32B on H200)
-        # These are expected to be PASS in the current support_matrix.csv
-        agg, disagg = common.check_support("Qwen/Qwen3-32B", "h200_sxm")
-        assert agg is True
-        assert disagg is True
-
-        # Test architecture-based support for a model not in the matrix
-        # Must pass architecture explicitly since model isn't in the matrix
-        agg, disagg = common.check_support(
-            "Qwen/Qwen3-235B-A22B-Thinking-2507", "h200_sxm", architecture="Qwen3ForCausalLM"
-        )
-        assert agg is True
-        assert disagg is True
-
-        # Test with a specific version that should pass
-        # Pick one that is likely to be there, e.g., 1.2.0rc5 for Qwen3-32B on H200
-        agg, disagg = common.check_support("Qwen/Qwen3-32B", "h200_sxm", backend="trtllm", version="1.2.0rc5")
-        assert agg is True
-        assert disagg is True
-
-        # Test an unsupported model
-        agg, disagg = common.check_support("non-existent-model", "h100_sxm")
-        assert agg is False
-        assert disagg is False
-
-        # Test an unsupported system
-        agg, disagg = common.check_support("Qwen/Qwen3-32B", "non-existent-system")
-        assert agg is False
-        assert disagg is False
+    @pytest.mark.parametrize(
+        "model,system,backend,version,architecture,expected_agg,expected_disagg",
+        [
+            # Known supported combination (Qwen3-32B on H200)
+            pytest.param(
+                "Qwen/Qwen3-32B",
+                "h200_sxm",
+                None,
+                None,
+                None,
+                True,
+                True,
+                id="qwen3_32b_h200_supported",
+            ),
+            # Architecture-based support for a model not in the matrix
+            pytest.param(
+                "Qwen/Qwen3-235B-A22B-Thinking-2507",
+                "h200_sxm",
+                None,
+                None,
+                "Qwen3ForCausalLM",
+                True,
+                True,
+                id="qwen3_architecture_inferred",
+            ),
+            # Specific backend and version that should pass
+            pytest.param(
+                "Qwen/Qwen3-32B",
+                "h200_sxm",
+                "trtllm",
+                "1.2.0rc5",
+                None,
+                True,
+                True,
+                id="qwen3_32b_trtllm_specific_version",
+            ),
+            # Unsupported model
+            pytest.param(
+                "non-existent-model",
+                "h100_sxm",
+                None,
+                None,
+                None,
+                False,
+                False,
+                id="unsupported_model",
+            ),
+            # Unsupported system
+            pytest.param(
+                "Qwen/Qwen3-32B",
+                "non-existent-system",
+                None,
+                None,
+                None,
+                False,
+                False,
+                id="unsupported_system",
+            ),
+        ],
+    )
+    def test_check_support(self, model, system, backend, version, architecture, expected_agg, expected_disagg):
+        """Test check_support function with various model/system combinations."""
+        agg, disagg = common.check_support(model, system, backend, version, architecture)
+        assert agg is expected_agg
+        assert disagg is expected_disagg
