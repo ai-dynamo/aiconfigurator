@@ -664,7 +664,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             else "collector.trtllm.collect_moe_pre_1_0"
             if v.startswith(("0.21.0", "1.0.0"))
             else "collector.trtllm.collect_moe"
-            if v.startswith(("1.1.0", "1.2.0"))
+            if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
             else None,
         },
     ]

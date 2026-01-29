@@ -54,6 +54,16 @@ def collect_generator_params(
     use_engine_cm = k8s.get("k8s_engine_mode", "inline") == "configmap"
     _mc_raw = k8s.get("k8s_model_cache")
     k8s_model_cache = _mc_raw.strip() if isinstance(_mc_raw, str) else ""
+
+    _hf_home_raw = k8s.get("k8s_hf_home")
+    k8s_hf_home = _hf_home_raw.strip() if isinstance(_hf_home_raw, str) else ""
+
+    # If model cache PVC mount is configured but HF_HOME is not set,
+    # set it to /workspace/model_cache, which is where the PVC is mounted.
+    # Note: k8s_model_cache is the PVC name, not the mount path.
+    if k8s_model_cache and not k8s_hf_home:
+        k8s_hf_home = "/workspace/model_cache"
+
     workers_dict = {
         "prefill_workers": int(prefill_workers),
         "decode_workers": int(decode_workers),
@@ -83,6 +93,7 @@ def collect_generator_params(
             "k8s_engine_mode": k8s.get("k8s_engine_mode"),
             "use_engine_cm": use_engine_cm,
             "k8s_model_cache": k8s_model_cache,
+            "k8s_hf_home": k8s_hf_home,
             "prefill_engine_args": "/workspace/engine_configs/prefill_config.yaml",
             "decode_engine_args": "/workspace/engine_configs/decode_config.yaml",
             "agg_engine_args": "/workspace/engine_configs/agg_config.yaml",

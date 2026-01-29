@@ -62,6 +62,9 @@ class TestSupportedModels:
             ("meta-llama/Meta-Llama-3.1-8B", False),
             ("deepseek-ai/DeepSeek-V3", True),
             ("mistralai/Mixtral-8x7B-v0.1", True),
+            # NemotronH: check hybrid_override_pattern for 'E' (MoE layers)
+            ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' in pattern
+            ("nvidia/Nemotron-H-56B-Base-8K", False),  # No 'E' in pattern (only M, *, -)
         ],
     )
     def test_model_moe_detection(self, hf_id, is_moe_expected):
@@ -93,6 +96,8 @@ class TestHFModelSupport:
             ("meta-llama/Meta-Llama-3.1-8B", "LLAMA"),
             ("deepseek-ai/DeepSeek-V3", "DEEPSEEK"),
             ("mistralai/Mixtral-8x7B-v0.1", "MOE"),
+            ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "NEMOTRONH"),
+            ("nvidia/Nemotron-H-56B-Base-8K", "NEMOTRONH"),
         ],
     )
     def test_hf_id_resolves_to_correct_model_family(self, hf_id, expected_family):
@@ -107,6 +112,9 @@ class TestHFModelSupport:
             ("meta-llama/Meta-Llama-3.1-8B", False),
             ("deepseek-ai/DeepSeek-V3", True),
             ("mistralai/Mixtral-8x7B-v0.1", True),
+            # NemotronH: is_moe depends on 'E' in hybrid_override_pattern
+            ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' (MoE layers)
+            ("nvidia/Nemotron-H-56B-Base-8K", False),  # No 'E' (Mamba + Attention + MLP only)
         ],
     )
     def test_hf_id_moe_detection(self, hf_id, is_moe_expected):

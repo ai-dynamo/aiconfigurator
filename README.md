@@ -64,14 +64,14 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 ```bash
 aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm
 aiconfigurator cli exp --yaml_path exp.yaml
-aiconfigurator cli generate --model_path QWEN3_32B --total_gpus 32 --system h200_sxm
+aiconfigurator cli generate --model_path QWEN3_32B --total_gpus 8 --system h200_sxm
 aiconfigurator cli support --model_path QWEN3_32B --system h200_sxm
 ```
-- We have four modes: `default`, `exp`, `generate`, and `check`.
+- We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
-- Use `check` to verify if AIC supports a model/hardware combination for agg and disagg modes.
+- Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
 - Use `exp`, pass in exp.yaml by `--yaml_path` to customize your experiments and even a heterogenous one.
 - Use `--save_dir DIR` to generate framework configuration files for Dynamo.
@@ -96,8 +96,19 @@ from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_support
 result = cli_default(model_path="Qwen/Qwen3-32B", total_gpus=32, system="h200_sxm")
 print(result.best_configs["disagg"].head())
 
-# 2. Run experiments from a YAML file
+# 2. Run experiments from a YAML file or a dictionary config
 result = cli_exp(yaml_path="my_experiments.yaml")
+# Or use a dictionary config directly
+result = cli_exp(config={
+    "my_exp": {
+        "serving_mode": "disagg",
+        "model_path": "Qwen/Qwen3-32B",
+        "total_gpus": 32,
+        "system_name": "h200_sxm",
+        "isl": 4000,
+        "osl": 1000,
+    }
+})
 
 # 3. Generate a naive configuration
 result = cli_generate(model_path="Qwen/Qwen3-32B", total_gpus=8, system="h200_sxm")
