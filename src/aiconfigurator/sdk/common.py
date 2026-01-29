@@ -66,6 +66,135 @@ def _get_support_matrix_resource():
 
 
 @cache
+def get_support_matrix() -> list[dict[str, str]]:
+    """
+    Get the support matrix as a list of dictionaries.
+
+    Returns:
+        list[dict[str, str]]: List of rows from support_matrix.csv.
+    """
+    csv_resource = _get_support_matrix_resource()
+    results = []
+    # Use as_file() context manager for proper package resource access
+    with pkg_resources.as_file(csv_resource) as csv_path, open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            results.append(row)
+    return results
+
+
+@dataclass
+class SupportResult:
+    """Result of a support check with explanation details."""
+
+    agg_supported: bool
+    disagg_supported: bool
+    exact_match: bool  # True if model was found in matrix, False if inferred from architecture
+    architecture: str | None = None  # Architecture used for inference (if not exact match)
+    agg_pass_count: int = 0  # Number of passing agg tests (for majority vote)
+    agg_total_count: int = 0  # Total agg tests (for majority vote)
+    disagg_pass_count: int = 0  # Number of passing disagg tests (for majority vote)
+    disagg_total_count: int = 0  # Total disagg tests (for majority vote)
+
+    def __iter__(self):
+        """Support tuple unpacking: agg, disagg = check_support(...)"""
+        return iter((self.agg_supported, self.disagg_supported))
+
+
+def check_support(
+    model: str,
+    system: str,
+    backend: str | None = None,
+    version: str | None = None,
+    architecture: str | None = None,
+) -> SupportResult:
+    """
+    Check if a model/system combination is supported for agg and disagg modes.
+    If the model exists in the support matrix, support is determined by the
+    matrix entries for that specific model. Otherwise, support is determined
+    by a majority vote of PASS status for models sharing the same architecture.
+
+    Args:
+        model: HuggingFace model ID or local path.
+        system: System/hardware name.
+        backend: Optional backend name to filter by.
+        version: Optional backend version to filter by.
+        architecture: Optional architecture name. If not provided and model is
+            not in matrix, it will be resolved if possible.
+
+    Returns:
+        SupportResult: Contains (agg_supported, disagg_supported) plus explanation details.
+            Supports tuple unpacking for backward compatibility.
+    """
+    matrix = get_support_matrix()
+
+    def _matches_filters(row: dict, backend: str | None, version: str | None) -> bool:
+        if backend and row["Backend"] != backend:
+            return False
+        return not (version and row["Version"] != version)
+
+    # 1. Check for exact model+system matches
+    exact_matches = [
+        row
+        for row in matrix
+        if row["HuggingFaceID"] == model and row["System"] == system and _matches_filters(row, backend, version)
+    ]
+
+    # Resolve architecture from matrix if model is found anywhere
+    matrix_arch = next((row["Architecture"] for row in matrix if row["HuggingFaceID"] == model), None)
+
+    if exact_matches:
+        return SupportResult(
+            agg_supported=any(row["Status"] == "PASS" for row in exact_matches if row["Mode"] == "agg"),
+            disagg_supported=any(row["Status"] == "PASS" for row in exact_matches if row["Mode"] == "disagg"),
+            exact_match=True,
+        )
+
+    # 2. Fallback to architecture-based inference
+    # Use provided architecture or the one found in the matrix
+    architecture = architecture or matrix_arch
+    if not architecture:
+        return SupportResult(agg_supported=False, disagg_supported=False, exact_match=False)
+
+    arch_matches = [
+        row
+        for row in matrix
+        if row["Architecture"] == architecture and row["System"] == system and _matches_filters(row, backend, version)
+    ]
+
+    agg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "agg"]
+    disagg_results = [row["Status"] == "PASS" for row in arch_matches if row["Mode"] == "disagg"]
+
+    def is_majority_pass(results: list[bool]) -> bool:
+        # We use majority vote to infer support for an untested model of a known architecture.
+        # This provides a balanced estimate: not too optimistic (any) nor too pessimistic (all).
+        return sum(results) > len(results) / 2 if results else False
+
+    return SupportResult(
+        agg_supported=is_majority_pass(agg_results),
+        disagg_supported=is_majority_pass(disagg_results),
+        exact_match=False,
+        architecture=architecture,
+        agg_pass_count=sum(agg_results),
+        agg_total_count=len(agg_results),
+        disagg_pass_count=sum(disagg_results),
+        disagg_total_count=len(disagg_results),
+    )
+
+
+@cache
+def get_supported_architectures() -> set[str]:
+    """
+    Get the set of supported architectures from support_matrix.csv.
+
+    Returns:
+        set[str]: Set of architecture names that have at least one PASSing configuration.
+    """
+    matrix = get_support_matrix()
+    return {row["Architecture"] for row in matrix if row["Status"] == "PASS"}
+
+
+@cache
 def get_default_models() -> set[str]:
     """
     Get the set of supported HuggingFace model IDs from support_matrix.csv.
@@ -122,44 +251,6 @@ DefaultHFModels = {
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "nvidia/Nemotron-H-56B-Base-8K",
-}
-
-"""
-Mapping from internal model names to HuggingFace model IDs.
-This allows the support matrix and other tools to use canonical HuggingFace paths.
-"""
-MODEL_NAME_TO_HF_ID = {
-    # Llama 2 Models
-    "LLAMA2_7B": "meta-llama/Llama-2-7b-hf",
-    "LLAMA2_13B": "meta-llama/Llama-2-13b-hf",
-    "LLAMA2_70B": "meta-llama/Llama-2-70b-hf",
-    # Llama 3.1 Models
-    "LLAMA3.1_8B": "meta-llama/Meta-Llama-3.1-8B",
-    "LLAMA3.1_70B": "meta-llama/Meta-Llama-3.1-70B",
-    "LLAMA3.1_405B": "meta-llama/Meta-Llama-3.1-405B",
-    # Mixtral Models
-    "MOE_Mixtral8x7B": "mistralai/Mixtral-8x7B-v0.1",
-    "MOE_Mixtral8x22B": "mistralai/Mixtral-8x22B-v0.1",
-    # DeepSeek Models
-    "DEEPSEEK_V3": "deepseek-ai/DeepSeek-V3",
-    # Qwen 2.5 Models
-    "QWEN2.5_1.5B": "Qwen/Qwen2.5-1.5B",
-    "QWEN2.5_7B": "Qwen/Qwen2.5-7B",
-    "QWEN2.5_32B": "Qwen/Qwen2.5-32B",
-    "QWEN2.5_72B": "Qwen/Qwen2.5-72B",
-    # Qwen 3 Models
-    "QWEN3_0.6B": "Qwen/Qwen3-0.6B",
-    "QWEN3_1.7B": "Qwen/Qwen3-1.7B",
-    "QWEN3_8B": "Qwen/Qwen3-8B",
-    "QWEN3_32B": "Qwen/Qwen3-32B",
-    "QWEN3_30B_A3B": "Qwen/Qwen3-30B-A3B",
-    "QWEN3_235B": "Qwen/Qwen3-235B-A22B",
-    "QWEN3_480B": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
-    # GPT-OSS Models
-    "GPT_OSS_120B": "openai/gpt-oss-120b",
-    "GPT_OSS_20B": "openai/gpt-oss-20b",
-    # NVIDIA Nemotron
-    "Nemotron_super_v1.1": "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
 }
 
 """
