@@ -241,25 +241,60 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
     raise SystemExit(1)
 
 
-def _build_default_task_configs(args) -> dict[str, TaskConfig]:
-    decode_system = args.decode_system or args.system
-    if args.backend_version:
-        _ensure_backend_version_available(args.system, args.backend, args.backend_version)
-        if decode_system != args.system:
-            _ensure_backend_version_available(decode_system, args.backend, args.backend_version)
+def build_default_task_configs(
+    model_path: str,
+    total_gpus: int,
+    system: str,
+    decode_system: str | None = None,
+    backend: str = "trtllm",
+    backend_version: str | None = None,
+    database_mode: str = "SILICON",
+    isl: int = 4000,
+    osl: int = 1000,
+    ttft: float = 2000.0,
+    tpot: float = 30.0,
+    request_latency: float | None = None,
+    prefix: int = 0,
+) -> dict[str, TaskConfig]:
+    """Build agg and disagg task configs for default mode comparison.
+
+    Args:
+        model_path: HuggingFace model path or local path.
+        total_gpus: Total number of GPUs for deployment.
+        system: System name (GPU type).
+        decode_system: System for disagg decode workers. Defaults to `system`.
+        backend: Backend name ('trtllm', 'sglang', 'vllm').
+        backend_version: Backend database version. Default is latest.
+        database_mode: Database mode for performance estimation.
+        isl: Input sequence length.
+        osl: Output sequence length.
+        ttft: Time to first token target in ms.
+        tpot: Time per output token target in ms.
+        request_latency: Optional end-to-end request latency target (ms).
+        prefix: Prefix cache length.
+
+    Returns:
+        Dict with 'agg' and 'disagg' TaskConfig objects.
+    """
+    decode_system = decode_system or system
+    if backend_version:
+        _ensure_backend_version_available(system, backend, backend_version)
+        if decode_system != system:
+            _ensure_backend_version_available(decode_system, backend, backend_version)
+
     common_kwargs: dict[str, Any] = {
-        "model_path": args.model_path,
-        "system_name": args.system,
-        "backend_name": args.backend,
-        "backend_version": args.backend_version,
-        "total_gpus": args.total_gpus,
-        "isl": args.isl,
-        "osl": args.osl,
-        "ttft": args.ttft,
-        "tpot": args.tpot,
-        "request_latency": args.request_latency,
-        "prefix": args.prefix,
-        "database_mode": args.database_mode,
+        "model_path": model_path,
+        "system_name": system,
+        "backend_name": backend,
+        "backend_version": backend_version,
+        "total_gpus": total_gpus,
+        "isl": isl,
+        "osl": osl,
+        "ttft": ttft,
+        "tpot": tpot,
+        "request_latency": request_latency,
+        "prefix": prefix,
+        "database_mode": database_mode,
     }
 
     task_configs: dict[str, TaskConfig] = {}
@@ -311,17 +346,41 @@ def _build_yaml_config(exp_config: dict, config_section: dict) -> dict | None:
     return yaml_config
 
 
-def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
-    try:
-        with open(args.yaml_path, encoding="utf-8") as fh:
-            experiment_data = yaml.safe_load(fh) or {}
-    except Exception as exc:
-        logger.exception("Error loading experiment YAML file '%s'", args.yaml_path)
-        raise SystemExit(1) from exc
+def build_experiment_task_configs(
+    yaml_path: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, TaskConfig]:
+    """Build task configs from YAML file or config dict.
+
+    Args:
+        yaml_path: Path to a YAML file containing experiment definitions.
+        config: Dict containing experiment definitions (alternative to yaml_path).
+            Keys are experiment names, values are experiment configs.
+
+    Returns:
+        Dict mapping experiment names to TaskConfig objects.
+
+    Raises:
+        ValueError: If both or neither of yaml_path/config provided, or YAML load fails.
+        TypeError: If experiment data is not a dict.
+    """
+    if yaml_path is not None and config is not None:
+        raise ValueError("Provide either yaml_path or config, not both.")
+    if yaml_path is None and config is None:
+        raise ValueError("Must provide either yaml_path or config.")
+
+    # Load experiment data
+    if yaml_path is not None:
+        try:
+            with open(yaml_path, encoding="utf-8") as fh:
+                experiment_data = yaml.safe_load(fh) or {}
+        except Exception as exc:
+            raise ValueError(f"Error loading experiment YAML file '{yaml_path}'") from exc
+    else:
+        experiment_data = config
 
     if not isinstance(experiment_data, dict):
-        logger.error("Experiment YAML root must be a mapping.")
-        raise SystemExit(1)
+        raise TypeError("Experiment data must be a mapping (dict).")
 
     order = experiment_data.get("exps")
     if isinstance(order, list):
@@ -343,18 +402,18 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
         else:
             config_section = copy.deepcopy(config_section)
 
-        serving_mode = exp_config["serving_mode"]
-        model_path = exp_config["model_path"]
+        serving_mode = exp_config.get("serving_mode")
+        model_path = exp_config.get("model_path")
         if serving_mode not in {"agg", "disagg"} or not model_path:
             logger.warning("Skipping experiment '%s': missing serving_mode or model_path.", exp_name)
             continue
 
         # system
         if serving_mode == "agg":
-            inferred_system = exp_config["system_name"]
+            inferred_system = exp_config.get("system_name")
             inferred_decode_system = None
         else:
-            inferred_system = exp_config["system_name"]
+            inferred_system = exp_config.get("system_name")
             inferred_decode_system = exp_config.get("decode_system_name") or inferred_system
         system_name = inferred_system
         if not system_name:
@@ -366,16 +425,12 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             continue
 
         # backend, default to trtllm
-        if serving_mode == "agg":
-            backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
-            backend_version = exp_config.get("backend_version")
-        else:
-            backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
-            backend_version = exp_config.get("backend_version")
+        backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
+        backend_version = exp_config.get("backend_version")
 
         total_gpus = exp_config.get("total_gpus")
         if total_gpus is None:
-            logger.warning("Skipping experiment '%s': total_gpus not provided in YAML.", exp_name)
+            logger.warning("Skipping experiment '%s': total_gpus not provided.", exp_name)
             continue
 
         task_kwargs: dict[str, Any] = {
@@ -416,10 +471,6 @@ def _build_experiment_task_configs(args) -> dict[str, TaskConfig]:
             task_configs[exp_name] = TaskConfig(**task_kwargs)
         except Exception:
             logger.exception("Failed to build TaskConfig for experiment '%s'", exp_name)
-
-    if not task_configs:
-        logger.error("No valid experiments found in '%s'.", args.yaml_path)
-        raise SystemExit(1)
 
     return task_configs
 
@@ -602,9 +653,30 @@ def main(args):
         return
 
     if args.mode == "default":
-        task_configs = _build_default_task_configs(args)
+        task_configs = build_default_task_configs(
+            model_path=args.model_path,
+            total_gpus=args.total_gpus,
+            system=args.system,
+            decode_system=args.decode_system,
+            backend=args.backend,
+            backend_version=args.backend_version,
+            database_mode=args.database_mode,
+            isl=args.isl,
+            osl=args.osl,
+            ttft=args.ttft,
+            tpot=args.tpot,
+            request_latency=args.request_latency,
+            prefix=args.prefix,
+        )
     elif args.mode == "exp":
-        task_configs = _build_experiment_task_configs(args)
+        try:
+            task_configs = build_experiment_task_configs(yaml_path=args.yaml_path)
+        except (ValueError, TypeError) as exc:
+            logger.exception("Failed to build experiment task configs")
+            raise SystemExit(1) from exc
+        if not task_configs:
+            logger.error("No valid experiments found in '%s'.", args.yaml_path)
+            raise SystemExit(1)
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 

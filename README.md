@@ -64,9 +64,12 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 ```bash
 aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm
 aiconfigurator cli exp --yaml_path exp.yaml
+gaiconfigurator cli generate --model_path QWEN3_32B --total_gpus 8 --system h200_sxm
 ```
-- We have two modes, `default` and `exp`.
-- Use `default`, followed with **three basic arguments** (model, total_gpus, system), it prints the estimated best deployment and the deployment details.
+- We have three modes: `default`, `exp`, and `generate`.
+- Use `default` to find the estimated best deployment by searching the configuration space.
+- Use `exp` to run customized experiments defined in a YAML file.
+- Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
 - Use `exp`, pass in exp.yaml by `--yaml_path` to customize your experiments and even a heterogenous one.
 - Use `--save_dir DIR` to generate framework configuration files for Dynamo.
@@ -79,6 +82,36 @@ aiconfigurator cli exp --yaml_path exp.yaml
   When this flag is set, `--tpot` becomes implicit and is ignored.
 
 Refer to [CLI User Guide](docs/cli_user_guide.md)
+
+### Python API
+
+You can also use `aiconfigurator` programmatically in Python:
+
+```python
+from aiconfigurator.cli import cli_default, cli_exp, cli_generate
+
+# 1. Run default agg vs disagg comparison
+result = cli_default(model_path="Qwen/Qwen3-32B", total_gpus=32, system="h200_sxm")
+print(result.best_configs["disagg"].head())
+
+# 2. Run experiments from a YAML file or a dictionary config
+result = cli_exp(yaml_path="my_experiments.yaml")
+# Or use a dictionary config directly
+result = cli_exp(config={
+    "my_exp": {
+        "serving_mode": "disagg",
+        "model_path": "Qwen/Qwen3-32B",
+        "total_gpus": 32,
+        "system_name": "h200_sxm",
+        "isl": 4000,
+        "osl": 1000,
+    }
+})
+
+# 3. Generate a naive configuration
+result = cli_generate(model_path="Qwen/Qwen3-32B", total_gpus=8, system="h200_sxm")
+print(result["parallelism"]) # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
+```
 
 An example here, 
 ```bash
