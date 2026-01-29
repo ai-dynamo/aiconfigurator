@@ -240,7 +240,9 @@ class TaskConfigFactory:
                     worker_config["tp_list"] = [1, 2, 4, 8]
                     worker_config["pp_list"] = [1, 2, 4, 8] if should_enable_pp else [1]
                     worker_config["dp_list"] = [1, 2, 4, 8]
-                    worker_config["moe_tp_list"] = [1, 2, 4, 8]
+                    # sglang only supports moe_dense_tp_size = 1 and None currently
+                    worker_config["moe_tp_list"] = [1]
+                    # TODO: https://linear.app/nvidia/issue/AIC-318/enable-moe-ep-for-sglang-non-wideep-path
                     worker_config["moe_ep_list"] = [1]
             elif ctx.backend_name == "vllm":
                 worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
@@ -351,14 +353,14 @@ class TaskConfigFactory:
                     prefill_worker_config["tp_list"] = parallel_config_list
                     prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
                     prefill_worker_config["dp_list"] = parallel_config_list
-                    prefill_worker_config["moe_tp_list"] = parallel_config_list
+                    prefill_worker_config["moe_tp_list"] = [1]
                     prefill_worker_config["moe_ep_list"] = [1]
 
                     decode_worker_config["num_gpu_per_worker"] = parallel_config_list
                     decode_worker_config["tp_list"] = parallel_config_list
                     decode_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
                     decode_worker_config["dp_list"] = parallel_config_list
-                    decode_worker_config["moe_tp_list"] = parallel_config_list
+                    decode_worker_config["moe_tp_list"] = [1]
                     decode_worker_config["moe_ep_list"] = [1]
             elif ctx.backend_name == "vllm":
                 parallel_config_list = [1, 2, 4, 8]
