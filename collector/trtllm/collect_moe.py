@@ -167,46 +167,24 @@ def get_moe_eplb_test_cases():
         if common_moe_testcase.token_expert_distribution != "power_law":
             continue
         
+        # EPLB test cases only for DeepSeek-V3 model
         model_name = common_moe_testcase.model_name
-        inter_s = common_moe_testcase.inter_size
-        moe_tp = common_moe_testcase.tp
-        
+        if "deepseek" not in model_name.lower() or "v3" not in model_name.lower():
+            print(f"Skipping EPLB test case for {model_name} as it is not a DeepSeek-V3 model")
+            continue
         for moe_type in moe_list:
-            if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
-                if moe_type != "w4a16_mxfp4":
-                    continue
-            else:
-                if moe_type == "w4a16_mxfp4":
-                    continue
-            
-            if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
-                continue
-            
             min_latency_mode_options = [False]
-            
             if moe_type == "nvfp4" and get_sm_version() == 100 and common_moe_testcase.num_experts <= 256:
                 min_latency_mode_options.append(True)
-            
             for min_latency_mode in min_latency_mode_options:
-                # Test with different num_slots configurations:
-                # 1. num_slots == num_experts: no redundancy (EPLB placement only)
-                # 2. num_slots > num_experts: with redundant experts
                 num_experts = common_moe_testcase.num_experts
                 ep_size = common_moe_testcase.ep
-                slots_per_rank = num_experts // ep_size
-                
-                # Generate slot configurations to test
-                # - No redundancy: num_slots = num_experts
-                # - With redundancy: add extra slots (e.g., 12.5% more)
-                num_slots_options = [num_experts,288]  # baseline: no redundancy
-                
-                # Add redundant slots test case: ~12.5% extra slots (rounded to slots_per_rank)
-                redundant_slots = max(slots_per_rank, num_experts // 8)
-                redundant_slots = (redundant_slots // slots_per_rank) * slots_per_rank  # align to slots_per_rank
-                if redundant_slots > 0:
-                    num_slots_options.append(num_experts + redundant_slots)
+                num_slots_options = [num_experts, 288]  # baseline: no redundancy
                 
                 for num_slots in num_slots_options:
+                    # Skip if num_slots is not divisible by ep_size
+                    if num_slots % ep_size != 0:
+                        continue
                     test_cases.append(
                         [
                             moe_type,

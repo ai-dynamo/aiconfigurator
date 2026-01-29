@@ -866,7 +866,7 @@ def compute_eplb(
         num_slots = num_experts
     
     # Step 1: Compute replication
-    replication = compute_expert_replication(expert_tokens, num_experts, num_slots)
+    replication = compute_expert_replication(expert_tokens, num_experts, num_slots) 
     
     # Step 2: Compute placement
     placement = compute_eplb_placement(
@@ -1087,22 +1087,18 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
             new_slot_to_expert[new_slot_idx] = slot_to_expert[orig_slot]
             new_slot_idx += 1
     
-    # Convert to int for assignment generation
-    num_tokens_per_slot = torch.round(new_slot_tokens).to(torch.int64)
+    # Convert to int: use floor + distribute remainder by fractional part
+    # This ensures exact sum without cumulative rounding errors
+    floored = torch.floor(new_slot_tokens).to(torch.int64)
+    remainder = target_sum - floored.sum().item()
     
-    # Ensure sum matches target
-    current_sum = num_tokens_per_slot.sum().item()
-    if current_sum != target_sum:
-        delta = target_sum - current_sum
-        sorted_indices = torch.argsort(num_tokens_per_slot, descending=True)
-        if delta > 0:
-            for i in range(delta):
-                num_tokens_per_slot[sorted_indices[i % len(sorted_indices)]] += 1
-        else:
-            for i in range(-delta):
-                idx = sorted_indices[-(i % len(sorted_indices)) - 1]
-                if num_tokens_per_slot[idx] > 0:
-                    num_tokens_per_slot[idx] -= 1
+    if remainder > 0:
+        # Distribute remainder to slots with largest fractional parts
+        fractional_parts = new_slot_tokens - floored.float()
+        top_indices = torch.argsort(fractional_parts, descending=True)[:remainder]
+        floored[top_indices] += 1
+    
+    num_tokens_per_slot = floored
     
     # Debug output
     aic_debug = int(os.getenv("AIC_DEBUG", "0"))
@@ -1118,7 +1114,18 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
     _, num_tokens_per_slot_sorted_index = torch.sort(num_tokens_per_slot, descending=True)
     slot_assignments = []
     for slot_id in num_tokens_per_slot_sorted_index.tolist():
-        slot_assignments.extend([slot_id] * num_tokens_per_slot[slot_id])
+        count = int(num_tokens_per_slot[slot_id].item())
+        slot_assignments.extend([slot_id] * count)
+    
+    # Verify total count matches expected
+    expected_total = num_tokens * topk
+    actual_total = len(slot_assignments)
+    if actual_total != expected_total:
+        raise ValueError(
+            f"Slot assignment count mismatch: expected {expected_total}, got {actual_total}. "
+            f"num_tokens={num_tokens}, topk={topk}, num_slots={num_slots}, "
+            f"sum(num_tokens_per_slot)={num_tokens_per_slot.sum().item()}"
+        )
     
     slot_assignments = torch.tensor(slot_assignments, dtype=torch.int64)
     h_selected_slots = slot_assignments.reshape(topk, num_tokens).T
