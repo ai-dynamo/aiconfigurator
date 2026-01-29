@@ -1,0 +1,53 @@
+{#
+  Heterogeneous backend template for Kubernetes DynamoGraphDeployment
+  This template composes worker specs from the appropriate backend
+  using shared macros from _workers/ directory.
+#}
+{% from 'base_k8s.j2' import deployment_header, frontend_spec %}
+{% import 'sglang.j2' as sglang %}
+{% import 'trtllm.j2' as trtllm %}
+{% import 'vllm.j2' as vllm %}
+
+{{ deployment_header(DynConfig) }}
+{{ frontend_spec(ServiceConfig, DynConfig) }}
+
+{% set mode = DynConfig.mode | default('disagg') %}
+{% set enable_router = DynConfig.enable_router | default(false) %}
+
+{% if mode == 'agg' %}
+{# ============ AGGREGATE MODE ============ #}
+{% set backend = agg_backend | default('sglang') %}
+
+{% if backend == 'sglang' %}
+{{ sglang.k8s_worker(None, agg_gpu, agg_workers, agg_cli_args, ServiceConfig) }}
+{% elif backend == 'vllm' %}
+{{ vllm.k8s_worker(None, agg_gpu, agg_workers, agg_cli_args_list | default([]), ServiceConfig) }}
+{% elif backend == 'trtllm' %}
+{{ trtllm.k8s_worker(None, agg_gpu, agg_workers, agg_engine_args, enable_router, ServiceConfig) }}
+{% endif %}
+
+{% else %}
+{# ============ DISAGGREGATE MODE ============ #}
+
+{# ---- PREFILL WORKER ---- #}
+{% set p_backend = prefill_backend | default('sglang') %}
+
+{% if p_backend == 'sglang' %}
+{{ sglang.k8s_worker('prefill', prefill_gpu, prefill_workers, prefill_cli_args, ServiceConfig) }}
+{% elif p_backend == 'vllm' %}
+{{ vllm.k8s_worker('prefill', prefill_gpu, prefill_workers, prefill_cli_args_list | default([]), ServiceConfig) }}
+{% elif p_backend == 'trtllm' %}
+{{ trtllm.k8s_worker('prefill', prefill_gpu, prefill_workers, prefill_engine_args, enable_router, ServiceConfig) }}
+{% endif %}
+
+{# ---- DECODE WORKER ---- #}
+{% set d_backend = decode_backend | default('sglang') %}
+
+{% if d_backend == 'sglang' %}
+{{ sglang.k8s_worker('decode', decode_gpu, decode_workers, decode_cli_args, ServiceConfig) }}
+{% elif d_backend == 'vllm' %}
+{{ vllm.k8s_worker('decode', decode_gpu, decode_workers, decode_cli_args_list | default([]), ServiceConfig) }}
+{% elif d_backend == 'trtllm' %}
+{{ trtllm.k8s_worker('decode', decode_gpu, decode_workers, decode_engine_args, enable_router, ServiceConfig) }}
+{% endif %}
+{% endif %}

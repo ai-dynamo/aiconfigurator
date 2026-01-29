@@ -1,0 +1,35 @@
+{#
+  Common Kubernetes manifest boilerplate for k8s_deploy.yaml templates.
+  This file provides shared DynamoGraphDeployment structure.
+#}
+
+{% macro deployment_header(DynConfig) %}
+apiVersion: apps.dynamo.nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ DynConfig.deployment_name | default('dynamo-deployment') }}
+  namespace: {{ DynConfig.namespace | default('default') }}
+spec:
+  graph:
+{% endmacro %}
+
+{% macro frontend_spec(ServiceConfig, DynConfig) %}
+{% set enable_router = DynConfig.enable_router | default(false) %}
+    - name: DynamoFrontend
+      replicas: {{ ServiceConfig.frontend_replicas | default(1) }}
+      serviceAccount:
+        name: dynamo-frontend
+      container:
+        image: "{{ ServiceConfig.container_image }}"
+        command:
+          - python3
+          - -m
+          - dynamo.frontend
+        args:
+          - --http-port
+          - "{{ ServiceConfig.port }}"
+{% if enable_router %}
+          - --router-mode
+          - kv
+{% endif %}
+{% endmacro %}

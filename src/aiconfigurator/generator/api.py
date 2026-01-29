@@ -627,7 +627,19 @@ def generate_naive_config(
         logger.info("Saved generator config to %s", generator_config_path)
 
     # Generate backend artifacts
-    artifacts = render_backend_templates(generator_params, backend, None, backend_version)
+    role_backends = {}
+    params_obj = generator_params.get("params", {})
+    for role in ("prefill", "decode", "agg"):
+        if params_obj.get(role):
+            role_backends[role] = backend
+
+    role_versions = dict.fromkeys(role_backends, backend_version) if backend_version else None
+
+    artifacts = render_backend_templates(
+        generator_params,
+        role_backends=role_backends,
+        role_versions=role_versions,
+    )
 
     if actual_output_dir:
         params_obj = generator_params.get("params", {})

@@ -10,7 +10,7 @@ from typing import Any, Optional
 import yaml
 from jinja2 import Environment, FileSystemLoader, Undefined
 
-from aiconfigurator.generator.rendering.rules import apply_rule_plugins
+from aiconfigurator.generator.rendering.rule_engine import apply_rule_plugins
 
 logger = logging.getLogger(__name__)
 
@@ -53,16 +53,39 @@ def render_backend_templates(
 
     primary_version = role_versions.get("decode") or role_versions.get("agg") or role_versions.get("prefill")
 
+    # Check if we have heterogeneous backends (different backends for different roles)
+    unique_backends = set(role_backends.values())
+    is_heterogeneous = len(unique_backends) > 1
+
     if templates_dir is None:
-        templates_dir = str(_TEMPLATE_ROOT / primary_backend)
+        if is_heterogeneous:
+            # Use the 'any' template directory for heterogeneous deployments
+            templates_dir = str(_TEMPLATE_ROOT / "any")
+        else:
+            templates_dir = str(_TEMPLATE_ROOT / primary_backend)
 
     if not os.path.exists(templates_dir):
         raise FileNotFoundError(f"Templates directory not found: {templates_dir}")
 
     # Set up Jinja2 environment with FileSystemLoader
+    # Use multiple search paths to enable cross-directory imports:
+    # 1. Primary templates directory (backend-specific or 'any')
+    # 2. _common/ for shared base templates
+    # 3. _workers/ for backend-specific worker macros
+    # 4. Template root for relative imports like '_workers/sglang.j2'
     env = _TEMPLATE_ENV_CACHE.get(templates_dir)
     if env is None:
-        env = Environment(loader=FileSystemLoader(templates_dir), trim_blocks=True, lstrip_blocks=True)
+        search_paths = [
+            templates_dir,
+            str(_TEMPLATE_ROOT / "_common"),
+            str(_TEMPLATE_ROOT / "_workers"),
+            str(_TEMPLATE_ROOT),
+        ]
+        env = Environment(
+            loader=FileSystemLoader(search_paths),
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
         _TEMPLATE_ENV_CACHE[templates_dir] = env
 
     param_values = apply_rule_plugins(dict(param_values), primary_backend)
@@ -706,3 +729,58 @@ def _set_by_path(dst: dict[str, Any], path: str, value: Any) -> None:
             cur[p] = {}
         cur = cur[p]
     cur[parts[-1]] = value
+
+
+def render_backend_parameters(
+    params: dict[str, Any], backend: str, yaml_path: Optional[str] = None
+) -> dict[str, dict[str, Any]]:
+    """
+    Transform unified parameters into backend-specific configuration for all roles.
+
+    Args:
+        params: Unified parameters dictionary
+        backend: Target backend name
+        yaml_path: Optional path to mapping YAML file
+
+    Returns:
+        Dictionary mapping roles to backend-specific configurations
+    """
+    if yaml_path is None:
+        yaml_path = str(_BACKEND_MAPPING_FILE)
+    mapping_data = load_yaml_mapping(yaml_path)
+    param_keys = get_param_keys(yaml_path)
+
+    context = prepare_template_context(params, backend)
+    rendered = {}
+
+    # Available roles
+    for role in ["prefill", "decode", "agg"]:
+        if params.get("params", {}).get(role):
+            wc = make_worker_context(context, role, param_keys, mapping_data, backend)
+            # Backend-specific keys are collected into a nested dict named after the backend
+            rendered[role] = wc.get(backend, {})
+
+    return rendered
+
+
+def render_parameters(params: dict[str, Any], backend: str, yaml_path: Optional[str] = None) -> dict[str, Any]:
+    """
+    Transform unified parameters into a single backend-specific configuration dict.
+    If multiple roles exist, returns the aggregate or prefill one.
+
+    Args:
+        params: Unified parameters dictionary
+        backend: Target backend name
+        yaml_path: Optional path to mapping YAML file
+
+    Returns:
+        Backend-specific configuration dictionary
+    """
+    rendered = render_backend_parameters(params, backend, yaml_path)
+    if "agg" in rendered:
+        return rendered["agg"]
+    if "prefill" in rendered:
+        return rendered["prefill"]
+    if "decode" in rendered:
+        return rendered["decode"]
+    return {}
