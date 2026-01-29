@@ -36,6 +36,7 @@ from aiconfigurator.cli.api import (
     cli_default,
     cli_exp,
     cli_generate,
+    cli_support,
 )
 
 __all__ = [
@@ -43,4 +44,5 @@ __all__ = [
     "cli_default",
     "cli_exp",
     "cli_generate",
+    "cli_support",
 ]
