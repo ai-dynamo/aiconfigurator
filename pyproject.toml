@@ -94,7 +94,7 @@ aiconfigurator = "aiconfigurator.main:main"
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
 "aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule"]
-"aiconfigurator" = ["systems/*.yaml", "systems/**/*.txt", "model_configs/*.json"]
+"aiconfigurator" = ["systems/*.yaml", "systems/*.csv", "systems/**/*.txt", "model_configs/*.json"]
 "aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
 
 [tool.setuptools.packages.find]

@@ -15,7 +15,7 @@ import pytest
 pytestmark = pytest.mark.e2e
 
 REQUEST_LATENCY = 12_000
-DOC_MODEL = "QWEN3_32B"
+DOC_MODEL = "Qwen/Qwen3-32B"
 DOC_SYSTEM = "h200_sxm"
 DOC_TOTAL_GPUS = 16
 DOC_ISL = 4000
@@ -34,7 +34,7 @@ def _build_cmd(backend: str, include_ttft: bool) -> list[str]:
         "aiconfigurator",
         "cli",
         "default",
-        "--model",
+        "--model_path",
         DOC_MODEL,
         "--total_gpus",
         str(DOC_TOTAL_GPUS),

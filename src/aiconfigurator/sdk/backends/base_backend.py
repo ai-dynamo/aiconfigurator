@@ -236,7 +236,7 @@ class BaseBackend(ABC):
 
         data = [
             [
-                model.model_name,
+                model.model_path,
                 isl,
                 osl,
                 prefix,

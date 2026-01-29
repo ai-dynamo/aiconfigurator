@@ -428,9 +428,8 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
 
     # Extract unified service configuration
     service_config = param_values.get("ServiceConfig", {})
-    context["model_name"] = service_config.get("model_name") or service_config.get("served_model_name", "")
-    context["model_path"] = service_config.get("model_path")
-    context["served_model_name"] = service_config.get("served_model_name")
+    context["model_path"] = service_config.get("model_path") or service_config.get("served_model_path", "")
+    context["served_model_path"] = service_config.get("served_model_path")
     context["ServiceConfig"] = dict(service_config)
 
     # Extract K8s configuration
@@ -442,6 +441,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["working_dir"] = k8s_config.get("working_dir")
     context["k8s_engine_mode"] = k8s_config.get("k8s_engine_mode")
     context["k8s_model_cache"] = k8s_config.get("k8s_model_cache")
+    context["k8s_hf_home"] = k8s_config.get("k8s_hf_home")
 
     # Extract DynConfig for mode/router decisions
     dyn_config = param_values.get("DynConfig", {})

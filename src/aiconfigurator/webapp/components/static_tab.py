@@ -6,8 +6,8 @@ import gradio as gr
 from aiconfigurator.sdk.common import ColumnsStatic
 from aiconfigurator.webapp.components.base import (
     create_model_misc_config,
-    create_model_name_config,
     create_model_parallel_config,
+    create_model_path_config,
     create_model_quant_config,
     create_runtime_config,
     create_system_config,
@@ -25,7 +25,7 @@ def create_static_tab(app_config):
                 """,
             )
 
-        model_name_components = create_model_name_config(app_config)
+        model_path_components = create_model_path_config(app_config)
         runtime_config_components = create_runtime_config(
             app_config, tip_text="More inputs = more precise profiling results.", ttft_optional=True, itl_optional=True
         )
@@ -59,7 +59,7 @@ def create_static_tab(app_config):
         output_file = gr.File(label="When you click the download button, the downloaded form will be displayed here.")
 
     return {
-        "model_name_components": model_name_components,
+        "model_path_components": model_path_components,
         "runtime_config_components": runtime_config_components,
         "model_system_components": model_system_components,
         "model_quant_components": model_quant_components,

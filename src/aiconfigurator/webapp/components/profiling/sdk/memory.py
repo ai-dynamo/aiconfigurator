@@ -14,7 +14,7 @@ import aiconfigurator.sdk.models
 def get_max_batch_size(
     database,
     backend,
-    model_name: str,
+    model_path: str,
     isl: int,
     osl: int,
     **model_config_kwargs,
@@ -28,7 +28,7 @@ def get_max_batch_size(
     Args:
         database: Performance database instance
         backend: Backend instance
-        model_name: Model name (e.g., "QWEN3_32B")
+        model_path: Model name (e.g., "Qwen/Qwen3-32B")
         isl: Input sequence length
         osl: Output sequence length
         **model_config_kwargs: Model config kwargs (e.g., tp_size)
@@ -38,7 +38,7 @@ def get_max_batch_size(
     """
     # Create model instance
     model_config = aiconfigurator.sdk.config.ModelConfig(**model_config_kwargs)
-    model = aiconfigurator.sdk.models.get_model(model_name, model_config, backend)
+    model = aiconfigurator.sdk.models.get_model(model_path, model_config, backend)
 
     def get_mem_usage(bs: int):
         """Get memory usage for a given batch size."""

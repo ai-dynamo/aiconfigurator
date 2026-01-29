@@ -123,9 +123,8 @@ def task_config_to_generator_config(
         pass
 
     service_cfg = {
-        "model_name": task_config.model_name,
-        "served_model_name": task_config.model_name,
-        "model_path": task_config.model_name,
+        "model_path": task_config.model_path,
+        "served_model_path": task_config.model_path,
         "include_frontend": True,
         "prefix": prefix_tokens,
     }

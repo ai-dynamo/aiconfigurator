@@ -80,7 +80,7 @@ def _enum_name(value):
 
 
 def test_taskconfig_agg_default():
-    task = TaskConfig(serving_mode="agg", model_name="QWEN3_32B", system_name="h200_sxm")
+    task = TaskConfig(serving_mode="agg", model_path="Qwen/Qwen3-32B", system_name="h200_sxm")
     cfg = task.config
 
     assert cfg.worker_config.system_name == "h200_sxm"
@@ -90,7 +90,7 @@ def test_taskconfig_agg_default():
 
 
 def test_taskconfig_disagg_default():
-    task = TaskConfig(serving_mode="disagg", model_name="QWEN3_32B", system_name="h200_sxm")
+    task = TaskConfig(serving_mode="disagg", model_path="Qwen/Qwen3-32B", system_name="h200_sxm")
     cfg = task.config
 
     assert cfg.prefill_worker_config.system_name == "h200_sxm"
@@ -106,7 +106,7 @@ def test_taskconfig_disagg_default():
 def test_taskconfig_profile_application():
     task = TaskConfig(
         serving_mode="agg",
-        model_name="QWEN3_32B",
+        model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
         profiles=["fp8_default"],
     )
@@ -119,7 +119,7 @@ def test_taskconfig_profile_application():
 def test_taskconfig_total_gpus_limits_agg_workers():
     task = TaskConfig(
         serving_mode="agg",
-        model_name="QWEN3_32B",
+        model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
         total_gpus=2,
     )
@@ -131,7 +131,7 @@ def test_taskconfig_total_gpus_limits_agg_workers():
 def test_taskconfig_agg_yaml_patch_overrides():
     task = TaskConfig(
         serving_mode="agg",
-        model_name="QWEN3_32B",
+        model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
         yaml_config={
             "mode": "patch",
@@ -169,7 +169,7 @@ def test_taskconfig_yaml_file_profiles_and_patch(tmp_path):
 
     task = TaskConfig(
         serving_mode="agg",
-        model_name="QWEN3_32B",
+        model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
         profiles=["fp8_default"],
         yaml_config=loaded_yaml,
@@ -184,7 +184,7 @@ def test_taskconfig_yaml_file_profiles_and_patch(tmp_path):
 def test_taskconfig_disagg_profile_patch_expands_replica():
     task = TaskConfig(
         serving_mode="disagg",
-        model_name="QWEN3_32B",
+        model_path="Qwen/Qwen3-32B",
         system_name="b200_sxm",
         profiles=["fp8_default"],
         yaml_config={
@@ -207,7 +207,7 @@ def test_taskconfig_disagg_profile_patch_expands_replica():
 def test_taskconfig_disagg_total_gpus_caps_replica():
     task = TaskConfig(
         serving_mode="disagg",
-        model_name="QWEN3_32B",
+        model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
         total_gpus=16,
     )
@@ -219,7 +219,7 @@ def test_taskconfig_disagg_total_gpus_caps_replica():
 def test_taskconfig_disagg_total_gpus_with_patch():
     task = TaskConfig(
         serving_mode="disagg",
-        model_name="QWEN3_32B",
+        model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
         total_gpus=32,
         profiles=["fp8_default"],
@@ -236,7 +236,7 @@ def test_taskconfig_disagg_total_gpus_with_patch():
 def test_taskconfig_disagg_wideep_expands_lists():
     task = TaskConfig(
         serving_mode="disagg",
-        model_name="DEEPSEEK_V3",
+        model_path="deepseek-ai/DeepSeek-V3",
         system_name="gb200_sxm",
         enable_wideep=True,
     )
@@ -252,7 +252,7 @@ def test_taskconfig_agg_total_gpus_negative_rejected():
     with pytest.raises(ValueError):
         TaskConfig(
             serving_mode="agg",
-            model_name="QWEN3_32B",
+            model_path="Qwen/Qwen3-32B",
             system_name="h200_sxm",
             total_gpus=-1,
         )
@@ -262,15 +262,15 @@ def test_taskconfig_disagg_total_gpus_small_rejected():
     with pytest.raises(ValueError):
         TaskConfig(
             serving_mode="disagg",
-            model_name="QWEN3_32B",
+            model_path="Qwen/Qwen3-32B",
             system_name="h200_sxm",
             total_gpus=1,
         )
 
 
 def test_taskrunner_runs_agg_and_disagg():
-    agg_task = TaskConfig(serving_mode="agg", model_name="QWEN3_32B", system_name="h200_sxm")
-    disagg_task = TaskConfig(serving_mode="disagg", model_name="QWEN3_32B", system_name="h200_sxm", total_gpus=8)
+    agg_task = TaskConfig(serving_mode="agg", model_path="Qwen/Qwen3-32B", system_name="h200_sxm")
+    disagg_task = TaskConfig(serving_mode="disagg", model_path="Qwen/Qwen3-32B", system_name="h200_sxm", total_gpus=8)
 
     runner = TaskRunner()
 
@@ -286,7 +286,7 @@ def test_sglang_moe_configs():
     # Test 1: sglang + MoE + wideep + disagg
     task_wideep = TaskConfig(
         serving_mode="disagg",
-        model_name="DEEPSEEK_V3",
+        model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         backend_name="sglang",
         enable_wideep=True,
@@ -317,7 +317,7 @@ def test_sglang_moe_configs():
     # Test 2: sglang + MoE (non-wideep) + disagg
     task_no_wideep = TaskConfig(
         serving_mode="disagg",
-        model_name="DEEPSEEK_V3",
+        model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         backend_name="sglang",
         enable_wideep=False,
@@ -348,7 +348,7 @@ def test_sglang_moe_configs():
     # Test 3: trtllm + MoE + wideep (should use previous logic)
     task_trtllm_wideep = TaskConfig(
         serving_mode="disagg",
-        model_name="DEEPSEEK_V3",
+        model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         backend_name="trtllm",
         enable_wideep=True,

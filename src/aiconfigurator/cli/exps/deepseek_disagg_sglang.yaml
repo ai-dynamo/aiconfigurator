@@ -16,7 +16,7 @@ exps:
 exp_disagg_wideep:
   mode: "patch" 
   serving_mode: "disagg" 
-  model_name: "DEEPSEEK_V3" 
+  model_path: "deepseek-ai/DeepSeek-V3" 
   total_gpus: 512 # required
   system_name: "h200_sxm" 
   decode_system_name: "h200_sxm" 
@@ -71,7 +71,7 @@ exp_disagg_wideep:
 exp_disagg_non_wideep:
   mode: "patch" 
   serving_mode: "disagg" 
-  model_name: "DEEPSEEK_V3" 
+  model_path: "deepseek-ai/DeepSeek-V3" 
   total_gpus: 512 # required
   system_name: "h200_sxm" 
   decode_system_name: "h200_sxm" 

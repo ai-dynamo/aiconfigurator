@@ -23,7 +23,7 @@ DEFAULT_NAME_PREFIX = "profiling"
 
 
 def generate_config_yaml(
-    model_name: str,
+    model_path: str,
     system: str,
     backend: str,
     version: str,
@@ -36,7 +36,7 @@ def generate_config_yaml(
     Generate a k8s_deploy.yaml string for a profiling data point.
 
     Args:
-        model_name: Model name (e.g., "QWEN3_32B")
+        model_path: Model name (e.g., "Qwen/Qwen3-32B")
         system: System name (e.g., "h200_sxm")
         backend: Backend name (e.g., "trtllm")
         version: Backend template version (e.g., "0.20.0")
@@ -56,9 +56,8 @@ def generate_config_yaml(
     input_params = {
         "SlaConfig": {"isl": isl, "osl": osl},
         "ServiceConfig": {
-            "model_path": model_name,
-            "served_model_name": model_name,
-            "model_name": model_name,
+            "model_path": model_path,
+            "served_model_path": model_path,
             "include_frontend": True,
         },
         "ModelConfig": {
@@ -125,12 +124,12 @@ def generate_config_yaml(
     return result
 
 
-def validate_inputs(model_name, system, backend, version):
+def validate_inputs(model_path, system, backend, version):
     """
     Validate profiling inputs.
 
     Args:
-        model_name: Model name
+        model_path: Model name
         system: System name
         backend: Backend name
         version: Backend version
@@ -138,8 +137,8 @@ def validate_inputs(model_name, system, backend, version):
     Returns:
         Tuple of (is_valid, error_message)
     """
-    if not model_name or not system or not version:
-        return False, "❌ Missing required parameters (model_name, system, or version)"
+    if not model_path or not system or not version:
+        return False, "❌ Missing required parameters (model_path, system, or version)"
 
     return True, None
 

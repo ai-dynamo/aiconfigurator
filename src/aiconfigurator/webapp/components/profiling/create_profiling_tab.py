@@ -5,7 +5,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from aiconfigurator.webapp.components.base import create_model_name_config, create_runtime_config, create_system_config
+from aiconfigurator.webapp.components.base import create_model_path_config, create_runtime_config, create_system_config
 from aiconfigurator.webapp.components.profiling.constants import (
     COST_TAB_DESCRIPTION,
     DECODE_TAB_DESCRIPTION,
@@ -118,21 +118,21 @@ def create_performance_results_section():
             gr.HTML('<div id="decode_table_wrapper"></div>')
 
 
-def _setup_button_validation(generate_btn, model_name_components, model_system_components, runtime_config_components):
+def _setup_button_validation(generate_btn, model_path_components, model_system_components, runtime_config_components):
     """
     Setup validation to enable the generate button only when all required fields are filled.
 
     Args:
         generate_btn: The generate button component
-        model_name_components: Model name components dictionary
+        model_path_components: Model name components dictionary
         model_system_components: System components dictionary
         runtime_config_components: Runtime config components dictionary
     """
 
-    def validate_fields(model_name, system, backend, version, min_gpu, max_gpu, gpus_per_node, isl, osl):
+    def validate_fields(model_path, system, backend, version, min_gpu, max_gpu, gpus_per_node, isl, osl):
         """Check if all required fields are filled."""
         # Check dropdowns - all must be selected
-        dropdowns_filled = all([model_name, system, backend, version])
+        dropdowns_filled = all([model_path, system, backend, version])
 
         # Check number fields - must have valid numeric values (not None, not empty string)
         numbers_filled = all(
@@ -149,7 +149,7 @@ def _setup_button_validation(generate_btn, model_name_components, model_system_c
 
     # Get all required components
     required_inputs = [
-        model_name_components["model_name"],
+        model_path_components["model_path"],
         model_system_components["system"],
         model_system_components["backend"],
         model_system_components["version"],
@@ -195,7 +195,7 @@ def create_setup_section(app_config):
         )
 
     with gr.Accordion("Setup Your Profiling Job"):
-        model_name_components = create_model_name_config(app_config)
+        model_path_components = create_model_path_config(app_config)
         model_system_components = create_system_config(app_config, gpu_config=True)
         runtime_config_components = create_runtime_config(app_config, with_sla=True, prefix_length=False)
         generate_btn = gr.Button("Generate Profiling Job", variant="primary", interactive=False)
@@ -210,14 +210,14 @@ def create_setup_section(app_config):
     # Setup validation to enable button when all required fields are filled
     _setup_button_validation(
         generate_btn,
-        model_name_components,
+        model_path_components,
         model_system_components,
         runtime_config_components,
     )
 
     return {
         "introduction": introduction,
-        "model_name_components": model_name_components,
+        "model_path_components": model_path_components,
         "model_system_components": model_system_components,
         "runtime_config_components": runtime_config_components,
         "generate_btn": generate_btn,

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def agg_pareto(
-    model_name: str,
+    model_path: str,
     runtime_config: config.RuntimeConfig,
     database: PerfDatabase,
     backend_name: str,
@@ -35,7 +35,7 @@ def agg_pareto(
     each parallel configuration.
 
     Args:
-        model_name: name of the model
+        model_path: name of the model
         runtime_config: runtime config. tpot is a list of tpot values to search over or a single
             tpot value
         database: database
@@ -65,7 +65,7 @@ def agg_pareto(
             overwritten_model_config.moe_ep_size = moe_ep_size
             overwritten_model_config.attention_dp_size = dp_size
             model = get_model(
-                model_name=model_name,
+                model_path=model_path,
                 model_config=overwritten_model_config,
                 backend_name=backend_name,
             )
@@ -147,7 +147,7 @@ def agg_pareto(
 
 
 def disagg_pareto(
-    model_name: str,
+    model_path: str,
     runtime_config: config.RuntimeConfig,
     prefill_database: PerfDatabase,
     prefill_backend_name: str,
@@ -167,7 +167,7 @@ def disagg_pareto(
     DisaggInferenceSession.find_best    _disagg_result_under_constraints.
 
     Args:
-        model_name: name of the model
+        model_path: name of the model
         runtime_config: runtime config
         prefill_database: prefill database
         prefill_backend_name: prefill backend name
@@ -246,7 +246,7 @@ def disagg_pareto(
     decode_num_worker_list = get_working_list(decode_num_worker_list, decode_max_num_worker)
 
     summary = disagg_sess.find_best_disagg_result_under_constraints(
-        model_name=model_name,
+        model_path=model_path,
         runtime_config=runtime_config,
         prefill_model_config=prefill_model_config,
         prefill_parallel_config_list=prefill_parallel_config_list,
