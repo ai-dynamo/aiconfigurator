@@ -11,13 +11,8 @@ from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
 from tensorrt_llm._torch.modules.fused_moe import RenormalizeMoeRoutingMethod, create_moe
-from tensorrt_llm._torch.utils import ActivationType
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
-
-# Models that use non-gated MoE (Relu2 activation instead of SwiGLU)
-# These are substring patterns that will be matched against the full model name
-NON_GATED_MOE_MODELS = ["Nemotron-3"]
 
 try:
     from common_test_cases import get_common_moe_test_cases
@@ -84,16 +79,16 @@ def cleanup_empty_json_files(directory):
 
 
 def get_moe_test_cases():
-    moe_list = ["float16"]
+    moe_list = []
     if get_sm_version() > 86:
-        moe_list += ["fp8"]
+        #moe_list += []
         if get_sm_version() < 100:
             # though trtllm gen kernel source supports fp8_block, it only provides min-latency
             # data. not practical.
             moe_list += [
                 # "w4afp8", FIXME: trtllm 1.2 has bugs for w4afp8
                 "fp8_block",
-                "w4a16_mxfp4",
+                
             ]
 
     if get_sm_version() >= 100:
@@ -128,6 +123,7 @@ def get_moe_test_cases():
                 min_latency_mode_options.append(True)
 
             for min_latency_mode in min_latency_mode_options:
+                # use_eplb=False for standard MoE test
                 test_cases.append(
                     [
                         moe_type,
@@ -143,9 +139,92 @@ def get_moe_test_cases():
                         "moe_perf.txt",
                         common_moe_testcase.token_expert_distribution,
                         common_moe_testcase.power_law_alpha,
+                        False,  # use_eplb
+                        common_moe_testcase.num_experts,  # num_slots (no redundancy)
                     ]
                 )
+    return test_cases
 
+
+def get_moe_eplb_test_cases():
+    """Generate test cases for MoE with EPLB (Expert Parallel Load Balancer).
+    
+    Only generates power_law distribution cases with use_eplb=True.
+    """
+    moe_list = []
+    if get_sm_version() > 86:
+        if get_sm_version() < 100:
+            moe_list += ["fp8_block"]
+    
+    if get_sm_version() >= 100:
+        moe_list += ["nvfp4"]
+    
+    test_cases = []
+    
+    for common_moe_testcase in get_common_moe_test_cases():
+        # EPLB only makes sense for power_law distributions
+        if common_moe_testcase.token_expert_distribution != "power_law":
+            continue
+        
+        model_name = common_moe_testcase.model_name
+        inter_s = common_moe_testcase.inter_size
+        moe_tp = common_moe_testcase.tp
+        
+        for moe_type in moe_list:
+            if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
+                if moe_type != "w4a16_mxfp4":
+                    continue
+            else:
+                if moe_type == "w4a16_mxfp4":
+                    continue
+            
+            if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
+                continue
+            
+            min_latency_mode_options = [False]
+            
+            if moe_type == "nvfp4" and get_sm_version() == 100 and common_moe_testcase.num_experts <= 256:
+                min_latency_mode_options.append(True)
+            
+            for min_latency_mode in min_latency_mode_options:
+                # Test with different num_slots configurations:
+                # 1. num_slots == num_experts: no redundancy (EPLB placement only)
+                # 2. num_slots > num_experts: with redundant experts
+                num_experts = common_moe_testcase.num_experts
+                ep_size = common_moe_testcase.ep
+                slots_per_rank = num_experts // ep_size
+                
+                # Generate slot configurations to test
+                # - No redundancy: num_slots = num_experts
+                # - With redundancy: add extra slots (e.g., 12.5% more)
+                num_slots_options = [num_experts,288]  # baseline: no redundancy
+                
+                # Add redundant slots test case: ~12.5% extra slots (rounded to slots_per_rank)
+                redundant_slots = max(slots_per_rank, num_experts // 8)
+                redundant_slots = (redundant_slots // slots_per_rank) * slots_per_rank  # align to slots_per_rank
+                if redundant_slots > 0:
+                    num_slots_options.append(num_experts + redundant_slots)
+                
+                for num_slots in num_slots_options:
+                    test_cases.append(
+                        [
+                            moe_type,
+                            common_moe_testcase.num_tokens_list,
+                            common_moe_testcase.hidden_size,
+                            common_moe_testcase.inter_size,
+                            common_moe_testcase.topk,
+                            num_experts,
+                            common_moe_testcase.tp,
+                            ep_size,
+                            min_latency_mode,
+                            common_moe_testcase.model_name,
+                            "moe_eplb_perf.txt",  # use different output file 
+                            common_moe_testcase.token_expert_distribution,
+                            common_moe_testcase.power_law_alpha,
+                            True,  # use_eplb
+                            num_slots,  # num_slots (may > num_experts for redundancy)
+                        ]
+                    )
     return test_cases
 
 
@@ -163,8 +242,13 @@ def run_moe_torch(
     perf_filename,
     distributed="power_law",
     power_law_alpha=0.0,
+    use_eplb=False,
+    num_slots=None,
     device="cuda:0",
 ):
+    # Default num_slots to num_experts (no redundancy)
+    if num_slots is None:
+        num_slots = num_experts
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -220,16 +304,6 @@ def run_moe_torch(
     swiglu_beta = None
     swiglu_limit = None
 
-    # Determine activation type based on model
-    # Nemotron-3 Nano uses non-gated MoE with Relu2 activation
-    # Other models (DeepSeek, Qwen, Mixtral) use gated MoE with SwiGLU activation
-    if any(pattern in model_name for pattern in NON_GATED_MOE_MODELS):
-        activation_type = ActivationType.Relu2
-        is_gated = False
-    else:
-        activation_type = ActivationType.Swiglu
-        is_gated = True
-
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
         # use triton backend for best performance on Hopper
         model_config.moe_backend = "triton"
@@ -267,7 +341,7 @@ def run_moe_torch(
     else:
         # for low latency mode in fp4, experts > 128 is not supported.
         routing_method = RenormalizeMoeRoutingMethod(topk)
-
+    
     moe = create_moe(
         routing_method=routing_method,
         num_experts=num_experts,
@@ -281,7 +355,6 @@ def run_moe_torch(
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
         swiglu_limit=swiglu_limit,
-        activation_type=activation_type,
     )
     moe.to(torch.device(device))
 
@@ -382,9 +455,14 @@ def run_moe_torch(
         num_iter = 5 if distributed == "power_law" else 1
         if distributed == "power_law":
             actual_logits_list = [
-                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype)
+                power_law_logits_v3(
+                    num_tokens, num_experts, topk, moe_ep_size, power_law_alpha,
+                    use_eplb=use_eplb, num_slots=num_slots
+                ).to(router_logits_dtype)
                 for _ in range(num_iter)
             ]
+            eplb_str = f"_eplb_slots{num_slots}" if use_eplb else ""
+            print(f"input_tokens,{num_tokens},ep,{moe_ep_size}{eplb_str}, actual_logits_list: {[logits_list.shape for logits_list in actual_logits_list]}")
         elif distributed == "balanced":
             actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype)
         else:
@@ -427,11 +505,17 @@ def run_moe_torch(
 
         if min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
-        elif not is_gated:
-            source = "moe_torch_flow_nongated"  # non-gated MoE (relu2)
         else:
-            source = "moe_torch_flow"  # cutlass (gated SwiGLU)
+            source = "moe_torch_flow"  # cutlass
 
+        # Build distribution string with EPLB suffix if enabled
+        if distributed == "power_law":
+            dist_str = f"power_law_{power_law_alpha}"
+            if use_eplb:
+                dist_str += "_eplb"
+        else:
+            dist_str = distributed
+        
         log_perf(
             item_list=[
                 {
@@ -441,16 +525,17 @@ def run_moe_torch(
                     "inter_size": inter_size,
                     "topk": topk,
                     "num_experts": num_experts,
+                    "num_slots": num_slots,
                     "moe_tp_size": moe_tp_size,
                     "moe_ep_size": moe_ep_size,
-                    "distribution": "power_law_" + str(power_law_alpha) if distributed == "power_law" else distributed,
+                    "distribution": dist_str,
                     "latency": latency,
                 }
             ],
             framework="TRTLLM",
             version=tensorrt_llm.__version__,
             device_name=torch.cuda.get_device_name(device),
-            op_name="moe",
+            op_name="moe" if not use_eplb else "moe_eplb",
             kernel_source=source,
             perf_filename=perf_filename,
             power_stats=power_stats,
