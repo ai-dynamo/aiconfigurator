@@ -345,7 +345,10 @@ def collect_ops(
 
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
-
+            #print(f"Collecting {collection['name']}.{collection['type']}")
+            #print(f"get_func: {get_func}")
+            #print(f"run_func: {run_func}")
+            #print(f"num_processes: {num_processes}")
             errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
             all_errors.extend(errors)
 
@@ -675,6 +678,25 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
             else None,
         },
+        # MOE with EPLB (Expert Parallel Load Balancer) collection
+        {
+            "name": "trtllm",
+            "type": "moe_eplb",
+            "module": None,  # Will be determined based on version
+            "get_func": "get_moe_eplb_test_cases",
+            "run_func": "run_moe_torch",
+            "version_handler": lambda v: "collector.trtllm.collect_moe"
+            if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
+            else None,
+        },
+        # WideEP MOE collection (computation only, single GPU)
+        {
+            "name": "trtllm",
+            "type": "wideep_moe",
+            "module": "collector.trtllm.collect_wideep_moe",
+            "get_func": "get_wideep_moe_test_cases",
+            "run_func": "run_wideep_moe",
+        },
     ]
 
     all_errors = collect_ops(num_processes, collections, ops, version)
@@ -746,11 +768,12 @@ def main():
             "mla_bmm_gen_pre",
             "mla_bmm_gen_post",
             "moe",
+            "moe_eplb",  # MoE with EPLB (Expert Parallel Load Balancer)
+            "wideep_moe",  # TensorRT-LLM WideEP MoE computation (single GPU)
             "wideep_mla_context",
             "wideep_mla_generation",
             "wideep_mlp_context",
             "wideep_mlp_generation",
-            "wideep_moe",
         ],
         help="Run only specified collection items. Leave empty to run all. "
         "Available ops vary by backend - see backend-specific collectors for details.",
