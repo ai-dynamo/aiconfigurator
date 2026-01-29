@@ -47,19 +47,20 @@ _DEFAULT_BUILD_CASES = [
             "tpot": 10,
         },
     ),
-    pytest.param(
-        {
-            "model_path": "deepseek-ai/DeepSeek-V3",
-            "system": "h200_sxm",
-            "backend": "sglang",
-            "total_gpus": 32,
-            "isl": 4000,
-            "osl": 1000,
-            "prefix": 0,
-            "ttft": 5000,
-            "tpot": 100,
-        },
-    ),
+    # TODO: enable this after https://linear.app/nvidia/issue/AIC-318/enable-moe-ep-for-sglang-non-wideep-path
+    # pytest.param(
+    #     {
+    #         "model_path": "deepseek-ai/DeepSeek-V3",
+    #         "system": "h200_sxm",
+    #         "backend": "sglang",
+    #         "total_gpus": 32,
+    #         "isl": 4000,
+    #         "osl": 1000,
+    #         "prefix": 0,
+    #         "ttft": 5000,
+    #         "tpot": 100,
+    #     },
+    # ),
     pytest.param(
         {
             "model_path": "Qwen/Qwen3-32B",
