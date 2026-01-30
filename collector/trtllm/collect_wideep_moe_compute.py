@@ -62,6 +62,11 @@ except ModuleNotFoundError:
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))
 
+# Control simulation mode via environment variable:
+# AIC_ACCURATE_WIDEEP_SIM=1 (default): Accurate mode - DP split + rank0 filter
+# AIC_ACCURATE_WIDEEP_SIM=0: Simple mode - all tokens directly
+aic_accurate_wideep_sim = os.getenv("AIC_ACCURATE_WIDEEP_SIM", "1") == "1"
+
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wideep_moe_compute_tuned_cache_path")
 
 
@@ -255,8 +260,9 @@ class WideEPMoEComputeSimulator(nn.Module):
                 self.intermediate_size_per_partition,
             )
             
-            self.w3_w1_weight = torch.randn(w3_w1_shape, dtype=torch.bfloat16, device=device).to(weight_dtype)
-            self.w2_weight = torch.randn(w2_shape, dtype=torch.bfloat16, device=device).to(weight_dtype)
+            # Use CPU to avoid CUDA RNG state pollution from previous tasks
+            self.w3_w1_weight = torch.randn(w3_w1_shape, dtype=torch.bfloat16, device='cpu').to(weight_dtype).to(device)
+            self.w2_weight = torch.randn(w2_shape, dtype=torch.bfloat16, device='cpu').to(weight_dtype).to(device)
             
         else:
             # Unquantized: weights are bfloat16
@@ -273,8 +279,9 @@ class WideEPMoEComputeSimulator(nn.Module):
                 self.intermediate_size_per_partition,
             )
             
-            self.w3_w1_weight = torch.randn(w3_w1_shape, dtype=weight_dtype, device=device)
-            self.w2_weight = torch.randn(w2_shape, dtype=weight_dtype, device=device)
+            # Use CPU to avoid CUDA RNG state pollution from previous tasks
+            self.w3_w1_weight = torch.randn(w3_w1_shape, dtype=weight_dtype, device='cpu').to(device)
+            self.w2_weight = torch.randn(w2_shape, dtype=weight_dtype, device='cpu').to(device)
         
         # Bias (set to None, same as WideEPMoE default)
         self.w3_w1_bias = None
@@ -381,6 +388,8 @@ class WideEPMoEComputeSimulator(nn.Module):
         output_dtype = torch.bfloat16
         
         # Step 1: Routing (WideEPMoE line 404-405)
+        if aic_debug == 1:
+            print(f"[wideep_moe_compute_eplb normal mode] router_logits.shape: {router_logits.shape}")
         token_selected_experts, token_final_scales = self.routing_method.apply(router_logits)
         token_selected_slots = token_selected_experts
         
@@ -397,6 +406,94 @@ class WideEPMoEComputeSimulator(nn.Module):
             pass
         
         # Step 3: MoE Computation (WideEPMoE line 624-642)
+        if aic_debug == 1:
+            print(f"[wideep_moe_compute_eplb normal mode] x.shape: {x.shape}, token_selected_slots.shape: {token_selected_slots.shape}, token_final_scales.shape: {token_final_scales.shape}")
+        output = self.moe_op.run_moe(
+            module=self,
+            input=x,
+            token_selected_slots=token_selected_slots,
+            token_final_scales=token_final_scales,
+            w3_w1_weight=self.w3_w1_weight,
+            w3_w1_bias=None,
+            w2_weight=self.w2_weight,
+            w2_bias=None,
+            output_dtype=output_dtype,
+            quant_scales=self.quant_scales,
+            use_all_to_all=False,
+            input_sf=x_sf,
+            swizzled_input_sf=False,
+            min_latency_mode=False,
+            use_fused_finalize=do_finalize,
+        )
+        
+        if isinstance(output, (list, tuple)):
+            output = output[0]
+        
+        return output
+    
+    def forward_router_only(self, router_logits: torch.Tensor):
+        """
+        Execute ONLY the routing computation.
+        Used to simulate the router computation of a single DP rank in WideEP.
+        
+        In WideEP, DP size = EP size, so each DP rank has num_tokens/ep_size tokens.
+        This method simulates that router computation cost.
+        
+        Args:
+            router_logits: [num_tokens, num_experts/num_slots] tensor
+            
+        Returns:
+            token_selected_slots: [num_tokens, topk] selected slot indices
+            token_final_scales: [num_tokens, topk] routing weights
+        """
+        #print(f"[wideep_moe_compute_eplb accurate mode] router_logits.shape: {router_logits.shape}")
+        token_selected_experts, token_final_scales = self.routing_method.apply(router_logits)
+        token_selected_slots = token_selected_experts
+        return token_selected_slots, token_final_scales
+    
+    def forward_moe_only(self, hidden_states: torch.Tensor, token_selected_slots: torch.Tensor, token_final_scales: torch.Tensor, do_finalize: bool = True) -> torch.Tensor:
+        """
+        Execute ONLY the MoE computation (quantization + MoE kernel), NO routing.
+        Used to simulate the MoE computation of EP rank 0 in WideEP.
+        
+        The hidden_states and routing results should be pre-filtered to only include
+        tokens that are routed to this EP rank.
+        
+        Args:
+            hidden_states: [rank0_num_tokens, hidden_size] filtered hidden states
+            token_selected_slots: [rank0_num_tokens, topk] pre-computed slot assignments
+            token_final_scales: [rank0_num_tokens, topk] pre-computed routing weights
+            do_finalize: Whether to finalize the output
+            
+        Returns:
+            output: [rank0_num_tokens, hidden_size] MoE output
+        """
+        x = hidden_states
+        x_sf = None
+        output_dtype = torch.bfloat16
+        
+        # NO routing here - routing results are passed as arguments
+        
+        # Step 2: Input Quantization
+        if self.has_fp8_qdq:
+            x, _ = torch.ops.tensorrt_llm.static_quantize_e4m3_per_tensor(x, self.fc31_input_dequant)
+        elif self.has_nvfp4:
+            x_row = x.shape[0]
+            x, x_sf = torch.ops.trtllm.fp4_quantize(
+                x, self.fc31_input_scale, self.scaling_vector_size,
+                sfUseUE8M0=False, isSfSwizzledLayout=False)
+            x_sf = x_sf.view((x_row, -1))
+        elif self.has_deepseek_fp8_block_scales:
+            pass
+        
+        # Step 3: MoE Computation
+        
+        # 统计该 EP rank 上实际要计算的 token-slot pairs 数量
+        #token_selected_slots 中 < expert_size_per_partition 的值表示本地 slot
+        # local_slot_mask = token_selected_slots < self.expert_size_per_partition
+        # total_local_computations = local_slot_mask.sum().item()
+        # print(f"[wideep_moe_compute_eplb accurate mode] x.shape: {x.shape}, token_selected_slots.shape: {token_selected_slots.shape}, "
+        #       f"total_local_computations (token-slot pairs on this rank): {total_local_computations}")
         output = self.moe_op.run_moe(
             module=self,
             input=x,
@@ -482,6 +579,7 @@ def get_wideep_moe_compute_test_cases():
                         common_moe_testcase.power_law_alpha,
                         False,  # use_eplb
                         common_moe_testcase.num_experts,  # num_slots (no redundancy)
+                        aic_accurate_wideep_sim,  # accurate_wideep_simulation (from env)
                     ])
     
     return test_cases
@@ -553,6 +651,7 @@ def get_wideep_moe_compute_eplb_test_cases():
                             common_moe_testcase.power_law_alpha,
                             True,   # use_eplb
                             num_slots,
+                            aic_accurate_wideep_sim,  # accurate_wideep_simulation (from env)
                         ])
     
     return test_cases
@@ -578,10 +677,21 @@ def run_wideep_moe_compute(
     power_law_alpha=0.0,
     use_eplb=False,
     num_slots=None,
+    accurate_wideep_simulation=True,
     device="cuda:0",
 ):
     """
     Benchmark WideEP MoE computation (excluding communication).
+    
+    Args:
+        accurate_wideep_simulation: If True, uses accurate WideEP simulation:
+            - Router uses dp_num_tokens = num_tokens / ep_size (single DP rank)
+            - MoE uses only tokens routed to EP rank 0
+            This accurately simulates the real WideEP scenario where DP size = EP size.
+            
+            If False, uses all tokens directly (original mode):
+            - Router and MoE both use full num_tokens
+            This is simpler but less accurate for WideEP simulation.
     """
     # Default num_slots to num_experts (no redundancy)
     if num_slots is None:
@@ -666,17 +776,19 @@ def run_wideep_moe_compute(
     )
     moe.to(torch.device(device))
     
-    eplb_str = f", EPLB slots={num_slots}" if use_eplb else ""
-    print(f"\n{'='*60}")
-    print(f"WideEPMoE Compute Collection")
-    print(f"{'='*60}")
-    print(f"Model: {model_name}")
-    print(f"Quantization: {moe_type}, Kernel: {moe_kernel}")
-    print(f"EP config: ep_size={moe_ep_size}, tp_size={moe_tp_size}")
-    print(f"Expert config: total={num_experts}, local_slots={moe.expert_size_per_partition}{eplb_str}")
-    print(f"Size config: hidden={hidden_size}, inter={inter_size}, inter_local={moe.intermediate_size_per_partition}")
-    print(f"Routing: topk={topk}, min_latency={min_latency_mode}")
-    print(f"{'='*60}\n")
+    # eplb_str = f", EPLB slots={num_slots}" if use_eplb else ""
+    # sim_mode = "accurate (DP split + rank0 filter)" if accurate_wideep_simulation else "simple (all tokens)"
+    # print(f"\n{'='*60}")
+    # print(f"WideEPMoE Compute Collection")
+    # print(f"{'='*60}")
+    # print(f"Model: {model_name}")
+    # print(f"Quantization: {moe_type}, Kernel: {moe_kernel}")
+    # print(f"EP config: ep_size={moe_ep_size}, tp_size={moe_tp_size}")
+    # print(f"Expert config: total={num_experts}, local_slots={moe.expert_size_per_partition}{eplb_str}")
+    # print(f"Size config: hidden={hidden_size}, inter={inter_size}, inter_local={moe.intermediate_size_per_partition}")
+    # print(f"Routing: topk={topk}, min_latency={min_latency_mode}")
+    # print(f"Simulation mode: {sim_mode}")
+    # print(f"{'='*60}\n")
     
     # =========================================================================
     # Dry run
@@ -686,14 +798,15 @@ def run_wideep_moe_compute(
     for i in range(len(num_tokens_lists)):
         max_tokens = num_tokens_lists[-i - 1]
         try:
-            hidden_states_max_tokens = torch.randn([max_tokens, hidden_size]).bfloat16().to(torch.device(device))
-            logits_max_tokens = balanced_logits(max_tokens, num_experts, topk).to(router_logits_dtype)
+            hidden_states_max_tokens = torch.randn([max_tokens, hidden_size], device='cpu').bfloat16().to(device)
+            # Use num_slots for routing (EPLB routes to slots, not experts)
+            logits_max_tokens = balanced_logits(max_tokens, num_slots, topk).to(router_logits_dtype).to(device)
             moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
             torch.cuda.synchronize()
-            if aic_debug == 1:
-                print(f"Successfully dry run for {max_tokens} tokens")
+            print(f"[dry run] Successfully dry run for {max_tokens} tokens")
             break
         except Exception as e:
+            print(f"[dry run] Failed for {max_tokens} tokens: {e}, trying smaller size...")
             if i == len(num_tokens_lists) - 1:
                 RuntimeError(f"dry run failed for {max_tokens} tokens: {e}")
             else:
@@ -747,30 +860,110 @@ def run_wideep_moe_compute(
             continue
         
         num_iter = 5 if distributed == "power_law" else 1
-        hidden_states = torch.randn([num_tokens, hidden_size]).bfloat16().to(torch.device(device))
         
-        if distributed == "power_law":
-            actual_logits_list = [
-                power_law_logits_v3(
+        # In WideEP, DP size = EP size, each DP rank has num_tokens/ep_size tokens
+        dp_num_tokens = num_tokens // moe_ep_size
+        
+        # Variables for logging
+        actual_dp_tokens = None
+        actual_rank0_tokens = None
+        
+        if accurate_wideep_simulation:
+            # =====================================================================
+            # ACCURATE MODE: Simulates real WideEP scenario
+            # - Router uses dp_num_tokens (single DP rank)
+            # - MoE uses only tokens routed to EP rank 0
+            # =====================================================================
+            if distributed == "power_law":
+                # Generate ONE distribution to get rank0 info with EPLB slot assignments
+                _, rank0_info = power_law_logits_v3(
                     num_tokens, num_experts, topk, moe_ep_size, power_law_alpha,
-                    use_eplb=use_eplb, num_slots=num_slots
-                ).to(router_logits_dtype)
-                for _ in range(num_iter)
-            ]
-            eplb_str = f"_eplb_slots{num_slots}" if use_eplb else ""
-            print(f"power_law: num_tokens={num_tokens}, ep={moe_ep_size}{eplb_str}")
-        elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype)
+                    use_eplb=use_eplb, num_slots=num_slots, return_rank0_info=True
+                )
+                rank0_num_tokens = rank0_info['rank0_num_tokens']
+                rank0_total_selections = rank0_info['rank0_total_selections']
+                rank0_logits = rank0_info['rank0_logits'].to(router_logits_dtype).to(device)
+                
+                # Use EPLB's actual slot assignments (the TRUE distribution after load balancing)
+                rank0_selected_slots = rank0_info['rank0_selected_slots'].to(torch.int32).to(device)
+                # Compute scales from logits using EPLB's slot assignments
+                gathered_logits = torch.gather(rank0_logits, 1, rank0_selected_slots.long())
+                token_final_scales = torch.softmax(gathered_logits, dim=1).to(torch.float32)
+                
+                # Create hidden states for rank0 tokens
+                rank0_hidden = torch.randn([rank0_num_tokens, hidden_size]).bfloat16().to(torch.device(device))
+                
+                # Create dummy router logits for DP rank (length = num_tokens / ep_size)
+                # This simulates the router computation on a single DP rank
+                # Random logits for router computation (just need correct shape, not actual distribution)
+                dummy_router_logits = torch.randn([dp_num_tokens, num_slots]).to(router_logits_dtype).to(device)
+                
+                # Store data for forward_router_only + forward_moe_only
+                rank0_data_list = [{
+                    'hidden': rank0_hidden,
+                    'token_selected_slots': rank0_selected_slots,
+                    'token_final_scales': token_final_scales,
+                    'num_tokens': rank0_num_tokens,
+                    'router_logits': dummy_router_logits,  # for router computation
+                } for _ in range(num_iter)]
+                total_selections_list = [rank0_total_selections] * num_iter
+                
+                avg_rank0_tokens = sum(d['num_tokens'] for d in rank0_data_list) / len(rank0_data_list)
+                avg_rank0_selections = sum(total_selections_list) / len(total_selections_list)
+                actual_dp_tokens = dp_num_tokens
+                actual_rank0_tokens = int(avg_rank0_tokens)
+                eplb_str = f"slots={num_slots}" if use_eplb else ""
+                print(f"[accurate] power_law: total={num_tokens}, rank0_tokens={avg_rank0_tokens:.0f}, "
+                      f"rank0_selections={avg_rank0_selections:.0f}, ep={moe_ep_size} {eplb_str}")
+            else:  # balanced
+                hidden_states = torch.randn([dp_num_tokens, hidden_size], device='cpu').bfloat16().to(device)
+                actual_logits = balanced_logits(dp_num_tokens, num_slots, topk).to(router_logits_dtype).to(device)
+                actual_dp_tokens = dp_num_tokens
+                actual_rank0_tokens = dp_num_tokens
+                print(f"[accurate] balanced: total={num_tokens}, dp={dp_num_tokens}, ep={moe_ep_size}")
         else:
-            raise ValueError(f"Unsupported distributed mode: {distributed}")
+            # =====================================================================
+            # SIMPLE MODE: Uses all tokens directly (original behavior)
+            # - Router and MoE both use full num_tokens
+            # =====================================================================
+            hidden_states = torch.randn([num_tokens, hidden_size], device='cpu').bfloat16().to(device)
+            
+            if distributed == "power_law":
+                actual_logits_list = [
+                    power_law_logits_v3(
+                        num_tokens, num_experts, topk, moe_ep_size, power_law_alpha,
+                        use_eplb=use_eplb, num_slots=num_slots
+                    ).to(router_logits_dtype).to(device)
+                    for _ in range(num_iter)
+                ]
+                eplb_str = f"_eplb_slots{num_slots}" if use_eplb else ""
+                print(f"[simple] power_law: num_tokens={num_tokens}, ep={moe_ep_size}{eplb_str}")
+            else:  # balanced
+                actual_logits = balanced_logits(num_tokens, num_slots, topk).to(router_logits_dtype).to(device)
+                print(f"[simple] balanced: num_tokens={num_tokens}, ep={moe_ep_size}")
+            
+            actual_dp_tokens = num_tokens # use all tokens
+            actual_rank0_tokens = num_tokens
         
         def run_forward_pass():
             """Execute one forward pass through WideEP MOE simulator."""
-            if distributed == "power_law":
-                for logits in actual_logits_list:
-                    moe.forward(hidden_states, logits, do_finalize=not min_latency_mode)
+            if accurate_wideep_simulation:
+                if distributed == "power_law":
+                    for data in rank0_data_list:
+                        # Router computation (simulating DP rank with dp_num_tokens)
+                        moe.forward_router_only(data['router_logits'])
+                        # MoE computation with EPLB's true distribution (rank0 tokens only)
+                        moe.forward_moe_only(data['hidden'], data['token_selected_slots'],
+                                            data['token_final_scales'], do_finalize=not min_latency_mode)
+                else:
+                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
             else:
-                moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+                # Simple mode: use all tokens
+                if distributed == "power_law":
+                    for logits in actual_logits_list:
+                        moe.forward(hidden_states, logits, do_finalize=not min_latency_mode)
+                else:
+                    moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
         
         # Benchmark with power measurement
         num_warmups = 1 if distributed == "power_law" else 3
@@ -804,13 +997,18 @@ def run_wideep_moe_compute(
         else:
             dist_str = distributed
         
+        # Simulation mode string
+        sim_mode_str = "accurate" if accurate_wideep_simulation else "simple"
+        
         # Log performance
         log_perf(
             item_list=[
                 {
                     "moe_dtype": moe_type,
                     "moe_kernel": moe_kernel,
-                    "num_tokens": num_tokens,
+                    "num_tokens": num_tokens,  # Total tokens (input parameter)
+                    "dp_num_tokens": actual_dp_tokens,  # Tokens per DP rank (router input)
+                    "rank0_num_tokens": actual_rank0_tokens,  # Tokens actually computed by EP rank 0
                     "hidden_size": hidden_size,
                     "inter_size": inter_size,
                     "topk": topk,
@@ -820,6 +1018,7 @@ def run_wideep_moe_compute(
                     "moe_tp_size": moe_tp_size,
                     "moe_ep_size": moe_ep_size,
                     "distribution": dist_str,
+                    "simulation_mode": sim_mode_str,
                     "latency": latency,
                 }
             ],
@@ -832,15 +1031,20 @@ def run_wideep_moe_compute(
             power_stats=power_stats,
         )
         
-        print(f"WideEP MOE Compute | tokens={num_tokens}, kernel={moe_kernel}, "
-              f"latency={latency:.3f}ms, dist={dist_str}")
+        print(f"WideEP MOE Compute | total={num_tokens}, dp={actual_dp_tokens}, rank0={actual_rank0_tokens}, "
+              f"kernel={moe_kernel}, latency={latency:.3f}ms, dist={dist_str}, mode={sim_mode_str}")
         
         # Cleanup iteration
-        if distributed == "power_law":
-            del actual_logits_list
+        if accurate_wideep_simulation:
+            if distributed == "power_law":
+                del rank0_data_list
+            else:
+                del actual_logits, hidden_states
         else:
-            del actual_logits
-        del hidden_states
+            if distributed == "power_law":
+                del actual_logits_list, hidden_states
+            else:
+                del actual_logits, hidden_states
         gc.collect()
         torch.cuda.empty_cache()
     

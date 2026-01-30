@@ -931,15 +931,38 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
     target_distribution = original_distribution * target_sum
     num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
 
-    # Adjust to match exact target sum
+    # Clamp to upper bound: each expert can be selected at most num_tokens times
+    # (since each token can select an expert at most once)
+    upper_bound = num_tokens
+    overflow = (num_tokens_per_expert - upper_bound).clamp(min=0).sum().item()
+    num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
+    
+    # Redistribute overflow to experts that haven't reached the bound
+    if overflow > 0:
+        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
+        for i in range(int(overflow)):
+            # Find an expert that hasn't reached the bound
+            for j in range(len(sorted_indices)):
+                expert_idx = sorted_indices[-(j + 1)]  # Start from smallest
+                if num_tokens_per_expert[expert_idx] < upper_bound:
+                    num_tokens_per_expert[expert_idx] += 1
+                    break
+
+    # Adjust to match exact target sum (respecting upper bound)
     current_sum = num_tokens_per_expert.sum().item()
     delta = target_sum - current_sum
     if delta != 0:
         sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
         if delta > 0:
-            for i in range(delta):
-                expert_idx = sorted_indices[i % len(sorted_indices)]
-                num_tokens_per_expert[expert_idx] += 1
+            # Add to experts that haven't reached the bound
+            added = 0
+            for i in range(int(delta) * len(sorted_indices)):  # Extra iterations for safety
+                if added >= delta:
+                    break
+                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]  # Start from smallest
+                if num_tokens_per_expert[expert_idx] < upper_bound:
+                    num_tokens_per_expert[expert_idx] += 1
+                    added += 1
         else:
             for i in range(-delta):
                 expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
@@ -984,13 +1007,24 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
         print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
 
     # Generate expert assignments
-    _, num_tokens_per_expert_sorted_index = torch.sort(num_tokens_per_expert, descending=True)
-    expert_assignments = []
-    for expert_id in num_tokens_per_expert_sorted_index.tolist():
-        expert_assignments.extend([expert_id] * num_tokens_per_expert[expert_id])
-
-    expert_assignments = torch.tensor(expert_assignments, dtype=torch.int64)
-    h_selected_experts = expert_assignments.reshape(topk, num_tokens).T
+    # 确保每个 token 选择 topk 个**不同的** expert
+    # 使用贪心分配算法：优先将 token 分配给需求最高的 expert
+    
+    h_selected_experts = torch.zeros((num_tokens, topk), dtype=torch.int64)
+    remaining = num_tokens_per_expert.clone()  # 每个 expert 的剩余需求
+    
+    for token_id in range(num_tokens):
+        # 选择剩余需求最高的 topk 个 expert
+        _, top_experts = torch.topk(remaining, topk)
+        h_selected_experts[token_id] = top_experts
+        # 减少这些 expert 的剩余需求
+        remaining[top_experts] -= 1
+    
+    # 验证：检查是否所有需求都被满足
+    if remaining.sum() != 0:
+        aic_debug = int(os.getenv("AIC_DEBUG", "0"))
+        if aic_debug >= 1:
+            print(f"Warning: Expert assignment incomplete: remaining sum = {remaining.sum().item()}")
 
     return num_tokens_per_expert, h_selected_experts
 
@@ -1035,15 +1069,38 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
     target_distribution = original_distribution * target_sum
     num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
     
-    # Adjust to match exact target sum
+    # Clamp to upper bound: each expert can be selected at most num_tokens times
+    # (since each token can select an expert at most once)
+    upper_bound = num_tokens
+    overflow = (num_tokens_per_expert - upper_bound).clamp(min=0).sum().item()
+    num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
+    
+    # Redistribute overflow to experts that haven't reached the bound
+    if overflow > 0:
+        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
+        for i in range(int(overflow)):
+            # Find an expert that hasn't reached the bound
+            for j in range(len(sorted_indices)):
+                expert_idx = sorted_indices[-(j + 1)]  # Start from smallest
+                if num_tokens_per_expert[expert_idx] < upper_bound:
+                    num_tokens_per_expert[expert_idx] += 1
+                    break
+    
+    # Adjust to match exact target sum (respecting upper bound)
     current_sum = num_tokens_per_expert.sum().item()
     delta = target_sum - current_sum
     if delta != 0:
         sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
         if delta > 0:
-            for i in range(delta):
-                expert_idx = sorted_indices[i % len(sorted_indices)]
-                num_tokens_per_expert[expert_idx] += 1
+            # Add to experts that haven't reached the bound
+            added = 0
+            for i in range(int(delta) * len(sorted_indices)):  # Extra iterations for safety
+                if added >= delta:
+                    break
+                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]  # Start from smallest
+                if num_tokens_per_expert[expert_idx] < upper_bound:
+                    num_tokens_per_expert[expert_idx] += 1
+                    added += 1
         else:
             for i in range(-delta):
                 expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
@@ -1056,6 +1113,10 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
     if len(num_tokens_per_expert) > 1:
         sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
         assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
+    
+    # Verify upper bound constraint
+    assert num_tokens_per_expert.max().item() <= num_tokens, \
+        f"Expert token count {num_tokens_per_expert.max().item()} exceeds num_tokens {num_tokens}"
     
     # Step 2: EPLB - Replication + Placement
     expert_tokens_np = num_tokens_per_expert.cpu().numpy()
@@ -1110,31 +1171,39 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
         print(f"EPLB: expert_replica_count (top 5 experts)={eplb_result['expert_replica_count'][:5]}")
         print("num_tokens_per_slot", num_tokens_per_slot[:10], "...", num_tokens_per_slot.sum().item())
     
-    # Step 4: Generate slot assignments (using slot IDs, not expert IDs)
-    # For routing, we still use slot IDs which map to local weights
-    _, num_tokens_per_slot_sorted_index = torch.sort(num_tokens_per_slot, descending=True)
-    slot_assignments = []
-    for slot_id in num_tokens_per_slot_sorted_index.tolist():
-        count = int(num_tokens_per_slot[slot_id].item())
-        slot_assignments.extend([slot_id] * count)
+    # Step 4: Generate slot assignments using per-token topk method
+    # Each token selects topk DIFFERENT slots with highest remaining demand
+    # This ensures no duplicate slots per token
     
     # Verify total count matches expected
     expected_total = num_tokens * topk
-    actual_total = len(slot_assignments)
+    actual_total = int(num_tokens_per_slot.sum().item())
     if actual_total != expected_total:
         raise ValueError(
             f"Slot assignment count mismatch: expected {expected_total}, got {actual_total}. "
-            f"num_tokens={num_tokens}, topk={topk}, num_slots={num_slots}, "
-            f"sum(num_tokens_per_slot)={num_tokens_per_slot.sum().item()}"
+            f"num_tokens={num_tokens}, topk={topk}, num_slots={num_slots}"
         )
     
-    slot_assignments = torch.tensor(slot_assignments, dtype=torch.int64)
-    h_selected_slots = slot_assignments.reshape(topk, num_tokens).T
+    h_selected_slots = torch.zeros((num_tokens, topk), dtype=torch.int64)
+    remaining = num_tokens_per_slot.clone().float()
+    
+    for token_id in range(num_tokens):
+        # Select topk slots with highest remaining demand
+        _, top_slots = torch.topk(remaining, topk)
+        h_selected_slots[token_id] = top_slots
+        remaining[top_slots] -= 1
+    
+    # Verify: remaining should be all zeros (or very close due to float precision)
+    if remaining.abs().max().item() !=0: 
+        raise ValueError(
+            f"Slot assignment incomplete: remaining max={remaining.max().item()}, "
+            f"min={remaining.min().item()}, sum={remaining.sum().item()}"
+        )
     
     return num_tokens_per_slot, h_selected_slots
 
 
-def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha, use_eplb=False, num_slots=None):
+def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha, use_eplb=False, num_slots=None, return_rank0_info=False):
     """Generate power law distributed router logits for MoE.
 
     Used by: sglang/collect_moe.py, vllm/collect_moe.py, trtllm/collect_moe.py
@@ -1148,10 +1217,19 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha, use_eplb=False
         use_eplb: If True, use EPLB to balance load across ranks before measuring
         num_slots: Total weight slots (for redundant experts, must be >= num_experts)
                    Only used when use_eplb=True. Default: num_experts (no redundancy)
+        return_rank0_info: If True, also return rank0 token indices and logits for WideEP simulation.
+                           In WideEP, DP size = EP size, each DP rank has num_tokens/ep tokens.
+                           This returns tokens that would be routed to EP rank 0.
 
     Returns:
-        router_logits: [num_tokens, num_slots] tensor of softmax probabilities
-                       (num_slots if use_eplb with redundancy, else num_experts)
+        If return_rank0_info=False:
+            router_logits: [num_tokens, num_slots] tensor of softmax probabilities
+        If return_rank0_info=True:
+            tuple of (router_logits, rank0_info) where rank0_info is a dict containing:
+                - 'rank0_token_mask': [num_tokens] bool tensor, True for tokens routed to rank0
+                - 'rank0_logits': [rank0_num_tokens, num_slots] filtered logits for rank0
+                - 'rank0_num_tokens': number of tokens routed to rank0
+                - 'slots_per_rank': number of slots per EP rank
     """
     import torch.nn.functional as F
 
@@ -1164,6 +1242,29 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha, use_eplb=False
         # Convert to router logits via one-hot encoding and softmax
         expert_map = F.one_hot(h_selected_slots.long(), num_classes=actual_num_slots).sum(1)
         router_logits = F.softmax(expert_map.bfloat16(), dim=1)
+        
+        if return_rank0_info:
+            # Filter tokens that have ANY topk selection in rank0
+            # In WideEP with EPLB, rank0 owns slots [0, slots_per_rank)
+            slots_per_rank = actual_num_slots // ep
+            # A token is routed to rank0 if any of its topk slots is in rank0
+            rank0_selections_mask = (h_selected_slots < slots_per_rank)
+            rank0_token_mask = rank0_selections_mask.any(dim=1)
+            rank0_logits = router_logits[rank0_token_mask]
+            rank0_num_tokens = rank0_logits.shape[0]
+            rank0_total_selections = rank0_selections_mask.sum().item()
+            # Get EPLB slot assignments for rank0 tokens
+            rank0_selected_slots = h_selected_slots[rank0_token_mask]
+            
+            rank0_info = {
+                'rank0_token_mask': rank0_token_mask,
+                'rank0_logits': rank0_logits,
+                'rank0_selected_slots': rank0_selected_slots,  # EPLB distribution for rank0 tokens
+                'rank0_num_tokens': rank0_num_tokens,
+                'slots_per_rank': slots_per_rank,
+                'rank0_total_selections': rank0_total_selections,
+            }
+            return router_logits, rank0_info
         return router_logits
     else:
         # Original power law distribution (contiguous expert groups per rank)
@@ -1173,6 +1274,27 @@ def power_law_logits_v3(num_tokens, num_experts, topk, ep, alpha, use_eplb=False
         # Convert to router logits via one-hot encoding and softmax
         expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
         router_logits = F.softmax(expert_map.bfloat16(), dim=1)
+        
+        if return_rank0_info:
+            # For non-EPLB, slots = experts, rank0 owns experts [0, experts_per_rank)
+            experts_per_rank = num_experts // ep
+            rank0_selections_mask = (h_selected_experts < experts_per_rank)
+            rank0_token_mask = rank0_selections_mask.any(dim=1)
+            rank0_logits = router_logits[rank0_token_mask]
+            rank0_num_tokens = rank0_logits.shape[0]
+            rank0_total_selections = rank0_selections_mask.sum().item()
+            # Get expert assignments for rank0 tokens (for non-EPLB, slots = experts)
+            rank0_selected_slots = h_selected_experts[rank0_token_mask]
+            
+            rank0_info = {
+                'rank0_token_mask': rank0_token_mask,
+                'rank0_logits': rank0_logits,
+                'rank0_selected_slots': rank0_selected_slots,  # Expert distribution for rank0 tokens
+                'rank0_num_tokens': rank0_num_tokens,
+                'slots_per_rank': experts_per_rank,  # For non-EPLB, slots = experts
+                'rank0_total_selections': rank0_total_selections,
+            }
+            return router_logits, rank0_info
         return router_logits
 
 
