@@ -316,8 +316,9 @@ class Mamba2CommonTestCase:
     head_dim: int  # Dimension per head
     n_groups: int  # Number of groups for B, C matrices
     chunk_size: int  # Chunk size for SSM scan
-    num_tokens_list: Optional[list[int]]  # For context phase
-    batch_size_list: Optional[list[int]]  # For generation phase
+    num_tokens_list: Optional[list[int]]  # For context phase (continuous batching)
+    batch_size_list: Optional[list[int]]  # For generation phase, or context static batching
+    seq_len_list: Optional[list[int]]  # For context phase with static batching
     model_name: str
 
 
@@ -334,8 +335,8 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
     """
     test_cases: list[Mamba2CommonTestCase] = []
 
-    # Token counts for context (prefill) phase
-    context_num_tokens = [
+    # Sequence lengths for context (prefill) phase
+    context_seq_lens = [
         1,
         2,
         4,
@@ -352,6 +353,17 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
         8192,
         16384,
         32768,
+    ]
+
+    # Batch sizes for context phase
+    context_batch_sizes = [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
     ]
 
     # Batch sizes for generation (decode) phase
@@ -372,15 +384,16 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
     # Model configurations:
     # [d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name]
     model_config_list = [
-        # Nemotron-H 3-30B (from config.json)
+        # Nemotron-H 3-Nano
         # hidden_size=2688, ssm_state_size=128, conv_kernel=4,
         # mamba_num_heads=64, mamba_head_dim=64, n_groups=8, chunk_size=128
-        [2688, 128, 4, 64, 64, 8, 128, "NEMOTRON_H_3_30B"],
-        # Nemotron-H 8B variant (smaller)
-        # Estimated: hidden_size=2048, similar ratios
-        [2048, 128, 4, 32, 64, 8, 128, "NEMOTRON_H_8B"],
+        [2688, 128, 4, 64, 64, 8, 128, "NEMOTRON_H_3_Nano"],
+        # Nemotron-H 3-Super
+        # hidden_size=4096, ssm_state_size=128, conv_kernel=4,
+        # mamba_num_heads=128, mamba_head_dim=64, n_groups=8, chunk_size=128
+        [4096, 128, 4, 128, 64, 8, 128, "NEMOTRON_H_3_Super"],
         # Generic Mamba2 configuration for interpolation coverage
-        [4096, 128, 4, 64, 64, 8, 256, "MAMBA2_GENERIC_4K"],
+        [8192, 128, 4, 64, 64, 8, 256, "MAMBA2_GENERIC_4K"],
         [1024, 64, 4, 16, 64, 4, 128, "MAMBA2_GENERIC_1K"],
     ]
 
@@ -398,8 +411,9 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
                 head_dim=head_dim,
                 n_groups=n_groups,
                 chunk_size=chunk_size,
-                num_tokens_list=context_num_tokens,
-                batch_size_list=None,
+                num_tokens_list=None,  # Not used for static batching
+                batch_size_list=context_batch_sizes,
+                seq_len_list=context_seq_lens,
                 model_name=model_name,
             )
         )
@@ -417,6 +431,7 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
                 chunk_size=chunk_size,
                 num_tokens_list=None,
                 batch_size_list=generation_batch_sizes,
+                seq_len_list=None,  # Not used for generation
                 model_name=model_name,
             )
         )
