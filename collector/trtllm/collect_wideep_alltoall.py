@@ -10,12 +10,15 @@ using NVLinkTwoSided communication strategy.
 Supports both balanced and power-law token distributions to simulate real-world
 workloads where some experts receive more tokens than others.
 
-Usage:
-    # Run with torchrun for multi-GPU:
-    torchrun --nproc_per_node=4 collect_wideep_alltoall.py
+IMPORTANT: This script MUST be run with mpirun because TensorRT-LLM's MNNVL
+(Multi-Node NVLink) uses MPI for symmetric memory management.
 
-    # Or with mpirun:
+Usage:
+    # Run with mpirun (REQUIRED):
     mpirun -np 4 python collect_wideep_alltoall.py
+
+    # For multi-node:
+    mpirun -np 8 -hostfile hostfile python collect_wideep_alltoall.py
 """
 
 import os
@@ -124,31 +127,42 @@ def get_default_test_cases(ep_size: int) -> List[AlltoallTestCase]:
 
 def init_distributed():
     """
-    Initialize distributed environment.
+    Initialize distributed environment using MPI.
+
+    MNNVL requires MPI for symmetric memory management, so this script
+    must be launched with mpirun.
 
     Returns:
         Tuple of (rank, world_size, device)
     """
-    # Try torchrun environment first
-    if "RANK" in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ.get("LOCAL_RANK", rank))
-    # Try MPI environment
-    elif "OMPI_COMM_WORLD_RANK" in os.environ:
-        rank = int(os.environ["OMPI_COMM_WORLD_RANK"])
-        world_size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
-        local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", rank))
+    # Import MPI from TensorRT-LLM's utilities
+    from tensorrt_llm._utils import mpi_comm
+
+    # Get MPI communicator
+    comm = mpi_comm()
+    rank = comm.Get_rank()
+    world_size = comm.Get_size()
+
+    # Calculate local rank (for multi-node setups)
+    # Use OMPI environment variable if available, otherwise use rank % num_gpus
+    if "OMPI_COMM_WORLD_LOCAL_RANK" in os.environ:
+        local_rank = int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
     else:
-        # Single GPU fallback
-        rank = 0
-        world_size = 1
-        local_rank = 0
+        # Assume GPUs are assigned sequentially
+        num_gpus = torch.cuda.device_count()
+        local_rank = rank % num_gpus
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
 
+    # Initialize NCCL process group for barriers (optional but useful for synchronization)
     if world_size > 1 and not dist.is_initialized():
+        # Set environment variables for torch.distributed
+        os.environ["RANK"] = str(rank)
+        os.environ["WORLD_SIZE"] = str(world_size)
+        os.environ["LOCAL_RANK"] = str(local_rank)
+        os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
+        os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "29500")
         dist.init_process_group(backend="nccl")
 
     return rank, world_size, device
@@ -187,14 +201,11 @@ def create_mapping(rank: int, world_size: int):
     mapping = Mapping(
         world_size=world_size,
         rank=rank,
-        tp_size=world_size,
+        tp_size=world_size,  # Must satisfy: tp_size * pp_size == world_size
         pp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=world_size,
     )
-    # Set MoE EP parameters
-    mapping.moe_ep_size = world_size
-    mapping.moe_ep_rank = rank
-    mapping.moe_tp_size = 1
-    mapping.moe_tp_rank = 0
 
     return mapping
 
@@ -300,16 +311,55 @@ def generate_power_law_expert_ids(
             reshaped[0], reshaped[max_rank] = reshaped[max_rank].clone(), reshaped[0].clone()
             tokens_per_expert = reshaped.view(-1)
 
-    # Build expert assignments based on token counts
-    expert_assignments = []
-    _, sorted_indices = torch.sort(tokens_per_expert, descending=True)
-    for expert_id in sorted_indices.tolist():
-        count = int(tokens_per_expert[expert_id].item())
-        expert_assignments.extend([expert_id] * count)
+    # Build expert assignments for each token
+    # Each token needs top_k DIFFERENT experts
+    expert_ids = torch.zeros((num_tokens, top_k), dtype=torch.int32, device=device)
 
-    # Reshape to [num_tokens, top_k]
-    expert_assignments = torch.tensor(expert_assignments, dtype=torch.int32, device=device)
-    expert_ids = expert_assignments.reshape(top_k, num_tokens).T.contiguous()
+    # Create a pool of expert assignments based on power-law counts
+    # Each expert appears in the pool according to its token count
+    expert_pool = []
+    for expert_id in range(num_experts):
+        count = int(tokens_per_expert[expert_id].item())
+        expert_pool.extend([expert_id] * count)
+
+    # Shuffle the pool to distribute experts randomly across tokens
+    import random
+    random.shuffle(expert_pool)
+
+    # Assign experts to tokens, ensuring each token gets top_k different experts
+    pool_idx = 0
+    for token_idx in range(num_tokens):
+        assigned_experts = set()
+        k_idx = 0
+        attempts = 0
+        max_attempts = num_experts * 2  # Prevent infinite loop
+
+        while k_idx < top_k and attempts < max_attempts:
+            if pool_idx >= len(expert_pool):
+                # Pool exhausted, wrap around
+                pool_idx = 0
+                random.shuffle(expert_pool)
+
+            expert_id = expert_pool[pool_idx]
+            pool_idx += 1
+
+            # Only assign if this expert hasn't been assigned to this token yet
+            if expert_id not in assigned_experts:
+                expert_ids[token_idx, k_idx] = expert_id
+                assigned_experts.add(expert_id)
+                k_idx += 1
+            attempts += 1
+
+        # If we couldn't fill all top_k slots (shouldn't happen normally),
+        # fill remaining with random different experts
+        if k_idx < top_k:
+            available = [e for e in range(num_experts) if e not in assigned_experts]
+            for remaining_idx in range(k_idx, top_k):
+                if available:
+                    expert_ids[token_idx, remaining_idx] = available.pop(0)
+                else:
+                    # Fallback: just use any expert
+                    expert_ids[token_idx, remaining_idx] = remaining_idx % num_experts
 
     return expert_ids
 
@@ -494,7 +544,7 @@ def benchmark_nvlink_two_sided_alltoall(
                 top_k=top_k,
                 token_count=num_tokens,
                 use_low_precision_combine=False,
-                do_reduce=True,
+                do_reduce=False,
             )
 
         # Warmup (only on first sample)
@@ -661,12 +711,11 @@ def run_wideep_alltoall(ep_size: int, perf_filename: str, device: str = "cuda:0"
     """
     Entry point for collect.py framework.
 
-    Note: This function requires multi-GPU setup with torchrun/mpirun.
-    When called from collect.py, it should spawn subprocess with proper
-    distributed environment.
+    Note: This function requires multi-GPU setup with mpirun (NOT torchrun).
+    MNNVL uses MPI for symmetric memory management.
     """
-    print(f"WideEP All-to-All benchmark requires multi-GPU setup.")
-    print(f"Please run with: torchrun --nproc_per_node={ep_size} {__file__}")
+    print(f"WideEP All-to-All benchmark requires multi-GPU setup with MPI.")
+    print(f"Please run with: mpirun -np {ep_size} python {__file__}")
 
 
 def main():
@@ -675,7 +724,8 @@ def main():
 
     if world_size < 2:
         print("ERROR: This benchmark requires at least 2 GPUs.")
-        print("Usage: torchrun --nproc_per_node=N collect_wideep_alltoall.py")
+        print("IMPORTANT: Must use mpirun (NOT torchrun) because MNNVL uses MPI.")
+        print("Usage: mpirun -np N python collect_wideep_alltoall.py")
         return
 
     try:
