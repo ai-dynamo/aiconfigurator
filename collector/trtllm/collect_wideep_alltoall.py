@@ -437,6 +437,70 @@ def generate_expert_ids(
         raise ValueError(f"Unknown distribution: {test_case.distribution}")
 
 
+def get_dispatch_data_size_bytes(num_tokens: int, hidden_size: int, moe_dtype: MoEDtype) -> int:
+    """
+    Calculate data size in bytes for AlltoAll dispatch based on MoE dtype.
+
+    Args:
+        num_tokens: Number of tokens
+        hidden_size: Hidden dimension size
+        moe_dtype: MoE data type
+
+    Returns:
+        Data size in bytes
+    """
+    if moe_dtype == MoEDtype.FLOAT16:
+        # bfloat16: 2 bytes per element
+        return num_tokens * hidden_size * 2
+    elif moe_dtype == MoEDtype.FP8:
+        # fp8: 1 byte per element
+        return num_tokens * hidden_size * 1
+    elif moe_dtype == MoEDtype.NVFP4:
+        # NVFP4: 0.5 bytes per element (2 values packed in 1 byte) + scale factors
+        # Scale factors: 1 scale per 16 elements, stored as uint8
+        data_bytes = num_tokens * (hidden_size // 2)  # packed FP4
+        sf_bytes = num_tokens * (hidden_size // 16)   # scale factors
+        return data_bytes + sf_bytes
+    else:
+        return num_tokens * hidden_size * 2
+
+
+def get_combine_data_size_bytes(num_tokens: int, hidden_size: int) -> int:
+    """
+    Calculate data size in bytes for AlltoAll combine.
+
+    Combine always uses bfloat16 (expert output precision).
+
+    Args:
+        num_tokens: Number of tokens
+        hidden_size: Hidden dimension size
+
+    Returns:
+        Data size in bytes
+    """
+    # Combine always uses bfloat16: 2 bytes per element
+    return num_tokens * hidden_size * 2
+
+
+def calculate_bandwidth_gbps(data_size_bytes: int, latency_ms: float) -> float:
+    """
+    Calculate bandwidth in GB/s.
+
+    Args:
+        data_size_bytes: Data size in bytes
+        latency_ms: Latency in milliseconds
+
+    Returns:
+        Bandwidth in GB/s
+    """
+    if latency_ms <= 0:
+        return 0.0
+    # Convert: bytes / ms -> GB/s
+    # bytes / ms = bytes * 1000 / s = KB/s * 1000 = MB/s
+    # GB/s = bytes / ms / 1e6
+    return data_size_bytes / latency_ms / 1e6
+
+
 def prepare_test_data(
     test_case: AlltoallTestCase,
     device: torch.device,
@@ -836,10 +900,23 @@ def run_benchmark(
 
             # Log results (only rank 0)
             if rank == 0:
+                # Calculate data sizes and bandwidths
+                dispatch_data_size = get_dispatch_data_size_bytes(
+                    test_case.num_tokens, test_case.hidden_size, test_case.moe_dtype
+                )
+                combine_data_size = get_combine_data_size_bytes(
+                    test_case.num_tokens, test_case.hidden_size
+                )
+
+                dispatch_bw = calculate_bandwidth_gbps(dispatch_data_size, result.dispatch_latency_ms)
+                combine_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_latency_ms)
+                combine_lp_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_low_precision_latency_ms)
+
                 print(f"  Prepare: {result.prepare_latency_ms:.3f} ms")
-                print(f"  Dispatch: {result.dispatch_latency_ms:.3f} ms")
-                print(f"  Combine: {result.combine_latency_ms:.3f} ms")
-                print(f"  Combine (low precision): {result.combine_low_precision_latency_ms:.3f} ms")
+                print(f"  Dispatch: {result.dispatch_latency_ms:.3f} ms ({dispatch_bw:.2f} GB/s, {dispatch_data_size/1024:.1f} KB)")
+                print(f"  Combine: {result.combine_latency_ms:.3f} ms ({combine_bw:.2f} GB/s, {combine_data_size/1024:.1f} KB)")
+                if result.combine_low_precision_latency_ms > 0:
+                    print(f"  Combine (low precision): {result.combine_low_precision_latency_ms:.3f} ms ({combine_lp_bw:.2f} GB/s)")
 
                 # Log each operation separately
                 log_alltoall_perf(
