@@ -638,15 +638,15 @@ def benchmark_nvlink_two_sided_alltoall(
             torch.cuda.synchronize()
 
         # Benchmark prepare
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
         for _ in range(num_iterations):
             torch.cuda.synchronize()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            start_event.record()
             alltoall_info, _ = prepare_func()
-            end.record()
-            end.synchronize()
-            all_prepare_times.append(start.elapsed_time(end))
+            end_event.record()
+            end_event.synchronize()
+            all_prepare_times.append(start_event.elapsed_time(end_event))
 
         # ============================================================================
         # Benchmark: alltoall_dispatch (All-to-All send)
@@ -668,15 +668,15 @@ def benchmark_nvlink_two_sided_alltoall(
             torch.cuda.synchronize()
 
         # Benchmark dispatch
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
         for _ in range(num_iterations):
             torch.cuda.synchronize()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            start_event.record()
             dispatched = dispatch_func()
-            end.record()
-            end.synchronize()
-            all_dispatch_times.append(start.elapsed_time(end))
+            end_event.record()
+            end_event.synchronize()
+            all_dispatch_times.append(start_event.elapsed_time(end_event))
 
         # Get dispatched hidden states for combine benchmark
         recv_hidden_states = dispatched[0]
@@ -715,15 +715,15 @@ def benchmark_nvlink_two_sided_alltoall(
             torch.cuda.synchronize()
 
         # Benchmark combine
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
         for _ in range(num_iterations):
             torch.cuda.synchronize()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            start_event.record()
             combined = combine_func()
-            end.record()
-            end.synchronize()
-            all_combine_times.append(start.elapsed_time(end))
+            end_event.record()
+            end_event.synchronize()
+            all_combine_times.append(start_event.elapsed_time(end_event))
 
         # ============================================================================
         # Benchmark: alltoall_combine_low_precision (do_reduce=False, use_low_precision_combine=True)
@@ -753,20 +753,20 @@ def benchmark_nvlink_two_sided_alltoall(
             torch.cuda.synchronize()
 
         # Benchmark combine with low precision
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
         for _ in range(num_iterations):
             torch.cuda.synchronize()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            start_event.record()
             try:
                 combined_lp = combine_low_precision_func()
-                end.record()
-                end.synchronize()
-                all_combine_low_precision_times.append(start.elapsed_time(end))
+                end_event.record()
+                end_event.synchronize()
+                all_combine_low_precision_times.append(start_event.elapsed_time(end_event))
             except Exception:
                 # Low precision combine may fail for certain configurations
-                end.record()
-                end.synchronize()
+                end_event.record()
+                end_event.synchronize()
 
     # Calculate average latencies across all samples
     prepare_latency = sum(all_prepare_times) / len(all_prepare_times) if all_prepare_times else 0.0
