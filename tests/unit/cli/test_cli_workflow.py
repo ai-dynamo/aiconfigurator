@@ -124,7 +124,7 @@ class TestCLIIntegration:
             cli_main(args)
 
         mock_builder.assert_called_once()
-        mock_execute.assert_called_once_with({"agg": mock_task_config}, mode)
+        mock_execute.assert_called_once_with({"agg": mock_task_config}, mode, top_n=5)
 
     @pytest.mark.parametrize(
         "builder_patch",
