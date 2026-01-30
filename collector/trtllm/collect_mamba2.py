@@ -20,8 +20,8 @@ Conv1D + SSM operations that are specific to Mamba2.
 
 Mamba2 Layer Flow:
     in_proj (GEMM) → Conv1D → SSM Scan/Update → out_proj (GEMM)
-    ^^^^^^^^^^^^^^^^         ^^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^
-    Use GEMM model          Benchmarked here     Use GEMM model
+    ^^^^^^^^^^^^^    ^^^^^^^^^^^^^^^^^^^^^^^    ^^^^^^^^^^^^^^^^
+    Use GEMM model       Benchmarked here       Use GEMM model
 
 Usage:
     python collect_mamba2.py
@@ -73,26 +73,50 @@ def get_mamba2_test_cases():
 
     Returns a list of test case configurations for both context (prefill)
     and generation (decode) phases.
+
+    Context phase uses static batching (batch_size x seq_len) for P/D disaggregated serving.
+    Generation phase uses batch_size only (1 token per request).
     """
     test_cases = []
 
     # Get common test cases from centralized definition
     for common_case in get_common_mamba2_test_cases():
-        test_cases.append(
-            [
-                common_case.phase,
-                common_case.d_model,
-                common_case.d_state,
-                common_case.d_conv,
-                common_case.nheads,
-                common_case.head_dim,
-                common_case.n_groups,
-                common_case.chunk_size,
-                common_case.num_tokens_list if common_case.phase == "context" else common_case.batch_size_list,
-                common_case.model_name,
-                "mamba2_perf.txt",
-            ]
-        )
+        if common_case.phase == "context":
+            # Context phase: sweep batch_size x seq_len
+            test_cases.append(
+                [
+                    common_case.phase,
+                    common_case.d_model,
+                    common_case.d_state,
+                    common_case.d_conv,
+                    common_case.nheads,
+                    common_case.head_dim,
+                    common_case.n_groups,
+                    common_case.chunk_size,
+                    common_case.batch_size_list,
+                    common_case.seq_len_list,
+                    common_case.model_name,
+                    "mamba2_perf.txt",
+                ]
+            )
+        else:
+            # Generation phase: sweep batch_size only
+            test_cases.append(
+                [
+                    common_case.phase,
+                    common_case.d_model,
+                    common_case.d_state,
+                    common_case.d_conv,
+                    common_case.nheads,
+                    common_case.head_dim,
+                    common_case.n_groups,
+                    common_case.chunk_size,
+                    common_case.batch_size_list,
+                    None,  # seq_len_list not used for generation
+                    common_case.model_name,
+                    "mamba2_perf.txt",
+                ]
+            )
 
     return test_cases
 
@@ -105,13 +129,16 @@ def run_mamba2_context_benchmark(
     head_dim: int,
     n_groups: int,
     chunk_size: int,
-    num_tokens_list: list[int],
+    batch_size_list: list[int],
+    seq_len_list: list[int],
     model_name: str,
     perf_filename: str,
     device: str = "cuda:0",
 ):
     """
     Benchmark Mamba2 SSM for context (prefill) phase.
+
+    Uses static batching (batch_size x seq_len) for P/D disaggregated serving.
 
     This benchmarks:
     1. causal_conv1d_fn - Conv1D for context phase
@@ -145,54 +172,38 @@ def run_mamba2_context_benchmark(
     D = torch.randn(nheads, device=device)  # noqa: N806
     dt_bias = torch.rand(nheads, device=device) - 4.0
 
-    for num_tokens in num_tokens_list:
-        if aic_debug == 1:
-            print(f"  Benchmarking num_tokens={num_tokens}")
+    # Sweep over batch_size x seq_len combinations
+    for batch_size in batch_size_list:
+        for seq_len in seq_len_list:
+            if aic_debug == 1:
+                print(f"  Benchmarking batch_size={batch_size}, seq_len={seq_len}")
 
-        try:
-            # Input tensor for conv1d: [num_tokens, conv_dim]
-            # This is the output of in_proj GEMM
-            xbc_input = torch.randn(1, conv_dim, num_tokens, dtype=dtype, device=device)
+            try:
+                # Input tensor for conv1d: (batch, dim, seqlen)
+                # causal_conv1d_fn expects shape (batch, dim, seqlen)
+                xbc_input = torch.randn(batch_size, conv_dim, seq_len, dtype=dtype, device=device)
 
-            # After conv1d, we split xbc into x, B, C and reshape for SSM
-            # For benchmarking, we prepare the SSM inputs directly
-            # x: [batch=1, seqlen, nheads, head_dim]
-            # B, C: [batch=1, seqlen, n_groups, d_state]
-            x = torch.randn(1, num_tokens, nheads, head_dim, dtype=dtype, device=device)
-            dt = torch.randn(1, num_tokens, nheads, dtype=dtype, device=device)
-            B = torch.randn(1, num_tokens, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
-            C = torch.randn(1, num_tokens, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
+                # Conv state cache: (batch, dim, width-1) - updated in-place by causal_conv1d_fn
+                # This matches real inference where conv_states are read/written
+                conv_state = torch.randn(batch_size, conv_dim, d_conv - 1, dtype=dtype, device=device)
 
-            # Warmup
-            torch.cuda.synchronize()
-            causal_conv1d_fn(xbc_input, conv_weight, conv_bias, activation="silu")
-            mamba_chunk_scan_combined(
-                x,
-                dt,
-                A,
-                B,
-                C,
-                chunk_size=chunk_size,
-                D=D,
-                z=None,
-                dt_bias=dt_bias,
-                dt_softplus=True,
-                return_final_states=True,
-            )
-            torch.cuda.synchronize()
+                # SSM inputs:
+                # x: [batch, seqlen, nheads, head_dim]
+                # B, C: [batch, seqlen, n_groups, d_state]
+                x = torch.randn(batch_size, seq_len, nheads, head_dim, dtype=dtype, device=device)
+                dt = torch.randn(batch_size, seq_len, nheads, dtype=dtype, device=device)
+                B = torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
+                C = torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
 
-            # Define benchmark function - Conv1D + SSM scan combined
-            # Capture loop variables as default args to satisfy ruff F821
-            def run_conv1d_and_ssm_scan(_xbc=xbc_input, _x=x, _dt=dt, _b=B, _c=C):
-                # Step 1: Causal Conv1D
-                causal_conv1d_fn(_xbc, conv_weight, conv_bias, activation="silu")
-                # Step 2: SSM Scan
+                # Warmup
+                torch.cuda.synchronize()
+                causal_conv1d_fn(xbc_input, conv_weight, conv_bias, activation="silu", conv_states=conv_state)
                 mamba_chunk_scan_combined(
-                    _x,
-                    _dt,
+                    x,
+                    dt,
                     A,
-                    _b,
-                    _c,
+                    B,
+                    C,
                     chunk_size=chunk_size,
                     D=D,
                     z=None,
@@ -200,53 +211,76 @@ def run_mamba2_context_benchmark(
                     dt_softplus=True,
                     return_final_states=True,
                 )
+                torch.cuda.synchronize()
 
-            # Benchmark with power measurement
-            with benchmark_with_power(
-                device=device,
-                kernel_func=run_conv1d_and_ssm_scan,
-                num_warmups=3,
-                num_runs=10,
-                repeat_n=1,
-                allow_graph_fail=True,
-            ) as results:
-                latency = results["latency_ms"]
-                power_stats = results["power_stats"]
+                # Define benchmark function - Conv1D + SSM scan combined
+                # Capture loop variables as default args to satisfy ruff F821
+                def run_conv1d_and_ssm_scan(_xbc=xbc_input, _conv_state=conv_state, _x=x, _dt=dt, _b=B, _c=C):
+                    # Step 1: Causal Conv1D (with conv_states for realistic memory access)
+                    causal_conv1d_fn(_xbc, conv_weight, conv_bias, activation="silu", conv_states=_conv_state)
+                    # Step 2: SSM Scan
+                    mamba_chunk_scan_combined(
+                        _x,
+                        _dt,
+                        A,
+                        _b,
+                        _c,
+                        chunk_size=chunk_size,
+                        D=D,
+                        z=None,
+                        dt_bias=dt_bias,
+                        dt_softplus=True,
+                        return_final_states=True,
+                    )
 
-            # Log performance
-            log_perf(
-                item_list=[
-                    {
-                        "phase": "context",
-                        "num_tokens": num_tokens,
-                        "d_model": d_model,
-                        "d_state": d_state,
-                        "d_conv": d_conv,
-                        "nheads": nheads,
-                        "head_dim": head_dim,
-                        "n_groups": n_groups,
-                        "chunk_size": chunk_size,
-                        "model_name": model_name,
-                        "latency": latency,
-                    }
-                ],
-                framework="TRTLLM",
-                version=tensorrt_llm.__version__,
-                device_name=torch.cuda.get_device_name(device),
-                op_name="mamba2",
-                kernel_source="conv1d_ssm_combined",
-                perf_filename=perf_filename,
-                power_stats=power_stats,
-            )
+                # Benchmark with power measurement
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=run_conv1d_and_ssm_scan,
+                    num_warmups=3,
+                    num_runs=10,
+                    repeat_n=1,
+                    allow_graph_fail=True,
+                ) as results:
+                    latency = results["latency_ms"]
+                    power_stats = results["power_stats"]
 
-            # Cleanup
-            del x, dt, B, C, xbc_input
-            gc.collect()
-            torch.cuda.empty_cache()
+                # Log performance
+                log_perf(
+                    item_list=[
+                        {
+                            "phase": "context",
+                            "batch_size": batch_size,
+                            "seq_len": seq_len,
+                            "num_tokens": batch_size * seq_len,  # Total tokens for reference
+                            "d_model": d_model,
+                            "d_state": d_state,
+                            "d_conv": d_conv,
+                            "nheads": nheads,
+                            "head_dim": head_dim,
+                            "n_groups": n_groups,
+                            "chunk_size": chunk_size,
+                            "model_name": model_name,
+                            "latency": latency,
+                        }
+                    ],
+                    framework="TRTLLM",
+                    version=tensorrt_llm.__version__,
+                    device_name=torch.cuda.get_device_name(device),
+                    op_name="mamba2",
+                    kernel_source="conv1d_ssm_combined",
+                    perf_filename=perf_filename,
+                    power_stats=power_stats,
+                )
 
-        except Exception as e:
-            print(f"  Error at num_tokens={num_tokens}: {e}")
-            continue
+                # Cleanup
+                del x, dt, B, C, xbc_input, conv_state
+                gc.collect()
+                torch.cuda.empty_cache()
+
+            except Exception as e:
+                print(f"  Error at batch_size={batch_size}, seq_len={seq_len}: {e}")
+                continue
 
 
 def run_mamba2_generation_benchmark(
@@ -307,13 +341,13 @@ def run_mamba2_generation_benchmark(
             print(f"  Benchmarking batch_size={batch_size}")
 
         try:
-            # Conv1d state: [batch, conv_dim, d_conv]
+            # Conv1d state: [batch, dim, width-1] where width = d_conv
             conv_state = torch.randn(batch_size, conv_dim, d_conv - 1, dtype=dtype, device=device)
 
             # SSM state: [batch, nheads, head_dim, d_state]
             ssm_state = torch.randn(batch_size, nheads, head_dim, d_state, dtype=dtype, device=device)
 
-            # Input for single token from in_proj: [batch, conv_dim]
+            # Input for single token from in_proj: [batch, dim]
             xbc_input = torch.randn(batch_size, conv_dim, dtype=dtype, device=device)
 
             # SSM inputs for single token: [batch, nheads, head_dim]
@@ -417,7 +451,8 @@ def run_mamba2_torch(
     head_dim: int,
     n_groups: int,
     chunk_size: int,
-    tokens_or_batch_list: list[int],
+    batch_size_list: list[int],
+    seq_len_list: list[int] | None,
     model_name: str,
     perf_filename: str,
     device: str = "cuda:0",
@@ -426,6 +461,21 @@ def run_mamba2_torch(
     Main entry point for Mamba2 benchmarking.
 
     Routes to appropriate benchmark function based on phase.
+
+    Args:
+        phase: "context" or "generation"
+        d_model: Hidden size
+        d_state: SSM state dimension
+        d_conv: Conv1d kernel size
+        nheads: Number of Mamba heads
+        head_dim: Dimension per head
+        n_groups: Number of groups for B, C matrices
+        chunk_size: Chunk size for SSM scan
+        batch_size_list: List of batch sizes to sweep
+        seq_len_list: List of sequence lengths (context only, None for generation)
+        model_name: Model configuration name
+        perf_filename: Output performance file
+        device: CUDA device string
     """
     if phase == "context":
         run_mamba2_context_benchmark(
@@ -436,7 +486,8 @@ def run_mamba2_torch(
             head_dim=head_dim,
             n_groups=n_groups,
             chunk_size=chunk_size,
-            num_tokens_list=tokens_or_batch_list,
+            batch_size_list=batch_size_list,
+            seq_len_list=seq_len_list,
             model_name=model_name,
             perf_filename=perf_filename,
             device=device,
@@ -450,7 +501,7 @@ def run_mamba2_torch(
             head_dim=head_dim,
             n_groups=n_groups,
             chunk_size=chunk_size,
-            batch_size_list=tokens_or_batch_list,
+            batch_size_list=batch_size_list,
             model_name=model_name,
             perf_filename=perf_filename,
             device=device,
@@ -483,13 +534,20 @@ if __name__ == "__main__":
             head_dim,
             n_groups,
             chunk_size,
-            tokens_or_batch_list,
+            batch_size_list,
+            seq_len_list,
             model_name,
             perf_filename,
         ) = test_case
 
         print(f"\n[{i + 1}/{len(test_cases)}] {model_name} - {phase}")
         print(f"  d_model={d_model}, nheads={nheads}, head_dim={head_dim}, d_state={d_state}, n_groups={n_groups}")
+
+        if phase == "context":
+            print(f"  batch_sizes={batch_size_list}")
+            print(f"  seq_lens={seq_len_list}")
+        else:
+            print(f"  batch_sizes={batch_size_list}")
 
         run_mamba2_torch(
             phase=phase,
@@ -500,7 +558,8 @@ if __name__ == "__main__":
             head_dim=head_dim,
             n_groups=n_groups,
             chunk_size=chunk_size,
-            tokens_or_batch_list=tokens_or_batch_list,
+            batch_size_list=batch_size_list,
+            seq_len_list=seq_len_list,
             model_name=model_name,
             perf_filename=perf_filename,
         )
