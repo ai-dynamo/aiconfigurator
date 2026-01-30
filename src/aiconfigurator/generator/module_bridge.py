@@ -220,5 +220,8 @@ def task_config_to_generator_config(
     )
 
     params = _deep_merge(params, overrides.get("Params"))
+    rule_name = overrides.get("rule")
+    if rule_name:
+        params["rule"] = rule_name
     params["ModelConfig"] = model_cfg
     return params

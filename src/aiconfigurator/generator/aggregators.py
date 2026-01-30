@@ -239,4 +239,7 @@ def generate_config_from_input_dict(
     )
     if target.get("ModelConfig"):
         params["ModelConfig"] = target.get("ModelConfig", {})
+    rule_name = input_params.get("rule")
+    if rule_name:
+        params["rule"] = rule_name
     return params
