@@ -1014,13 +1014,15 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
         
     Returns:
         Tuple of (num_tokens_per_slot, h_selected_slots):
-            - num_tokens_per_slot: Token count per slot (after remap, rank 0 is slowest)
+            - num_tokens_per_slot: Token count per slot (after remap, rank 0 is slowest) [num_slots]
             - h_selected_slots: Slot assignments matrix [num_tokens, topk]
     """
     import torch
     
     if num_slots is None:
         num_slots = num_experts
+    
+    slots_per_rank = num_slots // ep
     
     # Step 1: Sample initial power law distribution for experts
     if num_tokens * topk > num_experts:
@@ -1063,7 +1065,6 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
     rank_slots = eplb_result['rank_slots']
     slot_tokens = eplb_result['slot_tokens']
     slot_to_expert = eplb_result['slot_to_expert']
-    slots_per_rank = num_slots // ep
     
     # Step 3: Rearrange slots so rank 0 owns the slowest rank's slots
     # Create new slot distribution array, rearranged according to EPLB result
@@ -1098,7 +1099,7 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
         top_indices = torch.argsort(fractional_parts, descending=True)[:remainder]
         floored[top_indices] += 1
     
-    num_tokens_per_slot = floored
+    num_tokens_per_slot = floored #this num_tokens_per_slot is a list and each index means it's slot id
     
     # Debug output
     aic_debug = int(os.getenv("AIC_DEBUG", "0"))

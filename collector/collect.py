@@ -681,13 +681,21 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
             else None,
         },
-        # WideEP MOE collection (computation only, single GPU)
+        # WideEP MOE Compute collection (computation only, excludes AlltoAll)
         {
             "name": "trtllm",
-            "type": "wideep_moe",
-            "module": "collector.trtllm.collect_wideep_moe",
-            "get_func": "get_wideep_moe_test_cases",
-            "run_func": "run_wideep_moe",
+            "type": "moe_wideep",
+            "module": "collector.trtllm.collect_wideep_moe_compute",
+            "get_func": "get_wideep_moe_compute_test_cases",
+            "run_func": "run_wideep_moe_compute",
+        },
+        # WideEP MOE Compute with EPLB collection
+        {
+            "name": "trtllm",
+            "type": "moe_wideep_eplb",
+            "module": "collector.trtllm.collect_wideep_moe_compute",
+            "get_func": "get_wideep_moe_compute_eplb_test_cases",
+            "run_func": "run_wideep_moe_compute",
         },
     ]
 
@@ -760,7 +768,9 @@ def main():
             "mla_bmm_gen_post",
             "moe",
             "moe_eplb",  # MoE with EPLB (Expert Parallel Load Balancer)
-            "wideep_moe",  # TensorRT-LLM WideEP MoE computation (single GPU)
+            "moe_wideep",  # WideEP MoE compute (excludes AlltoAll)
+            "moe_wideep_eplb",  # WideEP MoE compute with EPLB
+            "wideep_moe",  # TensorRT-LLM WideEP MoE computation (single GPU) - from aic
             "wideep_mla_context",
             "wideep_mla_generation",
             "wideep_mlp_context",
