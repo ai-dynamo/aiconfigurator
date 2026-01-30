@@ -65,6 +65,9 @@ from tensorrt_llm._torch.modules.mamba.selective_state_update import selective_s
 from tensorrt_llm._torch.modules.mamba.ssd_combined import mamba_chunk_scan_combined
 
 aic_debug = int(os.getenv("aic_mamba2_debug", "0"))  # noqa: SIM112
+# Use cached inputs (same data each iteration) instead of randomized inputs
+# Set AIC_MAMBA2_CACHED_INPUTS=1 to enable cached mode (saves memory but may be overly optimistic)
+aic_cached_inputs = int(os.getenv("AIC_MAMBA2_CACHED_INPUTS", "0"))
 
 
 def get_mamba2_test_cases():
@@ -179,52 +182,30 @@ def run_mamba2_context_benchmark(
                 print(f"  Benchmarking batch_size={batch_size}, seq_len={seq_len}")
 
             try:
-                # Input tensor for conv1d: (batch, dim, seqlen)
-                # causal_conv1d_fn expects shape (batch, dim, seqlen)
-                xbc_input = torch.randn(batch_size, conv_dim, seq_len, dtype=dtype, device=device)
+                num_warmups = 3
+                num_runs = 10
+                total_iters = num_warmups + num_runs
 
                 # Conv state cache: (batch, dim, width-1) - updated in-place by causal_conv1d_fn
-                # This matches real inference where conv_states are read/written
                 conv_state = torch.randn(batch_size, conv_dim, d_conv - 1, dtype=dtype, device=device)
 
-                # SSM inputs:
-                # x: [batch, seqlen, nheads, head_dim]
-                # B, C: [batch, seqlen, n_groups, d_state]
-                x = torch.randn(batch_size, seq_len, nheads, head_dim, dtype=dtype, device=device)
-                dt = torch.randn(batch_size, seq_len, nheads, dtype=dtype, device=device)
-                B = torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
-                C = torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
+                if aic_cached_inputs:
+                    # Cached mode: use same inputs for all iterations (saves memory)
+                    xbc_input = torch.randn(batch_size, conv_dim, seq_len, dtype=dtype, device=device)
+                    x = torch.randn(batch_size, seq_len, nheads, head_dim, dtype=dtype, device=device)
+                    dt = torch.randn(batch_size, seq_len, nheads, dtype=dtype, device=device)
+                    B = torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
+                    C = torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
 
-                # Warmup
-                torch.cuda.synchronize()
-                causal_conv1d_fn(xbc_input, conv_weight, conv_bias, activation="silu", conv_states=conv_state)
-                mamba_chunk_scan_combined(
-                    x,
-                    dt,
-                    A,
-                    B,
-                    C,
-                    chunk_size=chunk_size,
-                    D=D,
-                    z=None,
-                    dt_bias=dt_bias,
-                    dt_softplus=True,
-                    return_final_states=True,
-                )
-                torch.cuda.synchronize()
-
-                # Define benchmark function - Conv1D + SSM scan combined
-                # Capture loop variables as default args to satisfy ruff F821
-                def run_conv1d_and_ssm_scan(_xbc=xbc_input, _conv_state=conv_state, _x=x, _dt=dt, _b=B, _c=C):
-                    # Step 1: Causal Conv1D (with conv_states for realistic memory access)
-                    causal_conv1d_fn(_xbc, conv_weight, conv_bias, activation="silu", conv_states=_conv_state)
-                    # Step 2: SSM Scan
+                    # Warmup
+                    torch.cuda.synchronize()
+                    causal_conv1d_fn(xbc_input, conv_weight, conv_bias, activation="silu", conv_states=conv_state)
                     mamba_chunk_scan_combined(
-                        _x,
-                        _dt,
+                        x,
+                        dt,
                         A,
-                        _b,
-                        _c,
+                        B,
+                        C,
                         chunk_size=chunk_size,
                         D=D,
                         z=None,
@@ -232,13 +213,96 @@ def run_mamba2_context_benchmark(
                         dt_softplus=True,
                         return_final_states=True,
                     )
+                    torch.cuda.synchronize()
+
+                    def run_conv1d_and_ssm_scan(_xbc=xbc_input, _conv_state=conv_state, _x=x, _dt=dt, _b=B, _c=C):
+                        causal_conv1d_fn(_xbc, conv_weight, conv_bias, activation="silu", conv_states=_conv_state)
+                        mamba_chunk_scan_combined(
+                            _x,
+                            _dt,
+                            A,
+                            _b,
+                            _c,
+                            chunk_size=chunk_size,
+                            D=D,
+                            z=None,
+                            dt_bias=dt_bias,
+                            dt_softplus=True,
+                            return_final_states=True,
+                        )
+                else:
+                    # Randomized mode (default): pre-generate pool of random inputs
+                    # to avoid L2 cache effects while excluding tensor creation from timing
+                    input_pool = {
+                        "xbc": [
+                            torch.randn(batch_size, conv_dim, seq_len, dtype=dtype, device=device)
+                            for _ in range(total_iters)
+                        ],
+                        "x": [
+                            torch.randn(batch_size, seq_len, nheads, head_dim, dtype=dtype, device=device)
+                            for _ in range(total_iters)
+                        ],
+                        "dt": [
+                            torch.randn(batch_size, seq_len, nheads, dtype=dtype, device=device)
+                            for _ in range(total_iters)
+                        ],
+                        "B": [
+                            torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)
+                            for _ in range(total_iters)
+                        ],
+                        "C": [
+                            torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)
+                            for _ in range(total_iters)
+                        ],
+                    }
+                    iter_idx = [0]  # Mutable counter for closure
+
+                    # Warmup with first set of inputs
+                    torch.cuda.synchronize()
+                    causal_conv1d_fn(
+                        input_pool["xbc"][0], conv_weight, conv_bias, activation="silu", conv_states=conv_state
+                    )
+                    mamba_chunk_scan_combined(
+                        input_pool["x"][0],
+                        input_pool["dt"][0],
+                        A,
+                        input_pool["B"][0],
+                        input_pool["C"][0],
+                        chunk_size=chunk_size,
+                        D=D,
+                        z=None,
+                        dt_bias=dt_bias,
+                        dt_softplus=True,
+                        return_final_states=True,
+                    )
+                    torch.cuda.synchronize()
+
+                    def run_conv1d_and_ssm_scan(_pool=input_pool, _conv_state=conv_state, _idx=iter_idx):
+                        idx = _idx[0] % total_iters
+                        _idx[0] += 1
+                        causal_conv1d_fn(
+                            _pool["xbc"][idx], conv_weight, conv_bias, activation="silu", conv_states=_conv_state
+                        )
+                        mamba_chunk_scan_combined(
+                            _pool["x"][idx],
+                            _pool["dt"][idx],
+                            A,
+                            _pool["B"][idx],
+                            _pool["C"][idx],
+                            chunk_size=chunk_size,
+                            D=D,
+                            z=None,
+                            dt_bias=dt_bias,
+                            dt_softplus=True,
+                            return_final_states=True,
+                        )
 
                 # Benchmark with power measurement
                 with benchmark_with_power(
                     device=device,
                     kernel_func=run_conv1d_and_ssm_scan,
-                    num_warmups=3,
-                    num_runs=10,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
                     repeat_n=1,
                     allow_graph_fail=True,
                 ) as results:
@@ -274,7 +338,10 @@ def run_mamba2_context_benchmark(
                 )
 
                 # Cleanup
-                del x, dt, B, C, xbc_input, conv_state
+                if aic_cached_inputs:
+                    del x, dt, B, C, xbc_input, conv_state
+                else:
+                    del input_pool, conv_state
                 gc.collect()
                 torch.cuda.empty_cache()
 
@@ -341,65 +408,120 @@ def run_mamba2_generation_benchmark(
             print(f"  Benchmarking batch_size={batch_size}")
 
         try:
+            num_warmups = 3
+            num_runs = 10
+            total_iters = num_warmups + num_runs
             # Conv1d state: [batch, dim, width-1] where width = d_conv
             conv_state = torch.randn(batch_size, conv_dim, d_conv - 1, dtype=dtype, device=device)
 
             # SSM state: [batch, nheads, head_dim, d_state]
             ssm_state = torch.randn(batch_size, nheads, head_dim, d_state, dtype=dtype, device=device)
 
-            # Input for single token from in_proj: [batch, dim]
-            xbc_input = torch.randn(batch_size, conv_dim, dtype=dtype, device=device)
-
-            # SSM inputs for single token: [batch, nheads, head_dim]
-            x = torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
-            dt = torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
-            B = torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
-            C = torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
-
-            # Warmup
-            torch.cuda.synchronize()
-            causal_conv1d_update(xbc_input, conv_state, conv_weight, conv_bias, activation="silu")
-            selective_state_update(
-                ssm_state,
-                x,
-                dt,
-                A,
-                B,
-                C,
-                D,
-                z=None,
-                dt_bias=dt_bias,
-                dt_softplus=True,
-            )
-            torch.cuda.synchronize()
-
-            # Define benchmark function - Conv1D update + SSM state update
-            # Capture loop variables as default args to satisfy ruff F821
-            def run_conv1d_update_and_state_update(
-                _xbc=xbc_input, _conv_state=conv_state, _ssm_state=ssm_state, _x=x, _dt=dt, _b=B, _c=C
-            ):
-                # Step 1: Causal Conv1D update (processes single token, updates conv_state)
-                causal_conv1d_update(_xbc, _conv_state, conv_weight, conv_bias, activation="silu")
-                # Step 2: SSM state update
+            if aic_cached_inputs:
+                # Cached mode: use same inputs for all iterations (saves memory)
+                xbc_input = torch.randn(batch_size, conv_dim, dtype=dtype, device=device)
+                x = torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
+                dt = torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
+                B = torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
+                C = torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
+                # Warmup
+                torch.cuda.synchronize()
+                causal_conv1d_update(xbc_input, conv_state, conv_weight, conv_bias, activation="silu")
                 selective_state_update(
-                    _ssm_state,
-                    _x,
-                    _dt,
+                    ssm_state,
+                    x,
+                    dt,
                     A,
-                    _b,
-                    _c,
+                    B,
+                    C,
                     D,
                     z=None,
                     dt_bias=dt_bias,
                     dt_softplus=True,
                 )
+                torch.cuda.synchronize()
+
+                def run_conv1d_update_and_state_update(
+                    _xbc=xbc_input, _conv_state=conv_state, _ssm_state=ssm_state, _x=x, _dt=dt, _b=B, _c=C
+                ):
+                    causal_conv1d_update(_xbc, _conv_state, conv_weight, conv_bias, activation="silu")
+                    selective_state_update(
+                        _ssm_state,
+                        _x,
+                        _dt,
+                        A,
+                        _b,
+                        _c,
+                        D,
+                        z=None,
+                        dt_bias=dt_bias,
+                        dt_softplus=True,
+                    )
+            else:
+                # Randomized mode (default): pre-generate pool of random inputs
+                input_pool = {
+                    "xbc": [torch.randn(batch_size, conv_dim, dtype=dtype, device=device) for _ in range(total_iters)],
+                    "x": [
+                        torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
+                        for _ in range(total_iters)
+                    ],
+                    "dt": [
+                        torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
+                        for _ in range(total_iters)
+                    ],
+                    "B": [
+                        torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)
+                        for _ in range(total_iters)
+                    ],
+                    "C": [
+                        torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)
+                        for _ in range(total_iters)
+                    ],
+                }
+                iter_idx = [0]  # Mutable counter for closure
+
+                # Warmup
+                torch.cuda.synchronize()
+                causal_conv1d_update(input_pool["xbc"][0], conv_state, conv_weight, conv_bias, activation="silu")
+                selective_state_update(
+                    ssm_state,
+                    input_pool["x"][0],
+                    input_pool["dt"][0],
+                    A,
+                    input_pool["B"][0],
+                    input_pool["C"][0],
+                    D,
+                    z=None,
+                    dt_bias=dt_bias,
+                    dt_softplus=True,
+                )
+                torch.cuda.synchronize()
+
+                def run_conv1d_update_and_state_update(
+                    _pool=input_pool, _conv_state=conv_state, _ssm_state=ssm_state, _idx=iter_idx
+                ):
+                    idx = _idx[0] % total_iters
+                    _idx[0] += 1
+                    causal_conv1d_update(_pool["xbc"][idx], _conv_state, conv_weight, conv_bias, activation="silu")
+                    selective_state_update(
+                        _ssm_state,
+                        _pool["x"][idx],
+                        _pool["dt"][idx],
+                        A,
+                        _pool["B"][idx],
+                        _pool["C"][idx],
+                        D,
+                        z=None,
+                        dt_bias=dt_bias,
+                        dt_softplus=True,
+                    )
 
             # Benchmark with power measurement
             with benchmark_with_power(
                 device=device,
                 kernel_func=run_conv1d_update_and_state_update,
-                num_warmups=3,
-                num_runs=10,
+                num_warmups=num_warmups,
+                num_runs=num_runs,
                 repeat_n=1,
                 allow_graph_fail=True,
             ) as results:
@@ -433,7 +555,10 @@ def run_mamba2_generation_benchmark(
             )
 
             # Cleanup
-            del ssm_state, conv_state, x, dt, B, C, xbc_input
+            if aic_cached_inputs:
+                del ssm_state, conv_state, x, dt, B, C, xbc_input
+            else:
+                del ssm_state, conv_state, input_pool
             gc.collect()
             torch.cuda.empty_cache()
 
