@@ -49,13 +49,28 @@ class ConfigLayer:
 
 @dataclass
 class TaskContext:
+    """Context for building a TaskConfig.
+
+    For agg mode: uses backend_name, backend_version, backend_deploy_version.
+    For disagg mode:
+      - Prefill workers use backend_name, backend_version, backend_deploy_version
+      - Decode workers use decode_backend_name, decode_backend_version, decode_backend_deploy_version
+        (with fallback to the main backend_* fields if not specified)
+    """
+
     serving_mode: Literal["agg", "disagg"]
     model_path: str
     model_family: str
     system_name: str
     decode_system_name: str | None
+    # Backend for agg mode, or prefill workers in disagg mode
     backend_name: str
     backend_version: str | None
+    backend_deploy_version: str | None
+    # Backend for decode workers in disagg mode (falls back to backend_* if None)
+    decode_backend_name: str | None
+    decode_backend_version: str | None
+    decode_backend_deploy_version: str | None
     use_specific_quant_mode: str | None
     isl: int
     osl: int
@@ -73,10 +88,46 @@ class TaskContext:
     def is_moe(self) -> bool:
         return check_is_moe(self.model_path)
 
-    def resolved_backend_version_for(self, system_name: str) -> str:
-        if self.backend_version is not None:
-            return self.backend_version
-        return get_latest_database_version(system=system_name, backend=self.backend_name)
+    @property
+    def effective_prefill_backend(self) -> str:
+        """Get the backend for prefill workers (same as backend_name)."""
+        return self.backend_name
+
+    @property
+    def effective_decode_backend(self) -> str:
+        """Get the backend for decode workers (falls back to backend_name)."""
+        return self.decode_backend_name or self.backend_name
+
+    @property
+    def effective_decode_backend_version(self) -> str | None:
+        """Get the backend version for decode workers (falls back to backend_version)."""
+        return self.decode_backend_version if self.decode_backend_version is not None else self.backend_version
+
+    @property
+    def effective_decode_backend_deploy_version(self) -> str | None:
+        """Get the deploy version for decode workers (falls back to backend_deploy_version)."""
+        return (
+            self.decode_backend_deploy_version
+            if self.decode_backend_deploy_version is not None
+            else self.backend_deploy_version
+        )
+
+    def resolved_backend_version(self, system_name: str, backend_name: str, explicit_version: str | None = None) -> str:
+        """Get the resolved backend version for a given system and backend.
+
+        Used for agg mode, disagg prefill, and disagg decode workers.
+
+        Args:
+            system_name: The system to get the version for.
+            backend_name: The backend to get the version for.
+            explicit_version: If provided, use this version. Otherwise, auto-detect latest.
+
+        Returns:
+            The resolved version string.
+        """
+        if explicit_version is not None:
+            return explicit_version
+        return get_latest_database_version(system=system_name, backend=backend_name)
 
 
 def _deep_merge(target: dict, source: Mapping, *, allow_new: bool = True) -> dict:
@@ -195,7 +246,7 @@ class TaskConfigFactory:
         worker_config = {
             "system_name": ctx.system_name,
             "backend_name": ctx.backend_name,
-            "backend_version": ctx.resolved_backend_version_for(ctx.system_name),
+            "backend_version": ctx.resolved_backend_version(ctx.system_name, ctx.backend_name, ctx.backend_version),
             "num_gpu_per_worker": [1, 2, 4, 8],
             "tp_list": [1, 2, 4, 8],
             "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
@@ -258,14 +309,94 @@ class TaskConfigFactory:
         }
 
     @staticmethod
+    def _apply_moe_worker_config(
+        worker_config: dict,
+        backend_name: str,
+        enable_wideep: bool,
+        should_enable_pp: bool,
+        is_prefill: bool,
+    ) -> None:
+        """Apply backend-specific MoE configuration to a worker config.
+
+        Args:
+            worker_config: The worker config dict to modify in-place.
+            backend_name: The backend name for this worker.
+            enable_wideep: Whether wideep is enabled.
+            should_enable_pp: Whether pipeline parallelism should be enabled.
+            is_prefill: True for prefill worker, False for decode worker.
+        """
+        if backend_name == "trtllm":
+            if enable_wideep:
+                if is_prefill:
+                    worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32]
+                    worker_config["tp_list"] = [1, 2, 4, 8]
+                    worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
+                    worker_config["dp_list"] = [1, 2, 4, 8, 16, 32]
+                    worker_config["moe_tp_list"] = [1]
+                    worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32]
+                else:
+                    worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32, 64]
+                    worker_config["tp_list"] = [1, 2, 4, 8]
+                    worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
+                    worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
+                    worker_config["moe_tp_list"] = [1]
+                    worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32, 64]
+            else:
+                parallel_config_list = [1, 2, 4, 8]
+                worker_config["num_gpu_per_worker"] = parallel_config_list
+                worker_config["tp_list"] = parallel_config_list
+                worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                worker_config["dp_list"] = parallel_config_list
+                worker_config["moe_tp_list"] = parallel_config_list
+                worker_config["moe_ep_list"] = parallel_config_list
+        elif backend_name == "sglang":
+            if enable_wideep:
+                if is_prefill:
+                    worker_config["num_gpu_per_worker"] = [8, 16, 32]
+                    worker_config["tp_list"] = [1, 2, 4, 8]
+                    worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
+                    worker_config["dp_list"] = [1, 2, 4, 8, 16, 32]
+                    worker_config["moe_tp_list"] = [1]
+                    worker_config["moe_ep_list"] = [8, 16, 32]
+                else:
+                    worker_config["num_gpu_per_worker"] = [8, 16, 32, 64]
+                    worker_config["tp_list"] = [1, 2, 4, 8]
+                    worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
+                    worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
+                    worker_config["moe_tp_list"] = [1]
+                    worker_config["moe_ep_list"] = [8, 16, 32, 64]
+            else:
+                parallel_config_list = [1, 2, 4, 8]
+                worker_config["num_gpu_per_worker"] = parallel_config_list
+                worker_config["tp_list"] = parallel_config_list
+                worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                worker_config["dp_list"] = parallel_config_list
+                worker_config["moe_tp_list"] = parallel_config_list
+                worker_config["moe_ep_list"] = [1]
+        elif backend_name == "vllm":
+            parallel_config_list = [1, 2, 4, 8]
+            worker_config["num_gpu_per_worker"] = parallel_config_list
+            worker_config["tp_list"] = parallel_config_list
+            worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+            worker_config["dp_list"] = parallel_config_list
+            worker_config["moe_tp_list"] = parallel_config_list
+            worker_config["moe_ep_list"] = parallel_config_list
+        else:
+            raise ValueError(f"Invalid backend for disagg MoE config: {backend_name}")
+
+    @staticmethod
     def _disagg_defaults_layer(ctx: TaskContext) -> dict:
         should_enable_pp = False
         decode_system = ctx.decode_system_name or ctx.system_name
 
+        # Get effective backends for prefill and decode workers
+        prefill_backend = ctx.effective_prefill_backend
+        decode_backend = ctx.effective_decode_backend
+
         prefill_worker_config = {
             "system_name": ctx.system_name,
-            "backend_name": ctx.backend_name,
-            "backend_version": ctx.resolved_backend_version_for(ctx.system_name),
+            "backend_name": prefill_backend,
+            "backend_version": ctx.resolved_backend_version(ctx.system_name, prefill_backend, ctx.backend_version),
             "num_gpu_per_worker": [1, 2, 4, 8],
             "tp_list": [1, 2, 4, 8],
             "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
@@ -276,8 +407,10 @@ class TaskConfigFactory:
 
         decode_worker_config = {
             "system_name": decode_system,
-            "backend_name": ctx.backend_name,
-            "backend_version": ctx.resolved_backend_version_for(decode_system),
+            "backend_name": decode_backend,
+            "backend_version": ctx.resolved_backend_version(
+                decode_system, decode_backend, ctx.effective_decode_backend_version
+            ),
             "num_gpu_per_worker": [1, 2, 4, 8],
             "tp_list": [1, 2, 4, 8],
             "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
@@ -296,88 +429,14 @@ class TaskConfigFactory:
                 decode_worker_config["tp_list"] = [1, 2, 4, 8, 16]
                 decode_worker_config["pp_list"] = [1]
         else:
-            if ctx.backend_name == "trtllm":
-                if ctx.enable_wideep:
-                    # trtllm + wideep (keep previous logic)
-                    prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32]
-                    prefill_worker_config["tp_list"] = [1, 2, 4, 8]
-                    prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
-                    prefill_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32]
-                    prefill_worker_config["moe_tp_list"] = [1]
-                    prefill_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32]
-
-                    decode_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32, 64]
-                    decode_worker_config["tp_list"] = [1, 2, 4, 8]
-                    decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
-                    decode_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
-                    decode_worker_config["moe_tp_list"] = [1]
-                    decode_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32, 64]
-                else:
-                    parallel_config_list = [1, 2, 4, 8]
-
-                    prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
-                    prefill_worker_config["tp_list"] = parallel_config_list
-                    prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
-                    prefill_worker_config["dp_list"] = parallel_config_list
-                    prefill_worker_config["moe_tp_list"] = parallel_config_list
-                    prefill_worker_config["moe_ep_list"] = parallel_config_list
-
-                    decode_worker_config["num_gpu_per_worker"] = parallel_config_list
-                    decode_worker_config["tp_list"] = parallel_config_list
-                    decode_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
-                    decode_worker_config["dp_list"] = parallel_config_list
-                    decode_worker_config["moe_tp_list"] = parallel_config_list
-                    decode_worker_config["moe_ep_list"] = parallel_config_list
-            elif ctx.backend_name == "sglang":
-                if ctx.enable_wideep:
-                    # sglang + wideep (keep previous logic)
-                    prefill_worker_config["num_gpu_per_worker"] = [8, 16, 32]
-                    prefill_worker_config["tp_list"] = [1, 2, 4, 8]
-                    prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
-                    prefill_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32]
-                    prefill_worker_config["moe_tp_list"] = [1]
-                    prefill_worker_config["moe_ep_list"] = [8, 16, 32]
-
-                    decode_worker_config["num_gpu_per_worker"] = [8, 16, 32, 64]
-                    decode_worker_config["tp_list"] = [1, 2, 4, 8]
-                    decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
-                    decode_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
-                    decode_worker_config["moe_tp_list"] = [1]
-                    decode_worker_config["moe_ep_list"] = [8, 16, 32, 64]
-                else:
-                    parallel_config_list = [1, 2, 4, 8]
-
-                    prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
-                    prefill_worker_config["tp_list"] = parallel_config_list
-                    prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
-                    prefill_worker_config["dp_list"] = parallel_config_list
-                    prefill_worker_config["moe_tp_list"] = parallel_config_list
-                    prefill_worker_config["moe_ep_list"] = [1]
-
-                    decode_worker_config["num_gpu_per_worker"] = parallel_config_list
-                    decode_worker_config["tp_list"] = parallel_config_list
-                    decode_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
-                    decode_worker_config["dp_list"] = parallel_config_list
-                    decode_worker_config["moe_tp_list"] = parallel_config_list
-                    decode_worker_config["moe_ep_list"] = [1]
-            elif ctx.backend_name == "vllm":
-                parallel_config_list = [1, 2, 4, 8]
-
-                prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
-                prefill_worker_config["tp_list"] = parallel_config_list
-                prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
-                prefill_worker_config["dp_list"] = parallel_config_list
-                prefill_worker_config["moe_tp_list"] = parallel_config_list
-                prefill_worker_config["moe_ep_list"] = parallel_config_list
-
-                decode_worker_config["num_gpu_per_worker"] = parallel_config_list
-                decode_worker_config["tp_list"] = parallel_config_list
-                decode_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
-                decode_worker_config["dp_list"] = parallel_config_list
-                decode_worker_config["moe_tp_list"] = parallel_config_list
-                decode_worker_config["moe_ep_list"] = parallel_config_list
-            else:
-                raise ValueError(f"Invalid backend: {ctx.backend_name}")
+            # Apply prefill backend-specific MoE configuration
+            TaskConfigFactory._apply_moe_worker_config(
+                prefill_worker_config, prefill_backend, ctx.enable_wideep, should_enable_pp, is_prefill=True
+            )
+            # Apply decode backend-specific MoE configuration
+            TaskConfigFactory._apply_moe_worker_config(
+                decode_worker_config, decode_backend, ctx.enable_wideep, should_enable_pp, is_prefill=False
+            )
 
         replica_config = {
             "num_gpu_per_replica": [
@@ -701,6 +760,10 @@ class TaskConfig:
         decode_system_name: str | None = None,
         backend_name: str = "trtllm",
         backend_version: str | None = None,
+        backend_deploy_version: str | None = None,
+        decode_backend_name: str | None = None,
+        decode_backend_version: str | None = None,
+        decode_backend_deploy_version: str | None = None,
         use_specific_quant_mode: str | None = None,
         isl: int = 4000,
         osl: int = 1000,
@@ -726,12 +789,19 @@ class TaskConfig:
         TODO: To refactor this part to unify the final config
 
         Args:
-            serving_mode: The serving mode of the task.
+            serving_mode: The serving mode of the task ('agg' or 'disagg').
             model_path: The name of the model.
-            system_name: The name of the system.
-            decode_system_name: The name of the decode system.
-            backend_name: The name of the backend.
-            backend_version: The version of the backend.
+            system_name: The name of the system (for agg, or prefill in disagg).
+            decode_system_name: The name of the decode system (disagg only).
+            backend_name: Backend for agg mode, or prefill workers in disagg mode.
+            backend_version: Backend version for performance estimation (agg/prefill).
+            backend_deploy_version: Backend version for deployment artifacts (agg/prefill).
+            decode_backend_name: For disagg mode, backend for decode workers.
+                If None, falls back to backend_name.
+            decode_backend_version: For disagg mode, backend version for decode workers.
+                If None, falls back to backend_version.
+            decode_backend_deploy_version: For disagg mode, deploy version for decode workers.
+                If None, falls back to backend_deploy_version.
             use_specific_quant_mode: The specific quant mode to use.
             isl: The input sequence length.
             osl: The output sequence length.
@@ -742,6 +812,7 @@ class TaskConfig:
             total_gpus: The total number of GPUs.
             profiles: The profiles to use.
             yaml_config: The YAML configuration.
+            database_mode: The database mode for performance estimation.
         """
         self.serving_mode = serving_mode
         self.model_path = model_path
@@ -749,6 +820,10 @@ class TaskConfig:
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
         self.backend_version = backend_version
+        self.backend_deploy_version = backend_deploy_version
+        self.decode_backend_name = decode_backend_name
+        self.decode_backend_version = decode_backend_version
+        self.decode_backend_deploy_version = decode_backend_deploy_version
         self.use_specific_quant_mode = use_specific_quant_mode
         yaml_mode = "patch"
         yaml_patch: dict = {}
@@ -777,6 +852,10 @@ class TaskConfig:
             decode_system_name=decode_system_name,
             backend_name=backend_name,
             backend_version=backend_version,
+            backend_deploy_version=backend_deploy_version,
+            decode_backend_name=decode_backend_name,
+            decode_backend_version=decode_backend_version,
+            decode_backend_deploy_version=decode_backend_deploy_version,
             use_specific_quant_mode=use_specific_quant_mode,
             isl=isl,
             osl=osl,
@@ -875,6 +954,21 @@ class TaskConfig:
 
         # Validate requested quant modes against available perf data early, to avoid
         # late interpolation/assert failures and to provide actionable guidance.
+        # For disagg mode with heterogeneous backends (different prefill/decode backends),
+        # skip early validation since each backend has its own database.
+        # The actual validation will happen during pareto analysis for each backend.
+        if self.config.serving_mode == "disagg":
+            prefill_backend = self.config.prefill_worker_config.backend_name
+            decode_backend = self.config.decode_worker_config.backend_name
+            if prefill_backend != decode_backend:
+                # Heterogeneous backends - skip early validation, let downstream handle it
+                logger.debug(
+                    "Skipping early quant mode validation for heterogeneous disagg config (prefill=%s, decode=%s)",
+                    prefill_backend,
+                    decode_backend,
+                )
+                return
+
         try:
             database = get_database(system=self.system_name, backend=self.backend_name, version=self.backend_version)
         except Exception:

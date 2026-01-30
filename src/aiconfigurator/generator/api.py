@@ -257,26 +257,31 @@ def generate_backend_config(
 
 def generate_backend_artifacts(
     params: dict[str, Any],
-    backend: str,
+    role_backends: dict[str, str],
+    role_versions: Optional[dict[str, str]] = None,
     templates_dir: Optional[str] = None,
     output_dir: Optional[str] = None,
-    backend_version: Optional[str] = None,
 ) -> dict[str, str]:
     """
     Generate complete backend artifacts including run scripts, configs, and k8s YAML.
 
     Args:
         params: Complete parameter configuration
-        backend: Target backend name (e.g., 'trtllm', 'vllm', 'sglang')
+        role_backends: Mapping of role (prefill/decode/agg) to backend name
+        role_versions: Optional mapping of role to version string
         templates_dir: Optional directory containing templates
         output_dir: Optional directory to save generated files
-        backend_version: Optional version string for version-specific template selection
 
     Returns:
         Dictionary mapping artifact names to their content
     """
     logger = logging.getLogger(__name__)
-    artifacts = render_backend_templates(params, backend, templates_dir, backend_version)
+    artifacts = render_backend_templates(
+        params,
+        role_backends=role_backends,
+        role_versions=role_versions,
+        templates_dir=templates_dir,
+    )
 
     if output_dir:
         params_obj = params.get("params", {})
@@ -359,10 +364,20 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
         help="Print generator schema help (deploy, backend, or all) and exit.",
     )
     grp.add_argument(
-        "--generated_config_version",
+        "--backend_deploy_version",
         type=str,
         default=None,
-        help="Backend template version for generated artifacts (e.g. 1.1.0rc5).",
+        help="Backend version for deployment artifact generation (e.g. 1.1.0rc5). "
+        "If not specified, falls back to --backend_version.",
+    )
+    grp.add_argument(
+        "--decode_backend_deploy_version",
+        type=str,
+        default=None,
+        help=(
+            "Backend version for disagg decode worker deployment artifacts. "
+            "Defaults to --backend_deploy_version if omitted."
+        ),
     )
 
 
@@ -622,7 +637,19 @@ def generate_naive_config(
         logger.info("Saved generator config to %s", generator_config_path)
 
     # Generate backend artifacts
-    artifacts = render_backend_templates(generator_params, backend, None, backend_version)
+    role_backends = {}
+    params_obj = generator_params.get("params", {})
+    for role in ("prefill", "decode", "agg"):
+        if params_obj.get(role):
+            role_backends[role] = backend
+
+    role_versions = dict.fromkeys(role_backends, backend_version) if backend_version else None
+
+    artifacts = render_backend_templates(
+        generator_params,
+        role_backends=role_backends,
+        role_versions=role_versions,
+    )
 
     if actual_output_dir:
         params_obj = generator_params.get("params", {})

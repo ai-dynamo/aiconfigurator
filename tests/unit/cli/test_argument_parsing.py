@@ -109,7 +109,10 @@ class TestCLIArgumentParsing:
         assert args.database_mode == common.DatabaseMode.SILICON.name
         assert args.debug is False
         assert args.decode_system is None
-        assert args.generated_config_version is None
+        assert args.decode_backend is None
+        assert args.decode_backend_version is None
+        assert args.decode_backend_deploy_version is None
+        assert args.backend_deploy_version is None
         assert args.isl == 4000
         assert args.osl == 1000
         assert args.save_dir is None
