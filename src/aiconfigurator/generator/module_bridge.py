@@ -62,8 +62,17 @@ def task_config_to_generator_config(
     task_config: TaskConfig,
     result_df: pd.Series,
     generator_overrides: dict | None = None,
+    backend_override: str | None = None,
 ) -> dict:
-    """Convert a task config/result row into unified generator parameters."""
+    """Convert a task config/result row into unified generator parameters.
+
+    Args:
+        task_config: Task configuration
+        result_df: Result dataframe row as pandas Series
+        generator_overrides: Optional overrides for generator config
+        backend_override: Optional backend name to use instead of task_config.backend_name.
+                         Useful in 'any' backend mode where configs may come from different backends.
+    """
 
     overrides = copy.deepcopy(generator_overrides or {})
 
@@ -104,18 +113,28 @@ def task_config_to_generator_config(
         worker_payload = _deep_merge(worker_payload, extra_overrides)
         return worker_payload, max(workers, 1)
 
-    backend_name = getattr(task_config, "backend_name", None)
+    backend_name = backend_override or getattr(task_config, "backend_name", None)
     runtime_cfg = task_config.config.runtime_config
     prefix_tokens = _safe_int(_series_val(result_df, "prefix", runtime_cfg.prefix), runtime_cfg.prefix)
     config_obj = task_config.config
 
-    # Fetch num_gpus_per_node from system config
+    # Fetch num_gpus_per_node from system config.
+    # Note: num_gpus_per_node is a SYSTEM property (e.g., H200 has 8 GPUs/node),
+    # not backend-specific. We can use any backend's database for this system.
+    # For heterogeneous disagg (prefill=sglang, decode=trtllm), we use the prefill
+    # backend since task_config.backend_name refers to prefill.
     num_gpus_per_node = 8
     try:
+        # For disagg, use prefill worker config; for agg, use worker config
+        if task_config.serving_mode == "disagg":
+            worker_cfg = task_config.config.prefill_worker_config
+        else:
+            worker_cfg = task_config.config.worker_config
+
         db = get_database(
-            system=task_config.system_name,
-            backend=task_config.backend_name,
-            version=task_config.backend_version,
+            system=worker_cfg.system_name,
+            backend=worker_cfg.backend_name,
+            version=worker_cfg.backend_version,
         )
         if db and "node" in db.system_spec:
             num_gpus_per_node = db.system_spec["node"].get("num_gpus_per_node", 8)
@@ -220,8 +239,5 @@ def task_config_to_generator_config(
     )
 
     params = _deep_merge(params, overrides.get("Params"))
-    rule_name = overrides.get("rule")
-    if rule_name:
-        params["rule"] = rule_name
     params["ModelConfig"] = model_cfg
     return params

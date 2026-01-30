@@ -499,6 +499,17 @@ class BackendName(Enum):
     trtllm = "trtllm"
     sglang = "sglang"
     vllm = "vllm"
+    any = "any"  # Meta-backend: AIC will check all backends and find best performance
+
+    @classmethod
+    def all_backends(cls) -> list[str]:
+        """Return concrete backends that can actually run inference (excludes meta-backends like 'any')."""
+        return [cls.trtllm.value, cls.sglang.value, cls.vllm.value]
+
+    @classmethod
+    def resolve_backends(cls, backend: str) -> list[str]:
+        """Expand 'any' backend into all concrete backends, or return single list."""
+        return [backend] if backend != cls.any.value else cls.all_backends()
 
 
 class PerfDataFilename(Enum):

@@ -93,23 +93,36 @@ def _add_default_mode_arguments(parser):
         "--system", choices=common.SupportedSystems, type=str, required=True, help="Default system name (GPU type)."
     )
     parser.add_argument(
-        "--decode_system",
-        type=str,
-        default=None,
-        help="System name for disagg decode workers. Defaults to --system if omitted.",
-    )
-    parser.add_argument(
         "--backend",
         choices=[backend.value for backend in common.BackendName],
         type=str,
         default=common.BackendName.trtllm.value,
-        help="Backend name.",
+        help="Backend name. 'any' will check all 3 backends and find best performance.",
     )
     parser.add_argument(
         "--backend_version",
         type=str,
         default=None,
         help="Backend database version. Default is latest",
+    )
+    parser.add_argument(
+        "--decode_system",
+        type=str,
+        default=None,
+        help="System name for disagg decode workers. Defaults to --system if omitted.",
+    )
+    parser.add_argument(
+        "--decode_backend",
+        choices=[backend.value for backend in common.BackendName],
+        type=str,
+        default=None,
+        help="Backend for disagg decode workers. Defaults to --backend if omitted.",
+    )
+    parser.add_argument(
+        "--decode_backend_version",
+        type=str,
+        default=None,
+        help="Backend database version for disagg decode workers. Defaults to --backend_version if omitted.",
     )
     parser.add_argument(
         "--database_mode",
@@ -265,7 +278,9 @@ def _get_backend_data_path(system_name: str, backend_name: str, backend_version:
     return os.path.join(systems_dir, data_dir, backend_name, backend_version)
 
 
-def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str) -> None:
+def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str | None = None) -> None:
+    if backend_version is None:
+        return
     supported = perf_database.get_supported_databases()
     versions = supported.get(system_name, {}).get(backend_name, [])
     if backend_version in versions:
@@ -288,13 +303,33 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
     raise SystemExit(1)
 
 
+def validate_backend_versions(
+    system: str,
+    backend_name: str,
+    decode_backend_name: str,
+    backend_version: str | None,
+    decode_backend_version: str | None,
+    any_backend: bool = False,
+):
+    if any_backend:
+        for backend in common.BackendName.all_backends():
+            _ensure_backend_version_available(system, backend, backend_version)
+    else:
+        _ensure_backend_version_available(system, backend_name, backend_version)
+        _ensure_backend_version_available(system, decode_backend_name, decode_backend_version)
+
+
 def build_default_task_configs(
     model_path: str,
     total_gpus: int,
     system: str,
-    decode_system: str | None = None,
     backend: str = "trtllm",
     backend_version: str | None = None,
+    backend_deploy_version: str | None = None,
+    decode_system: str | None = None,
+    decode_backend: str | None = None,
+    decode_backend_version: str | None = None,
+    decode_backend_deploy_version: str | None = None,
     database_mode: str = "SILICON",
     isl: int = 4000,
     osl: int = 1000,
@@ -309,9 +344,17 @@ def build_default_task_configs(
         model_path: HuggingFace model path or local path.
         total_gpus: Total number of GPUs for deployment.
         system: System name (GPU type).
-        decode_system: System for disagg decode workers. Defaults to `system`.
-        backend: Backend name ('trtllm', 'sglang', 'vllm').
+        backend: Backend name ('trtllm', 'sglang', 'vllm', 'any').
+            If 'any', creates tasks for all concrete backends including heterogeneous
+            disagg combinations (different prefill/decode backends).
         backend_version: Backend database version. Default is latest.
+        backend_deploy_version: Backend version for deployment artifact generation.
+            If None, falls back to backend_version.
+        decode_system: System for disagg decode workers. Defaults to `system`.
+        decode_backend: For disagg mode, backend for decode workers.
+            Only used if backend != 'any'.
+        decode_backend_version: For disagg mode, backend version for decode workers.
+        decode_backend_deploy_version: For disagg mode, deploy version for decode workers.
         database_mode: Database mode for performance estimation.
         isl: Input sequence length.
         osl: Output sequence length.
@@ -321,19 +364,24 @@ def build_default_task_configs(
         prefix: Prefix cache length.
 
     Returns:
-        Dict with 'agg' and 'disagg' TaskConfig objects.
+        Dict with TaskConfig objects. Keys follow the pattern 'agg_{backend}'
+        and 'disagg_{prefill_backend}_{decode_backend}'.
     """
     decode_system = decode_system or system
-    if backend_version:
-        _ensure_backend_version_available(system, backend, backend_version)
-        if decode_system != system:
-            _ensure_backend_version_available(decode_system, backend, backend_version)
+    decode_backend = decode_backend or (None if backend == "any" else backend)
+    decode_backend_version = decode_backend_version or backend_version
+    decode_backend_deploy_version = decode_backend_deploy_version or backend_deploy_version
 
-    common_kwargs: dict[str, Any] = {
+    validate_backend_versions(system, backend, decode_system, backend_version, decode_backend_version, backend == "any")
+
+    task_configs: dict[str, TaskConfig] = {}
+
+    # Common kwargs shared by all tasks
+    base_kwargs: dict[str, Any] = {
         "model_path": model_path,
         "system_name": system,
-        "backend_name": backend,
         "backend_version": backend_version,
+        "backend_deploy_version": backend_deploy_version,
         "total_gpus": total_gpus,
         "isl": isl,
         "osl": osl,
@@ -344,14 +392,45 @@ def build_default_task_configs(
         "database_mode": database_mode,
     }
 
-    task_configs: dict[str, TaskConfig] = {}
-    agg_task = TaskConfig(serving_mode="agg", **common_kwargs)
-    task_configs["agg"] = agg_task
+    # Create agg tasks for each backend
+    for actual_backend in common.BackendName.resolve_backends(backend):
+        agg_kwargs = dict(base_kwargs)
+        agg_kwargs["backend_name"] = actual_backend
 
-    disagg_kwargs = dict(common_kwargs)
-    disagg_kwargs["decode_system_name"] = decode_system
-    disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
-    task_configs["disagg"] = disagg_task
+        # Use prefixed names to distinguish backends
+        agg_name = f"agg_{actual_backend}"
+        agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
+        task_configs[agg_name] = agg_task
+
+    # Create disagg tasks
+    if backend == "any":
+        # For 'any' mode, try all prefill/decode backend combinations
+        for prefill_backend in common.BackendName.all_backends():
+            for decode_backend_comb in common.BackendName.all_backends():
+                disagg_kwargs = dict(base_kwargs)
+                # backend_name is for prefill workers
+                disagg_kwargs["backend_name"] = prefill_backend
+                # decode_backend_name is for decode workers
+                disagg_kwargs["decode_backend_name"] = decode_backend_comb
+                disagg_kwargs["decode_system_name"] = decode_system
+
+                disagg_name = f"disagg_{prefill_backend}_{decode_backend_comb}"
+                disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
+                task_configs[disagg_name] = disagg_task
+    else:
+        # Single backend or specifically specified heterogeneous pair
+        disagg_kwargs = dict(base_kwargs)
+        disagg_kwargs["backend_name"] = backend
+        disagg_kwargs["decode_system_name"] = decode_system
+        disagg_kwargs["decode_backend_name"] = decode_backend
+        disagg_kwargs["decode_backend_version"] = decode_backend_version
+        disagg_kwargs["decode_backend_deploy_version"] = decode_backend_deploy_version
+
+        # Use provided decode_backend or fall back to backend
+        actual_decode_backend = decode_backend or backend
+        disagg_name = f"disagg_{backend}_{actual_decode_backend}"
+        disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
+        task_configs[disagg_name] = disagg_task
 
     return task_configs
 
@@ -364,6 +443,10 @@ _EXPERIMENT_RESERVED_KEYS = {
     "decode_system_name",
     "backend_name",
     "backend_version",
+    "backend_deploy_version",
+    "decode_backend_name",
+    "decode_backend_version",
+    "decode_backend_deploy_version",
     "profiles",
     "isl",
     "osl",
@@ -474,12 +557,29 @@ def build_experiment_task_configs(
         # backend, default to trtllm
         backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
         backend_version = exp_config.get("backend_version")
+        backend_deploy_version = exp_config.get("backend_deploy_version")
 
         total_gpus = exp_config.get("total_gpus")
         if total_gpus is None:
             logger.warning("Skipping experiment '%s': total_gpus not provided.", exp_name)
             continue
 
+        # Extract decode backend info for disagg mode
+        decode_backend_name = None
+        decode_backend_version = None
+        decode_backend_deploy_version = None
+        if serving_mode == "disagg":
+            decode_backend_name = exp_config.get("decode_backend_name")
+            decode_backend_version = exp_config.get("decode_backend_version")
+            decode_backend_deploy_version = exp_config.get("decode_backend_deploy_version")
+
+        # Validate all backend versions upfront (fail fast)
+        if backend_version is not None:
+            _ensure_backend_version_available(system_name, backend_name, backend_version)
+            if serving_mode == "disagg" and inferred_decode_system and inferred_decode_system != system_name:
+                _ensure_backend_version_available(inferred_decode_system, backend_name, backend_version)
+
+        # Build task kwargs after validation
         task_kwargs: dict[str, Any] = {
             "serving_mode": serving_mode,
             "model_path": model_path,
@@ -490,13 +590,22 @@ def build_experiment_task_configs(
         }
 
         if backend_version is not None:
-            _ensure_backend_version_available(system_name, backend_name, backend_version)
-            if serving_mode == "disagg" and inferred_decode_system and inferred_decode_system != system_name:
-                _ensure_backend_version_available(inferred_decode_system, backend_name, backend_version)
             task_kwargs["backend_version"] = backend_version
+
+        # backend_deploy_version: version for generating deployment artifacts
+        # If not provided, falls back to backend_version in TaskConfig
+        if backend_deploy_version is not None:
+            task_kwargs["backend_deploy_version"] = backend_deploy_version
 
         if serving_mode == "disagg":
             task_kwargs["decode_system_name"] = inferred_decode_system or system_name
+            # Support separate decode backend/version/deploy_version for disagg mode
+            if decode_backend_name is not None:
+                task_kwargs["decode_backend_name"] = decode_backend_name
+            if decode_backend_version is not None:
+                task_kwargs["decode_backend_version"] = decode_backend_version
+            if decode_backend_deploy_version is not None:
+                task_kwargs["decode_backend_deploy_version"] = decode_backend_deploy_version
 
         # Per-experiment overrides for runtime numeric parameters if provided at top level
         for numeric_key in ("isl", "osl", "ttft", "tpot", "request_latency"):
@@ -522,16 +631,107 @@ def build_experiment_task_configs(
     return task_configs
 
 
+def _is_any_backend_mode(task_configs: dict[str, TaskConfig]) -> bool:
+    """Check if task_configs represents 'any' backend mode (multiple backends)."""
+    backends = {tc.backend_name for tc in task_configs.values()}
+    return len(backends) > 1
+
+
+def _aggregate_any_backend_results(
+    best_configs: dict[str, pd.DataFrame],
+    pareto_fronts: dict[str, pd.DataFrame],
+    task_configs: dict[str, TaskConfig],
+    top_n: int,
+) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, TaskConfig]]:
+    """Aggregate results from multiple backends into single 'agg' and 'disagg' results.
+
+    For 'any' backend mode, combines all agg task results into one 'agg' result
+    and all disagg task results into one 'disagg' result, taking global top N.
+    """
+    agg_dfs: list[pd.DataFrame] = []
+    disagg_dfs: list[pd.DataFrame] = []
+    agg_pareto_dfs: list[pd.DataFrame] = []
+    disagg_pareto_dfs: list[pd.DataFrame] = []
+    agg_task_config: TaskConfig | None = None
+    disagg_task_config: TaskConfig | None = None
+
+    for name, df in best_configs.items():
+        task_config = task_configs[name]
+        if df.empty:
+            continue
+
+        # Add backend info and source experiment tracking to the dataframe
+        df = df.copy()
+        df["source_experiment"] = name  # Track which backend experiment this came from
+        df["backend"] = task_config.backend_name
+        df["backend_version"] = task_config.backend_version
+        if task_config.serving_mode == "disagg":
+            decode_backend = getattr(task_config, "decode_backend_name", None) or task_config.backend_name
+            decode_version = getattr(task_config, "decode_backend_version", None) or task_config.backend_version
+            df["decode_backend"] = decode_backend
+            df["decode_backend_version"] = decode_version
+
+        if task_config.serving_mode == "agg":
+            agg_dfs.append(df)
+            if name in pareto_fronts and not pareto_fronts[name].empty:
+                pf = pareto_fronts[name].copy()
+                pf["source_experiment"] = name
+                pf["backend"] = task_config.backend_name
+                pf["backend_version"] = task_config.backend_version
+                agg_pareto_dfs.append(pf)
+            if agg_task_config is None:
+                agg_task_config = task_config
+        else:
+            disagg_dfs.append(df)
+            if name in pareto_fronts and not pareto_fronts[name].empty:
+                pf = pareto_fronts[name].copy()
+                pf["source_experiment"] = name
+                pf["backend"] = task_config.backend_name
+                pf["backend_version"] = task_config.backend_version
+                pf["decode_backend"] = decode_backend
+                pf["decode_backend_version"] = decode_version
+                disagg_pareto_dfs.append(pf)
+            if disagg_task_config is None:
+                disagg_task_config = task_config
+
+    aggregated_best: dict[str, pd.DataFrame] = {}
+    aggregated_pareto: dict[str, pd.DataFrame] = {}
+    aggregated_tasks: dict[str, TaskConfig] = {}
+
+    if agg_dfs and agg_task_config:
+        combined_agg = pd.concat(agg_dfs, ignore_index=True)
+        combined_agg = combined_agg.sort_values("tokens/s/gpu_cluster", ascending=False).head(top_n)
+        aggregated_best["agg"] = combined_agg
+        if agg_pareto_dfs:
+            aggregated_pareto["agg"] = pd.concat(agg_pareto_dfs, ignore_index=True)
+        else:
+            aggregated_pareto["agg"] = pd.DataFrame()
+        aggregated_tasks["agg"] = agg_task_config
+
+    if disagg_dfs and disagg_task_config:
+        combined_disagg = pd.concat(disagg_dfs, ignore_index=True)
+        combined_disagg = combined_disagg.sort_values("tokens/s/gpu_cluster", ascending=False).head(top_n)
+        aggregated_best["disagg"] = combined_disagg
+        if disagg_pareto_dfs:
+            aggregated_pareto["disagg"] = pd.concat(disagg_pareto_dfs, ignore_index=True)
+        else:
+            aggregated_pareto["disagg"] = pd.DataFrame()
+        aggregated_tasks["disagg"] = disagg_task_config
+
+    return aggregated_best, aggregated_pareto, aggregated_tasks
+
+
 def _execute_task_configs(
     task_configs: dict[str, TaskConfig],
     mode: str,
     top_n: int = 5,
-) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float]]:
-    """Execute the task configs and return the chosen experiment, best configs, results, and best
-    throughputs."""
+) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float], dict[str, TaskConfig]]:
+    """Execute the task configs and return the chosen experiment, best configs, results, best
+    throughputs, and updated task configs."""
     results: dict[str, dict[str, pd.DataFrame]] = {}
     start_time = time.time()
     runner = TaskRunner()
+    is_any_mode = _is_any_backend_mode(task_configs)
 
     # TODO, can run in parallel
     for exp_name, task_config in task_configs.items():
@@ -611,6 +811,26 @@ def _execute_task_configs(
         else:
             best_throughputs[name] = 0.0
 
+    # For default mode, aggregate results into single 'agg' and 'disagg' entries
+    if mode == "default":
+        if is_any_mode:
+            logger.info("Aggregating results from multiple backends into 'agg' and 'disagg'...")
+        best_configs, pareto_fronts, task_configs = _aggregate_any_backend_results(
+            best_configs, pareto_fronts, task_configs, top_n
+        )
+        # Recompute best_throughputs and pareto_x_axis for aggregated results
+        best_throughputs = {}
+        pareto_x_axis = {}
+        for name, df in best_configs.items():
+            if not df.empty:
+                best_throughputs[name] = df["tokens/s/gpu_cluster"].values[0]
+            else:
+                best_throughputs[name] = 0.0
+            # Use request_latency if available, otherwise tokens/s/user
+            runtime_cfg = task_configs[name].config.runtime_config
+            use_request_latency = runtime_cfg.request_latency is not None and runtime_cfg.request_latency > 0
+            pareto_x_axis[name] = "request_latency" if use_request_latency else "tokens/s/user"
+
     chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
 
     log_final_summary(
@@ -627,7 +847,7 @@ def _execute_task_configs(
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
 
-    return chosen_exp, best_configs, pareto_fronts, best_throughputs
+    return chosen_exp, best_configs, pareto_fronts, best_throughputs, task_configs
 
 
 def _run_generate_mode(args):
@@ -766,9 +986,13 @@ def main(args):
             model_path=args.model_path,
             total_gpus=args.total_gpus,
             system=args.system,
-            decode_system=args.decode_system,
             backend=args.backend,
             backend_version=args.backend_version,
+            backend_deploy_version=args.backend_deploy_version,
+            decode_system=args.decode_system,
+            decode_backend=args.decode_backend,
+            decode_backend_version=args.decode_backend_version,
+            decode_backend_deploy_version=args.decode_backend_deploy_version,
             database_mode=args.database_mode,
             isl=args.isl,
             osl=args.osl,
@@ -789,7 +1013,7 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
-    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs(
+    chosen_exp, best_configs, pareto_fronts, best_throughputs, task_configs = _execute_task_configs(
         task_configs,
         args.mode,
         top_n=args.top_n,
@@ -802,7 +1026,6 @@ def main(args):
             pareto_fronts=pareto_fronts,
             task_configs=task_configs,
             save_dir=args.save_dir,
-            generated_backend_version=args.generated_config_version,
         )
 
 

@@ -39,6 +39,7 @@ class TestCLIExpUnit:
             {"exp_agg_simplified": pd.DataFrame()},
             {"exp_agg_simplified": pd.DataFrame()},
             {"exp_agg_simplified": 100.0},
+            {"exp_agg_simplified": mock_task_config},
         )
 
         # Simplified version based on example.yaml exp_agg_simplified

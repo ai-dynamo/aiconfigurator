@@ -84,12 +84,17 @@ def main(argv: Optional[list[str]] = None):
 
     cmd = args.cmd
     if cmd == "render-artifacts":
+        # Resolve roles to build backends/versions mapping
+        roles = _resolve_roles("all", generator_params, logger)
+        role_backends = dict.fromkeys(roles, backend)
+        role_versions = dict.fromkeys(roles, args.version) if args.version else None
+
         artifacts = generate_backend_artifacts(
-            generator_params,
-            backend,
+            params=generator_params,
+            role_backends=role_backends,
+            role_versions=role_versions,
             templates_dir=args.templates_dir,
             output_dir=args.output,
-            backend_version=args.version,
         )
         print(json.dumps(artifacts, ensure_ascii=False, indent=2))
         return

@@ -37,6 +37,7 @@ class TestCLIIntegration:
             mock_best_configs,
             {"agg": mock_results_df},
             mock_best_throughputs,
+            {"agg": mock_task_config},
         )
 
         with patch("aiconfigurator.cli.main.save_results") as mock_save:
@@ -78,6 +79,7 @@ class TestCLIIntegration:
             mock_best_configs,
             {"my_exp": mock_results_df},
             mock_best_throughputs,
+            {"my_exp": mock_task_config},
         )
 
         args = cli_args_factory(
@@ -112,7 +114,7 @@ class TestCLIIntegration:
     @patch("aiconfigurator.cli.main._execute_task_configs")
     def test_cli_main_build_dispatch(self, mock_execute, mode, build_patch, cli_args_factory, mock_exp_yaml_path):
         """Main should dispatch to the correct builder based on CLI mode."""
-        mock_execute.return_value = ("agg", {}, {}, {})
+        mock_execute.return_value = ("agg", {}, {}, {}, {"agg": MagicMock()})
         mock_task_config = MagicMock(name="TaskConfig")
 
         with patch(build_patch) as mock_builder:
@@ -198,7 +200,7 @@ exp_with_db_mode:
 
         mock_task_config = MagicMock(name="TaskConfig")
         mock_build_exp.return_value = {"exp_with_db_mode": mock_task_config}
-        mock_execute.return_value = ("exp_with_db_mode", {}, {}, {})
+        mock_execute.return_value = ("exp_with_db_mode", {}, {}, {}, {"exp_with_db_mode": MagicMock()})
 
         parser = argparse.ArgumentParser()
         configure_parser(parser)
