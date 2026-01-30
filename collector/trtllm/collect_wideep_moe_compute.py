@@ -1,0 +1,875 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""
+采集 WideEPMoE 的纯计算部分（排除 AlltoAll 通信）
+
+模拟 EP size > 1 场景下，单个 EP rank 的计算负载。
+支持 EPLB (Expert Parallel Load Balancer) 场景。
+
+参考实现: aic/collector/trtllm/collect_wideep_moe.py
+"""
+
+import gc
+import glob
+import json
+import os
+import sys
+from typing import Optional
+
+import tensorrt_llm
+import torch
+import torch.nn as nn
+from tensorrt_llm._torch.autotuner import AutoTuner, autotune
+from tensorrt_llm._torch.model_config import ModelConfig
+from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
+from tensorrt_llm._torch.modules.fused_moe import RenormalizeMoeRoutingMethod
+from tensorrt_llm._torch.modules.fused_moe.ops.moe_op import MoEOp, MoEOpSelector
+from tensorrt_llm._torch.modules.fused_moe.ops.moe_op_cutlass import CutlassMoEOp
+from tensorrt_llm._torch.modules.fused_moe.ops.moe_op_deepgemm import DeepGemmMoEOp
+from tensorrt_llm._torch.modules.fused_moe.quantization import (
+    DeepSeekFP8BlockScalesFusedMoEMethod,
+    FP8QDQFusedMoEMethod,
+    NVFP4CutlassFusedMoEMethod,
+    UnquantizedFusedMoEMethod,
+)
+from tensorrt_llm.mapping import Mapping
+from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
+
+try:
+    from common_test_cases import get_common_moe_test_cases
+
+    from helper import (
+        EXIT_CODE_RESTART,
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+        power_law_logits_v3,
+    )
+except ModuleNotFoundError:
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from common_test_cases import get_common_moe_test_cases
+
+    from helper import (
+        EXIT_CODE_RESTART,
+        balanced_logits,
+        benchmark_with_power,
+        get_sm_version,
+        log_perf,
+        power_law_logits_v3,
+    )
+
+
+aic_debug = int(os.getenv("aic_moe_debug", "0"))
+
+moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wideep_moe_compute_tuned_cache_path")
+
+
+def cleanup_empty_json_files(directory):
+    if not os.path.exists(directory):
+        return
+
+    json_files = glob.glob(os.path.join(directory, "*.json"))
+    deleted_count = 0
+
+    for file_path in json_files:
+        try:
+            if os.path.getsize(file_path) == 0:
+                os.remove(file_path)
+                deleted_count += 1
+                print(f"Deleted empty file: {file_path}")
+            else:
+                with open(file_path) as f:
+                    data = json.load(f)
+                    if not data:
+                        os.remove(file_path)
+                        deleted_count += 1
+                        print(f"Deleted empty JSON content: {file_path}")
+        except (OSError, json.JSONDecodeError) as e:
+            try:
+                os.remove(file_path)
+                deleted_count += 1
+                print(f"Deleted invalid file: {file_path} (Error: {e})")
+            except OSError:
+                pass
+
+    if deleted_count > 0:
+        print(f"Total deleted {deleted_count} invalid JSON files from {directory}")
+
+
+# =============================================================================
+# WideEPMoE Compute Simulator - simulates WideEPMoE computation on single GPU
+# =============================================================================
+class WideEPMoEComputeSimulator(nn.Module):
+    """
+    Simulates WideEPMoE's computation path on SINGLE GPU.
+    
+    Uses the SAME kernel selection logic as WideEPMoE (MoEOpSelector.select_op).
+    
+    模拟 EP size > 1 场景:
+    - expert_size_per_partition = num_slots / ep_size (每个 rank 的本地 slot 数量)
+    - 权重形状: [expert_size_per_partition, ...]
+    - EPLB 场景下 num_slots >= num_experts
+    """
+    
+    def __init__(
+        self,
+        routing_method,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size: int,
+        dtype: torch.dtype = torch.bfloat16,
+        quant_config: Optional[QuantConfig] = None,
+        ep_size: int = 1,
+        tp_size: int = 1,
+        num_slots: Optional[int] = None,  # EPLB: num_slots >= num_experts
+        force_kernel: str = "auto",
+    ):
+        super().__init__()
+        
+        self.routing_method = routing_method
+        self.num_experts = num_experts
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.dtype = dtype
+        self.quant_config = quant_config
+        
+        self.ep_size = ep_size
+        self.tp_size = tp_size
+        
+        # EPLB support: num_slots >= num_experts for redundancy
+        self.num_slots = num_slots if num_slots is not None else num_experts
+        
+        # expert_size_per_partition based on num_slots (not num_experts)
+        self.expert_size_per_partition = self.num_slots // ep_size
+        self.intermediate_size_per_partition = intermediate_size // tp_size
+        # expand_intermediate_size_per_partition = intermediate_size_per_partition * 2 (for gated activation)
+        self.expand_intermediate_size_per_partition = self.intermediate_size_per_partition * 2
+        
+        # For MoEOpSelector compatibility
+        self.has_deepseek_fp8_block_scales = (
+            quant_config is not None and 
+            quant_config.quant_algo == QuantAlgo.FP8_BLOCK_SCALES
+        )
+        self.has_fp8_qdq = (
+            quant_config is not None and
+            quant_config.quant_algo == QuantAlgo.FP8
+        )
+        self.has_nvfp4 = (
+            quant_config is not None and
+            quant_config.quant_algo == QuantAlgo.NVFP4
+        )
+        # Additional quant mode flags required by CutlassMoEOp
+        self.has_w4a16_mxfp4 = False
+        self.has_w4afp8 = False
+        self.has_int8_woq_per_channel = False
+        self.has_mxfp8_act_scaling = False
+        
+        # For moe_op compatibility
+        self.is_gated_activation = True
+        self.intermediate_size_expand_ratio = 2
+        self.activation_type = 5  # ActivationType.Swiglu = 5 (gated activation)
+        
+        # Parallelism attributes required by MoERunner
+        self.tp_rank = 0
+        self.ep_rank = 0
+        self.cluster_size = 1
+        self.cluster_rank = 0
+        self.tune_max_num_tokens = 8192
+        
+        # Swiglu parameters (None for standard Swiglu activation)
+        # WideEPMoE 不支持 swiglu_alpha/beta/limit
+        self.swiglu_alpha = None
+        self.swiglu_beta = None
+        self.swiglu_limit = None
+        
+        # For unpadded_hidden_size (used in compute_moe)
+        self.unpadded_hidden_size = hidden_size
+        
+        self.quant_method = self._get_quant_method()
+        self._create_weights()
+        
+        self.force_kernel = force_kernel
+        self._moe_op = None
+    
+    def _get_quant_method(self):
+        if self.quant_config is None:
+            return UnquantizedFusedMoEMethod()
+        if self.has_deepseek_fp8_block_scales:
+            return DeepSeekFP8BlockScalesFusedMoEMethod()
+        elif self.has_fp8_qdq:
+            return FP8QDQFusedMoEMethod()
+        elif self.has_nvfp4:
+            return NVFP4CutlassFusedMoEMethod()
+        return UnquantizedFusedMoEMethod()
+    
+    def _create_weights(self):
+        """
+        Create weights based on quantization mode, following TensorRT-LLM's implementation.
+        权重按 expert_size_per_partition (= num_slots / ep_size) 创建。
+        """
+        device = "cuda"
+        
+        if self.has_nvfp4:
+            # NVFP4: weights packed as int64 (16 fp4 values per int64)
+            weight_dtype = torch.int64
+            weight_vec_size = 16
+            
+            NVFP4_ROW_ALIGNMENT = 128
+            expand_inter = self.expand_intermediate_size_per_partition
+            intermediate_size_expand_aligned = (
+                (expand_inter + NVFP4_ROW_ALIGNMENT - 1) 
+                // NVFP4_ROW_ALIGNMENT * NVFP4_ROW_ALIGNMENT
+            )
+            
+            w3_w1_shape = (
+                self.expert_size_per_partition,
+                intermediate_size_expand_aligned,
+                self.hidden_size // weight_vec_size,
+            )
+            w2_shape = (
+                self.expert_size_per_partition,
+                self.hidden_size,
+                intermediate_size_expand_aligned // self.intermediate_size_expand_ratio // weight_vec_size,
+            )
+            
+            self.w3_w1_weight = torch.randint(
+                low=-(2**62), high=2**62, size=w3_w1_shape, dtype=weight_dtype, device=device
+            )
+            self.w2_weight = torch.randint(
+                low=-(2**62), high=2**62, size=w2_shape, dtype=weight_dtype, device=device
+            )
+            
+        elif self.has_deepseek_fp8_block_scales or self.has_fp8_qdq:
+            # FP8: weights are float8_e4m3fn
+            weight_dtype = torch.float8_e4m3fn
+            
+            w3_w1_shape = (
+                self.expert_size_per_partition,
+                self.expand_intermediate_size_per_partition,
+                self.hidden_size,
+            )
+            w2_shape = (
+                self.expert_size_per_partition,
+                self.hidden_size,
+                self.intermediate_size_per_partition,
+            )
+            
+            self.w3_w1_weight = torch.randn(w3_w1_shape, dtype=torch.bfloat16, device=device).to(weight_dtype)
+            self.w2_weight = torch.randn(w2_shape, dtype=torch.bfloat16, device=device).to(weight_dtype)
+            
+        else:
+            # Unquantized: weights are bfloat16
+            weight_dtype = self.dtype
+            
+            w3_w1_shape = (
+                self.expert_size_per_partition,
+                self.expand_intermediate_size_per_partition,
+                self.hidden_size,
+            )
+            w2_shape = (
+                self.expert_size_per_partition,
+                self.hidden_size,
+                self.intermediate_size_per_partition,
+            )
+            
+            self.w3_w1_weight = torch.randn(w3_w1_shape, dtype=weight_dtype, device=device)
+            self.w2_weight = torch.randn(w2_shape, dtype=weight_dtype, device=device)
+        
+        # Bias (set to None, same as WideEPMoE default)
+        self.w3_w1_bias = None
+        self.w2_bias = None
+        
+        self._create_input_quant_scales(device)
+        self.quant_scales = self._create_quant_scales(device)
+    
+    def _create_input_quant_scales(self, device):
+        if self.has_fp8_qdq:
+            self.fc31_input_dequant = torch.ones(1, dtype=torch.float32, device=device)
+        else:
+            self.fc31_input_dequant = None
+        
+        if self.has_nvfp4:
+            self.fc31_input_scale = torch.ones(1, dtype=torch.float32, device=device)
+            self.scaling_vector_size = 16
+        else:
+            self.fc31_input_scale = None
+            self.scaling_vector_size = None
+    
+    def _create_quant_scales(self, device):
+        if self.quant_config is None:
+            return []
+        
+        if self.has_deepseek_fp8_block_scales:
+            block_size = 128
+            fc_scale_shape = (
+                self.expert_size_per_partition,
+                2 * self.intermediate_size_per_partition // block_size,
+                self.hidden_size // block_size,
+            )
+            proj_scale_shape = (
+                self.expert_size_per_partition,
+                self.hidden_size // block_size,
+                self.intermediate_size_per_partition // block_size,
+            )
+            from tensorrt_llm._torch.modules.fused_moe.quantization import (
+                FusedMoEQuantScalesDeepSeekFP8BlockScales,
+            )
+            return FusedMoEQuantScalesDeepSeekFP8BlockScales(
+                fc_weight_scales=torch.ones(fc_scale_shape, dtype=torch.float32, device=device),
+                proj_weight_scales=torch.ones(proj_scale_shape, dtype=torch.float32, device=device),
+            )
+        elif self.has_fp8_qdq:
+            from tensorrt_llm._torch.modules.fused_moe.quantization import FusedMoEQuantScalesFP8
+            return FusedMoEQuantScalesFP8(
+                fc1_dequant=torch.ones(self.expert_size_per_partition, dtype=torch.float32, device=device),
+                fc2_quant=torch.ones(1, dtype=torch.float32, device=device),
+                fc2_dequant=torch.ones(self.expert_size_per_partition, dtype=torch.float32, device=device),
+                fc1_input_dequant=torch.ones(1, dtype=torch.float32, device=device),
+            )
+        elif self.has_nvfp4:
+            from tensorrt_llm._torch.modules.fused_moe.quantization import FusedMoEQuantScalesNVFP4
+            
+            NVFP4_ROW_ALIGNMENT = 128
+            block_scales_vec_size = 4
+            
+            expand_inter = self.expand_intermediate_size_per_partition
+            intermediate_size_expand_aligned = (
+                (expand_inter + NVFP4_ROW_ALIGNMENT - 1) 
+                // NVFP4_ROW_ALIGNMENT * NVFP4_ROW_ALIGNMENT
+            )
+            
+            w3_w1_weight_scale_shape = (
+                self.expert_size_per_partition,
+                intermediate_size_expand_aligned,
+                self.hidden_size // self.scaling_vector_size // block_scales_vec_size,
+            )
+            w2_weight_scale_shape = (
+                self.expert_size_per_partition,
+                self.hidden_size,
+                intermediate_size_expand_aligned // self.intermediate_size_expand_ratio // self.scaling_vector_size // block_scales_vec_size,
+            )
+            
+            return FusedMoEQuantScalesNVFP4(
+                fc1_act_global=torch.ones(1, dtype=torch.float32, device=device),
+                fc1_weight_block=torch.ones(w3_w1_weight_scale_shape, dtype=torch.int32, device=device),
+                fc1_global=torch.ones(self.expert_size_per_partition, dtype=torch.float32, device=device),
+                fc2_act_global=torch.ones(1, dtype=torch.float32, device=device),
+                fc2_weight_block=torch.ones(w2_weight_scale_shape, dtype=torch.int32, device=device),
+                fc2_global=torch.ones(self.expert_size_per_partition, dtype=torch.float32, device=device),
+            )
+        return []
+    
+    @property
+    def moe_op(self) -> MoEOp:
+        if self._moe_op is None:
+            if self.force_kernel == "deepgemm":
+                self._moe_op = DeepGemmMoEOp()
+            elif self.force_kernel == "cutlass":
+                self._moe_op = CutlassMoEOp()
+            else:
+                self._moe_op = MoEOpSelector.select_op(self)
+        return self._moe_op
+    
+    def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor, do_finalize: bool = True) -> torch.Tensor:
+        """
+        Run FULL MoE computation pipeline (no communication).
+        Same steps as WideEPMoE.forward_chunk.
+        """
+        x = hidden_states
+        x_sf = None
+        output_dtype = torch.bfloat16
+        
+        # Step 1: Routing (WideEPMoE line 404-405)
+        token_selected_experts, token_final_scales = self.routing_method.apply(router_logits)
+        token_selected_slots = token_selected_experts
+        
+        # Step 2: Input Quantization (WideEPMoE line 501-531)
+        if self.has_fp8_qdq:
+            x, _ = torch.ops.tensorrt_llm.static_quantize_e4m3_per_tensor(x, self.fc31_input_dequant)
+        elif self.has_nvfp4:
+            x_row = x.shape[0]
+            x, x_sf = torch.ops.trtllm.fp4_quantize(
+                x, self.fc31_input_scale, self.scaling_vector_size,
+                sfUseUE8M0=False, isSfSwizzledLayout=False)
+            x_sf = x_sf.view((x_row, -1))
+        elif self.has_deepseek_fp8_block_scales:
+            pass
+        
+        # Step 3: MoE Computation (WideEPMoE line 624-642)
+        output = self.moe_op.run_moe(
+            module=self,
+            input=x,
+            token_selected_slots=token_selected_slots,
+            token_final_scales=token_final_scales,
+            w3_w1_weight=self.w3_w1_weight,
+            w3_w1_bias=None,
+            w2_weight=self.w2_weight,
+            w2_bias=None,
+            output_dtype=output_dtype,
+            quant_scales=self.quant_scales,
+            use_all_to_all=False,
+            input_sf=x_sf,
+            swizzled_input_sf=False,
+            min_latency_mode=False,
+            use_fused_finalize=do_finalize,
+        )
+        
+        if isinstance(output, (list, tuple)):
+            output = output[0]
+        
+        return output
+
+
+# =============================================================================
+# Test Cases Generation
+# =============================================================================
+def get_wideep_moe_compute_test_cases():
+    """Generate test cases for WideEP MoE compute (consistent with collect_moe.py)."""
+    moe_list = []
+    if get_sm_version() > 86:
+        if get_sm_version() < 100:
+            moe_list += ["fp8_block"]
+    
+    if get_sm_version() >= 100:
+        moe_list += ["nvfp4", "fp8_block"]
+    
+    # Kernel options: cutlass, deepgemm (SM100 + fp8_block only)
+    kernel_options = {
+        "float16": ["cutlass"],
+        "fp8": ["cutlass"],
+        "fp8_block": ["cutlass", "deepgemm"] if get_sm_version() >= 100 else ["cutlass"],
+        "nvfp4": ["cutlass"],
+    }
+    
+    test_cases = []
+    
+    for common_moe_testcase in get_common_moe_test_cases():
+        # Focus on DeepSeek models for WideEP
+        if "DEEPSEEK" not in common_moe_testcase.model_name.upper():
+            continue
+        
+        for moe_type in moe_list:
+            for kernel in kernel_options.get(moe_type, ["cutlass"]):
+                # DeepGemm only works with fp8_block on SM100
+                if kernel == "deepgemm" and moe_type != "fp8_block":
+                    continue
+                
+                min_latency_mode_options = [False]
+                if moe_type == "nvfp4" and get_sm_version() >= 100 and common_moe_testcase.num_experts <= 256:
+                    min_latency_mode_options.append(True)
+                
+                for min_latency_mode in min_latency_mode_options:
+                    # DeepGemm doesn't support min_latency_mode
+                    if kernel == "deepgemm" and min_latency_mode:
+                        continue
+                    
+                    # Standard test case (no EPLB)
+                    test_cases.append([
+                        moe_type,
+                        kernel,
+                        common_moe_testcase.num_tokens_list,
+                        common_moe_testcase.hidden_size,
+                        common_moe_testcase.inter_size,
+                        common_moe_testcase.topk,
+                        common_moe_testcase.num_experts,
+                        common_moe_testcase.tp,
+                        common_moe_testcase.ep,
+                        min_latency_mode,
+                        common_moe_testcase.model_name,
+                        "wideep_moe_compute_perf.txt",
+                        common_moe_testcase.token_expert_distribution,
+                        common_moe_testcase.power_law_alpha,
+                        False,  # use_eplb
+                        common_moe_testcase.num_experts,  # num_slots (no redundancy)
+                    ])
+    
+    return test_cases
+
+
+def get_wideep_moe_compute_eplb_test_cases():
+    """Generate test cases for WideEP MoE compute with EPLB."""
+    moe_list = []
+    if get_sm_version() > 86:
+        if get_sm_version() < 100:
+            moe_list += ["fp8_block"]
+    
+    if get_sm_version() >= 100:
+        moe_list += ["nvfp4", "fp8_block"]
+    
+    kernel_options = {
+        "fp8_block": ["cutlass", "deepgemm"] if get_sm_version() >= 100 else ["cutlass"],
+        "nvfp4": ["cutlass"],
+    }
+    
+    test_cases = []
+    
+    for common_moe_testcase in get_common_moe_test_cases():
+        # EPLB only makes sense for power_law distributions
+        if common_moe_testcase.token_expert_distribution != "power_law":
+            continue
+        
+        # EPLB test cases only for DeepSeek-V3 model
+        model_name = common_moe_testcase.model_name
+        if "deepseek" not in model_name.lower() or "v3" not in model_name.lower():
+            continue
+        
+        for moe_type in moe_list:
+            for kernel in kernel_options.get(moe_type, ["cutlass"]):
+                if kernel == "deepgemm" and moe_type != "fp8_block":
+                    continue
+                
+                min_latency_mode_options = [False]
+                if moe_type == "nvfp4" and get_sm_version() >= 100 and common_moe_testcase.num_experts <= 256:
+                    min_latency_mode_options.append(True)
+                
+                for min_latency_mode in min_latency_mode_options:
+                    if kernel == "deepgemm" and min_latency_mode:
+                        continue
+                    
+                    num_experts = common_moe_testcase.num_experts
+                    ep_size = common_moe_testcase.ep
+                    num_slots_options = [num_experts, 288]  # baseline + redundancy
+                    
+                    for num_slots in num_slots_options:
+                        # Skip if num_slots is not divisible by ep_size
+                        if num_slots % ep_size != 0:
+                            continue
+                        
+                        test_cases.append([
+                            moe_type,
+                            kernel,
+                            common_moe_testcase.num_tokens_list,
+                            common_moe_testcase.hidden_size,
+                            common_moe_testcase.inter_size,
+                            common_moe_testcase.topk,
+                            num_experts,
+                            common_moe_testcase.tp,
+                            ep_size,
+                            min_latency_mode,
+                            common_moe_testcase.model_name,
+                            "wideep_moe_compute_eplb_perf.txt",
+                            common_moe_testcase.token_expert_distribution,
+                            common_moe_testcase.power_law_alpha,
+                            True,   # use_eplb
+                            num_slots,
+                        ])
+    
+    return test_cases
+
+
+# =============================================================================
+# Main Benchmark Function
+# =============================================================================
+def run_wideep_moe_compute(
+    moe_type,
+    moe_kernel,
+    num_tokens_lists,
+    hidden_size,
+    inter_size,
+    topk,
+    num_experts,
+    moe_tp_size,
+    moe_ep_size,
+    min_latency_mode,
+    model_name,
+    perf_filename,
+    distributed="power_law",
+    power_law_alpha=0.0,
+    use_eplb=False,
+    num_slots=None,
+    device="cuda:0",
+):
+    """
+    Benchmark WideEP MoE computation (excluding communication).
+    """
+    # Default num_slots to num_experts (no redundancy)
+    if num_slots is None:
+        num_slots = num_experts
+        
+    device = torch.device(device)
+    torch.cuda.set_device(device)
+    torch.set_default_device(device)
+
+    if aic_debug == 1:
+        print("WideEP MOE Compute Allocated GDRAM:", torch.cuda.memory_allocated(device.index) / 1024**2, "MB")
+        print("WideEP MOE Compute Reserved GDRAM:", torch.cuda.memory_reserved(device) / 1024**2, "MB")
+    
+    # =========================================================================
+    # Setup quantization config (same as collect_moe.py)
+    # =========================================================================
+    dtype = torch.bfloat16
+    quant_group_size = 128
+    quant_algo = None
+    
+    if moe_type == "fp8_block":
+        quant_algo = QuantAlgo.FP8_BLOCK_SCALES
+        dtype = torch.float8_e4m3fn
+    elif moe_type == "fp8":
+        quant_algo = QuantAlgo.FP8
+        dtype = torch.float8_e4m3fn
+    elif moe_type == "nvfp4":
+        quant_algo = QuantAlgo.NVFP4
+        quant_group_size = 16
+    
+    if power_law_alpha - 0.0 < 1e-6:
+        distributed = "balanced"
+    
+    quant_config = QuantConfig(
+        quant_algo=quant_algo,
+        kv_cache_quant_algo=None,
+        group_size=quant_group_size,
+        smoothquant_val=0.5,
+        clamp_val=None,
+        use_meta_recipe=False,
+        has_zero_point=False,
+        pre_quant_scale=False,
+        exclude_modules=None,
+    )
+    
+    # =========================================================================
+    # Setup routing method
+    # =========================================================================
+    router_logits_dtype = torch.bfloat16
+    if min_latency_mode:
+        n_group = 8
+        topk_group = 4
+        routed_scaling_factor = 2.5
+        routing_method = DeepseekV3Gate(
+            hidden_size,
+            num_experts,
+            top_k=topk,
+            n_group=n_group,
+            topk_group=topk_group,
+            routed_scaling_factor=routed_scaling_factor,
+            dtype=dtype,
+            moe_backend="TRTLLM",
+        ).routing_method
+        router_logits_dtype = torch.float32
+    else:
+        routing_method = RenormalizeMoeRoutingMethod(topk)
+    
+    # =========================================================================
+    # Create WideEPMoE Compute Simulator
+    # =========================================================================
+    moe = WideEPMoEComputeSimulator(
+        routing_method=routing_method,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size=inter_size,
+        dtype=dtype,
+        quant_config=quant_config,
+        ep_size=moe_ep_size,
+        tp_size=moe_tp_size,
+        num_slots=num_slots,  # EPLB support
+        force_kernel=moe_kernel,
+    )
+    moe.to(torch.device(device))
+    
+    eplb_str = f", EPLB slots={num_slots}" if use_eplb else ""
+    print(f"\n{'='*60}")
+    print(f"WideEPMoE Compute Collection")
+    print(f"{'='*60}")
+    print(f"Model: {model_name}")
+    print(f"Quantization: {moe_type}, Kernel: {moe_kernel}")
+    print(f"EP config: ep_size={moe_ep_size}, tp_size={moe_tp_size}")
+    print(f"Expert config: total={num_experts}, local_slots={moe.expert_size_per_partition}{eplb_str}")
+    print(f"Size config: hidden={hidden_size}, inter={inter_size}, inter_local={moe.intermediate_size_per_partition}")
+    print(f"Routing: topk={topk}, min_latency={min_latency_mode}")
+    print(f"{'='*60}\n")
+    
+    # =========================================================================
+    # Dry run
+    # =========================================================================
+    torch.cuda.synchronize()
+    max_tokens = num_tokens_lists[-1]
+    for i in range(len(num_tokens_lists)):
+        max_tokens = num_tokens_lists[-i - 1]
+        try:
+            hidden_states_max_tokens = torch.randn([max_tokens, hidden_size]).bfloat16().to(torch.device(device))
+            logits_max_tokens = balanced_logits(max_tokens, num_experts, topk).to(router_logits_dtype)
+            moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
+            torch.cuda.synchronize()
+            if aic_debug == 1:
+                print(f"Successfully dry run for {max_tokens} tokens")
+            break
+        except Exception as e:
+            if i == len(num_tokens_lists) - 1:
+                RuntimeError(f"dry run failed for {max_tokens} tokens: {e}")
+            else:
+                continue
+    
+    # =========================================================================
+    # AutoTuner
+    # =========================================================================
+    cleanup_empty_json_files(moe_tune_path)
+    cache_path = (
+        f"{moe_tune_path}/wideep_compute_{moe_kernel}_{moe_type}_{hidden_size}_{inter_size // moe_tp_size}_{num_slots // moe_ep_size}"
+    )
+    existing_files = glob.glob(f"{cache_path}*")
+    cache_loaded = False
+    if existing_files:
+        json_path = existing_files[0]
+        try:
+            AutoTuner.get().profiling_cache.load_cache(json_path)
+            cache_loaded = True
+            print(f"Loaded profiling cache from {json_path}")
+        except (OSError, json.JSONDecodeError):
+            pass
+    
+    if not cache_loaded:
+        torch.cuda.synchronize()
+        for i in range(len(num_tokens_lists)):
+            max_tokens_for_tuning = num_tokens_lists[-i - 1]
+            if max_tokens_for_tuning > max_tokens:
+                continue
+            else:
+                try:
+                    with torch.inference_mode(), autotune(cache_path=cache_path):
+                        moe.forward(
+                            hidden_states_max_tokens[:max_tokens_for_tuning],
+                            logits_max_tokens[:max_tokens_for_tuning],
+                            do_finalize=not min_latency_mode,
+                        )
+                    torch.cuda.synchronize()
+                    break  # Tuning succeeded, exit loop
+                except Exception as e:
+                    print(f"tune failed for {max_tokens_for_tuning} tokens: {e}, fallback to smaller tokens")
+                    continue
+    
+    del hidden_states_max_tokens, logits_max_tokens
+    
+    # =========================================================================
+    # Benchmark each token count
+    # =========================================================================
+    for num_tokens in num_tokens_lists:
+        if num_tokens > max_tokens:
+            continue
+        
+        num_iter = 5 if distributed == "power_law" else 1
+        hidden_states = torch.randn([num_tokens, hidden_size]).bfloat16().to(torch.device(device))
+        
+        if distributed == "power_law":
+            actual_logits_list = [
+                power_law_logits_v3(
+                    num_tokens, num_experts, topk, moe_ep_size, power_law_alpha,
+                    use_eplb=use_eplb, num_slots=num_slots
+                ).to(router_logits_dtype)
+                for _ in range(num_iter)
+            ]
+            eplb_str = f"_eplb_slots{num_slots}" if use_eplb else ""
+            print(f"power_law: num_tokens={num_tokens}, ep={moe_ep_size}{eplb_str}")
+        elif distributed == "balanced":
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype)
+        else:
+            raise ValueError(f"Unsupported distributed mode: {distributed}")
+        
+        def run_forward_pass():
+            """Execute one forward pass through WideEP MOE simulator."""
+            if distributed == "power_law":
+                for logits in actual_logits_list:
+                    moe.forward(hidden_states, logits, do_finalize=not min_latency_mode)
+            else:
+                moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+        
+        # Benchmark with power measurement
+        num_warmups = 1 if distributed == "power_law" else 3
+        num_runs = 1 if distributed == "power_law" else 6
+        
+        with benchmark_with_power(
+            device=device,
+            kernel_func=run_forward_pass,
+            num_warmups=num_warmups,
+            num_runs=num_runs,
+            repeat_n=1,
+            allow_graph_fail=True,
+        ) as results:
+            latency = results["latency_ms"] / num_iter
+            power_stats = results["power_stats"]
+            
+            if not results["used_cuda_graph"] and aic_debug == 1:
+                print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
+        
+        # Determine source name
+        if min_latency_mode:
+            source = f"wideep_compute_{moe_kernel}_min_latency"
+        else:
+            source = f"wideep_compute_{moe_kernel}"
+        
+        # Build distribution string with EPLB suffix if enabled
+        if distributed == "power_law":
+            dist_str = f"power_law_{power_law_alpha}"
+            if use_eplb:
+                dist_str += "_eplb"
+        else:
+            dist_str = distributed
+        
+        # Log performance
+        log_perf(
+            item_list=[
+                {
+                    "moe_dtype": moe_type,
+                    "moe_kernel": moe_kernel,
+                    "num_tokens": num_tokens,
+                    "hidden_size": hidden_size,
+                    "inter_size": inter_size,
+                    "topk": topk,
+                    "num_experts": num_experts,
+                    "num_slots": num_slots,
+                    "num_local_slots": moe.expert_size_per_partition,
+                    "moe_tp_size": moe_tp_size,
+                    "moe_ep_size": moe_ep_size,
+                    "distribution": dist_str,
+                    "latency": latency,
+                }
+            ],
+            framework="TRTLLM",
+            version=tensorrt_llm.__version__,
+            device_name=torch.cuda.get_device_name(device),
+            op_name="wideep_moe_compute" if not use_eplb else "wideep_moe_compute_eplb",
+            kernel_source=source,
+            perf_filename=perf_filename,
+            power_stats=power_stats,
+        )
+        
+        print(f"WideEP MOE Compute | tokens={num_tokens}, kernel={moe_kernel}, "
+              f"latency={latency:.3f}ms, dist={dist_str}")
+        
+        # Cleanup iteration
+        if distributed == "power_law":
+            del actual_logits_list
+        else:
+            del actual_logits
+        del hidden_states
+        gc.collect()
+        torch.cuda.empty_cache()
+    
+    # =========================================================================
+    # Cleanup and exit
+    # =========================================================================
+    del moe
+    for _ in range(5):
+        gc.collect()
+        torch.cuda.empty_cache()
+    AutoTuner.get().clear_cache()
+    
+    # Exit the worker process to ensure complete resource cleanup
+    sys.exit(EXIT_CODE_RESTART)
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+if __name__ == "__main__":
+    test_cases = get_wideep_moe_compute_test_cases()
+    eplb_test_cases = get_wideep_moe_compute_eplb_test_cases()
+    all_test_cases = test_cases + eplb_test_cases
+    
+    print(f"Running {len(all_test_cases)} WideEP MOE compute test configurations...")
+    print(f"  - Standard: {len(test_cases)}")
+    print(f"  - EPLB: {len(eplb_test_cases)}")
+    
+    for i, test_case in enumerate(all_test_cases):
+        print(f"\nProgress: {i+1}/{len(all_test_cases)}")
+        print(f"  Config: moe_type={test_case[0]}, kernel={test_case[1]}, model={test_case[10]}, eplb={test_case[14]}")
+        run_wideep_moe_compute(*test_case)
