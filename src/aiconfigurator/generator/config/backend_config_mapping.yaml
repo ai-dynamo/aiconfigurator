@@ -35,7 +35,9 @@ parameters:
 
 - param_key: moe_tensor_parallel_size
   vllm: null
-  sglang: moe-dense-tp-size
+  # https://github.com/sgl-project/sglang/issues/8530
+  # sglang moe_tensor_parallel_size only supports 1 or None for now
+  sglang: null
   trtllm: moe_tensor_parallel_size
 
 # KV Cache
