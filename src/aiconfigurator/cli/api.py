@@ -101,7 +101,7 @@ def _execute_and_wrap_result(
     top_n: int = 5,
 ) -> CLIResult:
     """Execute task configs using main.py's function and wrap result in CLIResult."""
-    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs_internal(
+    chosen_exp, best_configs, pareto_fronts, best_throughputs, task_configs = _execute_task_configs_internal(
         task_configs, mode, top_n=top_n
     )
 
@@ -120,9 +120,13 @@ def cli_default(
     total_gpus: int,
     system: str,
     *,
-    decode_system: str | None = None,
     backend: str = "trtllm",
     backend_version: str | None = None,
+    backend_deploy_version: str | None = None,
+    decode_system: str | None = None,
+    decode_backend: str | None = None,
+    decode_backend_version: str | None = None,
+    decode_backend_deploy_version: str | None = None,
     database_mode: str = "SILICON",
     isl: int = 4000,
     osl: int = 1000,
@@ -143,9 +147,14 @@ def cli_default(
         model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
         total_gpus: Total number of GPUs for deployment.
         system: System name (GPU type), e.g., 'h200_sxm', 'b200_sxm'.
-        decode_system: System name for disagg decode workers. Defaults to `system`.
         backend: Backend name ('trtllm', 'sglang', 'vllm'). Default is 'trtllm'.
-        backend_version: Backend database version. Default is latest.
+        backend_version: Backend database version for performance estimation. Default is latest.
+        backend_deploy_version: Backend version for deployment artifact generation.
+            If None, falls back to backend_version.
+        decode_system: System name for disagg decode workers. Defaults to `system`.
+        decode_backend: For disagg mode, backend for decode workers.
+        decode_backend_version: For disagg mode, backend version for decode workers.
+        decode_backend_deploy_version: For disagg mode, deploy version for decode workers.
         database_mode: Database mode for performance estimation
             ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
         isl: Input sequence length. Default is 4000.
@@ -177,9 +186,13 @@ def cli_default(
         model_path=model_path,
         total_gpus=total_gpus,
         system=system,
-        decode_system=decode_system,
         backend=backend,
         backend_version=backend_version,
+        backend_deploy_version=backend_deploy_version,
+        decode_system=decode_system,
+        decode_backend=decode_backend,
+        decode_backend_version=decode_backend_version,
+        decode_backend_deploy_version=decode_backend_deploy_version,
         database_mode=database_mode,
         isl=isl,
         osl=osl,
@@ -209,7 +222,6 @@ def cli_default(
         mock_args.tpot = tpot
         mock_args.request_latency = request_latency
         mock_args.top_n = top_n
-        mock_args.generated_config_version = None
 
         save_results(
             args=mock_args,
@@ -217,7 +229,6 @@ def cli_default(
             pareto_fronts=result.pareto_fronts,
             task_configs=result.task_configs,
             save_dir=save_dir,
-            generated_backend_version=None,
         )
 
     return result
@@ -320,7 +331,6 @@ def cli_exp(
         mock_args.mode = "exp"
         mock_args.yaml_path = yaml_path
         mock_args.top_n = top_n
-        mock_args.generated_config_version = None
 
         save_results(
             args=mock_args,
@@ -328,7 +338,6 @@ def cli_exp(
             pareto_fronts=result.pareto_fronts,
             task_configs=result.task_configs,
             save_dir=save_dir,
-            generated_backend_version=None,
         )
 
     return result
