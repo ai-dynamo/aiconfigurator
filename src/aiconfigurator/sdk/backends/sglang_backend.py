@@ -37,7 +37,8 @@ class SGLANGBackend(BaseBackend):
         osl = runtime_config.osl
         prefix = runtime_config.prefix
         b = runtime_config.batch_size
-        seq_imbalance_correction_scale = runtime_config.seq_imbalance_correction_scale
+        ctx_seq_imbalance_correction_scale = runtime_config.seq_imbalance_correction_scale
+        gen_seq_imbalance_correction_scale = runtime_config.gen_seq_imbalance_correction_scale
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
         balance_score = isl * b / ctx_tokens / osl
@@ -107,7 +108,7 @@ class SGLANGBackend(BaseBackend):
                         isl=num_tokens,
                         osl=1,
                         prefix=prefix * np.floor(ctx_tokens / isl),
-                        seq_imbalance_correction_scale=seq_imbalance_correction_scale,
+                        seq_imbalance_correction_scale=ctx_seq_imbalance_correction_scale,
                     ),
                     mode="static_ctx",
                 )
@@ -134,7 +135,7 @@ class SGLANGBackend(BaseBackend):
                         isl=num_tokens,
                         osl=1,
                         prefix=prefix,
-                        seq_imbalance_correction_scale=seq_imbalance_correction_scale,
+                        seq_imbalance_correction_scale=ctx_seq_imbalance_correction_scale,
                     ),
                     mode="static_ctx",
                 )
@@ -155,7 +156,7 @@ class SGLANGBackend(BaseBackend):
                             beam_width=1,
                             isl=isl + osl // 2,
                             osl=2,
-                            seq_imbalance_correction_scale=seq_imbalance_correction_scale,
+                            gen_seq_imbalance_correction_scale=gen_seq_imbalance_correction_scale,
                         ),
                         mode="static_gen",
                     )
@@ -193,7 +194,7 @@ class SGLANGBackend(BaseBackend):
                         beam_width=1,
                         isl=isl + osl // 2,
                         osl=2,
-                        seq_imbalance_correction_scale=seq_imbalance_correction_scale,
+                        gen_seq_imbalance_correction_scale=gen_seq_imbalance_correction_scale,
                     ),
                     mode="static_gen",
                 )

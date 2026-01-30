@@ -640,6 +640,16 @@ class GenerationAttention(Operation):
             window_size=self._window_size,
             head_size=self._head_size,
         )
+        # Generation/decoding stage uses a separate correction scale (do NOT reuse ctx scale).
+        # Backward-compatible fallback: if only the old key is provided, use it.
+        gen_seq_imbalance_correction_scale = float(
+            kwargs.get(
+                "gen_seq_imbalance_correction_scale",
+                kwargs.get("seq_imbalance_correction_scale", 1.0),
+            )
+        )
+        if gen_seq_imbalance_correction_scale != 1.0:
+            result = result * gen_seq_imbalance_correction_scale
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):

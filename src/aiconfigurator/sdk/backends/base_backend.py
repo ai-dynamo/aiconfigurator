@@ -125,6 +125,7 @@ class BaseBackend(ABC):
                         batch_size=batch_size,
                         beam_width=beam_width,
                         s=isl + i + 1,
+                        gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
                     )
 
                     # ✅ IMMEDIATELY extract values - do NOT accumulate PerformanceResult objects!
