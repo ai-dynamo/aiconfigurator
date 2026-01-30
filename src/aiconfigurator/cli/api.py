@@ -98,9 +98,12 @@ class CLIResult:
 def _execute_and_wrap_result(
     task_configs: dict[str, TaskConfig],
     mode: str,
+    top_n: int = 5,
 ) -> CLIResult:
     """Execute task configs using main.py's function and wrap result in CLIResult."""
-    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs_internal(task_configs, mode)
+    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs_internal(
+        task_configs, mode, top_n=top_n
+    )
 
     return CLIResult(
         chosen_exp=chosen_exp,
@@ -127,6 +130,7 @@ def cli_default(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
+    top_n: int = 5,
     save_dir: str | None = None,
 ) -> CLIResult:
     """
@@ -151,6 +155,7 @@ def cli_default(
         request_latency: Optional end-to-end request latency target (ms).
             Enables request-latency optimization mode.
         prefix: Prefix cache length. Default is 0.
+        top_n: Number of top configurations to return for each mode (agg/disagg). Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
 
     Returns:
@@ -184,7 +189,7 @@ def cli_default(
         prefix=prefix,
     )
 
-    result = _execute_and_wrap_result(task_configs, mode="default")
+    result = _execute_and_wrap_result(task_configs, mode="default", top_n=top_n)
 
     if save_dir:
         # Create a mock args object for save_results compatibility
@@ -203,6 +208,7 @@ def cli_default(
         mock_args.ttft = ttft
         mock_args.tpot = tpot
         mock_args.request_latency = request_latency
+        mock_args.top_n = top_n
         mock_args.generated_config_version = None
 
         save_results(
@@ -221,6 +227,7 @@ def cli_exp(
     *,
     yaml_path: str | None = None,
     config: dict[str, dict] | None = None,
+    top_n: int = 5,
     save_dir: str | None = None,
 ) -> CLIResult:
     """
@@ -235,6 +242,7 @@ def cli_exp(
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
             Keys are experiment names, values are experiment configs.
+        top_n: Number of top configurations to return for each experiment. Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
 
     Returns:
@@ -300,7 +308,7 @@ def cli_exp(
     if not task_configs:
         raise ValueError("No valid experiments found in configuration.")
 
-    result = _execute_and_wrap_result(task_configs, mode="exp")
+    result = _execute_and_wrap_result(task_configs, mode="exp", top_n=top_n)
 
     if save_dir:
         # Create a mock args object for save_results compatibility
@@ -311,6 +319,7 @@ def cli_exp(
         mock_args.save_dir = save_dir
         mock_args.mode = "exp"
         mock_args.yaml_path = yaml_path
+        mock_args.top_n = top_n
         mock_args.generated_config_version = None
 
         save_results(
