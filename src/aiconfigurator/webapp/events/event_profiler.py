@@ -21,12 +21,12 @@ def setup_profiling_events(components):
         components: Dictionary of all UI components from create_profiling_tab
     """
     # Extract nested component dictionaries
-    model_name_components = components["model_name_components"]
+    model_path_components = components["model_path_components"]
     model_system_components = components["model_system_components"]
     runtime_config_components = components["runtime_config_components"]
 
     # Extract individual components
-    model_name = model_name_components["model_name"]
+    model_path = model_path_components["model_path"]
     system = model_system_components["system"]
     backend = model_system_components["backend"]
     version = model_system_components["version"]
@@ -49,7 +49,7 @@ def setup_profiling_events(components):
 
     # Prepare inputs for the generate function
     inputs = [
-        model_name,
+        model_path,
         system,
         backend,
         version,

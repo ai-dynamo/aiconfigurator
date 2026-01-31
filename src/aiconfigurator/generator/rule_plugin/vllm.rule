@@ -1,5 +1,6 @@
+agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
 prefill max_batch_size = (max_batch_size if max_batch_size else 1)
-decode max_batch_size = (max_batch_size if max_batch_size else 128)
+agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
 
 
 agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_parallel_size or 1) * (data_parallel_size or 1)
@@ -12,6 +13,7 @@ agg max_seq_len = (SlaConfig.isl or 0) + (SlaConfig.osl or 0) + 1500
 
 when (ModelConfig.prefix or 0) > 0:
     disable_prefix_cache = false
+    DynConfig.enable_router = true
 
 when (ModelConfig.nextn or 0) > 0:
     speculative_decoding_type = "mtp"

@@ -76,7 +76,7 @@ def get_moe_test_cases():
             continue
 
         model_name = common_moe_testcase.model_name
-        if model_name in ["GPT_OSS_20B", "GPT_OSS_120B"]:
+        if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
             continue
 
         num_tokens_list = [num_tokens for num_tokens in common_moe_testcase.num_tokens_list if num_tokens <= 20480]

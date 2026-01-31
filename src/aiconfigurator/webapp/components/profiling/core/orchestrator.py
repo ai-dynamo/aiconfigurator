@@ -52,7 +52,7 @@ def format_status_message(profile_num_gpus, prefill_results):
 
 
 def generate_profiling_plots(
-    model_name: str,
+    model_path: str,
     system: str,
     backend: str,
     version: str,
@@ -73,7 +73,7 @@ def generate_profiling_plots(
     3. Computing GPU hours for cost analysis (frontend handles cost calculation)
 
     Args:
-        model_name: Model name (e.g., "QWEN3_32B")
+        model_path: Model name (e.g., "Qwen/Qwen3-32B")
         system: System name (e.g., "h200_sxm")
         backend: Backend name (e.g., "trtllm")
         version: Backend version (e.g., "0.20.0")
@@ -91,7 +91,7 @@ def generate_profiling_plots(
 
     try:
         # Validate inputs
-        is_valid, error_msg = validate_inputs(model_name, system, backend, version)
+        is_valid, error_msg = validate_inputs(model_path, system, backend, version)
         if not is_valid:
             return ("", error_msg)
 
@@ -115,16 +115,16 @@ def generate_profiling_plots(
             raise ValueError("No valid GPU configurations to profile")
 
         # Profile prefill performance
-        prefill_results = profile_prefill_performance(database, backend_instance, model_name, profile_num_gpus, isl)
+        prefill_results = profile_prefill_performance(database, backend_instance, model_path, profile_num_gpus, isl)
 
         # Profile decode performance
-        decode_results = profile_decode_performance(database, backend_instance, model_name, profile_num_gpus, isl, osl)
+        decode_results = profile_decode_performance(database, backend_instance, model_path, profile_num_gpus, isl, osl)
 
         # Prepare table data
-        prefill_table_data = prepare_prefill_table_data(prefill_results, model_name, system, backend, version, isl, osl)
-        decode_table_data = prepare_decode_table_data(decode_results, model_name, system, backend, version, isl, osl)
+        prefill_table_data = prepare_prefill_table_data(prefill_results, model_path, system, backend, version, isl, osl)
+        decode_table_data = prepare_decode_table_data(decode_results, model_path, system, backend, version, isl, osl)
         cost_table_data = prepare_cost_table_data(
-            isl, osl, prefill_results, decode_results, model_name, system, backend, version
+            isl, osl, prefill_results, decode_results, model_path, system, backend, version
         )
 
         # Serialize all data to JSON for frontend

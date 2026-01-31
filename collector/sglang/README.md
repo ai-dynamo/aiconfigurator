@@ -20,9 +20,9 @@ The collected performance data can be used for performance modeling, scheduling 
 
 ## Requirements
 
-- SGLang framework: v0.5.0rc0 
+- SGLang framework: v0.5.6.post2
 ```bash
-docker run -itd --shm-size 32g --gpus all --ipc=host --network=host --name sglang lmsysorg/sglang:v0.5.0rc0-cu126
+docker run -itd --shm-size 32g --gpus all --ipc=host --network=host --name sglang lmsysorg/sglang:v0.5.6.post2-cu126
 ```
 - DeepSeek model config (or use dummy weights)
 

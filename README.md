@@ -12,6 +12,9 @@ TPOT (Time per Output Token), optimizing throughput at a given latency becomes e
 `aiconfigurator` helps you find a strong starting configuration for disaggregated serving. Given your model, GPU
 count, and GPU type, it searches the configuration space and generates configuration files you can use for deployment with Dynamo.
 
+For a technical deep dive into the design and methodology of AIConfigurator, please refer to our paper:  
+[**AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework LLM Serving**](https://arxiv.org/abs/2601.06288).
+
 The tool models LLM inference using collected data for a target machine and framework. It evaluates thousands of
 configurations and runs anywhere via the CLI and the web app.
 
@@ -61,9 +64,14 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 ```bash
 aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm
 aiconfigurator cli exp --yaml_path exp.yaml
+aiconfigurator cli generate --model_path QWEN3_32B --total_gpus 8 --system h200_sxm
+aiconfigurator cli support --model_path QWEN3_32B --system h200_sxm
 ```
-- We have two modes, `default` and `exp`.
-- Use `default`, followed with **three basic arguments** (model, total_gpus, system), it prints the estimated best deployment and the deployment details.
+- We have four modes: `default`, `exp`, `generate`, and `support`.
+- Use `default` to find the estimated best deployment by searching the configuration space.
+- Use `exp` to run customized experiments defined in a YAML file.
+- Use `generate` to quickly create a naive configuration without a parameter sweep.
+- Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
 - Use `exp`, pass in exp.yaml by `--yaml_path` to customize your experiments and even a heterogenous one.
 - Use `--save_dir DIR` to generate framework configuration files for Dynamo.
@@ -76,6 +84,40 @@ aiconfigurator cli exp --yaml_path exp.yaml
   When this flag is set, `--tpot` becomes implicit and is ignored.
 
 Refer to [CLI User Guide](docs/cli_user_guide.md)
+
+### Python API
+
+You can also use `aiconfigurator` programmatically in Python:
+
+```python
+from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_support
+
+# 1. Run default agg vs disagg comparison
+result = cli_default(model_path="Qwen/Qwen3-32B", total_gpus=32, system="h200_sxm")
+print(result.best_configs["disagg"].head())
+
+# 2. Run experiments from a YAML file or a dictionary config
+result = cli_exp(yaml_path="my_experiments.yaml")
+# Or use a dictionary config directly
+result = cli_exp(config={
+    "my_exp": {
+        "serving_mode": "disagg",
+        "model_path": "Qwen/Qwen3-32B",
+        "total_gpus": 32,
+        "system_name": "h200_sxm",
+        "isl": 4000,
+        "osl": 1000,
+    }
+})
+
+# 3. Generate a naive configuration
+result = cli_generate(model_path="Qwen/Qwen3-32B", total_gpus=8, system="h200_sxm")
+print(result["parallelism"]) # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
+
+# 4. Check support for a model/system combination
+agg, disagg = cli_support(model_path="Qwen/Qwen3-32B", system="h200_sxm")
+print(f"Agg supported: {agg}, Disagg supported: {disagg}")
+```
 
 An example here, 
 ```bash
@@ -191,7 +233,7 @@ This feature bridges the gap between configuration and Dynamo deployment.
 The folder structure looks like this:
 
 ```text
-results/QWEN3_32B_isl4000_osl1000_ttft1000_tpot20_904495
+results/QWEN3_32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
 │   ├── best_config_topn.csv
 │   ├── config.yaml
@@ -218,7 +260,7 @@ results/QWEN3_32B_isl4000_osl1000_ttft1000_tpot20_904495
 └── pareto_frontier.png
 ```
 
-Use `--generator-config path/to/file.yaml` to load a YAML payload with `ServiceConfig`, `K8sConfig`, and `Workers.*` sections, or specify inline overrides with `--generator-set KEY=VALUE` (repeatable). Examples:
+Use `--generator-config path/to/file.yaml` to load a YAML payload with `ServiceConfig`, `K8sConfig`, `DynConfig`, `WorkerConfig`, and `Workers.<role>` sections, or specify inline overrides with `--generator-set KEY=VALUE` (repeatable). Examples:
 
 - `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`
 - `--generator-set K8sConfig.k8s_namespace=dynamo \`
@@ -318,8 +360,8 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 | System | Framework(Version) | Status |
 |--------|-------------------|--------|
-| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.5.post2, 0.5.5.post3), vLLM(0.11.0) | ✅ |
-| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.5.post2, 0.5.5.post3), vLLM(0.11.0) | ✅ |
+| h100_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.6.post2), vLLM(0.11.0) | ✅ |
+| h200_sxm | TRTLLM(0.20.0, 1.0.0rc3), SGLang(0.5.6.post2), vLLM(0.11.0) | ✅ |
 | b200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | gb200_sxm | TRTLLM(1.0.0rc6) | ✅ |
 | a100_sxm | TRTLLM(1.0.0) | ✅ |
@@ -339,6 +381,19 @@ We welcome contributions from the community! Check out the below resources to ge
 
 ### How To Add A New Model
 Adding a new model will require modifying the source code and perhaps collecting new data for the model. Please refer to [How to Add a New Model](docs/add_a_new_model.md).
+
+## Citation
+
+If you use AIConfigurator for your research, please cite our paper:
+
+```bibtex
+@article{xu2026aiconfigurator,
+  title={AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework LLM Serving},
+  author={Tianhao Xu and Yiming Liu and Xianglong Lu and Yijia Zhao and Xuting Zhou and Aichen Feng and Yiyi Chen and Yi Shen and Qin Zhou and Xumeng Chen and Ilya Sherstyuk and Haorui Li and Rishi Thakkar and Ben Hamm and Yuanzhe Li and Xue Huang and Wenpeng Wu and Anish Shanbhag and Harry Kim and Chuan Chen and Junjie Lai},
+  journal={arXiv preprint arXiv:2601.06288},
+  year={2026}
+}
+```
 
 ## Known Issues
 

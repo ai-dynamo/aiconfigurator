@@ -1,18 +1,22 @@
+agg_decode cuda_graph_batch_sizes = ((range(1, 16 + 1, 1) | list) + (range(16, 32 + 1, 4) | list) + (range(32, 64 + 1, 8) | list) + (range(64, 128 + 1, 16) | list) + (range(128, 256 + 1, 32) | list) + (range(256, 512 + 1, 64) | list) + (range((1 if (max_batch_size or 0) <= 8 else (max_batch_size or 0) - 8), (max_batch_size or 0) + 8 + 1, 1) | list))
+
+agg_decode cuda_graph_enable_padding = true
+
 prefill max_batch_size = (max_batch_size if max_batch_size else 1)
-agg_decode max_batch_size = (max_batch_size if max_batch_size else 128)
+agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
 
 agg_prefill_decode max_prefill_tokens = SlaConfig.isl + 1500
-
-
-agg_prefill_decode cuda_graph_batch_sizes = ((range(1, max_batch_size + 1) | list) if max_batch_size else [])
+agg enable_mixed_chunk = true
 
 # GPUs per worker follow the same TP/PP/DP product that SGLang expects
 agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_parallel_size or 1) * (data_parallel_size or 1)
 
-agg_prefill_decode kv_cache_dtype = ("fp8_e5m2" if kv_cache_dtype == "fp8" else kv_cache_dtype)
+agg_prefill_decode kv_cache_dtype = ("fp8_e4m3" if kv_cache_dtype == "fp8" else kv_cache_dtype)
+prefill_decode kv_transfer_backend = (kv_transfer_backend if kv_transfer_backend else "nixl")
 
 when (ModelConfig.prefix or 0) > 0:
     disable_prefix_cache = false
+    DynConfig.enable_router = true
 
 when (ModelConfig.nextn or 0) > 0:
     speculative_decoding_type = "NEXTN"

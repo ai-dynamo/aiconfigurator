@@ -16,7 +16,7 @@ import os
 import sys
 from typing import Any, Optional
 
-from api import (
+from .api import (
     generate_backend_artifacts,
     generate_backend_config,
     parse_cli_params,
@@ -116,10 +116,12 @@ def _resolve_roles(requested: str, params: dict[str, Any], logger: logging.Logge
 
 def _build_worker_context(params: dict[str, Any], role: str) -> dict[str, Any]:
     ctx: dict[str, Any] = {}
-    ctx.update(params.get("service") or {})
-    ctx.update(params.get("k8s") or {})
-    ctx.update(params.get("workers") or {})
-    ctx.update(params.get("sla") or {})
+    ctx.update(params.get("ServiceConfig") or {})
+    ctx.update(params.get("K8sConfig") or {})
+    ctx.update(params.get("WorkerConfig") or {})
+    ctx.update(params.get("SlaConfig") or {})
+    ctx.update(params.get("DynConfig") or {})
+    ctx.update(params.get("NodeConfig") or {})
     ctx.update(params.get("params", {}).get(role, {}) or {})
     ctx["role"] = role
     return ctx

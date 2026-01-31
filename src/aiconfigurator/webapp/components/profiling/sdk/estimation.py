@@ -19,7 +19,7 @@ import aiconfigurator.sdk.models
 def estimate_perf(
     database,
     backend,
-    model_name: str,
+    model_path: str,
     isl: int,
     osl: int,
     batch_size: int,
@@ -32,7 +32,7 @@ def estimate_perf(
     Args:
         database: Performance database instance
         backend: Backend instance
-        model_name: Model name (e.g., "QWEN3_32B")
+        model_path: Model name (e.g., "Qwen/Qwen3-32B")
         isl: Input sequence length
         osl: Output sequence length
         batch_size: Batch size
@@ -53,7 +53,7 @@ def estimate_perf(
 
     # Create model and session
     model_config = aiconfigurator.sdk.config.ModelConfig(**model_config_kwargs)
-    model = aiconfigurator.sdk.models.get_model(model_name, model_config, backend)
+    model = aiconfigurator.sdk.models.get_model(model_path, model_config, backend)
 
     runtime_config = aiconfigurator.sdk.config.RuntimeConfig(
         batch_size=batch_size,
@@ -73,7 +73,7 @@ def estimate_perf(
 def estimate_prefill_perf(
     database,
     backend,
-    model_name: str,
+    model_path: str,
     isl: int,
     **model_config_kwargs,
 ) -> dict[str, Any]:
@@ -83,7 +83,7 @@ def estimate_prefill_perf(
     Args:
         database: Performance database instance
         backend: Backend instance
-        model_name: Model name (e.g., "QWEN3_32B")
+        model_path: Model name (e.g., "Qwen/Qwen3-32B")
         isl: Input sequence length
         **model_config_kwargs: Model config kwargs (e.g., tp_size)
 
@@ -93,7 +93,7 @@ def estimate_prefill_perf(
     return estimate_perf(
         database,
         backend,
-        model_name,
+        model_path,
         isl,
         5,  # small osl for prefill-only
         1,  # concurrency = 1

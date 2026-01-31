@@ -10,7 +10,7 @@ class EventHandler:
         components["estimate_btn"].click(
             fn=EventFn.run_estimation_static,
             inputs=[
-                components["model_name_components"]["model_path"],
+                components["model_path_components"]["model_path"],
                 components["model_system_components"]["system"],
                 components["model_system_components"]["backend"],
                 components["model_system_components"]["version"],
@@ -55,13 +55,13 @@ class EventHandler:
             outputs=components["output_file"],
         )
         EventHandler.setup_common_events(
-            components["model_name_components"],
+            components["model_path_components"],
             components["model_system_components"],
             components["model_quant_components"],
             components["model_misc_config_components"],
         )
-        EventHandler.setup_model_name_events(
-            components["model_name_components"],
+        EventHandler.setup_model_path_events(
+            components["model_path_components"],
             components["model_quant_components"],
             components["model_parallel_components"],
             components["model_misc_config_components"],
@@ -72,7 +72,7 @@ class EventHandler:
         components["estimate_btn"].click(
             fn=EventFn.run_estimation_agg,
             inputs=[
-                components["model_name_components"]["model_path"],
+                components["model_path_components"]["model_path"],
                 components["model_system_components"]["system"],
                 components["model_system_components"]["backend"],
                 components["model_system_components"]["version"],
@@ -106,13 +106,13 @@ class EventHandler:
             outputs=components["output_file"],
         )
         EventHandler.setup_common_events(
-            components["model_name_components"],
+            components["model_path_components"],
             components["model_system_components"],
             components["model_quant_components"],
             components["model_misc_config_components"],
         )
-        EventHandler.setup_model_name_events(
-            components["model_name_components"],
+        EventHandler.setup_model_path_events(
+            components["model_path_components"],
             components["model_quant_components"],
             components["model_parallel_components"],
             components["model_misc_config_components"],
@@ -123,7 +123,7 @@ class EventHandler:
         components["estimate_btn"].click(
             fn=EventFn.run_estimation_agg_pareto,
             inputs=[
-                components["model_name_components"]["model_path"],
+                components["model_path_components"]["model_path"],
                 components["model_system_components"]["system"],
                 components["model_system_components"]["backend"],
                 components["model_system_components"]["version"],
@@ -163,13 +163,13 @@ class EventHandler:
             outputs=components["output_file"],
         )
         EventHandler.setup_common_events(
-            components["model_name_components"],
+            components["model_path_components"],
             components["model_system_components"],
             components["model_quant_components"],
             components["model_misc_config_components"],
         )
-        EventHandler.setup_model_name_events(
-            components["model_name_components"],
+        EventHandler.setup_model_path_events(
+            components["model_path_components"],
             components["model_quant_components"],
             components["model_parallel_components"],
             components["model_misc_config_components"],
@@ -180,7 +180,7 @@ class EventHandler:
         components["estimate_btn"].click(
             fn=EventFn.run_estimation_disagg_pareto,
             inputs=[
-                components["model_name_components"]["model_path"],  # model
+                components["model_path_components"]["model_path"],  # model
                 components["runtime_config_components"]["isl"],  # runtime
                 components["runtime_config_components"]["osl"],
                 components["runtime_config_components"]["prefix"],
@@ -246,25 +246,25 @@ class EventHandler:
             outputs=components["output_file"],
         )
         EventHandler.setup_common_events(
-            components["model_name_components"],
+            components["model_path_components"],
             components["prefill_model_system_components"],
             components["prefill_model_quant_components"],
             components["model_misc_config_components"],
         )
         EventHandler.setup_common_events(
-            components["model_name_components"],
+            components["model_path_components"],
             components["decode_model_system_components"],
             components["decode_model_quant_components"],
             components["model_misc_config_components"],
         )
-        EventHandler.setup_model_name_events(
-            components["model_name_components"],
+        EventHandler.setup_model_path_events(
+            components["model_path_components"],
             components["prefill_model_quant_components"],
             components["prefill_model_parallel_components"],
             components["model_misc_config_components"],
         )
-        EventHandler.setup_model_name_events(
-            components["model_name_components"],
+        EventHandler.setup_model_path_events(
+            components["model_path_components"],
             components["decode_model_quant_components"],
             components["decode_model_parallel_components"],
             components["model_misc_config_components"],
@@ -275,7 +275,7 @@ class EventHandler:
         components["estimate_btn"].click(
             fn=EventFn.run_estimation_disagg_pd_ratio,
             inputs=[
-                components["model_name_components"]["model_path"],  # model
+                components["model_path_components"]["model_path"],  # model
                 components["runtime_config_components"]["isl"],  # runtime
                 components["runtime_config_components"]["osl"],
                 components["runtime_config_components"]["prefix"],
@@ -329,25 +329,25 @@ class EventHandler:
             outputs=components["output_file"],
         )
         EventHandler.setup_common_events(
-            components["model_name_components"],
+            components["model_path_components"],
             components["prefill_model_system_components"],
             components["prefill_model_quant_components"],
             components["model_misc_config_components"],
         )
         EventHandler.setup_common_events(
-            components["model_name_components"],
+            components["model_path_components"],
             components["decode_model_system_components"],
             components["decode_model_quant_components"],
             components["model_misc_config_components"],
         )
-        EventHandler.setup_model_name_events(
-            components["model_name_components"],
+        EventHandler.setup_model_path_events(
+            components["model_path_components"],
             components["prefill_model_quant_components"],
             components["prefill_model_parallel_components"],
             components["model_misc_config_components"],
         )
-        EventHandler.setup_model_name_events(
-            components["model_name_components"],
+        EventHandler.setup_model_path_events(
+            components["model_path_components"],
             components["decode_model_quant_components"],
             components["decode_model_parallel_components"],
             components["model_misc_config_components"],
@@ -432,7 +432,11 @@ class EventHandler:
         model_quant_components,
         model_misc_config_components,
     ):
-        EventHandler.setup_system_events_with_quant_toggles(model_path_components, model_system_components, model_quant_components)
+        EventHandler.setup_system_events_with_quant_toggles(
+            model_path_components,
+            model_system_components,
+            model_quant_components,
+        )
 
         model_system_components["version"].change(
             fn=EventFn.update_quant_mode_choices,
@@ -478,7 +482,7 @@ class EventHandler:
         )
 
     @staticmethod
-    def setup_model_name_events(
+    def setup_model_path_events(
         model_path_components,
         model_quant_components,
         model_parallel_components,
@@ -501,6 +505,6 @@ class EventHandler:
     @staticmethod
     def setup_profiling_events(components):
         EventHandler.setup_system_events(
-            components["model_name_components"],
+            components["model_path_components"],
             components["model_system_components"],
         )

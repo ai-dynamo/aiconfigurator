@@ -9,7 +9,7 @@ exps:
 exp_h200_h200:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_name: "QWEN3_32B" # required
+  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
@@ -23,7 +23,7 @@ exp_h200_h200:
 exp_b200_h200:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_name: "QWEN3_32B" # required
+  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
   total_gpus: 16 # required
   system_name: "b200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.

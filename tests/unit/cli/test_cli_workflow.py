@@ -23,7 +23,7 @@ class TestCLIIntegration:
     """Workflow tests for the CLI orchestration layer (builders/executor/save)."""
 
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    @patch("aiconfigurator.cli.main._build_default_task_configs")
+    @patch("aiconfigurator.cli.main.build_default_task_configs")
     def test_cli_main_success_flow(self, mock_build_default, mock_execute, sample_cli_args_with_save_dir):
         """Test successful CLI main execution flow for default mode."""
         mock_task_config = MagicMock(name="TaskConfig")
@@ -58,7 +58,7 @@ class TestCLIIntegration:
 
     @patch("aiconfigurator.cli.main.save_results")
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    @patch("aiconfigurator.cli.main._build_experiment_task_configs")
+    @patch("aiconfigurator.cli.main.build_experiment_task_configs")
     def test_cli_main_success_flow_exp_mode(
         self,
         mock_build_exp,
@@ -105,28 +105,32 @@ class TestCLIIntegration:
     @pytest.mark.parametrize(
         "mode,build_patch",
         [
-            ("default", "aiconfigurator.cli.main._build_default_task_configs"),
-            ("exp", "aiconfigurator.cli.main._build_experiment_task_configs"),
+            ("default", "aiconfigurator.cli.main.build_default_task_configs"),
+            ("exp", "aiconfigurator.cli.main.build_experiment_task_configs"),
         ],
     )
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    def test_cli_main_build_dispatch(self, mock_execute, mode, build_patch, cli_args_factory):
+    def test_cli_main_build_dispatch(self, mock_execute, mode, build_patch, cli_args_factory, mock_exp_yaml_path):
         """Main should dispatch to the correct builder based on CLI mode."""
         mock_execute.return_value = ("agg", {}, {}, {})
+        mock_task_config = MagicMock(name="TaskConfig")
 
         with patch(build_patch) as mock_builder:
-            mock_builder.return_value = {}
-            args = cli_args_factory(mode=mode)
+            mock_builder.return_value = {"agg": mock_task_config}
+            if mode == "exp":
+                args = cli_args_factory(mode=mode, extra_args=["--yaml_path", str(mock_exp_yaml_path)])
+            else:
+                args = cli_args_factory(mode=mode)
             cli_main(args)
 
         mock_builder.assert_called_once()
-        mock_execute.assert_called_once_with({}, mode)
+        mock_execute.assert_called_once_with({"agg": mock_task_config}, mode)
 
     @pytest.mark.parametrize(
         "builder_patch",
         [
-            "aiconfigurator.cli.main._build_default_task_configs",
-            "aiconfigurator.cli.main._build_experiment_task_configs",
+            "aiconfigurator.cli.main.build_default_task_configs",
+            "aiconfigurator.cli.main.build_experiment_task_configs",
         ],
     )
     def test_cli_main_unsupported_mode_raises(self, builder_patch, cli_args_factory):
@@ -142,17 +146,18 @@ class TestCLIIntegration:
     @pytest.mark.parametrize(
         "builder_patch",
         [
-            "aiconfigurator.cli.main._build_default_task_configs",
-            "aiconfigurator.cli.main._build_experiment_task_configs",
+            "aiconfigurator.cli.main.build_default_task_configs",
+            "aiconfigurator.cli.main.build_experiment_task_configs",
         ],
     )
     @patch("aiconfigurator.cli.main._execute_task_configs")
     def test_cli_main_runtime_failure(self, mock_execute, builder_patch, cli_args_factory, tmp_path):
         """Execution errors propagate as RuntimeError for visibility."""
         mock_execute.side_effect = RuntimeError("failed")
+        mock_task_config = MagicMock(name="TaskConfig")
 
         with patch(builder_patch) as mock_builder:
-            mock_builder.return_value = {}
+            mock_builder.return_value = {"agg": mock_task_config}
 
             if "default" in builder_patch:
                 args = cli_args_factory(mode="default")
@@ -177,13 +182,13 @@ class TestCLIIntegration:
         assert args.database_mode == database_mode
 
     @patch("aiconfigurator.cli.main._execute_task_configs")
-    @patch("aiconfigurator.cli.main._build_experiment_task_configs")
+    @patch("aiconfigurator.cli.main.build_experiment_task_configs")
     def test_cli_exp_mode_with_database_mode_in_yaml(self, mock_build_exp, mock_execute, tmp_path):
         """Test that database_mode from YAML is correctly parsed in exp mode."""
         yaml_content = """
 exp_with_db_mode:
     serving_mode: "agg"
-    model_name: "QWEN3_32B"
+    model_path: "Qwen/Qwen3-32B"
     system_name: "h200_sxm"
     total_gpus: 8
     database_mode: "HYBRID"

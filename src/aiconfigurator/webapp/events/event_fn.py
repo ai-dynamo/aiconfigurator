@@ -464,7 +464,7 @@ class EventFn:
                     )
 
                 results_df = pareto_analysis.agg_pareto(
-                    model_name=model_path,
+                    model_path=model_path,
                     runtime_config=runtime_config,
                     database=database,
                     backend_name=backend_name,
@@ -703,7 +703,7 @@ class EventFn:
                 num_gpu_list = [int(x) for x in num_gpu_list.split(",")] if len(num_gpu_list) > 0 else None
                 # logger.info(f"target num_gpu_list in the disagg system: {num_gpu_list}")
                 results_df = pareto_analysis.disagg_pareto(
-                    model_name=model_path,
+                    model_path=model_path,
                     runtime_config=runtime_config,
                     prefill_database=prefill_database,
                     prefill_backend_name=prefill_backend_name,
@@ -1281,8 +1281,6 @@ class EventFn:
             version_update,
             gr.update(value=False, interactive=False),
         )
-
-    @staticmethod
     def update_model_related_components(model_path):
         # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
         if models.get_model_family(model_path) == "DEEPSEEK":

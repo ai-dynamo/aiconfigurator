@@ -89,6 +89,7 @@ def task_config_to_generator_config(
             "tensor_parallel_size": tp,
             "pipeline_parallel_size": pp,
             "data_parallel_size": dp,
+            "gpus_per_worker": tp * pp * dp,
             "moe_tensor_parallel_size": moe_tp,
             "moe_expert_parallel_size": moe_ep,
             "max_batch_size": bs,
@@ -122,9 +123,8 @@ def task_config_to_generator_config(
         pass
 
     service_cfg = {
-        "model_name": task_config.model_name,
-        "served_model_name": task_config.model_name,
-        "model_path": task_config.model_name,
+        "model_path": task_config.model_path,
+        "served_model_path": task_config.model_path,
         "include_frontend": True,
         "prefix": prefix_tokens,
     }
@@ -220,5 +220,8 @@ def task_config_to_generator_config(
     )
 
     params = _deep_merge(params, overrides.get("Params"))
+    rule_name = overrides.get("rule")
+    if rule_name:
+        params["rule"] = rule_name
     params["ModelConfig"] = model_cfg
     return params

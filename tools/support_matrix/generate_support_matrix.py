@@ -19,7 +19,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 sys.path.insert(0, _REPO_ROOT)
 
-from tests.e2e.support_matrix.support_matrix import SupportMatrix
+from tools.support_matrix.support_matrix import SupportMatrix
 
 
 def main():

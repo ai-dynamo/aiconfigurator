@@ -10,9 +10,26 @@ import urllib.request
 from pathlib import Path
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.common import ARCHITECTURE_TO_MODEL_FAMILY, CachedHFModels
+from aiconfigurator.sdk.common import ARCHITECTURE_TO_MODEL_FAMILY, BlockConfig, DefaultHFModels
 
 logger = logging.getLogger(__name__)
+
+
+def _load_json_with_infinity(file_path) -> dict:
+    """
+    Load JSON file with support for JavaScript-style Infinity and NaN values.
+
+    Standard JSON doesn't support Infinity/NaN, but HuggingFace configs may contain them (e.g., Nemotron-H-56B)
+    This function pre-processes the file content to replace these values before parsing.
+    """
+    with open(file_path) as f:
+        content = f.read()
+    # Replace JavaScript-style Infinity/NaN with Python-compatible values
+    # Use regex to match standalone Infinity/-Infinity/NaN (not part of a string)
+    content = re.sub(r"\bInfinity\b", "null", content)
+    content = re.sub(r"-Infinity\b", "null", content)
+    content = re.sub(r"\bNaN\b", "null", content)
+    return json.loads(content)
 
 
 def enumerate_parallel_config(
@@ -258,10 +275,71 @@ def _download_hf_config(hf_id: str) -> dict:
         raise HuggingFaceDownloadError(f"Failed to download {hf_id}'s config.json from HuggingFace: {e}") from e
 
 
+def _parse_nemotron_block_configs(block_configs: list[dict]) -> list[BlockConfig]:
+    """
+    Parse Nemotron's block_configs into a list of BlockConfig objects.
+    Groups consecutive blocks with the same configuration together.
+
+    Args:
+        block_configs: List of block configuration dictionaries from HuggingFace config
+
+    Returns:
+        list[BlockConfig]: Grouped block configurations
+    """
+    if not block_configs:
+        return None
+
+    grouped_configs = []
+    current_config = None
+    current_count = 0
+
+    for block in block_configs:
+        attn = block.get("attention", {})
+        ffn = block.get("ffn", {})
+
+        n_heads_in_group = attn.get("n_heads_in_group")
+        attn_no_op = attn.get("no_op", False)
+        ffn_mult = ffn.get("ffn_mult", 3.5)
+        ffn_no_op = ffn.get("no_op", False)
+
+        # Create a tuple to compare configurations
+        config_tuple = (n_heads_in_group, attn_no_op, ffn_mult, ffn_no_op)
+
+        if current_config == config_tuple:
+            current_count += 1
+        else:
+            if current_config is not None:
+                grouped_configs.append(
+                    BlockConfig(
+                        attn_n_heads_in_group=current_config[0],
+                        attn_no_op=current_config[1],
+                        ffn_ffn_mult=current_config[2],
+                        ffn_no_op=current_config[3],
+                        num_inst=current_count,
+                    )
+                )
+            current_config = config_tuple
+            current_count = 1
+
+    # Add the last group
+    if current_config is not None:
+        grouped_configs.append(
+            BlockConfig(
+                attn_n_heads_in_group=current_config[0],
+                attn_no_op=current_config[1],
+                ffn_ffn_mult=current_config[2],
+                ffn_no_op=current_config[3],
+                num_inst=current_count,
+            )
+        )
+
+    return grouped_configs if grouped_configs else None
+
+
 def _parse_hf_config_json(config: dict) -> list:
     """
     Convert a HuggingFace config.json dictionary into a list of model configuration parameters:
-    [model_family, l, n, n_kv, d, hidden_size, inter_size, vocab, context, topk,
+    [architecture, l, n, n_kv, d, hidden_size, inter_size, vocab, context, topk,
     num_experts, moe_inter_size, extra_params]
 
     Args:
@@ -273,31 +351,56 @@ def _parse_hf_config_json(config: dict) -> list:
     Raises:
         ValueError: If a required field is missing from the config or the architecture is not supported
     """
-    try:
-        model_family = ARCHITECTURE_TO_MODEL_FAMILY[config["architectures"][0]]
-    except KeyError as e:
+    architecture = config["architectures"][0]
+    if architecture not in ARCHITECTURE_TO_MODEL_FAMILY:
         raise ValueError(
-            f"The model's architecture {config['architectures'][0]} is not supported. "
+            f"The model's architecture {architecture} is not supported. "
             f"Supported architectures: {', '.join(ARCHITECTURE_TO_MODEL_FAMILY.keys())}"
-        ) from e
+        )
+
     layers = config["num_hidden_layers"]
-    n_kv = config["num_key_value_heads"]
     hidden_size = config["hidden_size"]
     n = config["num_attention_heads"]
-    inter_size = config["intermediate_size"]
-    d = config.get("head_dim", hidden_size // n)
     vocab = config["vocab_size"]
     context = config["max_position_embeddings"]
+
+    # Handle nullable fields (e.g., Nemotron has null for these)
+    n_kv = config.get("num_key_value_heads") or 0
+    inter_size = config.get("intermediate_size") or 0
+    d = config.get("head_dim") or config.get("attention_head_dim") or (hidden_size // n if n > 0 else 0)
+
+    # MoE parameters
     topk = config.get("num_experts_per_tok", 0)
     num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
     moe_inter_size = config.get("moe_intermediate_size", 0)
+
+    # Handle NemotronH-specific configuration (only fields unique to NemotronH)
+    extra_params = None
+    if architecture == "NemotronHForCausalLM":
+        extra_params = common.NemotronHConfig(
+            hybrid_override_pattern=config["hybrid_override_pattern"],
+            mamba_num_heads=config["mamba_num_heads"],
+            mamba_head_dim=config["mamba_head_dim"],
+            ssm_state_size=config["ssm_state_size"],
+            conv_kernel=config["conv_kernel"],
+            n_groups=config["n_groups"],
+            chunk_size=config["chunk_size"],
+            # Optional: 0 for non-MoE NemotronH models (e.g., Nemotron-H-56B)
+            moe_shared_expert_intermediate_size=config.get("moe_shared_expert_intermediate_size", 0),
+        )
+        logger.info(
+            f"NemotronH hybrid config: pattern={extra_params.hybrid_override_pattern}, "
+            f"mamba_heads={extra_params.mamba_num_heads}"
+        )
+
     logger.info(
-        f"Model architecture: model_family={model_family}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "
+        f"Model architecture: architecture={architecture}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "
         f"hidden_size={hidden_size}, inter_size={inter_size}, vocab={vocab}, context={context}, "
-        f"topk={topk}, num_experts={num_experts}, moe_inter_size={moe_inter_size}"
+        f"topk={topk}, num_experts={num_experts}, moe_inter_size={moe_inter_size}, "
+        f"extra_params={'present' if extra_params else 'None'}"
     )
     return [
-        model_family,
+        architecture,
         layers,
         n,
         n_kv,
@@ -309,7 +412,7 @@ def _parse_hf_config_json(config: dict) -> list:
         topk,
         num_experts,
         moe_inter_size,
-        None,
+        extra_params,
     ]
 
 
@@ -324,27 +427,47 @@ def _load_pre_downloaded_hf_config(hf_id: str) -> dict:
     config_path = _get_model_config_path() / f"{hf_id.replace('/', '--')}_config.json"
     if not config_path.exists():
         raise ValueError(f"HuggingFace model {hf_id} is not cached in model_configs directory.")
-    with open(config_path) as f:
-        return json.load(f)
+    return _load_json_with_infinity(config_path)
 
 
-def get_model_config_from_hf_id(hf_id: str) -> list:
+def _load_local_config(path: str) -> dict:
+    """Load config.json from a local directory path."""
+    config_path = Path(path) / "config.json"
+    if not config_path.exists():
+        raise ValueError(f"config.json not found at {config_path}")
+    return _load_json_with_infinity(config_path)
+
+
+def get_model_config_from_model_path(model_path: str) -> list:
     """
-    Get model configuration from HuggingFace ID.
-    First try to load the config from model_configs directory, if failed, try to download the config from HuggingFace.
+    Get model configuration from model path.
+
+    The model_path can be:
+    1. A HuggingFace model path (e.g., "Qwen/Qwen3-32B")
+    2. A local directory path containing config.json
 
     Args:
-        hf_id: HuggingFace model ID
+        model_path: HuggingFace model path or local directory path
 
     Returns:
         list: Model configuration parameters
+              [architecture, layers, n, n_kv, d, hidden_size, inter_size, vocab, context,
+               topk, num_experts, moe_inter_size, extra_params]
 
     Raises:
-        ValueError: If the HuggingFace model is not cached in model_configs directory
-        HuggingFaceDownloadError: If the HuggingFace API returns an error
+        ValueError: If the model config cannot be found
+        HuggingFaceDownloadError: If fetching from HuggingFace fails
     """
-    if hf_id in CachedHFModels:
-        config = _load_pre_downloaded_hf_config(hf_id)
+    import os
+
+    # Check if it's a local path
+    if os.path.isdir(model_path):
+        config = _load_local_config(model_path)
+        return _parse_hf_config_json(config)
+
+    # Otherwise treat as HuggingFace path
+    if model_path in DefaultHFModels:
+        config = _load_pre_downloaded_hf_config(model_path)
     else:
-        config = _download_hf_config(hf_id)
+        config = _download_hf_config(model_path)
     return _parse_hf_config_json(config)

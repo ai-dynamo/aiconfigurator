@@ -12,6 +12,21 @@ _ENV = Environment()
 logger = logging.getLogger(__name__)
 _BASE_DIR = Path(__file__).resolve().parent
 _RULES_DIR = (_BASE_DIR.parent / "rule_plugin").resolve()
+_DEFAULT_RULE_PLUGIN = "default"
+
+
+def _resolve_rule_plugin_dir(plugin: Optional[str], base_dir: Optional[str] = None) -> str:
+    base = Path(base_dir).resolve() if base_dir else _RULES_DIR
+    if not plugin or plugin == _DEFAULT_RULE_PLUGIN:
+        return str(base)
+    if os.path.sep in plugin or (os.path.altsep and os.path.altsep in plugin):
+        raise ValueError(f"Rule plugin must be a simple name, got: {plugin!r}")
+    candidate = (base / plugin).resolve()
+    if not candidate.exists() or not candidate.is_dir():
+        raise FileNotFoundError(f"Rule plugin directory not found: {candidate}")
+    if base not in candidate.parents and candidate != base:
+        raise ValueError(f"Rule plugin path escapes base directory: {candidate}")
+    return str(candidate)
 
 
 def _ensure_scope(pv: dict[str, Any], scope: str) -> dict[str, Any]:
@@ -30,19 +45,32 @@ def _get_scope(pv: dict[str, Any], scope: str) -> Optional[dict[str, Any]]:
 def _eval(expr: str, scope: str, pv: dict[str, Any]) -> Any:
     ctx: dict[str, Any] = {}
     ctx.update(pv)
-    ctx.update(pv.get("service", {}))
-    ctx.update(pv.get("k8s", {}))
+    service_cfg = pv.get("ServiceConfig", {})
+    ctx.update(service_cfg)
+    if isinstance(service_cfg, dict):
+        ctx.setdefault("ServiceConfig", service_cfg)
+    k8s_cfg = pv.get("K8sConfig", {})
+    ctx.update(k8s_cfg)
+    if isinstance(k8s_cfg, dict):
+        ctx.setdefault("K8sConfig", k8s_cfg)
+    node_cfg = pv.get("NodeConfig", {})
+    if isinstance(node_cfg, dict):
+        ctx.update(node_cfg)
+        ctx.setdefault("NodeConfig", node_cfg)
+    dyn_cfg = pv.get("DynConfig")
+    if isinstance(dyn_cfg, dict):
+        ctx.setdefault("DynConfig", dyn_cfg)
     # Provide structured aliases for DSL compatibility
     if "SlaConfig" not in ctx:
-        sla_cfg = pv.get("sla")
+        sla_cfg = pv.get("SlaConfig")
         if isinstance(sla_cfg, dict):
             ctx["SlaConfig"] = sla_cfg
     sc = pv.get("params", {}).get(scope, {})
     ctx.update(sc)
     # Alias ModelConfig.is_moe -> is_moe for convenience
     mc = pv.get("ModelConfig") or pv.get("model") or pv.get("model_config") or {}
-    if not mc and "service" in pv and isinstance(pv["service"], dict):
-        svc = pv["service"]
+    if not mc and "ServiceConfig" in pv and isinstance(pv["ServiceConfig"], dict):
+        svc = pv["ServiceConfig"]
         modeled: dict[str, Any] = {}
         if "is_moe" in svc:
             modeled["is_moe"] = svc.get("is_moe")
@@ -89,6 +117,29 @@ def _apply_line(
     default_scope: Optional[str],
 ) -> None:
     scope, name, expr = assign
+    if "." in name:
+        prefix, remainder = name.split(".", 1)
+        config_targets = {
+            "DynConfig": "DynConfig",
+            "K8sConfig": "K8sConfig",
+            "ServiceConfig": "ServiceConfig",
+            "ModelConfig": "ModelConfig",
+            "NodeConfig": "NodeConfig",
+            "SlaConfig": "SlaConfig",
+        }
+        target_key = config_targets.get(prefix)
+        if target_key:
+            target = pv.setdefault(target_key, {})
+            if isinstance(target, dict):
+                value = _eval(expr, default_scope or "prefill", pv)
+                parts = remainder.split(".")
+                cur = target
+                for part in parts[:-1]:
+                    if part not in cur or not isinstance(cur[part], dict):
+                        cur[part] = {}
+                    cur = cur[part]
+                cur[parts[-1]] = value
+            return
     sc = scope or default_scope
     if not sc:
         return
@@ -121,13 +172,29 @@ def _load_rule_path(base_dir: str, backend: str) -> Optional[str]:
     return p if os.path.exists(p) else None
 
 
-def apply_rule_plugins(param_values: dict[str, Any], backend: str, dsl_dir: Optional[str] = None) -> dict[str, Any]:
-    base = str(Path(dsl_dir).resolve()) if dsl_dir else str(_RULES_DIR)
+def apply_rule_plugins(
+    param_values: dict[str, Any],
+    backend: str,
+    dsl_dir: Optional[str] = None,
+) -> dict[str, Any]:
+    rule_name = param_values.get("rule")
+    base = _resolve_rule_plugin_dir(rule_name, base_dir=dsl_dir)
     rule_path = _load_rule_path(base, backend)
     if not rule_path:
         return param_values
     with open(rule_path, encoding="utf-8") as f:
         content = f.read().splitlines()
+
+    # Ensure agg_prefill_decode has data so default_scope eval can access tp/ep, etc.
+    params_obj = param_values.setdefault("params", {})
+    if "agg_prefill_decode" not in params_obj:
+        merged: dict[str, Any] = {}
+        for sc in ("agg", "prefill", "decode"):
+            sc_val = params_obj.get(sc)
+            if isinstance(sc_val, dict):
+                merged.update(sc_val)
+        if merged:
+            params_obj["agg_prefill_decode"] = merged
 
     default_scope = "agg_prefill_decode" if backend in ("trtllm", "vllm", "sglang") else None
     cond_stack: list[tuple[int, bool]] = []

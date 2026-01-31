@@ -14,11 +14,14 @@ gpu:
   sm_version: 100
 
 node:
-  num_gpus_per_node: 72
-  inter_node_bw: 25000000000  # Byte/s per GPU, single direction, CX7 1:1
-  intra_node_bw: 900000000000  # Byte/s per gpu, single direction
+  num_gpus_per_node: 4  # 4 GPUs per physical node (2 Grace CPUs x 2 GPUs each)
+  num_gpus_per_rack: 72  # 72 GPUs per rack (18 compute trays x 4 GPUs each)
+  inter_rack_bw: 25000000000  # Byte/s per GPU, single direction - InfiniBand between racks
+  inter_node_bw: 900000000000  # Byte/s per GPU, single direction - NVLink via NVSwitch within rack
+  intra_node_bw: 900000000000  # Byte/s per GPU, single direction - NVLink 5th gen within node
   pcie_bw: 64000000000  # Byte/s, single direction, pcie 5.0
   p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
+  inter_rack_latency: 0.000005  # 5us typical for InfiniBand between racks
 
 misc:
   nccl_mem: # some nonofficial correction based on observations, you should try to modify based on your own observations

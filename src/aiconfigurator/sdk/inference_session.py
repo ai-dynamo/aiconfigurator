@@ -131,11 +131,11 @@ class DisaggInferenceSession:
         decode_backend (backend.Backend): the backend to run decode
 
     Methods:
-        run_disagg (model_name, runtime_config, prefill_model_config, prefill_batch_size,
+        run_disagg (model_path, runtime_config, prefill_model_config, prefill_batch_size,
                     prefill_num_worker, decode_model_config, decode_batch_size,
                     decode_num_worker)
             run disagg with given prefill/decode worker info
-        find_best_disagg_result_under_constraints (model_name,runtime_config, prefill_model_config,
+        find_best_disagg_result_under_constraints (model_path,runtime_config, prefill_model_config,
                     prefill_parallel_config_list, prefill_max_num_tokens, prefill_num_worker_list,
                     decode_model_config, decode_parallel_config_list, decode_max_num_tokens,
                     decode_num_worker_list, num_gpu_list)
@@ -309,7 +309,7 @@ class DisaggInferenceSession:
 
     def run_disagg(
         self,
-        model_name: str,
+        model_path: str,
         runtime_config: config.RuntimeConfig,
         prefill_model_config: config.ModelConfig,
         prefill_batch_size: int,
@@ -322,7 +322,7 @@ class DisaggInferenceSession:
         Run disagg with given prefill/decode worker info
 
         Args:
-            model_name (str): the model name
+            model_path (str): the model name
             runtime_config (RuntimeConfig): the runtime config
             prefill_model_config (ModelConfig): the prefill model config
             prefill_batch_size (int): the prefill batch size
@@ -334,8 +334,8 @@ class DisaggInferenceSession:
         Returns:
             InferenceSummary: the summary of the inference result
         """
-        prefill_model = models.get_model(model_name, prefill_model_config, self._prefill_backend.name.value)
-        decode_model = models.get_model(model_name, decode_model_config, self._decode_backend.name.value)
+        prefill_model = models.get_model(model_path, prefill_model_config, self._prefill_backend.name.value)
+        decode_model = models.get_model(model_path, decode_model_config, self._decode_backend.name.value)
         prefill_sess = InferenceSession(
             model=prefill_model, database=self._prefill_database, backend=self._prefill_backend
         )
@@ -361,7 +361,7 @@ class DisaggInferenceSession:
     # optimization
     def find_best_disagg_result_under_constraints(
         self,
-        model_name: str,
+        model_path: str,
         runtime_config: config.RuntimeConfig,
         prefill_model_config: config.ModelConfig,
         prefill_parallel_config_list: list[tuple[int, int, int, int, int]],
@@ -385,7 +385,7 @@ class DisaggInferenceSession:
             - 5 is the top k to return for drawing pareto frontier of each tpot
 
         Args:
-            model_name (str): the model name
+            model_path (str): the model name
             runtime_config (RuntimeConfig): the runtime config
             prefill_model_config (ModelConfig): the prefill model config
             prefill_parallel_config_list (List[Tuple[int, int, int, int, int]]):
@@ -484,7 +484,7 @@ class DisaggInferenceSession:
                     overwritten_model_config.moe_ep_size = moe_ep_size
                     overwritten_model_config.attention_dp_size = dp_size
                     model = models.get_model(
-                        model_name=model_name,
+                        model_path=model_path,
                         model_config=overwritten_model_config,
                         backend_name=self._prefill_backend.name.value,
                     )
@@ -681,7 +681,7 @@ class DisaggInferenceSession:
             latency_correction_scale=self._decode_latency_correction_scale,
         )
         if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:
-            logger.debug(f"No prefill or decode workers found for {model_name} with given configs.")
+            logger.debug(f"No prefill or decode workers found for {model_path} with given configs.")
             return disagg_summary
 
         # find best result under constraints
@@ -722,7 +722,7 @@ class DisaggInferenceSession:
                     [disagg_summary_df, filtered_disagg_summary_df], axis=0, ignore_index=True
                 )
         if len(disagg_summary_df) == 0:
-            logger.debug(f"No disagg result found for {model_name} with given constraints.")
+            logger.debug(f"No disagg result found for {model_path} with given constraints.")
             return disagg_summary
 
         disagg_summary_df = disagg_summary_df.drop_duplicates(ignore_index=True)

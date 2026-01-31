@@ -3,7 +3,7 @@
 
 [project]
 name = "aiconfigurator"
-version = "0.5.0"
+version = "0.6.0"
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
@@ -68,7 +68,8 @@ dev = [
     "pytest-mock>=3.14.0",
     "pytest-split>=0.10.0",
     "pytest-timeout>=2.3.1",
-    "pytest-xdist==3.8.0"
+    "pytest-xdist==3.8.0",
+    "import-ipynb==0.2",
 ]
 webapp = [
     "gradio==5.47.1"
@@ -92,8 +93,8 @@ aiconfigurator = "aiconfigurator.main:main"
 
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
-"aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/*.rule"]
-"aiconfigurator" = ["systems/*.yaml", "systems/**/*.txt", "model_configs/*.json"]
+"aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule"]
+"aiconfigurator" = ["systems/*.yaml", "systems/*.csv", "systems/**/*.txt", "model_configs/*.json"]
 "aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js"]
 
 [tool.setuptools.packages.find]

@@ -596,13 +596,6 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         # GEMM collections
         {
             "name": "trtllm",
-            "type": "gemm_trt",
-            "module": "collector.trtllm.collect_gemm_trt",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
-        {
-            "name": "trtllm",
             "type": "gemm",
             "module": "collector.trtllm.collect_gemm",
             "get_func": "get_gemm_test_cases",
@@ -679,7 +672,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             else "collector.trtllm.collect_moe_pre_1_0"
             if v.startswith(("0.21.0", "1.0.0"))
             else "collector.trtllm.collect_moe"
-            if v.startswith(("1.1.0", "1.2.0"))
+            if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
             else None,
         },
     ]
@@ -744,7 +737,6 @@ def main():
         nargs="*",
         type=str,
         choices=[
-            "gemm_trt",
             "gemm",
             "compute_scale",
             "mla_context",

@@ -4,15 +4,8 @@
 import gradio as gr
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.common import SupportedModels
+from aiconfigurator.sdk.common import get_default_models
 from aiconfigurator.sdk.perf_database import get_all_databases
-
-
-def get_default_models():
-    """Get a default list of models shown in the webapp model dropdown."""
-    models = set(SupportedModels.keys())
-    models.update(getattr(common, "CachedHFModels", set()))
-    return models
 
 
 def create_model_path_config(app_config):
@@ -28,11 +21,6 @@ def create_model_path_config(app_config):
         )
 
     return {"model_path": model_path}
-
-
-def create_model_name_config(app_config):
-    """Backward-compatible alias for older tabs that still call create_model_name_config."""
-    return create_model_path_config(app_config)
 
 
 def create_system_config(app_config, gpu_config=False):
