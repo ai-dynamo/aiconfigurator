@@ -4,9 +4,11 @@
 import importlib.resources as pkg_resources
 import json
 import logging
+import os
 import re
 import tempfile
 import urllib.request
+from functools import cache
 from pathlib import Path
 
 from aiconfigurator.sdk import common
@@ -438,7 +440,8 @@ def _load_local_config(path: str) -> dict:
     return _load_json_with_infinity(config_path)
 
 
-def get_model_config_from_model_path(model_path: str) -> list:
+@cache
+def _load_model_config_from_model_path(model_path: str) -> dict:
     """
     Get model configuration from model path.
 
@@ -450,24 +453,34 @@ def get_model_config_from_model_path(model_path: str) -> list:
         model_path: HuggingFace model path or local directory path
 
     Returns:
-        list: Model configuration parameters
-              [architecture, layers, n, n_kv, d, hidden_size, inter_size, vocab, context,
-               topk, num_experts, moe_inter_size, extra_params]
+        dict: Raw model configuration dictionary
 
     Raises:
         ValueError: If the model config cannot be found
         HuggingFaceDownloadError: If fetching from HuggingFace fails
     """
-    import os
-
     # Check if it's a local path
     if os.path.isdir(model_path):
-        config = _load_local_config(model_path)
-        return _parse_hf_config_json(config)
+        return _load_local_config(model_path)
 
     # Otherwise treat as HuggingFace path
     if model_path in DefaultHFModels:
         config = _load_pre_downloaded_hf_config(model_path)
     else:
         config = _download_hf_config(model_path)
-    return _parse_hf_config_json(config)
+    return config
+
+
+def get_model_config_from_model_path(model_path: str) -> list:
+    """
+    Get model configuration from model path and parse it into a list of model configuration parameters
+
+    Args:
+        model_path: HuggingFace model path or local directory path
+
+    Returns:
+        list: Model configuration parameters
+              [architecture, layers, n, n_kv, d, hidden_size, inter_size, vocab, context,
+               topk, num_experts, moe_inter_size, extra_params]
+    """
+    return _parse_hf_config_json(_load_model_config_from_model_path(model_path))

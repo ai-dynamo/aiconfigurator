@@ -8,7 +8,7 @@ from functools import cache
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.utils import get_model_config_from_model_path
+from aiconfigurator.sdk.utils import _load_model_config_from_model_path, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -648,10 +648,11 @@ class MOEModel(BaseModel):
         )
 
         self._topk = topk
-
-        self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
+
+        # Validate quantized MoE block size alignment
+        self._validate_fp8_block_quantized_moe_config()
 
         self._power_law_alpha = 1.2
 
@@ -895,6 +896,35 @@ class MOEModel(BaseModel):
         pp_scale_factor = pp_size - 1
         self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor, h, pp_size))
+
+    def _validate_fp8_block_quantized_moe_config(self) -> None:
+        """
+        Validate that quantized MoE configuration satisfies block size constraints.
+
+        For fp8_block quantized MoE models, the constraint is:
+        (moe_intermediate_size / moe_tp_size) % weight_block_size_n == 0
+
+        This ensures proper alignment for quantized weight blocks.
+        """
+        # Only validate for fp8_block quantization
+        if self.config.moe_quant_mode != common.MoEQuantMode.fp8_block:
+            return
+
+        # Load raw model config to get block size
+        raw_config = _load_model_config_from_model_path(self.model_path)
+
+        # Get weight_block_size from quantization_config (default to [128, 128])
+        default_size = [128, 128]
+        weight_block_size = raw_config.get("quantization_config", {}).get("weight_block_size", default_size)[0]
+
+        # Check alignment
+        moe_size_per_gpu = self._moe_inter_size // self.config.moe_tp_size
+        if (moe_size_per_gpu % weight_block_size) != 0:
+            raise ValueError(
+                f"Invalid quantized MoE configuration: "
+                f"(moe_intermediate_size={self._moe_inter_size} / moe_tp_size={self.config.moe_tp_size}) "
+                f"% weight_block_size={weight_block_size} != 0. "
+            )
 
 
 class DeepSeekModel(BaseModel):
