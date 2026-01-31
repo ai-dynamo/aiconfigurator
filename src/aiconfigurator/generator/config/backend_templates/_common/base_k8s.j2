@@ -1,0 +1,44 @@
+{#
+  Common Kubernetes manifest boilerplate for k8s_deploy.yaml templates.
+  This file provides shared DynamoGraphDeployment structure.
+#}
+
+{% macro deployment_header(DynConfig, K8sConfig, name) %}
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ name | default(DynConfig.deployment_name | default('dynamo-deployment')) }}
+  namespace: {{ K8sConfig.k8s_namespace | default(DynConfig.namespace | default('default')) }}
+spec:
+  services:
+{% endmacro %}
+
+{% macro frontend_spec(ServiceConfig, DynConfig, K8sConfig, enable_router, k8s_use_model_cache, k8s_model_cache_pvc, k8s_model_cache_mount, frontend_replicas) %}
+    Frontend:
+      componentType: frontend
+      replicas: {{ frontend_replicas | default(1) }}
+      extraPodSpec:
+        {% if k8s_use_model_cache %}
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: {{ k8s_model_cache_pvc }}
+        {% endif %}
+        {% if K8sConfig.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ K8sConfig.k8s_image | default(ServiceConfig.container_image | default('')) }}
+          imagePullPolicy: IfNotPresent
+          {% if k8s_use_model_cache %}
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ k8s_model_cache_mount }}
+          {% endif %}
+      {% if enable_router %}
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
+      {% endif %}
+{% endmacro %}
