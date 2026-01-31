@@ -1162,7 +1162,7 @@ class EventFn:
     # common functions
     # system change func and event
     @staticmethod
-    def update_quant_mode_choices(model_name, system_name, backend_name, version, enable_wideep):
+    def update_quant_mode_choices(model_path, system_name, backend_name, version, enable_wideep):
         if version is None:
             return (
                 gr.update(choices=[], value=None, interactive=True),
@@ -1174,7 +1174,7 @@ class EventFn:
         database_dict = get_all_databases()
         supported_quant_mode = database_dict[system_name][backend_name][version].supported_quant_mode
 
-        if get_model_family(model_name) != "DEEPSEEK":
+        if get_model_family(model_path) != "DEEPSEEK":
             gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
             kvcache_quant_mode_choices = sorted(supported_quant_mode["generation_attention"])
             fmha_quant_mode_choices = sorted(supported_quant_mode["context_attention"])
@@ -1239,7 +1239,7 @@ class EventFn:
         )
 
     @staticmethod
-    def update_system_value(model_name):
+    def update_system_value(model_path):
         return gr.update(value=None, interactive=True)
 
     @staticmethod
@@ -1283,9 +1283,9 @@ class EventFn:
         )
 
     @staticmethod
-    def update_model_related_components(model_name):
+    def update_model_related_components(model_path):
         # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
-        if models.get_model_family(model_name) == "DEEPSEEK":
+        if models.get_model_family(model_path) == "DEEPSEEK":
             return (
                 gr.update(value=0, visible=True),
                 gr.update(visible=True),
@@ -1295,7 +1295,7 @@ class EventFn:
                 gr.update(visible=True),
                 gr.update(visible=True),
             )
-        elif models.get_model_family(model_name) == "MOE":
+        elif models.get_model_family(model_path) == "MOE":
             return (
                 gr.update(value=0, visible=False),
                 gr.update(visible=False),

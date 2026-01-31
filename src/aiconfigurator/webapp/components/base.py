@@ -18,7 +18,8 @@ def create_model_name_config(app_config):
             interactive=True,
         )
 
-    return {"model_name": model_name}
+    # Keep both keys for compatibility with upstream refactors (model_name -> model_path).
+    return {"model_name": model_name, "model_path": model_name}
 
 
 def create_system_config(app_config, gpu_config=False):

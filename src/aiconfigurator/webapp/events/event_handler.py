@@ -10,7 +10,7 @@ class EventHandler:
         components["estimate_btn"].click(
             fn=EventFn.run_estimation_static,
             inputs=[
-                components["model_name_components"]["model_name"],
+                components["model_name_components"]["model_path"],
                 components["model_system_components"]["system"],
                 components["model_system_components"]["backend"],
                 components["model_system_components"]["version"],
@@ -72,7 +72,7 @@ class EventHandler:
         components["estimate_btn"].click(
             fn=EventFn.run_estimation_agg,
             inputs=[
-                components["model_name_components"]["model_name"],
+                components["model_name_components"]["model_path"],
                 components["model_system_components"]["system"],
                 components["model_system_components"]["backend"],
                 components["model_system_components"]["version"],
@@ -123,7 +123,7 @@ class EventHandler:
         components["estimate_btn"].click(
             fn=EventFn.run_estimation_agg_pareto,
             inputs=[
-                components["model_name_components"]["model_name"],
+                components["model_name_components"]["model_path"],
                 components["model_system_components"]["system"],
                 components["model_system_components"]["backend"],
                 components["model_system_components"]["version"],
@@ -180,7 +180,7 @@ class EventHandler:
         components["estimate_btn"].click(
             fn=EventFn.run_estimation_disagg_pareto,
             inputs=[
-                components["model_name_components"]["model_name"],  # model
+                components["model_name_components"]["model_path"],  # model
                 components["runtime_config_components"]["isl"],  # runtime
                 components["runtime_config_components"]["osl"],
                 components["runtime_config_components"]["prefix"],
@@ -275,7 +275,7 @@ class EventHandler:
         components["estimate_btn"].click(
             fn=EventFn.run_estimation_disagg_pd_ratio,
             inputs=[
-                components["model_name_components"]["model_name"],  # model
+                components["model_name_components"]["model_path"],  # model
                 components["runtime_config_components"]["isl"],  # runtime
                 components["runtime_config_components"]["osl"],
                 components["runtime_config_components"]["prefix"],
@@ -381,11 +381,11 @@ class EventHandler:
 
     # common events
     @staticmethod
-    def setup_system_events(model_name_components, model_system_components, model_quant_components=None):
+    def setup_system_events(model_path_components, model_system_components, model_quant_components=None):
         """Setup events for system/backend/version dropdowns - reusable across tabs"""
-        model_name_components["model_name"].change(
+        model_path_components["model_path"].change(
             fn=EventFn.update_system_value,
-            inputs=[model_name_components["model_name"]],
+            inputs=[model_path_components["model_path"]],
             outputs=[model_system_components["system"]],
         )
 
@@ -424,17 +424,17 @@ class EventHandler:
 
     @staticmethod
     def setup_common_events(
-        model_name_components,
+        model_path_components,
         model_system_components,
         model_quant_components,
         model_misc_config_components,
     ):
-        EventHandler.setup_system_events(model_name_components, model_system_components, model_quant_components)
+        EventHandler.setup_system_events(model_path_components, model_system_components, model_quant_components)
 
         model_system_components["version"].change(
             fn=EventFn.update_quant_mode_choices,
             inputs=[
-                model_name_components["model_name"],
+                model_path_components["model_path"],
                 model_system_components["system"],
                 model_system_components["backend"],
                 model_system_components["version"],
@@ -452,7 +452,7 @@ class EventHandler:
         model_misc_config_components["enable_wideep"].change(
             fn=EventFn.update_quant_mode_choices,
             inputs=[
-                model_name_components["model_name"],
+                model_path_components["model_path"],
                 model_system_components["system"],
                 model_system_components["backend"],
                 model_system_components["version"],
@@ -476,14 +476,14 @@ class EventHandler:
 
     @staticmethod
     def setup_model_name_events(
-        model_name_components,
+        model_path_components,
         model_quant_components,
         model_parallel_components,
         model_misc_config_components,
     ):
-        model_name_components["model_name"].change(
+        model_path_components["model_path"].change(
             fn=EventFn.update_model_related_components,
-            inputs=[model_name_components["model_name"]],
+            inputs=[model_path_components["model_path"]],
             outputs=[
                 model_misc_config_components["nextn"],
                 model_misc_config_components["nextn_accept_rates"],
