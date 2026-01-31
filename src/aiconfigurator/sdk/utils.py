@@ -392,6 +392,9 @@ def _parse_hf_config_json(config: dict) -> list:
             f"NemotronH hybrid config: pattern={extra_params.hybrid_override_pattern}, "
             f"mamba_heads={extra_params.mamba_num_heads}"
         )
+    elif architecture == "DeciLMForCausalLM":
+        if "block_configs" in config:
+            extra_params = _parse_nemotron_block_configs(config["block_configs"])
 
     logger.info(
         f"Model architecture: architecture={architecture}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "
