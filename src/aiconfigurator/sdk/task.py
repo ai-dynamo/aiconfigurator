@@ -891,9 +891,10 @@ class TaskConfig:
 
             gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)
             gemm_quant_mode_name = gemm_quant_mode.name if hasattr(gemm_quant_mode, "name") else str(gemm_quant_mode)
-            if str(gemm_quant_mode_name).lower() != common.GEMMQuantMode.fp8.name:
+            if str(gemm_quant_mode_name).lower() not in {common.GEMMQuantMode.fp8.name, common.GEMMQuantMode.fp8_block.name}:
                 raise ValueError(
-                    f"{target}: static_quant_mode requires gemm_quant_mode='{common.GEMMQuantMode.fp8.name}' "
+                    f"{target}: static_quant_mode requires gemm_quant_mode='{common.GEMMQuantMode.fp8.name}' or "
+                    f"'{common.GEMMQuantMode.fp8_block.name}' "
                     f"for backend '{common.BackendName.trtllm.value}', "
                     f"but got gemm_quant_mode='{gemm_quant_mode_name}'."
                 )

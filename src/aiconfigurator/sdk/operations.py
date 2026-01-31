@@ -161,8 +161,9 @@ class GEMM(Operation):
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
         model_name = str(kwargs.get("model_name", ""))
         static_quant_mode = bool(kwargs.get("static_quant_mode", False))
+        is_fp8 = quant_mode in {common.GEMMQuantMode.fp8, common.GEMMQuantMode.fp8_block}
         subtract_scale_matrix = (
-            quant_mode == common.GEMMQuantMode.fp8
+            is_fp8
             and static_quant_mode
             and "qwen" in model_name.lower()
             and self._name
@@ -182,7 +183,7 @@ class GEMM(Operation):
         energy = result.energy
 
         # Adjust for static quantization: subtract compute_scale overhead
-        if quant_mode == common.GEMMQuantMode.fp8 and static_quant_mode:
+        if is_fp8 and static_quant_mode:
             compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
             latency -= float(compute_scale_result)
             energy -= compute_scale_result.energy

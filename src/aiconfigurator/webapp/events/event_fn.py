@@ -157,7 +157,7 @@ class EventFn:
     @staticmethod
     def update_quant_overhead_toggles(backend_name, gemm_quant_mode):
         backend_ok = str(backend_name).lower() == common.BackendName.trtllm.value
-        gemm_ok = str(gemm_quant_mode).lower() == common.GEMMQuantMode.fp8.name
+        gemm_ok = str(gemm_quant_mode).lower() in {common.GEMMQuantMode.fp8.name, common.GEMMQuantMode.fp8_block.name}
         if backend_ok and gemm_ok:
             return gr.update(interactive=True)
         return gr.update(value=False, interactive=False)
