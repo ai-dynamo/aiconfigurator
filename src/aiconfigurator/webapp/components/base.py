@@ -8,18 +8,31 @@ from aiconfigurator.sdk.common import SupportedModels
 from aiconfigurator.sdk.perf_database import get_all_databases
 
 
-def create_model_name_config(app_config):
+def get_default_models():
+    """Get a default list of models shown in the webapp model dropdown."""
+    models = set(SupportedModels.keys())
+    models.update(getattr(common, "CachedHFModels", set()))
+    return models
+
+
+def create_model_path_config(app_config):
     """create model name config components"""
+    default_models = sorted(get_default_models())
+    default_model = "deepseek-ai/DeepSeek-V3" if "deepseek-ai/DeepSeek-V3" in default_models else default_models[0]
     with gr.Accordion("Model"):
-        model_name = gr.Dropdown(
-            choices=list(SupportedModels.keys()),
+        model_path = gr.Dropdown(
+            choices=default_models,
             label="model name",
-            value="DEEPSEEK_V3",
+            value=default_model,
             interactive=True,
         )
 
-    # Keep both keys for compatibility with upstream refactors (model_name -> model_path).
-    return {"model_name": model_name, "model_path": model_name}
+    return {"model_path": model_path}
+
+
+def create_model_name_config(app_config):
+    """Backward-compatible alias for older tabs that still call create_model_name_config."""
+    return create_model_path_config(app_config)
 
 
 def create_system_config(app_config, gpu_config=False):
