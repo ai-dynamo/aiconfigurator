@@ -1281,6 +1281,8 @@ class EventFn:
             version_update,
             gr.update(value=False, interactive=False),
         )
+
+    @staticmethod
     def update_model_related_components(model_path):
         # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
         if models.get_model_family(model_path) == "DEEPSEEK":
