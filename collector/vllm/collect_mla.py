@@ -6,6 +6,7 @@ import math
 import os
 
 import torch
+import vllm
 from vllm.config import set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.version import __version__ as vllm_version
@@ -24,10 +25,13 @@ from collector.vllm.utils import (
     get_attention_backend,
     resolve_obj_by_qualname,
     setup_distributed,
+    with_exit_stack,
 )
 
 
+@with_exit_stack
 def run_attention_torch(
+    exit_stack,
     batch_size,
     input_len,
     num_heads,
@@ -77,17 +81,33 @@ def run_attention_torch(
             use_sparse=False,
         )
     except TypeError:
-        # in the case of vllm 0.12.0 use_v1 is removed
-        backend = current_platform.get_attn_backend_cls(
-            None,
-            head_dim,
-            dtype,
-            kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-            block_size=block_size,
-            use_mla=True,
-            has_sink=False,
-            use_sparse=False,
-        )
+        try:
+            # in the case of vllm 0.12.0 use_v1 is removed
+            backend = current_platform.get_attn_backend_cls(
+                None,
+                head_dim,
+                dtype,
+                kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                block_size=block_size,
+                use_mla=True,
+                has_sink=False,
+                use_sparse=False,
+            )
+        except TypeError:
+            # vllm 0.14.0
+            from vllm.v1.attention.selector import AttentionSelectorConfig
+
+            attn_selector_config = AttentionSelectorConfig(
+                head_size=head_dim,
+                dtype=dtype,
+                kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                block_size=block_size,
+                use_mla=True,
+                has_sink=False,
+                use_sparse=False,
+            )
+            backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
+
     if _Backend is not None:
         backend_name = _Backend[resolve_obj_by_qualname(backend).get_name()]
         print(f"VLLM chose MLA backend: {backend_name}")
@@ -110,13 +130,18 @@ def run_attention_torch(
             query_lens=[1] * batch_size,
         )
 
-    current_platform.seed_everything(42)
+    try:
+        vllm.utils.torch_utils.set_random_seed(42)
+    except AttributeError:
+        current_platform.seed_everything(42)
+
     vllm_config = create_vllm_config(
         model_name=model,
         max_model_len=max(batch_spec.seq_lens),
         block_size=block_size,
         num_gpu_blocks=num_kv_cache_blocks,
         max_num_seqs=batch_size,
+        use_fp8_kv_cache=use_fp8_kv_cache,
     )
     assert convert_dtype_to_torch(vllm_config.model_config.dtype) == torch.bfloat16
 
@@ -173,6 +198,8 @@ def run_attention_torch(
 
     # Build metadata
     layer_names = ["placeholder"]
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
+
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
     attn_metadata = builder.build(
         common_prefix_len=0,
@@ -190,26 +217,25 @@ def run_attention_torch(
     sliding_window = vllm_config.model_config.get_sliding_window()
     scale = 1.0 / (head_dim**0.5)
 
-    with set_current_vllm_config(vllm_config):
-        impl = impl_cls(
-            num_heads=num_heads,
-            head_size=head_dim,
-            scale=scale,
-            num_kv_heads=num_kv_heads,
-            alibi_slopes=None,
-            sliding_window=sliding_window,
-            kv_cache_dtype="fp8" if use_fp8_kv_cache else "auto",
-            logits_soft_cap=None,
-            attn_type="decoder",
-            kv_sharing_target_layer_name=None,
-            q_lora_rank=q_lora_rank,
-            kv_lora_rank=kv_lora_rank,
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
-            v_head_dim=v_head_dim,
-            kv_b_proj=mock_kv_b_proj,
-        )
+    impl = impl_cls(
+        num_heads=num_heads,
+        head_size=head_dim,
+        scale=scale,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=sliding_window,
+        kv_cache_dtype="fp8" if use_fp8_kv_cache else "auto",
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+        q_lora_rank=q_lora_rank,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        kv_b_proj=mock_kv_b_proj,
+    )
 
     # Process weights to create W_UK_T and W_UV attributes needed by MLA
     impl.process_weights_after_loading(dtype)
@@ -343,13 +369,13 @@ def get_generation_mla_test_cases():
 
 if __name__ == "__main__":
     test_cases = get_context_mla_test_cases()
-    test_cases = test_cases[:1]
+    test_cases = test_cases[:10]
     for test_case in test_cases:
         print(f"Running context attention test case: {test_case}")
         run_attention_torch(*test_case)
 
     test_cases = get_generation_mla_test_cases()
-    test_cases = test_cases[:1]
+    test_cases = test_cases[:10]
     for test_case in test_cases:
         print(f"Running generation attention test case: {test_case}")
         run_attention_torch(*test_case)

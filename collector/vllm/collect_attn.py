@@ -5,11 +5,15 @@
 import os
 
 import torch
+import vllm
 
 try:
     from vllm.attention.backends.registry import AttentionBackendEnum
 except ImportError:
-    AttentionBackendEnum = None  # type: ignore
+    try:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    except ImportError:
+        AttentionBackendEnum = None  # type: ignore
 try:
     from vllm.platforms import _Backend as LegacyBackendEnum  # type: ignore
 except Exception:
@@ -29,6 +33,9 @@ try:
 except ImportError:
     from vllm.utils.import_utils import resolve_obj_by_qualname  # type: ignore
 
+from vllm.config import set_current_vllm_config
+
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import (
     BatchSpec,
     create_and_prepopulate_kv_cache,
@@ -36,8 +43,8 @@ from collector.vllm.utils import (
     create_standard_kv_cache_spec,
     create_vllm_config,
     get_attention_backend,
+    with_exit_stack,
 )
-from helper import benchmark_with_power, get_sm_version, log_perf
 
 compatible_version = ["0.11.0", "0.12.0"]
 
@@ -61,7 +68,9 @@ compatible_versions = ["0.11.0", "0.12.0"]
 # support MHA GQA MQA fp16 tensor and float16/fp8 kv cache
 
 
+@with_exit_stack
 def run_attention_torch(
+    exit_stack,
     batch_size,
     input_len,
     num_heads,
@@ -107,17 +116,31 @@ def run_attention_torch(
                 use_sparse=False,
             )
         except TypeError:
-            backend = current_platform.get_attn_backend_cls(
-                None,
-                head_dim,
-                dtype,
-                kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-                block_size=block_size,
-                use_mla=False,
-                has_sink=False,
-                use_sparse=False,
-                use_v1=True,
-            )
+            try:
+                backend = current_platform.get_attn_backend_cls(
+                    None,
+                    head_dim,
+                    dtype,
+                    kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                    block_size=block_size,
+                    use_mla=False,
+                    has_sink=False,
+                    use_sparse=False,
+                    use_v1=True,
+                )
+            except TypeError:
+                from vllm.v1.attention.selector import AttentionSelectorConfig
+
+                attn_selector_config = AttentionSelectorConfig(
+                    head_size=head_dim,
+                    dtype=dtype,
+                    kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                    block_size=block_size,
+                    use_mla=False,
+                    has_sink=False,
+                    use_sparse=False,
+                )
+                backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
 
     backend_name_obj = resolve_obj_by_qualname(backend)
     backend_name_str = backend_name_obj.get_name()
@@ -139,13 +162,18 @@ def run_attention_torch(
             query_lens=[1] * batch_size,
         )
 
-    current_platform.seed_everything(42)
+    try:
+        vllm.utils.torch_utils.set_random_seed(42)
+    except AttributeError:
+        current_platform.seed_everything(42)
+
     vllm_config = create_vllm_config(
         model_name=model,
         max_model_len=max(batch_spec.seq_lens),
         block_size=block_size,
         num_gpu_blocks=8192,
         max_num_seqs=batch_size,
+        use_fp8_kv_cache=use_fp8_kv_cache,
     )
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache)
@@ -223,6 +251,8 @@ def run_attention_torch(
     builder_cls, impl_cls = get_attention_backend(actual_backend)
     layer_names = ["placeholder"]
 
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
+
     # Mock flashinfer's get_per_layer_parameters if needed
     if backend_name_str == "FLASHINFER":
         import unittest.mock
@@ -280,7 +310,7 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
-    if use_fp8_kv_cache:
+    if use_fp8_kv_cache and backend_name_str == "FLASH_ATTN":
         query_vllm = query_vllm.to(current_platform.fp8_dtype())
         output = output.to(torch.bfloat16)
 
