@@ -173,6 +173,9 @@ class GEMM(Operation):
 class MoE(Operation):
     """
     MoE operation with power tracking.
+
+    Supports both traditional MoE and TensorRT-LLM WideEP MoE with EPLB.
+    For WideEP mode, set enable_wideep=True and optionally provide num_slots for EPLB.
     """
 
     def __init__(
@@ -205,6 +208,9 @@ class MoE(Operation):
         self._is_context = is_context
         self._is_gated = is_gated
         self._moe_backend = kwargs.get("moe_backend")
+        # TensorRT-LLM WideEP specific parameters
+        self._enable_wideep = kwargs.get("enable_wideep", False)
+        self._num_slots = kwargs.get("num_slots")  # For EPLB, None means use num_experts
         # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down)
         num_gemms = 3 if is_gated else 2
         self._weights = (
@@ -224,6 +230,26 @@ class MoE(Operation):
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
+        # TensorRT-LLM WideEP path: use dedicated query method for EPLB compute
+        if self._enable_wideep and database.backend == common.BackendName.trtllm.value:
+            logger.debug("MoE: Using TensorRT-LLM WideEP EPLB compute path")
+            # For EPLB, num_slots can be >= num_experts; default to num_experts if not specified
+            num_slots = self._num_slots if self._num_slots is not None else self._num_experts
+            result = database.query_wideep_moe_eplb_compute(
+                num_tokens=x,
+                hidden_size=self._hidden_size,
+                inter_size=self._inter_size,
+                topk=self._topk,
+                num_experts=self._num_experts,
+                num_slots=num_slots,
+                moe_tp_size=self._moe_tp_size,
+                moe_ep_size=self._moe_ep_size,
+                quant_mode=quant_mode,
+                workload_distribution=self._workload_distribution,
+            )
+            return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+
+        # Standard MoE path (existing behavior)
         result = database.query_moe(
             num_tokens=x,
             hidden_size=self._hidden_size,
@@ -248,7 +274,13 @@ class MoE(Operation):
 # a comm op to deduce the communication cost of MoE
 class MoEDispatch(Operation):
     """
-    MoE dispatch operation. For fine grained moe dispatch
+    MoE dispatch operation. For fine grained moe dispatch.
+
+    Supports both traditional MoE communication (AllGather/ReduceScatter/All2All)
+    and TensorRT-LLM WideEP All2All communication with NVLink Two-Sided (MnnvlMoe).
+
+    For WideEP mode, set enable_wideep=True and provide quant_mode.
+    WideEP All2All includes: prepare, dispatch, combine, combine_low_precision.
     """
 
     def __init__(
@@ -281,6 +313,11 @@ class MoEDispatch(Operation):
         self._moe_backend = kwargs.get("moe_backend")
         self._is_context = kwargs.get("is_context", True)
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
+        # TensorRT-LLM WideEP specific parameters
+        self._enable_wideep = kwargs.get("enable_wideep", False)
+        self._quant_mode = kwargs.get("quant_mode")  # MoEQuantMode for WideEP All2All query
+        self._use_low_precision_combine = kwargs.get("use_low_precision_combine", False)  # FP8 combine optimization
+        self._wideep_node_num = kwargs.get("node_num")  # Node number for WideEP All2All, None means auto-compute
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         num_tokens = kwargs.get("x")
@@ -290,6 +327,57 @@ class MoEDispatch(Operation):
         _node_num = self.num_gpus / _num_gpus_per_node
 
         if database.backend == common.BackendName.trtllm.value:
+            # TensorRT-LLM WideEP path: use dedicated query for NVLink Two-Sided All2All
+            if self._enable_wideep:
+                logger.debug("MoEDispatch: Using TensorRT-LLM WideEP All2All path")
+                if self._quant_mode is None:
+                    raise ValueError("quant_mode is required for TensorRT-LLM WideEP All2All")
+
+                # Use explicit node_num if provided, otherwise let query method auto-compute
+                wideep_node_num = self._wideep_node_num
+
+                comm_latency = 0.0
+                if self._pre_dispatch:
+                    # Dispatch phase: prepare + dispatch
+                    prepare_result = database.query_wideep_alltoall(
+                        op_name="alltoall_prepare",
+                        num_tokens=num_tokens,
+                        hidden_size=self._hidden_size,
+                        topk=self._topk,
+                        num_experts=self._num_experts,
+                        moe_ep_size=self._moe_ep_size,
+                        quant_mode=self._quant_mode,
+                        node_num=wideep_node_num,
+                    )
+                    dispatch_result = database.query_wideep_alltoall(
+                        op_name="alltoall_dispatch",
+                        num_tokens=num_tokens,
+                        hidden_size=self._hidden_size,
+                        topk=self._topk,
+                        num_experts=self._num_experts,
+                        moe_ep_size=self._moe_ep_size,
+                        quant_mode=self._quant_mode,
+                        node_num=wideep_node_num,
+                    )
+                    comm_latency = float(prepare_result) + float(dispatch_result)
+                else:
+                    # Combine phase: combine or combine_low_precision
+                    combine_op = "alltoall_combine_low_precision" if self._use_low_precision_combine else "alltoall_combine"
+                    combine_result = database.query_wideep_alltoall(
+                        op_name=combine_op,
+                        num_tokens=num_tokens,
+                        hidden_size=self._hidden_size,
+                        topk=self._topk,
+                        num_experts=self._num_experts,
+                        moe_ep_size=self._moe_ep_size,
+                        quant_mode=self._quant_mode,
+                        node_num=wideep_node_num,
+                    )
+                    comm_latency = float(combine_result)
+
+                return PerformanceResult(comm_latency * self._scale_factor, energy=0.0)
+
+            # Standard trtllm path (existing behavior)
             assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
                 "trtllm does not support TP>1 and DP>1 for attn simultaneously"
             )

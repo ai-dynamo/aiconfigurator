@@ -1272,6 +1272,207 @@ def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
     return wideep_deepep_normal_data
 
 
+def load_wideep_moe_compute_data(wideep_moe_compute_file):
+    """
+    Load the TensorRT-LLM wideep MoE compute data from wideep_moe_compute_perf.txt.
+    This data represents pure computation time (excluding All2All communication).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+        Structure: [kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][inter_size]
+                   [num_slots][moe_tp_size][moe_ep_size][num_tokens] -> {latency, power, energy}
+
+    Note:
+        kernel_source identifies the MoE computation kernel:
+        - "moe_torch_flow": Cutlass-based kernel (default for SM < 100)
+        - "deepgemm": DeepGemm kernel (SM >= 100 with fp8_block)
+        If data file does not have 'kernel_source' column, it defaults to "moe_torch_flow".
+    """
+    if not os.path.exists(wideep_moe_compute_file):
+        logger.warning(f"TensorRT-LLM wideep MoE compute data file {wideep_moe_compute_file} not found.")
+        return None
+
+    wideep_moe_compute_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(
+                            lambda: defaultdict(
+                                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+
+    logger.debug(f"Loading TensorRT-LLM wideep MoE compute data from: {wideep_moe_compute_file}")
+    with open(wideep_moe_compute_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+        # Check if power columns exist (backward compatibility)
+        has_power = len(rows) > 0 and "power" in rows[0]
+        if not has_power:
+            logger.debug(
+                f"Legacy database format detected in {wideep_moe_compute_file} - power will default to 0.0"
+            )
+
+        # Check if kernel_source column exists
+        has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
+        if not has_kernel_source:
+            logger.debug(
+                f"kernel_source column not found in {wideep_moe_compute_file} - will default to 'moe_torch_flow'"
+            )
+
+        for row in rows:
+            quant_mode = row["moe_dtype"]
+            num_tokens = int(row["num_tokens"])
+            hidden_size = int(row["hidden_size"])
+            inter_size = int(row["inter_size"])
+            topk = int(row["topk"])
+            num_experts = int(row["num_experts"])
+            num_slots = int(row["num_slots"])
+            moe_tp_size = int(row["moe_tp_size"])
+            moe_ep_size = int(row["moe_ep_size"])
+            distribution = row["distribution"]
+            latency = float(row["latency"])
+            quant_mode = common.MoEQuantMode[quant_mode]
+
+            # Get kernel_source from data or use default
+            kernel_source = row.get("kernel_source", "moe_torch_flow")
+
+            # Read power with backward compatibility
+            power = float(row.get("power", 0.0))
+            energy = power * latency  # watt-milliseconds
+
+            # Store all three values with kernel_source dimension
+            wideep_moe_compute_data[kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][
+                inter_size
+            ][num_slots][moe_tp_size][moe_ep_size][num_tokens] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+            logger.debug(
+                f"Loaded TensorRT-LLM wideep MoE compute data: kernel={kernel_source}, {quant_mode}, "
+                f"{distribution}, {topk}, {num_experts}, {hidden_size}, {inter_size}, {num_slots}, "
+                f"{moe_tp_size}, {moe_ep_size}, {num_tokens} -> {latency}"
+            )
+
+    return wideep_moe_compute_data
+
+
+def load_wideep_alltoall_data(wideep_alltoall_file):
+    """
+    Load the TensorRT-LLM wideep All2All data from wideep_alltoall_perf.txt.
+    This data represents All2All communication time (prepare, dispatch, combine).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+        Structure: [kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts]
+                   [moe_ep_size][num_tokens] -> {latency, power, energy}
+        op_name can be: alltoall_prepare, alltoall_dispatch, alltoall_combine, alltoall_combine_low_precision
+
+    Note:
+        kernel_source identifies the All2All communication method:
+        - "MnnvlMoe": NVLink Two-Sided via MNNVL (GB200, SM >= 100)
+        - "DeepEP": DeepEP normal mode (H100/H200, cross-node)
+        - "DeepEPLowLatency": DeepEP low-latency mode (H100/H200, intra-node)
+        - "NCCL": Standard NCCL communication (fallback)
+        If data file does not have 'kernel_source' column, it defaults to "MnnvlMoe".
+
+        If data file does not have 'num_nodes' column, it will be computed as moe_ep_size // 4.
+        This assumes 4 GPUs per node (e.g., GB200 NVL4).
+    """
+    if not os.path.exists(wideep_alltoall_file):
+        logger.warning(f"TensorRT-LLM wideep All2All data file {wideep_alltoall_file} not found.")
+        return None
+
+    wideep_alltoall_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
+                )
+            )
+        )
+    )
+
+    logger.debug(f"Loading TensorRT-LLM wideep All2All data from: {wideep_alltoall_file}")
+    with open(wideep_alltoall_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+        # Check if power columns exist (backward compatibility)
+        has_power = len(rows) > 0 and "power" in rows[0]
+        if not has_power:
+            logger.debug(f"Legacy database format detected in {wideep_alltoall_file} - power will default to 0.0")
+
+        # Check if num_nodes column exists
+        has_num_nodes = len(rows) > 0 and "num_nodes" in rows[0]
+        if not has_num_nodes:
+            logger.debug(
+                f"num_nodes column not found in {wideep_alltoall_file} - will be computed as moe_ep_size // 4"
+            )
+
+        # Check if kernel_source column exists
+        has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
+        if not has_kernel_source:
+            logger.debug(
+                f"kernel_source column not found in {wideep_alltoall_file} - will default to 'MnnvlMoe'"
+            )
+
+        for row in rows:
+            op_name = row["op_name"]  # alltoall_prepare, alltoall_dispatch, alltoall_combine, etc.
+            quant_mode = row["moe_dtype"]
+            num_tokens = int(row["num_tokens"])
+            hidden_size = int(row["hidden_size"])
+            topk = int(row["topk"])
+            num_experts = int(row["num_experts"])
+            moe_ep_size = int(row["moe_ep_size"])
+            latency = float(row["latency"])
+            quant_mode = common.MoEQuantMode[quant_mode]
+
+            # Get kernel_source from data or use default
+            kernel_source = row.get("kernel_source", "MnnvlMoe")
+
+            # Get num_nodes from data or compute from moe_ep_size
+            if has_num_nodes:
+                num_nodes = int(row["num_nodes"])
+            else:
+                # Default: assume 4 GPUs per node
+                if moe_ep_size % 4 != 0:
+                    logger.warning(
+                        f"moe_ep_size={moe_ep_size} is not divisible by 4, using moe_ep_size // 4 = {moe_ep_size // 4}"
+                    )
+                num_nodes = max(1, moe_ep_size // 4)
+
+            # Read power with backward compatibility
+            power = float(row.get("power", 0.0))
+            energy = power * latency  # watt-milliseconds
+
+            # Store all three values with kernel_source and num_nodes dimensions
+            wideep_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
+                moe_ep_size
+            ][num_tokens] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+            logger.debug(
+                f"Loaded TensorRT-LLM wideep All2All data: kernel={kernel_source}, {op_name}, {quant_mode}, "
+                f"num_nodes={num_nodes}, {hidden_size}, {topk}, {num_experts}, {moe_ep_size}, "
+                f"{num_tokens} -> {latency}"
+            )
+
+    return wideep_alltoall_data
+
+
 class PerfDatabase:
     """
     The perf database for a given system, backend and version
@@ -1298,6 +1499,9 @@ class PerfDatabase:
         _wideep_generation_mla_data (dict): the wideep generation mla data
         _wideep_deepep_normal_data (dict): the wideep deepep normal data
         _wideep_deepep_ll_data (dict): the wideep deepep ll data
+        TensorRT-LLM wideep:
+        _wideep_moe_compute_data (dict): the wideep moe compute data (pure computation, no all2all)
+        _wideep_alltoall_data (dict): the wideep all2all data (prepare, dispatch, combine)
 
     Methods:
         query_gemm: query the gemm data
@@ -1422,6 +1626,14 @@ class PerfDatabase:
             )
             self._nccl_data = load_nccl_data(nccl_data_dir)
             self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
+
+            # TensorRT-LLM wideep path
+            self._wideep_moe_compute_data = load_wideep_moe_compute_data(
+                os.path.join(data_dir, common.PerfDataFilename.wideep_moe_compute.value)
+            )
+            self._wideep_alltoall_data = load_wideep_alltoall_data(
+                os.path.join(data_dir, common.PerfDataFilename.wideep_alltoall.value)
+            )
 
         # pre-correction
         self._correct_data()
@@ -1911,6 +2123,118 @@ class PerfDatabase:
         Check if the number of GPUs is an inter node
         """
         return num_gpus > self.system_spec["node"]["num_gpus_per_node"]
+
+    def _select_alltoall_kernel(
+        self,
+        quant_mode: common.MoEQuantMode,
+        moe_ep_size: int,
+        topk: int,
+    ) -> str:
+        """
+        Automatically select All2All communication method based on GPU architecture and configuration.
+
+        Selection logic (based on TensorRT-LLM's select_alltoall_method_type):
+        1. SM >= 100 (GB200 with MNNVL support) -> MnnvlMoe (NVLink Two-Sided)
+        2. SM >= 90 (H100/H200) with cross-node -> DeepEP
+        3. SM >= 90 (H100/H200) within single node -> DeepEPLowLatency
+        4. SM < 90 -> NCCL (fallback)
+
+        Args:
+            quant_mode: MoE quantization mode
+            moe_ep_size: MoE expert parallelism size
+            topk: Number of experts activated per token
+
+        Returns:
+            str: The selected kernel_source name
+        """
+        sm_version = self.system_spec["gpu"]["sm_version"]
+        num_gpus_per_node = self.system_spec["node"]["num_gpus_per_node"]
+        is_inter_node = moe_ep_size > num_gpus_per_node
+
+        # Preferred kernel based on hardware
+        if sm_version >= 100:
+            # GB200 supports MNNVL (Multi-Node NVLink)
+            preferred = "MnnvlMoe"
+        elif sm_version >= 90:
+            # H100/H200: Check DeepEP feasibility
+            # DeepEP requires: tp_size == 1, ep_size > 1, top_k in supported range
+            deepep_feasible = moe_ep_size > 1 and topk <= 8
+
+            if deepep_feasible and is_inter_node:
+                # Cross-node: use DeepEP normal mode
+                preferred = "DeepEP"
+            elif deepep_feasible:
+                # Intra-node: use DeepEP low-latency mode
+                preferred = "DeepEPLowLatency"
+            else:
+                preferred = "MnnvlMoe"
+        else:
+            # SM89 and below: use NCCL standard communication
+            preferred = "NCCL"
+
+        # Check if preferred kernel is available in data, otherwise fallback
+        if self._wideep_alltoall_data is not None:
+            available_kernels = list(self._wideep_alltoall_data.keys())
+            if preferred in available_kernels:
+                return preferred
+            elif available_kernels:
+                # Fallback to any available kernel
+                fallback = available_kernels[0]
+                logger.debug(
+                    f"Preferred All2All kernel '{preferred}' not available, "
+                    f"falling back to '{fallback}'"
+                )
+                return fallback
+
+        return preferred
+
+    def _select_moe_kernel(
+        self,
+        quant_mode: common.MoEQuantMode,
+    ) -> str:
+        """
+        Automatically select MoE computation kernel based on GPU architecture and quantization mode.
+
+        Selection logic (based on TensorRT-LLM's MoEOpSelector.select_op):
+        1. SM >= 100 (Blackwell) with fp8_block -> deepgemm (DeepGemm kernel)
+        2. Otherwise -> moe_torch_flow (Cutlass kernel)
+
+        Args:
+            quant_mode: MoE quantization mode
+
+        Returns:
+            str: The selected kernel_source name
+        """
+        sm_version = self.system_spec["gpu"]["sm_version"]
+        is_blackwell = sm_version >= 100
+
+        # Convert quant_mode to string for comparison if needed
+        quant_mode_str = quant_mode.name if hasattr(quant_mode, "name") else str(quant_mode)
+        is_fp8_block = "fp8_block" in quant_mode_str
+
+        # Preferred kernel based on hardware and quant mode
+        if is_blackwell and is_fp8_block:
+            # Blackwell + FP8 block scales -> DeepGemm kernel
+            preferred = "deepgemm"
+        else:
+            # Default: Cutlass kernel
+            preferred = "moe_torch_flow"
+
+        # Check if preferred kernel is available in data, otherwise fallback
+        if self._wideep_moe_compute_data is not None:
+            available_kernels = list(self._wideep_moe_compute_data.keys())
+            if preferred in available_kernels:
+                return preferred
+            elif available_kernels:
+                # Fallback to any available kernel
+                fallback = available_kernels[0]
+                logger.debug(
+                    f"Preferred MoE kernel '{preferred}' not available, "
+                    f"falling back to '{fallback}'"
+                )
+                return fallback
+
+        return preferred
 
     def _get_value(self, data_value, metric: str = "latency"):
         """
@@ -4234,6 +4558,221 @@ class PerfDatabase:
                                                 self._generation_attention_data[quant_mode][n_kv][head_size][
                                                     window_size
                                                 ][n][b][s] = float(sol)
+
+
+    def query_wideep_moe_eplb_compute(
+        self,
+        num_tokens: int,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        num_slots: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """
+        Query WideEP MoE EPLB compute latency (pure computation, excluding All2All communication).
+
+        This is for TensorRT-LLM WideEP scenarios with EPLB support.
+        The MoE computation kernel is automatically selected based on GPU architecture and quantization mode:
+        - SM >= 100 (Blackwell) with fp8_block -> DeepGemm kernel
+        - Otherwise -> Cutlass kernel (moe_torch_flow)
+
+        Args:
+            num_tokens: Number of tokens
+            hidden_size: Hidden dimension size
+            inter_size: Intermediate size (FFN)
+            topk: Number of experts activated per token
+            num_experts: Total number of experts
+            num_slots: Number of expert slots (>= num_experts when using EPLB)
+            moe_tp_size: MoE tensor parallelism size
+            moe_ep_size: MoE expert parallelism size
+            quant_mode: MoE quantization mode
+            workload_distribution: Workload distribution pattern (e.g., "power_law_1.2_eplb")
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Latency in ms, energy accessible via .energy attribute.
+        """
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        if self._wideep_moe_compute_data is None:
+            raise PerfDataNotAvailableError(
+                f"WideEP MoE compute perf table is missing for system='{self.system}', "
+                f"backend='{self.backend}', version='{self.version}'. "
+                "Please provide the wideep_moe_compute_perf.txt data file."
+            )
+
+        # Automatically select MoE kernel based on GPU architecture and quant mode
+        kernel_source = self._select_moe_kernel(quant_mode)
+        logger.debug(f"query_wideep_moe_eplb_compute: auto-selected kernel_source='{kernel_source}'")
+
+        try:
+            # Find the best matching distribution
+            kernel_data = self._wideep_moe_compute_data[kernel_source]
+            available_distributions = list(kernel_data[quant_mode].keys())
+            if workload_distribution in available_distributions:
+                used_distribution = workload_distribution
+            else:
+                # Fallback: try to find a similar distribution or use the first available
+                used_distribution = available_distributions[0] if available_distributions else None
+                if used_distribution is None:
+                    raise KeyError(f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}")
+                logger.debug(
+                    f"Distribution '{workload_distribution}' not found, using '{used_distribution}' instead"
+                )
+
+            moe_dict = kernel_data[quant_mode][used_distribution][topk][num_experts][
+                hidden_size
+            ][inter_size][num_slots][moe_tp_size][moe_ep_size]
+
+            num_left, num_right = self._nearest_1d_point_helper(
+                num_tokens,
+                list(moe_dict.keys()),
+                inner_only=False,
+            )
+            result = self._interp_1d(
+                [num_left, num_right],
+                [moe_dict[num_left], moe_dict[num_right]],
+                num_tokens,
+            )
+
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", 0.0)
+            else:
+                lat = result
+                energy = 0.0
+
+            return PerformanceResult(lat, energy=energy)
+
+        except Exception as e:
+            if database_mode == common.DatabaseMode.HYBRID:
+                logger.debug(
+                    f"Failed to query wideep moe compute data (kernel={kernel_source}): {e}, "
+                    "falling back to empirical estimation"
+                )
+                # Simple empirical fallback based on SOL
+                total_tokens = num_tokens * topk
+                ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size
+                sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+                lat = sol_math / 0.4  # Empirical scale factor
+                return PerformanceResult(lat, energy=0.0)
+            else:
+                raise
+
+    def query_wideep_alltoall(
+        self,
+        op_name: str,
+        num_tokens: int,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        node_num: int | None = None,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """
+        Query WideEP All2All communication latency.
+
+        The All2All communication method is automatically selected based on GPU architecture:
+        - SM >= 100 (GB200 with MNNVL) -> MnnvlMoe (NVLink Two-Sided)
+        - SM >= 90 (H100/H200) cross-node -> DeepEP
+        - SM >= 90 (H100/H200) intra-node -> DeepEPLowLatency
+        - SM < 90 -> NCCL (fallback)
+
+        Args:
+            op_name: Operation name, one of:
+                - "alltoall_prepare": Prepare phase
+                - "alltoall_dispatch": Token dispatch phase
+                - "alltoall_combine": Result combine phase
+                - "alltoall_combine_low_precision": Low precision combine
+            num_tokens: Number of tokens
+            hidden_size: Hidden dimension size
+            topk: Number of experts activated per token
+            num_experts: Total number of experts
+            moe_ep_size: MoE expert parallelism size (must be divisible by 4 if node_num is None)
+            quant_mode: MoE quantization mode
+            node_num: Number of nodes. If None, computed as moe_ep_size // 4 (assuming 4 GPUs per node)
+            database_mode: Database mode
+
+        Returns:
+            PerformanceResult: Latency in ms, energy accessible via .energy attribute.
+
+        Raises:
+            ValueError: If moe_ep_size is not divisible by 4 when node_num is None
+        """
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        # Compute node_num if not provided
+        if node_num is None:
+            if moe_ep_size % 4 != 0:
+                raise ValueError(
+                    f"moe_ep_size={moe_ep_size} must be divisible by 4 when node_num is not specified. "
+                    "Please provide node_num explicitly or use an ep_size that is a multiple of 4."
+                )
+            node_num = moe_ep_size // 4
+            logger.debug(f"query_wideep_alltoall: node_num not specified, using moe_ep_size // 4 = {node_num}")
+
+        if self._wideep_alltoall_data is None:
+            raise PerfDataNotAvailableError(
+                f"WideEP All2All perf table is missing for system='{self.system}', "
+                f"backend='{self.backend}', version='{self.version}'. "
+                "Please provide the wideep_alltoall_perf.txt data file."
+            )
+
+        valid_op_names = ["alltoall_prepare", "alltoall_dispatch", "alltoall_combine", "alltoall_combine_low_precision"]
+        if op_name not in valid_op_names:
+            raise ValueError(f"Invalid op_name '{op_name}'. Must be one of {valid_op_names}")
+
+        # Automatically select All2All kernel based on GPU architecture
+        kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk)
+        logger.debug(f"query_wideep_alltoall: auto-selected kernel_source='{kernel_source}'")
+
+        try:
+            kernel_data = self._wideep_alltoall_data[kernel_source]
+            alltoall_dict = kernel_data[op_name][quant_mode][node_num][hidden_size][topk][num_experts][
+                moe_ep_size
+            ]
+
+            num_left, num_right = self._nearest_1d_point_helper(
+                num_tokens,
+                list(alltoall_dict.keys()),
+                inner_only=False,
+            )
+            result = self._interp_1d(
+                [num_left, num_right],
+                [alltoall_dict[num_left], alltoall_dict[num_right]],
+                num_tokens,
+            )
+
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", 0.0)
+            else:
+                lat = result
+                energy = 0.0
+
+            return PerformanceResult(lat, energy=energy)
+
+        except Exception as e:
+            if database_mode == common.DatabaseMode.HYBRID:
+                logger.debug(
+                    f"Failed to query wideep alltoall data for {op_name} (kernel={kernel_source}), "
+                    f"node_num={node_num}: {e}, using empirical estimation"
+                )
+                # Simple empirical fallback: ~0.1ms per operation as baseline
+                lat = 0.1
+                return PerformanceResult(lat, energy=0.0)
+            else:
+                raise
 
 
 if __name__ == "__main__":

@@ -428,6 +428,9 @@ class PerfDataFilename(Enum):
     wideep_generation_moe = "wideep_generation_moe_perf.txt"
     wideep_deepep_normal = "wideep_deepep_normal_perf.txt"
     wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
+    # TensorRT-LLM WideEP specific
+    wideep_moe_compute = "moe_eplb_perf.txt" #@TODO: rename to the true filename
+    wideep_alltoall = "wideep_alltoall_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
