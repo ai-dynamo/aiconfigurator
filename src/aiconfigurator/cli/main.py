@@ -361,21 +361,21 @@ def build_default_task_configs(
 
         def _is_fp8(mode: object) -> bool:
             name = mode.name if hasattr(mode, "name") else str(mode)
-            return str(name).lower() in {common.GEMMQuantMode.fp8.name, common.GEMMQuantMode.fp8_block.name}
+            return str(name).lower() == common.GEMMQuantMode.fp8.name
 
         if not _is_fp8(agg_task.config.worker_config.gemm_quant_mode):
             raise ValueError(
-                "static_quant_mode requires gemm_quant_mode='fp8' or 'fp8_block' for TRTLLM in default mode, "
+                "static_quant_mode requires gemm_quant_mode='fp8' for TRTLLM in default mode, "
                 f"but got gemm_quant_mode='{agg_task.config.worker_config.gemm_quant_mode}'."
             )
         if not _is_fp8(disagg_task.config.prefill_worker_config.gemm_quant_mode):
             raise ValueError(
-                "static_quant_mode requires gemm_quant_mode='fp8' or 'fp8_block' for TRTLLM in default mode, "
+                "static_quant_mode requires gemm_quant_mode='fp8' for TRTLLM in default mode, "
                 f"but got prefill gemm_quant_mode='{disagg_task.config.prefill_worker_config.gemm_quant_mode}'."
             )
         if not _is_fp8(disagg_task.config.decode_worker_config.gemm_quant_mode):
             raise ValueError(
-                "static_quant_mode requires gemm_quant_mode='fp8' or 'fp8_block' for TRTLLM in default mode, "
+                "static_quant_mode requires gemm_quant_mode='fp8' for TRTLLM in default mode, "
                 f"but got decode gemm_quant_mode='{disagg_task.config.decode_worker_config.gemm_quant_mode}'."
             )
 
