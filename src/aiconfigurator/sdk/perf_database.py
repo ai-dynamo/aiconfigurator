@@ -268,6 +268,7 @@ def get_all_databases(
     elif isinstance(systems_paths, str):
         systems_paths = [systems_paths]
 
+    seen_systems: dict[str, str] = {}
     for systems_root in systems_paths:
         try:
             entries = os.listdir(systems_root)
@@ -278,6 +279,15 @@ def get_all_databases(
             if not entry.endswith(".yaml"):
                 continue
             system = entry[:-5]
+            if system in seen_systems:
+                logger.warning(
+                    "System config '%s' already loaded from %s; also found in %s",
+                    system,
+                    seen_systems[system],
+                    systems_root,
+                )
+            else:
+                seen_systems[system] = systems_root
             system_yaml_path = os.path.join(systems_root, entry)
             try:
                 with open(system_yaml_path) as f:
@@ -292,8 +302,21 @@ def get_all_databases(
                         if version.startswith("."):
                             continue
                         database = get_database(system, backend.value, version, systems_root)
-                        if database is not None:
-                            database_dict[system][backend.value][version] = database
+                        if database is None:
+                            continue
+                        if version in database_dict[system][backend.value]:
+                            existing = database_dict[system][backend.value][version]
+                            existing_root = getattr(existing, "systems_root", None) or "unknown"
+                            logger.warning(
+                                "Database '%s/%s/%s' already loaded from %s; ignoring %s",
+                                system,
+                                backend.value,
+                                version,
+                                existing_root,
+                                systems_root,
+                            )
+                            continue
+                        database_dict[system][backend.value][version] = database
             except Exception as e:
                 logger.warning(f"Could not process system config {os.path.basename(system_yaml_path)}: {e}")
 
