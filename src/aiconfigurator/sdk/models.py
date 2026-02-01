@@ -1394,9 +1394,36 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             else self.config.workload_distribution
         )
 
-        # WideEP EPLB: num_slots can be >= num_experts for load balancing
-        # TODO: make this configurable via model_config
-        wideep_num_slots = num_experts
+        # ===================== WideEP Configuration Validation =====================
+        # Based on TensorRT-LLM WideEPMoE constraints (fused_moe_wide_ep.py)
+
+        # 1. Attention DP must be enabled for WideEP
+        assert attention_dp_size > 1, (
+            f"WideEP requires attention_dp_size > 1, got {attention_dp_size}. "
+            "Attention DP should be used with WideEP."
+        )
+
+        # 2. EP size must be > 1 for WideEP (parallel_size > 1)
+        assert moe_ep_size > 1, (
+            f"WideEP requires moe_ep_size > 1, got {moe_ep_size}. "
+            "WideEP should only be enabled with parallel_size > 1."
+        )
+
+        # 3. EP size must be > top_k for AlltoAll to be effective
+        if moe_ep_size <= topk:
+            logger.warning(
+                f"moe_ep_size ({moe_ep_size}) <= top_k ({topk}), "
+                "AlltoAll communication will be disabled. Consider increasing moe_ep_size."
+            )
+
+        # 4. num_slots validation
+        wideep_num_slots = self.config.wideep_num_slots if self.config.wideep_num_slots else num_experts
+
+        # num_slots must be >= num_experts (EPLB can have more slots for redundant experts)
+        assert wideep_num_slots >= num_experts, (
+            f"wideep_num_slots ({wideep_num_slots}) must be >= num_experts ({num_experts}). "
+            "There should be at least num_experts slots in the model engine."
+        )
 
         # ===================== Context Phase =====================
         self.context_ops.extend(

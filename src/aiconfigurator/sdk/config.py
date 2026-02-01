@@ -32,6 +32,8 @@ class ModelConfig:
     moe_backend: str = None  # for sglang wideep only, deepep
     attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3', for sglang wideep only
     enable_wideep: bool = False
+    # TensorRT-LLM WideEP specific parameters
+    wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None
 
 
 @dataclass
