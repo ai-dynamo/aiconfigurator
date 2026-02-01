@@ -58,7 +58,7 @@ def test_get_database_with_yaml_and_data_path(tmp_path, monkeypatch):
 
     databases_cache.clear()
 
-    db1 = get_database(system, backend, version, systems_dir=str(systems_dir))
+    db1 = get_database(system, backend, version, systems_paths=str(systems_dir))
 
     assert isinstance(db1, DummyPerfDatabase), "Expected a DummyPerfDatabase"
 
@@ -67,7 +67,7 @@ def test_get_database_with_yaml_and_data_path(tmp_path, monkeypatch):
     assert db1.version == version
     assert db1.systems_dir == str(systems_dir)
 
-    db2 = get_database(system, backend, version, systems_dir=str(systems_dir))
+    db2 = get_database(system, backend, version, systems_paths=str(systems_dir))
     assert db2 is db1, "Repeated calls with identical args should return the same database object"
 
 
