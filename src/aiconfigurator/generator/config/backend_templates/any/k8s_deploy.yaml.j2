@@ -1,0 +1,80 @@
+{#
+  Heterogeneous backend template for Kubernetes DynamoGraphDeployment
+  This template composes worker specs from the appropriate backend
+  using shared macros from _workers/ directory.
+#}
+{% from 'base_k8s.j2' import deployment_header, frontend_spec %}
+{% import 'sglang.j2' as sglang %}
+{% import 'trtllm.j2' as trtllm %}
+{% import 'vllm.j2' as vllm %}
+
+{# ConfigMap for trtllm engine args when using ConfigMap mode #}
+{% set has_trtllm = (agg_backend | default('') == 'trtllm') or (prefill_backend | default('') == 'trtllm') or (decode_backend | default('') == 'trtllm') %}
+{% if has_trtllm and use_engine_cm | default(false) %}
+{%- set agg_engine_key = agg_engine_args.split('/')[-1] -%}
+{%- set prefill_engine_key = prefill_engine_args.split('/')[-1] -%}
+{%- set decode_engine_key = decode_engine_args.split('/')[-1] -%}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ engine_cm_name | default('engine-config') }}
+data:
+  {% if DynConfig.mode | default('disagg') == 'agg' %}
+  {{ agg_engine_key }}: |
+{{ (agg_engine_args_inline | default('', true) | trim | indent(4, true)) }}
+  {% else %}
+  {% if prefill_backend == 'trtllm' %}
+  {{ prefill_engine_key }}: |
+{{ (prefill_engine_args_inline | default('', true) | trim | indent(4, true)) }}
+  {% endif %}
+  {% if decode_backend == 'trtllm' %}
+  {{ decode_engine_key }}: |
+{{ (decode_engine_args_inline | default('', true) | trim | indent(4, true)) }}
+  {% endif %}
+  {% endif %}
+---
+{% endif %}
+
+{{ deployment_header(DynConfig, K8sConfig | default({}), name | default('dynamo-any')) }}
+{{ frontend_spec(ServiceConfig, DynConfig, K8sConfig | default({}), enable_router | default(false), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), frontend_replicas | default(1)) }}
+
+{% set mode = DynConfig.mode | default('disagg') %}
+{% set enable_router = DynConfig.enable_router | default(false) %}
+
+{% if mode == 'agg' %}
+{# ============ AGGREGATE MODE ============ #}
+{% set backend = agg_backend | default('sglang') %}
+
+{% if backend == 'sglang' %}
+{{ sglang.k8s_worker(None, agg_gpu, agg_workers, agg_cli_args, ServiceConfig, K8sConfig | default({}), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
+{% elif backend == 'vllm' %}
+{{ vllm.k8s_worker(None, agg_gpu, agg_workers, agg_cli_args_list | default([]), ServiceConfig, K8sConfig | default({}), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
+{% elif backend == 'trtllm' %}
+{{ trtllm.k8s_worker(None, agg_gpu, agg_workers, agg_engine_args, agg_engine_args_inline | default(''), enable_router, ServiceConfig, K8sConfig | default({}), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace'), use_engine_cm | default(false), engine_mount_path | default('/workspace/engine_configs')) }}
+{% endif %}
+
+{% else %}
+{# ============ DISAGGREGATE MODE ============ #}
+
+{# ---- PREFILL WORKER ---- #}
+{% set p_backend = prefill_backend | default('sglang') %}
+
+{% if p_backend == 'sglang' %}
+{{ sglang.k8s_worker('prefill', prefill_gpu, prefill_workers, prefill_cli_args, ServiceConfig, K8sConfig | default({}), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
+{% elif p_backend == 'vllm' %}
+{{ vllm.k8s_worker('prefill', prefill_gpu, prefill_workers, prefill_cli_args_list | default([]), ServiceConfig, K8sConfig | default({}), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
+{% elif p_backend == 'trtllm' %}
+{{ trtllm.k8s_worker('prefill', prefill_gpu, prefill_workers, prefill_engine_args, prefill_engine_args_inline | default(''), enable_router, ServiceConfig, K8sConfig | default({}), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace'), use_engine_cm | default(false), engine_mount_path | default('/workspace/engine_configs')) }}
+{% endif %}
+
+{# ---- DECODE WORKER ---- #}
+{% set d_backend = decode_backend | default('sglang') %}
+
+{% if d_backend == 'sglang' %}
+{{ sglang.k8s_worker('decode', decode_gpu, decode_workers, decode_cli_args, ServiceConfig, K8sConfig | default({}), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
+{% elif d_backend == 'vllm' %}
+{{ vllm.k8s_worker('decode', decode_gpu, decode_workers, decode_cli_args_list | default([]), ServiceConfig, K8sConfig | default({}), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
+{% elif d_backend == 'trtllm' %}
+{{ trtllm.k8s_worker('decode', decode_gpu, decode_workers, decode_engine_args, decode_engine_args_inline | default(''), enable_router, ServiceConfig, K8sConfig | default({}), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace'), use_engine_cm | default(false), engine_mount_path | default('/workspace/engine_configs')) }}
+{% endif %}
+{% endif %}

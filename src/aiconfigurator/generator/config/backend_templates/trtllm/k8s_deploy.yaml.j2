@@ -1,135 +1,19 @@
-{%- set enable_router = DynConfig.enable_router | default(false) -%}
-{%- set k8s_engine_mode = K8sConfig.k8s_engine_mode -%}
-{%- set use_engine_cm = (k8s_engine_mode == 'configmap') -%}
-{%- set model_cache_input = K8sConfig.k8s_model_cache | default('', true) | trim -%}
-{%- set k8s_use_model_cache = (model_cache_input != '') -%}
-{%- set k8s_model_cache_pvc = (model_cache_input if k8s_use_model_cache else 'model-cache') -%}
-{%- set k8s_model_cache_mount = '/workspace/model_cache' -%}
-{%- set runtime_working_dir = working_dir or '/workspace/' -%}
-{%- set engine_cm_name = 'engine-configs' -%}
-{%- set engine_mount_path = '/workspace/engine_configs' -%}
+{#
+  TRT-LLM backend Kubernetes DynamoGraphDeployment template
+  Uses shared macros for worker specs.
+#}
+{% from 'base_k8s.j2' import deployment_header, frontend_spec %}
+{% import 'trtllm.j2' as trtllm %}
 
-{%- macro render_volumes() -%}
-volumes:
-  {% if k8s_use_model_cache %}
-  - name: model-cache
-    persistentVolumeClaim:
-      claimName: {{ k8s_model_cache_pvc }}
-  {% endif %}
-  {% if use_engine_cm %}
-  - name: engine-configs
-    configMap:
-      name: {{ engine_cm_name }}
-  {% else %}
-  - name: engine-configs
-    emptyDir: {}
-  {% endif %}
-  - name: tmp
-    emptyDir:
-      medium: Memory
-      sizeLimit: 10Gi
-{%- endmacro %}
-
-{%- macro render_volume_mounts() -%}
-volumeMounts:
-  {% if k8s_use_model_cache %}
-  - name: model-cache
-    mountPath: {{ k8s_model_cache_mount }}
-  {% endif %}
-  - name: engine-configs
-    mountPath: {{ engine_mount_path }}
-    {% if use_engine_cm %}readOnly: true{% endif %}
-  - name: tmp
-    mountPath: /tmp
-{%- endmacro %}
-
-{%- macro render_probes() -%}
-startupProbe:
-  httpGet:
-    path: /health
-    port: 9090
-  initialDelaySeconds: 120
-  periodSeconds: 30
-  timeoutSeconds: 10
-  failureThreshold: 40
-livenessProbe:
-  httpGet:
-    path: /live
-    port: 9090
-  initialDelaySeconds: 300
-  periodSeconds: 30
-  timeoutSeconds: 10
-  failureThreshold: 10
-readinessProbe:
-  httpGet:
-    path: /live
-    port: 9090
-  initialDelaySeconds: 300
-  periodSeconds: 30
-  timeoutSeconds: 10
-  failureThreshold: 10
-{%- endmacro %}
-
-{%- macro render_worker(component_name, sub_component_type, replicas, gpu, engine_path, inline_payload, disagg_mode=None, publish_metrics=False) -%}
-{{ "    " ~ component_name ~ ":" }}
-      envFromSecret: hf-token-secret
-      {% if K8sConfig.k8s_hf_home %}
-      envs:
-        - name: HF_HOME
-          value: {{ K8sConfig.k8s_hf_home }}
-      {% endif %}
-      componentType: worker
-      {% if sub_component_type %}
-      subComponentType: {{ sub_component_type }}
-      {% endif %}
-      replicas: {{ replicas }}
-      resources:
-        limits:
-          gpu: "{{ gpu }}"
-      extraPodSpec:
-{{ render_volumes() | indent(8, True) }}
-        {% if K8sConfig.k8s_image_pull_secret %}
-        imagePullSecrets:
-          - name: {{ K8sConfig.k8s_image_pull_secret }}
-        {% endif %}
-        mainContainer:
-          image: {{ K8sConfig.k8s_image }}
-          workingDir: {{ runtime_working_dir }}
-          imagePullPolicy: IfNotPresent
-{{ render_volume_mounts() | indent(10, True) }}
-          command: ["/bin/bash","-c"]
-          args:
-            - |
-              set -euo pipefail
-              {% if not use_engine_cm %}
-              mkdir -p {{ engine_mount_path }}
-              cat > {{ engine_path }} <<'YAML'
-{{ (inline_payload | default('', true) | trim | indent(14, true)) }}
-              YAML
-              {% endif %}
-              args=(
-                --model-path "{{ ServiceConfig.model_path }}"
-                --served-model-name "{{ ServiceConfig.served_model_name }}"
-                --extra-engine-args "{{ engine_path }}"
-              )
-              {% if disagg_mode %}
-              args+=(--disaggregation-mode {{ disagg_mode }})
-              {% endif %}
-              {% if publish_metrics %}
-              args+=(--publish-events-and-metrics)
-              {% endif %}
-              exec python3 -m dynamo.trtllm "${args[@]}"
-{{ render_probes() | indent(10, True) }}
-{%- endmacro %}
-
-{% if use_engine_cm %}
+{# ConfigMap for engine args when using ConfigMap mode #}
+{% if use_engine_cm | default(false) %}
 {%- set agg_engine_key = agg_engine_args.split('/')[-1] -%}
 {%- set prefill_engine_key = prefill_engine_args.split('/')[-1] -%}
 {%- set decode_engine_key = decode_engine_args.split('/')[-1] -%}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ engine_cm_name }}
+  name: {{ engine_cm_name | default('engine-config') }}
 data:
   {% if DynConfig.mode | default('disagg') == 'agg' %}
   {{ agg_engine_key }}: |
@@ -143,80 +27,18 @@ data:
 ---
 {% endif %}
 
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: {{ name }}
-  namespace: {{ K8sConfig.k8s_namespace }}
-spec:
-  services:
-    Frontend:
-      envFromSecret: hf-token-secret
-      componentType: frontend
-      replicas: {{ frontend_replicas }}
-      extraPodSpec:
-        {% if k8s_use_model_cache %}
-        volumes:
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: {{ k8s_model_cache_pvc }}
-        {% endif %}
-        {% if K8sConfig.k8s_image_pull_secret %}
-        imagePullSecrets:
-          - name: {{ K8sConfig.k8s_image_pull_secret }}
-        {% endif %}
-        mainContainer:
-          image: {{ K8sConfig.k8s_image }}
-          imagePullPolicy: IfNotPresent
-          {% if k8s_use_model_cache %}
-          volumeMounts:
-            - name: model-cache
-              mountPath: {{ k8s_model_cache_mount }}
-          {% endif %}
-      {% if enable_router or K8sConfig.k8s_hf_home %}
-      envs:
-        {% if enable_router %}
-        - name: DYN_ROUTER_MODE
-          value: kv
-        {% endif %}
-        {% if K8sConfig.k8s_hf_home %}
-        - name: HF_HOME
-          value: {{ K8sConfig.k8s_hf_home }}
-        {% endif %}
-      {% endif %}
+{{ deployment_header(DynConfig, K8sConfig, name | default('dynamo-trtllm')) }}
+{{ frontend_spec(ServiceConfig, DynConfig, K8sConfig, enable_router | default(false), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), frontend_replicas | default(1)) }}
 
-    {% if DynConfig.mode | default('disagg') == 'agg' %}
-{{ render_worker(
-    "TRTLLMWorker",
-    None,
-    agg_workers,
-    agg_gpu,
-    agg_engine_args,
-    agg_engine_args_inline,
-    None,
-    enable_router
-) }}
-    {% else %}
-{{ render_worker(
-    "TRTLLMPrefillWorker",
-    "prefill",
-    prefill_workers,
-    prefill_gpu,
-    prefill_engine_args,
-    prefill_engine_args_inline,
-    "prefill",
-    enable_router
-) }}
-{{ render_worker(
-    "TRTLLMDecodeWorker",
-    "decode",
-    decode_workers,
-    decode_gpu,
-    decode_engine_args,
-    decode_engine_args_inline,
-    "decode",
-    enable_router
-) }}
-    {% endif %}
-{{ '\n' }}
+{% set mode = DynConfig.mode | default('disagg') %}
+{% set enable_router = DynConfig.enable_router | default(false) %}
 
+{% if mode == 'agg' %}
+{# ============ AGGREGATE MODE ============ #}
+{{ trtllm.k8s_worker(None, agg_gpu, agg_workers, agg_engine_args, agg_engine_args_inline | default(''), enable_router, ServiceConfig, K8sConfig, k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace'), use_engine_cm | default(false), engine_mount_path | default('/workspace/engine_configs')) }}
+
+{% else %}
+{# ============ DISAGGREGATE MODE ============ #}
+{{ trtllm.k8s_worker('prefill', prefill_gpu, prefill_workers, prefill_engine_args, prefill_engine_args_inline | default(''), enable_router, ServiceConfig, K8sConfig, k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace'), use_engine_cm | default(false), engine_mount_path | default('/workspace/engine_configs')) }}
+{{ trtllm.k8s_worker('decode', decode_gpu, decode_workers, decode_engine_args, decode_engine_args_inline | default(''), enable_router, ServiceConfig, K8sConfig, k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace'), use_engine_cm | default(false), engine_mount_path | default('/workspace/engine_configs')) }}
+{% endif %}
