@@ -53,6 +53,13 @@ def get_common_moe_test_cases():
     #     65536,
     # ]
     num_tokens = [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
         128,
         256,
         512,
@@ -63,7 +70,7 @@ def get_common_moe_test_cases():
         32768,
         65536,
     ]
-    tp_list = [1, 2, 4, 8, 16, 32]
+    tp_list = [1]
     ep_list = [4, 8, 16, 32, 64]
     num_gpu_list = [4, 8, 16, 32, 64]
 

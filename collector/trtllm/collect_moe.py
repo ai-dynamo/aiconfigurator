@@ -184,6 +184,11 @@ def get_moe_eplb_test_cases():
                     # Skip if num_slots is not divisible by ep_size
                     if num_slots % ep_size != 0:
                         continue
+                    # Skip redundant slots (num_slots > num_experts) when min_latency_mode=True
+                    # because DeepseekV3Gate expects routing_logits shape [N, num_experts],
+                    # but power_law_logits_v3 with use_eplb returns [N, num_slots]
+                    if min_latency_mode and num_slots > num_experts:
+                        continue
                     test_cases.append(
                         [
                             moe_type,
