@@ -24,16 +24,16 @@ from sglang.srt.utils import (
 )
 
 try:
-    from helper import log_perf, power_law_deepep_decode, power_law_deepep_prefill
+    from helper import _get_deepseek_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import log_perf, power_law_deepep_decode, power_law_deepep_prefill
+    from helper import _get_deepseek_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
 from importlib.metadata import version as get_version
 
-DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
+DEEPSEEK_MODEL_PATH = _get_deepseek_model_path()
 
 
 def get_moe_prefill_test_cases(rank):
