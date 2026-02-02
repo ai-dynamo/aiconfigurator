@@ -1356,11 +1356,11 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
                 "power": power,
                 "energy": energy,
             }
-            logger.debug(
-                f"Loaded TensorRT-LLM wideep MoE compute data: kernel={kernel_source}, {quant_mode}, "
-                f"{distribution}, {topk}, {num_experts}, {hidden_size}, {inter_size}, {num_slots}, "
-                f"{moe_tp_size}, {moe_ep_size}, {num_tokens} -> {latency}"
-            )
+            # logger.debug(
+            #     f"Loaded TensorRT-LLM wideep MoE compute data: kernel={kernel_source}, {quant_mode}, "
+            #     f"{distribution}, {topk}, {num_experts}, {hidden_size}, {inter_size}, {num_slots}, "
+            #     f"{moe_tp_size}, {moe_ep_size}, {num_tokens} -> {latency}"
+            # )
 
     return wideep_moe_compute_data
 
@@ -1464,11 +1464,11 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
                 "power": power,
                 "energy": energy,
             }
-            logger.debug(
-                f"Loaded TensorRT-LLM wideep All2All data: kernel={kernel_source}, {op_name}, {quant_mode}, "
-                f"num_nodes={num_nodes}, {hidden_size}, {topk}, {num_experts}, {moe_ep_size}, "
-                f"{num_tokens} -> {latency}"
-            )
+            # logger.debug(
+            #     f"Loaded TensorRT-LLM wideep All2All data: kernel={kernel_source}, {op_name}, {quant_mode}, "
+            #     f"num_nodes={num_nodes}, {hidden_size}, {topk}, {num_experts}, {moe_ep_size}, "
+            #     f"{num_tokens} -> {latency}"
+            # )
 
     return wideep_alltoall_data
 

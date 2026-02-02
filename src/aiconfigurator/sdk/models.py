@@ -1410,6 +1410,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         )
 
         # 3. EP size must be > top_k for AlltoAll to be effective
+        # FIXME: this warning should make the comm mode fallback to NCCL!!
         if moe_ep_size <= topk:
             logger.warning(
                 f"moe_ep_size ({moe_ep_size}) <= top_k ({topk}), "
@@ -1509,7 +1510,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # WideEP: dispatch tokens to experts, pre-dispatch (prepare + dispatch)
         self.context_ops.extend(
             [
-                ops.MoEDispatch(
+                ops.TrtLLMWideEPMoEDispatch(
                     "context_moe_pre_dispatch",
                     self._num_layers,
                     h,
@@ -1519,7 +1520,6 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     True,  # pre_dispatch
-                    enable_wideep=True,
                     quant_mode=moe_quant_mode,
                 )
             ]
@@ -1528,7 +1528,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # WideEP: MoE computation with EPLB support
         self.context_ops.extend(
             [
-                ops.MoE(
+                ops.TrtLLMWideEPMoE(
                     "context_moe",
                     self._num_layers,
                     h,
@@ -1540,7 +1540,6 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     moe_quant_mode,
                     workload_distribution,
                     attention_dp_size,
-                    enable_wideep=True,
                     num_slots=wideep_num_slots,
                 )
             ]
@@ -1549,7 +1548,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # WideEP: dispatch tokens to experts, post-dispatch (combine)
         self.context_ops.extend(
             [
-                ops.MoEDispatch(
+                ops.TrtLLMWideEPMoEDispatch(
                     "context_moe_post_dispatch",
                     self._num_layers,
                     h,
@@ -1559,7 +1558,6 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     False,  # post_dispatch (combine)
-                    enable_wideep=True,
                     quant_mode=moe_quant_mode,
                 )
             ]
@@ -1689,7 +1687,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # WideEP: dispatch tokens to experts, pre-dispatch
         self.generation_ops.extend(
             [
-                ops.MoEDispatch(
+                ops.TrtLLMWideEPMoEDispatch(
                     "generation_moe_pre_dispatch",
                     self._num_layers * self._mtp_scale_factor,
                     h,
@@ -1699,7 +1697,6 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     True,  # pre_dispatch
-                    enable_wideep=True,
                     quant_mode=moe_quant_mode,
                 )
             ]
@@ -1708,7 +1705,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # WideEP: MoE computation with EPLB support
         self.generation_ops.extend(
             [
-                ops.MoE(
+                ops.TrtLLMWideEPMoE(
                     "generation_moe",
                     self._num_layers * self._mtp_scale_factor,
                     h,
@@ -1720,7 +1717,6 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     moe_quant_mode,
                     workload_distribution,
                     attention_dp_size,
-                    enable_wideep=True,
                     num_slots=wideep_num_slots,
                 ),
             ]
@@ -1729,7 +1725,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # WideEP: dispatch tokens to experts, post-dispatch (combine)
         self.generation_ops.extend(
             [
-                ops.MoEDispatch(
+                ops.TrtLLMWideEPMoEDispatch(
                     "generation_moe_post_dispatch",
                     self._num_layers * self._mtp_scale_factor,
                     h,
@@ -1739,7 +1735,6 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     False,  # post_dispatch (combine)
-                    enable_wideep=True,
                     quant_mode=moe_quant_mode,
                 )
             ]
