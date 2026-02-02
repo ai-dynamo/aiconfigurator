@@ -40,9 +40,8 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
         "--top_n",
         type=int,
         default=5,
-        metavar="5",
         help="Number of top configurations to output for each experiment (in exp mode) "
-        "or for each mode (agg/disagg) in default mode. Default: 5.",
+        "or for each mode (agg/disagg) in default mode (default: %(default)s).",
     )
     add_generator_override_arguments(common_parser)
     return common_parser
@@ -98,13 +97,15 @@ def _add_default_mode_arguments(parser):
         choices=[backend.value for backend in common.BackendName],
         type=str,
         default=common.BackendName.trtllm.value,
-        help="Backend name. 'any' will check all 3 backends and find best performance.",
+        help="Name of the backend (default: %(default)s). "
+        "Use 'any' to search best configurations for all backends (with heterogeneous P/D in disagg mode).",
     )
     parser.add_argument(
         "--backend_version",
         type=str,
         default=None,
-        help="Backend database version. Default is latest",
+        help="Backend version used for workers in agg mode and prefill workers in disagg mode "
+        "(default: latest available version).",
     )
     parser.add_argument(
         "--decode_system",
@@ -123,28 +124,28 @@ def _add_default_mode_arguments(parser):
         "--decode_backend_version",
         type=str,
         default=None,
-        help="Backend database version for disagg decode workers. Defaults to --backend_version if omitted.",
+        help="Backend version for disagg decode workers. Defaults to --backend_version if omitted.",
     )
     parser.add_argument(
         "--database_mode",
         choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
         type=str,
         default=common.DatabaseMode.SILICON.name,
-        help="Database mode for performance estimation. Options: SILICON (default, uses silicon data), "
+        help="Database mode for performance estimation. Options: SILICON (uses silicon data), "
         "HYBRID (uses silicon data when available, otherwise SOL+empirical factor), "
-        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only).",
+        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only) (default: %(default)s).",
     )
-    parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
-    parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
-    parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms.")
-    parser.add_argument("--tpot", type=float, default=30.0, help="Time per output token in ms.")
+    parser.add_argument("--isl", type=int, default=4000, help="Input sequence length (default: %(default)s).")
+    parser.add_argument("--osl", type=int, default=1000, help="Output sequence length (default: %(default)s).")
+    parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms (default: %(default)s).")
+    parser.add_argument("--tpot", type=float, default=30.0, help="Time per output token in ms (default: %(default)s).")
     parser.add_argument(
         "--request_latency",
         type=float,
         default=None,
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
-    parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
+    parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length (default: %(default)s).")
 
 
 def _add_experiments_mode_arguments(parser):
@@ -163,7 +164,7 @@ def _add_generate_mode_arguments(parser):
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
-        "local path to directory containing config.json.",
+        "local path to a directory containing config.json.",
     )
     parser.add_argument(
         "--total_gpus",
@@ -183,7 +184,7 @@ def _add_generate_mode_arguments(parser):
         choices=[backend.value for backend in common.BackendName],
         type=str,
         default=common.BackendName.trtllm.value,
-        help="Backend name (default: trtllm).",
+        help="Backend name (default: %(default)s).",
     )
 
 
@@ -208,7 +209,7 @@ def _add_support_mode_arguments(parser):
         choices=[backend.value for backend in common.BackendName],
         type=str,
         default="trtllm",
-        help="Backend name to filter by. Defaults to 'trtllm'.",
+        help="Backend name to filter by (default: %(default)s).",
     )
     parser.add_argument(
         "--backend_version",

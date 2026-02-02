@@ -367,15 +367,16 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
         "--generated_config_version",
         type=str,
         default=None,
-        help="Backend version for deployment artifact generation (e.g. 1.1.0rc5). "
-        "If not specified, falls back to --backend_version.",
+        help="Backend version for workers in agg mode and prefill workers in disagg mode "
+        "for deployment artifact generation (e.g. 1.1.0rc5). "
+        "Defaults to --backend_version if omitted.",
     )
     grp.add_argument(
         "--generated_decode_config_version",
         type=str,
         default=None,
         help=(
-            "Backend version for disagg decode worker deployment artifacts. "
+            "Backend version for disagg decode workers in deployment artifact generation. "
             "Defaults to --generated_config_version if omitted."
         ),
     )
