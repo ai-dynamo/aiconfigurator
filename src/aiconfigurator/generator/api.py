@@ -364,19 +364,19 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
         help="Print generator schema help (deploy, backend, or all) and exit.",
     )
     grp.add_argument(
-        "--backend_deploy_version",
+        "--generated_config_version",
         type=str,
         default=None,
         help="Backend version for deployment artifact generation (e.g. 1.1.0rc5). "
         "If not specified, falls back to --backend_version.",
     )
     grp.add_argument(
-        "--decode_backend_deploy_version",
+        "--generated_decode_config_version",
         type=str,
         default=None,
         help=(
             "Backend version for disagg decode worker deployment artifacts. "
-            "Defaults to --backend_deploy_version if omitted."
+            "Defaults to --generated_config_version if omitted."
         ),
     )
 

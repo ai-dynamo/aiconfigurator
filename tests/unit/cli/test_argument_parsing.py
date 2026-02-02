@@ -111,8 +111,8 @@ class TestCLIArgumentParsing:
         assert args.decode_system is None
         assert args.decode_backend is None
         assert args.decode_backend_version is None
-        assert args.decode_backend_deploy_version is None
-        assert args.backend_deploy_version is None
+        assert args.generated_decode_config_version is None
+        assert args.generated_config_version is None
         assert args.isl == 4000
         assert args.osl == 1000
         assert args.save_dir is None
@@ -269,3 +269,138 @@ class TestCLIArgumentParsing:
         action = next(action for action in default_parser._actions if action.dest == "database_mode")
         expected_choices = [mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL]
         assert sorted(action.choices) == sorted(expected_choices)
+
+    def test_generated_config_version_defaults_to_none(self, cli_parser):
+        """Test that --generated_config_version defaults to None when not specified."""
+        args = cli_parser.parse_args(
+            ["default", "--model_path", "Qwen/Qwen3-32B", "--total_gpus", "8", "--system", "h200_sxm"]
+        )
+        assert args.generated_config_version is None
+
+    def test_generated_config_version_accepts_string(self, cli_parser):
+        """Test that --generated_config_version accepts version strings."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model_path",
+                "Qwen/Qwen3-32B",
+                "--total_gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--generated_config_version",
+                "1.1.0rc5",
+            ]
+        )
+        assert args.generated_config_version == "1.1.0rc5"
+
+    def test_generated_decode_config_version_defaults_to_none(self, cli_parser):
+        """Test that --generated_decode_config_version defaults to None when not specified."""
+        args = cli_parser.parse_args(
+            ["default", "--model_path", "Qwen/Qwen3-32B", "--total_gpus", "8", "--system", "h200_sxm"]
+        )
+        assert args.generated_decode_config_version is None
+
+    def test_generated_decode_config_version_accepts_string(self, cli_parser):
+        """Test that --generated_decode_config_version accepts version strings."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model_path",
+                "Qwen/Qwen3-32B",
+                "--total_gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--generated_decode_config_version",
+                "1.0.0rc6",
+            ]
+        )
+        assert args.generated_decode_config_version == "1.0.0rc6"
+
+    def test_generated_config_versions_can_be_set_independently(self, cli_parser):
+        """Test that both generated config version flags can be set independently."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model_path",
+                "Qwen/Qwen3-32B",
+                "--total_gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--generated_config_version",
+                "1.1.0rc5",
+                "--generated_decode_config_version",
+                "1.0.0rc6",
+            ]
+        )
+        assert args.generated_config_version == "1.1.0rc5"
+        assert args.generated_decode_config_version == "1.0.0rc6"
+
+    def test_generated_config_version_with_backend_version(self, cli_parser):
+        """Test that --generated_config_version works alongside --backend_version."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model_path",
+                "Qwen/Qwen3-32B",
+                "--total_gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--backend_version",
+                "1.0.0rc3",
+                "--generated_config_version",
+                "1.1.0rc5",
+            ]
+        )
+        assert args.backend_version == "1.0.0rc3"
+        assert args.generated_config_version == "1.1.0rc5"
+
+    def test_generated_config_version_with_decode_backend(self, cli_parser):
+        """Test that generated config versions work with decode backend settings."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model_path",
+                "Qwen/Qwen3-32B",
+                "--total_gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--decode_backend",
+                "vllm",
+                "--decode_backend_version",
+                "0.11.0",
+                "--generated_config_version",
+                "1.1.0rc5",
+                "--generated_decode_config_version",
+                "0.14.0",
+            ]
+        )
+        assert args.decode_backend == "vllm"
+        assert args.decode_backend_version == "0.11.0"
+        assert args.generated_config_version == "1.1.0rc5"
+        assert args.generated_decode_config_version == "0.14.0"
+
+    @pytest.mark.parametrize(
+        "version_string",
+        ["1.0.0", "1.1.0rc5", "0.20.0", "1.0.0rc3", "0.11.0"],
+    )
+    def test_generated_config_version_accepts_various_formats(self, cli_parser, version_string):
+        """Test that --generated_config_version accepts various version string formats."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model_path",
+                "Qwen/Qwen3-32B",
+                "--total_gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--generated_config_version",
+                version_string,
+            ]
+        )
+        assert args.generated_config_version == version_string

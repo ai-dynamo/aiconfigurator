@@ -122,11 +122,11 @@ def cli_default(
     *,
     backend: str = "trtllm",
     backend_version: str | None = None,
-    backend_deploy_version: str | None = None,
+    generated_config_version: str | None = None,
     decode_system: str | None = None,
     decode_backend: str | None = None,
     decode_backend_version: str | None = None,
-    decode_backend_deploy_version: str | None = None,
+    generated_decode_config_version: str | None = None,
     database_mode: str = "SILICON",
     isl: int = 4000,
     osl: int = 1000,
@@ -149,12 +149,12 @@ def cli_default(
         system: System name (GPU type), e.g., 'h200_sxm', 'b200_sxm'.
         backend: Backend name ('trtllm', 'sglang', 'vllm'). Default is 'trtllm'.
         backend_version: Backend database version for performance estimation. Default is latest.
-        backend_deploy_version: Backend version for deployment artifact generation.
+        generated_config_version: Backend version for deployment artifact generation.
             If None, falls back to backend_version.
         decode_system: System name for disagg decode workers. Defaults to `system`.
         decode_backend: For disagg mode, backend for decode workers.
         decode_backend_version: For disagg mode, backend version for decode workers.
-        decode_backend_deploy_version: For disagg mode, deploy version for decode workers.
+        generated_decode_config_version: For disagg mode, deploy version for decode workers.
         database_mode: Database mode for performance estimation
             ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
         isl: Input sequence length. Default is 4000.
@@ -188,11 +188,11 @@ def cli_default(
         system=system,
         backend=backend,
         backend_version=backend_version,
-        backend_deploy_version=backend_deploy_version,
+        generated_config_version=generated_config_version,
         decode_system=decode_system,
         decode_backend=decode_backend,
         decode_backend_version=decode_backend_version,
-        decode_backend_deploy_version=decode_backend_deploy_version,
+        generated_decode_config_version=generated_decode_config_version,
         database_mode=database_mode,
         isl=isl,
         osl=osl,

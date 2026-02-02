@@ -662,7 +662,7 @@ def _save_experiment_results(
     exp_task_config = task_configs[exp_name]
 
     # Get the deploy version from task config (falls back to backend_version if not set)
-    deploy_version = getattr(exp_task_config, "backend_deploy_version", None) or exp_task_config.backend_version
+    deploy_version = getattr(exp_task_config, "generated_config_version", None) or exp_task_config.backend_version
 
     # 1. Save best config dataframe
     best_config_df = best_configs.get(exp_name)  # top n configs
@@ -681,7 +681,7 @@ def _save_experiment_results(
     if not is_any_backend_mode:
         if deploy_version != exp_task_config.backend_version:
             logger.info(
-                "Experiment '%s': Using backend_deploy_version=%s for artifact generation "
+                "Experiment '%s': Using generated_config_version=%s for artifact generation "
                 "(backend_version=%s used for estimation)",
                 exp_name,
                 deploy_version,

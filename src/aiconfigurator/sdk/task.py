@@ -51,10 +51,10 @@ class ConfigLayer:
 class TaskContext:
     """Context for building a TaskConfig.
 
-    For agg mode: uses backend_name, backend_version, backend_deploy_version.
+    For agg mode: uses backend_name, backend_version, generated_config_version.
     For disagg mode:
-      - Prefill workers use backend_name, backend_version, backend_deploy_version
-      - Decode workers use decode_backend_name, decode_backend_version, decode_backend_deploy_version
+      - Prefill workers use backend_name, backend_version, generated_config_version
+      - Decode workers use decode_backend_name, decode_backend_version, generated_decode_config_version
         (with fallback to the main backend_* fields if not specified)
     """
 
@@ -66,11 +66,11 @@ class TaskContext:
     # Backend for agg mode, or prefill workers in disagg mode
     backend_name: str
     backend_version: str | None
-    backend_deploy_version: str | None
+    generated_config_version: str | None
     # Backend for decode workers in disagg mode (falls back to backend_* if None)
     decode_backend_name: str | None
     decode_backend_version: str | None
-    decode_backend_deploy_version: str | None
+    generated_decode_config_version: str | None
     use_specific_quant_mode: str | None
     isl: int
     osl: int
@@ -105,11 +105,11 @@ class TaskContext:
 
     @property
     def effective_decode_backend_deploy_version(self) -> str | None:
-        """Get the deploy version for decode workers (falls back to backend_deploy_version)."""
+        """Get the deploy version for decode workers (falls back to generated_config_version)."""
         return (
-            self.decode_backend_deploy_version
-            if self.decode_backend_deploy_version is not None
-            else self.backend_deploy_version
+            self.generated_decode_config_version
+            if self.generated_decode_config_version is not None
+            else self.generated_config_version
         )
 
     def resolved_backend_version(self, system_name: str, backend_name: str, explicit_version: str | None = None) -> str:
@@ -760,10 +760,10 @@ class TaskConfig:
         decode_system_name: str | None = None,
         backend_name: str = "trtllm",
         backend_version: str | None = None,
-        backend_deploy_version: str | None = None,
+        generated_config_version: str | None = None,
         decode_backend_name: str | None = None,
         decode_backend_version: str | None = None,
-        decode_backend_deploy_version: str | None = None,
+        generated_decode_config_version: str | None = None,
         use_specific_quant_mode: str | None = None,
         isl: int = 4000,
         osl: int = 1000,
@@ -795,13 +795,13 @@ class TaskConfig:
             decode_system_name: The name of the decode system (disagg only).
             backend_name: Backend for agg mode, or prefill workers in disagg mode.
             backend_version: Backend version for performance estimation (agg/prefill).
-            backend_deploy_version: Backend version for deployment artifacts (agg/prefill).
+            generated_config_version: Backend version for deployment artifacts (agg/prefill).
             decode_backend_name: For disagg mode, backend for decode workers.
                 If None, falls back to backend_name.
             decode_backend_version: For disagg mode, backend version for decode workers.
                 If None, falls back to backend_version.
-            decode_backend_deploy_version: For disagg mode, deploy version for decode workers.
-                If None, falls back to backend_deploy_version.
+            generated_decode_config_version: For disagg mode, deploy version for decode workers.
+                If None, falls back to generated_config_version.
             use_specific_quant_mode: The specific quant mode to use.
             isl: The input sequence length.
             osl: The output sequence length.
@@ -820,10 +820,10 @@ class TaskConfig:
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
         self.backend_version = backend_version
-        self.backend_deploy_version = backend_deploy_version
+        self.generated_config_version = generated_config_version
         self.decode_backend_name = decode_backend_name
         self.decode_backend_version = decode_backend_version
-        self.decode_backend_deploy_version = decode_backend_deploy_version
+        self.generated_decode_config_version = generated_decode_config_version
         self.use_specific_quant_mode = use_specific_quant_mode
         yaml_mode = "patch"
         yaml_patch: dict = {}
@@ -852,10 +852,10 @@ class TaskConfig:
             decode_system_name=decode_system_name,
             backend_name=backend_name,
             backend_version=backend_version,
-            backend_deploy_version=backend_deploy_version,
+            generated_config_version=generated_config_version,
             decode_backend_name=decode_backend_name,
             decode_backend_version=decode_backend_version,
-            decode_backend_deploy_version=decode_backend_deploy_version,
+            generated_decode_config_version=generated_decode_config_version,
             use_specific_quant_mode=use_specific_quant_mode,
             isl=isl,
             osl=osl,

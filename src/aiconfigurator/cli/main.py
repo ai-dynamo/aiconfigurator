@@ -40,6 +40,7 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
         "--top_n",
         type=int,
         default=5,
+        metavar="5",
         help="Number of top configurations to output for each experiment (in exp mode) "
         "or for each mode (agg/disagg) in default mode. Default: 5.",
     )
@@ -325,11 +326,11 @@ def build_default_task_configs(
     system: str,
     backend: str = "trtllm",
     backend_version: str | None = None,
-    backend_deploy_version: str | None = None,
+    generated_config_version: str | None = None,
     decode_system: str | None = None,
     decode_backend: str | None = None,
     decode_backend_version: str | None = None,
-    decode_backend_deploy_version: str | None = None,
+    generated_decode_config_version: str | None = None,
     database_mode: str = "SILICON",
     isl: int = 4000,
     osl: int = 1000,
@@ -348,13 +349,13 @@ def build_default_task_configs(
             If 'any', creates tasks for all concrete backends including heterogeneous
             disagg combinations (different prefill/decode backends).
         backend_version: Backend database version. Default is latest.
-        backend_deploy_version: Backend version for deployment artifact generation.
+        generated_config_version: Backend version for deployment artifact generation.
             If None, falls back to backend_version.
         decode_system: System for disagg decode workers. Defaults to `system`.
         decode_backend: For disagg mode, backend for decode workers.
             Only used if backend != 'any'.
         decode_backend_version: For disagg mode, backend version for decode workers.
-        decode_backend_deploy_version: For disagg mode, deploy version for decode workers.
+        generated_decode_config_version: For disagg mode, deploy version for decode workers.
         database_mode: Database mode for performance estimation.
         isl: Input sequence length.
         osl: Output sequence length.
@@ -370,7 +371,7 @@ def build_default_task_configs(
     decode_system = decode_system or system
     decode_backend = decode_backend or (None if backend == "any" else backend)
     decode_backend_version = decode_backend_version or backend_version
-    decode_backend_deploy_version = decode_backend_deploy_version or backend_deploy_version
+    generated_decode_config_version = generated_decode_config_version or generated_config_version
 
     validate_backend_versions(system, backend, decode_system, backend_version, decode_backend_version, backend == "any")
 
@@ -381,7 +382,7 @@ def build_default_task_configs(
         "model_path": model_path,
         "system_name": system,
         "backend_version": backend_version,
-        "backend_deploy_version": backend_deploy_version,
+        "generated_config_version": generated_config_version,
         "total_gpus": total_gpus,
         "isl": isl,
         "osl": osl,
@@ -424,7 +425,7 @@ def build_default_task_configs(
         disagg_kwargs["decode_system_name"] = decode_system
         disagg_kwargs["decode_backend_name"] = decode_backend
         disagg_kwargs["decode_backend_version"] = decode_backend_version
-        disagg_kwargs["decode_backend_deploy_version"] = decode_backend_deploy_version
+        disagg_kwargs["generated_decode_config_version"] = generated_decode_config_version
 
         # Use provided decode_backend or fall back to backend
         actual_decode_backend = decode_backend or backend
@@ -443,10 +444,10 @@ _EXPERIMENT_RESERVED_KEYS = {
     "decode_system_name",
     "backend_name",
     "backend_version",
-    "backend_deploy_version",
+    "generated_config_version",
     "decode_backend_name",
     "decode_backend_version",
-    "decode_backend_deploy_version",
+    "generated_decode_config_version",
     "profiles",
     "isl",
     "osl",
@@ -557,7 +558,7 @@ def build_experiment_task_configs(
         # backend, default to trtllm
         backend_name = exp_config.get("backend_name") or common.BackendName.trtllm.value
         backend_version = exp_config.get("backend_version")
-        backend_deploy_version = exp_config.get("backend_deploy_version")
+        generated_config_version = exp_config.get("generated_config_version")
 
         total_gpus = exp_config.get("total_gpus")
         if total_gpus is None:
@@ -567,11 +568,11 @@ def build_experiment_task_configs(
         # Extract decode backend info for disagg mode
         decode_backend_name = None
         decode_backend_version = None
-        decode_backend_deploy_version = None
+        generated_decode_config_version = None
         if serving_mode == "disagg":
             decode_backend_name = exp_config.get("decode_backend_name")
             decode_backend_version = exp_config.get("decode_backend_version")
-            decode_backend_deploy_version = exp_config.get("decode_backend_deploy_version")
+            generated_decode_config_version = exp_config.get("generated_decode_config_version")
 
         # Validate all backend versions upfront (fail fast)
         if backend_version is not None:
@@ -592,10 +593,10 @@ def build_experiment_task_configs(
         if backend_version is not None:
             task_kwargs["backend_version"] = backend_version
 
-        # backend_deploy_version: version for generating deployment artifacts
+        # generated_config_version: version for generating deployment artifacts
         # If not provided, falls back to backend_version in TaskConfig
-        if backend_deploy_version is not None:
-            task_kwargs["backend_deploy_version"] = backend_deploy_version
+        if generated_config_version is not None:
+            task_kwargs["generated_config_version"] = generated_config_version
 
         if serving_mode == "disagg":
             task_kwargs["decode_system_name"] = inferred_decode_system or system_name
@@ -604,8 +605,8 @@ def build_experiment_task_configs(
                 task_kwargs["decode_backend_name"] = decode_backend_name
             if decode_backend_version is not None:
                 task_kwargs["decode_backend_version"] = decode_backend_version
-            if decode_backend_deploy_version is not None:
-                task_kwargs["decode_backend_deploy_version"] = decode_backend_deploy_version
+            if generated_decode_config_version is not None:
+                task_kwargs["generated_decode_config_version"] = generated_decode_config_version
 
         # Per-experiment overrides for runtime numeric parameters if provided at top level
         for numeric_key in ("isl", "osl", "ttft", "tpot", "request_latency"):
@@ -988,11 +989,11 @@ def main(args):
             system=args.system,
             backend=args.backend,
             backend_version=args.backend_version,
-            backend_deploy_version=args.backend_deploy_version,
+            generated_config_version=args.generated_config_version,
             decode_system=args.decode_system,
             decode_backend=args.decode_backend,
             decode_backend_version=args.decode_backend_version,
-            decode_backend_deploy_version=args.decode_backend_deploy_version,
+            generated_decode_config_version=args.generated_decode_config_version,
             database_mode=args.database_mode,
             isl=args.isl,
             osl=args.osl,
