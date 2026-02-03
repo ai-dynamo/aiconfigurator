@@ -596,7 +596,7 @@ class TaskConfigFactory:
             gemm_quant_mode = fp8_gemm_quant
             moe_quant_mode = _pick([fp8_moe_quant, "fp8", "float16"], supported_moe, fp8_moe_quant)
 
-        if model_path in ["GPT_OSS_120B", "GPT_OSS_20B"]:
+        if model_path in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
             moe_quant_mode = "w4a16_mxfp4"
 
         if use_specific_quant_mode is not None:
