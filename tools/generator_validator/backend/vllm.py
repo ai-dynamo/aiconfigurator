@@ -92,9 +92,7 @@ def collect_config_paths(root_dir: Path) -> list[tuple[str, Path, str]]:
     if not disagg_path.exists():
         missing.append("disagg/top1/k8s_deploy.yaml")
     if missing:
-        raise ValueError(
-            f"Missing expected config under {root_dir}: {', '.join(missing)}."
-        )
+        raise ValueError(f"Missing expected config under {root_dir}: {', '.join(missing)}.")
     return [
         ("agg", agg_path, "VLLMWorker"),
         ("prefill", disagg_path, "VLLMPrefillWorker"),
