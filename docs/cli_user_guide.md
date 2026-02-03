@@ -1,4 +1,23 @@
 # CLI User Guide
+
+## Table of Contents
+
+- [Basic Command](#basic-command)
+  - [Generate mode (Quick Start)](#generate-mode-quick-start)
+  - [Support mode](#support-mode)
+  - [Default mode (SLA-optimized)](#default-mode)
+    - [Backend Selection](#backend-selection)
+    - [Rule Plugin Selection](#rule-plugin-selection)
+    - [Request latency constraint](#request-latency-constraint)
+    - [Database Mode](#database-mode)
+  - [Exp mode (Fully Custom)](#exp-mode)
+- [Backend/Version Flag Guide](#backendversion-flag-guide)
+  - [Available Flags](#available-flags)
+  - [Fallback Chain](#fallback-chain)
+  - [Common Use Cases](#common-use-cases)
+  - [Version Validation](#version-validation)
+
+
 ## Basic Command
 As mentioned in root Readme, CLI supports three modes: `default`, `exp`, and `generate`. We'll go through these modes one by one.
 
@@ -627,3 +646,88 @@ In this example, we use a pre-defined profile to overwrite quantization of Qwen/
 You can refer to [src/aiconfigurator/cli/exps](../src/aiconfigurator/cli/exps) to find more reference yaml files.
 
 Use `exp` mode for flexible experiments, `default` mode for convenient agg vs disagg comparison with SLA optimization, and `generate` mode for quick config generation without sweeping. All modes support generating configs for frameworks automatically by `--save_dir DIR`.
+
+## Backend/Version Flag Guide
+
+AIConfigurator separates **performance estimation** from **deployment artifact generation**, allowing you to estimate performance with one backend version while generating configs for another. This is useful when you have performance data for an older version but want to deploy with a newer release.
+
+### Available Flags
+
+| Flag | Purpose | Applies To | Default |
+|------|---------|------------|---------|
+| `--backend` | Backend for agg workers OR prefill workers in disagg | All workers (agg)<br>Prefill workers (disagg) | `trtllm` |
+| `--backend_version` | Backend version for performance estimation | Same as `--backend` | Latest available |
+| `--generated_config_version` | Backend version for generated deployment artifacts | Same as `--backend` | Falls back to `--backend_version` |
+| `--decode_backend` | Backend for decode workers (disagg only) | Decode workers | Falls back to `--backend` |
+| `--decode_backend_version` | Backend version for decode worker estimation | Decode workers | Falls back to `--backend_version` |
+| `--generated_decode_config_version` | Backend version for decode worker deployment artifacts | Decode workers | Falls back through chain (see below) |
+
+### Common Use Cases
+
+#### 1. Basic Usage (All Defaults)
+```bash
+aiconfigurator cli default \
+  --model_path Qwen/Qwen3-32B \
+  --total_gpus 8 \
+  --system h200_sxm
+```
+Uses latest `trtllm` version for both estimation and deployment.
+
+#### 2. Specific Backend Version
+```bash
+aiconfigurator cli default \
+  --model_path Qwen/Qwen3-32B \
+  --total_gpus 8 \
+  --system h200_sxm \
+  --backend trtllm \
+  --backend_version 1.0.0rc3
+```
+Uses `1.0.0rc3` for both estimation and deployment.
+
+#### 3. Different Estimation vs Deployment Versions
+```bash
+aiconfigurator cli default \
+  --model_path Qwen/Qwen3-32B \
+  --total_gpus 8 \
+  --system h200_sxm \
+  --backend trtllm \
+  --backend_version 1.0.0rc3 \
+  --generated_config_version 1.1.0rc5
+```
+Estimates performance using `1.0.0rc3` data, but generates deployment configs for `1.1.0rc5`. Useful when you have performance data for an older version but want to deploy with a newer release.
+
+#### 4. Heterogeneous Backends (Disagg Mode)
+```bash
+aiconfigurator cli default \
+  --model_path Qwen/Qwen3-32B \
+  --total_gpus 16 \
+  --system h200_sxm \
+  --backend sglang \
+  --decode_backend trtllm
+```
+Uses `sglang` for prefill workers and `trtllm` for decode workers (both with latest versions).
+
+#### 5. Full Control (All Flags)
+```bash
+aiconfigurator cli default \
+  --model_path Qwen/Qwen3-32B \
+  --total_gpus 16 \
+  --system h200_sxm \
+  --backend sglang \
+  --backend_version 0.5.6.post2 \
+  --generated_config_version 0.6.0 \
+  --decode_backend trtllm \
+  --decode_backend_version 1.0.0rc3 \
+  --generated_decode_config_version 1.1.0rc5
+```
+Maximum control with different backends, estimation versions, and deployment versions for prefill and decode workers.
+
+### Version Validation
+
+Version validation happens early - if you specify a non-existent version, the CLI will error immediately with available versions:
+
+```
+ERROR No perf database for system=h200_sxm backend=trtllm version=99.99.99
+Available versions: 1.0.0rc3, 1.0.0rc6, 1.1.0rc5, 1.2.0rc5
+Fix: remove --backend_version to use the latest, or provide one of the available versions.
+```

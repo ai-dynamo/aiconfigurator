@@ -308,6 +308,7 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
 def validate_backend_versions(
     system: str,
     backend_name: str,
+    decode_system: str,
     decode_backend_name: str,
     backend_version: str | None,
     decode_backend_version: str | None,
@@ -318,7 +319,7 @@ def validate_backend_versions(
             _ensure_backend_version_available(system, backend, backend_version)
     else:
         _ensure_backend_version_available(system, backend_name, backend_version)
-        _ensure_backend_version_available(system, decode_backend_name, decode_backend_version)
+        _ensure_backend_version_available(decode_system, decode_backend_name, decode_backend_version)
 
 
 def build_default_task_configs(
@@ -374,7 +375,9 @@ def build_default_task_configs(
     decode_backend_version = decode_backend_version or backend_version
     generated_decode_config_version = generated_decode_config_version or generated_config_version
 
-    validate_backend_versions(system, backend, decode_system, backend_version, decode_backend_version, backend == "any")
+    validate_backend_versions(
+        system, backend, decode_system, decode_backend, backend_version, decode_backend_version, backend == "any"
+    )
 
     task_configs: dict[str, TaskConfig] = {}
 
