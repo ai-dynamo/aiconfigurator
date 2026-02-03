@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import yaml
 
@@ -56,10 +56,7 @@ def validate_torchllm_engine_args(
     # Treat unknown keys as validation errors for clarity.
     dropped_keys = sorted(set(extra_args) - set(base_dict))
     if dropped_keys:
-        raise ValueError(
-            "Unsupported TRT-LLM config keys: "
-            + ", ".join(dropped_keys)
-        )
+        raise ValueError("Unsupported TRT-LLM config keys: " + ", ".join(dropped_keys))
     merged = llm_args_mod.update_llm_args_with_extra_dict(
         base_dict,
         extra_args,
@@ -71,7 +68,9 @@ def validate_torchllm_engine_args(
 def validate_torchllm_engine_config_file(
     engine_config_path: str,
     model_path: Optional[str],
-) -> Tuple[Any, Optional[str]]:
+    service_key: Optional[str] = None,
+) -> tuple[Any, Optional[str]]:
+    _ = service_key
     engine_args = _load_yaml_payload(engine_config_path)
     llm_args = validate_torchllm_engine_args(engine_args, model_path)
     return llm_args, model_path

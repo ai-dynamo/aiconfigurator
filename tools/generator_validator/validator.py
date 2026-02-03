@@ -16,6 +16,7 @@ def _load_backend_handlers():
     try:
         from .backend import trtllm as trtllm_backend
         from .backend import vllm as vllm_backend
+
         return {
             "trtllm": {
                 "title": "TRT-LLM Config Validation (PyTorch backend)",
@@ -51,11 +52,13 @@ BACKEND_HANDLERS = _load_backend_handlers()
 
 logger = logging.getLogger(__name__)
 
+ANSI_GREEN = "\033[32m"
+ANSI_RED = "\033[31m"
+ANSI_RESET = "\033[0m"
+
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Validate engine configs for TRT-LLM or vLLM."
-    )
+    parser = argparse.ArgumentParser(description="Validate engine configs for TRT-LLM or vLLM.")
     parser.add_argument(
         "--backend",
         default="trtllm",
@@ -65,10 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--path",
         required=True,
-        help=("Path to either a single engine YAML or a root results directory. "
-              "For TRT-LLM, a directory uses agg/top1/agg_config.yaml and "
-              "disagg/top1/{decode,prefill}_config.yaml. For vLLM, a directory "
-              "uses agg/top1/k8s_deploy.yaml."),
+        help=(
+            "Path to either a single engine YAML or a root results directory. "
+            "For TRT-LLM, a directory uses agg/top1/agg_config.yaml and "
+            "disagg/top1/{decode,prefill}_config.yaml. For vLLM, a directory "
+            "uses agg/top1/k8s_deploy.yaml."
+        ),
     )
     parser.add_argument(
         "--model-path",
@@ -96,11 +101,15 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     failures: list[tuple[str, str]] = []
     resolved_model = None
-    for label, path in engine_configs:
+    for entry in engine_configs:
+        label = entry[0]
+        path = entry[1]
+        service_key = entry[2] if len(entry) > 2 else None
         try:
             _, resolved_model = handler["validate"](
                 str(path),
                 model_path=args.model_path,
+                service_key=service_key,
             )
         except Exception as exc:
             if args.show_traceback:
@@ -115,16 +124,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     if resolved_model:
         print(f"Model path       : {resolved_model}")
     print("Checked files    :")
-    for label, path in engine_configs:
+    for entry in engine_configs:
+        label = entry[0]
+        path = entry[1]
         print(f"  - {label:<7} -> {path}")
     if failures:
-        print("Result           : FAIL")
+        print(f"Result           : {ANSI_RED}FAIL{ANSI_RESET}")
         print("Failures         :")
         for label, msg in failures:
             print(f"  - {label}: {msg}")
         print("=" * 72 + "\n")
         return 1
-    print("Result           : PASS")
+    print(f"Result           : {ANSI_GREEN}PASS{ANSI_RESET}")
     print("=" * 72 + "\n")
     return 0
 

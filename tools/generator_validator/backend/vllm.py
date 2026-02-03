@@ -7,7 +7,7 @@ import io
 import json
 from contextlib import redirect_stderr
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import yaml
 
@@ -40,7 +40,8 @@ def _dict_to_cli_args(payload: dict[str, Any]) -> list[str]:
 
 
 def _normalize_cli_args(args: list[str]) -> list[str]:
-    return [str(item) for item in args]
+    ignored_flags = {"--is-prefill-worker", "--is-decode-worker"}
+    return [str(item) for item in args if str(item) not in ignored_flags]
 
 
 def _parse_args_with_errors(parser, args: list[str], context: str):
@@ -49,9 +50,7 @@ def _parse_args_with_errors(parser, args: list[str], context: str):
         with redirect_stderr(buf):
             parsed, unknown = parser.parse_known_args(args)
         if unknown:
-            raise ValueError(
-                f"{context} Unrecognized arguments: {' '.join(unknown)}"
-            )
+            raise ValueError(f"{context} Unrecognized arguments: {' '.join(unknown)}")
         return parsed
     except SystemExit:
         detail = buf.getvalue().strip() or "Invalid vLLM args."
@@ -66,10 +65,13 @@ def _load_yaml_payload(path: str) -> dict[str, Any]:
     return payload
 
 
-def _extract_vllm_cli_args(payload: dict[str, Any]) -> Optional[list[str]]:
+def _extract_vllm_cli_args(
+    payload: dict[str, Any],
+    service_key: Optional[str],
+) -> Optional[list[str]]:
     try:
         services = payload.get("spec", {}).get("services", {})
-        worker = services.get("VLLMWorker", {})
+        worker = services.get(service_key or "VLLMWorker", {})
         container = worker.get("extraPodSpec", {}).get("mainContainer", {})
         args = container.get("args")
     except AttributeError:
@@ -81,54 +83,64 @@ def _extract_vllm_cli_args(payload: dict[str, Any]) -> Optional[list[str]]:
     return [str(item) for item in args]
 
 
-def collect_config_paths(root_dir: Path) -> list[tuple[str, Path]]:
-    target = ("k8s", root_dir / "agg" / "top1" / "k8s_deploy.yaml")
-    if not target[1].exists():
+def collect_config_paths(root_dir: Path) -> list[tuple[str, Path, str]]:
+    agg_path = root_dir / "agg" / "top1" / "k8s_deploy.yaml"
+    disagg_path = root_dir / "disagg" / "top1" / "k8s_deploy.yaml"
+    missing = []
+    if not agg_path.exists():
+        missing.append("agg/top1/k8s_deploy.yaml")
+    if not disagg_path.exists():
+        missing.append("disagg/top1/k8s_deploy.yaml")
+    if missing:
         raise ValueError(
-            "Missing expected config under "
-            f"{root_dir}: agg/top1/k8s_deploy.yaml."
+            f"Missing expected config under {root_dir}: {', '.join(missing)}."
         )
-    return [target]
+    return [
+        ("agg", agg_path, "VLLMWorker"),
+        ("prefill", disagg_path, "VLLMPrefillWorker"),
+        ("decode", disagg_path, "VLLMDecodeWorker"),
+    ]
 
 
 def validate_vllm_engine_args(
     engine_args: dict[str, Any],
     model_path: Optional[str] = None,
 ):
-    EngineArgs, FlexibleArgumentParser = _import_vllm_engine_args()
+    engine_args_cls, flexible_parser_cls = _import_vllm_engine_args()
     payload = dict(engine_args)
     if not payload.get("model"):
         payload["model"] = model_path or "dummy-model"
-    parser = FlexibleArgumentParser(add_help=False)
-    EngineArgs.add_cli_args(parser)
+    parser = flexible_parser_cls(add_help=False)
+    engine_args_cls.add_cli_args(parser)
     parsed = _parse_args_with_errors(
         parser,
         _dict_to_cli_args(payload),
         "Invalid vLLM args in config payload.",
     )
-    engine_args_obj = EngineArgs.from_cli_args(parsed)
+    engine_args_obj = engine_args_cls.from_cli_args(parsed)
     return engine_args_obj.create_engine_config()
 
 
 def validate_vllm_engine_args_from_cli(cli_args: list[str]):
-    EngineArgs, FlexibleArgumentParser = _import_vllm_engine_args()
-    parser = FlexibleArgumentParser(add_help=False)
-    EngineArgs.add_cli_args(parser)
+    engine_args_cls, flexible_parser_cls = _import_vllm_engine_args()
+    parser = flexible_parser_cls(add_help=False)
+    engine_args_cls.add_cli_args(parser)
     parsed = _parse_args_with_errors(
         parser,
         _normalize_cli_args(cli_args),
         "Invalid vLLM CLI args in k8s_deploy.yaml.",
     )
-    engine_args_obj = EngineArgs.from_cli_args(parsed)
+    engine_args_obj = engine_args_cls.from_cli_args(parsed)
     return engine_args_obj.create_engine_config()
 
 
 def validate_vllm_engine_config_file(
     engine_config_path: str,
     model_path: Optional[str],
-) -> Tuple[Any, Optional[str]]:
+    service_key: Optional[str] = None,
+) -> tuple[Any, Optional[str]]:
     engine_args = _load_yaml_payload(engine_config_path)
-    cli_args = _extract_vllm_cli_args(engine_args)
+    cli_args = _extract_vllm_cli_args(engine_args, service_key)
     if cli_args is not None:
         vllm_config = validate_vllm_engine_args_from_cli(cli_args)
     else:
