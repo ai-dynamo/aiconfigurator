@@ -4,6 +4,7 @@
 import glob
 import json
 import os
+from types import SimpleNamespace
 
 import tensorrt_llm
 import torch
@@ -212,7 +213,16 @@ def run_moe_torch(
     mapping.moe_ep_size = moe_ep_size
     mapping.moe_tp_size = moe_tp_size
 
-    model_config = ModelConfig()
+    # Create a minimal pretrained_config with required attributes for TensorRT-LLM 1.3+
+    # The CommunicationFactory.create_strategy() accesses model_config.pretrained_config.hidden_size
+    pretrained_config = SimpleNamespace(
+        hidden_size=hidden_size,
+        intermediate_size=inter_size,
+        num_experts=num_experts,
+        torch_dtype=torch.bfloat16,
+    )
+
+    model_config = ModelConfig(pretrained_config=pretrained_config)
     model_config.mapping = mapping
     model_config.quant_config = quant_config
     model_config.moe_max_num_tokens = num_tokens_lists[-1]  # to avoid multi-chunk auxi stream in cuda-graph mode.
