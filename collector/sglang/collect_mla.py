@@ -36,7 +36,7 @@ import sglang.srt.layers.attention.trtllm_mla_backend
 sglang.srt.layers.attention.flashinfer_mla_backend.get_attention_tp_size = lambda: 1
 sglang.srt.layers.attention.trtllm_mla_backend.get_attention_tp_size = lambda: 1
 
-compatible_version = ["0.5.5.post3", "0.5.6.post2"]
+compatible_version = ["0.5.5.post3", "0.5.6.post2", "0.5.8"]
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
@@ -82,6 +82,7 @@ class MockModelConfig:
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.scaling = scaling
+        self.is_local_attention_model = False
 
     def get_num_kv_heads(self, tp_size: int):
         return 1
