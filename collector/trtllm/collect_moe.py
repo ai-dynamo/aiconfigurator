@@ -172,42 +172,35 @@ def get_moe_eplb_test_cases():
             print(f"Skipping EPLB test case for {model_name} as it is not a DeepSeek-V3 model")
             continue
         for moe_type in moe_list:
-            min_latency_mode_options = [False]
-            if moe_type == "nvfp4" and get_sm_version() == 100 and common_moe_testcase.num_experts <= 256:
-                min_latency_mode_options.append(True)
-            for min_latency_mode in min_latency_mode_options:
-                num_experts = common_moe_testcase.num_experts
-                ep_size = common_moe_testcase.ep
-                num_slots_options = [num_experts, 288]  # baseline: no redundancy
-                
-                for num_slots in num_slots_options:
-                    # Skip if num_slots is not divisible by ep_size
-                    if num_slots % ep_size != 0:
-                        continue
-                    # Skip redundant slots (num_slots > num_experts) when min_latency_mode=True
-                    # because DeepseekV3Gate expects routing_logits shape [N, num_experts],
-                    # but power_law_logits_v3 with use_eplb returns [N, num_slots]
-                    if min_latency_mode and num_slots > num_experts:
-                        continue
-                    test_cases.append(
-                        [
-                            moe_type,
-                            common_moe_testcase.num_tokens_list,
-                            common_moe_testcase.hidden_size,
-                            common_moe_testcase.inter_size,
-                            common_moe_testcase.topk,
-                            num_experts,
-                            common_moe_testcase.tp,
-                            ep_size,
-                            min_latency_mode,
-                            common_moe_testcase.model_name,
-                            "moe_eplb_perf.txt",  # use different output file 
-                            common_moe_testcase.token_expert_distribution,
-                            common_moe_testcase.power_law_alpha,
-                            True,  # use_eplb
-                            num_slots,  # num_slots (may > num_experts for redundancy)
-                        ]
-                    )
+            # EPLB mode: only collect non-min_latency data
+            # min_latency mode is not applicable for EPLB scenarios
+            min_latency_mode = False
+            
+            num_experts = common_moe_testcase.num_experts
+            ep_size = common_moe_testcase.ep
+            num_slots_options = [num_experts, 288]  # baseline: no redundancy
+            
+            for num_slots in num_slots_options:
+                # Skip if num_slots is not divisible by ep_size
+                if num_slots % ep_size != 0:
+                    continue
+                test_cases.append([
+                    moe_type,
+                    common_moe_testcase.num_tokens_list,
+                    common_moe_testcase.hidden_size,
+                    common_moe_testcase.inter_size,
+                    common_moe_testcase.topk,
+                    num_experts,
+                    common_moe_testcase.tp,
+                    ep_size,
+                    min_latency_mode,
+                    common_moe_testcase.model_name,
+                    "moe_eplb_perf.txt",  # use different output file 
+                    common_moe_testcase.token_expert_distribution,
+                    common_moe_testcase.power_law_alpha,
+                    True,  # use_eplb
+                    num_slots,  # num_slots (may > num_experts for redundancy)
+                ])
     return test_cases
 
 
