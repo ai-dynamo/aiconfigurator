@@ -5,13 +5,13 @@ import os
 import torch
 
 try:
-    from helper import log_perf
+    from helper import _get_deepseek_model_path, log_perf
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import log_perf
+    from helper import _get_deepseek_model_path, log_perf
 from importlib.metadata import version as get_version
 
 from sglang.srt.distributed import (
@@ -22,7 +22,7 @@ from sglang.srt.layers.quantization import Fp8Config
 from sglang.srt.models.deepseek_v2 import DeepseekV2MLP
 from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
 
-DEEPSEEK_MODEL_PATH = os.environ.get("DEEPSEEK_MODEL_PATH", "/deepseek-v3")
+DEEPSEEK_MODEL_PATH = _get_deepseek_model_path()
 
 
 def get_mlp_prefill_test_cases():
