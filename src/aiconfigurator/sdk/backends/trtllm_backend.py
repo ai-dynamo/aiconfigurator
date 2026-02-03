@@ -133,9 +133,11 @@ class TRTLLMBackend(BaseBackend):
                 ctx_attention_latency_ms = latency_dict["context_attention"] / scale_factor
                 ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor  # CHANGED
 
-                # third pass to get generation attn. use isl+osl//2 for avg generation attn latency.
+                # third pass to get generation latency. use isl+osl//2 for avg generation attn latency.
                 gen_attention_latency_ms = 0.0
                 gen_attention_energy_wms = 0.0  # RENAMED from gen_attention_power_weighted
+                gen_non_attention_latency_ms = 0.0
+                gen_non_attention_energy_wms = 0.0
                 if gen_tokens > 0:
                     num_tokens = gen_tokens
                     summary = self.run_static(
@@ -147,11 +149,27 @@ class TRTLLMBackend(BaseBackend):
                     latency_dict = summary.get_generation_latency_dict()
                     energy_wms_dict = summary.get_generation_energy_wms_dict()
                     gen_attention_latency_ms = latency_dict["generation_attention"]
-                    gen_attention_energy_wms = energy_wms_dict.get("generation_attention", 0.0)  # CHANGED
+                    gen_attention_energy_wms = energy_wms_dict.get("generation_attention", 0.0)
 
-                # Combine all components (simple addition)
-                total_latency_ms = non_attention_latency_ms + ctx_attention_latency_ms + gen_attention_latency_ms
-                total_energy_wms = non_attention_energy_wms + ctx_attention_energy_wms + gen_attention_energy_wms
+                    # add generation non-attention latency/energy (GEMMs, norms, logits, AR, etc.)
+                    for layer_name, latency in latency_dict.items():
+                        if layer_name != "generation_attention":
+                            gen_non_attention_latency_ms += latency
+                            gen_non_attention_energy_wms += energy_wms_dict.get(layer_name, 0.0)
+
+                # Combine all components
+                total_latency_ms = (
+                    non_attention_latency_ms
+                    + ctx_attention_latency_ms
+                    + gen_attention_latency_ms
+                    + gen_non_attention_latency_ms
+                )
+                total_energy_wms = (
+                    non_attention_energy_wms
+                    + ctx_attention_energy_wms
+                    + gen_attention_energy_wms
+                    + gen_non_attention_energy_wms
+                )
 
                 return total_latency_ms, total_energy_wms
 
@@ -192,17 +210,13 @@ class TRTLLMBackend(BaseBackend):
             )
 
             # Calculate timing (unchanged)
-            ttft = mix_step_latency_ms * np.ceil(isl / ctx_tokens)
-            # correction for ttft in trtllm agg mode, assume we have requests 10x of concurrency
-            # (batch size here) to mitigate the impact of first round latency
-            # assume we need to increase x of requests when concurrency gets larger.
-            # thus capped to 4 to make it reasonable.
-            correction_factor = min(2 + (steps_to_finish_ctx - 3) / 2 / 10, 4)
-            ttft *= correction_factor
-            logger.debug(
-                f"ttft correction factor: {2 + (steps_to_finish_ctx - 3) / 2 / 10} capped to "
-                f"{correction_factor} when b: {b}, ctx_tokens: {ctx_tokens} isl {isl}"
-            )
+            # TTFT waiting time based on batch size:
+            # - if batch size >= 3, then it waits 3 entire mix steps
+            # - if batch size == 2, then it waits 2 entire mix steps + 1 decode only step
+            # - if batch size == 1, then it waits 1 entire mix step + 0 decode only steps (no waiting)
+            num_mix_steps_ttft = 3 if b >= 3 else b
+            num_genonly_steps_ttft = 1 if b == 2 else 0
+            ttft = mix_step_latency_ms * num_mix_steps_ttft + genonly_step_latency_ms * num_genonly_steps_ttft
 
             tpot = (mix_step_latency_ms * num_mix_steps_for_tpot_calc + genonly_step_latency_ms * num_genonly_steps) / (
                 num_mix_steps_for_tpot_calc + num_genonly_steps
