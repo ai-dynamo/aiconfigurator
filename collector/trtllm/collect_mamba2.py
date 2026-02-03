@@ -189,6 +189,22 @@ def run_mamba2_context_benchmark(
                 # Conv state cache: (batch, dim, width-1) - updated in-place by causal_conv1d_fn
                 conv_state = torch.randn(batch_size, conv_dim, d_conv - 1, dtype=dtype, device=device)
 
+                # Common log data for both kernels
+                common_log_data = {
+                    "phase": "context",
+                    "batch_size": batch_size,
+                    "seq_len": seq_len,
+                    "num_tokens": batch_size * seq_len,
+                    "d_model": d_model,
+                    "d_state": d_state,
+                    "d_conv": d_conv,
+                    "nheads": nheads,
+                    "head_dim": head_dim,
+                    "n_groups": n_groups,
+                    "chunk_size": chunk_size,
+                    "model_name": model_name,
+                }
+
                 if aic_cached_inputs:
                     # Cached mode: use same inputs for all iterations (saves memory)
                     xbc_input = torch.randn(batch_size, conv_dim, seq_len, dtype=dtype, device=device)
@@ -197,9 +213,35 @@ def run_mamba2_context_benchmark(
                     B = torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
                     C = torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
 
-                    # Warmup
+                    # --- Benchmark causal_conv1d_fn ---
                     torch.cuda.synchronize()
                     causal_conv1d_fn(xbc_input, conv_weight, conv_bias, activation="silu", conv_states=conv_state)
+                    torch.cuda.synchronize()
+
+                    def run_conv1d(_xbc=xbc_input, _conv_state=conv_state):
+                        causal_conv1d_fn(_xbc, conv_weight, conv_bias, activation="silu", conv_states=_conv_state)
+
+                    with benchmark_with_power(
+                        device=device,
+                        kernel_func=run_conv1d,
+                        num_warmups=num_warmups,
+                        num_runs=num_runs,
+                        repeat_n=1,
+                        allow_graph_fail=True,
+                    ) as results:
+                        log_perf(
+                            item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                            framework="TRTLLM",
+                            version=tensorrt_llm.__version__,
+                            device_name=torch.cuda.get_device_name(device),
+                            op_name="mamba2",
+                            kernel_source="causal_conv1d_fn",
+                            perf_filename=perf_filename,
+                            power_stats=results["power_stats"],
+                        )
+
+                    # --- Benchmark mamba_chunk_scan_combined ---
+                    torch.cuda.synchronize()
                     mamba_chunk_scan_combined(
                         x,
                         dt,
@@ -215,8 +257,7 @@ def run_mamba2_context_benchmark(
                     )
                     torch.cuda.synchronize()
 
-                    def run_conv1d_and_ssm_scan(_xbc=xbc_input, _conv_state=conv_state, _x=x, _dt=dt, _b=B, _c=C):
-                        causal_conv1d_fn(_xbc, conv_weight, conv_bias, activation="silu", conv_states=_conv_state)
+                    def run_ssm_scan(_x=x, _dt=dt, _b=B, _c=C):
                         mamba_chunk_scan_combined(
                             _x,
                             _dt,
@@ -229,6 +270,25 @@ def run_mamba2_context_benchmark(
                             dt_bias=dt_bias,
                             dt_softplus=True,
                             return_final_states=True,
+                        )
+
+                    with benchmark_with_power(
+                        device=device,
+                        kernel_func=run_ssm_scan,
+                        num_warmups=num_warmups,
+                        num_runs=num_runs,
+                        repeat_n=1,
+                        allow_graph_fail=True,
+                    ) as results:
+                        log_perf(
+                            item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                            framework="TRTLLM",
+                            version=tensorrt_llm.__version__,
+                            device_name=torch.cuda.get_device_name(device),
+                            op_name="mamba2",
+                            kernel_source="mamba_chunk_scan_combined",
+                            perf_filename=perf_filename,
+                            power_stats=results["power_stats"],
                         )
                 else:
                     # Randomized mode (default): pre-generate pool of random inputs
@@ -255,13 +315,44 @@ def run_mamba2_context_benchmark(
                             for _ in range(total_iters)
                         ],
                     }
-                    iter_idx = [0]  # Mutable counter for closure
 
                     # Warmup with first set of inputs
                     torch.cuda.synchronize()
                     causal_conv1d_fn(
                         input_pool["xbc"][0], conv_weight, conv_bias, activation="silu", conv_states=conv_state
                     )
+                    torch.cuda.synchronize()
+
+                    conv1d_iter_idx = [0]
+
+                    def run_conv1d(_pool=input_pool, _conv_state=conv_state, _idx=conv1d_iter_idx):
+                        idx = _idx[0] % total_iters
+                        _idx[0] += 1
+                        causal_conv1d_fn(
+                            _pool["xbc"][idx], conv_weight, conv_bias, activation="silu", conv_states=_conv_state
+                        )
+
+                    with benchmark_with_power(
+                        device=device,
+                        kernel_func=run_conv1d,
+                        num_warmups=num_warmups,
+                        num_runs=num_runs,
+                        repeat_n=1,
+                        allow_graph_fail=True,
+                    ) as results:
+                        log_perf(
+                            item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                            framework="TRTLLM",
+                            version=tensorrt_llm.__version__,
+                            device_name=torch.cuda.get_device_name(device),
+                            op_name="mamba2",
+                            kernel_source="causal_conv1d_fn",
+                            perf_filename=perf_filename,
+                            power_stats=results["power_stats"],
+                        )
+
+                    # --- Benchmark mamba_chunk_scan_combined ---
+                    torch.cuda.synchronize()
                     mamba_chunk_scan_combined(
                         input_pool["x"][0],
                         input_pool["dt"][0],
@@ -277,12 +368,12 @@ def run_mamba2_context_benchmark(
                     )
                     torch.cuda.synchronize()
 
-                    def run_conv1d_and_ssm_scan(_pool=input_pool, _conv_state=conv_state, _idx=iter_idx):
+                    ssm_iter_idx = [0]
+
+                    def run_ssm_scan(_pool=input_pool, _idx=ssm_iter_idx):
                         idx = _idx[0] % total_iters
                         _idx[0] += 1
-                        causal_conv1d_fn(
-                            _pool["xbc"][idx], conv_weight, conv_bias, activation="silu", conv_states=_conv_state
-                        )
+
                         mamba_chunk_scan_combined(
                             _pool["x"][idx],
                             _pool["dt"][idx],
@@ -297,45 +388,24 @@ def run_mamba2_context_benchmark(
                             return_final_states=True,
                         )
 
-                # Benchmark with power measurement
-                with benchmark_with_power(
-                    device=device,
-                    kernel_func=run_conv1d_and_ssm_scan,
-                    num_warmups=num_warmups,
-                    num_runs=num_runs,
-                    repeat_n=1,
-                    allow_graph_fail=True,
-                ) as results:
-                    latency = results["latency_ms"]
-                    power_stats = results["power_stats"]
-
-                # Log performance
-                log_perf(
-                    item_list=[
-                        {
-                            "phase": "context",
-                            "batch_size": batch_size,
-                            "seq_len": seq_len,
-                            "num_tokens": batch_size * seq_len,  # Total tokens for reference
-                            "d_model": d_model,
-                            "d_state": d_state,
-                            "d_conv": d_conv,
-                            "nheads": nheads,
-                            "head_dim": head_dim,
-                            "n_groups": n_groups,
-                            "chunk_size": chunk_size,
-                            "model_name": model_name,
-                            "latency": latency,
-                        }
-                    ],
-                    framework="TRTLLM",
-                    version=tensorrt_llm.__version__,
-                    device_name=torch.cuda.get_device_name(device),
-                    op_name="mamba2",
-                    kernel_source="conv1d_ssm_combined",
-                    perf_filename=perf_filename,
-                    power_stats=power_stats,
-                )
+                    with benchmark_with_power(
+                        device=device,
+                        kernel_func=run_ssm_scan,
+                        num_warmups=num_warmups,
+                        num_runs=num_runs,
+                        repeat_n=1,
+                        allow_graph_fail=True,
+                    ) as results:
+                        log_perf(
+                            item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                            framework="TRTLLM",
+                            version=tensorrt_llm.__version__,
+                            device_name=torch.cuda.get_device_name(device),
+                            op_name="mamba2",
+                            kernel_source="mamba_chunk_scan_combined",
+                            perf_filename=perf_filename,
+                            power_stats=results["power_stats"],
+                        )
 
                 # Cleanup
                 if aic_cached_inputs:
@@ -418,15 +488,55 @@ def run_mamba2_generation_benchmark(
             ssm_state = torch.randn(batch_size, nheads, head_dim, d_state, dtype=dtype, device=device)
 
             if aic_cached_inputs:
+                # Common log data for both kernels
+                common_log_data = {
+                    "phase": "generation",
+                    "batch_size": batch_size,
+                    "d_model": d_model,
+                    "d_state": d_state,
+                    "d_conv": d_conv,
+                    "nheads": nheads,
+                    "head_dim": head_dim,
+                    "n_groups": n_groups,
+                    "chunk_size": chunk_size,
+                    "model_name": model_name,
+                }
                 # Cached mode: use same inputs for all iterations (saves memory)
                 xbc_input = torch.randn(batch_size, conv_dim, dtype=dtype, device=device)
                 x = torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
                 dt = torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
                 B = torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
                 C = torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)  # noqa: N806
-                # Warmup
+
+                # --- Benchmark causal_conv1d_update ---
                 torch.cuda.synchronize()
                 causal_conv1d_update(xbc_input, conv_state, conv_weight, conv_bias, activation="silu")
+                torch.cuda.synchronize()
+
+                def run_conv1d_update(_xbc=xbc_input, _conv_state=conv_state):
+                    causal_conv1d_update(_xbc, _conv_state, conv_weight, conv_bias, activation="silu")
+
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=run_conv1d_update,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                    repeat_n=1,
+                    allow_graph_fail=True,
+                ) as results:
+                    log_perf(
+                        item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                        framework="TRTLLM",
+                        version=tensorrt_llm.__version__,
+                        device_name=torch.cuda.get_device_name(device),
+                        op_name="mamba2",
+                        kernel_source="causal_conv1d_update",
+                        perf_filename=perf_filename,
+                        power_stats=results["power_stats"],
+                    )
+
+                # --- Benchmark selective_state_update ---
+                torch.cuda.synchronize()
                 selective_state_update(
                     ssm_state,
                     x,
@@ -441,10 +551,7 @@ def run_mamba2_generation_benchmark(
                 )
                 torch.cuda.synchronize()
 
-                def run_conv1d_update_and_state_update(
-                    _xbc=xbc_input, _conv_state=conv_state, _ssm_state=ssm_state, _x=x, _dt=dt, _b=B, _c=C
-                ):
-                    causal_conv1d_update(_xbc, _conv_state, conv_weight, conv_bias, activation="silu")
+                def run_state_update(_ssm_state=ssm_state, _x=x, _dt=dt, _b=B, _c=C):
                     selective_state_update(
                         _ssm_state,
                         _x,
@@ -457,7 +564,39 @@ def run_mamba2_generation_benchmark(
                         dt_bias=dt_bias,
                         dt_softplus=True,
                     )
+
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=run_state_update,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                    repeat_n=1,
+                    allow_graph_fail=True,
+                ) as results:
+                    log_perf(
+                        item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                        framework="TRTLLM",
+                        version=tensorrt_llm.__version__,
+                        device_name=torch.cuda.get_device_name(device),
+                        op_name="mamba2",
+                        kernel_source="selective_state_update",
+                        perf_filename=perf_filename,
+                        power_stats=results["power_stats"],
+                    )
             else:
+                # Common log data for both kernels
+                common_log_data = {
+                    "phase": "generation",
+                    "batch_size": batch_size,
+                    "d_model": d_model,
+                    "d_state": d_state,
+                    "d_conv": d_conv,
+                    "nheads": nheads,
+                    "head_dim": head_dim,
+                    "n_groups": n_groups,
+                    "chunk_size": chunk_size,
+                    "model_name": model_name,
+                }
                 # Randomized mode (default): pre-generate pool of random inputs
                 input_pool = {
                     "xbc": [torch.randn(batch_size, conv_dim, dtype=dtype, device=device) for _ in range(total_iters)],
@@ -478,11 +617,40 @@ def run_mamba2_generation_benchmark(
                         for _ in range(total_iters)
                     ],
                 }
-                iter_idx = [0]  # Mutable counter for closure
 
-                # Warmup
+                # --- Benchmark causal_conv1d_update ---
                 torch.cuda.synchronize()
                 causal_conv1d_update(input_pool["xbc"][0], conv_state, conv_weight, conv_bias, activation="silu")
+                torch.cuda.synchronize()
+
+                conv1d_iter_idx = [0]
+
+                def run_conv1d_update(_pool=input_pool, _conv_state=conv_state, _idx=conv1d_iter_idx):
+                    idx = _idx[0] % total_iters
+                    _idx[0] += 1
+                    causal_conv1d_update(_pool["xbc"][idx], _conv_state, conv_weight, conv_bias, activation="silu")
+
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=run_conv1d_update,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                    repeat_n=1,
+                    allow_graph_fail=True,
+                ) as results:
+                    log_perf(
+                        item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                        framework="TRTLLM",
+                        version=tensorrt_llm.__version__,
+                        device_name=torch.cuda.get_device_name(device),
+                        op_name="mamba2",
+                        kernel_source="causal_conv1d_update",
+                        perf_filename=perf_filename,
+                        power_stats=results["power_stats"],
+                    )
+
+                # --- Benchmark selective_state_update ---
+                torch.cuda.synchronize()
                 selective_state_update(
                     ssm_state,
                     input_pool["x"][0],
@@ -497,12 +665,11 @@ def run_mamba2_generation_benchmark(
                 )
                 torch.cuda.synchronize()
 
-                def run_conv1d_update_and_state_update(
-                    _pool=input_pool, _conv_state=conv_state, _ssm_state=ssm_state, _idx=iter_idx
-                ):
+                ssm_iter_idx = [0]
+
+                def run_state_update(_pool=input_pool, _ssm_state=ssm_state, _idx=ssm_iter_idx):
                     idx = _idx[0] % total_iters
                     _idx[0] += 1
-                    causal_conv1d_update(_pool["xbc"][idx], _conv_state, conv_weight, conv_bias, activation="silu")
                     selective_state_update(
                         _ssm_state,
                         _pool["x"][idx],
@@ -516,43 +683,24 @@ def run_mamba2_generation_benchmark(
                         dt_softplus=True,
                     )
 
-            # Benchmark with power measurement
-            with benchmark_with_power(
-                device=device,
-                kernel_func=run_conv1d_update_and_state_update,
-                num_warmups=num_warmups,
-                num_runs=num_runs,
-                repeat_n=1,
-                allow_graph_fail=True,
-            ) as results:
-                latency = results["latency_ms"]
-                power_stats = results["power_stats"]
-
-            # Log performance
-            log_perf(
-                item_list=[
-                    {
-                        "phase": "generation",
-                        "batch_size": batch_size,
-                        "d_model": d_model,
-                        "d_state": d_state,
-                        "d_conv": d_conv,
-                        "nheads": nheads,
-                        "head_dim": head_dim,
-                        "n_groups": n_groups,
-                        "chunk_size": chunk_size,
-                        "model_name": model_name,
-                        "latency": latency,
-                    }
-                ],
-                framework="TRTLLM",
-                version=tensorrt_llm.__version__,
-                device_name=torch.cuda.get_device_name(device),
-                op_name="mamba2",
-                kernel_source="conv1d_ssm_combined",
-                perf_filename=perf_filename,
-                power_stats=power_stats,
-            )
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=run_state_update,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                    repeat_n=1,
+                    allow_graph_fail=True,
+                ) as results:
+                    log_perf(
+                        item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                        framework="TRTLLM",
+                        version=tensorrt_llm.__version__,
+                        device_name=torch.cuda.get_device_name(device),
+                        op_name="mamba2",
+                        kernel_source="selective_state_update",
+                        perf_filename=perf_filename,
+                        power_stats=results["power_stats"],
+                    )
 
             # Cleanup
             if aic_cached_inputs:
