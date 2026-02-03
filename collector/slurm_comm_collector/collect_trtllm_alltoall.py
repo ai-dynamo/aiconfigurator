@@ -10,20 +10,13 @@ using NVLinkTwoSided communication strategy.
 Supports both balanced and power-law token distributions to simulate real-world
 workloads where some experts receive more tokens than others.
 
-IMPORTANT: This script MUST be run with mpirun because TensorRT-LLM's MNNVL
-(Multi-Node NVLink) uses MPI for symmetric memory management.
-
-Usage:
-    # Run with mpirun (REQUIRED):
-    mpirun -np 4 python collect_wideep_alltoall.py
-
-    # For multi-node:
-    mpirun -np 8 -hostfile hostfile python collect_wideep_alltoall.py
+Usage (Slurm):
+    srun --ntasks 8 --ntasks-per-node 4 --mpi=pmix python collect_trtllm_alltoall.py
 """
 
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple
 
@@ -33,10 +26,7 @@ import torch.distributed as dist
 # Add parent directory to path for helper imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-try:
-    from helper import benchmark_with_power, log_perf, sample_power_law
-except ModuleNotFoundError:
-    from helper import benchmark_with_power, log_perf, sample_power_law
+from helper import log_perf, sample_power_law
 
 
 class TokenDistribution(Enum):
@@ -52,6 +42,24 @@ class MoEDtype(Enum):
     FLOAT16 = "float16"  # BFloat16/Float16
     FP8 = "fp8"  # FP8 E4M3
     NVFP4 = "nvfp4"  # NVFP4 with scale factors
+
+
+# Token distribution configurations: (distribution_type, power_law_alpha)
+# - balanced: uniform distribution across all experts
+# - power_law with α=1.01: slight imbalance
+# - power_law with α=1.2: moderate imbalance (realistic workload)
+DEFAULT_DISTRIBUTIONS = [
+    (TokenDistribution.BALANCED, None),
+    # (TokenDistribution.POWER_LAW, 1.01),
+    # (TokenDistribution.POWER_LAW, 1.2),
+]
+
+# Supported MoE data types
+DEFAULT_MOE_DTYPES = [
+    MoEDtype.FLOAT16,
+    MoEDtype.FP8,
+    MoEDtype.NVFP4,
+]
 
 
 @dataclass
@@ -79,37 +87,6 @@ class AlltoallTestCase:
                 f"experts={self.num_experts}, topk={self.top_k}, "
                 f"dtype={self.moe_dtype.value}, dist={dist_str}"
             )
-
-
-# Token distribution configurations: (distribution_type, power_law_alpha)
-# - balanced: uniform distribution across all experts
-# - power_law with α=1.01: slight imbalance
-# - power_law with α=1.2: moderate imbalance (realistic workload)
-DEFAULT_DISTRIBUTIONS = [
-    (TokenDistribution.BALANCED, None),
-    # (TokenDistribution.POWER_LAW, 1.01),
-    # (TokenDistribution.POWER_LAW, 1.2),
-]
-
-# Supported MoE data types
-DEFAULT_MOE_DTYPES = [
-    MoEDtype.FLOAT16,
-    MoEDtype.FP8,
-    MoEDtype.NVFP4,
-]
-
-
-def get_torch_dtype(moe_dtype: MoEDtype) -> torch.dtype:
-    """Convert MoEDtype to torch.dtype for hidden states."""
-    if moe_dtype == MoEDtype.FLOAT16:
-        return torch.bfloat16
-    elif moe_dtype == MoEDtype.FP8:
-        return torch.float8_e4m3fn
-    elif moe_dtype == MoEDtype.NVFP4:
-        # NVFP4 uses uint8 for storage, but hidden states are bfloat16 before quantization
-        return torch.bfloat16
-    else:
-        return torch.bfloat16
 
 
 def get_default_test_cases(ep_size: int) -> List[AlltoallTestCase]:
@@ -164,37 +141,45 @@ def get_default_test_cases(ep_size: int) -> List[AlltoallTestCase]:
 
 def init_distributed():
     """
-    Initialize distributed environment using MPI.
+    Initialize distributed environment using Slurm with srun --mpi=pmix.
 
-    MNNVL requires MPI for symmetric memory management, so this script
-    must be launched with mpirun.
+    MNNVL requires MPI for symmetric memory management.
 
     Returns:
         Tuple of (rank, world_size, device)
     """
-    # Import MPI from TensorRT-LLM's utilities
     from tensorrt_llm._utils import mpi_comm
 
-    # Get MPI communicator
+    # Get MPI communicator (srun --mpi=pmix)
     comm = mpi_comm()
     rank = comm.Get_rank()
     world_size = comm.Get_size()
 
-    # Calculate local rank (for multi-node setups)
-    # Use OMPI environment variable if available, otherwise use rank % num_gpus
-    if "OMPI_COMM_WORLD_LOCAL_RANK" in os.environ:
-        local_rank = int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
+    # Get local rank from Slurm environment
+    if "SLURM_LOCALID" in os.environ:
+        local_rank = int(os.environ["SLURM_LOCALID"])
+    elif "LOCAL_RANK" in os.environ:
+        local_rank = int(os.environ["LOCAL_RANK"])
     else:
-        # Assume GPUs are assigned sequentially
-        num_gpus = torch.cuda.device_count()
-        local_rank = rank % num_gpus
+        gpus_per_node = int(os.environ.get("SLURM_NTASKS_PER_NODE", torch.cuda.device_count()))
+        local_rank = rank % gpus_per_node
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
 
-    # Initialize NCCL process group for barriers (optional but useful for synchronization)
+    # Also set via cuda bindings for consistency
+    try:
+        from cuda import cudart
+    except ImportError:
+        try:
+            from cuda.bindings import runtime as cudart
+        except ImportError:
+            cudart = None
+    if cudart is not None:
+        cudart.cudaSetDevice(local_rank)
+
+    # Initialize NCCL process group for barriers
     if world_size > 1 and not dist.is_initialized():
-        # Set environment variables for torch.distributed
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["LOCAL_RANK"] = str(local_rank)
@@ -238,6 +223,7 @@ def create_mapping(rank: int, world_size: int):
     mapping = Mapping(
         world_size=world_size,
         rank=rank,
+        gpus_per_node=4,
         tp_size=world_size,  # Must satisfy: tp_size * pp_size == world_size
         pp_size=1,
         moe_tp_size=1,
@@ -251,7 +237,6 @@ def generate_balanced_expert_ids(
     num_tokens: int,
     num_experts: int,
     top_k: int,
-    ep_size: int,
     device: torch.device,
 ) -> torch.Tensor:
     """
@@ -263,7 +248,6 @@ def generate_balanced_expert_ids(
         num_tokens: Number of tokens
         num_experts: Total number of experts
         top_k: Number of experts per token
-        ep_size: Expert Parallelism size
         device: Target device
 
     Returns:
@@ -308,6 +292,8 @@ def generate_power_law_expert_ids(
     Returns:
         Expert IDs tensor of shape [num_tokens, top_k]
     """
+    import random
+
     # Generate power-law token counts per expert
     if num_tokens * top_k > num_experts:
         tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
@@ -337,30 +323,24 @@ def generate_power_law_expert_ids(
                     tokens_per_expert[torch.argmax(tokens_per_expert)] -= 1
 
     # Ensure the max-load EP rank is rank 0 for consistent benchmarking
-    # This simulates measuring the "worst case" rank
     experts_per_rank = num_experts // ep_size
     if experts_per_rank > 0:
         rank_loads = tokens_per_expert.view(ep_size, experts_per_rank).sum(dim=1)
         max_rank = torch.argmax(rank_loads).item()
         if max_rank != 0:
-            # Swap experts between rank 0 and max_rank
             reshaped = tokens_per_expert.view(ep_size, experts_per_rank)
             reshaped[0], reshaped[max_rank] = reshaped[max_rank].clone(), reshaped[0].clone()
             tokens_per_expert = reshaped.view(-1)
 
     # Build expert assignments for each token
-    # Each token needs top_k DIFFERENT experts
     expert_ids = torch.zeros((num_tokens, top_k), dtype=torch.int32, device=device)
 
     # Create a pool of expert assignments based on power-law counts
-    # Each expert appears in the pool according to its token count
     expert_pool = []
     for expert_id in range(num_experts):
         count = int(tokens_per_expert[expert_id].item())
         expert_pool.extend([expert_id] * count)
 
-    # Shuffle the pool to distribute experts randomly across tokens
-    import random
     random.shuffle(expert_pool)
 
     # Assign experts to tokens, ensuring each token gets top_k different experts
@@ -369,33 +349,29 @@ def generate_power_law_expert_ids(
         assigned_experts = set()
         k_idx = 0
         attempts = 0
-        max_attempts = num_experts * 2  # Prevent infinite loop
+        max_attempts = num_experts * 2
 
         while k_idx < top_k and attempts < max_attempts:
             if pool_idx >= len(expert_pool):
-                # Pool exhausted, wrap around
                 pool_idx = 0
                 random.shuffle(expert_pool)
 
             expert_id = expert_pool[pool_idx]
             pool_idx += 1
 
-            # Only assign if this expert hasn't been assigned to this token yet
             if expert_id not in assigned_experts:
                 expert_ids[token_idx, k_idx] = expert_id
                 assigned_experts.add(expert_id)
                 k_idx += 1
             attempts += 1
 
-        # If we couldn't fill all top_k slots (shouldn't happen normally),
-        # fill remaining with random different experts
+        # Fill remaining slots if needed
         if k_idx < top_k:
             available = [e for e in range(num_experts) if e not in assigned_experts]
             for remaining_idx in range(k_idx, top_k):
                 if available:
                     expert_ids[token_idx, remaining_idx] = available.pop(0)
                 else:
-                    # Fallback: just use any expert
                     expert_ids[token_idx, remaining_idx] = remaining_idx % num_experts
 
     return expert_ids
@@ -420,11 +396,10 @@ def generate_expert_ids(
             test_case.num_tokens,
             test_case.num_experts,
             test_case.top_k,
-            test_case.ep_size,
             device,
         )
     elif test_case.distribution == TokenDistribution.POWER_LAW:
-        alpha = test_case.power_law_alpha or 1.2  # Default alpha
+        alpha = test_case.power_law_alpha or 1.2
         return generate_power_law_expert_ids(
             test_case.num_tokens,
             test_case.num_experts,
@@ -561,13 +536,9 @@ def benchmark_nvlink_two_sided_alltoall(
     device: torch.device,
     num_warmup: int = 3,
     num_iterations: int = 10,
-    num_distribution_samples: int = 5,
 ) -> AlltoallBenchmarkResult:
     """
     Benchmark NVLinkTwoSided All-to-All communication.
-
-    For power-law distributions, multiple samples are taken to reduce variance
-    from the random distribution generation.
 
     Args:
         test_case: Test case configuration
@@ -575,7 +546,6 @@ def benchmark_nvlink_two_sided_alltoall(
         device: CUDA device
         num_warmup: Number of warmup iterations
         num_iterations: Number of benchmark iterations
-        num_distribution_samples: Number of distribution samples for power-law (default: 5)
 
     Returns:
         AlltoallBenchmarkResult containing latencies for each operation
@@ -597,138 +567,129 @@ def benchmark_nvlink_two_sided_alltoall(
     # Number of slots (same as num_experts for simple case)
     num_slots = num_experts
 
-    # For power-law, we sample multiple distributions to get stable results
-    is_power_law = test_case.distribution == TokenDistribution.POWER_LAW
-    num_samples = num_distribution_samples if is_power_law else 1
+    # Prepare test data
+    hidden_states, hidden_states_sf, token_selected_slots, token_final_scales = prepare_test_data(test_case, device)
 
-    # Pre-generate multiple test data samples for power-law
-    test_data_samples = [prepare_test_data(test_case, device) for _ in range(num_samples)]
-
-    # All rank token counts (same for balanced case)
+    # All rank token counts
     all_rank_num_tokens = [num_tokens] * ep_size
     all_rank_max_num_tokens = max(all_rank_num_tokens)
 
-    # Collect results across all distribution samples
+    # Collect timing results
     all_prepare_times = []
     all_dispatch_times = []
     all_combine_times = []
     all_combine_low_precision_times = []
 
-    for sample_idx, (hidden_states, hidden_states_sf, token_selected_slots, token_final_scales) in enumerate(test_data_samples):
-        # ============================================================================
-        # Benchmark: alltoall_prepare
-        # ============================================================================
-        def prepare_func():
-            return MnnvlMoe.mnnvl_moe_alltoallv_prepare_without_allgather(
-                token_selected_slots,
-                None,  # expert_statics (optional for EPLB)
-                alltoall_prepare_workspace,
-                all_rank_max_num_tokens,
-                ep_rank,
-                ep_size,
-                num_experts,
-                num_slots,
-                top_k,
-            )
+    # ============================================================================
+    # Benchmark: alltoall_prepare
+    # ============================================================================
+    def prepare_func():
+        return MnnvlMoe.mnnvl_moe_alltoallv_prepare_without_allgather(
+            token_selected_slots,
+            None,  # expert_statics (optional for EPLB)
+            alltoall_prepare_workspace,
+            all_rank_max_num_tokens,
+            ep_rank,
+            ep_size,
+            num_experts,
+            num_slots,
+            top_k,
+        )
 
-        # Warmup (only on first sample)
-        if sample_idx == 0:
-            for _ in range(num_warmup):
-                alltoall_info, _ = prepare_func()
-            torch.cuda.synchronize()
+    # Warmup
+    for _ in range(num_warmup):
+        alltoall_info, _ = prepare_func()
+    torch.cuda.synchronize()
 
-        # Benchmark prepare
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        for _ in range(num_iterations):
-            torch.cuda.synchronize()
-            start_event.record()
-            alltoall_info, _ = prepare_func()
-            end_event.record()
-            end_event.synchronize()
-            all_prepare_times.append(start_event.elapsed_time(end_event))
+    # Benchmark prepare
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    for _ in range(num_iterations):
+        torch.cuda.synchronize()
+        start_event.record()
+        alltoall_info, _ = prepare_func()
+        end_event.record()
+        end_event.synchronize()
+        all_prepare_times.append(start_event.elapsed_time(end_event))
 
-        # ============================================================================
-        # Benchmark: alltoall_dispatch (All-to-All send)
-        # ============================================================================
-        def dispatch_func():
-            return MnnvlMoe.mnnvl_moe_alltoallv(
-                [hidden_states.clone(), hidden_states_sf.clone() if hidden_states_sf is not None else None,
-                 token_selected_slots.clone(), token_final_scales.clone()],
-                alltoall_info,
-                alltoall_workspace,
-                ep_rank,
-                ep_size,
-            )
+    # ============================================================================
+    # Benchmark: alltoall_dispatch (All-to-All send)
+    # ============================================================================
+    def dispatch_func():
+        return MnnvlMoe.mnnvl_moe_alltoallv(
+            [hidden_states.clone(), hidden_states_sf.clone() if hidden_states_sf is not None else None,
+             token_selected_slots.clone(), token_final_scales.clone()],
+            alltoall_info,
+            alltoall_workspace,
+            ep_rank,
+            ep_size,
+        )
 
-        # Warmup (only on first sample)
-        if sample_idx == 0:
-            for _ in range(num_warmup):
-                dispatched = dispatch_func()
-            torch.cuda.synchronize()
+    # Warmup
+    for _ in range(num_warmup):
+        dispatched = dispatch_func()
+    torch.cuda.synchronize()
 
-        # Benchmark dispatch
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        for _ in range(num_iterations):
-            torch.cuda.synchronize()
-            start_event.record()
-            dispatched = dispatch_func()
-            end_event.record()
-            end_event.synchronize()
-            all_dispatch_times.append(start_event.elapsed_time(end_event))
+    # Benchmark dispatch
+    for _ in range(num_iterations):
+        torch.cuda.synchronize()
+        start_event.record()
+        dispatched = dispatch_func()
+        end_event.record()
+        end_event.synchronize()
+        all_dispatch_times.append(start_event.elapsed_time(end_event))
 
-        # Get dispatched hidden states for combine benchmark
-        recv_hidden_states = dispatched[0]
+    # Get dispatched hidden states for combine benchmark
+    recv_hidden_states = dispatched[0]
 
-        # Simulate MoE output (same shape as received hidden states, but always bfloat16 for combine)
-        # Combine always operates on expert output which is bfloat16
-        if recv_hidden_states.dtype == torch.uint8:
-            # For NVFP4, expert output is bfloat16
-            moe_output = torch.randn(recv_hidden_states.shape[0], hidden_size, dtype=torch.bfloat16, device=device)
-        elif recv_hidden_states.dtype == torch.float8_e4m3fn:
-            # For FP8, expert output is bfloat16
-            moe_output = torch.randn(recv_hidden_states.shape[0], hidden_size, dtype=torch.bfloat16, device=device)
-        else:
-            moe_output = torch.randn_like(recv_hidden_states)
+    # Simulate MoE output (same shape as received hidden states, but always bfloat16 for combine)
+    # Combine always operates on expert output which is bfloat16
+    if recv_hidden_states.dtype == torch.uint8:
+        # For NVFP4, expert output is bfloat16
+        moe_output = torch.randn(recv_hidden_states.shape[0], hidden_size, dtype=torch.bfloat16, device=device)
+    elif recv_hidden_states.dtype == torch.float8_e4m3fn:
+        # For FP8, expert output is bfloat16
+        moe_output = torch.randn(recv_hidden_states.shape[0], hidden_size, dtype=torch.bfloat16, device=device)
+    else:
+        moe_output = torch.randn_like(recv_hidden_states)
 
-        # ============================================================================
-        # Benchmark: alltoall_combine (do_reduce=False, use_low_precision_combine=False)
-        # ============================================================================
-        def combine_func():
-            return MnnvlMoe.mnnvl_moe_alltoallv_combine(
-                moe_output,
-                alltoall_info,
-                alltoall_workspace,
-                ep_rank=ep_rank,
-                ep_size=ep_size,
-                top_k=top_k,
-                token_count=num_tokens,
-                use_low_precision_combine=False,
-                do_reduce=False,
-            )
+    # ============================================================================
+    # Benchmark: alltoall_combine (do_reduce=False, use_low_precision_combine=False)
+    # ============================================================================
+    def combine_func():
+        return MnnvlMoe.mnnvl_moe_alltoallv_combine(
+            moe_output,
+            alltoall_info,
+            alltoall_workspace,
+            ep_rank=ep_rank,
+            ep_size=ep_size,
+            top_k=top_k,
+            token_count=num_tokens,
+            use_low_precision_combine=False,
+            do_reduce=False,
+        )
 
-        # Warmup (only on first sample)
-        if sample_idx == 0:
-            for _ in range(num_warmup):
-                combined = combine_func()
-            torch.cuda.synchronize()
+    # Warmup
+    for _ in range(num_warmup):
+        combined = combine_func()
+    torch.cuda.synchronize()
 
-        # Benchmark combine
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        for _ in range(num_iterations):
-            torch.cuda.synchronize()
-            start_event.record()
-            combined = combine_func()
-            end_event.record()
-            end_event.synchronize()
-            all_combine_times.append(start_event.elapsed_time(end_event))
+    # Benchmark combine
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    for _ in range(num_iterations):
+        torch.cuda.synchronize()
+        start_event.record()
+        combined = combine_func()
+        end_event.record()
+        end_event.synchronize()
+        all_combine_times.append(start_event.elapsed_time(end_event))
 
-        # ============================================================================
-        # Benchmark: alltoall_combine_low_precision (do_reduce=False, use_low_precision_combine=True)
-        # Note: low_precision_combine only works with bfloat16/float16 output
-        # ============================================================================
+    # ============================================================================
+    # Benchmark: alltoall_combine_low_precision (do_reduce=False, use_low_precision_combine=True)
+    # Only benchmark for NVFP4 dtype as low_precision_combine is most relevant for it
+    # ============================================================================
+    if moe_dtype == MoEDtype.NVFP4:
         def combine_low_precision_func():
             return MnnvlMoe.mnnvl_moe_alltoallv_combine(
                 moe_output,
@@ -742,15 +703,14 @@ def benchmark_nvlink_two_sided_alltoall(
                 do_reduce=False,
             )
 
-        # Warmup (only on first sample)
-        if sample_idx == 0:
-            for _ in range(num_warmup):
-                try:
-                    combined_lp = combine_low_precision_func()
-                except Exception:
-                    # Low precision combine may not be supported for all dtypes
-                    pass
-            torch.cuda.synchronize()
+        # Warmup
+        for _ in range(num_warmup):
+            try:
+                combined_lp = combine_low_precision_func()
+            except Exception:
+                # Low precision combine may not be supported
+                pass
+        torch.cuda.synchronize()
 
         # Benchmark combine with low precision
         start_event = torch.cuda.Event(enable_timing=True)
@@ -768,7 +728,7 @@ def benchmark_nvlink_two_sided_alltoall(
                 end_event.record()
                 end_event.synchronize()
 
-    # Calculate average latencies across all samples
+    # Calculate average latencies
     prepare_latency = sum(all_prepare_times) / len(all_prepare_times) if all_prepare_times else 0.0
     dispatch_latency = sum(all_dispatch_times) / len(all_dispatch_times) if all_dispatch_times else 0.0
     combine_latency = sum(all_combine_times) / len(all_combine_times) if all_combine_times else 0.0
@@ -872,12 +832,11 @@ def run_benchmark(
         print(f"\n{'=' * 70}")
         print(f"TensorRT-LLM WideEP NVLinkTwoSided All-to-All Benchmark")
         print(f"{'=' * 70}")
-        print(f"World size: {world_size}")
+        print(f"EP size: {world_size}")
         print(f"Device: {device_name}")
         print(f"TensorRT-LLM version: {version}")
         print(f"Number of test cases: {len(test_cases)}")
         print(f"MoE dtypes: {[d.value for d in DEFAULT_MOE_DTYPES]}")
-        print(f"Distributions: balanced, power_law (α=1.01, α=1.2)")
         print(f"{'=' * 70}\n")
 
     # Run benchmarks
@@ -935,7 +894,7 @@ def run_benchmark(
                     log_alltoall_perf(
                         test_case, "alltoall_combine_low_precision", result.combine_low_precision_latency_ms,
                         framework, version, device_name, output_file
-                    )
+                )
 
         except Exception as e:
             if rank == 0:
@@ -970,25 +929,57 @@ def run_wideep_alltoall(ep_size: int, perf_filename: str, device: str = "cuda:0"
     """
     Entry point for collect.py framework.
 
-    Note: This function requires multi-GPU setup with mpirun (NOT torchrun).
+    Note: This function requires multi-GPU setup with srun --mpi=pmix.
     MNNVL uses MPI for symmetric memory management.
     """
-    print(f"WideEP All-to-All benchmark requires multi-GPU setup with MPI.")
-    print(f"Please run with: mpirun -np {ep_size} python {__file__}")
+    print(f"WideEP All-to-All benchmark requires multi-GPU setup.")
+    print(f"Please run with: srun --ntasks {ep_size} --mpi=pmix python {__file__}")
+
+
+def parse_args():
+    """Parse command line arguments."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="WideEP NVLinkTwoSided All-to-All Communication Benchmark",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=str,
+        default="wideep_alltoall_perf.txt",
+        help="Output file path for performance results (default: wideep_alltoall_perf.txt)",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=3,
+        help="Number of warmup iterations (default: 3)",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=10,
+        help="Number of benchmark iterations (default: 10)",
+    )
+    return parser.parse_args()
 
 
 def main():
     """Main entry point."""
+    args = parse_args()
     rank, world_size, device = init_distributed()
 
     if world_size < 2:
         print("ERROR: This benchmark requires at least 2 GPUs.")
-        print("IMPORTANT: Must use mpirun (NOT torchrun) because MNNVL uses MPI.")
-        print("Usage: mpirun -np N python collect_wideep_alltoall.py")
+        print("Usage: srun --ntasks N --mpi=pmix python collect_trtllm_alltoall.py")
         return
 
+    if rank == 0:
+        print(f"Running with {world_size} GPUs")
+
     try:
-        run_benchmark(rank, world_size, device)
+        run_benchmark(rank, world_size, device, output_file=args.output)
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
