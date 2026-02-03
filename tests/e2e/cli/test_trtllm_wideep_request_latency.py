@@ -51,7 +51,7 @@ def build_base_cmd(batch_size: int, isl: int, osl: int) -> List[str]:
         "--tp_size", "1",
         "--attention_dp_size", "8",
         "--moe_tp_size", "1",
-        "--moe_ep_size", "16",  # Increased to enable proper AlltoAll communication
+        "--moe_ep_size", "8",  # Increased to enable proper AlltoAll communication
         "--moe_quant_mode", "nvfp4",
     ]
 
