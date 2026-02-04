@@ -14,6 +14,7 @@ from typing import Optional
 
 def _load_backend_handlers():
     try:
+        from .backend import sglang as sglang_backend
         from .backend import trtllm as trtllm_backend
         from .backend import vllm as vllm_backend
 
@@ -28,12 +29,18 @@ def _load_backend_handlers():
                 "collect": vllm_backend.collect_config_paths,
                 "validate": vllm_backend.validate_vllm_engine_config_file,
             },
+            "sglang": {
+                "title": "SGLang Config Validation",
+                "collect": sglang_backend.collect_config_paths,
+                "validate": sglang_backend.validate_sglang_engine_config_file,
+            },
         }
     except ImportError:  # Allow running as a script without package context.
         tools_root = Path(__file__).resolve().parent.parent
         sys.path.insert(0, str(tools_root))
         trtllm_backend = import_module("generator_validator.backend.trtllm")
         vllm_backend = import_module("generator_validator.backend.vllm")
+        sglang_backend = import_module("generator_validator.backend.sglang")
         return {
             "trtllm": {
                 "title": "TRT-LLM Config Validation (PyTorch backend)",
@@ -44,6 +51,11 @@ def _load_backend_handlers():
                 "title": "vLLM Config Validation",
                 "collect": vllm_backend.collect_config_paths,
                 "validate": vllm_backend.validate_vllm_engine_config_file,
+            },
+            "sglang": {
+                "title": "SGLang Config Validation",
+                "collect": sglang_backend.collect_config_paths,
+                "validate": sglang_backend.validate_sglang_engine_config_file,
             },
         }
 
@@ -58,11 +70,11 @@ ANSI_RESET = "\033[0m"
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate engine configs for TRT-LLM or vLLM.")
+    parser = argparse.ArgumentParser(description="Validate engine configs for TRT-LLM, vLLM, or SGLang.")
     parser.add_argument(
         "--backend",
         default="trtllm",
-        choices=["trtllm", "vllm"],
+        choices=["trtllm", "vllm", "sglang"],
         help="Which engine backend to validate (default: trtllm).",
     )
     parser.add_argument(
