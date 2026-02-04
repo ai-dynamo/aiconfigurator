@@ -175,3 +175,36 @@ When deploying with TRT-LLM, the generated run scripts (`run_x.sh`) reference en
 
 Refer to the [Dynamo Deployment Guide](dynamo_deployment_guide.md) for detailed deployment instructions. 
 
+### Generator Validator
+The generator validator checks that generated engine configs or CLI args are accepted by the backend runtime version. It parses the generated output using each backend's argument schema and reports unknown or invalid flags early.
+
+**Usage (run inside the matching runtime image):**
+- TRT-LLM runtime image (e.g. `tensorrtllm-runtime`):
+  ```
+  python -m aiconfigurator/tools/generator_validator/validator.py \
+    --backend trtllm \
+    --path /path/to/results
+  ```
+- vLLM runtime image:
+  ```
+  python -m aiconfigurator/tools/generator_validator/validator.py \
+    --backend vllm \
+    --path /path/to/results
+  ```
+- SGLang runtime image:
+  ```
+  python -m aiconfigurator/tools/generator_validator/validator.py \
+    --backend sglang \
+    --path /path/to/results
+  ```
+
+**`--path` meaning (file or directory):**
+- File: point directly to a single engine config YAML (TRT-LLM) or `k8s_deploy.yaml` (vLLM/SGLang).
+- Directory: point to a generator results root with the expected layout:
+  - TRT-LLM: `agg/top1/agg_config.yaml` and `disagg/top1/{decode,prefill}_config.yaml`
+  - vLLM / SGLang: `agg/top1/k8s_deploy.yaml` and `disagg/top1/k8s_deploy.yaml`
+
+**How it works (high level):**
+- TRT-LLM: loads `tensorrt_llm.llmapi.llm_args.TorchLlmArgs` and validates keys against the runtime schema.
+- vLLM: loads `vllm.engine.arg_utils.EngineArgs` and parses CLI args to build an engine config.
+- SGLang: loads `sglang.srt.server_args.ServerArgs` and parses CLI args found in the generated Kubernetes manifest.
