@@ -122,6 +122,7 @@ class SupportMatrix:
                     "prefix": PREFIX,
                     "ttft": TTFT,
                     "tpot": TPOT,
+                    "enable_wideep": True,
                 }
 
                 # For disagg mode, set decode_system_name
