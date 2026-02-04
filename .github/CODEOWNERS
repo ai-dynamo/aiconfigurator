@@ -69,6 +69,7 @@
 /tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @Harrilee @ai-dynamo/Devops
 
 # tools
+/tools/generator_validator @Ethan-ES @jasonqinzhou @Arsene12358
 /tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358
 /tools/sanity_check @tianhaox @YijiaZhao @jasonqinzhou @Arsene12358
 /tools/simple_sdk_demo @tianhaox @jasonqinzhou @Arsene12358
