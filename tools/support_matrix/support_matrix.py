@@ -28,8 +28,8 @@ TOTAL_GPUS = 128
 ISL = 4000
 OSL = 500
 PREFIX = 500
-TTFT = 2000.0
-TPOT = 50.0
+TTFT = 1e4
+TPOT = 1e2
 
 
 class SupportMatrix:
