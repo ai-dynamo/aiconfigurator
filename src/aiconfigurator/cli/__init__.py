@@ -7,7 +7,7 @@ CLI module for aiconfigurator.
 Provides both command-line interface and programmatic Python API.
 
 Python API usage:
-    from aiconfigurator.cli import cli_default, cli_exp, cli_generate
+    from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_support
 
     # cli_default: Run agg vs disagg comparison
     result = cli_default(
@@ -28,6 +28,12 @@ Python API usage:
         system="h200_sxm",
         backend="trtllm",
         output_dir="./output",
+    )
+
+    # cli_support: Check model/hardware support
+    agg_ok, disagg_ok = cli_support(
+        model_path="Qwen/Qwen3-32B",
+        system="h200_sxm",
     )
 """
 
