@@ -29,4 +29,5 @@ spec:
                 --osl {{ bench_osl }} --osl-stddev {{ bench_osl_stddev }} \
                 --num-requests {{ bench_num_requests | join(' ') }} \
                 --concurrency {{ bench_concurrency | join(' ') }} \
-                --ui {{ bench_ui }}
+                --ui {{ bench_ui }} \
+                --streaming
