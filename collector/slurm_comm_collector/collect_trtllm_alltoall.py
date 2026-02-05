@@ -185,7 +185,7 @@ def init_distributed():
         os.environ["LOCAL_RANK"] = str(local_rank)
         os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "localhost")
         os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "29500")
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(backend="nccl", device_id=device)
 
     return rank, world_size, device
 
@@ -617,8 +617,7 @@ def benchmark_nvlink_two_sided_alltoall(
     # ============================================================================
     def dispatch_func():
         return MnnvlMoe.mnnvl_moe_alltoallv(
-            [hidden_states.clone(), hidden_states_sf.clone() if hidden_states_sf is not None else None,
-             token_selected_slots.clone(), token_final_scales.clone()],
+            [hidden_states, hidden_states_sf, token_selected_slots, token_final_scales],
             alltoall_info,
             alltoall_workspace,
             ep_rank,
