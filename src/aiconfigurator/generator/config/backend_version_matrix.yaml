@@ -1,4 +1,6 @@
-# Backend version matrix by Dynamo release.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 matrix:
   v0.8.1.post1:
     vllm: "0.12.0"
