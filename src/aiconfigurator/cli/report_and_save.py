@@ -14,7 +14,9 @@ from prettytable import PrettyTable
 
 from aiconfigurator.generator.api import (
     generate_backend_artifacts,
+    get_default_backend_version_entry,
     load_generator_overrides_from_args,
+    resolve_backend_version_for_dynamo,
 )
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 from aiconfigurator.sdk import pareto_analysis
@@ -453,9 +455,10 @@ def save_results(
 
             # 3. Save the config for this experiment
             exp_task_config = task_configs[exp_name]
-            effective_generated_version = generated_backend_version or exp_task_config.backend_version
-
+            default_dynamo_version, default_backend_versions = get_default_backend_version_entry()
+            dynamo_version = (generator_overrides or {}).get("generator_dynamo_version") or default_dynamo_version
             if generated_backend_version:
+                effective_generated_version = generated_backend_version
                 logger.warning(
                     "\n" + "=" * 80 + "\n"
                     "  ⚠️  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
@@ -467,7 +470,39 @@ def save_results(
                     exp_name,
                     generated_backend_version,
                 )
+            elif dynamo_version:
+                if dynamo_version == default_dynamo_version:
+                    backend_key = exp_task_config.backend_name
+                    effective_generated_version = default_backend_versions.get(backend_key)
+                else:
+                    effective_generated_version = None
+                if not effective_generated_version:
+                    try:
+                        effective_generated_version = resolve_backend_version_for_dynamo(
+                            dynamo_version,
+                            exp_task_config.backend_name,
+                        )
+                    except ValueError as exc:
+                        logger.exception(
+                            "Failed to resolve backend version for generator_dynamo_version=%s.",
+                            dynamo_version,
+                        )
+                        raise SystemExit(2) from exc
+                logger.warning(
+                    "\n" + "=" * 80 + "\n"
+                    "  ⚠️  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
+                    "  Experiment: %s\n"
+                    "  Using generator_dynamo_version: %s\n"
+                    "  Resolved backend version: %s\n"
+                    "\n"
+                    "  Config formats differ across backend releases. Ensure the Dynamo version\n"
+                    "  matches your deployment target!\n" + "=" * 80,
+                    exp_name,
+                    dynamo_version,
+                    effective_generated_version,
+                )
             else:
+                effective_generated_version = exp_task_config.backend_version
                 logger.warning(
                     "\n" + "=" * 80 + "\n"
                     "  ⚠️  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
