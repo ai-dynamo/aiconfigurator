@@ -261,7 +261,7 @@ results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 │   ...
 └── pareto_frontier.png
 ```
-By default, we output top3 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. `agg_config.yaml` and `node_0_run.sh` are the files you need to deploy with Dynamo. If you want to deploy using k8s, you can leverage `k8s_deploy.yaml`. Refer to [deployment guide](dynamo_deployment_guide.md) for info about deployment.
+By default, we output top 5 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. `agg_config.yaml` and `node_0_run.sh` are the files you need to deploy with Dynamo. If you want to deploy using k8s, you can leverage `k8s_deploy.yaml`. Refer to [deployment guide](dynamo_deployment_guide.md) for info about deployment.
 
 `--save_dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated_config_version 1.0.0rc6` can give you the right result.
 
