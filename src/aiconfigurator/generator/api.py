@@ -25,12 +25,74 @@ from .utils import DEFAULT_BACKEND, normalize_backend
 GENERATOR_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
 DEFAULT_DEPLOYMENT_SCHEMA_PATH = os.path.join(GENERATOR_CONFIG_DIR, "deployment_config.yaml")
 DEFAULT_BACKEND_MAPPING_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_config_mapping.yaml")
+DEFAULT_BACKEND_VERSION_MATRIX_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_version_matrix.yaml")
 _VALID_GENERATOR_HELP_SECTIONS = {"all", "deploy", "backend"}
 
 
 def _load_yaml_payload(path: str) -> Any:
     with open(path, encoding="utf-8") as fh:
         return yaml.safe_load(fh) or {}
+
+
+def _load_backend_version_matrix(
+    matrix_path: str = DEFAULT_BACKEND_VERSION_MATRIX_PATH,
+) -> dict[str, dict[str, Any]]:
+    payload = _load_yaml_payload(matrix_path)
+    if not isinstance(payload, dict):
+        raise TypeError(f"Backend version matrix must be a YAML mapping: {matrix_path}")
+    matrix = payload.get("matrix", payload)
+    if not isinstance(matrix, dict):
+        raise TypeError(f"Backend version matrix missing 'matrix' mapping: {matrix_path}")
+    return matrix
+
+
+def resolve_backend_version_for_dynamo(
+    dynamo_version: str,
+    backend: Optional[str],
+    matrix_path: str = DEFAULT_BACKEND_VERSION_MATRIX_PATH,
+) -> str:
+    """
+    Resolve backend template version from a Dynamo version via the matrix file.
+
+    Args:
+        dynamo_version: Dynamo release string (e.g., "v0.8.1").
+        backend: Backend name (e.g., "trtllm", "vllm", "sglang").
+        matrix_path: Optional backend version matrix YAML file.
+    """
+    version_key = str(dynamo_version).strip()
+    if not version_key:
+        raise ValueError("dynamo_version must be a non-empty string.")
+    matrix = _load_backend_version_matrix(matrix_path)
+    entry = matrix.get(version_key)
+    if not isinstance(entry, dict):
+        supported = ", ".join(sorted(matrix.keys()))
+        raise TypeError(f"Unsupported dynamo_version '{version_key}'. Supported versions: {supported or 'none'}.")
+    backend_key = normalize_backend(backend, DEFAULT_BACKEND)
+    backend_version = entry.get(backend_key)
+    if backend_version is None:
+        supported_backends = ", ".join(sorted(entry.keys()))
+        raise ValueError(
+            f"No backend version mapping for backend '{backend_key}' in dynamo '{version_key}'. "
+            f"Supported backends: {supported_backends or 'none'}."
+        )
+    return str(backend_version)
+
+
+def get_default_backend_version_entry(
+    matrix_path: str = DEFAULT_BACKEND_VERSION_MATRIX_PATH,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Return the default Dynamo version and its backend-version mapping.
+
+    The default entry is the first item in backend_version_matrix.yaml.
+    """
+    matrix = _load_backend_version_matrix(matrix_path)
+    if not matrix:
+        raise ValueError(f"Backend version matrix is empty: {matrix_path}")
+    dynamo_version, entry = next(iter(matrix.items()))
+    if not isinstance(entry, dict):
+        raise TypeError(f"Invalid backend version entry for {dynamo_version}: {entry!r}")
+    return str(dynamo_version), entry
 
 
 def _format_default_value(value: Any) -> str:
@@ -364,6 +426,13 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Backend template version for generated artifacts (e.g. 1.1.0rc5).",
     )
+    grp.add_argument(
+        "--generator-dynamo-version",
+        dest="generator_dynamo_version",
+        type=str,
+        default=None,
+        help="Dynamo version used for backend template selection.",
+    )
 
 
 def load_generator_overrides(
@@ -396,10 +465,14 @@ def load_generator_overrides_from_args(args: argparse.Namespace) -> dict[str, An
     """
     Convenience wrapper that pulls generator override fields from an argparse namespace.
     """
-    return load_generator_overrides(
+    overrides = load_generator_overrides(
         getattr(args, "generator_config", None),
         getattr(args, "generator_set", None),
     )
+    dynamo_version = getattr(args, "generator_dynamo_version", None)
+    if dynamo_version:
+        overrides = _deep_merge_dicts(overrides, {"generator_dynamo_version": dynamo_version})
+    return overrides
 
 
 def parse_backend_arg(argv: list[str]) -> Optional[str]:
@@ -671,6 +744,7 @@ __all__ = [
     "generate_config_from_yaml",
     "generate_naive_config",
     "generator_cli_helper",
+    "get_default_backend_version_entry",
     "load_generator_overrides",
     "load_generator_overrides_from_args",
     "parse_backend_arg",
@@ -678,5 +752,6 @@ __all__ = [
     "parse_mapping_arg",
     "prepare_generator_params",
     "print_generator_help",
+    "resolve_backend_version_for_dynamo",
     "resolve_mapping_yaml",
 ]

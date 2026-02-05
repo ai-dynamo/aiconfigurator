@@ -283,6 +283,11 @@ By default, we output top 5 configs we have found. You can get the configs and s
 
 `--save_dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated_config_version 1.0.0rc6` can give you the right result.
 
+**Generator Dynamo version**
+- Use `--generator-dynamo-version v0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
+- If `--generator-dynamo-version` is not provided, the default is the first entry in `generator/config/backend_version_matrix.yaml`.
+- If `--generated_config_version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the first entry in `backend_version_matrix.yaml`.
+
 Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/DynConfig/WorkerConfig/Workers.<role> sections, or add inline overrides via `--generator-set KEY=VALUE`. Examples:
 
 - `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`

@@ -14,7 +14,9 @@ from prettytable import PrettyTable
 
 from aiconfigurator.generator.api import (
     generate_backend_artifacts,
+    get_default_backend_version_entry,
     load_generator_overrides_from_args,
+    resolve_backend_version_for_dynamo,
 )
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 from aiconfigurator.sdk import pareto_analysis
@@ -541,25 +543,24 @@ def save_results(
                 pareto_df.to_csv(os.path.join(exp_dir, "pareto.csv"), index=False)
 
             # 3. Save the config for this experiment
-            # For multi-backend mode, we'll get task_config per row later
-            # For single-backend mode, get it once here
-            is_multi_backend = best_config_df is not None and "backend" in best_config_df.columns
-            if not is_multi_backend:
-                exp_task_config = task_configs[exp_name]
-                effective_generated_version = generated_backend_version or exp_task_config.backend_version
+            exp_task_config = task_configs[exp_name]
+            dynamo_version = (generator_overrides or {}).get("generator_dynamo_version")
+            
+            # there could be multiple backends in the same experiment if backend == "any" as the result is merged
+            if backend == "any":
+                actual_backend_versions = {
+                    task_config.backend_name: task_config.backend_version
+                    for task_config in task_configs.values()
+                }
+                backend_version_str = ", ".join(
+                    f"({backend_name}){backend_version}" for backend_name, backend_version in actual_backend_versions.items()
+                )
             else:
-                # For multi-backend, we'll use the first backend's version for warnings
-                # but actual generation will use per-row backend
-                first_backend = best_config_df["backend"].iloc[0]
-                task_config_key = f"{exp_name}_{first_backend}"
-                # Verify the key exists (for multi-backend mode)
-                if task_config_key not in task_configs:
-                    task_config_key = exp_name
-                    is_multi_backend = False  # Treat as single backend
-                exp_task_config = task_configs[task_config_key]
-                effective_generated_version = generated_backend_version or exp_task_config.backend_version
+                backend_version_str = exp_task_config.backend_version
 
+            # case #1: --generated_config_version is provided            
             if generated_backend_version:
+                effective_generated_version = generated_backend_version
                 logger.warning(
                     "\n" + "=" * 80 + "\n"
                     "  ⚠️  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
@@ -571,7 +572,39 @@ def save_results(
                     exp_name,
                     generated_backend_version,
                 )
+            # case #2: --generator_dynamo_version is provided, generating config matching the dynamo version,
+            # but the data used for prediction may not match dynamo version due to imperfect coverage.
+            elif dynamo_version:
+                if backend != "any":
+                    try:
+                        effective_generated_version = resolve_backend_version_for_dynamo(
+                            dynamo_version,
+                            exp_task_config.backend_name,
+                        )
+                    except ValueError as exc:
+                        logger.exception(
+                            "Failed to resolve backend version for generator_dynamo_version=%s.",
+                            dynamo_version,
+                        )
+                        raise SystemExit(2) from exc
+                else:
+                    effective_generated_versions = get_
+                logger.warning(
+                    "\n" + "=" * 80 + "\n"
+                    "  ⚠️  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
+                    "  Experiment: %s\n"
+                    "  Using generator_dynamo_version: %s\n"
+                    "  Resolved backend version: %s\n"
+                    "\n"
+                    "  Config formats differ across backend releases. Ensure the Dynamo version\n"
+                    "  matches your deployment target!\n" + "=" * 80,
+                    exp_name,
+                    dynamo_version,
+                    effective_generated_version,
+                )
+            # case #3: no override is provided, use the backend version used by the experiment
             else:
+                effective_generated_version = exp_task_config.backend_version
                 logger.warning(
                     "\n" + "=" * 80 + "\n"
                     "  ⚠️  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
@@ -582,7 +615,7 @@ def save_results(
                     "  Config formats differ across backend releases. If you are targeting\n"
                     "  a different version, please pass --generated_config_version explicitly!\n" + "=" * 80,
                     exp_name,
-                    exp_task_config.backend_version,
+                    backend_version_str,
                 )
 
             with open(os.path.join(exp_dir, "config.yaml"), "w") as f:  # for future aic repro
@@ -592,16 +625,11 @@ def save_results(
             if best_config_df is not None:
                 for i, (idx, result_df) in enumerate(best_config_df.iterrows()):
                     # For multi-backend mode, get the task_config for this row's backend
-                    if is_multi_backend and "backend" in result_df:
+                    if backend == "any" and "backend" in result_df:
                         row_backend = result_df["backend"]
                         row_task_config_key = f"{exp_name}_{row_backend}"
-                        # Verify the key exists (for multi-backend mode)
-                        if row_task_config_key in task_configs:
-                            row_task_config = task_configs[row_task_config_key]
-                            row_backend_version = generated_backend_version or row_task_config.backend_version
-                        else:
-                            row_task_config = exp_task_config
-                            row_backend_version = effective_generated_version
+                        row_task_config = task_configs[row_task_config_key]
+                        row_backend_version = generated_backend_version or row_task_config.backend_version
                     else:
                         row_task_config = exp_task_config
                         row_backend_version = effective_generated_version

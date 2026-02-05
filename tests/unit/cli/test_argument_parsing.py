@@ -110,6 +110,7 @@ class TestCLIArgumentParsing:
         assert args.debug is False
         assert args.decode_system is None
         assert args.generated_config_version is None
+        assert args.generator_dynamo_version is None
         assert args.isl == 4000
         assert args.osl == 1000
         assert args.save_dir is None
