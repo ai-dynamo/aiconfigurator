@@ -1,0 +1,10 @@
+aiperf profile \
+  -m {{ (bench_model.split('/')[-1] if bench_model else '') }} \
+  --endpoint-type {{ bench_endpoint_type }} \
+  -u http://{{ ServiceConfig.head_node_ip }}:{{ ServiceConfig.port }} \
+  --tokenizer {{ bench_tokenizer }} \
+  --isl {{ bench_isl }} --isl-stddev {{ bench_isl_stddev }} \
+  --osl {{ bench_osl }} --osl-stddev {{ bench_osl_stddev }} \
+  --num-requests {{ bench_num_requests | join(' ') }} \
+  --concurrency {{ bench_concurrency | join(' ') }} \
+  --ui {{ bench_ui }}

@@ -203,6 +203,7 @@ def task_config_to_generator_config(
         "tpot": _safe_float(_series_val(result_df, "tpot", runtime_cfg.tpot), runtime_cfg.tpot),
     }
     sla_cfg = _deep_merge(sla_cfg, overrides.get("SlaConfig"))
+    bench_cfg = overrides.get("BenchConfig")
 
     params = collect_generator_params(
         service=service_cfg,
@@ -215,6 +216,7 @@ def task_config_to_generator_config(
         agg_workers=agg_workers if agg_params else 0,
         num_gpus_per_node=num_gpus_per_node,
         sla=sla_cfg,
+        bench=bench_cfg,
         dyn_config=dyn_cfg,
         backend=backend_name,
     )

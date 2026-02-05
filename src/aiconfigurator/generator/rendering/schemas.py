@@ -64,9 +64,17 @@ def _select_backend_default(entry: dict[str, Any], backend: str) -> Any:
     return entry.get("default")
 
 
-def apply_defaults(group: str, cfg: dict[str, Any], backend: Optional[str] = None) -> dict[str, Any]:
+def apply_defaults(
+    group: str,
+    cfg: dict[str, Any],
+    backend: Optional[str] = None,
+    full_config: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     inputs = _load_schema_inputs(str(_SCHEMA_FILE))
-    eval_ctx = {group: dict(cfg)}
+    eval_ctx: dict[str, Any] = {}
+    if isinstance(full_config, dict):
+        eval_ctx.update(full_config)
+    eval_ctx[group] = dict(cfg)
     out = dict(cfg)
     backend_key = _normalize_backend(backend)
     for entry in inputs:
