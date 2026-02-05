@@ -690,19 +690,12 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             else None,
         },
         # WideEP MOE Compute collection (computation only, excludes AlltoAll)
+        # Includes 3 EPLB modes: OFF, ON (baseline), ON (288 slots)
         {
             "name": "trtllm",
-            "type": "moe_wideep",
+            "type": "trtllm_moe_wideep",
             "module": "collector.trtllm.collect_wideep_moe_compute",
-            "get_func": "get_wideep_moe_compute_test_cases",
-            "run_func": "run_wideep_moe_compute",
-        },
-        # WideEP MOE Compute with EPLB collection
-        {
-            "name": "trtllm",
-            "type": "moe_wideep_eplb",
-            "module": "collector.trtllm.collect_wideep_moe_compute",
-            "get_func": "get_wideep_moe_compute_eplb_test_cases",
+            "get_func": "get_wideep_moe_compute_all_test_cases",
             "run_func": "run_wideep_moe_compute",
         },
     ]
@@ -777,8 +770,7 @@ def main():
             "mla_bmm_gen_post",
             "moe",
             "moe_eplb",  # MoE with EPLB (Expert Parallel Load Balancer)
-            "moe_wideep",  # WideEP MoE compute (excludes AlltoAll)
-            "moe_wideep_eplb",  # WideEP MoE compute with EPLB
+            "moe_wideep",  # WideEP MoE compute (includes all 3 EPLB modes)
             "wideep_moe",  # TensorRT-LLM WideEP MoE computation (single GPU) - from aic
             "wideep_mla_context",
             "wideep_mla_generation",

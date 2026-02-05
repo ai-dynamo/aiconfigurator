@@ -358,10 +358,10 @@ class WideEPMoEComputeSimulator(nn.Module):
             )
             
             return FusedMoEQuantScalesNVFP4(
-                fc1_act_global=torch.ones(1, dtype=torch.float32, device=device),
+                fc1_act_global=torch.tensor(1.0, dtype=torch.float32, device=device),
                 fc1_weight_block=torch.ones(w3_w1_weight_scale_shape, dtype=torch.int32, device=device),
                 fc1_global=torch.ones(self.expert_size_per_partition, dtype=torch.float32, device=device),
-                fc2_act_global=torch.ones(1, dtype=torch.float32, device=device),
+                fc2_act_global=torch.tensor(1.0, dtype=torch.float32, device=device),
                 fc2_weight_block=torch.ones(w2_weight_scale_shape, dtype=torch.int32, device=device),
                 fc2_global=torch.ones(self.expert_size_per_partition, dtype=torch.float32, device=device),
             )
@@ -521,140 +521,77 @@ class WideEPMoEComputeSimulator(nn.Module):
 # =============================================================================
 # Test Cases Generation
 # =============================================================================
-def get_wideep_moe_compute_test_cases():
-    """Generate test cases for WideEP MoE compute (consistent with collect_moe.py)."""
+def get_wideep_moe_compute_all_test_cases():
+    """
+    Generate all test cases for WideEP MoE compute with three EPLB modes.
+    
+    Three EPLB configurations:
+    1. EPLB OFF: use_eplb=False, num_slots=num_experts
+    2. EPLB ON (baseline): use_eplb=True, num_slots=num_experts  
+    3. EPLB ON (redundant): use_eplb=True, num_slots=288
+    
+    Notes:
+    - Only uses cutlass kernel (no deepgemm)
+    - Only uses min_latency_mode=False
+    - Only for DeepSeek-V3 model with power_law distribution
+    """
     moe_list = []
-    if get_sm_version() > 86:
-        if get_sm_version() < 100:
-            moe_list += ["fp8_block"]
-    
+    if get_sm_version() > 86 and get_sm_version() < 100:
+        moe_list += ["fp8_block"]
     if get_sm_version() >= 100:
-        moe_list += ["nvfp4", "fp8_block"]
-    
-    # Kernel options: cutlass, deepgemm (SM100 + fp8_block only)
-    kernel_options = {
-        "float16": ["cutlass"],
-        "fp8": ["cutlass"],
-        "fp8_block": ["cutlass", "deepgemm"] if get_sm_version() >= 100 else ["cutlass"],
-        "nvfp4": ["cutlass"],
-    }
+        moe_list += ["nvfp4"]  # SM100+ uses nvfp4
     
     test_cases = []
     
     for common_moe_testcase in get_common_moe_test_cases():
-        # Focus on DeepSeek models for WideEP
-        if "DEEPSEEK" not in common_moe_testcase.model_name.upper():
-            continue
-        
-        for moe_type in moe_list:
-            for kernel in kernel_options.get(moe_type, ["cutlass"]):
-                # DeepGemm only works with fp8_block on SM100
-                if kernel == "deepgemm" and moe_type != "fp8_block":
-                    continue
-                
-                min_latency_mode_options = [False]
-                if moe_type == "nvfp4" and get_sm_version() >= 100 and common_moe_testcase.num_experts <= 256:
-                    min_latency_mode_options.append(True)
-                
-                for min_latency_mode in min_latency_mode_options:
-                    # DeepGemm doesn't support min_latency_mode
-                    if kernel == "deepgemm" and min_latency_mode:
-                        continue
-                    
-                    # Standard test case (no EPLB)
-                    test_cases.append([
-                        moe_type,
-                        kernel,
-                        common_moe_testcase.num_tokens_list,
-                        common_moe_testcase.hidden_size,
-                        common_moe_testcase.inter_size,
-                        common_moe_testcase.topk,
-                        common_moe_testcase.num_experts,
-                        common_moe_testcase.tp,
-                        common_moe_testcase.ep,
-                        min_latency_mode,
-                        common_moe_testcase.model_name,
-                        "wideep_moe_compute_perf.txt",
-                        common_moe_testcase.token_expert_distribution,
-                        common_moe_testcase.power_law_alpha,
-                        False,  # use_eplb
-                        common_moe_testcase.num_experts,  # num_slots (no redundancy)
-                        aic_accurate_wideep_sim,  # accurate_wideep_simulation (from env)
-                    ])
-    
-    return test_cases
-
-
-def get_wideep_moe_compute_eplb_test_cases():
-    """Generate test cases for WideEP MoE compute with EPLB."""
-    moe_list = []
-    if get_sm_version() > 86:
-        if get_sm_version() < 100:
-            moe_list += ["fp8_block"]
-    
-    if get_sm_version() >= 100:
-        moe_list += ["nvfp4", "fp8_block"]
-    
-    kernel_options = {
-        "fp8_block": ["cutlass", "deepgemm"] if get_sm_version() >= 100 else ["cutlass"],
-        "nvfp4": ["cutlass"],
-    }
-    
-    test_cases = []
-    
-    for common_moe_testcase in get_common_moe_test_cases():
-        # EPLB only makes sense for power_law distributions
-        if common_moe_testcase.token_expert_distribution != "power_law":
-            continue
-        
-        # EPLB test cases only for DeepSeek-V3 model
+        # Focus on DeepSeek-V3 model for WideEP EPLB testing
         model_name = common_moe_testcase.model_name
         if "deepseek" not in model_name.lower() or "v3" not in model_name.lower():
             continue
         
+        # Only test power_law distribution (EPLB is designed for imbalanced workloads)
+        if common_moe_testcase.token_expert_distribution != "power_law":
+            continue
+        
+        num_experts = common_moe_testcase.num_experts
+        ep_size = common_moe_testcase.ep
+        
+        # Three EPLB configurations: (use_eplb, num_slots)
+        eplb_configs = [
+            (False, num_experts),   # EPLB OFF
+            (True, num_experts),    # EPLB ON, baseline slots
+            (True, 288),            # EPLB ON, 288 slots
+        ]
+        
         for moe_type in moe_list:
-            for kernel in kernel_options.get(moe_type, ["cutlass"]):
-                if kernel == "deepgemm" and moe_type != "fp8_block":
+            for use_eplb, num_slots in eplb_configs:
+                # Skip if num_slots is not divisible by ep_size
+                if num_slots % ep_size != 0:
                     continue
                 
-                min_latency_mode_options = [False]
-                if moe_type == "nvfp4" and get_sm_version() >= 100 and common_moe_testcase.num_experts <= 256:
-                    min_latency_mode_options.append(True)
-                
-                for min_latency_mode in min_latency_mode_options:
-                    if kernel == "deepgemm" and min_latency_mode:
-                        continue
-                    
-                    num_experts = common_moe_testcase.num_experts
-                    ep_size = common_moe_testcase.ep
-                    num_slots_options = [num_experts, 288]  # baseline + redundancy
-                    
-                    for num_slots in num_slots_options:
-                        # Skip if num_slots is not divisible by ep_size
-                        if num_slots % ep_size != 0:
-                            continue
-                        
-                        test_cases.append([
-                            moe_type,
-                            kernel,
-                            common_moe_testcase.num_tokens_list,
-                            common_moe_testcase.hidden_size,
-                            common_moe_testcase.inter_size,
-                            common_moe_testcase.topk,
-                            num_experts,
-                            common_moe_testcase.tp,
-                            ep_size,
-                            min_latency_mode,
-                            common_moe_testcase.model_name,
-                            "wideep_moe_compute_eplb_perf.txt",
-                            common_moe_testcase.token_expert_distribution,
-                            common_moe_testcase.power_law_alpha,
-                            True,   # use_eplb
-                            num_slots,
-                            aic_accurate_wideep_sim,  # accurate_wideep_simulation (from env)
-                        ])
+                test_cases.append([
+                    moe_type,
+                    "cutlass",  # Only use cutlass kernel (no deepgemm)
+                    common_moe_testcase.num_tokens_list,
+                    common_moe_testcase.hidden_size,
+                    common_moe_testcase.inter_size,
+                    common_moe_testcase.topk,
+                    num_experts,
+                    common_moe_testcase.tp,
+                    ep_size,
+                    False,  # min_latency_mode = False (no min_latency_mode)
+                    common_moe_testcase.model_name,
+                    None,  # perf_filename - determined dynamically based on use_eplb
+                    common_moe_testcase.token_expert_distribution,
+                    common_moe_testcase.power_law_alpha,
+                    use_eplb,
+                    num_slots,
+                    aic_accurate_wideep_sim,  # accurate_wideep_simulation (from env)
+                ])
     
     return test_cases
+
+
 
 
 # =============================================================================
@@ -696,7 +633,7 @@ def run_wideep_moe_compute(
     # Default num_slots to num_experts (no redundancy)
     if num_slots is None:
         num_slots = num_experts
-        
+    
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -945,6 +882,9 @@ def run_wideep_moe_compute(
             actual_dp_tokens = num_tokens # use all tokens
             actual_rank0_tokens = num_tokens
         
+        # =====================================================================
+        # Helper closure to encapsulate forward pass logic (same as collect_moe.py)
+        # =====================================================================
         def run_forward_pass():
             """Execute one forward pass through WideEP MOE simulator."""
             if accurate_wideep_simulation:
@@ -965,7 +905,10 @@ def run_wideep_moe_compute(
                 else:
                     moe.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
         
-        # Benchmark with power measurement
+        # =====================================================================
+        # Benchmark with automatic power measurement and graph fallback
+        # (same pattern as collect_moe.py)
+        # =====================================================================
         num_warmups = 1 if distributed == "power_law" else 3
         num_runs = 1 if distributed == "power_law" else 6
         
@@ -977,10 +920,13 @@ def run_wideep_moe_compute(
             repeat_n=1,
             allow_graph_fail=True,
         ) as results:
+            # Calculate per-iteration latency (accounting for internal iterations)
             latency = results["latency_ms"] / num_iter
             power_stats = results["power_stats"]
             
-            if not results["used_cuda_graph"] and aic_debug == 1:
+            # Always print CUDA graph status for debugging
+            print(f"[DEBUG] used_cuda_graph={results['used_cuda_graph']}, latency_ms={results['latency_ms']:.4f}")
+            if not results["used_cuda_graph"]:
                 print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
         
         # Determine source name
@@ -1014,7 +960,6 @@ def run_wideep_moe_compute(
                     "topk": topk,
                     "num_experts": num_experts,
                     "num_slots": num_slots,
-                    "num_local_slots": moe.expert_size_per_partition,
                     "moe_tp_size": moe_tp_size,
                     "moe_ep_size": moe_ep_size,
                     "distribution": dist_str,
@@ -1025,14 +970,14 @@ def run_wideep_moe_compute(
             framework="TRTLLM",
             version=tensorrt_llm.__version__,
             device_name=torch.cuda.get_device_name(device),
-            op_name="wideep_moe_compute" if not use_eplb else "wideep_moe_compute_eplb",
+            op_name="wideep_moe" if not use_eplb else "wideep_moe_eplb",
             kernel_source=source,
-            perf_filename=perf_filename,
+            perf_filename="wideep_moe_perf.txt",
             power_stats=power_stats,
         )
         
-        print(f"WideEP MOE Compute | total={num_tokens}, dp={actual_dp_tokens}, rank0={actual_rank0_tokens}, "
-              f"kernel={moe_kernel}, latency={latency:.3f}ms, dist={dist_str}, mode={sim_mode_str}")
+        # print(f"WideEP MOE Compute | total={num_tokens}, dp={actual_dp_tokens}, rank0={actual_rank0_tokens}, "
+        #       f"kernel={moe_kernel}, latency={latency:.3f}ms, dist={dist_str}, mode={sim_mode_str}")
         
         # Cleanup iteration
         if accurate_wideep_simulation:
@@ -1065,9 +1010,8 @@ def run_wideep_moe_compute(
 # Main Entry Point
 # =============================================================================
 if __name__ == "__main__":
-    test_cases = get_wideep_moe_compute_test_cases()
-    eplb_test_cases = get_wideep_moe_compute_eplb_test_cases()
-    all_test_cases = test_cases + eplb_test_cases
+
+    all_test_cases = get_wideep_moe_compute_all_test_cases()
     
     print(f"Running {len(all_test_cases)} WideEP MOE compute test configurations...")
     print(f"  - Standard: {len(test_cases)}")
