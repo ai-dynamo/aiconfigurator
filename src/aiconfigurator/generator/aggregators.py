@@ -37,14 +37,20 @@ def collect_generator_params(
     sla: Optional[dict[str, Any]] = None,
     dyn_config: Optional[dict[str, Any]] = None,
     backend: Optional[str] = None,
+    generator_dynamo_version: Optional[str] = None,
 ) -> dict[str, Any]:
     prefill_params = prefill_params or {}
     decode_params = decode_params or {}
     agg_params = agg_params or {}
     backend_key = normalize_backend(backend, DEFAULT_BACKEND)
     service = apply_defaults("ServiceConfig", service, backend=backend_key)
-    k8s = apply_defaults("K8sConfig", k8s, backend=backend_key)
     dyn_cfg = apply_defaults("DynConfig", dyn_config or {}, backend=backend_key)
+    k8s = apply_defaults(
+        "K8sConfig",
+        k8s,
+        backend=backend_key,
+        extra_context={"generator_dynamo_version": generator_dynamo_version},
+    )
 
     mode_value = dyn_cfg.get("mode") or "disagg"
     enable_router = coerce_bool(dyn_cfg.get("enable_router"))
@@ -203,6 +209,8 @@ def generate_config_from_input_dict(
                 dest = None
             if dest:
                 _set_by_path(target, dest, val)
+            elif group == "generator_dynamo_version":
+                target["generator_dynamo_version"] = val
     target.setdefault("ServiceConfig", {})
     target.setdefault("K8sConfig", {})
     target.setdefault("WorkerConfig", {})
@@ -236,6 +244,7 @@ def generate_config_from_input_dict(
         sla=target.get("SlaConfig", {}),
         dyn_config=target.get("DynConfig", {}),
         backend=backend_key,
+        generator_dynamo_version=target.get("generator_dynamo_version"),
     )
     if target.get("ModelConfig"):
         params["ModelConfig"] = target.get("ModelConfig", {})

@@ -141,15 +141,21 @@ def task_config_to_generator_config(
     model_cfg = _deep_merge(model_cfg, overrides.get("ModelConfig"))
     model_cfg = apply_defaults("ModelConfig", model_cfg, backend=backend_name)
 
-    k8s_cfg = {}
-    k8s_cfg = _deep_merge(k8s_cfg, overrides.get("K8sConfig"))
-    k8s_cfg = apply_defaults("K8sConfig", k8s_cfg, backend=backend_name)
-
     dyn_cfg = {
         "mode": task_config.serving_mode,
     }
     dyn_cfg = _deep_merge(dyn_cfg, overrides.get("DynConfig"))
     dyn_cfg = apply_defaults("DynConfig", dyn_cfg, backend=backend_name)
+
+    generator_dynamo_version = overrides.get("generator_dynamo_version")
+    k8s_cfg = {}
+    k8s_cfg = _deep_merge(k8s_cfg, overrides.get("K8sConfig"))
+    k8s_cfg = apply_defaults(
+        "K8sConfig",
+        k8s_cfg,
+        backend=backend_name,
+        extra_context={"generator_dynamo_version": generator_dynamo_version},
+    )
 
     worker_overrides = overrides.get("Workers", {})
     worker_count_overrides = overrides.get("WorkerCounts") or overrides.get("WorkerConfig") or {}
@@ -217,6 +223,7 @@ def task_config_to_generator_config(
         sla=sla_cfg,
         dyn_config=dyn_cfg,
         backend=backend_name,
+        generator_dynamo_version=generator_dynamo_version,
     )
 
     params = _deep_merge(params, overrides.get("Params"))
