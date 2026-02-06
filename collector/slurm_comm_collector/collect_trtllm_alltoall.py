@@ -7,8 +7,7 @@ TensorRT-LLM WideEP NVLinkTwoSided All-to-All Communication Benchmark
 This script collects All-to-All communication performance data for WideEP MoE
 using NVLinkTwoSided communication strategy.
 
-Supports both balanced and power-law token distributions to simulate real-world
-workloads where some experts receive more tokens than others.
+Supports only balanced token distribution workloads.
 
 Usage (Slurm):
     srun --ntasks 8 --ntasks-per-node 4 --mpi=pmix python collect_trtllm_alltoall.py
@@ -18,7 +17,7 @@ import os
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -26,14 +25,13 @@ import torch.distributed as dist
 # Add parent directory to path for helper imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helper import log_perf, sample_power_law
+from helper import log_perf
 
 
 class TokenDistribution(Enum):
     """Token distribution strategies for expert selection."""
 
     BALANCED = "balanced"  # Uniform distribution across experts
-    POWER_LAW = "power_law"  # Skewed distribution (some experts get more tokens)
 
 
 class MoEDtype(Enum):
@@ -44,14 +42,9 @@ class MoEDtype(Enum):
     NVFP4 = "nvfp4"  # NVFP4 with scale factors
 
 
-# Token distribution configurations: (distribution_type, power_law_alpha)
-# - balanced: uniform distribution across all experts
-# - power_law with α=1.01: slight imbalance
-# - power_law with α=1.2: moderate imbalance (realistic workload)
+# Token distribution configurations
 DEFAULT_DISTRIBUTIONS = [
-    (TokenDistribution.BALANCED, None),
-    # (TokenDistribution.POWER_LAW, 1.01),
-    # (TokenDistribution.POWER_LAW, 1.2),
+    TokenDistribution.BALANCED,
 ]
 
 # Supported MoE data types
@@ -73,23 +66,19 @@ class AlltoallTestCase:
     ep_size: int
     moe_dtype: MoEDtype = MoEDtype.FLOAT16
     distribution: TokenDistribution = TokenDistribution.BALANCED
-    power_law_alpha: Optional[float] = None  # Only used when distribution is POWER_LAW
     description: str = ""
 
     def __post_init__(self):
         """Generate description if not provided."""
         if not self.description:
-            dist_str = self.distribution.value
-            if self.distribution == TokenDistribution.POWER_LAW and self.power_law_alpha:
-                dist_str = f"power_law_α={self.power_law_alpha}"
             self.description = (
                 f"tokens={self.num_tokens}, hidden={self.hidden_size}, "
                 f"experts={self.num_experts}, topk={self.top_k}, "
-                f"dtype={self.moe_dtype.value}, dist={dist_str}"
+                f"dtype={self.moe_dtype.value}, dist={self.distribution.value}"
             )
 
 
-def get_default_test_cases(ep_size: int) -> List[AlltoallTestCase]:
+def get_default_test_cases(ep_size: int) -> list[AlltoallTestCase]:
     """
     Generate default test cases for All-to-All benchmark.
 
@@ -122,7 +111,7 @@ def get_default_test_cases(ep_size: int) -> List[AlltoallTestCase]:
                 continue
 
             for moe_dtype in DEFAULT_MOE_DTYPES:
-                for distribution, alpha in DEFAULT_DISTRIBUTIONS:
+                for distribution in DEFAULT_DISTRIBUTIONS:
                     test_cases.append(
                         AlltoallTestCase(
                             num_tokens=num_tokens,
@@ -132,7 +121,6 @@ def get_default_test_cases(ep_size: int) -> List[AlltoallTestCase]:
                             ep_size=ep_size,
                             moe_dtype=moe_dtype,
                             distribution=distribution,
-                            power_law_alpha=alpha,
                         )
                     )
 
@@ -264,119 +252,6 @@ def generate_balanced_expert_ids(
     return expert_ids
 
 
-def generate_power_law_expert_ids(
-    num_tokens: int,
-    num_experts: int,
-    top_k: int,
-    ep_size: int,
-    alpha: float,
-    device: torch.device,
-) -> torch.Tensor:
-    """
-    Generate power-law distributed expert IDs for testing imbalanced workloads.
-
-    Some experts ("hot" experts) will receive significantly more tokens than others,
-    simulating real-world scenarios where certain experts specialize in common patterns.
-
-    Args:
-        num_tokens: Number of tokens
-        num_experts: Total number of experts
-        top_k: Number of experts per token
-        ep_size: Expert Parallelism size
-        alpha: Power-law exponent (higher = more imbalanced)
-               - α ≈ 1.0: nearly uniform
-               - α = 1.2: moderate skew
-               - α > 1.5: heavy skew
-        device: Target device
-
-    Returns:
-        Expert IDs tensor of shape [num_tokens, top_k]
-    """
-    import random
-
-    # Generate power-law token counts per expert
-    if num_tokens * top_k > num_experts:
-        tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
-    else:
-        tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
-
-    # Normalize to match target total
-    target_sum = num_tokens * top_k
-    tokens_per_expert = tokens_per_expert / tokens_per_expert.sum() * target_sum
-    tokens_per_expert = torch.round(tokens_per_expert).to(torch.int64)
-
-    # Adjust to exactly match target sum
-    current_sum = tokens_per_expert.sum().item()
-    delta = int(target_sum - current_sum)
-    if delta != 0:
-        sorted_indices = torch.argsort(tokens_per_expert, descending=True)
-        if delta > 0:
-            for i in range(delta):
-                expert_idx = sorted_indices[i % len(sorted_indices)]
-                tokens_per_expert[expert_idx] += 1
-        else:
-            for i in range(-delta):
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
-                if tokens_per_expert[expert_idx] > 0:
-                    tokens_per_expert[expert_idx] -= 1
-                else:
-                    tokens_per_expert[torch.argmax(tokens_per_expert)] -= 1
-
-    # Ensure the max-load EP rank is rank 0 for consistent benchmarking
-    experts_per_rank = num_experts // ep_size
-    if experts_per_rank > 0:
-        rank_loads = tokens_per_expert.view(ep_size, experts_per_rank).sum(dim=1)
-        max_rank = torch.argmax(rank_loads).item()
-        if max_rank != 0:
-            reshaped = tokens_per_expert.view(ep_size, experts_per_rank)
-            reshaped[0], reshaped[max_rank] = reshaped[max_rank].clone(), reshaped[0].clone()
-            tokens_per_expert = reshaped.view(-1)
-
-    # Build expert assignments for each token
-    expert_ids = torch.zeros((num_tokens, top_k), dtype=torch.int32, device=device)
-
-    # Create a pool of expert assignments based on power-law counts
-    expert_pool = []
-    for expert_id in range(num_experts):
-        count = int(tokens_per_expert[expert_id].item())
-        expert_pool.extend([expert_id] * count)
-
-    random.shuffle(expert_pool)
-
-    # Assign experts to tokens, ensuring each token gets top_k different experts
-    pool_idx = 0
-    for token_idx in range(num_tokens):
-        assigned_experts = set()
-        k_idx = 0
-        attempts = 0
-        max_attempts = num_experts * 2
-
-        while k_idx < top_k and attempts < max_attempts:
-            if pool_idx >= len(expert_pool):
-                pool_idx = 0
-                random.shuffle(expert_pool)
-
-            expert_id = expert_pool[pool_idx]
-            pool_idx += 1
-
-            if expert_id not in assigned_experts:
-                expert_ids[token_idx, k_idx] = expert_id
-                assigned_experts.add(expert_id)
-                k_idx += 1
-            attempts += 1
-
-        # Fill remaining slots if needed
-        if k_idx < top_k:
-            available = [e for e in range(num_experts) if e not in assigned_experts]
-            for remaining_idx in range(k_idx, top_k):
-                if available:
-                    expert_ids[token_idx, remaining_idx] = available.pop(0)
-                else:
-                    expert_ids[token_idx, remaining_idx] = remaining_idx % num_experts
-
-    return expert_ids
-
-
 def generate_expert_ids(
     test_case: AlltoallTestCase,
     device: torch.device,
@@ -396,16 +271,6 @@ def generate_expert_ids(
             test_case.num_tokens,
             test_case.num_experts,
             test_case.top_k,
-            device,
-        )
-    elif test_case.distribution == TokenDistribution.POWER_LAW:
-        alpha = test_case.power_law_alpha or 1.2
-        return generate_power_law_expert_ids(
-            test_case.num_tokens,
-            test_case.num_experts,
-            test_case.top_k,
-            test_case.ep_size,
-            alpha,
             device,
         )
     else:
@@ -479,7 +344,7 @@ def calculate_bandwidth_gbps(data_size_bytes: int, latency_ms: float) -> float:
 def prepare_test_data(
     test_case: AlltoallTestCase,
     device: torch.device,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
     """
     Prepare test data based on MoE dtype.
 
@@ -641,16 +506,10 @@ def benchmark_nvlink_two_sided_alltoall(
     # Get dispatched hidden states for combine benchmark
     recv_hidden_states = dispatched[0]
 
-    # Simulate MoE output (same shape as received hidden states, but always bfloat16 for combine)
-    # Combine always operates on expert output which is bfloat16
-    if recv_hidden_states.dtype == torch.uint8:
-        # For NVFP4, expert output is bfloat16
-        moe_output = torch.randn(recv_hidden_states.shape[0], hidden_size, dtype=torch.bfloat16, device=device)
-    elif recv_hidden_states.dtype == torch.float8_e4m3fn:
-        # For FP8, expert output is bfloat16
-        moe_output = torch.randn(recv_hidden_states.shape[0], hidden_size, dtype=torch.bfloat16, device=device)
-    else:
-        moe_output = torch.randn_like(recv_hidden_states)
+    # Simulate MoE output: combine always operates on bfloat16 expert output
+    moe_output = torch.randn(
+        recv_hidden_states.shape[0], hidden_size, dtype=torch.bfloat16, device=device
+    )
 
     # ============================================================================
     # Benchmark: alltoall_combine (do_reduce=False, use_low_precision_combine=False)
@@ -670,7 +529,7 @@ def benchmark_nvlink_two_sided_alltoall(
 
     # Warmup
     for _ in range(num_warmup):
-        combined = combine_func()
+        combine_func()
     torch.cuda.synchronize()
 
     # Benchmark combine
@@ -679,7 +538,7 @@ def benchmark_nvlink_two_sided_alltoall(
     for _ in range(num_iterations):
         torch.cuda.synchronize()
         start_event.record()
-        combined = combine_func()
+        combine_func()
         end_event.record()
         end_event.synchronize()
         all_combine_times.append(start_event.elapsed_time(end_event))
@@ -705,7 +564,7 @@ def benchmark_nvlink_two_sided_alltoall(
         # Warmup
         for _ in range(num_warmup):
             try:
-                combined_lp = combine_low_precision_func()
+                combine_low_precision_func()
             except Exception:
                 # Low precision combine may not be supported
                 pass
@@ -718,7 +577,7 @@ def benchmark_nvlink_two_sided_alltoall(
             torch.cuda.synchronize()
             start_event.record()
             try:
-                combined_lp = combine_low_precision_func()
+                combine_low_precision_func()
                 end_event.record()
                 end_event.synchronize()
                 all_combine_low_precision_times.append(start_event.elapsed_time(end_event))
@@ -765,11 +624,7 @@ def log_alltoall_perf(
         device_name: GPU device name
         perf_filename: Output file path
     """
-    # Format distribution string
-    if test_case.distribution == TokenDistribution.POWER_LAW:
-        distribution_str = f"power_law_{test_case.power_law_alpha}"
-    else:
-        distribution_str = test_case.distribution.value
+    distribution_str = test_case.distribution.value
 
     log_perf(
         item_list=[
@@ -798,6 +653,8 @@ def run_benchmark(
     world_size: int,
     device: torch.device,
     output_file: str = "wideep_alltoall_perf.txt",
+    num_warmup: int = 3,
+    num_iterations: int = 10,
 ):
     """
     Run All-to-All benchmark and log results.
@@ -807,6 +664,8 @@ def run_benchmark(
         world_size: Total number of ranks
         device: CUDA device
         output_file: Output file path
+        num_warmup: Number of warmup iterations
+        num_iterations: Number of benchmark iterations
     """
     import tensorrt_llm
 
@@ -829,7 +688,7 @@ def run_benchmark(
 
     if rank == 0:
         print(f"\n{'=' * 70}")
-        print(f"TensorRT-LLM WideEP NVLinkTwoSided All-to-All Benchmark")
+        print("TensorRT-LLM WideEP NVLinkTwoSided All-to-All Benchmark")
         print(f"{'=' * 70}")
         print(f"EP size: {world_size}")
         print(f"Device: {device_name}")
@@ -852,8 +711,8 @@ def run_benchmark(
                 test_case,
                 mapping,
                 device,
-                num_warmup=3,
-                num_iterations=10,
+                num_warmup=num_warmup,
+                num_iterations=num_iterations,
             )
 
             # Log results (only rank 0)
@@ -871,10 +730,13 @@ def run_benchmark(
                 combine_lp_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_low_precision_latency_ms)
 
                 print(f"  Prepare: {result.prepare_latency_ms:.3f} ms")
-                print(f"  Dispatch: {result.dispatch_latency_ms:.3f} ms ({dispatch_bw:.2f} GB/s, {dispatch_data_size/1024:.1f} KB)")
-                print(f"  Combine: {result.combine_latency_ms:.3f} ms ({combine_bw:.2f} GB/s, {combine_data_size/1024:.1f} KB)")
+                dispatch_kb = dispatch_data_size / 1024
+                print(f"  Dispatch: {result.dispatch_latency_ms:.3f} ms ({dispatch_bw:.2f} GB/s, {dispatch_kb:.1f} KB)")
+                combine_kb = combine_data_size / 1024
+                print(f"  Combine: {result.combine_latency_ms:.3f} ms ({combine_bw:.2f} GB/s, {combine_kb:.1f} KB)")
                 if result.combine_low_precision_latency_ms > 0:
-                    print(f"  Combine (low precision): {result.combine_low_precision_latency_ms:.3f} ms ({combine_lp_bw:.2f} GB/s)")
+                    lp_ms = result.combine_low_precision_latency_ms
+                    print(f"  Combine (low precision): {lp_ms:.3f} ms ({combine_lp_bw:.2f} GB/s)")
 
                 # Log each operation separately
                 log_alltoall_perf(
@@ -904,35 +766,6 @@ def run_benchmark(
         print(f"\n{'=' * 70}")
         print(f"Benchmark completed. Results saved to: {output_file}")
         print(f"{'=' * 70}")
-
-
-def get_wideep_alltoall_test_cases():
-    """
-    Returns test cases for collect.py framework integration.
-
-    Returns:
-        List of [ep_size, output_filename] pairs
-    """
-    return [
-        [2, "wideep_alltoall_perf.txt"],
-        [4, "wideep_alltoall_perf.txt"],
-        [8, "wideep_alltoall_perf.txt"],
-        [16, "wideep_alltoall_perf.txt"],
-        [32, "wideep_alltoall_perf.txt"],
-        [64, "wideep_alltoall_perf.txt"],
-        [72, "wideep_alltoall_perf.txt"],  # NVL72 configuration
-    ]
-
-
-def run_wideep_alltoall(ep_size: int, perf_filename: str, device: str = "cuda:0"):
-    """
-    Entry point for collect.py framework.
-
-    Note: This function requires multi-GPU setup with srun --mpi=pmix.
-    MNNVL uses MPI for symmetric memory management.
-    """
-    print(f"WideEP All-to-All benchmark requires multi-GPU setup.")
-    print(f"Please run with: srun --ntasks {ep_size} --mpi=pmix python {__file__}")
 
 
 def parse_args():
@@ -978,7 +811,12 @@ def main():
         print(f"Running with {world_size} GPUs")
 
     try:
-        run_benchmark(rank, world_size, device, output_file=args.output)
+        run_benchmark(
+            rank, world_size, device,
+            output_file=args.output,
+            num_warmup=args.warmup,
+            num_iterations=args.iterations,
+        )
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
