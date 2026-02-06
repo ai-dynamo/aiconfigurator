@@ -1250,14 +1250,14 @@ class EventFn:
         return gr.update(choices=version_choices, value=None, interactive=True)
 
     @staticmethod
-<<<<<<< HEAD
     def update_eplb_mode(enable_wideep):
         """Update wideep_eplb_mode interactivity based on enable_wideep state."""
         if enable_wideep:
             return gr.update(interactive=True)
         else:
             return gr.update(value="off", interactive=False)
-=======
+
+    @staticmethod
     def update_version_choices_with_quant_toggles(system_name, backend_name):
         if not backend_name:
             # Backend not selected yet.
@@ -1265,7 +1265,6 @@ class EventFn:
 
         version_update = EventFn.update_version_choices(system_name, backend_name)
         return version_update
->>>>>>> 793f60a (feat: add fp8 static_quant_mode/lowbit_input with compute_scale & scale_matrix modeling (#261))
 
     @staticmethod
     def update_model_related_components(model_path):
