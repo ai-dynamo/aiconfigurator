@@ -113,11 +113,14 @@ def create_model_quant_config(app_config):
 
     with gr.Accordion("Quantization config"):
         with gr.Row():
+            default_gemm_quant_mode = (
+                "fp8_block" if "fp8_block" in gemm_quant_mode_choices else gemm_quant_mode_choices[0]
+            )
             gemm_quant_mode = gr.Dropdown(
                 choices=gemm_quant_mode_choices,
                 label="gemm quant mode",
                 allow_custom_value=False,
-                value="fp8_block" if "fp8_block" in gemm_quant_mode_choices else gemm_quant_mode_choices[0],
+                value=default_gemm_quant_mode,
                 interactive=True,
             )
             kvcache_quant_mode = gr.Dropdown(

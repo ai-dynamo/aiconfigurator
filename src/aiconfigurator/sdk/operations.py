@@ -147,6 +147,10 @@ class GEMM(Operation):
         """
         Query GEMM latency with energy data.
 
+        For `fp8_static` quant mode, subtracts compute_scale overhead.
+        For Qwen models, proj/fc2 GEMMs are treated as FP8 input under `fp8_static`, so we also
+        subtract the scale_matrix overhead for those specific GEMMs.
+
         Returns:
             PerformanceResult: Behaves like float (scaled latency in ms).
                               Energy data accessible via .energy attribute.
@@ -156,15 +160,60 @@ class GEMM(Operation):
         x //= self._scale_num_tokens
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
+        model_name = str(kwargs.get("model_name", ""))
+        is_fp8_static = quant_mode == common.GEMMQuantMode.fp8_static
+        subtract_scale_matrix = (
+            is_fp8_static
+            and "qwen" in model_name.lower()
+            and self._name
+            in {
+                "context_proj_gemm",
+                "generation_proj_gemm",
+                "context_ffn2_gemm",
+                "generation_ffn2_gemm",
+                "context_shared_ffn2_gemm",
+                "generation_shared_ffn2_gemm",
+            }
+        )
 
         # Query with energy
         result = database.query_gemm(x, self._n, self._k, quant_mode)
+        latency = float(result)
+        energy = result.energy
 
-        # Return PerformanceResult: scale BOTH latency and energy
-        # (energy scales with latency for serial execution)
+        # Adjust for fp8_static: subtract compute_scale overhead
+        if is_fp8_static:
+            compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
+            latency -= float(compute_scale_result)
+            energy -= compute_scale_result.energy
+            if subtract_scale_matrix:
+                scale_matrix_result = database.query_scale_matrix(x, self._k, quant_mode)
+                latency -= float(scale_matrix_result)
+                energy -= scale_matrix_result.energy
+
+        # Ensure non-negative latency and energy
+        latency_clamped = max(0.0, latency)
+        energy_clamped = max(0.0, energy)
+        if latency_clamped != latency or energy_clamped != energy:
+            logger.warning(
+                "GEMM.query clamped latency/energy to 0.0. "
+                "op=%s model=%s m=%s n=%s k=%s quant_mode=%s post_sub(lat=%.6f, eng=%.6f)",
+                self._name,
+                model_name,
+                x,
+                self._n,
+                self._k,
+                quant_mode.name,
+                latency,
+                energy,
+            )
+
+        latency = latency_clamped
+        energy = energy_clamped
+
         return PerformanceResult(
-            latency=float(result) * self._scale_factor,  # Scaled latency
-            energy=result.energy * self._scale_factor,  # Scaled energy (proportional to latency)
+            latency=latency * self._scale_factor,
+            energy=energy * self._scale_factor,
         )
 
     def get_weights(self, **kwargs):
