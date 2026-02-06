@@ -799,7 +799,7 @@ def run_wideep_moe_compute(
         num_iter = 5 if distributed == "power_law" else 1
         
         # In WideEP, DP size = EP size, each DP rank has num_tokens/ep_size tokens
-        dp_num_tokens = num_tokens // moe_ep_size
+        dp_num_tokens = num_tokens if num_tokens < moe_ep_size else num_tokens // moe_ep_size
         
         # Variables for logging
         actual_dp_tokens = None

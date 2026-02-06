@@ -770,7 +770,7 @@ def main():
             "mla_bmm_gen_post",
             "moe",
             "moe_eplb",  # MoE with EPLB (Expert Parallel Load Balancer)
-            "moe_wideep",  # WideEP MoE compute (includes all 3 EPLB modes)
+            "trtllm_moe_wideep",  # WideEP MoE compute (includes all 3 EPLB modes)
             "wideep_moe",  # TensorRT-LLM WideEP MoE computation (single GPU) - from aic
             "wideep_mla_context",
             "wideep_mla_generation",
