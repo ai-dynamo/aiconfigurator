@@ -81,8 +81,13 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     setup_signal_handlers(device_id, error_queue)
 
     # Setup device
-    device = torch.device(f"cuda:{device_id}")
-    torch.cuda.set_device(device_id)
+
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{device_id}")
+        torch.cuda.set_device(device)
+    elif torch.xpu.is_available():
+        device = torch.device(f"xpu:{device_id}")
+        torch.xpu.set_device(device)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
     # Process tasks
@@ -565,6 +570,10 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         },
     ]
 
+    if torch.xpu.is_available():
+        # xpu's MLA kernel is WIP
+        collections = [c for c in collections if "mla" not in c.get("type", "").lower()]
+
     all_errors = collect_ops(num_processes, collections, ops, version)
 
     generate_collection_summary(all_errors, "vllm", version)
@@ -769,6 +778,8 @@ def main():
         setup_logging(debug=args.debug)
 
     num_processes = torch.cuda.device_count()
+    if num_processes == 0 and torch.xpu.is_available():
+        num_processes = torch.xpu.device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
 
     # Set environment variables for worker processes

@@ -509,7 +509,7 @@ class DisaggInferenceSession:
                             runtime_config=overwritten_runtime_config,
                             latency_correction_scale=latency_correction_scale,
                         )
-                        if not summary.check_oom():
+                        if not summary.check_oom():  # TODO check here, schedule into different batches instead of OOM?
                             summary_df = pd.concat(
                                 [summary_df, summary.get_summary_df()],
                                 axis=0,

@@ -307,6 +307,7 @@ SupportedSystems = {
     "gb200_sxm",
     "a100_sxm",
     "l40s",
+    "b60",
 }
 
 """
