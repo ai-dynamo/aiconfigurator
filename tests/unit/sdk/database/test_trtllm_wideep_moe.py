@@ -20,11 +20,11 @@ class TestTrtLLMWideEPMoE:
         """Create a mock database for testing."""
         mock_db = MagicMock()
         mock_db.backend = "trtllm"
-        # Mock query_wideep_moe_eplb_compute to return a PerformanceResult-like object
+        # Mock query_wideep_moe_compute to return a PerformanceResult-like object
         mock_result = MagicMock()
         mock_result.__float__ = MagicMock(return_value=10.5)
         mock_result.energy = 2.5
-        mock_db.query_wideep_moe_eplb_compute.return_value = mock_result
+        mock_db.query_wideep_moe_compute.return_value = mock_result
         return mock_db
     
     def test_initialization_with_default_num_slots(self):
@@ -139,7 +139,7 @@ class TestTrtLLMWideEPMoE:
         result = moe.query(mock_database, x=16)
         
         # Verify database was called correctly
-        mock_database.query_wideep_moe_eplb_compute.assert_called_once_with(
+        mock_database.query_wideep_moe_compute.assert_called_once_with(
             num_tokens=16,  # x * attention_dp_size = 16 * 1
             hidden_size=2048,
             inter_size=8192,
@@ -176,8 +176,8 @@ class TestTrtLLMWideEPMoE:
         result = moe.query(mock_database, x=16)
         
         # Verify tokens were scaled by attention_dp_size
-        mock_database.query_wideep_moe_eplb_compute.assert_called_once()
-        call_args = mock_database.query_wideep_moe_eplb_compute.call_args[1]
+        mock_database.query_wideep_moe_compute.assert_called_once()
+        call_args = mock_database.query_wideep_moe_compute.call_args[1]
         assert call_args["num_tokens"] == 64  # 16 * 4
     
     def test_query_with_scale_factor(self, mock_database):
@@ -222,7 +222,7 @@ class TestTrtLLMWideEPMoE:
         result = moe.query(mock_database, x=16, quant_mode=common.MoEQuantMode.nvfp4)
         
         # Verify override was used
-        call_args = mock_database.query_wideep_moe_eplb_compute.call_args[1]
+        call_args = mock_database.query_wideep_moe_compute.call_args[1]
         assert call_args["quant_mode"] == common.MoEQuantMode.nvfp4
     
     def test_query_with_custom_num_slots(self, mock_database):
@@ -245,7 +245,7 @@ class TestTrtLLMWideEPMoE:
         result = moe.query(mock_database, x=16)
         
         # Verify custom num_slots was used
-        call_args = mock_database.query_wideep_moe_eplb_compute.call_args[1]
+        call_args = mock_database.query_wideep_moe_compute.call_args[1]
         assert call_args["num_slots"] == 12
     
     @patch('aiconfigurator.sdk.operations.logger')
@@ -270,7 +270,7 @@ class TestTrtLLMWideEPMoE:
         
         # Verify debug logging was called
         mock_logger.debug.assert_called_with(
-            "TrtLLMWideEPMoE: Querying EPLB compute with num_slots=16"
+            "TrtLLMWideEPMoE: Querying compute with num_slots=16"
         )
 
 

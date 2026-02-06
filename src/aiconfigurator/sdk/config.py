@@ -33,6 +33,7 @@ class ModelConfig:
     attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3', for sglang wideep only
     enable_wideep: bool = False
     # TensorRT-LLM WideEP specific parameters
+    wideep_eplb_mode: str = "off"  # "off" or "on", redundant mode is auto-detected when num_slots > num_experts
     wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None
 
 

@@ -27,6 +27,7 @@ from aiconfigurator.sdk.perf_database import (
     load_mla_bmm_data,
     load_moe_data,
     load_nccl_data,
+    load_wideep_moe_compute_data,
 )
 
 pytestmark = pytest.mark.unit
@@ -602,3 +603,57 @@ def test_load_mla_bmm_data_basic(tmp_path):
     assert 2 in data[qg]["bmm_op"]
     assert 8 in data[qg]["bmm_op"][2]
     assert data[qg]["bmm_op"][2][8]["latency"] == pytest.approx(3.333)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10) load_wideep_moe_compute_data
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_load_wideep_moe_compute_data(tmp_path):
+    """
+    Test loading wideep MoE compute data with the format from:
+    aiconfigurator/src/aiconfigurator/systems/data/gb200_sxm/trtllm/1.2.0rc6/wideep_moe_perf.txt
+
+    CSV columns:
+        framework,version,device,op_name,kernel_source,moe_dtype,moe_kernel,num_tokens,
+        dp_num_tokens,rank0_num_tokens,hidden_size,inter_size,topk,num_experts,num_slots,
+        moe_tp_size,moe_ep_size,distribution,simulation_mode,latency
+
+    Structure: [kernel_source][quant_mode][distribution][topk][num_experts][hidden_size]
+               [inter_size][num_slots][moe_tp_size][moe_ep_size][num_tokens] -> {latency, power, energy}
+    """
+    csv_file = tmp_path / "wideep_moe_perf.txt"
+    headers = (
+        "framework,version,device,op_name,kernel_source,moe_dtype,moe_kernel,num_tokens,"
+        "dp_num_tokens,rank0_num_tokens,hidden_size,inter_size,topk,num_experts,num_slots,"
+        "moe_tp_size,moe_ep_size,distribution,simulation_mode,latency\n"
+    )
+    # wideep_moe (no EPLB)
+    line1 = (
+        "TRTLLM,1.2.0rc6,NVIDIA GB200,wideep_moe,wideep_compute_cutlass,nvfp4,cutlass,"
+        "1,1,1,7168,2048,8,256,256,1,4,power_law_1.01,accurate,0.08142079710960388\n"
+    )
+    # wideep_moe_eplb (with EPLB)
+    line2 = (
+        "TRTLLM,1.2.0rc6,NVIDIA GB200,wideep_moe_eplb,wideep_compute_cutlass,nvfp4,cutlass,"
+        "1,1,1,7168,2048,8,256,288,1,4,power_law_1.01_eplb,accurate,0.07909759879112244\n"
+    )
+
+    csv_file.write_text(headers + line1 + line2)
+
+    data = load_wideep_moe_compute_data(str(csv_file))
+
+    assert data is not None
+
+    qm = MoEQuantMode.nvfp4
+    kernel_source = "wideep_compute_cutlass"
+
+    # Verify non-EPLB entry: power_law_1.01, num_slots=256
+    result = data[kernel_source][qm]["power_law_1.01"][8][256][7168][2048][256][1][4][1]
+    assert result["latency"] == pytest.approx(0.08142079710960388)
+
+    # Verify EPLB entry: power_law_1.01_eplb, num_slots=288
+    result_eplb = data[kernel_source][qm]["power_law_1.01_eplb"][8][256][7168][2048][288][1][4][1]
+    assert result_eplb["latency"] == pytest.approx(0.07909759879112244)
+

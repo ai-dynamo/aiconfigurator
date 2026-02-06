@@ -172,11 +172,16 @@ class GEMM(Operation):
 
 class TrtLLMWideEPMoE(Operation):
     """
-    TensorRT-LLM WideEP MoE operation with EPLB support.
+    TensorRT-LLM WideEP MoE operation with configurable EPLB modes.
     
-    This class is specifically designed for TensorRT-LLM backend's WideEP MoE computation
-    with Expert Parallelism Load Balancing (EPLB). It handles the pure computation aspect
-    of MoE, excluding All2All communication which is handled by TrtLLMWideEPMoEDispatch.
+    This class is specifically designed for TensorRT-LLM backend's WideEP MoE computation.
+    It handles the pure computation aspect of MoE, excluding All2All communication which
+    is handled by TrtLLMWideEPMoEDispatch.
+    
+    Supports three EPLB modes:
+    - EPLB off: workload_distribution without "_eplb" suffix, num_slots = num_experts
+    - EPLB on: workload_distribution with "_eplb" suffix, num_slots = num_experts
+    - EPLB redundant: workload_distribution with "_eplb" suffix, num_slots > num_experts
     
     Args:
         name: Operation name
@@ -185,11 +190,11 @@ class TrtLLMWideEPMoE(Operation):
         inter_size: Intermediate dimension size
         topk: Number of top experts to select
         num_experts: Total number of experts
-        num_slots: Number of expert slots for EPLB (defaults to num_experts if not specified)
+        num_slots: Number of expert slots (= num_experts for EPLB off/on, > num_experts for redundant)
         moe_tp_size: MoE tensor parallelism size
         moe_ep_size: MoE expert parallelism size
         quant_mode: Quantization mode for MoE computation
-        workload_distribution: Workload distribution pattern (e.g., "power_law_1.01_eplb")
+        workload_distribution: Workload distribution pattern (e.g., "power_law_1.01" or "power_law_1.01_eplb")
         attention_dp_size: Attention data parallelism size (scales input tokens)
         is_gated: Whether MoE uses gated activation (default: True)
     """
@@ -238,7 +243,12 @@ class TrtLLMWideEPMoE(Operation):
     
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """
-        Query TrtLLM WideEP MoE EPLB compute latency with energy data.
+        Query TrtLLM WideEP MoE compute latency with energy data.
+        
+        Supports three EPLB modes based on workload_distribution and num_slots:
+        - EPLB off: distribution without "_eplb" suffix, num_slots = num_experts
+        - EPLB on: distribution with "_eplb" suffix, num_slots = num_experts
+        - EPLB redundant: distribution with "_eplb" suffix, num_slots > num_experts
         
         Args:
             database: Performance database instance
@@ -254,10 +264,10 @@ class TrtLLMWideEPMoE(Operation):
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
         
-        logger.debug(f"TrtLLMWideEPMoE: Querying EPLB compute with num_slots={self._num_slots}")
+        logger.debug(f"TrtLLMWideEPMoE: Querying compute with num_slots={self._num_slots}")
         
-        # Query WideEP MoE EPLB compute performance
-        result = database.query_wideep_moe_eplb_compute(
+        # Query WideEP MoE compute performance
+        result = database.query_wideep_moe_compute(
             num_tokens=x,
             hidden_size=self._hidden_size,
             inter_size=self._inter_size,

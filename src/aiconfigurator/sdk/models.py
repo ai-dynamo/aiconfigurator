@@ -1325,7 +1325,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
     DeepSeek V3/R1 with TensorRT-LLM WideEP support.
 
     This model enables WideEP (Wide Expert Parallelism) for TensorRT-LLM backend:
-    - MoE computation uses WideEP EPLB path (query_wideep_moe_eplb_compute)
+    - MoE computation uses WideEP path (query_wideep_moe_compute) with configurable EPLB modes
     - All2All communication uses WideEP path (query_wideep_alltoall with auto kernel selection)
 
     Token handling (handled in MoE/MoEDispatch query methods):
@@ -1387,12 +1387,17 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
 
-        # WideEP workload distribution (append "_eplb" for EPLB-aware distribution)
-        workload_distribution = (
-            self.config.workload_distribution + f"_{self._power_law_alpha}_eplb"
-            if self.config.workload_distribution == "power_law"
-            else self.config.workload_distribution
-        )
+        # WideEP workload distribution
+        # - EPLB off: "power_law_1.01" (no _eplb suffix)
+        # - EPLB on/redundant: "power_law_1.01_eplb" (with _eplb suffix)
+        eplb_enabled = self.config.wideep_eplb_mode == "on"
+        if self.config.workload_distribution == "power_law":
+            if eplb_enabled:
+                workload_distribution = f"{self.config.workload_distribution}_{self._power_law_alpha}_eplb"
+            else:
+                workload_distribution = f"{self.config.workload_distribution}_{self._power_law_alpha}"
+        else:
+            workload_distribution = self.config.workload_distribution
 
         # ===================== WideEP Configuration Validation =====================
         # Based on TensorRT-LLM WideEPMoE constraints (fused_moe_wide_ep.py)
@@ -1420,11 +1425,18 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # 4. num_slots validation
         wideep_num_slots = self.config.wideep_num_slots if self.config.wideep_num_slots else num_experts
 
-        # num_slots must be >= num_experts (EPLB can have more slots for redundant experts)
+        # num_slots must be >= num_experts
         assert wideep_num_slots >= num_experts, (
             f"wideep_num_slots ({wideep_num_slots}) must be >= num_experts ({num_experts}). "
             "There should be at least num_experts slots in the model engine."
         )
+
+        # When EPLB is off, num_slots must equal num_experts
+        if not eplb_enabled:
+            assert wideep_num_slots == num_experts, (
+                f"When wideep_eplb_mode='off', wideep_num_slots ({wideep_num_slots}) must equal "
+                f"num_experts ({num_experts}). Redundant slots require EPLB to be enabled."
+            )
 
         # ===================== Context Phase =====================
         self.context_ops.extend(

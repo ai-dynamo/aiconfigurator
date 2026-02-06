@@ -117,6 +117,14 @@ def parse(args):
         help="Enable WideEP DeepSeek modeling (effective for trtllm and sglang backends with DeepSeek model).",
     )
     parser.add_argument(
+        "--wideep_eplb_mode",
+        type=str,
+        default="off",
+        choices=["off", "on"],
+        help="WideEP EPLB mode: 'off' (no load balancing) or 'on' (with load balancing). "
+             "Redundant mode is auto-detected when wideep_num_slots > num_experts.",
+    )
+    parser.add_argument(
         "--wideep_num_slots",
         type=int,
         default=None,
@@ -149,6 +157,7 @@ def main(args):
         attention_dp_size=args.attention_dp_size,
         overwrite_num_layers=args.overwrite_num_layers,
         enable_wideep=args.enable_wideep,
+        wideep_eplb_mode=args.wideep_eplb_mode,
         wideep_num_slots=args.wideep_num_slots,
         moe_backend=args.moe_backend,
     )

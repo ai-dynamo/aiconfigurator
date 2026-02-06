@@ -4560,7 +4560,7 @@ class PerfDatabase:
                                                 ][n][b][s] = float(sol)
 
 
-    def query_wideep_moe_eplb_compute(
+    def query_wideep_moe_compute(
         self,
         num_tokens: int,
         hidden_size: int,
@@ -4575,12 +4575,16 @@ class PerfDatabase:
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult:
         """
-        Query WideEP MoE EPLB compute latency (pure computation, excluding All2All communication).
+        Query WideEP MoE compute latency (pure computation, excluding All2All communication).
 
-        This is for TensorRT-LLM WideEP scenarios with EPLB support.
+        This is for TensorRT-LLM WideEP scenarios with three EPLB modes:
+        - EPLB off: workload_distribution without "_eplb" suffix, num_slots = num_experts
+        - EPLB on: workload_distribution with "_eplb" suffix, num_slots = num_experts
+        - EPLB redundant: workload_distribution with "_eplb" suffix, num_slots > num_experts
+
         The MoE computation kernel is automatically selected based on GPU architecture and quantization mode:
         - SM >= 100 (Blackwell) with fp8_block -> DeepGemm kernel
-        - Otherwise -> Cutlass kernel (moe_torch_flow)
+        - Otherwise -> Cutlass kernel (wideep_compute_cutlass)
 
         Args:
             num_tokens: Number of tokens
@@ -4588,11 +4592,11 @@ class PerfDatabase:
             inter_size: Intermediate size (FFN)
             topk: Number of experts activated per token
             num_experts: Total number of experts
-            num_slots: Number of expert slots (>= num_experts when using EPLB)
+            num_slots: Number of expert slots (= num_experts for EPLB off/on, > num_experts for EPLB redundant)
             moe_tp_size: MoE tensor parallelism size
             moe_ep_size: MoE expert parallelism size
             quant_mode: MoE quantization mode
-            workload_distribution: Workload distribution pattern (e.g., "power_law_1.2_eplb")
+            workload_distribution: Workload distribution pattern (e.g., "power_law_1.01" or "power_law_1.01_eplb")
             database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
 
         Returns:
@@ -4610,7 +4614,7 @@ class PerfDatabase:
 
         # Automatically select MoE kernel based on GPU architecture and quant mode
         kernel_source = self._select_moe_kernel(quant_mode)
-        logger.debug(f"query_wideep_moe_eplb_compute: auto-selected kernel_source='{kernel_source}'")
+        logger.debug(f"query_wideep_moe_compute: auto-selected kernel_source='{kernel_source}'")
 
         try:
             # Find the best matching distribution

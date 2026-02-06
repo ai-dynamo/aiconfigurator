@@ -32,6 +32,7 @@ class EventHandler:
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
                 components["model_misc_config_components"]["enable_wideep"],
+                components["model_misc_config_components"]["wideep_eplb_mode"],
                 components["mode"],
                 components["record_df"],
             ],
@@ -94,6 +95,7 @@ class EventHandler:
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
                 components["model_misc_config_components"]["enable_wideep"],
+                components["model_misc_config_components"]["wideep_eplb_mode"],
             ],
             outputs=[components["result_df"], components["debugging_box"]],
         )
@@ -145,6 +147,7 @@ class EventHandler:
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
                 components["model_misc_config_components"]["enable_wideep"],
+                components["model_misc_config_components"]["wideep_eplb_mode"],
             ],
             outputs=[
                 components["result_df"],
@@ -186,6 +189,7 @@ class EventHandler:
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
                 components["model_misc_config_components"]["enable_wideep"],
+                components["model_misc_config_components"]["wideep_eplb_mode"],
                 components["prefill_model_system_components"]["system"],  # prefill
                 components["prefill_model_system_components"]["backend"],
                 components["prefill_model_system_components"]["version"],
@@ -279,6 +283,7 @@ class EventHandler:
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
                 components["model_misc_config_components"]["enable_wideep"],
+                components["model_misc_config_components"]["wideep_eplb_mode"],
                 components["prefill_model_system_components"]["system"],  # prefill
                 components["prefill_model_system_components"]["backend"],
                 components["prefill_model_system_components"]["version"],
