@@ -146,9 +146,9 @@ class GEMM(Operation):
         """
         Query GEMM latency with energy data.
 
-        For static quantization mode (FP8), subtracts compute_scale overhead.
-        For Qwen models, proj/fc2 GEMMs are treated as FP8 input under static quant mode, so we
-        also subtract the scale_matrix overhead for those specific GEMMs.
+        For `fp8_static` quant mode, subtracts compute_scale overhead.
+        For Qwen models, proj/fc2 GEMMs are treated as FP8 input under `fp8_static`, so we also
+        subtract the scale_matrix overhead for those specific GEMMs.
 
         Returns:
             PerformanceResult: Behaves like float (scaled latency in ms).
@@ -160,10 +160,9 @@ class GEMM(Operation):
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
         model_name = str(kwargs.get("model_name", ""))
-        static_quant_mode = bool(kwargs.get("static_quant_mode", False))
+        is_fp8_static = quant_mode == common.GEMMQuantMode.fp8_static
         subtract_scale_matrix = (
-            quant_mode == common.GEMMQuantMode.fp8
-            and static_quant_mode
+            is_fp8_static
             and "qwen" in model_name.lower()
             and self._name
             in {
@@ -181,8 +180,8 @@ class GEMM(Operation):
         latency = float(result)
         energy = result.energy
 
-        # Adjust for static quantization: subtract compute_scale overhead
-        if quant_mode == common.GEMMQuantMode.fp8 and static_quant_mode:
+        # Adjust for fp8_static: subtract compute_scale overhead
+        if is_fp8_static:
             compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
             latency -= float(compute_scale_result)
             energy -= compute_scale_result.energy

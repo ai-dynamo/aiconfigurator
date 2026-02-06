@@ -873,36 +873,33 @@ class TaskConfig:
         if self.backend_name == "vllm" and get_model_family(self.model_path) == "DEEPSEEK":
             raise NotImplementedError("AIConfigurator does not yet support DEEPSEEK models for VLLM backend.")
 
-        # Static quant mode is currently TRTLLM-only and requires FP8 GEMM.
+        # fp8_static GEMM mode is currently TRTLLM-only.
         def _is_trtllm_backend(backend_name: object) -> bool:
             return str(backend_name).lower() == common.BackendName.trtllm.value
 
-        def _validate_static_quant_mode(worker_cfg: DefaultMunch, target: str) -> None:
-            static_quant_mode = bool(worker_cfg.get("static_quant_mode", False))
-            if not static_quant_mode:
+        def _is_fp8_static(mode: object) -> bool:
+            if mode is None:
+                return False
+            name = mode.name if hasattr(mode, "name") else str(mode)
+            return str(name).lower() == common.GEMMQuantMode.fp8_static.name
+
+        def _validate_fp8_static(worker_cfg: DefaultMunch, target: str) -> None:
+            gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)
+            if not _is_fp8_static(gemm_quant_mode):
                 return
 
             backend_name = worker_cfg.get("backend_name", None)
             if not _is_trtllm_backend(backend_name):
                 raise ValueError(
-                    f"{target}: static_quant_mode is currently only supported for backend "
-                    f"'{common.BackendName.trtllm.value}', but got backend='{backend_name}'."
-                )
-
-            gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)
-            gemm_quant_mode_name = gemm_quant_mode.name if hasattr(gemm_quant_mode, "name") else str(gemm_quant_mode)
-            if str(gemm_quant_mode_name).lower() != common.GEMMQuantMode.fp8.name:
-                raise ValueError(
-                    f"{target}: static_quant_mode requires gemm_quant_mode='{common.GEMMQuantMode.fp8.name}' "
-                    f"for backend '{common.BackendName.trtllm.value}', "
-                    f"but got gemm_quant_mode='{gemm_quant_mode_name}'."
+                    f"{target}: gemm_quant_mode='{common.GEMMQuantMode.fp8_static.name}' is currently only supported "
+                    f"for backend '{common.BackendName.trtllm.value}', but got backend='{backend_name}'."
                 )
 
         if self.serving_mode == "agg":
-            _validate_static_quant_mode(self.config.worker_config, "worker_config")
+            _validate_fp8_static(self.config.worker_config, "worker_config")
         elif self.serving_mode == "disagg":
-            _validate_static_quant_mode(self.config.prefill_worker_config, "prefill_worker_config")
-            _validate_static_quant_mode(self.config.decode_worker_config, "decode_worker_config")
+            _validate_fp8_static(self.config.prefill_worker_config, "prefill_worker_config")
+            _validate_fp8_static(self.config.decode_worker_config, "decode_worker_config")
 
         # Validate requested quant modes against available perf data early, to avoid
         # late interpolation/assert failures and to provide actionable guidance.
@@ -1111,7 +1108,6 @@ class TaskRunner:
             fmha_quant_mode=task_config.worker_config.fmha_quant_mode,
             moe_quant_mode=task_config.worker_config.moe_quant_mode,
             comm_quant_mode=task_config.worker_config.comm_quant_mode,
-            static_quant_mode=bool(task_config.worker_config.get("static_quant_mode", False)),
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
             moe_backend=task_config.moe_backend,  # sglang wideep only
@@ -1197,7 +1193,6 @@ class TaskRunner:
             fmha_quant_mode=task_config.prefill_worker_config.fmha_quant_mode,
             moe_quant_mode=task_config.prefill_worker_config.moe_quant_mode,
             comm_quant_mode=task_config.prefill_worker_config.comm_quant_mode,
-            static_quant_mode=bool(task_config.prefill_worker_config.get("static_quant_mode", False)),
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
             moe_backend=task_config.moe_backend,  # sglang wideep only
@@ -1257,7 +1252,6 @@ class TaskRunner:
             fmha_quant_mode=task_config.decode_worker_config.fmha_quant_mode,
             moe_quant_mode=task_config.decode_worker_config.moe_quant_mode,
             comm_quant_mode=task_config.decode_worker_config.comm_quant_mode,
-            static_quant_mode=bool(task_config.decode_worker_config.get("static_quant_mode", False)),
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
             moe_backend=task_config.moe_backend,  # sglang wideep only

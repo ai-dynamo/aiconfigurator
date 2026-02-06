@@ -29,7 +29,6 @@ class EventHandler:
                 components["model_quant_components"]["fmha_quant_mode"],
                 components["model_quant_components"]["moe_quant_mode"],
                 components["model_quant_components"]["comm_quant_mode"],
-                components["model_quant_components"]["static_quant_mode"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
                 components["model_misc_config_components"]["enable_wideep"],
@@ -92,7 +91,6 @@ class EventHandler:
                 components["model_quant_components"]["fmha_quant_mode"],
                 components["model_quant_components"]["moe_quant_mode"],
                 components["model_quant_components"]["comm_quant_mode"],
-                components["model_quant_components"]["static_quant_mode"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
                 components["model_misc_config_components"]["enable_wideep"],
@@ -144,7 +142,6 @@ class EventHandler:
                 components["model_quant_components"]["fmha_quant_mode"],
                 components["model_quant_components"]["moe_quant_mode"],
                 components["model_quant_components"]["comm_quant_mode"],
-                components["model_quant_components"]["static_quant_mode"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
                 components["model_misc_config_components"]["enable_wideep"],
@@ -205,7 +202,6 @@ class EventHandler:
                 components["prefill_model_quant_components"]["fmha_quant_mode"],
                 components["prefill_model_quant_components"]["moe_quant_mode"],
                 components["prefill_model_quant_components"]["comm_quant_mode"],
-                components["prefill_model_quant_components"]["static_quant_mode"],
                 components["prefill_latency_correction_scale"],
                 components["decode_model_system_components"]["system"],  # decode
                 components["decode_model_system_components"]["backend"],
@@ -223,7 +219,6 @@ class EventHandler:
                 components["decode_model_quant_components"]["fmha_quant_mode"],
                 components["decode_model_quant_components"]["moe_quant_mode"],
                 components["decode_model_quant_components"]["comm_quant_mode"],
-                components["decode_model_quant_components"]["static_quant_mode"],
                 components["decode_latency_correction_scale"],
                 components["num_gpu_list"],
                 components["max_num_gpu"],
@@ -298,7 +293,6 @@ class EventHandler:
                 components["prefill_model_quant_components"]["fmha_quant_mode"],
                 components["prefill_model_quant_components"]["moe_quant_mode"],
                 components["prefill_model_quant_components"]["comm_quant_mode"],
-                components["prefill_model_quant_components"]["static_quant_mode"],
                 components["decode_model_system_components"]["system"],  # decode
                 components["decode_model_system_components"]["backend"],
                 components["decode_model_system_components"]["version"],
@@ -313,7 +307,6 @@ class EventHandler:
                 components["decode_model_quant_components"]["fmha_quant_mode"],
                 components["decode_model_quant_components"]["moe_quant_mode"],
                 components["decode_model_quant_components"]["comm_quant_mode"],
-                components["decode_model_quant_components"]["static_quant_mode"],
             ],
             outputs=[
                 components["prefill_result_df"],
@@ -413,7 +406,6 @@ class EventHandler:
             outputs=[
                 model_system_components["backend"],
                 model_system_components["version"],
-                model_quant_components["static_quant_mode"],
             ],
         )
         model_system_components["backend"].change(
@@ -421,7 +413,6 @@ class EventHandler:
             inputs=[model_system_components["system"], model_system_components["backend"]],
             outputs=[
                 model_system_components["version"],
-                model_quant_components["static_quant_mode"],
             ],
         )
 
@@ -452,7 +443,6 @@ class EventHandler:
                 model_quant_components["kvcache_quant_mode"],
                 model_quant_components["fmha_quant_mode"],
                 model_quant_components["moe_quant_mode"],
-                model_quant_components["static_quant_mode"],
             ],
         )
 
@@ -470,15 +460,7 @@ class EventHandler:
                 model_quant_components["kvcache_quant_mode"],
                 model_quant_components["fmha_quant_mode"],
                 model_quant_components["moe_quant_mode"],
-                model_quant_components["static_quant_mode"],
             ],
-        )
-
-        # Quant overhead toggles are only meaningful for fp8 GEMM on TRTLLM.
-        model_quant_components["gemm_quant_mode"].change(
-            fn=EventFn.update_quant_overhead_toggles,
-            inputs=[model_system_components["backend"], model_quant_components["gemm_quant_mode"]],
-            outputs=[model_quant_components["static_quant_mode"]],
         )
 
     @staticmethod

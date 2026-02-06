@@ -86,7 +86,6 @@ class BaseBackend(ABC):
                     s=isl,
                     prefix=prefix,
                     model_name=getattr(model, "model_name", ""),
-                    static_quant_mode=getattr(model.config, "static_quant_mode", False),
                 )
 
                 # ✅ IMMEDIATELY extract values - do NOT use PerformanceResult arithmetic!
@@ -127,7 +126,6 @@ class BaseBackend(ABC):
                         beam_width=beam_width,
                         s=isl + i + 1,
                         model_name=getattr(model, "model_name", ""),
-                        static_quant_mode=getattr(model.config, "static_quant_mode", False),
                     )
 
                     # ✅ IMMEDIATELY extract values - do NOT accumulate PerformanceResult objects!

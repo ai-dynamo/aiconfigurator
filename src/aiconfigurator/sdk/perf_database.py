@@ -2016,6 +2016,10 @@ class PerfDatabase:
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
             }
+            # `fp8_static` is a behavioral mode that reuses `fp8` GEMM perf tables.
+            gemm_modes = self.supported_quant_mode.get("gemm", []) or []
+            if common.GEMMQuantMode.fp8.name in gemm_modes and common.GEMMQuantMode.fp8_static.name not in gemm_modes:
+                gemm_modes.append(common.GEMMQuantMode.fp8_static.name)
         elif self.backend == "vllm":  # TODO: deepseek
             self.supported_quant_mode = {
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
@@ -2594,6 +2598,17 @@ class PerfDatabase:
         """
         return self._default_database_mode
 
+    @staticmethod
+    def _normalize_gemm_quant_mode_for_table(quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
+        """
+        Normalize GEMM quant modes for perf table lookup.
+
+        `fp8_static` is a behavioral mode that reuses `fp8` perf tables.
+        """
+        if quant_mode == common.GEMMQuantMode.fp8_static:
+            return common.GEMMQuantMode.fp8
+        return quant_mode
+
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
         self,
@@ -2645,6 +2660,8 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
 
+        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
+
         # SOL and EMPIRICAL modes don't have power/energy data
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0)
@@ -2661,7 +2678,7 @@ class PerfDatabase:
                         f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
                     )
                     raise PerfDataNotAvailableError(msg)
-                if quant_mode not in self._gemm_data:
+                if table_quant_mode not in self._gemm_data:
                     supported = sorted([k.name for k in self._gemm_data])
                     raise PerfDataNotAvailableError(
                         "GEMM perf data not available for requested quant mode. "
@@ -2669,7 +2686,7 @@ class PerfDatabase:
                         f"quant_mode='{quant_mode.name}'. "
                         f"Supported gemm modes: {supported}"
                     )
-                result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
+                result = self._interp_3d(m, n, k, self._gemm_data[table_quant_mode], "cubic")
                 # Result is dict: {"latency": ..., "power": ..., "energy": ...}
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
             except Exception:
@@ -2723,6 +2740,8 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
 
+        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
+
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, k)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
@@ -2738,7 +2757,7 @@ class PerfDatabase:
                         f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
                     )
                     raise PerfDataNotAvailableError(msg)
-                if quant_mode not in self._compute_scale_data:
+                if table_quant_mode not in self._compute_scale_data:
                     supported = sorted([k.name for k in self._compute_scale_data])
                     raise PerfDataNotAvailableError(
                         "Compute scale perf data not available for requested quant mode. "
@@ -2746,7 +2765,7 @@ class PerfDatabase:
                         f"quant_mode='{quant_mode.name}'. "
                         f"Supported modes: {supported}"
                     )
-                result = self._interp_2d_linear(m, k, self._compute_scale_data[quant_mode])
+                result = self._interp_2d_linear(m, k, self._compute_scale_data[table_quant_mode])
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
@@ -2803,6 +2822,8 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
 
+        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
+
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, k)[0], energy=0.0)
         elif database_mode == common.DatabaseMode.SOL_FULL:
@@ -2818,7 +2839,7 @@ class PerfDatabase:
                         f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
                     )
                     raise PerfDataNotAvailableError(msg)
-                if quant_mode not in self._scale_matrix_data:
+                if table_quant_mode not in self._scale_matrix_data:
                     supported = sorted([k.name for k in self._scale_matrix_data])
                     raise PerfDataNotAvailableError(
                         "Scale matrix perf data not available for requested quant mode. "
@@ -2826,7 +2847,7 @@ class PerfDatabase:
                         f"quant_mode='{quant_mode.name}'. "
                         f"Supported modes: {supported}"
                     )
-                result = self._interp_2d_linear(m, k, self._scale_matrix_data[quant_mode])
+                result = self._interp_2d_linear(m, k, self._scale_matrix_data[table_quant_mode])
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:

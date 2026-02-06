@@ -25,7 +25,6 @@ class ModelConfig:
     attention_dp_size: int = 1
     workload_distribution: str = "power_law"
     # quantization options
-    static_quant_mode: bool = False  # use static quantization instead of dynamic
     nextn: int = 0  # at most mtp5
     nextn_accept_rates: list = None
     overwrite_num_layers: int = 0

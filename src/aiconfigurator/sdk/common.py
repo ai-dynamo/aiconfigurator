@@ -535,6 +535,7 @@ class GEMMQuantMode(Enum):
     int8_wo = QuantMapping(1, 1, "int8_wo")  # w8a16
     int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
     fp8 = QuantMapping(1, 2, "fp8")  # w8fp8
+    fp8_static = QuantMapping(1, 2, "fp8_static")  # fp8 with static quantization (compute_scale/scale_matrix modeled)
     sq = QuantMapping(1, 2, "sq")  # w8int8
     fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for trtllm torch ds fp8
     fp8_ootb = QuantMapping(

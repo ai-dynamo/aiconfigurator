@@ -124,11 +124,6 @@ def _add_default_mode_arguments(parser):
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
-    parser.add_argument(
-        "--static_quant_mode",
-        action="store_true",
-        help="Enable static quantization modeling for GEMM (FP8 only).",
-    )
 
 
 def _add_experiments_mode_arguments(parser):
@@ -300,7 +295,6 @@ def build_default_task_configs(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
-    static_quant_mode: bool = False,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
 
@@ -351,37 +345,6 @@ def build_default_task_configs(
     disagg_kwargs["decode_system_name"] = decode_system
     disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
     task_configs["disagg"] = disagg_task
-
-    if static_quant_mode:
-        if str(backend).lower() != common.BackendName.trtllm.value:
-            raise ValueError(
-                "static_quant_mode is currently only supported for backend "
-                f"'{common.BackendName.trtllm.value}', but got backend='{backend}'."
-            )
-
-        def _is_fp8(mode: object) -> bool:
-            name = mode.name if hasattr(mode, "name") else str(mode)
-            return str(name).lower() == common.GEMMQuantMode.fp8.name
-
-        if not _is_fp8(agg_task.config.worker_config.gemm_quant_mode):
-            raise ValueError(
-                "static_quant_mode requires gemm_quant_mode='fp8' for TRTLLM in default mode, "
-                f"but got gemm_quant_mode='{agg_task.config.worker_config.gemm_quant_mode}'."
-            )
-        if not _is_fp8(disagg_task.config.prefill_worker_config.gemm_quant_mode):
-            raise ValueError(
-                "static_quant_mode requires gemm_quant_mode='fp8' for TRTLLM in default mode, "
-                f"but got prefill gemm_quant_mode='{disagg_task.config.prefill_worker_config.gemm_quant_mode}'."
-            )
-        if not _is_fp8(disagg_task.config.decode_worker_config.gemm_quant_mode):
-            raise ValueError(
-                "static_quant_mode requires gemm_quant_mode='fp8' for TRTLLM in default mode, "
-                f"but got decode gemm_quant_mode='{disagg_task.config.decode_worker_config.gemm_quant_mode}'."
-            )
-
-        agg_task.config.worker_config.static_quant_mode = True
-        disagg_task.config.prefill_worker_config.static_quant_mode = True
-        disagg_task.config.decode_worker_config.static_quant_mode = True
 
     return task_configs
 
@@ -803,7 +766,6 @@ def main(args):
             tpot=args.tpot,
             request_latency=args.request_latency,
             prefix=args.prefix,
-            static_quant_mode=bool(getattr(args, "static_quant_mode", False)),
         )
     elif args.mode == "exp":
         try:
