@@ -92,10 +92,36 @@ def get_default_test_cases(ep_size: int) -> list[AlltoallTestCase]:
 
     # Token counts to test (covering prefill and decode scenarios)
     token_counts = [
-        1, 2, 4, 8, 16, 32, 48, 64, 80, 96,
-        128, 160, 192, 256, 320, 384, 512, 768,
-        1024, 1536, 2048, 3072, 4096, 6144,
-        8192, 12288, 16384, 20480, 32768, 65536
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        48,
+        64,
+        80,
+        96,
+        128,
+        160,
+        192,
+        256,
+        320,
+        384,
+        512,
+        768,
+        1024,
+        1536,
+        2048,
+        3072,
+        4096,
+        6144,
+        8192,
+        12288,
+        16384,
+        20480,
+        32768,
+        65536,
     ]
 
     # Model configurations (hidden_size, num_experts, top_k)
@@ -299,7 +325,7 @@ def get_dispatch_data_size_bytes(num_tokens: int, hidden_size: int, moe_dtype: M
         # NVFP4: 0.5 bytes per element (2 values packed in 1 byte) + scale factors
         # Scale factors: 1 scale per 16 elements, stored as uint8
         data_bytes = num_tokens * (hidden_size // 2)  # packed FP4
-        sf_bytes = num_tokens * (hidden_size // 16)   # scale factors
+        sf_bytes = num_tokens * (hidden_size // 16)  # scale factors
         return data_bytes + sf_bytes
     else:
         return num_tokens * hidden_size * 2
@@ -389,6 +415,7 @@ def prepare_test_data(
 @dataclass
 class AlltoallBenchmarkResult:
     """Benchmark results for each operation."""
+
     prepare_latency_ms: float
     dispatch_latency_ms: float
     combine_latency_ms: float
@@ -507,9 +534,7 @@ def benchmark_nvlink_two_sided_alltoall(
     recv_hidden_states = dispatched[0]
 
     # Simulate MoE output: combine always operates on bfloat16 expert output
-    moe_output = torch.randn(
-        recv_hidden_states.shape[0], hidden_size, dtype=torch.bfloat16, device=device
-    )
+    moe_output = torch.randn(recv_hidden_states.shape[0], hidden_size, dtype=torch.bfloat16, device=device)
 
     # ============================================================================
     # Benchmark: alltoall_combine (do_reduce=False, use_low_precision_combine=False)
@@ -548,6 +573,7 @@ def benchmark_nvlink_two_sided_alltoall(
     # Only benchmark for NVFP4 dtype as low_precision_combine is most relevant for it
     # ============================================================================
     if moe_dtype == MoEDtype.NVFP4:
+
         def combine_low_precision_func():
             return MnnvlMoe.mnnvl_moe_alltoallv_combine(
                 moe_output,
@@ -592,7 +618,8 @@ def benchmark_nvlink_two_sided_alltoall(
     combine_latency = sum(all_combine_times) / len(all_combine_times) if all_combine_times else 0.0
     combine_low_precision_latency = (
         sum(all_combine_low_precision_times) / len(all_combine_low_precision_times)
-        if all_combine_low_precision_times else 0.0
+        if all_combine_low_precision_times
+        else 0.0
     )
 
     return AlltoallBenchmarkResult(
@@ -721,9 +748,7 @@ def run_benchmark(
                 dispatch_data_size = get_dispatch_data_size_bytes(
                     test_case.num_tokens, test_case.hidden_size, test_case.moe_dtype
                 )
-                combine_data_size = get_combine_data_size_bytes(
-                    test_case.num_tokens, test_case.hidden_size
-                )
+                combine_data_size = get_combine_data_size_bytes(test_case.num_tokens, test_case.hidden_size)
 
                 dispatch_bw = calculate_bandwidth_gbps(dispatch_data_size, result.dispatch_latency_ms)
                 combine_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_latency_ms)
@@ -740,22 +765,42 @@ def run_benchmark(
 
                 # Log each operation separately
                 log_alltoall_perf(
-                    test_case, "alltoall_prepare", result.prepare_latency_ms,
-                    framework, version, device_name, output_file
+                    test_case,
+                    "alltoall_prepare",
+                    result.prepare_latency_ms,
+                    framework,
+                    version,
+                    device_name,
+                    output_file,
                 )
                 log_alltoall_perf(
-                    test_case, "alltoall_dispatch", result.dispatch_latency_ms,
-                    framework, version, device_name, output_file
+                    test_case,
+                    "alltoall_dispatch",
+                    result.dispatch_latency_ms,
+                    framework,
+                    version,
+                    device_name,
+                    output_file,
                 )
                 log_alltoall_perf(
-                    test_case, "alltoall_combine", result.combine_latency_ms,
-                    framework, version, device_name, output_file
+                    test_case,
+                    "alltoall_combine",
+                    result.combine_latency_ms,
+                    framework,
+                    version,
+                    device_name,
+                    output_file,
                 )
                 if result.combine_low_precision_latency_ms > 0:
                     log_alltoall_perf(
-                        test_case, "alltoall_combine_low_precision", result.combine_low_precision_latency_ms,
-                        framework, version, device_name, output_file
-                )
+                        test_case,
+                        "alltoall_combine_low_precision",
+                        result.combine_low_precision_latency_ms,
+                        framework,
+                        version,
+                        device_name,
+                        output_file,
+                    )
 
         except Exception as e:
             if rank == 0:
@@ -777,7 +822,8 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=str,
         default="wideep_alltoall_perf.txt",
         help="Output file path for performance results (default: wideep_alltoall_perf.txt)",
@@ -812,7 +858,9 @@ def main():
 
     try:
         run_benchmark(
-            rank, world_size, device,
+            rank,
+            world_size,
+            device,
             output_file=args.output,
             num_warmup=args.warmup,
             num_iterations=args.iterations,
