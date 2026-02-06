@@ -155,6 +155,7 @@ class TestQuantizationModes:
 
         assert "float16" in mode_names
         assert "fp8" in mode_names
+        assert "fp8_static" in mode_names
 
     def test_attention_quant_modes_exist(self):
         """Test that attention quantization modes are defined."""
