@@ -2765,7 +2765,27 @@ class PerfDatabase:
                         f"quant_mode='{quant_mode.name}'. "
                         f"Supported modes: {supported}"
                     )
-                result = self._interp_2d_linear(m, k, self._compute_scale_data[table_quant_mode])
+                table = self._compute_scale_data[table_quant_mode]
+                m_i = int(m)
+                k_i = int(k)
+
+                m_keys = sorted(table.keys())
+                m_i = max(m_keys[0], min(m_i, m_keys[-1]))
+
+                k_min = None
+                k_max = None
+                for row in table.values():
+                    if not row:
+                        continue
+                    row_min = min(row.keys())
+                    row_max = max(row.keys())
+                    k_min = row_min if k_min is None else min(k_min, row_min)
+                    k_max = row_max if k_max is None else max(k_max, row_max)
+
+                if k_min is not None and k_max is not None:
+                    k_i = max(k_min, min(k_i, k_max))
+
+                result = self._interp_2d_linear(m_i, k_i, table)
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
@@ -2847,7 +2867,27 @@ class PerfDatabase:
                         f"quant_mode='{quant_mode.name}'. "
                         f"Supported modes: {supported}"
                     )
-                result = self._interp_2d_linear(m, k, self._scale_matrix_data[table_quant_mode])
+                table = self._scale_matrix_data[table_quant_mode]
+                m_i = int(m)
+                k_i = int(k)
+
+                m_keys = sorted(table.keys())
+                m_i = max(m_keys[0], min(m_i, m_keys[-1]))
+
+                k_min = None
+                k_max = None
+                for row in table.values():
+                    if not row:
+                        continue
+                    row_min = min(row.keys())
+                    row_max = max(row.keys())
+                    k_min = row_min if k_min is None else min(k_min, row_min)
+                    k_max = row_max if k_max is None else max(k_max, row_max)
+
+                if k_min is not None and k_max is not None:
+                    k_i = max(k_min, min(k_i, k_max))
+
+                result = self._interp_2d_linear(m_i, k_i, table)
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:

@@ -49,6 +49,12 @@ def test_query_compute_scale_fp8_static_reuses_fp8_table(comprehensive_perf_db):
     assert float(static_result) == pytest.approx(float(fp8_result))
     assert static_result.energy == pytest.approx(fp8_result.energy)
 
+    # Out-of-range m should be clamped to the table range (avoid hard failure in SILICON mode).
+    clamped = comprehensive_perf_db.query_compute_scale(10_000, k, common.GEMMQuantMode.fp8_static)
+    fp8_max_m = comprehensive_perf_db.query_compute_scale(128, k, common.GEMMQuantMode.fp8)
+    assert float(clamped) == pytest.approx(float(fp8_max_m))
+    assert clamped.energy == pytest.approx(fp8_max_m.energy)
+
 
 def test_query_scale_matrix_fp8_static_reuses_fp8_table(comprehensive_perf_db):
     comprehensive_perf_db._scale_matrix_data = {
@@ -70,6 +76,12 @@ def test_query_scale_matrix_fp8_static_reuses_fp8_table(comprehensive_perf_db):
 
     assert float(static_result) == pytest.approx(float(fp8_result))
     assert static_result.energy == pytest.approx(fp8_result.energy)
+
+    # Out-of-range m should be clamped to the table range (avoid hard failure in SILICON mode).
+    clamped = comprehensive_perf_db.query_scale_matrix(10_000, k, common.GEMMQuantMode.fp8_static)
+    fp8_max_m = comprehensive_perf_db.query_scale_matrix(128, k, common.GEMMQuantMode.fp8)
+    assert float(clamped) == pytest.approx(float(fp8_max_m))
+    assert clamped.energy == pytest.approx(fp8_max_m.energy)
 
 
 def test_gemm_query_subtracts_overheads_only_for_fp8_static_and_qwen_proj_fc2():
