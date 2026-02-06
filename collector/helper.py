@@ -229,43 +229,53 @@ def benchmark_with_power(
             )
     else:
         # Normal warmup
-        torch.cuda.synchronize()
-        for _ in range(num_warmups):
-            kernel_func()
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            for _ in range(num_warmups):
+                kernel_func()
+            torch.cuda.synchronize()
+        elif torch.xpu.is_available():
+            torch.xpu.synchronize()
+            for _ in range(num_warmups):
+                kernel_func()
+            torch.xpu.synchronize()
 
     # ═══════════════════════════════════════════════════════════════════
     # CUDA Graph Capture with Optional Fallback
     # ═══════════════════════════════════════════════════════════════════
-    use_graph = True
-    g = torch.cuda.CUDAGraph()
+    if torch.cuda.is_available():
+        use_graph = True
+        g = torch.cuda.CUDAGraph()
 
-    try:
-        with torch.cuda.graph(g):
-            for _ in range(repeat_n):
-                kernel_func()
-        torch.cuda.synchronize()
-    except Exception as e:
-        if allow_graph_fail:
-            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
-            torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
-            use_graph = False
-        else:
-            # Standard behavior: re-raise exception
-            raise
+        try:
+            with torch.cuda.graph(g):
+                for _ in range(repeat_n):
+                    kernel_func()
+            torch.cuda.synchronize()
+        except Exception as e:
+            if allow_graph_fail:
+                logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
+                torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
+                use_graph = False
+            else:
+                # Standard behavior: re-raise exception
+                raise
+    else:
+        use_graph = False
 
     # ═══════════════════════════════════════════════════════════════════
     # Warmup the ACTUAL execution path (after graph capture)
     # ═══════════════════════════════════════════════════════════════════
-    torch.cuda.synchronize()
-    for _ in range(num_warmups):
-        if use_graph:
-            g.replay()
-        else:
-            # Fallback: Direct execution matching actual execution path
-            for _ in range(repeat_n):
-                kernel_func()
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        for _ in range(num_warmups):
+            if use_graph:
+                g.replay()
+            else:
+                # Fallback: Direct execution matching actual execution path
+                for _ in range(repeat_n):
+                    kernel_func()
+        torch.cuda.synchronize()
 
     # Initialize power monitor if enabled
     power_monitor = None
@@ -289,20 +299,29 @@ def benchmark_with_power(
     # ═══════════════════════════════════════════════════════════════════
     # Execute with Graph or Eager (both paths measured!)
     # ═══════════════════════════════════════════════════════════════════
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    if torch.cuda.is_available():
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
 
-    start_event.record()
-    for _ in range(actual_num_runs):
-        if use_graph:
-            g.replay()
-        else:
-            # Fallback: Direct execution
-            # This matches SGLang/VLLM pattern where kernel_func handles internal loops
-            for _ in range(repeat_n):
-                kernel_func()
-    end_event.record()
-    torch.cuda.synchronize()
+        start_event.record()
+        for _ in range(actual_num_runs):
+            if use_graph:
+                g.replay()
+            else:
+                # Fallback: Direct execution
+                # This matches SGLang/VLLM pattern where kernel_func handles internal loops
+                for _ in range(repeat_n):
+                    kernel_func()
+        end_event.record()
+        torch.cuda.synchronize()
+    elif torch.xpu.is_available():
+        start_event = torch.xpu.Event(enable_timing=True)
+        end_event = torch.xpu.Event(enable_timing=True)
+        start_event.record()
+        for i in range(actual_num_runs):
+            kernel_func()
+        end_event.record()
+        torch.xpu.synchronize()
 
     # Check for throttling
     throttled = False
@@ -577,6 +596,8 @@ def get_sm_version():
             device = torch.cuda.current_device()
             capability = torch.cuda.get_device_capability(device)
             return capability[0] * 10 + capability[1]
+        elif torch.xpu.is_available():
+            return -1
     except Exception:
         pass
 
