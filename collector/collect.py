@@ -345,10 +345,6 @@ def collect_ops(
 
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
-            #print(f"Collecting {collection['name']}.{collection['type']}")
-            #print(f"get_func: {get_func}")
-            #print(f"run_func: {run_func}")
-            #print(f"num_processes: {num_processes}")
             errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
             all_errors.extend(errors)
 
