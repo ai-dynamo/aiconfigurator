@@ -135,5 +135,3 @@ def test_gemm_query_subtracts_overheads_only_for_fp8_static_and_qwen_proj_fc2():
     assert float(result3) == pytest.approx(10.0)
     assert result3.energy == pytest.approx(100.0)
     assert db3.calls == [("gemm", common.GEMMQuantMode.fp8)]
-
-
