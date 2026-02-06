@@ -442,6 +442,12 @@ class EventHandler:
             ],
         )
 
+        model_misc_config_components["enable_wideep"].change(
+            fn=EventFn.update_eplb_mode,
+            inputs=[model_misc_config_components["enable_wideep"]],
+            outputs=[model_misc_config_components["wideep_eplb_mode"]],
+        )
+
     @staticmethod
     def setup_model_path_events(
         model_path_components,

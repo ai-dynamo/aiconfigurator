@@ -1243,6 +1243,14 @@ class EventFn:
         return gr.update(choices=version_choices, value=None, interactive=True)
 
     @staticmethod
+    def update_eplb_mode(enable_wideep):
+        """Update wideep_eplb_mode interactivity based on enable_wideep state."""
+        if enable_wideep:
+            return gr.update(interactive=True)
+        else:
+            return gr.update(value="off", interactive=False)
+
+    @staticmethod
     def update_model_related_components(model_path):
         # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
         if models.get_model_family(model_path) == "DEEPSEEK":
