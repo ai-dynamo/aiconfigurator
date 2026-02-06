@@ -20,6 +20,7 @@ from jinja2 import Environment, FileSystemLoader, Undefined
 from .rule_engine import apply_rule_plugins
 
 _JINJA_ENV = Environment(trim_blocks=True, lstrip_blocks=True)
+_JINJA_ENV.filters.setdefault("multiply", lambda value, factor: value * factor)
 _TEMPLATE_ENV_CACHE: dict[str, Environment] = {}
 logger = logging.getLogger(__name__)
 _YAML_CACHE: dict[str, Any] = {}
@@ -61,11 +62,14 @@ def render_backend_templates(
     # 3. _workers/ for backend-specific worker macros
     env = _TEMPLATE_ENV_CACHE.get(templates_dir)
     if env is None:
+        benchmark_dir = str(_TEMPLATE_ROOT / "benchmark")
         search_paths = [
             templates_dir,
             str(_TEMPLATE_ROOT / "_common"),
             str(_TEMPLATE_ROOT / "_workers"),
         ]
+        if os.path.isdir(benchmark_dir):
+            search_paths.append(benchmark_dir)
         env = Environment(loader=FileSystemLoader(search_paths), trim_blocks=True, lstrip_blocks=True)
         _TEMPLATE_ENV_CACHE[templates_dir] = env
 
@@ -262,7 +266,7 @@ def render_backend_templates(
     context["decode_gpu"] = decode_gpu
     context["agg_gpu"] = agg_gpu
 
-    # Render auxiliary templates (k8s deploy and run script)
+    # Render auxiliary templates (k8s deploy, benchmark, and run script)
     # k8s deploy: single file
     k8s_aux = template_path / "k8s_deploy.yaml.j2"
     if k8s_aux.exists():
@@ -272,6 +276,27 @@ def render_backend_templates(
             rendered_templates["k8s_deploy.yaml"] = rendered
         except Exception as e:
             logger.warning(f"Failed to render template k8s_deploy.yaml.j2: {e}")
+
+    # benchmark job: single file from shared benchmark template folder
+    bench_dir = _TEMPLATE_ROOT / "benchmark"
+    bench_aux = bench_dir / "k8s_bench.yaml.j2"
+    if bench_aux.exists():
+        try:
+            tmpl = env.get_template("k8s_bench.yaml.j2")
+            rendered = tmpl.render(**context)
+            rendered_templates["k8s_bench.yaml"] = rendered
+        except Exception as e:
+            logger.warning(f"Failed to render template k8s_bench.yaml.j2: {e}")
+
+    # benchmark run script: single file from shared benchmark template folder
+    bench_run_aux = bench_dir / "bench_run.sh.j2"
+    if bench_run_aux.exists():
+        try:
+            tmpl = env.get_template("bench_run.sh.j2")
+            rendered = tmpl.render(**context)
+            rendered_templates["bench_run.sh"] = rendered
+        except Exception as e:
+            logger.warning(f"Failed to render template bench_run.sh.j2: {e}")
 
     # run scripts: generate per-node scripts when disagg; single when agg
     run_aux = template_path / "run.sh.j2"
@@ -494,6 +519,60 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     node_config = param_values.get("NodeConfig", {})
     if isinstance(node_config, dict):
         context["NodeConfig"] = dict(node_config)
+
+    # SLA + benchmark configuration (used by k8s_bench.yaml)
+    sla_config = param_values.get("SlaConfig", {})
+    if isinstance(sla_config, dict):
+        context["SlaConfig"] = dict(sla_config)
+    bench_config = param_values.get("BenchConfig", {}) or {}
+    if isinstance(bench_config, dict):
+        context["BenchConfig"] = dict(bench_config)
+
+    def _safe_int(value: Any, default: int) -> int:
+        if value is None or value == "":
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _ensure_int_list(value: Any, fallback: list[int]) -> list[int]:
+        if value is None:
+            return list(fallback)
+        if isinstance(value, (list, tuple)):
+            return [int(v) for v in value]
+        if isinstance(value, str):
+            parts = [p for p in value.replace(",", " ").split() if p]
+            if parts:
+                return [int(p) for p in parts]
+        try:
+            return [int(value)]
+        except (TypeError, ValueError):
+            return list(fallback)
+
+    bench_concurrency = _ensure_int_list(
+        bench_config.get("concurrency"),
+        [2, 4, 8, 16, 32, 64, 128],
+    )
+    bench_num_requests = _ensure_int_list(
+        bench_config.get("num_requests"),
+        [v * 10 for v in bench_concurrency],
+    )
+
+    context["bench_job_name"] = bench_config.get("name")
+    context["bench_image"] = bench_config.get("image")
+    context["bench_profile_start_timeout"] = _safe_int(bench_config.get("profile_start_timeout"), 400)
+    context["bench_model"] = bench_config.get("model")
+    context["bench_tokenizer"] = bench_config.get("tokenizer")
+    context["bench_endpoint_type"] = bench_config.get("endpoint_type")
+    context["bench_endpoint_url"] = bench_config.get("endpoint_url")
+    context["bench_isl"] = _safe_int(bench_config.get("isl"), 0)
+    context["bench_osl"] = _safe_int(bench_config.get("osl"), 0)
+    context["bench_isl_stddev"] = _safe_int(bench_config.get("isl_stddev"), 0)
+    context["bench_osl_stddev"] = _safe_int(bench_config.get("osl_stddev"), 0)
+    context["bench_num_requests"] = bench_num_requests
+    context["bench_concurrency"] = bench_concurrency
+    context["bench_ui"] = bench_config.get("ui")
 
     # Load backend_config_mapping.yaml to understand parameter mappings
     mapping_data = load_yaml_mapping(_BACKEND_MAPPING_FILE)
