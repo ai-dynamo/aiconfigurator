@@ -61,24 +61,24 @@ fi
 echo "================================================"
 
 # NCCL
-num_gpus_nccl=(2 4 8)
-nccl_ops=("all_gather" "alltoall" "reduce_scatter" "all_reduce")
-dtypes=("half" "int8")
-
-for n in "${num_gpus_nccl[@]}"; do
-    for op in "${nccl_ops[@]}"; do
-        for dtype in "${dtypes[@]}"; do
-            if [[ "$measure_power" == "true" ]]; then
-                python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype" \
-                    --measure_power --power_test_duration_sec "$power_test_duration"
-            else
-                python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype"
-            fi
-        done
-    done
-done
-
-echo "Running AllReduce Benchmarks with $all_reduce_backend backend..."
+#num_gpus_nccl=(2 4 8)
+#nccl_ops=("all_gather" "alltoall" "reduce_scatter" "all_reduce")
+#dtypes=("half" "int8")
+#
+#for n in "${num_gpus_nccl[@]}"; do
+#    for op in "${nccl_ops[@]}"; do
+#        for dtype in "${dtypes[@]}"; do
+#            if [[ "$measure_power" == "true" ]]; then
+#                python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype" \
+#                    --measure_power --power_test_duration_sec "$power_test_duration"
+#            else
+#                python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype"
+#            fi
+#        done
+#    done
+#done
+#
+#echo "Running AllReduce Benchmarks with $all_reduce_backend backend..."
 num_gpus_allreduce=(2 4 8)
 
 if [[ "$all_reduce_backend" == "trtllm" ]]; then
