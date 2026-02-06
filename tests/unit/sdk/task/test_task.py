@@ -412,9 +412,7 @@ def test_trtllm_moe_configs():
     )
     assert agg_cfg.dp_list == [2, 4, 8, 16, 32, 64], f"Expected [2, 4, 8, 16, 32, 64], got {agg_cfg.dp_list}"
     assert agg_cfg.moe_tp_list == [1], f"Expected [1], got {agg_cfg.moe_tp_list}"
-    assert agg_cfg.moe_ep_list == [2, 4, 8, 16, 32, 64], (
-        f"Expected [2, 4, 8, 16, 32, 64], got {agg_cfg.moe_ep_list}"
-    )
+    assert agg_cfg.moe_ep_list == [2, 4, 8, 16, 32, 64], f"Expected [2, 4, 8, 16, 32, 64], got {agg_cfg.moe_ep_list}"
 
     # Test 2: trtllm + MoE + wideep + disagg on gb200
     task_disagg = TaskConfig(
@@ -435,9 +433,7 @@ def test_trtllm_moe_configs():
     )
     assert prefill_cfg.dp_list == [2, 4, 8, 16, 32], f"Expected [2, 4, 8, 16, 32], got {prefill_cfg.dp_list}"
     assert prefill_cfg.moe_tp_list == [1], f"Expected [1], got {prefill_cfg.moe_tp_list}"
-    assert prefill_cfg.moe_ep_list == [2, 4, 8, 16, 32], (
-        f"Expected [2, 4, 8, 16, 32], got {prefill_cfg.moe_ep_list}"
-    )
+    assert prefill_cfg.moe_ep_list == [2, 4, 8, 16, 32], f"Expected [2, 4, 8, 16, 32], got {prefill_cfg.moe_ep_list}"
 
     # Verify decode config
     assert decode_cfg.num_gpu_per_worker == [2, 4, 8, 16, 32, 64], (
