@@ -1404,14 +1404,12 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
 
         # 1. Attention DP must be enabled for WideEP
         assert attention_dp_size > 1, (
-            f"WideEP requires attention_dp_size > 1, got {attention_dp_size}. "
-            "Attention DP should be used with WideEP."
+            f"WideEP requires attention_dp_size > 1, got {attention_dp_size}. Attention DP should be used with WideEP."
         )
 
         # 2. EP size must be > 1 for WideEP (parallel_size > 1)
         assert moe_ep_size > 1, (
-            f"WideEP requires moe_ep_size > 1, got {moe_ep_size}. "
-            "WideEP should only be enabled with parallel_size > 1."
+            f"WideEP requires moe_ep_size > 1, got {moe_ep_size}. WideEP should only be enabled with parallel_size > 1."
         )
 
         # 3. EP size must be > top_k for AlltoAll to be effective
@@ -1465,9 +1463,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     kvcache_quant_mode,
                     fmha_quant_mode,
                 ),
-                ops.GEMM(
-                    "context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode
-                ),
+                ops.GEMM("context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
             ]
         )

@@ -1316,9 +1316,7 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
         # Check if power columns exist (backward compatibility)
         has_power = len(rows) > 0 and "power" in rows[0]
         if not has_power:
-            logger.debug(
-                f"Legacy database format detected in {wideep_moe_compute_file} - power will default to 0.0"
-            )
+            logger.debug(f"Legacy database format detected in {wideep_moe_compute_file} - power will default to 0.0")
 
         # Check if kernel_source column exists
         has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
@@ -1416,16 +1414,12 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
         # Check if num_nodes column exists
         has_num_nodes = len(rows) > 0 and "num_nodes" in rows[0]
         if not has_num_nodes:
-            logger.debug(
-                f"num_nodes column not found in {wideep_alltoall_file} - will be computed as moe_ep_size // 4"
-            )
+            logger.debug(f"num_nodes column not found in {wideep_alltoall_file} - will be computed as moe_ep_size // 4")
 
         # Check if kernel_source column exists
         has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
         if not has_kernel_source:
-            logger.debug(
-                f"kernel_source column not found in {wideep_alltoall_file} - will default to 'MnnvlMoe'"
-            )
+            logger.debug(f"kernel_source column not found in {wideep_alltoall_file} - will default to 'MnnvlMoe'")
 
         for row in rows:
             op_name = row["op_name"]  # alltoall_prepare, alltoall_dispatch, alltoall_combine, etc.
@@ -2180,10 +2174,7 @@ class PerfDatabase:
             elif available_kernels:
                 # Fallback to any available kernel
                 fallback = available_kernels[0]
-                logger.debug(
-                    f"Preferred All2All kernel '{preferred}' not available, "
-                    f"falling back to '{fallback}'"
-                )
+                logger.debug(f"Preferred All2All kernel '{preferred}' not available, falling back to '{fallback}'")
                 return fallback
 
         return preferred
@@ -2228,10 +2219,7 @@ class PerfDatabase:
             elif available_kernels:
                 # Fallback to any available kernel
                 fallback = available_kernels[0]
-                logger.debug(
-                    f"Preferred MoE kernel '{preferred}' not available, "
-                    f"falling back to '{fallback}'"
-                )
+                logger.debug(f"Preferred MoE kernel '{preferred}' not available, falling back to '{fallback}'")
                 return fallback
 
         return preferred
@@ -4559,7 +4547,6 @@ class PerfDatabase:
                                                     window_size
                                                 ][n][b][s] = float(sol)
 
-
     def query_wideep_moe_compute(
         self,
         num_tokens: int,
@@ -4627,13 +4614,11 @@ class PerfDatabase:
                 used_distribution = available_distributions[0] if available_distributions else None
                 if used_distribution is None:
                     raise KeyError(f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}")
-                logger.debug(
-                    f"Distribution '{workload_distribution}' not found, using '{used_distribution}' instead"
-                )
+                logger.debug(f"Distribution '{workload_distribution}' not found, using '{used_distribution}' instead")
 
-            moe_dict = kernel_data[quant_mode][used_distribution][topk][num_experts][
-                hidden_size
-            ][inter_size][num_slots][moe_tp_size][moe_ep_size]
+            moe_dict = kernel_data[quant_mode][used_distribution][topk][num_experts][hidden_size][inter_size][
+                num_slots
+            ][moe_tp_size][moe_ep_size]
 
             num_left, num_right = self._nearest_1d_point_helper(
                 num_tokens,
@@ -4742,9 +4727,7 @@ class PerfDatabase:
 
         try:
             kernel_data = self._wideep_alltoall_data[kernel_source]
-            alltoall_dict = kernel_data[op_name][quant_mode][node_num][hidden_size][topk][num_experts][
-                moe_ep_size
-            ]
+            alltoall_dict = kernel_data[op_name][quant_mode][node_num][hidden_size][topk][num_experts][moe_ep_size]
 
             num_left, num_right = self._nearest_1d_point_helper(
                 num_tokens,

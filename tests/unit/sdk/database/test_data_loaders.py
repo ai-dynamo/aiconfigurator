@@ -656,4 +656,3 @@ def test_load_wideep_moe_compute_data(tmp_path):
     # Verify EPLB entry: power_law_1.01_eplb, num_slots=288
     result_eplb = data[kernel_source][qm]["power_law_1.01_eplb"][8][256][7168][2048][288][1][4][1]
     assert result_eplb["latency"] == pytest.approx(0.07909759879112244)
-
