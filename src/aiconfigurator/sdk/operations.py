@@ -191,8 +191,24 @@ class GEMM(Operation):
                 energy -= scale_matrix_result.energy
 
         # Ensure non-negative latency and energy
-        latency = max(0.0, latency)
-        energy = max(0.0, energy)
+        latency_clamped = max(0.0, latency)
+        energy_clamped = max(0.0, energy)
+        if latency_clamped != latency or energy_clamped != energy:
+            logger.warning(
+                "GEMM.query clamped latency/energy to 0.0. "
+                "op=%s model=%s m=%s n=%s k=%s quant_mode=%s post_sub(lat=%.6f, eng=%.6f)",
+                self._name,
+                model_name,
+                x,
+                self._n,
+                self._k,
+                quant_mode.name,
+                latency,
+                energy,
+            )
+
+        latency = latency_clamped
+        energy = energy_clamped
 
         return PerformanceResult(
             latency=latency * self._scale_factor,
