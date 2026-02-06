@@ -601,6 +601,14 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             "get_func": "get_gemm_test_cases",
             "run_func": "run_gemm",
         },
+        # Computescale collections
+        {
+            "name": "trtllm",
+            "type": "compute_scale",
+            "module": "collector.trtllm.collect_computescale",
+            "get_func": "get_computescale_test_cases",
+            "run_func": "run_computescale",
+        },
         # MLA collections
         {
             "name": "trtllm",
@@ -730,6 +738,7 @@ def main():
         type=str,
         choices=[
             "gemm",
+            "compute_scale",
             "mla_context",
             "mla_generation",
             "attention_context",

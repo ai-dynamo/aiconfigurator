@@ -579,7 +579,7 @@ class EventFn:
                 assert prefill_database is not None
                 assert decode_database is not None
                 prefill_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
-                decode_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
+                decode_database.set_default_database_mode(common.DatabaseMode[decode_database_mode])
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 prefill_model_config = config.ModelConfig(
                     tp_size=prefill_tp_size,
@@ -1147,6 +1147,7 @@ class EventFn:
                 gr.update(choices=[], value=None, interactive=True),
                 gr.update(choices=[], value=None, interactive=True),
                 gr.update(choices=[], value=None, interactive=True),
+                gr.update(value=False, interactive=False),
             )
         database_dict = get_all_databases()
         supported_quant_mode = database_dict[system_name][backend_name][version].supported_quant_mode
@@ -1189,10 +1190,11 @@ class EventFn:
             moe_quant_mode_choices if len(moe_quant_mode_choices) > 0 else [common.MoEQuantMode.float16.name]
         )
 
+        default_gemm_quant_mode = gemm_quant_mode_choices[0]
         return (
             gr.update(
                 choices=gemm_quant_mode_choices,
-                value=gemm_quant_mode_choices[0],
+                value=default_gemm_quant_mode,
                 interactive=True,
             ),
             gr.update(
@@ -1225,10 +1227,24 @@ class EventFn:
         )
 
     @staticmethod
+    def update_backend_choices_with_quant_toggles(system_name):
+        backend_update, version_update = EventFn.update_backend_choices(system_name)
+        return backend_update, version_update
+
+    @staticmethod
     def update_version_choices(system_name, backend_name):
         database_dict = get_all_databases()
         version_choices = sorted(database_dict[system_name][backend_name].keys(), reverse=True)
         return gr.update(choices=version_choices, value=None, interactive=True)
+
+    @staticmethod
+    def update_version_choices_with_quant_toggles(system_name, backend_name):
+        if not backend_name:
+            # Backend not selected yet.
+            return gr.update(choices=None, value=None, interactive=True)
+
+        version_update = EventFn.update_version_choices(system_name, backend_name)
+        return version_update
 
     @staticmethod
     def update_model_related_components(model_path):

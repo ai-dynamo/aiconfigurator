@@ -116,6 +116,24 @@ def test_taskconfig_profile_application():
     assert any(layer.startswith("profile:fp8_default") for layer in cfg.applied_layers)
 
 
+def test_taskconfig_fp8_static_requires_trtllm_backend():
+    with pytest.raises(ValueError, match=r"fp8_static"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="sglang",
+            yaml_config={
+                "mode": "patch",
+                "config": {
+                    "worker_config": {
+                        "gemm_quant_mode": "fp8_static",
+                    }
+                },
+            },
+        )
+
+
 def test_taskconfig_total_gpus_limits_agg_workers():
     task = TaskConfig(
         serving_mode="agg",
