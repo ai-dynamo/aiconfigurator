@@ -12,6 +12,7 @@ Supported modes:
 - wideep_with_eplb_redundant: WideEP with EPLB on + redundant slots (num_slots > num_experts)
 """
 
+import os
 import re
 import subprocess as sp
 from typing import Optional
@@ -47,8 +48,6 @@ WIDEEP_MODES = [
 
 def build_base_cmd(batch_size: int, isl: int, osl: int) -> list[str]:
     """Build the base command common to all tests."""
-    import os
-
     # Get the path to the CLI script relative to the test file location
     test_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(test_dir, "..", "..", ".."))
@@ -180,11 +179,6 @@ class TestTrtLLMWideEPComparison:
         cmd = build_cmd(1, 1024, 256, enable_wideep=enable_wideep, eplb_mode=eplb_mode, num_slots=num_slots)
         result = sp.run(cmd, capture_output=True, text=True)
 
-        print(f"\n--- {description} ({mode_name}) ---")
-        print("STDOUT:", result.stdout)
-        if result.stderr:
-            print("STDERR:", result.stderr)
-
         assert result.returncode == 0, f"{description} test failed: {result.stderr}"
 
         output = result.stdout + result.stderr
@@ -204,13 +198,9 @@ class TestTrtLLMWideEPComparison:
     @pytest.mark.parametrize("batch_size,isl,osl,test_desc", TEST_MATRIX)
     def test_compare_all_modes(self, batch_size: int, isl: int, osl: int, test_desc: str):
         """Compare all WideEP/EPLB modes for various configurations."""
-
-        print("\n" + "=" * 80)
-        print(f"Test: {test_desc} - Batch: {batch_size}, ISL: {isl}, OSL: {osl}")
-        print("=" * 80)
+        aic_debug = int(os.getenv("AIC_DEBUG", "0"))
 
         results = {}
-        metrics = {}
 
         # Run all modes
         for mode_name, enable_wideep, eplb_mode, num_slots, description in WIDEEP_MODES:
@@ -218,45 +208,21 @@ class TestTrtLLMWideEPComparison:
             result = sp.run(cmd, capture_output=True, text=True)
             results[mode_name] = result
 
-            if result.returncode != 0:
-                print(f"\n{mode_name} FAILED!")
-                print("STDERR:", result.stderr)
-                print("STDOUT:", result.stdout)
-            else:
-                metrics[mode_name] = extract_metrics(result.stdout)
-                print(f"\n--- {mode_name}: {description} ---")
-                print(f"Metrics: {metrics[mode_name]}")
-
         # All modes should succeed
         for mode_name, result in results.items():
             assert result.returncode == 0, f"{mode_name} test failed: {result.stderr}"
 
-        # Print comparison table
-        print("\n" + "-" * 80)
-        print("Performance Comparison:")
-        print("-" * 80)
-
-        # Use standard as baseline
-        if metrics.get("standard"):
-            baseline = metrics["standard"]
-            for mode_name, mode_metrics in metrics.items():
-                if mode_name == "standard":
-                    continue
-                print(f"\n{mode_name} vs standard:")
-                for key in mode_metrics:
-                    if key in baseline and baseline[key] > 0:
-                        improvement = ((baseline[key] - mode_metrics[key]) / baseline[key]) * 100
-                        print(f"  {key}: {mode_metrics[key]:.2f} (improvement: {improvement:+.1f}%)")
+        if aic_debug >= 1:
+            print(f"\n[AIC_DEBUG] {test_desc} (batch={batch_size}, isl={isl}, osl={osl})")
+            for mode_name, result in results.items():
+                metrics = extract_metrics(result.stdout)
+                print(f"  {mode_name}: {metrics}")
 
     @pytest.mark.build
     def test_standard_basic(self):
         """Quick test to verify standard TrtLLM is working correctly."""
         cmd = build_standard_cmd(1, 1024, 256)
         result = sp.run(cmd, capture_output=True, text=True)
-
-        print("STDOUT:", result.stdout)
-        if result.stderr:
-            print("STDERR:", result.stderr)
 
         assert result.returncode == 0, f"Standard test failed: {result.stderr}"
 
@@ -269,10 +235,6 @@ class TestTrtLLMWideEPComparison:
         """Quick test to verify WideEP (EPLB off) is working correctly."""
         cmd = build_wideep_cmd(1, 1024, 256, eplb_mode="off", num_slots=256)
         result = sp.run(cmd, capture_output=True, text=True)
-
-        print("STDOUT:", result.stdout)
-        if result.stderr:
-            print("STDERR:", result.stderr)
 
         assert result.returncode == 0, f"WideEP test failed: {result.stderr}"
 
@@ -289,10 +251,6 @@ class TestTrtLLMWideEPComparison:
         cmd = build_wideep_cmd(1, 1024, 256, eplb_mode="on", num_slots=256)
         result = sp.run(cmd, capture_output=True, text=True)
 
-        print("STDOUT:", result.stdout)
-        if result.stderr:
-            print("STDERR:", result.stderr)
-
         assert result.returncode == 0, f"WideEP with EPLB test failed: {result.stderr}"
 
         output = result.stdout + result.stderr
@@ -304,10 +262,6 @@ class TestTrtLLMWideEPComparison:
         """Quick test to verify WideEP with EPLB redundant (num_slots=288) is working correctly."""
         cmd = build_wideep_cmd(1, 1024, 256, eplb_mode="on", num_slots=288)
         result = sp.run(cmd, capture_output=True, text=True)
-
-        print("STDOUT:", result.stdout)
-        if result.stderr:
-            print("STDERR:", result.stderr)
 
         assert result.returncode == 0, f"WideEP with EPLB redundant test failed: {result.stderr}"
 

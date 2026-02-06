@@ -4702,13 +4702,11 @@ class PerfDatabase:
 
         # Compute node_num if not provided
         if node_num is None:
-            if moe_ep_size % 4 != 0:
-                raise ValueError(
-                    f"moe_ep_size={moe_ep_size} must be divisible by 4 when node_num is not specified. "
-                    "Please provide node_num explicitly or use an ep_size that is a multiple of 4."
-                )
-            node_num = moe_ep_size // 4
-            logger.debug(f"query_wideep_alltoall: node_num not specified, using moe_ep_size // 4 = {node_num}")
+            if moe_ep_size < 4:
+                node_num = 1
+            else:
+                node_num = moe_ep_size // 4
+            logger.debug(f"query_wideep_alltoall: node_num not specified, using {node_num} (moe_ep_size={moe_ep_size})")
 
         if self._wideep_alltoall_data is None:
             raise PerfDataNotAvailableError(

@@ -1403,14 +1403,18 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # Based on TensorRT-LLM WideEPMoE constraints (fused_moe_wide_ep.py)
 
         # 1. Attention DP must be enabled for WideEP
-        assert attention_dp_size > 1, (
-            f"WideEP requires attention_dp_size > 1, got {attention_dp_size}. Attention DP should be used with WideEP."
-        )
+        if attention_dp_size <= 1:
+            raise ValueError(
+                f"WideEP requires attention_dp_size > 1, got {attention_dp_size}. "
+                "Attention DP should be used with WideEP."
+            )
 
         # 2. EP size must be > 1 for WideEP (parallel_size > 1)
-        assert moe_ep_size > 1, (
-            f"WideEP requires moe_ep_size > 1, got {moe_ep_size}. WideEP should only be enabled with parallel_size > 1."
-        )
+        if moe_ep_size <= 1:
+            raise ValueError(
+                f"WideEP requires moe_ep_size > 1, got {moe_ep_size}. "
+                "WideEP should only be enabled with parallel_size > 1."
+            )
 
         # 3. EP size must be > top_k for AlltoAll to be effective
         # FIXME: this warning should make the comm mode fallback to NCCL!!
@@ -1424,14 +1428,15 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         wideep_num_slots = self.config.wideep_num_slots if self.config.wideep_num_slots else num_experts
 
         # num_slots must be >= num_experts
-        assert wideep_num_slots >= num_experts, (
-            f"wideep_num_slots ({wideep_num_slots}) must be >= num_experts ({num_experts}). "
-            "There should be at least num_experts slots in the model engine."
-        )
+        if wideep_num_slots < num_experts:
+            raise ValueError(
+                f"wideep_num_slots ({wideep_num_slots}) must be >= num_experts ({num_experts}). "
+                "There should be at least num_experts slots in the model engine."
+            )
 
         # When EPLB is off, num_slots must equal num_experts
-        if not eplb_enabled:
-            assert wideep_num_slots == num_experts, (
+        if not eplb_enabled and wideep_num_slots != num_experts:
+            raise ValueError(
                 f"When wideep_eplb_mode='off', wideep_num_slots ({wideep_num_slots}) must equal "
                 f"num_experts ({num_experts}). Redundant slots require EPLB to be enabled."
             )
