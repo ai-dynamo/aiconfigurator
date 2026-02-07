@@ -7,9 +7,9 @@
 #
 # Usage: bash submit_slurm.sh
 
-SCRIPT_DIR="/workspace/aiconfigurator/collector/slurm_comm_collector"
+SCRIPT_DIR="${HOME}/repo/aiconfigurator/collector/slurm_comm_collector"
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1}}"
-CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-$HOME/repo/aiconfigurator:/workspace/aiconfigurator}"
+CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-$SCRIPT_DIR:$SCRIPT_DIR}"
 ACCOUNT="${ACCOUNT:-coreai_tritoninference_triton3}"
 PARTITION="${PARTITION:-gb200}"
 
@@ -38,7 +38,7 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
         TASKS_PER_NODE=${GPUS_PER_NODE}
     fi
     
-    JOB_NAME="wideep_${NUM_GPUS}gpu"
+    JOB_NAME="${ACCOUNT}-wideep.${NUM_GPUS}gpu"
     
     echo "Submitting: ${JOB_NAME} (${NUM_NODES} nodes, ${NUM_GPUS} GPUs)"
     
