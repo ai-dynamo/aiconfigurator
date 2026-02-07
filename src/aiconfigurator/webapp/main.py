@@ -35,7 +35,7 @@ def configure_parser(parser):
         type=str,
         default=None,
         help=(
-            "Systems search paths (comma or OS path-sep). Use 'default' for the built-in systems path. "
+            "Systems search paths (comma-separated). Use 'default' for the built-in systems path. "
             "Example: default,/opt/aic/systems,/data/aic/systems."
         ),
     )

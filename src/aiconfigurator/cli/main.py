@@ -44,7 +44,7 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Systems search paths (comma or OS path-sep). Use 'default' for the built-in systems path. "
+            "Systems search paths (comma-separated). Use 'default' for the built-in systems path. "
             "Example: default,/opt/aic/systems,/data/aic/systems."
         ),
     )
