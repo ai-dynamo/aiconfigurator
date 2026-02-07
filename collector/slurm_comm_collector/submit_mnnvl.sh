@@ -7,11 +7,11 @@
 #
 # Usage: bash submit_slurm.sh
 
-SCRIPT_DIR="/path/to/aiconfigurator/collector/slurm_comm_collector"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/path/to/tensorrt-llm.sqsh}"
-CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-/yourdata:/yourdata}"
-ACCOUNT="${ACCOUNT:-your account}"
-PARTITION="${PARTITION:-your partition}"
+SCRIPT_DIR="/workspace/aiconfigurator/collector/slurm_comm_collector"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1}}"
+CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-$HOME/repo/aiconfigurator:/workspace/aiconfigurator}"
+ACCOUNT="${ACCOUNT:-coreai_tritoninference_triton3}"
+PARTITION="${PARTITION:-gb200}"
 
 COLLECTOR_SCRIPT="${SCRIPT_DIR}/collect_trtllm_alltoall.py"
 OUTPUT_FILE="${SCRIPT_DIR}/results/wideep_alltoall_perf.txt"
@@ -42,7 +42,15 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
     
     echo "Submitting: ${JOB_NAME} (${NUM_NODES} nodes, ${NUM_GPUS} GPUs)"
     
+    # get full rack
+    if [ "${NUM_GPUS}" -eq 72 ]; then
+        SBATCH_EXTRA_ARGS="--segment 18"
+    else
+        SBATCH_EXTRA_ARGS=""
+    fi
+
     sbatch \
+        -t 02:00:00 \
         --job-name="${JOB_NAME}" \
         --nodes=${NUM_NODES} \
         --ntasks=${NUM_GPUS} \
@@ -51,11 +59,14 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
         --partition=${PARTITION} \
         --output="${SCRIPT_DIR}/logs/${JOB_NAME}_%j.out" \
         --error="${SCRIPT_DIR}/errors/${JOB_NAME}_%j.err" \
-        --wrap="srun \
-            --container-image=${CONTAINER_IMAGE} \
-            --container-mounts=${CONTAINER_MOUNTS} \
-            --mpi=pmix \
-            -- python ${COLLECTOR_SCRIPT} --output ${OUTPUT_FILE}"
+        ${SBATCH_EXTRA_ARGS} \
+        --wrap="export MASTER_ADDR=\$(scontrol show hostname \$SLURM_NODELIST | head -n 1); \
+                export MASTER_PORT=29500; \
+                srun \
+                    --container-image=${CONTAINER_IMAGE} \
+                    --container-mounts=${CONTAINER_MOUNTS} \
+                    --mpi=pmix \
+                    -- python ${COLLECTOR_SCRIPT} --output ${OUTPUT_FILE}"
 done
 
 echo ""
