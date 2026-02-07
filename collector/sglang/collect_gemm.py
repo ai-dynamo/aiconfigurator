@@ -27,7 +27,7 @@ from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_qua
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
-compatible_versions = ["0.5.5.post2", "0.5.6.post3"]
+compatible_versions = ["0.5.5.post2", "0.5.6.post2", "0.5.8"]
 
 
 def get_gemm_test_cases():

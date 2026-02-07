@@ -381,17 +381,39 @@ class EventHandler:
             inputs=[model_path_components["model_path"]],
             outputs=[model_system_components["system"]],
         )
-
         model_system_components["system"].change(
             fn=EventFn.update_backend_choices,
             inputs=[model_system_components["system"]],
             outputs=[model_system_components["backend"], model_system_components["version"]],
         )
-
         model_system_components["backend"].change(
             fn=EventFn.update_version_choices,
             inputs=[model_system_components["system"], model_system_components["backend"]],
             outputs=[model_system_components["version"]],
+        )
+
+    @staticmethod
+    def setup_system_events_with_quant_toggles(model_path_components, model_system_components, model_quant_components):
+        """Setup events for system/backend/version dropdowns - reusable across tabs"""
+        model_path_components["model_path"].change(
+            fn=EventFn.update_system_value,
+            inputs=[model_path_components["model_path"]],
+            outputs=[model_system_components["system"]],
+        )
+        model_system_components["system"].change(
+            fn=EventFn.update_backend_choices_with_quant_toggles,
+            inputs=[model_system_components["system"]],
+            outputs=[
+                model_system_components["backend"],
+                model_system_components["version"],
+            ],
+        )
+        model_system_components["backend"].change(
+            fn=EventFn.update_version_choices_with_quant_toggles,
+            inputs=[model_system_components["system"], model_system_components["backend"]],
+            outputs=[
+                model_system_components["version"],
+            ],
         )
 
     @staticmethod
@@ -401,7 +423,11 @@ class EventHandler:
         model_quant_components,
         model_misc_config_components,
     ):
-        EventHandler.setup_system_events(model_path_components, model_system_components)
+        EventHandler.setup_system_events_with_quant_toggles(
+            model_path_components,
+            model_system_components,
+            model_quant_components,
+        )
 
         model_system_components["version"].change(
             fn=EventFn.update_quant_mode_choices,

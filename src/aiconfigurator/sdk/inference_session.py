@@ -518,10 +518,10 @@ class DisaggInferenceSession:
                         else:  # larger b will always OOM
                             break
                 except Exception as e:
-                    logger.exception(
+                    logger.warning(
                         f"Error getting candidate workers with parallel config: "
                         f"tp={tp_size}, pp={pp_size}, dp={dp_size}, moe_tp={moe_tp_size}, "
-                        f"moe_ep={moe_ep_size}; skipping this combination"
+                        f"moe_ep={moe_ep_size}; skipping this combination. Error: {e}"
                     )
                     exceptions.append(e)
                     continue

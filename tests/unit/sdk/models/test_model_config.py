@@ -7,10 +7,12 @@ Unit tests for model configuration functionality.
 Tests model validation, default models, and model-specific configurations.
 """
 
+from unittest.mock import patch
+
 import pytest
 
-from aiconfigurator.sdk import common
-from aiconfigurator.sdk.models import check_is_moe, get_model_family
+from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
@@ -155,6 +157,7 @@ class TestQuantizationModes:
 
         assert "float16" in mode_names
         assert "fp8" in mode_names
+        assert "fp8_static" in mode_names
 
     def test_attention_quant_modes_exist(self):
         """Test that attention quantization modes are defined."""
@@ -178,3 +181,102 @@ class TestQuantizationModes:
 
         assert "float16" in mode_names
         assert "fp8" in mode_names
+
+
+class TestMOEModelFP8BlockQuantizationValidation:
+    """Test MOEModel._validate_fp8_block_quantized_moe_config() method."""
+
+    @pytest.mark.parametrize(
+        "moe_quant_mode,moe_tp_size,quantization_config,should_raise,test_id",
+        [
+            # Valid fp8_block config: 1536/4 = 384, 384 % 128 = 0
+            (
+                common.MoEQuantMode.fp8_block,
+                4,
+                {"weight_block_size": [128, 128]},
+                False,
+                "valid_fp8_block",
+            ),
+            # Invalid fp8_block config: 1536/8 = 192, 192 % 128 = 64
+            (
+                common.MoEQuantMode.fp8_block,
+                8,
+                {"weight_block_size": [128, 128]},
+                True,
+                "invalid_fp8_block",
+            ),
+            # Skip validation for float16 (even with invalid moe_tp)
+            (
+                common.MoEQuantMode.float16,
+                8,
+                {"weight_block_size": [128, 128]},
+                False,
+                "skip_validation_float16",
+            ),
+            # Skip validation for fp8 non-block mode
+            (
+                common.MoEQuantMode.fp8,
+                8,
+                {"weight_block_size": [128, 128]},
+                False,
+                "skip_validation_fp8_no_block",
+            ),
+            # Default block size when not in config: 1536/4 = 384, 384 % 128 = 0
+            (
+                common.MoEQuantMode.fp8_block,
+                4,
+                None,
+                False,
+                "default_block_size",
+            ),
+        ],
+    )
+    @patch("aiconfigurator.sdk.models._get_model_info")
+    @patch("aiconfigurator.sdk.utils._load_model_config_from_model_path")
+    def test_fp8_block_quantization_validation(
+        self,
+        mock_load_config,
+        mock_get_info,
+        moe_quant_mode,
+        moe_tp_size,
+        quantization_config,
+        should_raise,
+        test_id,
+    ):
+        """Parametrized test for fp8_block quantization validation."""
+        # Setup mocks
+        mock_get_info.return_value = (
+            "MixtralForCausalLM",  # architecture
+            32,  # layers
+            32,  # n
+            8,  # n_kv
+            128,  # d
+            4096,  # hidden
+            14336,  # inter
+            32000,  # vocab
+            32768,  # context
+            2,  # topk
+            8,  # num_experts
+            1536,  # moe_inter_size
+            None,  # extra_params
+        )
+        config_dict = {"moe_intermediate_size": 1536}
+        if quantization_config is not None:
+            config_dict["quantization_config"] = quantization_config
+        mock_load_config.return_value = config_dict
+
+        # Create model config (tp_size * attention_dp_size must equal moe_tp_size * moe_ep_size)
+        model_config = config.ModelConfig()
+        model_config.moe_quant_mode = moe_quant_mode
+        model_config.tp_size = moe_tp_size
+        model_config.moe_tp_size = moe_tp_size
+        model_config.moe_ep_size = 1
+        model_config.attention_dp_size = 1
+
+        # Test validation
+        if should_raise:
+            with pytest.raises(ValueError, match="Invalid quantized MoE configuration"):
+                get_model("Qwen/Qwen3-235B-A22B", model_config, "trtllm")
+        else:
+            model = get_model("Qwen/Qwen3-235B-A22B", model_config, "trtllm")
+            assert model is not None
