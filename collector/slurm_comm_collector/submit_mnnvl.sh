@@ -8,7 +8,7 @@
 # Usage: bash submit_slurm.sh
 
 SCRIPT_DIR="${HOME}/repo/aiconfigurator/collector/slurm_comm_collector"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1}}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1}"
 CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-$SCRIPT_DIR:$SCRIPT_DIR}"
 ACCOUNT="${ACCOUNT:-coreai_tritoninference_triton3}"
 PARTITION="${PARTITION:-gb200}"
