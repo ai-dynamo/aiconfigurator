@@ -8,7 +8,7 @@
 # Usage: bash submit_slurm.sh
 
 SCRIPT_DIR="${HOME}/repo/aiconfigurator/collector/slurm_comm_collector"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5}"
 CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-${HOME}/repo/aiconfigurator:${HOME}/repo/aiconfigurator}"
 ACCOUNT="${ACCOUNT:-coreai_tritoninference_triton3}"
 PARTITION="${PARTITION:-gb200}"
@@ -50,7 +50,6 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
     fi
 
     sbatch \
-        -t 04:00:00 \
         --job-name="${JOB_NAME}" \
         --nodes=${NUM_NODES} \
         --ntasks=${NUM_GPUS} \
