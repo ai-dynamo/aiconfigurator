@@ -245,21 +245,22 @@ class TestMOEModelFP8BlockQuantizationValidation:
     ):
         """Parametrized test for fp8_block quantization validation."""
         # Setup mocks
-        mock_get_info.return_value = (
-            "MixtralForCausalLM",  # architecture
-            32,  # layers
-            32,  # n
-            8,  # n_kv
-            128,  # d
-            4096,  # hidden
-            14336,  # inter
-            32000,  # vocab
-            32768,  # context
-            2,  # topk
-            8,  # num_experts
-            1536,  # moe_inter_size
-            None,  # extra_params
-        )
+        mock_get_info.return_value = {
+            "architecture": "MixtralForCausalLM",
+            "layers": 32,
+            "n": 32,
+            "n_kv": 8,
+            "d": 128,
+            "hidden_size": 4096,
+            "inter_size": 14336,
+            "vocab": 32000,
+            "context": 32768,
+            "topk": 2,
+            "num_experts": 8,
+            "moe_inter_size": 1536,
+            "extra_params": None,
+            "raw_config": {},
+        }
         config_dict = {"moe_intermediate_size": 1536}
         if quantization_config is not None:
             config_dict["quantization_config"] = quantization_config

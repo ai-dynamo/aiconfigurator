@@ -226,13 +226,13 @@ DefaultHFModels = {
     "meta-llama/Meta-Llama-3.1-8B",
     "meta-llama/Meta-Llama-3.1-70B",
     "meta-llama/Meta-Llama-3.1-405B",
-    "nivida/Llama-3.1-70B-Instruct-FP8",
+    "nvidia/Llama-3.1-70B-Instruct-FP8",
     # Mixtral Models
     "mistralai/Mixtral-8x7B-v0.1",
     "mistralai/Mixtral-8x22B-v0.1",
     # DeepSeek Models
     "deepseek-ai/DeepSeek-V3",
-    "nvidia/DeepSeek-V3-NVFP4",
+    "nvidia/DeepSeek-V3.1-NVFP4",
     # Qwen 2.5 Models
     "Qwen/Qwen2.5-1.5B",
     "Qwen/Qwen2.5-7B",

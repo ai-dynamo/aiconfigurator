@@ -39,13 +39,13 @@ class TestParseHFConfig:
 
         result = _parse_hf_config_json(config)
 
-        assert result[0] == "LlamaForCausalLM"  # architecture
-        assert result[1] == 32  # num_layers
-        assert result[2] == 32  # num_heads
-        assert result[3] == 8  # num_kv_heads
-        assert result[5] == 4096  # hidden_size
-        assert result[6] == 14336  # inter_size
-        assert result[7] == 128256  # vocab_size
+        assert result["architecture"] == "LlamaForCausalLM"  # architecture
+        assert result["layers"] == 32  # num_layers
+        assert result["n"] == 32  # num_heads
+        assert result["n_kv"] == 8  # num_kv_heads
+        assert result["hidden_size"] == 4096  # hidden_size
+        assert result["inter_size"] == 14336  # inter_size
+        assert result["vocab"] == 128256  # vocab_size
 
     def test_parse_moe_config(self):
         """Test parsing a MoE model config."""
@@ -65,10 +65,10 @@ class TestParseHFConfig:
 
         result = _parse_hf_config_json(config)
 
-        assert result[0] == "MixtralForCausalLM"  # architecture
-        assert result[9] == 2  # topk
-        assert result[10] == 8  # num_experts
-        assert result[11] == 14336  # moe_inter_size
+        assert result["architecture"] == "MixtralForCausalLM"  # architecture
+        assert result["topk"] == 2  # topk
+        assert result["num_experts"] == 8  # num_experts
+        assert result["moe_inter_size"] == 14336  # moe_inter_size
 
     def test_parse_deepseek_config(self):
         """Test parsing a DeepSeek model config."""
@@ -88,8 +88,8 @@ class TestParseHFConfig:
 
         result = _parse_hf_config_json(config)
 
-        assert result[0] == "DeepseekV3ForCausalLM"  # architecture
-        assert result[10] == 256  # num_experts from n_routed_experts
+        assert result["architecture"] == "DeepseekV3ForCausalLM"  # architecture
+        assert result["num_experts"] == 256  # num_experts from n_routed_experts
 
     def test_parse_config_with_head_dim(self):
         """Test parsing config that explicitly provides head_dim."""
@@ -108,7 +108,7 @@ class TestParseHFConfig:
 
         result = _parse_hf_config_json(config)
 
-        assert result[4] == 80  # head_dim
+        assert result["d"] == 80  # head_dim
 
     def test_parse_nemotronh_config(self):
         """Test parsing a NemotronH hybrid model config (Mamba + MoE + Transformer)."""
@@ -138,13 +138,13 @@ class TestParseHFConfig:
 
         result = _parse_hf_config_json(config)
 
-        assert result[0] == "NemotronHForCausalLM"  # architecture
-        assert result[1] == 52  # num_layers
-        assert result[5] == 2688  # hidden_size
-        assert result[9] == 6  # topk (num_experts_per_tok)
-        assert result[10] == 128  # num_experts (n_routed_experts)
+        assert result["architecture"] == "NemotronHForCausalLM"  # architecture
+        assert result["layers"] == 52  # num_layers
+        assert result["hidden_size"] == 2688  # hidden_size
+        assert result["topk"] == 6  # topk (num_experts_per_tok)
+        assert result["num_experts"] == 128  # num_experts (n_routed_experts)
         # extra_params should be NemotronHConfig
-        extra_params = result[-1]
+        extra_params = result["extra_params"]
         assert extra_params is not None
         assert hasattr(extra_params, "hybrid_override_pattern")
         assert extra_params.hybrid_override_pattern == "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
@@ -175,12 +175,12 @@ class TestParseHFConfig:
 
         result = _parse_hf_config_json(config)
 
-        assert result[0] == "NemotronHForCausalLM"  # architecture
-        assert result[1] == 118  # num_layers
-        assert result[5] == 8192  # hidden_size
-        assert result[4] == 128  # head_dim from attention_head_dim
+        assert result["architecture"] == "NemotronHForCausalLM"  # architecture
+        assert result["layers"] == 118  # num_layers
+        assert result["hidden_size"] == 8192  # hidden_size
+        assert result["d"] == 128  # head_dim from attention_head_dim
         # extra_params should be NemotronHConfig with moe_shared_expert_intermediate_size=0
-        extra_params = result[-1]
+        extra_params = result["extra_params"]
         assert extra_params is not None
         assert "E" not in extra_params.hybrid_override_pattern  # No MoE layers
         assert extra_params.moe_shared_expert_intermediate_size == 0
@@ -189,8 +189,9 @@ class TestParseHFConfig:
 class TestGetModelConfigFromHFID:
     """Test getting model config from HuggingFace ID."""
 
+    @patch("aiconfigurator.sdk.utils._download_hf_json")
     @patch("aiconfigurator.sdk.utils._download_hf_config")
-    def test_successful_download(self, mock_download):
+    def test_successful_download(self, mock_download, mock_download_quant):
         """Test successful download from HuggingFace."""
         mock_config = {
             "architectures": ["LlamaForCausalLM"],
@@ -205,10 +206,13 @@ class TestGetModelConfigFromHFID:
         }
         mock_download.return_value = mock_config
 
-        result = get_model_config_from_model_path("Qwen/Qwen3-32B-FP8")
+        mock_download_quant.return_value = None
+
+        model_id = "acme/Fake-Model-32B"
+        result = get_model_config_from_model_path(model_id)
 
         assert result["architecture"] == "LlamaForCausalLM"  # architecture
-        mock_download.assert_called_once_with("Qwen/Qwen3-32B-FP8")
+        mock_download.assert_called_once_with(model_id)
 
 
 class TestSafeMkdir:
