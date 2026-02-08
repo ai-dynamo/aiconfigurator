@@ -9,7 +9,7 @@ exps:
 exp_agg:
   mode: "patch"
   serving_mode: "agg" # required
-  model_path: "nvidia/Qwen3-32B-NVFP4" # required, HuggingFace model ID
+  model_path: "nvidia/Qwen3-235B-A22B-NVFP4" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "b200_sxm" # required, for prefill
   backend_name: "trtllm"
@@ -22,7 +22,7 @@ exp_agg:
 exp_disagg:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_path: "nvidia/Qwen3-32B-NVFP4" # required, HuggingFace model ID
+  model_path: "nvidia/Qwen3-235B-A22B-NVFP4" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "b200_sxm" # required, for prefill
   decode_system_name: "b200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
