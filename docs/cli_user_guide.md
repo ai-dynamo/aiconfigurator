@@ -421,8 +421,8 @@ exp_hybrid:
   database_mode: "HYBRID"
 ```
 
-Hybrid mode is a quick solution to support new models without modeling the operation and collecting the data. 
-Will be leveraged more and more in future.
+Hybrid mode is a quick solution to support new models without modeling the operation and collecting the data. However, please be careful, only `SILICON` mode's result is reproducible. Other modes are for research purpose
+
 
 **Python API equivalent:**
 ```python

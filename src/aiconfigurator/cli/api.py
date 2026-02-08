@@ -37,6 +37,7 @@ def cli_support(
     Check if AIC supports the model/hardware combo for (agg, disagg).
     Support is determined by a majority vote of PASS status for the given
     architecture, system, backend, and version in the support matrix.
+    It's a light-weight check, need to verify under the CLI default or exp mode.
 
     This is the programmatic equivalent of:
         aiconfigurator cli support --model_path ... --system ...

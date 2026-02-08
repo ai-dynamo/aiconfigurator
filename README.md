@@ -76,7 +76,7 @@ aiconfigurator cli support --model Qwen/Qwen3-32B-FP8 --system h200_sxm
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
 - Use `exp`, pass in exp.yaml by `--yaml_path` to customize your experiments and even a heterogenous one.
 - Use `--save_dir DIR` to generate framework configuration files for Dynamo.
-- Use `--database_mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only).
+- Use `--database_mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only). Please be careful, only `SILICON` mode's result is reproducible. Other modes are for research purpose
 - Use `-h` for more options and customization.
 - SLA constraints:
   - `--ttft` and `--tpot` filter configurations that exceed either bound; omit a flag to leave that constraint unset.
@@ -135,48 +135,49 @@ aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --sys
 ********************************************************************************
   ----------------------------------------------------------------------------
   Input Configuration & SLA Target:
-    Model: QWEN3_32B_FP8 (is_moe: False)
+    Model: Qwen/Qwen3-32B-FP8 (is_moe: False)
     Total GPUs: 32
-    Best Experiment Chosen: disagg at 804.83 tokens/s/gpu (disagg 1.64x better)
+    Best Experiment Chosen: disagg at 684.79 tokens/s/gpu (disagg 1.67x better)
   ----------------------------------------------------------------------------
   Overall Best Configuration:
-    - Best Throughput: 25,754.50 tokens/s
-    - Per-GPU Throughput: 804.83 tokens/s/gpu
-    - Per-User Throughput: 109.13 tokens/s/user
-    - TTFT: 486.53ms
-    - TPOT: 9.16ms
+    - Best Throughput: 21,913.22 tokens/s
+    - Per-GPU Throughput: 684.79 tokens/s/gpu
+    - Per-User Throughput: 100.31 tokens/s/user
+    - TTFT: 295.71ms
+    - TPOT: 9.97ms
+    - Request Latency: 5270.24ms
   ----------------------------------------------------------------------------
   Pareto Frontier:
-               QWEN3_32B_FP8 Pareto Frontier: tokens/s/gpu vs tokens/s/user         
+       Qwen/Qwen3-32B-FP8 Pareto Frontier: tokens/s/gpu_cluster vs tokens/s/user
       ┌────────────────────────────────────────────────────────────────────────┐
-1400.0┤ •• disagg                                                              │
-      │ ff agg                                                                 │
+1250.0┤ •• agg                                                                 │
+      │ ff disagg                                                              │
       │ xx disagg best                                                         │
       │                                                                        │
-1166.7┤          •                                                             │
-      │           •••••••                                                      │
-      │                  •                                                     │
-      │                   ••••••                                               │
- 933.3┤                         •                                              │
-      │                         •                                              │
-      │                         •••••••x                                       │
-      │                                 •                                      │
- 700.0┤                                 •                                      │
-      │        f                         •                                     │
-      │         ffff                      •                                    │
-      │             ffffffffffffffff       ••                                  │
- 466.7┤                             fffffff  •••                               │
-      │                                    fff  •••                            │
-      │                                       ffff•                            │
-      │                                           ffffffff                     │
- 233.3┤                                                  fffffff               │
-      │                                                      •••fffff          │
-      │                                                         ••• fff        │
-      │                                                               f        │
+1041.7┤                                                                        │
+      │          f                                                             │
+      │          fffffffff                                                     │
+      │                   fff                                                  │
+ 833.3┤                      ffff                                              │
+      │                          f                                             │
+      │       •                   ff                                           │
+      │       ••                    fxfff                                      │
+ 625.0┤         •••••                   f                                      │
+      │              •                  f                                      │
+      │               ••••••••••••      f                                      │
+      │                           •••   f                                      │
+ 416.7┤                              ••••ff                                    │
+      │                                  ••ff                                  │
+      │                                     •fffffffffffff                     │
+      │                                           ••••••••ff•                  │
+ 208.3┤                                                     ff•••              │
+      │                                                       ff ••••          │
+      │                                                         fff •••        │
+      │                                                                •       │
    0.0┤                                                                        │
       └┬─────────────────┬─────────────────┬────────────────┬─────────────────┬┘
        0                60                120              180              240 
-tokens/s/gpu                         tokens/s/user                              
+tokens/s/gpu_cluster                 tokens/s/user                              
 
   ----------------------------------------------------------------------------
   Deployment Details:
@@ -185,28 +186,28 @@ tokens/s/gpu                         tokens/s/user
                gpus/replica = (p)gpus/worker * (p)workers + (d)gpus/worker * (d)workers; for Agg, gpus/replica = gpus/worker
                gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; tp * pp for dense models (underlined numbers are the actual values in math)
 
-disagg Top Configurations: (Sorted by tokens/s/gpu)
-+------+--------------+---------------+--------+--------------+-------------------+----------+---------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
-| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | concurrency  | total_gpus (used) | replicas |  gpus/replica | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
-+------+--------------+---------------+--------+--------------+-------------------+----------+---------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
-|  1   |    804.83    |     109.13    | 486.53 | 256 (=64x4)  |    32 (32=4x8)    |    4     |  8 (=4x1+1x4) |     4      |    1 (=1x1)    |    tp1pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   64  |
-|  2   |    416.25    |     102.85    | 486.53 | 144 (=144x1) |    32 (24=1x24)   |    1     | 24 (=8x1+8x2) |     8      |    1 (=1x1)    |    tp1pp1   |   1   |     8      |    2 (=2x1)    |    tp2pp1   |   18  |
-|  3   |    416.25    |     118.53    | 486.53 | 128 (=128x1) |    32 (24=1x24)   |    1     | 24 (=8x1+2x8) |     8      |    1 (=1x1)    |    tp1pp1   |   1   |     2      |    8 (=8x1)    |    tp8pp1   |   64  |
-+------+--------------+---------------+--------+--------------+-------------------+----------+---------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
-
 agg Top Configurations: (Sorted by tokens/s/gpu)
-+------+--------------+---------------+--------+-------------+-------------------+----------+--------------+-------------+----------+----+
-| Rank | tokens/s/gpu | tokens/s/user |  TTFT  | concurrency | total_gpus (used) | replicas | gpus/replica | gpus/worker | parallel | bs |
-+------+--------------+---------------+--------+-------------+-------------------+----------+--------------+-------------+----------+----+
-|  1   |    491.03    |     103.66    | 272.50 | 160 (=20x8) |    32 (32=8x4)    |    8     |      4       |  4 (=4x1x1) |  tp4pp1  | 20 |
-|  2   |    359.06    |     106.77    | 226.94 | 112 (=28x4) |    32 (32=4x8)    |    4     |      8       |  8 (=8x1x1) |  tp8pp1  | 28 |
-|  3   |    180.64    |     129.41    | 295.45 |  48 (=3x16) |    32 (32=16x2)   |    16    |      2       |  2 (=2x1x1) |  tp2pp1  | 3  |
-+------+--------------+---------------+--------+-------------+-------------------+----------+--------------+-------------+----------+----+
++------+---------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+--------------+-------------+----------+----+
+| Rank | backend | tokens/s/gpu | tokens/s/user |  TTFT  | request_latency | concurrency | total_gpus (used) | replicas | gpus/replica | gpus/worker | parallel | bs |
++------+---------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+--------------+-------------+----------+----+
+|  1   |  trtllm |    410.22    |     108.48    | 251.10 |     4850.91     | 128 (=16x8) |    32 (32=8x4)    |    8     |      4       |  4 (=4x1x1) |  tp4pp1  | 16 |
+|  2   |  trtllm |    361.33    |     107.43    | 224.48 |     4869.40     | 112 (=28x4) |    32 (32=4x8)    |    4     |      8       |  8 (=8x1x1) |  tp8pp1  | 28 |
+|  3   |  trtllm |    117.92    |     122.25    | 292.72 |     4374.38     |  32 (=2x16) |    32 (32=16x2)   |    16    |      2       |  2 (=2x1x1) |  tp2pp1  | 2  |
++------+---------+--------------+---------------+--------+-----------------+-------------+-------------------+----------+--------------+-------------+----------+----+
+
+disagg Top Configurations: (Sorted by tokens/s/gpu)
++------+---------+--------------+---------------+--------+-----------------+--------------+-------------------+----------+---------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+| Rank | backend | tokens/s/gpu | tokens/s/user |  TTFT  | request_latency | concurrency  | total_gpus (used) | replicas |  gpus/replica | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
++------+---------+--------------+---------------+--------+-----------------+--------------+-------------------+----------+---------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+|  1   |  trtllm |    684.79    |     100.31    | 295.71 |     5270.24     | 272 (=68x4)  |    32 (32=4x8)    |    4     |  8 (=2x2+1x4) |     2      |    2 (=2x1)    |    tp2pp1   |   1   |     1      |    4 (=4x1)    |    tp4pp1   |   68  |
+|  2   |  trtllm |    684.79    |     100.16    | 295.71 |     5277.73     | 240 (=120x2) |    32 (32=2x16)   |    2     | 16 (=4x2+1x8) |     4      |    2 (=2x1)    |    tp2pp1   |   1   |     1      |    8 (=8x1)    |    tp8pp1   |  120  |
+|  3   |  trtllm |    404.71    |     100.35    | 295.71 |     5268.25     | 140 (=140x1) |    32 (24=1x24)   |    1     | 24 (=5x2+7x2) |     5      |    2 (=2x1)    |    tp2pp1   |   1   |     7      |    2 (=2x1)    |    tp2pp1   |   20  |
++------+---------+--------------+---------------+--------+-----------------+--------------+-------------------+----------+---------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
 ********************************************************************************
-INFO 2025-10-25 23:40:24,396 main.py:340] All experiments completed in 13.90 seconds
+2026-02-08 23:10:21,413 - aiconfigurator.cli.main - INFO - All experiments completed in 6.50 seconds
 ```
 
-These results indicate that deploying Qwen3-32B on h200_sxm in FP8 can achieve **1.64x** higher tokens/s/gpu for disaggregated versus aggregated deployment **under the SLA targets TTFT ≤ 300 ms and TPOT ≤ 10 ms**, with ISL:OSL of 4000:500 (with prefix len: 500).
+These results indicate that deploying Qwen3-32B-FP8 on h200_sxm in FP8 can achieve **1.67x** higher tokens/s/gpu for disaggregated versus aggregated deployment **under the SLA targets TTFT ≤ 300 ms and TPOT ≤ 10 ms**, with ISL:OSL of 4000:500 (with prefix len: 500).
 Try different ISL:OSL values and SLA limits to fit your use case, for example:
 
 ```bash
@@ -272,7 +273,7 @@ Use `--generator-config path/to/file.yaml` to load a YAML payload with `ServiceC
 
 Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
 
-### All-in-one automation
+### All-in-one automation (To be refactored)
 
 To further simpify the end-to-end user experience, we're now supporting automate everything in one script, starting from configuring the deployment, generating the configs, preparing docker image and container, pulling model checkpoints, deploying the service, benchmarking and summarizing. 
 ```bash

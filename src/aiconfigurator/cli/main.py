@@ -116,7 +116,8 @@ def _add_default_mode_arguments(parser):
         default=common.DatabaseMode.SILICON.name,
         help="Database mode for performance estimation. Options: SILICON (default, uses silicon data), "
         "HYBRID (uses silicon data when available, otherwise SOL+empirical factor), "
-        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only).",
+        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only), "
+        "Please be careful, only SILICON mode's results are reproducible.",
     )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
