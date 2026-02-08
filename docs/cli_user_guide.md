@@ -19,6 +19,7 @@ The `generate` mode calculates the smallest tensor parallel (TP) size that fits 
 **Optional arguments:**
 - `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
 - `--save_dir`: Directory to save generated artifacts
+- `--systems-paths`: Override system YAML/data search paths (comma-separated; `default` maps to the built-in systems path). First match wins for identical system/backend/version.
 
 **Example output:**
 ```
@@ -66,6 +67,7 @@ aiconfigurator cli support --model_path Qwen/Qwen3-32B --system h200_sxm
 **Optional arguments:**
 - `--backend`: Filter by specific backend (`trtllm`, `vllm`, `sglang`). Defaults to `trtllm`.
 - `--backend_version`: Filter by a specific backend version. Defaults to the latest version found in the support matrix for the given model/architecture/system/backend combination.
+- `--systems-paths`: Override system YAML/data search paths (comma-separated; `default` maps to the built-in systems path). First match wins for identical system/backend/version.
 
 **Example output:**
 ```text
@@ -120,6 +122,22 @@ aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 32 --system 
 ```
 
 The command will create two experiments for the given problem, one is `agg` and another one is `disagg`. Compare them to find the better one and estimates the perf gain.
+
+#### Systems Paths
+
+You can override where system YAMLs and performance data are loaded from using `--systems-paths`.
+
+```bash
+aiconfigurator cli default \
+  --model_path Qwen/Qwen3-32B \
+  --total_gpus 32 \
+  --system h200_sxm \
+  --systems-paths "default,/opt/aic/systems,/data/aic/systems"
+```
+
+- Paths are searched in order.
+- Use `default` to include the built-in systems path.
+- If the same system/backend/version exists in multiple paths, the first match is used.
 
 The command will print out the result to your terminal with the basic info of the comparison, the pareto curve (the best point is tagged as `x`), 
 the worker setup for your reference. Let's split them into sections.

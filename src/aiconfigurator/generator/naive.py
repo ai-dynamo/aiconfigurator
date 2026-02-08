@@ -10,10 +10,11 @@ the smallest TP that fits the model in memory, with PP=1.
 
 import logging
 import os
-from importlib import resources as pkg_resources
 from typing import Any
 
 import yaml
+
+from aiconfigurator.sdk import perf_database
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +41,15 @@ def _get_system_config(system_name: str) -> dict[str, Any]:
     }
 
     try:
-        systems_dir = pkg_resources.files("aiconfigurator") / "systems"
-        system_yaml_path = os.path.join(str(systems_dir), f"{system_name}.yaml")
-
-        if os.path.isfile(system_yaml_path):
+        for systems_root in perf_database.get_systems_paths():
+            system_yaml_path = os.path.join(systems_root, f"{system_name}.yaml")
+            if not os.path.isfile(system_yaml_path):
+                continue
             with open(system_yaml_path) as f:
                 system_spec = yaml.safe_load(f)
             result["gpus_per_node"] = int(system_spec.get("node", {}).get("num_gpus_per_node", _DEFAULT_GPUS_PER_NODE))
             result["vram_per_gpu"] = int(system_spec.get("gpu", {}).get("mem_capacity", _DEFAULT_VRAM_BYTES))
+            break
     except Exception as e:
         logger.warning(f"Could not read system config for {system_name}: {e}")
 
