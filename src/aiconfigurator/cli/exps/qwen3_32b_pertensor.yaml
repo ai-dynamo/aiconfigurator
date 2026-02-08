@@ -4,28 +4,26 @@
 # define your experiments here, the order will determine the execution order.
 exps:
   - exp_agg
-  - exp_disagg
+  - exp_agg_fp8_mimic
 
 exp_agg:
   mode: "patch"
   serving_mode: "agg" # required
-  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
+  model_path: "Qwen/Qwen3-32B-FP8-Static-PerTensor" # required, HuggingFace model ID
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
   backend_name: "trtllm"
-  profiles: ["fp8_static"]
   isl: 4000 # input sequence length
   osl: 500 # output sequence length
   ttft: 600.0  # Target TTFT in ms
   tpot: 16   # Target TPOT in ms
 
-exp_disagg:
+exp_agg_fp8_mimic:
   mode: "patch"
-  serving_mode: "disagg" # required
-  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
+  serving_mode: "agg" # required
+  model_path: "Qwen/Qwen3-32B-FP8" # required, HuggingFace model ID
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
-  decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
   backend_name: "trtllm"
   profiles: ["fp8_static"]
   isl: 4000 # input sequence length

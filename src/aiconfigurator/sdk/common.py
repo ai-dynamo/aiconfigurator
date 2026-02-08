@@ -250,6 +250,7 @@ DefaultHFModels = {
     "Qwen/Qwen3-235B-A22B-FP8",
     "Qwen/Qwen3-Coder-480B-A35B-Instruct",
     "nvidia/Qwen3-235B-A22B-NVFP4",
+    "Qwen/Qwen3-32B-FP8-Static-PerTensor",
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",

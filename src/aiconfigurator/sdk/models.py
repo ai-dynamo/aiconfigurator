@@ -163,6 +163,11 @@ def get_model(
     if architecture == "DeepseekV3ForCausalLM" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
 
+    # FIXME: temporary workaround for Qwen3 32B FP8, only float16+fp8kvcache is supported
+    # VLLM perf tables only include float16 FMHA; fall back to float16 for estimation.
+    if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
+
     logger.info(
         "Model config (final quant modes): gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
         model_config.gemm_quant_mode,
