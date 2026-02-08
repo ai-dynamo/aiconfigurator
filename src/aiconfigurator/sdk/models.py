@@ -454,6 +454,7 @@ class GPTModel(BaseModel):
                     h,
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
+                    low_precision_input=True,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
@@ -476,6 +477,7 @@ class GPTModel(BaseModel):
                     h,
                     self._inter_size // tp_size,
                     gemm_quant_mode,
+                    low_precision_input=True,
                 ),
                 ops.GEMM(
                     "context_logits_gemm",
@@ -511,6 +513,7 @@ class GPTModel(BaseModel):
                     h,
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
+                    low_precision_input=True,
                 ),
                 ops.ElementWise("generation_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
@@ -533,6 +536,7 @@ class GPTModel(BaseModel):
                     h,
                     self._inter_size // tp_size,
                     gemm_quant_mode,
+                    low_precision_input=True,
                 ),
                 ops.GEMM(
                     "generation_logits_gemm",
@@ -603,6 +607,7 @@ class LLAMAModel(BaseModel):
                     h,
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
+                    low_precision_input=True,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
@@ -625,6 +630,7 @@ class LLAMAModel(BaseModel):
                     h,
                     self._inter_size // tp_size,
                     gemm_quant_mode,
+                    low_precision_input=True,
                 ),
                 ops.GEMM(
                     "context_logits_gemm",
@@ -660,6 +666,7 @@ class LLAMAModel(BaseModel):
                     h,
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
+                    low_precision_input=True,
                 ),
                 ops.ElementWise("generation_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
@@ -682,6 +689,7 @@ class LLAMAModel(BaseModel):
                     h,
                     self._inter_size // tp_size,
                     gemm_quant_mode,
+                    low_precision_input=True,
                 ),
                 ops.GEMM(
                     "generation_logits_gemm",
@@ -817,6 +825,7 @@ class MOEModel(BaseModel):
                     h,
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
+                    low_precision_input=True,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
             ]
@@ -902,6 +911,7 @@ class MOEModel(BaseModel):
                     h,
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
+                    low_precision_input=True,
                 ),
                 ops.ElementWise("generation_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
             ]
@@ -2084,6 +2094,7 @@ class NemotronHModel(BaseModel):
                         h,
                         self._num_heads * self._head_size // tp_size,
                         gemm_quant_mode,
+                        low_precision_input=True,
                     ),
                     ops.CustomAllReduce("context_attn_ar", count, h, tp_size),
                 ]
@@ -2120,6 +2131,7 @@ class NemotronHModel(BaseModel):
                         h,
                         cfg.moe_shared_expert_intermediate_size // tp_size,
                         gemm_quant_mode,
+                        low_precision_input=True,
                     ),
                 ]
             )
@@ -2309,6 +2321,7 @@ class NemotronHModel(BaseModel):
                         h,
                         self._num_heads * self._head_size // tp_size,
                         gemm_quant_mode,
+                        low_precision_input=True,
                     ),
                     ops.CustomAllReduce("generation_attn_ar", count, h, tp_size),
                 ]
@@ -2345,6 +2358,7 @@ class NemotronHModel(BaseModel):
                         h,
                         cfg.moe_shared_expert_intermediate_size // tp_size,
                         gemm_quant_mode,
+                        low_precision_input=True,
                     ),
                 ]
             )
