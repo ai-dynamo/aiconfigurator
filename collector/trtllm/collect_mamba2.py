@@ -32,8 +32,13 @@ Output:
 
 import gc
 import os
+from typing import TYPE_CHECKING
 
-import tensorrt_llm
+if TYPE_CHECKING:
+    # keep these imports to satisfy static analysis (ruff F821).
+    from tensorrt_llm._torch.modules.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+    from tensorrt_llm._torch.modules.mamba.selective_state_update import selective_state_update
+    from tensorrt_llm._torch.modules.mamba.ssd_combined import mamba_chunk_scan_combined
 import torch
 from einops import repeat
 
@@ -58,11 +63,6 @@ except ModuleNotFoundError:
         get_sm_version,
         log_perf,
     )
-
-# Import Mamba2 kernels from TensorRT-LLM
-from tensorrt_llm._torch.modules.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-from tensorrt_llm._torch.modules.mamba.selective_state_update import selective_state_update
-from tensorrt_llm._torch.modules.mamba.ssd_combined import mamba_chunk_scan_combined
 
 aic_debug = int(os.getenv("aic_mamba2_debug", "0"))  # noqa: SIM112
 # Use cached inputs (same data each iteration) instead of randomized inputs
@@ -750,6 +750,30 @@ def run_mamba2_torch(
         perf_filename: Output performance file
         device: CUDA device string
     """
+    # Suppress both Python-level print() and C-level printf() during TRT-LLM import
+    import contextlib
+
+    with (
+        open(os.devnull, "w") as _devnull_file,
+        contextlib.redirect_stdout(_devnull_file),
+        contextlib.redirect_stderr(_devnull_file),
+    ):
+        import tensorrt_llm
+        from tensorrt_llm._torch.modules.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+        from tensorrt_llm._torch.modules.mamba.selective_state_update import selective_state_update
+        from tensorrt_llm._torch.modules.mamba.ssd_combined import mamba_chunk_scan_combined
+
+    # Expose imported symbols as module globals for benchmark functions
+    globals().update(
+        {
+            "tensorrt_llm": tensorrt_llm,
+            "selective_state_update": selective_state_update,
+            "mamba_chunk_scan_combined": mamba_chunk_scan_combined,
+            "causal_conv1d_fn": causal_conv1d_fn,
+            "causal_conv1d_update": causal_conv1d_update,
+        }
+    )
+
     if phase == "context":
         run_mamba2_context_benchmark(
             d_model=d_model,
@@ -789,6 +813,8 @@ def run_mamba2_torch(
 
 
 if __name__ == "__main__":
+    import tensorrt_llm
+
     print(f"Mamba2 Collector - TensorRT-LLM {tensorrt_llm.__version__}")
     print(f"SM Version: {get_sm_version()}")
     print(f"Device: {torch.cuda.get_device_name()}")

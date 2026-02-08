@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
+import os
 import warnings
 
 
@@ -26,19 +27,25 @@ def setup_warning_filters():
     # Suppress flashinfer warnings
     warnings.filterwarnings("ignore", message="Prebuilt kernels not found", module="flashinfer")
 
+    # Suppress torch operator override warnings (flash_attn kernel re-registration)
+    warnings.filterwarnings(
+        "ignore",
+        message="Warning only once for all operators.*",
+        category=UserWarning,
+    )
+
+
+import torch
+from tqdm import tqdm
 
 setup_warning_filters()
 import argparse
 import json
 import multiprocessing as mp
-import os
 import signal
 import time
 import traceback
 from datetime import datetime
-
-import torch
-from tqdm import tqdm
 
 from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
 
@@ -73,6 +80,8 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
 
 def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, module_name="unknown"):
     """worker with automatic logging setup"""
+
+    setup_warning_filters()  # Must run in each spawned process
 
     # Setup logging for this worker - reads config from environment automatically
     worker_logger = setup_logging(worker_id=device_id)
@@ -296,7 +305,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
 
     # Wait for processes
     for p in processes:
-        p.join(timeout=10)
+        p.join(timeout=42)
         if p.is_alive():
             logger.warning(f"Process {p.pid} did not terminate, forcing...")
             p.terminate()
@@ -796,6 +805,10 @@ def main():
         logger.info(f"Power monitoring enabled (min duration: {args.power_test_duration_sec}s)")
     else:
         os.environ["COLLECTOR_MEASURE_POWER"] = "false"
+
+    # Suppress torch operator override warnings in spawned workers
+    # (env var takes effect at interpreter startup, before any module imports)
+    os.environ["PYTHONWARNINGS"] = "ignore::UserWarning:torch.library"
 
     mp.set_start_method("spawn")
 
