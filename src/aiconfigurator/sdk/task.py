@@ -14,10 +14,10 @@ import pandas as pd
 from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.models import check_is_moe, get_model_family
+from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
 from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
-from aiconfigurator.sdk.utils import enumerate_parallel_config
+from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -697,25 +697,18 @@ class TaskConfig:
             raise NotImplementedError("AIConfigurator does not yet support DEEPSEEK models for VLLM backend.")
 
         # fp8_static GEMM mode is currently TRTLLM-only.
-        def _is_trtllm_backend(backend_name: object) -> bool:
-            return str(backend_name).lower() == common.BackendName.trtllm.value
-
-        def _is_fp8_static(mode: object) -> bool:
-            if mode is None:
-                return False
-            name = mode.name if hasattr(mode, "name") else str(mode)
-            return str(name).lower() == common.GEMMQuantMode.fp8_static.name
-
         def _validate_fp8_static(worker_cfg: DefaultMunch, target: str) -> None:
             gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)
-            if not _is_fp8_static(gemm_quant_mode):
+            if gemm_quant_mode is None:
+                return
+            mode_name = gemm_quant_mode.name if hasattr(gemm_quant_mode, "name") else str(gemm_quant_mode)
+            if str(mode_name).lower() != common.GEMMQuantMode.fp8_static.name:
                 return
 
             backend_name = worker_cfg.get("backend_name", None)
-            if not _is_trtllm_backend(backend_name):
+            if str(backend_name).lower() != common.BackendName.trtllm.value:
                 raise ValueError(
-                    f"{target}: gemm_quant_mode='{common.GEMMQuantMode.fp8_static.name}' is currently only supported "
-                    f"for backend '{common.BackendName.trtllm.value}', but got backend='{backend_name}'."
+                    f"fp8_static is currently only supported in trtllm backend. we got backend='{backend_name}'."
                 )
 
         if self.serving_mode == "agg":
@@ -750,6 +743,46 @@ class TaskConfig:
                 return None
             return value.name if hasattr(value, "name") else str(value)
 
+        def _get_cfg_value(cfg: object, key: str) -> object:
+            if isinstance(cfg, Mapping):
+                return cfg.get(key, None)
+            return getattr(cfg, key, None)
+
+        model_info = {}
+        try:
+            model_info = get_model_config_from_model_path(self.model_path) or {}
+        except Exception:
+            model_info = {}
+        model_raw_config = model_info.get("raw_config")
+        model_architecture = model_info.get("architecture")
+
+        def _resolve_model_quant_modes(worker_cfg: object) -> dict[str, str | None]:
+            if model_raw_config is None:
+                return {}
+            model_config = config.ModelConfig(
+                gemm_quant_mode=_get_cfg_value(worker_cfg, "gemm_quant_mode"),
+                moe_quant_mode=_get_cfg_value(worker_cfg, "moe_quant_mode"),
+                kvcache_quant_mode=_get_cfg_value(worker_cfg, "kvcache_quant_mode"),
+                fmha_quant_mode=_get_cfg_value(worker_cfg, "fmha_quant_mode"),
+                comm_quant_mode=_get_cfg_value(worker_cfg, "comm_quant_mode"),
+            )
+            try:
+                _apply_model_quant_defaults(
+                    model_config,
+                    model_raw_config,
+                    model_architecture,
+                    self.backend_name,
+                )
+            except Exception:
+                return {}
+            return {
+                "gemm_quant_mode": _to_name(model_config.gemm_quant_mode),
+                "moe_quant_mode": _to_name(model_config.moe_quant_mode),
+                "kvcache_quant_mode": _to_name(model_config.kvcache_quant_mode),
+                "fmha_quant_mode": _to_name(model_config.fmha_quant_mode),
+                "comm_quant_mode": _to_name(model_config.comm_quant_mode),
+            }
+
         is_deepseek = get_model_family(self.model_path) == "DEEPSEEK"
         enable_wideep = bool(getattr(self.config, "enable_wideep", self.enable_wideep))
         moe_backend = getattr(self.config, "moe_backend", None)
@@ -766,15 +799,12 @@ class TaskConfig:
             context_attn_key = "context_attention"
             generation_attn_key = "generation_attention"
 
-        def _get_cfg_value(cfg: object, key: str) -> object:
-            if isinstance(cfg, Mapping):
-                return cfg.get(key, None)
-            return getattr(cfg, key, None)
-
         def _validate_worker_config(wc: object, *, validate_context: bool, validate_generation: bool) -> None:
-            _supported_or_raise("gemm", _to_name(_get_cfg_value(wc, "gemm_quant_mode")))
+            model_modes = _resolve_model_quant_modes(wc)
+            gemm_mode = model_modes.get("gemm_quant_mode") or _to_name(_get_cfg_value(wc, "gemm_quant_mode"))
+            _supported_or_raise("gemm", gemm_mode)
 
-            moe_mode = _to_name(_get_cfg_value(wc, "moe_quant_mode"))
+            moe_mode = model_modes.get("moe_quant_mode") or _to_name(_get_cfg_value(wc, "moe_quant_mode"))
             if self.backend_name == "sglang" and enable_wideep and moe_backend == "deepep_moe":
                 if validate_context:
                     _supported_or_raise("wideep_context_moe", moe_mode)
@@ -784,10 +814,14 @@ class TaskConfig:
                 _supported_or_raise("moe", moe_mode)
 
             if validate_context:
-                _supported_or_raise(context_attn_key, _to_name(_get_cfg_value(wc, "fmha_quant_mode")))
+                fmha_mode = model_modes.get("fmha_quant_mode") or _to_name(_get_cfg_value(wc, "fmha_quant_mode"))
+                _supported_or_raise(context_attn_key, fmha_mode)
 
             if validate_generation:
-                _supported_or_raise(generation_attn_key, _to_name(_get_cfg_value(wc, "kvcache_quant_mode")))
+                kvcache_mode = model_modes.get("kvcache_quant_mode") or _to_name(
+                    _get_cfg_value(wc, "kvcache_quant_mode")
+                )
+                _supported_or_raise(generation_attn_key, kvcache_mode)
 
         # agg/disagg worker configs use the same field names
         if self.config.serving_mode == "agg":

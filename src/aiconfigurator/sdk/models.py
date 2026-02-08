@@ -91,7 +91,9 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
     return overrides
 
 
-def _apply_model_quant_defaults(model_config: config.ModelConfig, raw_config: dict) -> None:
+def _apply_model_quant_defaults(
+    model_config: config.ModelConfig, raw_config: dict, architecture: str, backend_name: str
+) -> None:
     inferred = _infer_quant_modes_from_raw_config(raw_config)
     applied: list[str] = []
     for key, value in inferred.items():
@@ -112,6 +114,24 @@ def _apply_model_quant_defaults(model_config: config.ModelConfig, raw_config: di
 
     if applied:
         logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
+
+    # FIXME: temporary workaround for Deepseek V3 fp8 fmha quant mode, only float16+fp8kvcache is supported
+    if architecture == "DeepseekV3ForCausalLM" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
+
+    # FIXME: temporary workaround for Qwen3 32B FP8, only float16+fp8kvcache is supported
+    # VLLM perf tables only include float16 FMHA; fall back to float16 for estimation.
+    if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
+
+    logger.info(
+        "Model config (final quant modes): gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
+        model_config.gemm_quant_mode,
+        model_config.moe_quant_mode,
+        model_config.kvcache_quant_mode,
+        model_config.fmha_quant_mode,
+        model_config.comm_quant_mode,
+    )
 
 
 def _architecture_to_model_family(architecture: str) -> str:
@@ -141,8 +161,6 @@ def get_model(
     """
     model_info = _get_model_info(model_path)
     raw_config = model_info.get("raw_config", {})
-    _apply_model_quant_defaults(model_config, raw_config)
-
     architecture = model_info["architecture"]
     layers = model_info["layers"]
     n = model_info["n"]
@@ -159,23 +177,7 @@ def get_model(
     # Convert architecture (e.g., 'LlamaForCausalLM') to model family (e.g., 'LLAMA')
     model_family = _architecture_to_model_family(architecture)
 
-    # FIXME: temporary workaround for Deepseek V3 fp8 fmha quant mode, only float16+fp8kvcache is supported
-    if architecture == "DeepseekV3ForCausalLM" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
-        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
-
-    # FIXME: temporary workaround for Qwen3 32B FP8, only float16+fp8kvcache is supported
-    # VLLM perf tables only include float16 FMHA; fall back to float16 for estimation.
-    if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
-        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
-
-    logger.info(
-        "Model config (final quant modes): gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
-        model_config.gemm_quant_mode,
-        model_config.moe_quant_mode,
-        model_config.kvcache_quant_mode,
-        model_config.fmha_quant_mode,
-        model_config.comm_quant_mode,
-    )
+    _apply_model_quant_defaults(model_config, raw_config, architecture, backend_name)
 
     if model_config.overwrite_num_layers > 0:
         layers = model_config.overwrite_num_layers

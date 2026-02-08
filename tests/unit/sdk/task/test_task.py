@@ -84,7 +84,7 @@ def test_taskconfig_agg_default():
     cfg = task.config
 
     assert cfg.worker_config.system_name == "h200_sxm"
-    assert _enum_name(cfg.worker_config.gemm_quant_mode) == "fp8_block"
+    assert _enum_name(cfg.worker_config.gemm_quant_mode) is None
     assert cfg.worker_config.num_gpu_per_worker == [1, 2, 4, 8]
     assert cfg.applied_layers == ["base-common", "agg-defaults"]
 
@@ -266,6 +266,19 @@ def test_taskconfig_disagg_wideep_expands_lists():
     assert cfg.decode_worker_config.num_gpu_per_worker[-1] == 64
 
 
+def test_taskconfig_disagg_decode_system_name_override():
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        decode_system_name="b200_sxm",
+    )
+    cfg = task.config
+
+    assert cfg.prefill_worker_config.system_name == "h200_sxm"
+    assert cfg.decode_worker_config.system_name == "b200_sxm"
+
+
 def test_taskconfig_agg_total_gpus_negative_rejected():
     with pytest.raises(ValueError):
         TaskConfig(
@@ -283,6 +296,44 @@ def test_taskconfig_disagg_total_gpus_small_rejected():
             model_path="Qwen/Qwen3-32B",
             system_name="h200_sxm",
             total_gpus=1,
+        )
+
+
+def test_taskconfig_yaml_replace_uses_full_config():
+    base = TaskConfig(serving_mode="agg", model_path="Qwen/Qwen3-32B", system_name="h200_sxm")
+    replaced_config = base.config.toDict()
+    replaced_config["worker_config"]["system_name"] = "b200_sxm"
+    replaced_config.pop("applied_layers", None)
+
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        yaml_config={"mode": "replace", "config": replaced_config},
+    )
+    cfg = task.config
+
+    assert cfg.worker_config.system_name == "b200_sxm"
+    assert cfg.applied_layers[-1] == "yaml_replace"
+
+
+def test_taskconfig_rejects_unsupported_quant_mode(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {"gemm": ["float16"]}
+
+    def fake_get_database(system, backend, version):
+        return FakeDatabase()
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+
+    with pytest.raises(ValueError, match=r"Unsupported gemm quant mode"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            profiles=["fp8"],
         )
 
 
