@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 import yaml
 
+pytestmark = pytest.mark.unit
+
 
 def _find_repo_root(start: pathlib.Path) -> pathlib.Path:
     """Find repository root.
@@ -29,8 +31,6 @@ if str(_SRC) not in sys.path:
 
 import aiconfigurator.sdk.task as task_module
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-
-pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
@@ -84,7 +84,7 @@ def test_taskconfig_agg_default():
     cfg = task.config
 
     assert cfg.worker_config.system_name == "h200_sxm"
-    assert _enum_name(cfg.worker_config.gemm_quant_mode) == "fp8_block"
+    assert _enum_name(cfg.worker_config.gemm_quant_mode) is None
     assert cfg.worker_config.num_gpu_per_worker == [1, 2, 4, 8]
     assert cfg.applied_layers == ["base-common", "agg-defaults"]
 
@@ -108,12 +108,12 @@ def test_taskconfig_profile_application():
         serving_mode="agg",
         model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
-        profiles=["fp8_default"],
+        profiles=["fp8"],
     )
     cfg = task.config
 
     assert _enum_name(cfg.worker_config.gemm_quant_mode) == "fp8"
-    assert any(layer.startswith("profile:fp8_default") for layer in cfg.applied_layers)
+    assert any(layer.startswith("profile:fp8") for layer in cfg.applied_layers)
 
 
 def test_taskconfig_fp8_static_requires_trtllm_backend():
@@ -173,7 +173,7 @@ def test_taskconfig_agg_yaml_patch_overrides():
 def test_taskconfig_yaml_file_profiles_and_patch(tmp_path):
     yaml_payload = {
         "mode": "patch",
-        "profiles": ["float16_default"],
+        "profiles": ["float16"],
         "config": {
             "worker_config": {
                 "tp_list": [1, 2],
@@ -189,7 +189,7 @@ def test_taskconfig_yaml_file_profiles_and_patch(tmp_path):
         serving_mode="agg",
         model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
-        profiles=["fp8_default"],
+        profiles=["fp8"],
         yaml_config=loaded_yaml,
     )
     cfg = task.config
@@ -204,7 +204,7 @@ def test_taskconfig_disagg_profile_patch_expands_replica():
         serving_mode="disagg",
         model_path="Qwen/Qwen3-32B",
         system_name="b200_sxm",
-        profiles=["fp8_default"],
+        profiles=["fp8"],
         yaml_config={
             "mode": "patch",
             "config": {
@@ -240,7 +240,7 @@ def test_taskconfig_disagg_total_gpus_with_patch():
         model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
         total_gpus=32,
-        profiles=["fp8_default"],
+        profiles=["fp8"],
         yaml_config={
             "mode": "patch",
             "config": {"replica_config": {"max_gpu_per_replica": 256}},
@@ -266,6 +266,19 @@ def test_taskconfig_disagg_wideep_expands_lists():
     assert cfg.decode_worker_config.num_gpu_per_worker[-1] == 64
 
 
+def test_taskconfig_disagg_decode_system_name_override():
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        decode_system_name="b200_sxm",
+    )
+    cfg = task.config
+
+    assert cfg.prefill_worker_config.system_name == "h200_sxm"
+    assert cfg.decode_worker_config.system_name == "b200_sxm"
+
+
 def test_taskconfig_agg_total_gpus_negative_rejected():
     with pytest.raises(ValueError):
         TaskConfig(
@@ -284,6 +297,149 @@ def test_taskconfig_disagg_total_gpus_small_rejected():
             system_name="h200_sxm",
             total_gpus=1,
         )
+
+
+def test_taskconfig_yaml_replace_uses_full_config():
+    base = TaskConfig(serving_mode="agg", model_path="Qwen/Qwen3-32B", system_name="h200_sxm")
+    replaced_config = base.config.toDict()
+    replaced_config["worker_config"]["system_name"] = "b200_sxm"
+    replaced_config.pop("applied_layers", None)
+
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        yaml_config={"mode": "replace", "config": replaced_config},
+    )
+    cfg = task.config
+
+    assert cfg.worker_config.system_name == "b200_sxm"
+    assert cfg.applied_layers[-1] == "yaml_replace"
+
+
+def test_taskconfig_rejects_unsupported_quant_mode(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {"gemm": ["float16"]}
+
+    def fake_get_database(system, backend, version):
+        return FakeDatabase()
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+
+    with pytest.raises(ValueError, match=r"Unsupported gemm quant mode"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            profiles=["fp8"],
+        )
+
+
+def test_taskconfig_quant_merge_uses_model_info_when_missing(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {
+                "gemm": ["float16"],
+                "moe": ["float16"],
+                "context_attention": ["float16"],
+                "generation_attention": ["float16"],
+            }
+
+    def fake_get_database(system, backend, version):
+        return FakeDatabase()
+
+    def fake_model_info(_path):
+        return {
+            "raw_config": {"quant_algo": "fp8", "quant_dynamic": True},
+            "architecture": "LlamaForCausalLM",
+        }
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+    monkeypatch.setattr(task_module, "get_model_config_from_model_path", fake_model_info)
+
+    with pytest.raises(ValueError, match=r"Unsupported gemm quant mode 'fp8'"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+        )
+
+
+def test_taskconfig_quant_merge_preserves_explicit_values(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {
+                "gemm": ["float16"],
+                "moe": ["float16"],
+                "context_attention": ["float16"],
+                "generation_attention": ["float16"],
+            }
+
+    def fake_get_database(system, backend, version):
+        return FakeDatabase()
+
+    def fake_model_info(_path):
+        return {
+            "raw_config": {"quant_algo": "fp8", "quant_dynamic": True},
+            "architecture": "LlamaForCausalLM",
+        }
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+    monkeypatch.setattr(task_module, "get_model_config_from_model_path", fake_model_info)
+
+    TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        yaml_config={
+            "mode": "patch",
+            "config": {
+                "worker_config": {
+                    "gemm_quant_mode": "float16",
+                    "moe_quant_mode": "float16",
+                    "kvcache_quant_mode": "float16",
+                    "fmha_quant_mode": "float16",
+                }
+            },
+        },
+    )
+
+
+def test_taskconfig_quant_merge_deepseek_fmha_fallback(monkeypatch):
+    class FakeDatabase:
+        def __init__(self):
+            self.system_spec = {"gpu": {"sm_version": 90}}
+            self.supported_quant_mode = {
+                "gemm": ["fp8"],
+                "moe": ["fp8"],
+                "context_mla": ["float16"],
+                "generation_mla": ["fp8"],
+            }
+
+    def fake_get_database(system, backend, version):
+        return FakeDatabase()
+
+    def fake_model_info(_path):
+        return {
+            "raw_config": {"quant_algo": "fp8", "quant_dynamic": True},
+            "architecture": "DeepseekV3ForCausalLM",
+        }
+
+    monkeypatch.setattr(task_module, "get_database", fake_get_database)
+    monkeypatch.setattr(task_module, "get_model_config_from_model_path", fake_model_info)
+
+    TaskConfig(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+    )
 
 
 def test_taskrunner_runs_agg_and_disagg():

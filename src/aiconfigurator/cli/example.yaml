@@ -16,7 +16,7 @@ exp_agg_full:
   total_gpus: 8 # required
   system_name: "h200_sxm" # required
   backend_name: "trtllm" # optional, default to trtllm
-  backend_version: "0.20.0" # optional, default to the latest version in the database
+  backend_version: "1.2.0rc5" # optional, default to the latest version in the database
   database_mode: "SILICON" # optional, default to SILICON. Options: SILICON (uses silicon data), HYBRID (uses silicon data when available, otherwise SOL+empirical factor), EMPIRICAL (SOL+empirical factor), SOL (SOL time only), SOL_FULL (SOL time and details)
   isl: 4000 # input sequence length, optional, default to 4000
   osl: 1000 # output sequence length, optional, default to 1000
@@ -28,7 +28,7 @@ exp_agg_full:
   config: # all optional, used to patch default values
     nextn: 1 # mtp 1
     nextn_accept_rates: [0.85,0,0,0,0] # each position maps to the accept rate of the ith draft token, nextn 1 will only use the first draft token accept rate.
-    worker_config: # defines quantization of each component
+    worker_config: # override quantization of each component
       gemm_quant_mode: "fp8_block" # fp8, fp8_static, fp8_block, float16
       moe_quant_mode: "fp8_block" # fp8, fp8_block, w4afp8, float16
       kvcache_quant_mode: "float16" # fp8, int8, float16
@@ -41,16 +41,13 @@ exp_agg_full:
       moe_tp_list: [1]
       moe_ep_list: [1, 2, 4, 8]
 
-# exp_agg_simplified, simplified mode, as we're doing patch to default things.
+# exp_agg_simplified, simplified mode.
 exp_agg_simplified:
   mode: "patch" # patch or replace the config section, required
   serving_mode: "agg" # required
   model_path: "deepseek-ai/DeepSeek-V3" # required, HuggingFace model ID
   total_gpus: 8 # required
   system_name: "h200_sxm" # required
-  config: # optional, would like to overwrite moe quant
-    worker_config:
-      moe_quant_mode: "w4afp8" # patch moe quant mode to w4afp8, config part is the last one to overwrite previous settings
 
 # exp_disagg_full, disagg, full config, please refer to this as a template.
 exp_disagg_full:
@@ -61,7 +58,7 @@ exp_disagg_full:
   system_name: "h200_sxm" # required
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
   backend_name: "trtllm" # optional, default to trtllm
-  backend_version: "0.20.0" # optional, default to the latest version in the database
+  backend_version: "1.2.0rc5" # optional, default to the latest version in the database
   database_mode: "SILICON" # optional, default to SILICON. Options: SILICON, HYBRID, EMPIRICAL, SOL, SOL_FULL
   isl: 4000 # input sequence length, optional, default to 4000
   osl: 1000 # output sequence length, optional, default to 1000
@@ -120,7 +117,7 @@ exp_disagg_full:
 exp_disagg_simplified:
   mode: "patch"
   serving_mode: "disagg"
-  model_path: "DEEPSEEK_V3"
+  model_path: "nvidia/DeepSeek-V3.1-NVFP4"
   total_gpus: 512
   system_name: "gb200_sxm"
   enable_wideep: false # enable wide ep for prefill/decode, default to false, optional

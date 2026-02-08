@@ -65,6 +65,8 @@ python3 -m pytest -m "e2e and not sweep"
 python3 -m pytest -m "unit or build"
 ```
 
+> Note: if encoutering error `NotImplementedError: Implement enable_gui in a subclass`, please add `MPLBACKEND=agg` to your command
+
 ### Where tests live
 
 - **Unit**

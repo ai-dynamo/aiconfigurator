@@ -48,7 +48,7 @@ class SupportMatrix:
 
     def get_architecture(self, huggingface_id: str) -> str:
         """Get the HuggingFace architecture for a model."""
-        return _get_model_info(huggingface_id)[0]
+        return _get_model_info(huggingface_id)["architecture"]
 
     def get_systems(self):
         return set(common.SupportedSystems)

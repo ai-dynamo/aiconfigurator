@@ -141,14 +141,14 @@ class GEMM(Operation):
         self._quant_mode = quant_mode
         self._weights = self._n * self._k * quant_mode.value.memory
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
+        self._low_precision_input = kwargs.get("low_precision_input", False)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """
         Query GEMM latency with energy data.
 
         For `fp8_static` quant mode, subtracts compute_scale overhead.
-        For Qwen models, proj/fc2 GEMMs are treated as FP8 input under `fp8_static`, so we also
-        subtract the scale_matrix overhead for those specific GEMMs.
+        For GEMMs marked as low-precision input under `fp8_static`, also subtract scale_matrix.
 
         Returns:
             PerformanceResult: Behaves like float (scaled latency in ms).
@@ -161,31 +161,18 @@ class GEMM(Operation):
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
         model_name = str(kwargs.get("model_name", ""))
         is_fp8_static = quant_mode == common.GEMMQuantMode.fp8_static
-        subtract_scale_matrix = (
-            is_fp8_static
-            and "qwen" in model_name.lower()
-            and self._name
-            in {
-                "context_proj_gemm",
-                "generation_proj_gemm",
-                "context_ffn2_gemm",
-                "generation_ffn2_gemm",
-                "context_shared_ffn2_gemm",
-                "generation_shared_ffn2_gemm",
-            }
-        )
 
         # Query with energy
         result = database.query_gemm(x, self._n, self._k, quant_mode)
         latency = float(result)
         energy = result.energy
 
-        # Adjust for fp8_static: subtract compute_scale overhead
+        # Adjust for fp8_static: subtract compute_scale overhead, only fix for trtllm now
         if is_fp8_static:
             compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
             latency -= float(compute_scale_result)
             energy -= compute_scale_result.energy
-            if subtract_scale_matrix:
+            if self._low_precision_input:
                 scale_matrix_result = database.query_scale_matrix(x, self._k, quant_mode)
                 latency -= float(scale_matrix_result)
                 energy -= scale_matrix_result.energy

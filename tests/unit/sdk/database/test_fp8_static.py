@@ -110,6 +110,7 @@ def test_gemm_query_subtracts_overheads_only_for_fp8_static_and_qwen_proj_fc2():
         n=128,
         k=256,
         quant_mode=common.GEMMQuantMode.fp8_static,
+        low_precision_input=True,
     )
     result = op.query(db, x=64, model_name="Qwen/Qwen3-32B")
     assert float(result) == pytest.approx(7.0)
