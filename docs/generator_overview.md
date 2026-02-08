@@ -66,7 +66,7 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
   aiconfigurator cli default \
     --backend sglang \
     --backend_version 0.5.6.post2 \
-    --model_path Qwen/Qwen3-32B \
+    --model_path Qwen/Qwen3-32B-FP8 \
     --system h200_sxm \
     --total_gpus 8 \
     --isl 5000 --osl 1000 --ttft 2000 --tpot 50 \
@@ -121,7 +121,7 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
     # Sample sample_input.yaml
     
     ServiceConfig:
-      model_path: Qwen/Qwen3-32B
+      model_path: Qwen/Qwen3-32B-FP8
       served_model_name: qwen3-32b
       head_node_ip: 0.0.0.0
       port: 8000

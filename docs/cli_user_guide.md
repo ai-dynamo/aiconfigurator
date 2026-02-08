@@ -2,17 +2,20 @@
 ## Basic Command
 As mentioned in root Readme, CLI supports three modes: `default`, `exp`, and `generate`. We'll go through these modes one by one.
 
+Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
+For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.
+
 ### Generate mode (Quick Start)
 This mode generates a working configuration without running the full parameter sweep. It's useful when you want a quick deployment config without SLA optimization.
 
 ```bash
-aiconfigurator cli generate --model_path Qwen/Qwen3-32B --total_gpus 8 --system h200_sxm
+aiconfigurator cli generate --model_path Qwen/Qwen3-32B-FP8 --total_gpus 8 --system h200_sxm
 ```
 
 The `generate` mode calculates the smallest tensor parallel (TP) size that fits the model in memory using the formula: `TP * VRAM_per_GPU > 1.5 * model_weight_size`. This ensures the model fits with room for KV cache and activations.
 
 **Required arguments:**
-- `--model_path`: HuggingFace model path (e.g., `Qwen/Qwen3-32B`) or local path containing `config.json`
+- `--model_path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
 - `--total_gpus`: Total GPUs for deployment
 - `--system`: System name (`h200_sxm`, `gb200_sxm`, `b200_sxm`)
 
@@ -25,14 +28,14 @@ The `generate` mode calculates the smallest tensor parallel (TP) size that fits 
 ============================================================
   Naive Configuration Generated Successfully
 ============================================================
-  Model:           Qwen/Qwen3-32B
+  Model:           Qwen/Qwen3-32B-FP8
   System:          h200_sxm
   Backend:         trtllm (1.2.0rc5)
   Total GPUs:      8 (using 8)
   Parallelism:     TP=1, PP=1
   Replicas:        8 (each using 1 GPUs)
   Max Batch Size:  128
-  Output:          ./output/Qwen_Qwen3-32B_naive_tp1_pp1_123456
+  Output:          ./output/Qwen_Qwen3-32B-FP8_naive_tp1_pp1_123456
 ============================================================
 ```
 
@@ -41,7 +44,7 @@ The `generate` mode calculates the smallest tensor parallel (TP) size that fits 
 from aiconfigurator.cli import cli_generate
 
 result = cli_generate(
-    model_path="Qwen/Qwen3-32B",
+    model_path="Qwen/Qwen3-32B-FP8",
     total_gpus=8,
     system="h200_sxm",
     backend="trtllm",
@@ -56,11 +59,11 @@ print(result["parallelism"])  # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8
 This mode allows you to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
 
 ```bash
-aiconfigurator cli support --model_path Qwen/Qwen3-32B --system h200_sxm
+aiconfigurator cli support --model_path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
 
 **Required arguments:**
-- `--model_path`: HuggingFace model path (e.g., `Qwen/Qwen3-32B`) or local path containing `config.json`
+- `--model_path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
 - `--system`: System name (`h200_sxm`, `gb200_sxm`, `b200_sxm`, `h100_sxm`, `a100_sxm`, `l40s`)
 
 **Optional arguments:**
@@ -72,7 +75,7 @@ aiconfigurator cli support --model_path Qwen/Qwen3-32B --system h200_sxm
 ============================================================
   AIC Support Check Results
 ============================================================
-  Model:           Qwen/Qwen3-32B
+  Model:           Qwen/Qwen3-32B-FP8
   System:          h200_sxm
   Backend:         trtllm
   Version:         0.18.0
@@ -87,7 +90,7 @@ aiconfigurator cli support --model_path Qwen/Qwen3-32B --system h200_sxm
 from aiconfigurator.cli import cli_support
 
 agg_supported, disagg_supported = cli_support(
-    model_path="Qwen/Qwen3-32B",
+    model_path="Qwen/Qwen3-32B-FP8",
     system="h200_sxm",
     backend="trtllm"
 )
@@ -97,9 +100,9 @@ print(f"Agg: {agg_supported}, Disagg: {disagg_supported}")
 ### Default mode
 This mode is triggered by
 ```bash
-aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 32 --system h200_sxm
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm
 or
-aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0
 ```
 `model_path`, `total_gpus`, `system` are three required arguments to define the problem.  
 If you want to specify your problem with more details, we allow to define `ttft`, `tpot`, `isl`, `osl` and `prefix`.
@@ -110,13 +113,13 @@ You can specify which inference backend to use with the `--backend` flag:
 
 ```bash
 # Use TensorRT-LLM (default)
-aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 32 --system h200_sxm --backend trtllm
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --backend trtllm
 
 # Use vLLM (dense models only, currently being evaluated)
-aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 32 --system h200_sxm --backend vllm
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --backend vllm
 
 # Use SGLang (dense and MoE models, currently being evaluated)
-aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 32 --system h200_sxm --backend sglang
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --backend sglang
 ```
 
 The command will create two experiments for the given problem, one is `agg` and another one is `disagg`. Compare them to find the better one and estimates the perf gain.
@@ -124,12 +127,12 @@ The command will create two experiments for the given problem, one is `agg` and 
 The command will print out the result to your terminal with the basic info of the comparison, the pareto curve (the best point is tagged as `x`), 
 the worker setup for your reference. Let's split them into sections.
 
-Let's run `aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0`
+Let's run `aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0`
 > Note that the result might differ based on different versions of your aiconfigurator.
 1. Basic info of the comparison
 ```
   Input Configuration & SLA Target:
-    Model: Qwen/Qwen3-32B (is_moe: False)
+    Model: Qwen/Qwen3-32B-FP8 (is_moe: False)
     Total GPUs: 32
     Best Experiment Chosen: disagg at 913.82 tokens/s/gpu (1.43x better)
   ----------------------------------------------------------------------------
@@ -140,14 +143,14 @@ Let's run `aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 3
     - TTFT: 202.65ms
     - TPOT: 8.07ms
 ```
-This shows that for model `Qwen/Qwen3-32B` to deploy on 32 H200, if you require your TTFT to be less than 1000ms and TPOT to be less than 10ms, and your problem is isl=3000 osl=512, then disagg will be 1.43x of agg. The target result is shown as Overall Best Configuration.
+This shows that for model `Qwen/Qwen3-32B-FP8` to deploy on 32 H200, if you require your TTFT to be less than 1000ms and TPOT to be less than 10ms, and your problem is isl=3000 osl=512, then disagg will be 1.43x of agg. The target result is shown as Overall Best Configuration.
 
 **Python API equivalent:**
 ```python
 from aiconfigurator.cli import cli_default
 
 result = cli_default(
-    model_path="Qwen/Qwen3-32B",
+    model_path="Qwen/Qwen3-32B-FP8",
     total_gpus=32,
     system="h200_sxm",
     ttft=1000,
@@ -162,7 +165,7 @@ print(result.best_configs["disagg"])
 2. Pareto frontier
 ```
   Pareto Frontier:
-              Qwen/Qwen3-32B Pareto Frontier: tokens/s/gpu vs tokens/s/user          
+              Qwen/Qwen3-32B-FP8 Pareto Frontier: tokens/s/gpu vs tokens/s/user          
     ┌──────────────────────────────────────────────────────────────────────────┐
 2250┤ •• disagg                                                                │
     │ ff agg                                                                   │
@@ -235,7 +238,7 @@ Each replica has a system of 4 prefill workers and 1 decode workers. Each prefil
 
 As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save_dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. Here's a stucture of the output folder,
 ```text
-results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
+results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
 │   ├── best_config_topn.csv
 │   ├── config.yaml
@@ -302,7 +305,7 @@ The command exits after printing the help information, so you do not need to pro
 Example: search for 16x H200 configs that meet a 12s end-to-end budget while capping TTFT at 4s.
 ```bash
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B \
+  --model_path Qwen/Qwen3-32B-FP8 \
   --total_gpus 16 \
   --system h200_sxm \
   --backend trtllm \
@@ -318,7 +321,7 @@ The summary will highlight the fastest configuration whose estimated request lat
 ********************************************************************************
   ----------------------------------------------------------------------------
   Input Configuration & SLA Target:
-    Model: Qwen/Qwen3-32B (is_moe: False)
+    Model: Qwen/Qwen3-32B-FP8 (is_moe: False)
     Total GPUs: 16
     Best Experiment Chosen: disagg at 932.91 tokens/s/gpu (disagg 1.09x better)
   ----------------------------------------------------------------------------
@@ -331,7 +334,7 @@ The summary will highlight the fastest configuration whose estimated request lat
     - Request Latency: 9222.18ms
   ----------------------------------------------------------------------------
   Pareto Frontier:
-          Qwen/Qwen3-32B Pareto Frontier: tokens/s/gpu_cluster vs request_latency    
+          Qwen/Qwen3-32B-FP8 Pareto Frontier: tokens/s/gpu_cluster vs request_latency    
       ┌────────────────────────────────────────────────────────────────────────┐
 1150.0┤ •• agg                                                                 │
       │ ff disagg                                                              │
@@ -405,14 +408,14 @@ The `--database_mode` argument controls how performance is estimated:
 
 Example using hybrid mode:
 ```bash
-aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 32 --system h200_sxm --database_mode HYBRID
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --database_mode HYBRID
 ```
 
 For exp mode, you can specify `database_mode` in your YAML file:
 ```yaml
 exp_hybrid:
   serving_mode: "agg"
-  model_path: "Qwen/Qwen3-32B"
+  model_path: "Qwen/Qwen3-32B-FP8"
   system_name: "h200_sxm"
   total_gpus: 8
   database_mode: "HYBRID"
@@ -432,7 +435,7 @@ result = cli_exp(yaml_path="example.yaml")
 config = {
     "my_exp": {
         "serving_mode": "agg",
-        "model_path": "Qwen/Qwen3-32B",
+        "model_path": "Qwen/Qwen3-32B-FP8",
         "total_gpus": 8,
         "system_name": "h200_sxm"
     }
@@ -531,6 +534,9 @@ This section is very long, let's go through the basic setting quickly
     - `profiles`: some inherit patch, we currently have 'fp8', 'fp8_static', 'float16', 'nvfp4', 'mxfp4' to force the precision of a worker.  
     - `config`: the most important part. It defines `nextn` for MTP; It also defines the agg_/prefill_/decode_worker's quantization, and parallelism search space; It also defines more about how we search for the disagg replica and do correction for better performance alignment. We'll go through it in [Advanced Tuning](advanced_tuning.md). Typically, the only thing here for you to modify, perhaps, is the quantization of the worker.
 
+Quantization override order: explicit quantization set via `profiles` or YAML `config` takes precedence; missing values are filled from the model's HF quantization metadata.  
+If you use `mode: replace`, ensure your replacement config includes the quantization you want.
+
 If you don't want to patch the `config` details, you can just delete them. Here's a simplified one,
 ```yaml
 exp_disagg_simplified:
@@ -559,7 +565,7 @@ exps:
 exp_h200_h200:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_path: "Qwen/Qwen3-32B" # required
+  model_path: "Qwen/Qwen3-32B-FP8" # required
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
@@ -573,7 +579,7 @@ exp_h200_h200:
 exp_b200_h200:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_path: "Qwen/Qwen3-32B" # required
+  model_path: "Qwen/Qwen3-32B-FP8" # required
   total_gpus: 16 # required
   system_name: "b200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
@@ -598,7 +604,7 @@ exps:
 exp_agg:
   mode: "patch"
   serving_mode: "agg" # required
-  model_path: "Qwen/Qwen3-32B" # required
+  model_path: "Qwen/Qwen3-32B-FP8" # required
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
   backend_name: "trtllm" # can also be "vllm" or "sglang"
@@ -611,7 +617,7 @@ exp_agg:
 exp_disagg:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_path: "Qwen/Qwen3-32B" # required
+  model_path: "Qwen/Qwen3-32B-FP8" # required
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
@@ -622,7 +628,7 @@ exp_disagg:
   ttft: 600.0  # Target TTFT in ms
   tpot: 16   # Target TPOT in ms
 ```
-In this example, we use a pre-defined profile to overwrite quantization of Qwen/Qwen3-32B. Default is blockwise FP8 for GEMM and here we use per-tensor FP8.
+In this example, we use a pre-defined profile to overwrite quantization of Qwen/Qwen3-32B-FP8. Default is blockwise FP8 for GEMM and here we use per-tensor FP8.
 
 You can refer to [src/aiconfigurator/cli/exps](../src/aiconfigurator/cli/exps) to find more reference yaml files.
 

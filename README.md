@@ -62,16 +62,17 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 ### CLI
 
 ```bash
-aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm
+aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm
 aiconfigurator cli exp --yaml_path exp.yaml
-aiconfigurator cli generate --model_path QWEN3_32B --total_gpus 8 --system h200_sxm
-aiconfigurator cli support --model_path QWEN3_32B --system h200_sxm
+aiconfigurator cli generate --model Qwen/Qwen3-32B-FP8 --total_gpus 8 --system h200_sxm
+aiconfigurator cli support --model Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
+- `--model` is an alias for `--model_path` in the CLI.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
 - Use `exp`, pass in exp.yaml by `--yaml_path` to customize your experiments and even a heterogenous one.
 - Use `--save_dir DIR` to generate framework configuration files for Dynamo.
@@ -83,6 +84,10 @@ aiconfigurator cli support --model_path QWEN3_32B --system h200_sxm
   latency stays within that budget, optionally honoring a provided `--ttft`. 
   When this flag is set, `--tpot` becomes implicit and is ignored.
 
+Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
+For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.  
+Any quantization set via `profiles` or YAML `config` overrides the HF defaults.
+
 Refer to [CLI User Guide](docs/cli_user_guide.md)
 
 ### Python API
@@ -93,7 +98,7 @@ You can also use `aiconfigurator` programmatically in Python:
 from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_support
 
 # 1. Run default agg vs disagg comparison
-result = cli_default(model_path="Qwen/Qwen3-32B", total_gpus=32, system="h200_sxm")
+result = cli_default(model_path="Qwen/Qwen3-32B-FP8", total_gpus=32, system="h200_sxm")
 print(result.best_configs["disagg"].head())
 
 # 2. Run experiments from a YAML file or a dictionary config
@@ -102,7 +107,7 @@ result = cli_exp(yaml_path="my_experiments.yaml")
 result = cli_exp(config={
     "my_exp": {
         "serving_mode": "disagg",
-        "model_path": "Qwen/Qwen3-32B",
+        "model_path": "Qwen/Qwen3-32B-FP8",
         "total_gpus": 32,
         "system_name": "h200_sxm",
         "isl": 4000,
@@ -111,17 +116,17 @@ result = cli_exp(config={
 })
 
 # 3. Generate a naive configuration
-result = cli_generate(model_path="Qwen/Qwen3-32B", total_gpus=8, system="h200_sxm")
+result = cli_generate(model_path="Qwen/Qwen3-32B-FP8", total_gpus=8, system="h200_sxm")
 print(result["parallelism"]) # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
 
 # 4. Check support for a model/system combination
-agg, disagg = cli_support(model_path="Qwen/Qwen3-32B", system="h200_sxm")
+agg, disagg = cli_support(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm")
 print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```
 
 An example here, 
 ```bash
-aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --isl 4000 --osl 500 --prefix 500 --ttft 300 --tpot 10
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --isl 4000 --osl 500 --prefix 500 --ttft 300 --tpot 10
 ```
 
 ```text
@@ -130,7 +135,7 @@ aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm -
 ********************************************************************************
   ----------------------------------------------------------------------------
   Input Configuration & SLA Target:
-    Model: QWEN3_32B (is_moe: False)
+    Model: QWEN3_32B_FP8 (is_moe: False)
     Total GPUs: 32
     Best Experiment Chosen: disagg at 804.83 tokens/s/gpu (disagg 1.64x better)
   ----------------------------------------------------------------------------
@@ -142,7 +147,7 @@ aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm -
     - TPOT: 9.16ms
   ----------------------------------------------------------------------------
   Pareto Frontier:
-               QWEN3_32B Pareto Frontier: tokens/s/gpu vs tokens/s/user         
+               QWEN3_32B_FP8 Pareto Frontier: tokens/s/gpu vs tokens/s/user         
       ┌────────────────────────────────────────────────────────────────────────┐
 1400.0┤ •• disagg                                                              │
       │ ff agg                                                                 │
@@ -205,7 +210,7 @@ These results indicate that deploying Qwen3-32B on h200_sxm in FP8 can achieve *
 Try different ISL:OSL values and SLA limits to fit your use case, for example:
 
 ```bash
-aiconfigurator cli default --model QWEN3_32B --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200 --prefix 500
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200 --prefix 500
 ```
 
 You will get different results.
@@ -233,7 +238,7 @@ This feature bridges the gap between configuration and Dynamo deployment.
 The folder structure looks like this:
 
 ```text
-results/QWEN3_32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
+results/QWEN3_32B_FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
 │   ├── best_config_topn.csv
 │   ├── config.yaml
@@ -375,7 +380,7 @@ For a comprehensive breakdown of which model/system/backend/version combinations
 
 You can also check if a system / framework version is supported via the `aiconfigurator cli support` command. For example:
 ```bash
-aiconfigurator cli support --model_path Qwen/Qwen3-32B --system h100_sxm --backend_version 1.2.0rc5
+aiconfigurator cli support --model_path Qwen/Qwen3-32B-FP8 --system h100_sxm --backend_version 1.2.0rc5
 ```
 
 ## Contributing and Development

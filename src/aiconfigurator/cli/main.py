@@ -79,6 +79,8 @@ def _validate_model_path(model_path: str) -> str:
 def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--model_path",
+        "--model",
+        dest="model_path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
@@ -142,6 +144,8 @@ def _add_generate_mode_arguments(parser):
     """Add arguments for the generate mode (naive config generation)."""
     parser.add_argument(
         "--model_path",
+        "--model",
+        dest="model_path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
@@ -173,6 +177,8 @@ def _add_support_mode_arguments(parser):
     """Add arguments for the support mode (support matrix check)."""
     parser.add_argument(
         "--model_path",
+        "--model",
+        dest="model_path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
