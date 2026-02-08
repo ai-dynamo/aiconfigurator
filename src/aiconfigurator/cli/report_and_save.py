@@ -103,11 +103,11 @@ def _plot_worker_setup_table(
 
     # Check if it is disagg config by checking for prefill/decode specific columns
     is_disagg = "(p)tp" in top_configs.columns
-    has_backend = "backend" in top_configs.columns
 
     if is_disagg:
         field_names = [
             "Rank",
+            "backend",
             "\033[1mtokens/s/gpu\033[0m",
             "tokens/s/user",
             "TTFT",
@@ -125,8 +125,6 @@ def _plot_worker_setup_table(
             "(d)parallel",
             "(d)bs",
         ]
-        if has_backend:
-            field_names.insert(1, "backend")  # Add after Rank
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -159,9 +157,8 @@ def _plot_worker_setup_table(
                 )
             row_data = [
                 i + 1,
+                row["backend"],
             ]
-            if has_backend:
-                row_data.append(row["backend"])
             row_data.extend(
                 [
                     f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
@@ -192,6 +189,7 @@ def _plot_worker_setup_table(
     else:  # agg
         field_names = [
             "Rank",
+            "backend",
             "\033[1mtokens/s/gpu\033[0m",
             "tokens/s/user",
             "TTFT",
@@ -204,8 +202,6 @@ def _plot_worker_setup_table(
             "parallel",
             "bs",
         ]
-        if has_backend:
-            field_names.insert(1, "backend")  # Add after Rank
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -227,9 +223,8 @@ def _plot_worker_setup_table(
                 )
             row_data = [
                 i + 1,
+                row["backend"],
             ]
-            if has_backend:
-                row_data.append(row["backend"])
             row_data.extend(
                 [
                     f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
@@ -391,6 +386,10 @@ def log_final_summary(
                 task_config_key = exp_name
         else:
             task_config_key = exp_name
+
+        if not config_df.empty and "backend" not in config_df.columns:
+            config_df = config_df.copy()
+            config_df["backend"] = task_configs[task_config_key].backend_name
 
         exp_task_config = task_configs[task_config_key].config
         total_gpus = getattr(task_configs[task_config_key], "total_gpus", None) or 0

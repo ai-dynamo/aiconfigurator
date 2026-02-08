@@ -528,7 +528,7 @@ This section is very long, let's go through the basic setting quickly
     - `backend_name`: specifies the inference backend - `trtllm` (default), `vllm`, or `sglang`
     - `backend_version`, `isl`, `osl`, `ttft`, `tpot`: defines the same things as in `default` mode  
     - `enable_wideep`: will trigger wide-ep for fined-grained moe model  
-    - `profiles`: some inherit patch, we current have 'fp8_default', 'float16_default', 'nvfp4_default' to force the precision of a worker.  
+    - `profiles`: some inherit patch, we currently have 'fp8', 'fp8_static', 'float16', 'nvfp4', 'mxfp4' to force the precision of a worker.  
     - `config`: the most important part. It defines `nextn` for MTP; It also defines the agg_/prefill_/decode_worker's quantization, and parallelism search space; It also defines more about how we search for the disagg replica and do correction for better performance alignment. We'll go through it in [Advanced Tuning](advanced_tuning.md). Typically, the only thing here for you to modify, perhaps, is the quantization of the worker.
 
 If you don't want to patch the `config` details, you can just delete them. Here's a simplified one,
@@ -602,7 +602,7 @@ exp_agg:
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
   backend_name: "trtllm" # can also be "vllm" or "sglang"
-  profiles: ["fp8_default"]
+  profiles: ["fp8"]
   isl: 4000 # input sequence length
   osl: 500 # output sequence length
   ttft: 600.0  # Target TTFT in ms
@@ -616,7 +616,7 @@ exp_disagg:
   system_name: "h200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
   backend_name: "trtllm" # can also be "vllm" or "sglang"
-  profiles: ["fp8_default"]
+  profiles: ["fp8"]
   isl: 4000 # input sequence length
   osl: 500 # output sequence length
   ttft: 600.0  # Target TTFT in ms

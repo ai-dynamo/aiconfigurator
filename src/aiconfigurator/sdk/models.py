@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 @cache
-def _get_model_info(model_path: str) -> list:
+def _get_model_info(model_path: str) -> dict:
     """
     Get model configuration info from model path.
 
@@ -22,9 +22,7 @@ def _get_model_info(model_path: str) -> list:
         model_path: HuggingFace model path (e.g., 'meta-llama/Llama-2-7b-hf') or local path
 
     Returns:
-        list: Model configuration parameters
-              [architecture, layers, n, n_kv, d, hidden_size, inter_size, vocab, context,
-               topk, num_experts, moe_inter_size, extra_params]
+        dict: Model configuration parameters and raw config under "raw_config".
     """
     return get_model_config_from_model_path(model_path)
 
@@ -44,6 +42,76 @@ def _architecture_to_model_family(architecture: str) -> str:
         f"Supported architectures: {', '.join(common.ARCHITECTURE_TO_MODEL_FAMILY.keys())}. "
         f"Supported model families: {', '.join(common.ModelFamily)}."
     )
+
+
+def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
+    quant_algo = raw_config.get("quant_algo")
+    quant_dynamic = raw_config.get("quant_dynamic")
+    kv_cache_algo = raw_config.get("kv_cache_quant_algo")
+
+    overrides: dict[str, object] = {}
+
+    # GEMM quant mode, MoE quant mode
+    if quant_algo == "fp8":
+        if quant_dynamic is False:
+            overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_static
+        else:
+            overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8
+        overrides["moe_quant_mode"] = common.MoEQuantMode.fp8
+    elif quant_algo == "fp8_block":
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_block
+        overrides["moe_quant_mode"] = common.MoEQuantMode.fp8_block
+    elif quant_algo == "nvfp4":
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.nvfp4
+        overrides["moe_quant_mode"] = common.MoEQuantMode.nvfp4
+    elif quant_algo == "mxfp4":
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
+        overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_mxfp4
+    elif quant_algo == "float16":
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
+        overrides["moe_quant_mode"] = common.MoEQuantMode.float16
+    elif quant_algo is not None:
+        raise ValueError(f"Unsupported quant algorithm: {quant_algo}")
+
+    # KVCache quant mode
+    # TODO: support fp4 kv cache
+    if kv_cache_algo == "fp8":
+        overrides["kvcache_quant_mode"] = common.KVCacheQuantMode.fp8
+    elif kv_cache_algo == "float16":
+        overrides["kvcache_quant_mode"] = common.KVCacheQuantMode.float16
+    elif kv_cache_algo is not None:
+        raise ValueError(f"Unsupported kv cache algorithm: {kv_cache_algo}")
+
+    # FMHA quant mode
+    if quant_algo is not None and (quant_algo in ("fp8", "fp8_block", "nvfp4") or kv_cache_algo in ("fp8")):
+        overrides["fmha_quant_mode"] = common.FMHAQuantMode.fp8
+        if kv_cache_algo is None or kv_cache_algo != "fp8":
+            overrides["kvcache_quant_mode"] = common.KVCacheQuantMode.fp8
+
+    return overrides
+
+
+def _apply_model_quant_defaults(model_config: config.ModelConfig, raw_config: dict) -> None:
+    inferred = _infer_quant_modes_from_raw_config(raw_config)
+    applied: list[str] = []
+    for key, value in inferred.items():
+        if getattr(model_config, key, None) is None:
+            setattr(model_config, key, value)
+            applied.append(f"{key}={value.name}")
+
+    if model_config.gemm_quant_mode is None:
+        model_config.gemm_quant_mode = common.GEMMQuantMode.float16
+    if model_config.moe_quant_mode is None:
+        model_config.moe_quant_mode = common.MoEQuantMode.float16
+    if model_config.kvcache_quant_mode is None:
+        model_config.kvcache_quant_mode = common.KVCacheQuantMode.float16
+    if model_config.fmha_quant_mode is None:
+        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
+    if model_config.comm_quant_mode is None:
+        model_config.comm_quant_mode = common.CommQuantMode.half
+
+    if applied:
+        logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
 
 
 def _architecture_to_model_family(architecture: str) -> str:
@@ -71,23 +139,38 @@ def get_model(
     """
     Get model.
     """
-    (
-        architecture,
-        layers,
-        n,
-        n_kv,
-        d,
-        hidden,
-        inter,
-        vocab,
-        context,
-        topk,
-        num_experts,
-        moe_inter_size,
-        extra_params,
-    ) = _get_model_info(model_path)
+    model_info = _get_model_info(model_path)
+    raw_config = model_info.get("raw_config", {})
+    _apply_model_quant_defaults(model_config, raw_config)
+
+    architecture = model_info["architecture"]
+    layers = model_info["layers"]
+    n = model_info["n"]
+    n_kv = model_info["n_kv"]
+    d = model_info["d"]
+    hidden = model_info["hidden_size"]
+    inter = model_info["inter_size"]
+    vocab = model_info["vocab"]
+    context = model_info["context"]
+    topk = model_info["topk"]
+    num_experts = model_info["num_experts"]
+    moe_inter_size = model_info["moe_inter_size"]
+    extra_params = model_info["extra_params"]
     # Convert architecture (e.g., 'LlamaForCausalLM') to model family (e.g., 'LLAMA')
     model_family = _architecture_to_model_family(architecture)
+
+    # FIXME: temporary workaround for Deepseek V3 fp8 fmha quant mode, only float16+fp8kvcache is supported
+    if architecture == "DeepseekV3ForCausalLM" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+        model_config.fmha_quant_mode = common.FMHAQuantMode.float16
+
+    logger.info(
+        "Model config (final quant modes): gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
+        model_config.gemm_quant_mode,
+        model_config.moe_quant_mode,
+        model_config.kvcache_quant_mode,
+        model_config.fmha_quant_mode,
+        model_config.comm_quant_mode,
+    )
 
     if model_config.overwrite_num_layers > 0:
         layers = model_config.overwrite_num_layers
@@ -226,7 +309,7 @@ def get_model_family(model_path: str) -> str:
     Get model family.
     Converts architecture name to model family if needed.
     """
-    architecture = _get_model_info(model_path)[0]
+    architecture = _get_model_info(model_path)["architecture"]
     return _architecture_to_model_family(architecture)
 
 
@@ -242,7 +325,7 @@ def check_is_moe(model_path: str) -> bool:
         return True
     if family == "NEMOTRONH":
         model_info = _get_model_info(model_path)
-        extra_params = model_info[-1]  # extra_params is always the last element
+        extra_params = model_info.get("extra_params")
         if extra_params is None or not hasattr(extra_params, "hybrid_override_pattern"):
             logger.warning(f"NEMOTRONH model {model_path} missing hybrid_override_pattern, defaulting is_moe=False")
             return False

@@ -46,11 +46,11 @@ class TestSupportedModels:
         """Test that model configurations have the expected structure."""
         for hf_id in common.DefaultHFModels:
             config = get_model_config_from_model_path(hf_id)
-            assert isinstance(config, (list, tuple))
-            assert len(config) >= 1  # At least architecture
+            assert isinstance(config, dict)
+            assert "architecture" in config
 
             # First element should be architecture string that maps to a valid model family
-            architecture = config[0]
+            architecture = config["architecture"]
             assert isinstance(architecture, str)
             assert architecture in common.ARCHITECTURE_TO_MODEL_FAMILY, (
                 f"Model {hf_id} has unknown architecture: {architecture}. "
@@ -88,7 +88,7 @@ class TestHFModelSupport:
         """Test that all HF model IDs have valid architecture mapping."""
         for hf_id in common.DefaultHFModels:
             config = get_model_config_from_model_path(hf_id)
-            architecture = config[0]
+            architecture = config["architecture"]
             assert architecture in common.ARCHITECTURE_TO_MODEL_FAMILY
 
     @pytest.mark.parametrize(

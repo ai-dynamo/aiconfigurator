@@ -108,12 +108,12 @@ def test_taskconfig_profile_application():
         serving_mode="agg",
         model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
-        profiles=["fp8_default"],
+        profiles=["fp8"],
     )
     cfg = task.config
 
     assert _enum_name(cfg.worker_config.gemm_quant_mode) == "fp8"
-    assert any(layer.startswith("profile:fp8_default") for layer in cfg.applied_layers)
+    assert any(layer.startswith("profile:fp8") for layer in cfg.applied_layers)
 
 
 def test_taskconfig_fp8_static_requires_trtllm_backend():
@@ -173,7 +173,7 @@ def test_taskconfig_agg_yaml_patch_overrides():
 def test_taskconfig_yaml_file_profiles_and_patch(tmp_path):
     yaml_payload = {
         "mode": "patch",
-        "profiles": ["float16_default"],
+        "profiles": ["float16"],
         "config": {
             "worker_config": {
                 "tp_list": [1, 2],
@@ -189,7 +189,7 @@ def test_taskconfig_yaml_file_profiles_and_patch(tmp_path):
         serving_mode="agg",
         model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
-        profiles=["fp8_default"],
+        profiles=["fp8"],
         yaml_config=loaded_yaml,
     )
     cfg = task.config
@@ -204,7 +204,7 @@ def test_taskconfig_disagg_profile_patch_expands_replica():
         serving_mode="disagg",
         model_path="Qwen/Qwen3-32B",
         system_name="b200_sxm",
-        profiles=["fp8_default"],
+        profiles=["fp8"],
         yaml_config={
             "mode": "patch",
             "config": {
@@ -240,7 +240,7 @@ def test_taskconfig_disagg_total_gpus_with_patch():
         model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
         total_gpus=32,
-        profiles=["fp8_default"],
+        profiles=["fp8"],
         yaml_config={
             "mode": "patch",
             "config": {"replica_config": {"max_gpu_per_replica": 256}},

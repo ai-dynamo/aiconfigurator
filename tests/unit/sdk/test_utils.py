@@ -207,7 +207,7 @@ class TestGetModelConfigFromHFID:
 
         result = get_model_config_from_model_path("Qwen/Qwen3-32B-FP8")
 
-        assert result[0] == "LlamaForCausalLM"  # architecture
+        assert result["architecture"] == "LlamaForCausalLM"  # architecture
         mock_download.assert_called_once_with("Qwen/Qwen3-32B-FP8")
 
 

@@ -383,7 +383,6 @@ _EXPERIMENT_RESERVED_KEYS = {
     "request_latency",
     "enable_wideep",
     "total_gpus",
-    "use_specific_quant_mode",
     "database_mode",
 }
 
@@ -516,8 +515,6 @@ def build_experiment_task_configs(
 
         if "enable_wideep" in exp_config:
             task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
-        if "use_specific_quant_mode" in exp_config:
-            task_kwargs["use_specific_quant_mode"] = exp_config["use_specific_quant_mode"]
         if "database_mode" in exp_config:
             task_kwargs["database_mode"] = exp_config["database_mode"]
 
@@ -695,7 +692,7 @@ def _run_support_mode(args):
     # Resolve architecture for better check
     try:
         model_info = get_model_config_from_model_path(model)
-        architecture = model_info[0]
+        architecture = model_info["architecture"]
     except Exception:
         architecture = None
 

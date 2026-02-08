@@ -15,11 +15,11 @@ class ModelConfig:
 
     tp_size: int = 1
     pp_size: int = 1
-    gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16
-    moe_quant_mode: common.MoEQuantMode = common.MoEQuantMode.float16
-    kvcache_quant_mode: common.KVCacheQuantMode = common.KVCacheQuantMode.float16
-    fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.float16
-    comm_quant_mode: common.CommQuantMode = common.CommQuantMode.half
+    gemm_quant_mode: common.GEMMQuantMode | None = None
+    moe_quant_mode: common.MoEQuantMode | None = None
+    kvcache_quant_mode: common.KVCacheQuantMode | None = None
+    fmha_quant_mode: common.FMHAQuantMode | None = None
+    comm_quant_mode: common.CommQuantMode | None = common.CommQuantMode.half
     moe_tp_size: int = None
     moe_ep_size: int = None
     attention_dp_size: int = 1

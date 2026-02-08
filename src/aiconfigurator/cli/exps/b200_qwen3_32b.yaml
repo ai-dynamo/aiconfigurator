@@ -13,7 +13,7 @@ exp_agg:
   total_gpus: 8 # required
   system_name: "b200_sxm" # required, for prefill
   backend_name: "trtllm"
-  profiles: ["fp8_default"]
+  profiles: ["fp8"]
   isl: 4000 # input sequence length
   osl: 500 # output sequence length
   ttft: 600.0  # Target TTFT in ms
@@ -27,7 +27,7 @@ exp_disagg:
   system_name: "b200_sxm" # required, for prefill
   decode_system_name: "b200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
   backend_name: "trtllm"
-  profiles: ["fp8_default"]
+  profiles: ["fp8"]
   isl: 4000 # input sequence length
   osl: 500 # output sequence length
   ttft: 600.0  # Target TTFT in ms

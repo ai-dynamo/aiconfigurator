@@ -55,7 +55,7 @@ def cli_support(
 
     try:
         model_info = get_model_config_from_model_path(model_path)
-        architecture = model_info[0]
+        architecture = model_info["architecture"]
     except Exception:
         architecture = None
 
