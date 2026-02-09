@@ -15,6 +15,23 @@ from .rendering import apply_defaults
 
 
 def _deep_merge(target: dict, extra: dict | None) -> dict:
+    """
+    Recursively merge the contents of the 'extra' dictionary into 'target',
+    performing a deep merge for nested dictionaries.
+
+    Args:
+        target: The base dictionary to update.
+        extra: An optional dictionary whose values will be merged into 'target'.
+
+    Returns:
+        The modified 'target' dictionary with merged values from 'extra'.
+
+    Example:
+        >>> a = {'a': 1, 'b': {'c': 2}}
+        >>> b = {'b': {'d': 3}, 'e': 4}
+        >>> _deep_merge(a, b)
+        {'a': 1, 'b': {'c': 2, 'd': 3}, 'e': 4}
+    """
     if not extra:
         return target
     for key, value in extra.items():

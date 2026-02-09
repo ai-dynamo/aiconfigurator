@@ -14,7 +14,7 @@ from prettytable import PrettyTable
 
 from aiconfigurator.generator.api import (
     generate_backend_artifacts,
-    get_default_backend_version_entry,
+    get_default_dynamo_version_mapping,
     load_generator_overrides_from_args,
     resolve_backend_version_for_dynamo,
 )
