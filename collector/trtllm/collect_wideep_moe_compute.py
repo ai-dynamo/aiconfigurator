@@ -109,8 +109,8 @@ class WideEPMoEComputeSimulator(nn.Module):
 
     Uses the SAME kernel selection logic as WideEPMoE (MoEOpSelector.select_op).
 
-    simulate EP size > 1 :
-    - expert_size_per_partition = num_slots / ep_size 
+    Simulate EP size > 1 scenario:
+    - expert_size_per_partition = num_slots / ep_size (local slot count per rank)
     - weight shape: [expert_size_per_partition, ...]
     - EPLB num_slots >= num_experts
     """
@@ -174,7 +174,7 @@ class WideEPMoEComputeSimulator(nn.Module):
         self.tune_max_num_tokens = 8192
 
         # Swiglu parameters (None for standard Swiglu activation)
-        # WideEPMoE 不支持 swiglu_alpha/beta/limit
+        # WideEPMoE does not support swiglu_alpha/beta/limit
         self.swiglu_alpha = None
         self.swiglu_beta = None
         self.swiglu_limit = None
@@ -202,6 +202,7 @@ class WideEPMoEComputeSimulator(nn.Module):
     def _create_weights(self):
         """
         Create weights based on quantization mode, following TensorRT-LLM's implementation.
+        Weights are created per expert_size_per_partition (= num_slots / ep_size).
         """
         device = "cuda"
 
@@ -485,7 +486,7 @@ class WideEPMoEComputeSimulator(nn.Module):
 
         # Step 3: MoE Computation
 
-        # 统计该 EP rank 上实际要计算的 token-slot pairs 数量
+        # Count the actual number of token-slot pairs to compute on this EP rank
         # token_selected_slots < expert_size_per_partition means local slot
         # local_slot_mask = token_selected_slots < self.expert_size_per_partition
         # total_local_computations = local_slot_mask.sum().item()

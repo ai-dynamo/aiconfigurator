@@ -1007,13 +1007,13 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
     # Greedy assignment: prioritize experts with highest demand
 
     h_selected_experts = torch.zeros((num_tokens, topk), dtype=torch.int64)
-    remaining = num_tokens_per_expert.clone()  # 每个 expert 的剩余需求
+    remaining = num_tokens_per_expert.clone()  # remaining demand per expert
 
     for token_id in range(num_tokens):
-        # 选择剩余需求最高的 topk 个 expert
+        # Select the top-k experts with the highest remaining demand
         _, top_experts = torch.topk(remaining, topk)
         h_selected_experts[token_id] = top_experts
-        # 减少这些 expert 的剩余需求
+        # Decrease the remaining demand for the selected experts
         remaining[top_experts] -= 1
 
     # Verify: check if all demands are satisfied
