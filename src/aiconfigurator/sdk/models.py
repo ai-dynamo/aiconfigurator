@@ -83,7 +83,7 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
         raise ValueError(f"Unsupported kv cache algorithm: {kv_cache_algo}")
 
     # FMHA quant mode
-    if quant_algo is not None and (quant_algo in ("fp8", "fp8_block", "nvfp4") or kv_cache_algo in ("fp8")):
+    if quant_algo is not None and (quant_algo in ("fp8", "fp8_block", "nvfp4") or kv_cache_algo in ("fp8",)):
         overrides["fmha_quant_mode"] = common.FMHAQuantMode.fp8
         if kv_cache_algo is None or kv_cache_algo != "fp8":
             overrides["kvcache_quant_mode"] = common.KVCacheQuantMode.fp8
