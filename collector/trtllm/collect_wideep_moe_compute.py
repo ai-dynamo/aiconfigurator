@@ -109,10 +109,10 @@ class WideEPMoEComputeSimulator(nn.Module):
 
     Uses the SAME kernel selection logic as WideEPMoE (MoEOpSelector.select_op).
 
-    模拟 EP size > 1 场景:
-    - expert_size_per_partition = num_slots / ep_size (每个 rank 的本地 slot 数量)
-    - 权重形状: [expert_size_per_partition, ...]
-    - EPLB 场景下 num_slots >= num_experts
+    simulate EP size > 1 :
+    - expert_size_per_partition = num_slots / ep_size 
+    - weight shape: [expert_size_per_partition, ...]
+    - EPLB num_slots >= num_experts
     """
 
     def __init__(
@@ -202,7 +202,6 @@ class WideEPMoEComputeSimulator(nn.Module):
     def _create_weights(self):
         """
         Create weights based on quantization mode, following TensorRT-LLM's implementation.
-        权重按 expert_size_per_partition (= num_slots / ep_size) 创建。
         """
         device = "cuda"
 
