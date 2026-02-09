@@ -293,28 +293,18 @@ def run_mamba2_context_benchmark(
                 else:
                     # Randomized mode (default): pre-generate pool of random inputs
                     # to avoid L2 cache effects while excluding tensor creation from timing
-                    input_pool = {
-                        "xbc": [
-                            torch.randn(batch_size, conv_dim, seq_len, dtype=dtype, device=device)
-                            for _ in range(total_iters)
-                        ],
-                        "x": [
-                            torch.randn(batch_size, seq_len, nheads, head_dim, dtype=dtype, device=device)
-                            for _ in range(total_iters)
-                        ],
-                        "dt": [
-                            torch.randn(batch_size, seq_len, nheads, dtype=dtype, device=device)
-                            for _ in range(total_iters)
-                        ],
-                        "B": [
-                            torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)
-                            for _ in range(total_iters)
-                        ],
-                        "C": [
-                            torch.randn(batch_size, seq_len, n_groups, d_state, dtype=dtype, device=device)
-                            for _ in range(total_iters)
-                        ],
-                    }
+                    input_pool = _make_input_pool(
+                        {
+                            "xbc": (batch_size, conv_dim, seq_len),
+                            "x": (batch_size, seq_len, nheads, head_dim),
+                            "dt": (batch_size, seq_len, nheads),
+                            "B": (batch_size, seq_len, n_groups, d_state),
+                            "C": (batch_size, seq_len, n_groups, d_state),
+                        },
+                        total_iters,
+                        dtype,
+                        device,
+                    )
 
                     # Warmup with first set of inputs
                     torch.cuda.synchronize()
@@ -598,25 +588,18 @@ def run_mamba2_generation_benchmark(
                     "model_name": model_name,
                 }
                 # Randomized mode (default): pre-generate pool of random inputs
-                input_pool = {
-                    "xbc": [torch.randn(batch_size, conv_dim, dtype=dtype, device=device) for _ in range(total_iters)],
-                    "x": [
-                        torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
-                        for _ in range(total_iters)
-                    ],
-                    "dt": [
-                        torch.randn(batch_size, nheads, head_dim, dtype=dtype, device=device)
-                        for _ in range(total_iters)
-                    ],
-                    "B": [
-                        torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)
-                        for _ in range(total_iters)
-                    ],
-                    "C": [
-                        torch.randn(batch_size, n_groups, d_state, dtype=dtype, device=device)
-                        for _ in range(total_iters)
-                    ],
-                }
+                input_pool = _make_input_pool(
+                    {
+                        "xbc": (batch_size, conv_dim),
+                        "x": (batch_size, nheads, head_dim),
+                        "dt": (batch_size, nheads, head_dim),
+                        "B": (batch_size, n_groups, d_state),
+                        "C": (batch_size, n_groups, d_state),
+                    },
+                    total_iters,
+                    dtype,
+                    device,
+                )
 
                 # --- Benchmark causal_conv1d_update ---
                 torch.cuda.synchronize()
@@ -713,6 +696,18 @@ def run_mamba2_generation_benchmark(
         except Exception as e:
             print(f"  Error at batch_size={batch_size}: {e}")
             continue
+
+
+def _make_input_pool(
+    shapes: dict[str, tuple[int, ...]],
+    count: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> dict[str, list[torch.Tensor]]:
+    """Pre-generate a pool of random input tensors for randomized benchmarking."""
+    return {
+        name: [torch.randn(*shape, dtype=dtype, device=device) for _ in range(count)] for name, shape in shapes.items()
+    }
 
 
 def run_mamba2_torch(
