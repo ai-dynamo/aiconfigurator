@@ -118,10 +118,8 @@ def parse(args):
     )
     parser.add_argument(
         "--wideep_eplb_mode",
-        type=str,
-        default="off",
-        choices=["off", "on"],
-        help="WideEP EPLB mode: 'off' (no load balancing) or 'on' (with load balancing). "
+        action="store_true",
+        help="Enable WideEP EPLB (Expert Parallelism Load Balancing). "
         "Redundant mode is auto-detected when wideep_num_slots > num_experts.",
     )
     parser.add_argument(

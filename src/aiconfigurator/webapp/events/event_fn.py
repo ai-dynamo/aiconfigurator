@@ -210,7 +210,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
-                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else "off",
+                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
@@ -308,7 +308,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
-                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else "off",
+                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
@@ -417,7 +417,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
-                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else "off",
+                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
@@ -602,7 +602,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
-                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else "off",
+                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and prefill_backend_name == "sglang") else None,
                 )
@@ -620,7 +620,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
-                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else "off",
+                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and decode_backend_name == "sglang") else None,
                 )
@@ -887,7 +887,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
-                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else "off",
+                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and prefill_backend_name == "sglang") else None,
                 )
@@ -905,7 +905,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
-                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else "off",
+                    wideep_eplb_mode=wideep_eplb_mode if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and decode_backend_name == "sglang") else None,
                 )
@@ -1255,7 +1255,7 @@ class EventFn:
         if enable_wideep:
             return gr.update(interactive=True)
         else:
-            return gr.update(value="off", interactive=False)
+            return gr.update(value=False, interactive=False)
 
     @staticmethod
     def update_version_choices_with_quant_toggles(system_name, backend_name):

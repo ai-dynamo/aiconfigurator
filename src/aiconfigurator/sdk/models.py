@@ -1420,7 +1420,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # WideEP workload distribution
         # - EPLB off: "power_law_1.01" (no _eplb suffix)
         # - EPLB on/redundant: "power_law_1.01_eplb" (with _eplb suffix)
-        eplb_enabled = self.config.wideep_eplb_mode == "on"
+        eplb_enabled = self.config.wideep_eplb_mode
         if self.config.workload_distribution == "power_law":
             if eplb_enabled:
                 workload_distribution = f"{self.config.workload_distribution}_{self._power_law_alpha}_eplb"
@@ -1467,7 +1467,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # When EPLB is off, num_slots must equal num_experts
         if not eplb_enabled and wideep_num_slots != num_experts:
             raise ValueError(
-                f"When wideep_eplb_mode='off', wideep_num_slots ({wideep_num_slots}) must equal "
+                f"When wideep_eplb_mode=False, wideep_num_slots ({wideep_num_slots}) must equal "
                 f"num_experts ({num_experts}). Redundant slots require EPLB to be enabled."
             )
 
