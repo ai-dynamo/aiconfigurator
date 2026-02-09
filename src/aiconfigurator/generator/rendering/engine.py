@@ -536,28 +536,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
         except (TypeError, ValueError):
             return default
 
-    def _ensure_int_list(value: Any, fallback: list[int]) -> list[int]:
-        if value is None:
-            return list(fallback)
-        if isinstance(value, (list, tuple)):
-            return [int(v) for v in value]
-        if isinstance(value, str):
-            parts = [p for p in value.replace(",", " ").split() if p]
-            if parts:
-                return [int(p) for p in parts]
-        try:
-            return [int(value)]
-        except (TypeError, ValueError):
-            return list(fallback)
-
-    bench_concurrency = _ensure_int_list(
-        bench_config.get("concurrency"),
-        [2, 4, 8, 16, 32, 64, 128],
-    )
-    bench_num_requests = _ensure_int_list(
-        bench_config.get("num_requests"),
-        [v * 10 for v in bench_concurrency],
-    )
+    bench_estimated_concurrency = _safe_int(bench_config.get("estimated_concurrency"), 0)
 
     context["bench_job_name"] = bench_config.get("name")
     context["bench_image"] = bench_config.get("image")
@@ -570,8 +549,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["bench_osl"] = _safe_int(bench_config.get("osl"), 0)
     context["bench_isl_stddev"] = _safe_int(bench_config.get("isl_stddev"), 0)
     context["bench_osl_stddev"] = _safe_int(bench_config.get("osl_stddev"), 0)
-    context["bench_num_requests"] = bench_num_requests
-    context["bench_concurrency"] = bench_concurrency
+    context["bench_estimated_concurrency"] = bench_estimated_concurrency
     context["bench_ui"] = bench_config.get("ui")
 
     # Load backend_config_mapping.yaml to understand parameter mappings

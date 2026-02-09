@@ -150,6 +150,9 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
 - [trtllm] Engine config files (`agg_config.yaml`, `prefill_config.yaml`, `decode_config.yaml`) when the backend provides `extra_engine_args*.j2`.
 - Run scripts (`run_0.sh`, `run_1.sh`, …) that assign workers to nodes and toggle frontend on the first node.
 - Kubernetes manifest (`k8s_deploy.yaml`) with images, namespace, volumes, engine args (inline or ConfigMap), and role-specific settings.
+- Benchmark helpers:
+  - `bench_run.sh` and `k8s_bench.yaml` are generated alongside deployment artifacts for running `aiperf` benchmarks.
+  - `concurrency_array` is built from a base list (`1 2 8 16 32 64 128`) plus `BenchConfig.estimated_concurrency` and its +/-5% neighbors when the estimate is available.
 
 ### TRT-LLM Deployment Notes
 When deploying with TRT-LLM, the generated run scripts (`run_x.sh`) reference engine config files at `/workspace/engine_configs/`. Before executing the run scripts, you must:

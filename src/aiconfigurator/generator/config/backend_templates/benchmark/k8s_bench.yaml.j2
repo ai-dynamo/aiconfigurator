@@ -1,33 +1,49 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ bench_job_name }}
-  namespace: {{ k8s_namespace | default("default") }}
+  name: {{ BenchConfig.name }}
+  namespace: {{ K8sConfig.k8s_namespace | default("default") }}
 spec:
   backoffLimit: 0
   template:
     metadata:
-      name: {{ bench_job_name }}
+      name: {{ BenchConfig.name }}
     spec:
       restartPolicy: Never
       containers:
         - name: aiperf
-          image: {{ bench_image }}
+          image: {{ BenchConfig.image }}
           env:
             - name: AIPERF_SERVICE_PROFILE_START_TIMEOUT
-              value: "{{ bench_profile_start_timeout }}"
+              value: "{{ BenchConfig.profile_start_timeout }}"
           command: ["/bin/bash", "-c"]
           args:
             - |
               pip install aiperf
-              aiperf profile \
-                -m {{ (bench_model.split('/')[-1] if bench_model else '') }} \
-                --endpoint-type {{ bench_endpoint_type }} \
-                -u {{ bench_endpoint_url }} \
-                --tokenizer {{ bench_tokenizer }} \
-                --isl {{ bench_isl }} --isl-stddev {{ bench_isl_stddev }} \
-                --osl {{ bench_osl }} --osl-stddev {{ bench_osl_stddev }} \
-                --num-requests {{ bench_num_requests | join(' ') }} \
-                --concurrency {{ bench_concurrency | join(' ') }} \
-                --ui {{ bench_ui }} \
-                --streaming
+              {% set base_concurrency = [1, 2, 8, 16, 32, 64, 128] %}
+              {% if BenchConfig.estimated_concurrency and BenchConfig.estimated_concurrency > 0 %}
+              {% set eff = BenchConfig.estimated_concurrency | int %}
+              {% set eff_low = (BenchConfig.estimated_concurrency * 0.95) | int %}
+              {% set eff_high = (BenchConfig.estimated_concurrency * 1.05) | int %}
+              concurrency_array=({{ (base_concurrency + [eff_low, eff, eff_high]) | join(' ') }})
+              {% else %}
+              concurrency_array=({{ base_concurrency | join(' ') }})
+              {% endif %}
+              for concurrency in "${concurrency_array[@]}"; do
+                echo "Run concurrency: $concurrency"
+                aiperf profile \
+                  -m {{ (BenchConfig.model.split('/')[-1] if BenchConfig.model else '') }} \
+                  --endpoint-type {{ BenchConfig.endpoint_type }} \
+                  -u {{ BenchConfig.endpoint_url }} \
+                  --tokenizer {{ BenchConfig.tokenizer }} \
+                  --isl {{ BenchConfig.isl }} --isl-stddev {{ BenchConfig.isl_stddev }} \
+                  --osl {{ BenchConfig.osl }} --osl-stddev {{ BenchConfig.osl_stddev }} \
+                  --extra-inputs ignore_eos:true \
+                  --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+                  --concurrency ${concurrency} \
+                  --num-requests $(($concurrency*50)) \
+                  --warmup-request-count $(($concurrency*2)) \
+                  --random-seed 100 \
+                  --ui {{ BenchConfig.ui }} \
+                  --streaming
+              done
