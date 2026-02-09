@@ -790,6 +790,7 @@ def main(args):
             task_configs=task_configs,
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,
+            backend=args.backend if args.mode == "default" else None,
         )
 
 
