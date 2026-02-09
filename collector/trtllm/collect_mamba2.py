@@ -482,6 +482,8 @@ def run_mamba2_generation_benchmark(
                 common_log_data = {
                     "phase": "generation",
                     "batch_size": batch_size,
+                    "seq_len": 1,
+                    "num_tokens": batch_size,
                     "d_model": d_model,
                     "d_state": d_state,
                     "d_conv": d_conv,
@@ -578,6 +580,8 @@ def run_mamba2_generation_benchmark(
                 common_log_data = {
                     "phase": "generation",
                     "batch_size": batch_size,
+                    "seq_len": 1,
+                    "num_tokens": batch_size,
                     "d_model": d_model,
                     "d_state": d_state,
                     "d_conv": d_conv,
