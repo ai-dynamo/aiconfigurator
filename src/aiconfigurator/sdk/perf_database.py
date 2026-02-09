@@ -235,25 +235,26 @@ def get_database(
             return database
         except KeyError:
             logger.info(f"loading {system=}, {backend=}, {version=}")
-            with open(system_yaml_path) as f:
-                system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-            data_path = os.path.join(systems_root, system_spec["data_dir"], backend, version)
+            try:
+                with open(system_yaml_path) as f:
+                    system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+                data_dir = system_spec["data_dir"]
+            except Exception:
+                logger.warning(f"failed to read system spec at {system_yaml_path}, continuing searching")
+                continue
+            data_path = os.path.join(systems_root, data_dir, backend, version)
             if os.path.exists(data_path):
                 try:
                     database = PerfDatabase(system, backend, version, systems_root)
                     databases_cache[cache_key][backend][version] = database
+                    return database
                 except Exception:
-                    logger.exception(f"failed to load {system=}, {backend=}, {version=}")
-                    database = None
+                    logger.warning(f"failed to load {system=}, {backend=}, {version=}, continuing searching")
             else:
-                logger.exception(f"data path {data_path} not found")
-                database = None
-            return database
+                logger.warning(f"data path {data_path} not found, continuing searching")
 
-    logger.exception(f"system yaml {system}.yaml not found in {systems_paths}")
+    logger.error(f"failed to get {system=}, {backend=}, {version=}")
     return None
-
-    return database
 
 
 def get_all_databases(
