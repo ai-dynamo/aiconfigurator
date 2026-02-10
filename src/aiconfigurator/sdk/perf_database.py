@@ -10,6 +10,7 @@ import logging
 import math
 import os
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import Optional
 
 import numpy as np
@@ -22,58 +23,94 @@ from aiconfigurator.sdk.performance_result import PerformanceResult
 databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
+_SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
+
+
+def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
+    default_path = os.fspath(pkg_resources.files("aiconfigurator") / "systems")
+    if raw_paths is None:
+        return [default_path]
+    if isinstance(raw_paths, str):
+        entries = [part.strip() for part in raw_paths.split(",") if part.strip()]
+    else:
+        entries = [os.fspath(entry) for entry in raw_paths if entry is not None]
+    if not entries:
+        return [default_path]
+    resolved: list[str] = []
+    for entry in entries:
+        if str(entry).lower() == "default":
+            resolved.append(default_path)
+        else:
+            resolved.append(os.fspath(entry))
+    return resolved
+
+
+def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
+    """
+    Override the system search paths for the current process.
+    """
+    global _SYSTEMS_PATHS
+    _SYSTEMS_PATHS = _normalize_systems_paths(raw_paths)
+
+
+def get_systems_paths() -> list[str]:
+    return list(_SYSTEMS_PATHS)
+
 
 class PerfDataNotAvailableError(RuntimeError):
     """Raised when required performance data is missing or unsupported for a requested mode."""
 
 
-def get_system_config_path():
-    """
-    Get the system config path
-    """
-    return pkg_resources.files("aiconfigurator") / "systems"
-
-
 def get_supported_databases(
-    systems_dir: str = get_system_config_path(),
+    systems_paths: str | list[str] | None = None,
 ) -> dict[str, dict[str, list[str]]]:
     """
     Get all supported databases for all systems, backends and versions without loading them.
     """
-    supported_dict = defaultdict(lambda: defaultdict(list))
-    if not os.path.isdir(systems_dir):
-        logger.warning(f"Systems directory not found: {systems_dir}")
-        return supported_dict
+    supported_sets: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
 
-    system_yamls = [
-        f for f in os.listdir(systems_dir) if f.endswith(".yaml") and os.path.isfile(os.path.join(systems_dir, f))
-    ]
-    for system_yaml in system_yamls:
-        system = system_yaml.split(".")[0]
+    for systems_root in systems_paths:
         try:
-            with open(os.path.join(systems_dir, system_yaml)) as f:
-                system_spec = yaml.safe_load(f)
-
-            data_dir = os.path.join(systems_dir, system_spec.get("data_dir", ""))
-            if not os.path.isdir(data_dir):
+            entries = os.listdir(systems_root)
+        except Exception as e:
+            logger.warning("Could not list systems dir %s: %s", systems_root, e)
+            continue
+        for entry in entries:
+            if not entry.endswith(".yaml"):
                 continue
+            system = entry[:-5]
+            system_yaml_path = os.path.join(systems_root, entry)
+            try:
+                with open(system_yaml_path) as f:
+                    system_spec = yaml.safe_load(f)
 
-            for backend in common.BackendName:
-                backend_path = os.path.join(data_dir, backend.value)
-                if not os.path.isdir(backend_path):
+                data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+                if not os.path.isdir(data_dir):
                     continue
 
-                versions = sorted(
-                    [
+                for backend in common.BackendName:
+                    backend_path = os.path.join(data_dir, backend.value)
+                    if not os.path.isdir(backend_path):
+                        continue
+
+                    versions = [
                         v
                         for v in os.listdir(backend_path)
                         if not v.startswith(".") and os.path.isdir(os.path.join(backend_path, v))
                     ]
-                )
-                if versions:
-                    supported_dict[system][backend.value] = versions
-        except Exception as e:
-            logger.warning(f"Could not process system config {system_yaml}: {e}")
+                    if versions:
+                        supported_sets[system][backend.value].update(versions)
+            except Exception as e:
+                logger.warning(f"Could not process system config {os.path.basename(system_yaml_path)}: {e}")
+
+    supported_dict = defaultdict(lambda: defaultdict(list))
+    for system, backend_versions in supported_sets.items():
+        for backend, versions in backend_versions.items():
+            supported_dict[system][backend] = sorted(versions)
 
     return supported_dict
 
@@ -166,7 +203,10 @@ def get_latest_database_version(
 
 
 def get_database(
-    system: str, backend: str, version: str, systems_dir: str = get_system_config_path()
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version
@@ -175,60 +215,111 @@ def get_database(
         system (str): the system name
         backend (str): the backend name
         version (str): the version name
-        systems_dir (str): the systems directory
+        systems_paths (str | list[str] | None): the systems search paths
 
     Returns:
         PerfDatabase: the database for the given system, backend and version
     """
-    try:
-        database = databases_cache[system][backend][version]
-    except KeyError:
-        logger.info(f"loading {system=}, {backend=}, {version=}")
-        if os.path.exists(os.path.join(systems_dir, system + ".yaml")):
-            with open(os.path.join(systems_dir, system + ".yaml")) as f:
-                system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-            data_path = os.path.join(systems_dir, system_spec["data_dir"], backend, version)
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+
+    for systems_root in systems_paths:
+        system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
+        if not os.path.isfile(system_yaml_path):
+            continue
+        cache_key = (systems_root, system)
+        try:
+            database = databases_cache[cache_key][backend][version]
+            return database
+        except KeyError:
+            logger.info(f"loading {system=}, {backend=}, {version=}")
+            try:
+                with open(system_yaml_path) as f:
+                    system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+                data_dir = system_spec["data_dir"]
+            except Exception:
+                logger.warning(f"failed to read system spec at {system_yaml_path}, continuing searching")
+                continue
+            data_path = os.path.join(systems_root, data_dir, backend, version)
             if os.path.exists(data_path):
                 try:
-                    database = PerfDatabase(system, backend, version, systems_dir)
-                    databases_cache[system][backend][version] = database
+                    database = PerfDatabase(system, backend, version, systems_root)
+                    databases_cache[cache_key][backend][version] = database
+                    return database
                 except Exception:
-                    logger.exception(f"failed to load {system=}, {backend=}, {version=}")
-                    database = None
+                    logger.warning(f"failed to load {system=}, {backend=}, {version=}, continuing searching")
             else:
-                logger.exception(f"data path {data_path} not found")
-                database = None
-        else:
-            logger.exception(f"system yaml {os.path.join(systems_dir, system + '.yaml')} not found")
-            database = None
+                logger.warning(f"data path {data_path} not found, continuing searching")
 
-    return database
+    logger.error(f"failed to get {system=}, {backend=}, {version=}")
+    return None
 
 
 def get_all_databases(
-    systems_dir: str = get_system_config_path(),
+    systems_paths: str | os.PathLike | Iterable[str] | None = None,
 ) -> dict[str, dict[str, dict[str, PerfDatabase]]]:
     """
     Get all the databases for all the systems, backends and versions
     """
     database_dict = defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    system_yamls = [system_yaml for system_yaml in os.listdir(systems_dir) if system_yaml.endswith(".yaml")]
-    for system_yaml in system_yamls:
-        system = system_yaml.split(".")[0]
-        with open(os.path.join(systems_dir, system_yaml)) as f:
-            system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-        data_dir = os.path.join(systems_dir, system_spec["data_dir"])
-        if not os.path.exists(data_dir):
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+
+    seen_systems: dict[str, str] = {}
+    for systems_root in systems_paths:
+        try:
+            entries = os.listdir(systems_root)
+        except Exception as e:
+            logger.warning("Could not list systems dir %s: %s", systems_root, e)
             continue
-        for backend in common.BackendName:
-            if not os.path.exists(os.path.join(data_dir, backend.value)):
+        for entry in entries:
+            if not entry.endswith(".yaml"):
                 continue
-            for version in os.listdir(os.path.join(data_dir, backend.value)):
-                if version.startswith("."):
+            system = entry[:-5]
+            if system in seen_systems:
+                logger.warning(
+                    "System config '%s' already loaded from %s; also found in %s",
+                    system,
+                    seen_systems[system],
+                    systems_root,
+                )
+            else:
+                seen_systems[system] = systems_root
+            system_yaml_path = os.path.join(systems_root, entry)
+            try:
+                with open(system_yaml_path) as f:
+                    system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+                data_dir = os.path.join(systems_root, system_spec["data_dir"])
+                if not os.path.exists(data_dir):
                     continue
-                database = get_database(system, backend.value, version, systems_dir)
-                if database is not None:
-                    database_dict[system][backend.value][version] = database
+                for backend in common.BackendName:
+                    if not os.path.exists(os.path.join(data_dir, backend.value)):
+                        continue
+                    for version in os.listdir(os.path.join(data_dir, backend.value)):
+                        if version.startswith("."):
+                            continue
+                        database = get_database(system, backend.value, version, systems_root)
+                        if database is None:
+                            continue
+                        if version in database_dict[system][backend.value]:
+                            existing = database_dict[system][backend.value][version]
+                            existing_root = getattr(existing, "systems_root", None) or "unknown"
+                            logger.warning(
+                                "Database '%s/%s/%s' already loaded from %s; ignoring %s",
+                                system,
+                                backend.value,
+                                version,
+                                existing_root,
+                                systems_root,
+                            )
+                            continue
+                        database_dict[system][backend.value][version] = database
+            except Exception as e:
+                logger.warning(f"Could not process system config {os.path.basename(system_yaml_path)}: {e}")
 
     return database_dict
 
@@ -981,6 +1072,82 @@ def load_mla_bmm_data(mla_bmm_file):
     return mla_bmm_data
 
 
+def load_mamba2_data(mamba2_file: str):
+    """
+    Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.txt.
+
+    CSV columns: framework, version, device, op_name, kernel_source, phase,
+    batch_size, seq_len, num_tokens, d_model, d_state, d_conv, nheads, head_dim,
+    n_groups, chunk_size, model_name, latency (optional: power).
+    All rows must have the same columns (context and generation both include
+    seq_len and num_tokens so columns align).
+
+    Returns:
+        dict: data[kernel_source][phase][model_key] where model_key is
+              (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size).
+              For phase "context" the leaf is [batch_size][seq_len] -> {latency, power, energy}.
+              For phase "generation" the leaf is [batch_size] -> {latency, power, energy}.
+              Returns None if file does not exist.
+    """
+    if not os.path.exists(mamba2_file):
+        logger.warning(f"Mamba2 data file {mamba2_file} not found.")
+        return None
+
+    # data[kernel_source][phase][model_key] -> nested batch_size [seq_len] -> {latency, power, energy}
+    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+
+    with open(mamba2_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug(f"Legacy database format detected in {mamba2_file} - power will default to 0.0")
+
+    for row in rows:
+        kernel_source = row["kernel_source"]
+        phase = row["phase"]
+        batch_size = int(row["batch_size"])
+        seq_len = int(row["seq_len"])
+        d_model = int(row["d_model"])
+        d_state = int(row["d_state"])
+        d_conv = int(row["d_conv"])
+        nheads = int(row["nheads"])
+        head_dim = int(row["head_dim"])
+        n_groups = int(row["n_groups"])
+        chunk_size = int(row["chunk_size"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0))
+        energy = power * latency
+
+        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
+        entry = {"latency": latency, "power": power, "energy": energy}
+
+        try:
+            if phase == "context":
+                data[kernel_source][phase][model_key][batch_size][seq_len]
+                logger.debug(
+                    f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}"
+                )
+            else:
+                data[kernel_source][phase][model_key][batch_size]
+                logger.debug(f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size}")
+        except KeyError:
+            if phase == "context":
+                data[kernel_source][phase][model_key][batch_size][seq_len] = entry
+            else:
+                data[kernel_source][phase][model_key][batch_size] = entry
+
+    # Convert default dicts to regular dicts for predictable behavior; keep generation as 1D
+    result = {}
+    for ks, by_phase in data.items():
+        result[ks] = {}
+        for ph, by_key in by_phase.items():
+            result[ks][ph] = dict(by_key)
+
+    return result
+
+
 def load_wideep_context_moe_data(wideep_context_moe_file):
     """
     Load the SGLang wideep context MoE data from wideep_context_moe_perf.txt
@@ -1623,23 +1790,24 @@ class PerfDatabase:
         query_moe: query the moe data
     """
 
-    def __init__(self, system: str, backend: str, version: str, systems_dir: str = "./systems") -> None:
+    def __init__(self, system: str, backend: str, version: str, systems_root: str = "./systems") -> None:
         """
         Initialize the perf database
         """
         self.system = system
         self.backend = backend
         self.version = version
-        with open(os.path.join(systems_dir, system + ".yaml")) as f:
+        self.systems_root = systems_root
+        with open(os.path.join(systems_root, system + ".yaml")) as f:
             self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
 
         # Cache for extracted metric data to avoid repeated extraction in _interp_3d
         self._extracted_metrics_cache = {}
 
-        data_dir = os.path.join(systems_dir, self.system_spec["data_dir"], backend, version)
+        data_dir = os.path.join(systems_root, self.system_spec["data_dir"], backend, version)
         nccl_data_dir = os.path.join(
-            systems_dir,
+            systems_root,
             self.system_spec["data_dir"],
             "nccl",
             self.system_spec["misc"]["nccl_version"],
@@ -1736,6 +1904,7 @@ class PerfDatabase:
             )
             self._nccl_data = load_nccl_data(nccl_data_dir)
             self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
+            self._mamba2_data = load_mamba2_data(os.path.join(data_dir, common.PerfDataFilename.mamba2.value))
             self._compute_scale_data = load_compute_scale_data(
                 os.path.join(data_dir, common.PerfDataFilename.compute_scale.value)
             )
@@ -4250,6 +4419,7 @@ class PerfDatabase:
         moe_backend: str | None = None,
         database_mode: common.DatabaseMode | None = None,
         is_gated: bool = True,
+        enable_eplb: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query MoE (Mixture of Experts) layer latency and energy.
@@ -4269,6 +4439,8 @@ class PerfDatabase:
             database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
             is_gated: Whether MoE uses gated activation (SwiGLU=True, Relu2=False).
                       Low-latency kernel only available for gated MoE.
+            enable_eplb: Expert Parallel Load Balancing. When enabled, applies
+                        num_tokens correction (0.8x) during prefill phase only.
 
         Returns:
             PerformanceResult: Acts as float (latency in ms).
@@ -4384,6 +4556,9 @@ class PerfDatabase:
             try:
                 if self.backend == common.BackendName.sglang.value:
                     # deepep_moe is for sglang wideep only
+                    # Apply num_tokens correction when eplb is enabled (only during prefill)
+                    if enable_eplb and is_context:
+                        num_tokens = int(num_tokens * 0.8)
                     if moe_backend == "deepep_moe":
                         if is_context:
                             moe_data = self._wideep_context_moe_data
@@ -4688,6 +4863,119 @@ class PerfDatabase:
         else:
             # hybrid and silicon modes have same logic
             return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
+
+    def query_mamba2(
+        self,
+        phase: str,
+        kernel_source: str,
+        batch_size: int,
+        seq_len: int | None,
+        d_model: int,
+        d_state: int,
+        d_conv: int,
+        nheads: int,
+        head_dim: int,
+        n_groups: int,
+        chunk_size: int,
+    ) -> PerformanceResult:
+        """
+        Query Mamba2 kernel (Conv1D or SSM) latency and energy.
+
+        Args:
+            phase: "context" or "generation"
+            kernel_source: "causal_conv1d_fn", "mamba_chunk_scan_combined",
+                           "causal_conv1d_update", or "selective_state_update"
+            batch_size: batch size
+            seq_len: sequence length (context only; use 0 or any for generation)
+            d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size: model config
+
+        Returns:
+            PerformanceResult with latency (ms) and energy (W·ms).
+            Uses SOL-based fallback when mamba2_perf data is not loaded.
+        """
+        mamba2_data = getattr(self, "_mamba2_data", None)
+
+        def _sol_fallback() -> PerformanceResult:
+            # SOL estimate for this kernel only (conv1d or ssm)
+            d_inner = nheads * head_dim
+            conv_dim = d_inner + 2 * n_groups * d_state
+            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
+            if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
+                conv_read_bytes = x * conv_dim * (d_conv + 1) * 2
+                conv_write_bytes = x * conv_dim * 2
+                return self.query_mem_op(conv_read_bytes + conv_write_bytes)
+            else:
+                ssm_read_bytes = x * (d_inner + n_groups * d_state * 2 + nheads) * 2
+                ssm_write_bytes = x * d_inner * 2
+                return self.query_mem_op(ssm_read_bytes + ssm_write_bytes)
+
+        if mamba2_data is None:
+            return _sol_fallback()
+
+        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
+        try:
+            by_phase = mamba2_data[kernel_source]
+        except KeyError:
+            return _sol_fallback()
+        try:
+            by_key = by_phase[phase]
+        except KeyError:
+            return _sol_fallback()
+        if model_key not in by_key:
+            # Nearest config by d_model
+            keys_with_d_model = [k for k in by_key if k[0] == d_model]
+            if keys_with_d_model:
+                model_key = keys_with_d_model[0]
+            else:
+                return _sol_fallback()
+
+        table = by_key[model_key]
+
+        if phase == "context":
+            if seq_len is None or seq_len <= 0:
+                return _sol_fallback()
+            try:
+                result = self._interp_2d_linear(batch_size, seq_len, table)
+            except (KeyError, ValueError):
+                return _sol_fallback()
+            return PerformanceResult(
+                latency=result["latency"],
+                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
+            )
+        else:
+            try:
+                batch_left, batch_right = self._nearest_1d_point_helper(
+                    batch_size, list(table.keys()), inner_only=False
+                )
+            except (KeyError, ValueError):
+                return _sol_fallback()
+
+            # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
+            def _mamba2_gen_entry(val):
+                if isinstance(val, dict) and "latency" in val:
+                    return val
+                if isinstance(val, dict) and val:
+                    inner = next(iter(val.values()))
+                    if isinstance(inner, dict) and "latency" in inner:
+                        return inner
+                return None
+
+            y_left = _mamba2_gen_entry(table[batch_left])
+            y_right = _mamba2_gen_entry(table[batch_right])
+            if y_left is None or y_right is None:
+                return _sol_fallback()
+            result = self._interp_1d(
+                [batch_left, batch_right],
+                [y_left, y_right],
+                batch_size,
+            )
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", result.get("power", 0.0) * lat)
+            else:
+                lat = result
+                energy = 0.0
+            return PerformanceResult(lat, energy=energy)
 
     @functools.lru_cache(maxsize=32768)
     def query_p2p(

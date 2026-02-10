@@ -326,18 +326,20 @@ class TestDatabaseCache:
         monkeypatch.setattr("yaml.load", lambda f, **kwargs: system_spec)
         monkeypatch.setattr("os.path.exists", lambda path: True)
         monkeypatch.setattr("builtins.open", lambda *args, **kwargs: MagicMock())
+        (tmp_path / "sys1.yaml").write_text("dummy")
+        (tmp_path / "sys2.yaml").write_text("dummy")
 
         # First call should create new instance
-        db1 = get_database("sys1", "backend1", "v1", str(tmp_path))
+        db1 = get_database("sys1", "backend1", "v1", systems_paths=str(tmp_path))
         assert instantiation_count == 1
 
         # Second call with same parameters should return cached instance
-        db2 = get_database("sys1", "backend1", "v1", str(tmp_path))
+        db2 = get_database("sys1", "backend1", "v1", systems_paths=str(tmp_path))
         assert instantiation_count == 1  # No new instantiation
         assert db1 is db2
 
         # Different parameters should create new instance
-        db3 = get_database("sys2", "backend1", "v1", str(tmp_path))
+        db3 = get_database("sys2", "backend1", "v1", systems_paths=str(tmp_path))
         assert instantiation_count == 2
         assert db3 is not db1
 
@@ -363,6 +365,7 @@ class TestDatabaseCache:
         }
         monkeypatch.setattr("yaml.load", lambda f, **kwargs: system_spec)
         monkeypatch.setattr("builtins.open", lambda *args, **kwargs: MagicMock())
+        (tmp_path / "sys1.yaml").write_text("dummy")
 
         # Mock os.path.exists to return True for yaml, False for data path
         def mock_exists(path):
@@ -371,7 +374,7 @@ class TestDatabaseCache:
         monkeypatch.setattr("os.path.exists", mock_exists)
 
         # Should return None when data path doesn't exist
-        db = get_database("sys1", "backend1", "v1", str(tmp_path))
+        db = get_database("sys1", "backend1", "v1", systems_paths=str(tmp_path))
         assert db is None
 
 

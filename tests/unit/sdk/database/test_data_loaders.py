@@ -18,6 +18,7 @@ from aiconfigurator.sdk.perf_database import (
     databases_cache,
     get_all_databases,
     get_database,
+    get_systems_paths,
     load_context_attention_data,
     load_context_mla_data,
     load_custom_allreduce_data,
@@ -28,17 +29,18 @@ from aiconfigurator.sdk.perf_database import (
     load_moe_data,
     load_nccl_data,
     load_wideep_moe_compute_data,
+    set_systems_paths,
 )
 
 pytestmark = pytest.mark.unit
 
 
 class DummyPerfDatabase:
-    def __init__(self, system, backend, version, systems_dir_arg):
+    def __init__(self, system, backend, version, systems_root_arg):
         self.system = system
         self.backend = backend
         self.version = version
-        self.systems_dir = systems_dir_arg
+        self.systems_root = systems_root_arg
 
 
 def test_get_database_with_yaml_and_data_path(tmp_path, monkeypatch):
@@ -59,16 +61,16 @@ def test_get_database_with_yaml_and_data_path(tmp_path, monkeypatch):
 
     databases_cache.clear()
 
-    db1 = get_database(system, backend, version, systems_dir=str(systems_dir))
+    db1 = get_database(system, backend, version, systems_paths=str(systems_dir))
 
     assert isinstance(db1, DummyPerfDatabase), "Expected a DummyPerfDatabase"
 
     assert db1.system == system
     assert db1.backend == backend
     assert db1.version == version
-    assert db1.systems_dir == str(systems_dir)
+    assert db1.systems_root == str(systems_dir)
 
-    db2 = get_database(system, backend, version, systems_dir=str(systems_dir))
+    db2 = get_database(system, backend, version, systems_paths=str(systems_dir))
     assert db2 is db1, "Repeated calls with identical args should return the same database object"
 
 
@@ -88,7 +90,7 @@ def test_get_all_databases(tmp_path, monkeypatch):
         data_subdir = systems_dir / data / backend.value / version
         data_subdir.mkdir(parents=True)
 
-    database_dict = get_all_databases(systems_dir)
+    database_dict = get_all_databases(systems_paths=str(systems_dir))
 
     assert isinstance(database_dict["testsys_0"][BackendName.trtllm.value]["v1"], DummyPerfDatabase)
     assert isinstance(database_dict["testsys_0"][BackendName.trtllm.value]["v2"], DummyPerfDatabase)
@@ -101,6 +103,103 @@ def test_get_all_databases(tmp_path, monkeypatch):
     assert isinstance(database_dict["testsys_2"][BackendName.vllm.value]["v1"], DummyPerfDatabase)
     assert isinstance(database_dict["testsys_2"][BackendName.vllm.value]["v2"], DummyPerfDatabase)
     assert isinstance(database_dict["testsys_2"][BackendName.vllm.value]["v3"], DummyPerfDatabase)
+
+
+def test_get_database_uses_default_systems_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.PerfDatabase", DummyPerfDatabase)
+    system = "testsys"
+    backend = "cuda"
+    version = "v1"
+
+    systems_root = tmp_path / "systems_root"
+    systems_root.mkdir()
+
+    yaml_path = systems_root / f"{system}.yaml"
+    with open(yaml_path, "w") as f:
+        yaml.dump({"data_dir": "data"}, f)
+
+    data_subdir = systems_root / "data" / backend / version
+    data_subdir.mkdir(parents=True)
+
+    databases_cache.clear()
+    previous_paths = get_systems_paths()
+    try:
+        set_systems_paths(str(systems_root))
+        db = get_database(system, backend, version)
+        assert isinstance(db, DummyPerfDatabase)
+        assert db.systems_root == str(systems_root)
+    finally:
+        set_systems_paths(previous_paths)
+
+
+def test_get_database_conflict_returns_first(tmp_path, monkeypatch):
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.PerfDatabase", DummyPerfDatabase)
+    system = "h100"
+    backend = "trtllm"
+    version = "v1"
+
+    systems_root_a = tmp_path / "systems_a"
+    systems_root_b = tmp_path / "systems_b"
+    systems_root_a.mkdir()
+    systems_root_b.mkdir()
+
+    (systems_root_a / f"{system}.yaml").write_text(yaml.safe_dump({"data_dir": "data_a"}))
+    (systems_root_b / f"{system}.yaml").write_text(yaml.safe_dump({"data_dir": "data_b"}))
+
+    (systems_root_a / "data_a" / backend / version).mkdir(parents=True)
+    (systems_root_b / "data_b" / backend / version).mkdir(parents=True)
+
+    databases_cache.clear()
+    db = get_database(system, backend, version, systems_paths=[str(systems_root_a), str(systems_root_b)])
+    assert isinstance(db, DummyPerfDatabase)
+    assert db.systems_root == str(systems_root_a)
+
+
+def test_get_all_databases_system_config_conflict(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.PerfDatabase", DummyPerfDatabase)
+    caplog.set_level("WARNING")
+    system = "h100"
+
+    systems_root_a = tmp_path / "systems_a"
+    systems_root_b = tmp_path / "systems_b"
+    systems_root_a.mkdir()
+    systems_root_b.mkdir()
+
+    (systems_root_a / f"{system}.yaml").write_text(yaml.safe_dump({"data_dir": "data_a"}))
+    (systems_root_b / f"{system}.yaml").write_text(yaml.safe_dump({"data_dir": "data_b"}))
+
+    (systems_root_a / "data_a" / "trtllm" / "v1").mkdir(parents=True)
+    (systems_root_b / "data_b" / "vllm" / "v0").mkdir(parents=True)
+
+    databases_cache.clear()
+    database_dict = get_all_databases(systems_paths=[str(systems_root_a), str(systems_root_b)])
+
+    assert "trtllm" in database_dict[system]
+    assert "vllm" in database_dict[system]
+    assert any("System config 'h100' already loaded from" in record.message for record in caplog.records)
+
+
+def test_get_all_databases_conflicting_backend_version_keeps_first(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.PerfDatabase", DummyPerfDatabase)
+    caplog.set_level("WARNING")
+    system = "h100"
+
+    systems_root_a = tmp_path / "systems_a"
+    systems_root_b = tmp_path / "systems_b"
+    systems_root_a.mkdir()
+    systems_root_b.mkdir()
+
+    (systems_root_a / f"{system}.yaml").write_text(yaml.safe_dump({"data_dir": "data_a"}))
+    (systems_root_b / f"{system}.yaml").write_text(yaml.safe_dump({"data_dir": "data_b"}))
+
+    (systems_root_a / "data_a" / "trtllm" / "v1").mkdir(parents=True)
+    (systems_root_b / "data_b" / "trtllm" / "v1").mkdir(parents=True)
+
+    databases_cache.clear()
+    database_dict = get_all_databases(systems_paths=[str(systems_root_a), str(systems_root_b)])
+    db = database_dict[system]["trtllm"]["v1"]
+    assert db.systems_root == str(systems_root_a)
+    assert any("Database 'h100/trtllm/v1' already loaded from" in record.message for record in caplog.records)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

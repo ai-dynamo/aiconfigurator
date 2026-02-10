@@ -32,7 +32,7 @@ gb200_wideep_eplb_agg:
   total_gpus: 512
   system_name: "gb200_sxm"
   enable_wideep: true
-  wideep_eplb_mode: true
+  enable_eplb: true
   isl: 4000
   osl: 1000
   ttft: 300.0
@@ -48,7 +48,7 @@ gb200_wideep_eplb_slots288_agg:
   total_gpus: 512
   system_name: "gb200_sxm"
   enable_wideep: true
-  wideep_eplb_mode: true
+  enable_eplb: true
   wideep_num_slots: 288
   isl: 4000
   osl: 1000
@@ -82,7 +82,7 @@ gb200_wideep_eplb_disagg:
   total_gpus: 512
   system_name: "gb200_sxm"
   enable_wideep: true
-  wideep_eplb_mode: true # enable EPLB
+  enable_eplb: true # enable EPLB
   isl: 4000
   osl: 1000
   ttft: 300.0
@@ -100,7 +100,7 @@ gb200_wideep_eplb_slots288_disagg:
   total_gpus: 512
   system_name: "gb200_sxm"
   enable_wideep: true
-  wideep_eplb_mode: true # enable EPLB
+  enable_eplb: true # enable EPLB
   wideep_num_slots: 288 # EPLB with 288 slots (> 256 experts, redundant mode)
   isl: 4000
   osl: 1000
