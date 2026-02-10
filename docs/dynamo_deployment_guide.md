@@ -113,7 +113,7 @@ results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 
 Here, `agg_config.yaml`, `prefill_config.yaml`, and `decode_config.yaml` are TRTLLM engine configuration files, and `run_x.sh` are the executable scripts. `k8s_deploy.yaml` is for deployment in k8s. In this guide, we're not using k8s.
 
-For multi-node setups, there will be multiple `run_x.sh` scripts (one per node), each invoking the same TRTLLM engine config file. By default, `run_0.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, please specify `--head_node_ip` to indicate the IP address of node0.
+For multi-node setups, there will be multiple `run_x.sh` scripts (one per node), each invoking the same TRTLLM engine config file. By default, `run_0.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, please specify `--generator-set ServiceConfig.head_node_ip=<IP>` to indicate the IP address of node0.
 
 Typically, the command is:
 
@@ -129,7 +129,7 @@ aiconfigurator cli default \
   --total-gpus 16 \
   --generator-set ServiceConfig.model_path=/workspace/model_hub/Qwen3-32B-FP8 \
   --generator-set ServiceConfig.served_model_name=Qwen3-32B-FP8 \
-  --head_node_ip x.x.x.x
+  --generator-set ServiceConfig.head_node_ip=x.x.x.x
 ````
 
 To customize parameters per worker type, override the `Workers.<role>` keys with `--generator-set`. To set worker counts, use `WorkerConfig.*` (e.g., `WorkerConfig.prefill_workers=2`). For example:
@@ -361,7 +361,7 @@ aiconfigurator cli default \
   --save-dir ./ \
   --model-path Qwen/Qwen3-32B \
   --total-gpus 16 \
-  --head_node_ip NODE_0_IP \
+  --generator-set ServiceConfig.head_node_ip=NODE_0_IP \
   --generated-config-version 1.0.0rc4 \
   --generator-set ServiceConfig.model_path=/workspace/model_hub/qwen3-32b-fp8 \
   --generator-set ServiceConfig.served_model_name=Qwen/Qwen3-32B-FP8 \
