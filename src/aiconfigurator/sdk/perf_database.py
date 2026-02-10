@@ -10,6 +10,7 @@ import logging
 import math
 import os
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import Optional
 
 import numpy as np
@@ -22,58 +23,94 @@ from aiconfigurator.sdk.performance_result import PerformanceResult
 databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
+_SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
+
+
+def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
+    default_path = os.fspath(pkg_resources.files("aiconfigurator") / "systems")
+    if raw_paths is None:
+        return [default_path]
+    if isinstance(raw_paths, str):
+        entries = [part.strip() for part in raw_paths.split(",") if part.strip()]
+    else:
+        entries = [os.fspath(entry) for entry in raw_paths if entry is not None]
+    if not entries:
+        return [default_path]
+    resolved: list[str] = []
+    for entry in entries:
+        if str(entry).lower() == "default":
+            resolved.append(default_path)
+        else:
+            resolved.append(os.fspath(entry))
+    return resolved
+
+
+def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
+    """
+    Override the system search paths for the current process.
+    """
+    global _SYSTEMS_PATHS
+    _SYSTEMS_PATHS = _normalize_systems_paths(raw_paths)
+
+
+def get_systems_paths() -> list[str]:
+    return list(_SYSTEMS_PATHS)
+
 
 class PerfDataNotAvailableError(RuntimeError):
     """Raised when required performance data is missing or unsupported for a requested mode."""
 
 
-def get_system_config_path():
-    """
-    Get the system config path
-    """
-    return pkg_resources.files("aiconfigurator") / "systems"
-
-
 def get_supported_databases(
-    systems_dir: str = get_system_config_path(),
+    systems_paths: str | list[str] | None = None,
 ) -> dict[str, dict[str, list[str]]]:
     """
     Get all supported databases for all systems, backends and versions without loading them.
     """
-    supported_dict = defaultdict(lambda: defaultdict(list))
-    if not os.path.isdir(systems_dir):
-        logger.warning(f"Systems directory not found: {systems_dir}")
-        return supported_dict
+    supported_sets: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
 
-    system_yamls = [
-        f for f in os.listdir(systems_dir) if f.endswith(".yaml") and os.path.isfile(os.path.join(systems_dir, f))
-    ]
-    for system_yaml in system_yamls:
-        system = system_yaml.split(".")[0]
+    for systems_root in systems_paths:
         try:
-            with open(os.path.join(systems_dir, system_yaml)) as f:
-                system_spec = yaml.safe_load(f)
-
-            data_dir = os.path.join(systems_dir, system_spec.get("data_dir", ""))
-            if not os.path.isdir(data_dir):
+            entries = os.listdir(systems_root)
+        except Exception as e:
+            logger.warning("Could not list systems dir %s: %s", systems_root, e)
+            continue
+        for entry in entries:
+            if not entry.endswith(".yaml"):
                 continue
+            system = entry[:-5]
+            system_yaml_path = os.path.join(systems_root, entry)
+            try:
+                with open(system_yaml_path) as f:
+                    system_spec = yaml.safe_load(f)
 
-            for backend in common.BackendName:
-                backend_path = os.path.join(data_dir, backend.value)
-                if not os.path.isdir(backend_path):
+                data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+                if not os.path.isdir(data_dir):
                     continue
 
-                versions = sorted(
-                    [
+                for backend in common.BackendName:
+                    backend_path = os.path.join(data_dir, backend.value)
+                    if not os.path.isdir(backend_path):
+                        continue
+
+                    versions = [
                         v
                         for v in os.listdir(backend_path)
                         if not v.startswith(".") and os.path.isdir(os.path.join(backend_path, v))
                     ]
-                )
-                if versions:
-                    supported_dict[system][backend.value] = versions
-        except Exception as e:
-            logger.warning(f"Could not process system config {system_yaml}: {e}")
+                    if versions:
+                        supported_sets[system][backend.value].update(versions)
+            except Exception as e:
+                logger.warning(f"Could not process system config {os.path.basename(system_yaml_path)}: {e}")
+
+    supported_dict = defaultdict(lambda: defaultdict(list))
+    for system, backend_versions in supported_sets.items():
+        for backend, versions in backend_versions.items():
+            supported_dict[system][backend] = sorted(versions)
 
     return supported_dict
 
@@ -166,7 +203,10 @@ def get_latest_database_version(
 
 
 def get_database(
-    system: str, backend: str, version: str, systems_dir: str = get_system_config_path()
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version
@@ -175,60 +215,111 @@ def get_database(
         system (str): the system name
         backend (str): the backend name
         version (str): the version name
-        systems_dir (str): the systems directory
+        systems_paths (str | list[str] | None): the systems search paths
 
     Returns:
         PerfDatabase: the database for the given system, backend and version
     """
-    try:
-        database = databases_cache[system][backend][version]
-    except KeyError:
-        logger.info(f"loading {system=}, {backend=}, {version=}")
-        if os.path.exists(os.path.join(systems_dir, system + ".yaml")):
-            with open(os.path.join(systems_dir, system + ".yaml")) as f:
-                system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-            data_path = os.path.join(systems_dir, system_spec["data_dir"], backend, version)
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+
+    for systems_root in systems_paths:
+        system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
+        if not os.path.isfile(system_yaml_path):
+            continue
+        cache_key = (systems_root, system)
+        try:
+            database = databases_cache[cache_key][backend][version]
+            return database
+        except KeyError:
+            logger.info(f"loading {system=}, {backend=}, {version=}")
+            try:
+                with open(system_yaml_path) as f:
+                    system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+                data_dir = system_spec["data_dir"]
+            except Exception:
+                logger.warning(f"failed to read system spec at {system_yaml_path}, continuing searching")
+                continue
+            data_path = os.path.join(systems_root, data_dir, backend, version)
             if os.path.exists(data_path):
                 try:
-                    database = PerfDatabase(system, backend, version, systems_dir)
-                    databases_cache[system][backend][version] = database
+                    database = PerfDatabase(system, backend, version, systems_root)
+                    databases_cache[cache_key][backend][version] = database
+                    return database
                 except Exception:
-                    logger.exception(f"failed to load {system=}, {backend=}, {version=}")
-                    database = None
+                    logger.warning(f"failed to load {system=}, {backend=}, {version=}, continuing searching")
             else:
-                logger.exception(f"data path {data_path} not found")
-                database = None
-        else:
-            logger.exception(f"system yaml {os.path.join(systems_dir, system + '.yaml')} not found")
-            database = None
+                logger.warning(f"data path {data_path} not found, continuing searching")
 
-    return database
+    logger.error(f"failed to get {system=}, {backend=}, {version=}")
+    return None
 
 
 def get_all_databases(
-    systems_dir: str = get_system_config_path(),
+    systems_paths: str | os.PathLike | Iterable[str] | None = None,
 ) -> dict[str, dict[str, dict[str, PerfDatabase]]]:
     """
     Get all the databases for all the systems, backends and versions
     """
     database_dict = defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    system_yamls = [system_yaml for system_yaml in os.listdir(systems_dir) if system_yaml.endswith(".yaml")]
-    for system_yaml in system_yamls:
-        system = system_yaml.split(".")[0]
-        with open(os.path.join(systems_dir, system_yaml)) as f:
-            system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-        data_dir = os.path.join(systems_dir, system_spec["data_dir"])
-        if not os.path.exists(data_dir):
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+
+    seen_systems: dict[str, str] = {}
+    for systems_root in systems_paths:
+        try:
+            entries = os.listdir(systems_root)
+        except Exception as e:
+            logger.warning("Could not list systems dir %s: %s", systems_root, e)
             continue
-        for backend in common.BackendName:
-            if not os.path.exists(os.path.join(data_dir, backend.value)):
+        for entry in entries:
+            if not entry.endswith(".yaml"):
                 continue
-            for version in os.listdir(os.path.join(data_dir, backend.value)):
-                if version.startswith("."):
+            system = entry[:-5]
+            if system in seen_systems:
+                logger.warning(
+                    "System config '%s' already loaded from %s; also found in %s",
+                    system,
+                    seen_systems[system],
+                    systems_root,
+                )
+            else:
+                seen_systems[system] = systems_root
+            system_yaml_path = os.path.join(systems_root, entry)
+            try:
+                with open(system_yaml_path) as f:
+                    system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+                data_dir = os.path.join(systems_root, system_spec["data_dir"])
+                if not os.path.exists(data_dir):
                     continue
-                database = get_database(system, backend.value, version, systems_dir)
-                if database is not None:
-                    database_dict[system][backend.value][version] = database
+                for backend in common.BackendName:
+                    if not os.path.exists(os.path.join(data_dir, backend.value)):
+                        continue
+                    for version in os.listdir(os.path.join(data_dir, backend.value)):
+                        if version.startswith("."):
+                            continue
+                        database = get_database(system, backend.value, version, systems_root)
+                        if database is None:
+                            continue
+                        if version in database_dict[system][backend.value]:
+                            existing = database_dict[system][backend.value][version]
+                            existing_root = getattr(existing, "systems_root", None) or "unknown"
+                            logger.warning(
+                                "Database '%s/%s/%s' already loaded from %s; ignoring %s",
+                                system,
+                                backend.value,
+                                version,
+                                existing_root,
+                                systems_root,
+                            )
+                            continue
+                        database_dict[system][backend.value][version] = database
+            except Exception as e:
+                logger.warning(f"Could not process system config {os.path.basename(system_yaml_path)}: {e}")
 
     return database_dict
 
@@ -1425,23 +1516,24 @@ class PerfDatabase:
         query_moe: query the moe data
     """
 
-    def __init__(self, system: str, backend: str, version: str, systems_dir: str = "./systems") -> None:
+    def __init__(self, system: str, backend: str, version: str, systems_root: str = "./systems") -> None:
         """
         Initialize the perf database
         """
         self.system = system
         self.backend = backend
         self.version = version
-        with open(os.path.join(systems_dir, system + ".yaml")) as f:
+        self.systems_root = systems_root
+        with open(os.path.join(systems_root, system + ".yaml")) as f:
             self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
 
         # Cache for extracted metric data to avoid repeated extraction in _interp_3d
         self._extracted_metrics_cache = {}
 
-        data_dir = os.path.join(systems_dir, self.system_spec["data_dir"], backend, version)
+        data_dir = os.path.join(systems_root, self.system_spec["data_dir"], backend, version)
         nccl_data_dir = os.path.join(
-            systems_dir,
+            systems_root,
             self.system_spec["data_dir"],
             "nccl",
             self.system_spec["misc"]["nccl_version"],
