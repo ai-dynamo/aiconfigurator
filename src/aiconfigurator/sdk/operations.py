@@ -254,6 +254,7 @@ class MoE(Operation):
         self._is_context = is_context
         self._is_gated = is_gated
         self._moe_backend = kwargs.get("moe_backend")
+        self._enable_eplb = kwargs.get("enable_eplb", False)
         # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down)
         num_gemms = 3 if is_gated else 2
         self._weights = (
@@ -286,6 +287,7 @@ class MoE(Operation):
             is_context=self._is_context,
             moe_backend=self._moe_backend,
             is_gated=self._is_gated,
+            enable_eplb=self._enable_eplb,
         )
 
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)

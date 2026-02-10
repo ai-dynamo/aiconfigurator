@@ -36,7 +36,7 @@ def parse(args):
         "--system",
         type=str,
         default="h200_sxm",
-        choices=["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm"],
+        choices=["h100_sxm", "h200_sxm", "b200_sxm", "gb200_sxm", "a100_sxm","h20_sxm"],
         help="GPU+system Type",
     )
     parser.add_argument(
@@ -117,6 +117,11 @@ def parse(args):
         help="Enable WideEP DeepSeek modeling (only effective when --backend sglang and model is DeepSeek).",
     )
     parser.add_argument(
+        "--enable_eplb",
+        action="store_true",
+        help="Enable Expert Parallel Load Balancing (only works during prefill).",
+    )
+    parser.add_argument(
         "--moe_backend",
         type=str,
         default="deepep_moe",
@@ -143,6 +148,7 @@ def main(args):
         attention_dp_size=args.attention_dp_size,
         overwrite_num_layers=args.overwrite_num_layers,
         enable_wideep=args.enable_wideep,
+        enable_eplb=args.enable_eplb,
         moe_backend=args.moe_backend,
     )
     runtime_config = config.RuntimeConfig(

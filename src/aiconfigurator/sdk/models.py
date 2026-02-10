@@ -1364,9 +1364,18 @@ class WideEPDeepSeekModel(BaseModel):
         moe_backend = self.config.moe_backend
         attn_backend = self.config.attention_backend
 
-        self._power_law_alpha = 1.01
-        workload_distribution = (
-            self.config.workload_distribution + f"_{self._power_law_alpha}"
+        # Set power_law_alpha: prefill affected by eplb, decode always uses 1.01
+        self._power_law_alpha_prefill = 0.6 if self.config.enable_eplb else 1.01
+        self._power_law_alpha_decode = 1.01  # decode not affected by eplb
+
+        # Create separate workload distributions for prefill and decode
+        context_workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha_prefill}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
+        generation_workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha_decode}"
             if self.config.workload_distribution == "power_law"
             else self.config.workload_distribution
         )
@@ -1480,10 +1489,11 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_tp_size,
                     moe_ep_size,
                     moe_quant_mode,
-                    workload_distribution,
+                    context_workload_distribution,
                     attention_dp_size,
                     is_context=True,
                     moe_backend=moe_backend,
+                    enable_eplb=self.config.enable_eplb,
                 )
             ]
         )
@@ -1562,10 +1572,11 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_tp_size,
                     moe_ep_size,
                     moe_quant_mode,
-                    workload_distribution,
+                    generation_workload_distribution,
                     attention_dp_size,
                     is_context=False,
                     moe_backend=moe_backend,
+                    enable_eplb=False,  # eplb only affects prefill, not decode
                 )
             ]
         )
