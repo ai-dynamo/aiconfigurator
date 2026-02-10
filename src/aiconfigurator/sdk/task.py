@@ -1283,6 +1283,19 @@ class TaskRunner:
             )
             return None
 
+        # For SGLang non-wideep disaggregated serving
+        # See: https://github.com/ai-dynamo/dynamo/issues/5870
+        backend_name = str(task_config.prefill_worker_config.backend_name)
+        enable_wideep = bool(getattr(task_config, "enable_wideep", False))
+        require_same_tp = backend_name == "sglang" and not enable_wideep
+
+        if require_same_tp:
+            logger.warning(
+                "SGLang non-wideep disaggregated serving requires the same TP size "
+                "for prefill and decode workers. Configurations with different TP "
+                "sizes will be filtered out. "
+            )
+
         logger.info("Task %s: Running disagg pareto", task_config.task_name)
         result_df = pa.disagg_pareto(
             model_path=task_config.model_path,
@@ -1304,6 +1317,7 @@ class TaskRunner:
             decode_max_num_tokens=task_config.advanced_tuning_config.decode_max_batch_size,
             prefill_latency_correction_scale=task_config.advanced_tuning_config.prefill_latency_correction_scale,
             decode_latency_correction_scale=task_config.advanced_tuning_config.decode_latency_correction_scale,
+            require_same_tp=require_same_tp,
         )
         return {"pareto_df": result_df}
 

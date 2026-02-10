@@ -245,6 +245,8 @@ def disagg_pareto(
     logger.debug(f"decode_num_worker_list: {decode_num_worker_list}, decode_max_num_worker: {decode_max_num_worker}")
     decode_num_worker_list = get_working_list(decode_num_worker_list, decode_max_num_worker)
 
+    require_same_tp = kwargs.get("require_same_tp", False)
+
     summary = disagg_sess.find_best_disagg_result_under_constraints(
         model_path=model_path,
         runtime_config=runtime_config,
@@ -257,6 +259,7 @@ def disagg_pareto(
         decode_max_num_tokens=decode_max_num_tokens,
         decode_num_worker_list=decode_num_worker_list,
         num_gpu_list=num_gpu_list,
+        require_same_tp=require_same_tp,
     )
 
     return summary.get_summary_df()
