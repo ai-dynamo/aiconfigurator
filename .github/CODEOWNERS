@@ -23,26 +23,26 @@
 /src/aiconfigurator/sdk/utils.py @tianhaox @jasonqinzhou @simone-chen @Arsene12358
 
 # cli
-/src/aiconfigurator/cli @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/cli @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
 
 # eval
-/src/aiconfigurator/eval @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/eval @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
 
 # webapp
-/src/aiconfigurator/webapp @tianhaox @jasonqinzhou @Arsene12358 @Harrilee
-/src/aiconfigurator/webapp/components/profiling @Harrilee @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/webapp @tianhaox @jasonqinzhou @Arsene12358 @Harrilee @simone-chen @harrilee @ilyasher
+/src/aiconfigurator/webapp/components/profiling @Harrilee @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
 
 # systems & data files
-/src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen @Arsene12358
+/src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen @harrilee @Arsene12358
 
 # model configs
-/src/aiconfigurator/model_configs @simone-chen @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/model_configs @simone-chen @tianhaox @jasonqinzhou @Arsene12358 @harrilee @ilyasher
 
 # generator
-/src/aiconfigurator/generator @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358
+/src/aiconfigurator/generator @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
 
 # collector
-/collector/ @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358
+/collector/ @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @simone-chen @harrilee @ilyasher
 /collector/deep_collector @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358
 /collector/sglang @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358 @YijiaZhao @davilu-nvidia
 /collector/slurm_comm_collector @YijiaZhao @Arsene12358 @tianhaox @jasonqinzhou
@@ -56,19 +56,20 @@
 /collector/README.md @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou
 
 # docs
-/docs @tianhaox @jasonqinzhou @Arsene12358
+/docs @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
 /docs/add_a_new_model.md @Arsene12358 @tianhaox @jasonqinzhou
 /docs/advanced_tunning.md @tianhaox @jasonqinzhou @Arsene12358
 /docs/cli_user_guide.md @tianhaox @jasonqinzhou @Arsene12358
 /docs/dynamo_deployment_guide.md @Ethan-ES @davilu-nvidia @tianhaox @jasonqinzhou @Arsene12358
 
 # docker
-/docker @jasonqinzhou @anish-shanbhag @ilyasher @ai-dynamo/Devops @tianhaox @Arsene12358
+/docker @jasonqinzhou @anish-shanbhag @ilyasher @ai-dynamo/Devops @tianhaox @Arsene12358 @simone-chen @harrilee
 
 # tests
-/tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @Harrilee @ai-dynamo/Devops
+/tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @Harrilee @ai-dynamo/Devops @simone-chen @harrilee
 
 # tools
+/tools @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
 /tools/generator_validator @Ethan-ES @jasonqinzhou @Arsene12358
 /tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358
 /tools/sanity_check @tianhaox @YijiaZhao @jasonqinzhou @Arsene12358
@@ -76,16 +77,16 @@
 /tools/support_matrix/generate_support_matrix.py @Harrilee @tianhaox @jasonqinzhou @Arsene12358
 
 # misc
-/ATTRIBUTIONS.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358
-/CODE_OF_CONDUCT.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358
-/CONTRIBUTING.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358
-/DEVELOPMENT.md @ai-dynamo/Devops @anish-shanbhag @tianhaox @jasonqinzhou @Arsene12358
+/ATTRIBUTIONS.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
+/CODE_OF_CONDUCT.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
+/CONTRIBUTING.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
+/DEVELOPMENT.md @ai-dynamo/Devops @anish-shanbhag @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
 /LICENSE @ai-dynamo/Devops 
-/pyproject.toml @tianhaox @jasonqinzhou @ai-dynamo/Devops @Arsene12358
-/pytest.ini @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358
-/README.md @tianhaox @jasonqinzhou @Arsene12358
-/SECURITY.md @ai-dynamo/Devops
-/.pre-commit-config.yaml @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358
+/pyproject.toml @tianhaox @jasonqinzhou @ai-dynamo/Devops @Arsene12358 @simone-chen @harrilee @ilyasher
+/pytest.ini @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
+/README.md @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
+/SECURITY.md @ai-dynamo/Devops @simone-chen @harrilee @ilyasher
+/.pre-commit-config.yaml @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
 
 # CI/CD and workflows
-/.github/workflows @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @Harrilee
+/.github/workflows @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @Harrilee @simone-chen @harrilee @ilyasher
