@@ -86,7 +86,7 @@ class TestCLIArgumentParsing:
         subparser_action = next(action for action in cli_parser._actions if action.dest == "mode")
         default_parser = subparser_action.choices["default"]
         action = next(action for action in default_parser._actions if action.dest == "backend")
-        expected_choices = [backend.value for backend in common.BackendName] + ["any"]
+        expected_choices = [backend.value for backend in common.BackendName] + ["auto"]
         assert sorted(action.choices) == sorted(expected_choices)
 
     @pytest.mark.parametrize("system_value", ["h200_sxm", "b200_sxm", "gb200_sxm"])

@@ -144,8 +144,8 @@ def cli_default(
         total_gpus: Total number of GPUs for deployment.
         system: System name (GPU type), e.g., 'h200_sxm', 'b200_sxm'.
         decode_system: System name for disagg decode workers. Defaults to `system`.
-        backend: Backend name ('trtllm', 'sglang', 'vllm', 'any'). Default is 'trtllm'.
-            Use 'any' to sweep across all three backends and compare results.
+        backend: Backend name ('trtllm', 'sglang', 'vllm', 'auto'). Default is 'trtllm'.
+            Use 'auto' to sweep across all three backends and compare results.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation
             ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
@@ -178,7 +178,7 @@ def cli_default(
         ...     model_path="Qwen/Qwen3-32B",
         ...     total_gpus=8,
         ...     system="h200_sxm",
-        ...     backend="any",
+        ...     backend="auto",
         ...     ttft=2000,
         ...     tpot=30,
         ... )

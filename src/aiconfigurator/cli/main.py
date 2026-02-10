@@ -108,10 +108,10 @@ def _add_default_mode_arguments(parser):
     )
     parser.add_argument(
         "--backend",
-        choices=[backend.value for backend in common.BackendName] + ["any"],
+        choices=[backend.value for backend in common.BackendName] + ["auto"],
         type=str,
         default=common.BackendName.trtllm.value,
-        help="Backend name. Use 'any' to sweep across all backends (trtllm, vllm, sglang) and compare results.",
+        help="Backend name. Use 'auto' to sweep across all backends (trtllm, vllm, sglang) and compare results.",
     )
     parser.add_argument(
         "--backend_version",
@@ -214,7 +214,7 @@ _USAGE_EXAMPLES = """
 Examples:
 # Sweep across all backends for Dynamo v0.7.1
 aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 \\
-    --backend any \\
+    --backend auto \\
     --top_n 3 \\
     --total_gpus 8 --system h200_sxm \\
     --ttft 600 --tpot 50 --isl 4000 --osl 500 \\
@@ -345,8 +345,8 @@ def build_default_task_configs(
         total_gpus: Total number of GPUs for deployment.
         system: System name (GPU type).
         decode_system: System for disagg decode workers. Defaults to `system`.
-        backend: Backend name ('trtllm', 'sglang', 'vllm', 'any').
-            Use 'any' to sweep across all backends.
+        backend: Backend name ('trtllm', 'sglang', 'vllm', 'auto').
+            Use 'auto' to sweep across all backends.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation.
         isl: Input sequence length.
@@ -357,13 +357,13 @@ def build_default_task_configs(
         prefix: Prefix cache length.
 
     Returns:
-        Dict with TaskConfig objects. When backend='any', returns 6 configs
+        Dict with TaskConfig objects. When backend='auto', returns 6 configs
         (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
         Otherwise returns 2 configs ('agg' and 'disagg').
     """
     decode_system = decode_system or system
-    # Expand "any" backend to all available backends
-    backends_to_sweep = [b.value for b in common.BackendName] if backend == "any" else [backend]
+    # Expand "auto" backend to all available backends
+    backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
 
     if backend_version:
         for backend_name in backends_to_sweep:
@@ -392,7 +392,7 @@ def build_default_task_configs(
         agg_kwargs = dict(common_kwargs)
         agg_kwargs["backend_name"] = backend_name
         agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
-        exp_name = f"agg_{backend_name}" if backend == "any" else "agg"
+        exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
         task_configs[exp_name] = agg_task
 
         # Create disagg task for this backend
@@ -400,7 +400,7 @@ def build_default_task_configs(
         disagg_kwargs["backend_name"] = backend_name
         disagg_kwargs["decode_system_name"] = decode_system
         disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
-        exp_name = f"disagg_{backend_name}" if backend == "any" else "disagg"
+        exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
         task_configs[exp_name] = disagg_task
 
     return task_configs

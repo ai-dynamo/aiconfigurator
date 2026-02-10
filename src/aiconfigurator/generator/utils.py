@@ -91,11 +91,11 @@ def resolve_backend_version_for_dynamo(
 
     Parameters:
         dynamo_version (str): The target Dynamo generator release (e.g., "v0.8.1").
-        backend (str | None): Name of the backend to look up ("trtllm", "vllm", "sglang", or "any").
+        backend (str | None): Name of the backend to look up ("trtllm", "vllm", "sglang", or "auto").
         matrix_path (str): Path to the backend version matrix YAML file.
 
     Returns:
-        str | dict: The backend version(str) for the given backend, or a dict of versions if backend is "any" or None.
+        str | dict: The backend version(str) for the given backend, or a dict of versions if backend is "auto" or None.
 
     Raises:
         ValueError: If the dynamo_version is missing or not present in the matrix.
@@ -111,8 +111,8 @@ def resolve_backend_version_for_dynamo(
         raise TypeError(f"Unsupported dynamo_version '{version_key}'. Supported versions: {supported or 'none'}.")
 
     backend_key = normalize_backend(backend, DEFAULT_BACKEND)
-    # return all backend versions for "any" backend
-    if not backend or backend_key == "any":
+    # return all backend versions for "auto" backend
+    if not backend or backend_key == "auto":
         return entry
 
     backend_version = entry.get(backend_key)
