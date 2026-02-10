@@ -157,7 +157,7 @@ class GEMM(Operation):
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
 
         # Query with energy
-        print(f"Querying GEMM: {x}, {self._n}, {self._k}, {quant_mode}")
+        #print(f"Querying GEMM: {x}, {self._n}, {self._k}, {quant_mode}")
         result = database.query_gemm(x, self._n, self._k, quant_mode)
 
         # Return PerformanceResult: scale BOTH latency and energy
