@@ -442,3 +442,95 @@ def test_trtllm_moe_configs():
     assert decode_cfg.dp_list == [4, 8, 16, 32, 64], f"Expected [4, 8, 16, 32, 64], got {decode_cfg.dp_list}"
     assert decode_cfg.moe_tp_list == [1], f"Expected [1], got {decode_cfg.moe_tp_list}"
     assert decode_cfg.moe_ep_list == [4, 8, 16, 32, 64], f"Expected [4, 8, 16, 32, 64], got {decode_cfg.moe_ep_list}"
+
+
+def _make_capturing_disagg_pareto(captured: dict):
+    """Helper: return a fake disagg_pareto that records its kwargs."""
+
+    def _fn(**kwargs):
+        captured.update(kwargs)
+        return pd.DataFrame({"tokens/s/user": [0.8], "tokens/s/gpu": [0.4]})
+
+    return _fn
+
+
+def test_sglang_non_wideep_disagg_requires_same_tp(monkeypatch):
+    """SGLang non-wideep disagg must pass require_same_tp=True to disagg_pareto."""
+    captured = {}
+    pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+    monkeypatch.setattr(pa_stub, "disagg_pareto", _make_capturing_disagg_pareto(captured))
+
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=False,
+        total_gpus=8,
+    )
+    TaskRunner().run(task)
+
+    assert captured.get("require_same_tp") is True, (
+        f"Expected require_same_tp=True for sglang non-wideep disagg, got {captured.get('require_same_tp')}"
+    )
+
+
+def test_sglang_wideep_disagg_does_not_require_same_tp(monkeypatch):
+    """SGLang wideep disagg should NOT enforce same TP."""
+    captured = {}
+    pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+    monkeypatch.setattr(pa_stub, "disagg_pareto", _make_capturing_disagg_pareto(captured))
+
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=True,
+        total_gpus=64,
+    )
+    TaskRunner().run(task)
+
+    assert captured.get("require_same_tp") is False, (
+        f"Expected require_same_tp=False for sglang wideep disagg, got {captured.get('require_same_tp')}"
+    )
+
+
+def test_trtllm_disagg_does_not_require_same_tp(monkeypatch):
+    """TRT-LLM disagg should NOT enforce same TP."""
+    captured = {}
+    pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+    monkeypatch.setattr(pa_stub, "disagg_pareto", _make_capturing_disagg_pareto(captured))
+
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        total_gpus=8,
+    )
+    TaskRunner().run(task)
+
+    assert captured.get("require_same_tp") is False, (
+        f"Expected require_same_tp=False for trtllm disagg, got {captured.get('require_same_tp')}"
+    )
+
+
+def test_vllm_disagg_does_not_require_same_tp(monkeypatch):
+    """vLLM disagg should NOT enforce same TP."""
+    captured = {}
+    pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+    monkeypatch.setattr(pa_stub, "disagg_pareto", _make_capturing_disagg_pareto(captured))
+
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="vllm",
+        total_gpus=8,
+    )
+    TaskRunner().run(task)
+
+    assert captured.get("require_same_tp") is False, (
+        f"Expected require_same_tp=False for vllm disagg, got {captured.get('require_same_tp')}"
+    )
