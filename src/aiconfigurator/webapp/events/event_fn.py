@@ -693,6 +693,11 @@ class EventFn:
 
                 num_gpu_list = [int(x) for x in num_gpu_list.split(",")] if len(num_gpu_list) > 0 else None
                 # logger.info(f"target num_gpu_list in the disagg system: {num_gpu_list}")
+
+                # For SGLang non-wideep disaggregated serving
+                # See: https://github.com/ai-dynamo/dynamo/issues/5870
+                require_same_tp = prefill_backend_name == "sglang" and not enable_wideep
+
                 results_df = pareto_analysis.disagg_pareto(
                     model_path=model_path,
                     runtime_config=runtime_config,
@@ -712,6 +717,7 @@ class EventFn:
                     max_num_gpu=max_num_gpu if max_num_gpu > 0 else None,
                     prefill_max_num_tokens=prefill_max_batch_size * isl,
                     decode_max_num_tokens=decode_max_batch_size,
+                    require_same_tp=require_same_tp,
                 )
 
                 # Use request_latency as x-axis if request_latency mode is active
