@@ -178,6 +178,7 @@ class EventFn:
         nextn,
         nextn_accept_rates,
         enable_wideep,
+        enable_eplb,
         mode,
         record_df,
     ):
@@ -209,6 +210,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
@@ -277,6 +279,7 @@ class EventFn:
         nextn,
         nextn_accept_rates,
         enable_wideep,
+        enable_eplb,
     ):
         traceback_log = ""
         stdout_buffer = StringIO()
@@ -305,6 +308,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
@@ -388,6 +392,7 @@ class EventFn:
         nextn,
         nextn_accept_rates,
         enable_wideep,
+        enable_eplb,
     ):
         is_error = False
         traceback_log = ""
@@ -412,6 +417,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
@@ -521,6 +527,7 @@ class EventFn:
         nextn,
         nextn_accept_rates,
         enable_wideep,
+        enable_eplb,
         prefill_system_name,
         prefill_backend_name,
         prefill_version,
@@ -595,6 +602,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and prefill_backend_name == "sglang") else None,
                 )
@@ -612,6 +620,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and decode_backend_name == "sglang") else None,
                 )
@@ -769,6 +778,7 @@ class EventFn:
         nextn,
         nextn_accept_rates,
         enable_wideep,
+        enable_eplb,
         prefill_system_name,
         prefill_backend_name,
         prefill_version,
@@ -877,6 +887,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and prefill_backend_name == "sglang") else None,
                 )
@@ -894,6 +905,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and decode_backend_name == "sglang") else None,
                 )
@@ -1236,6 +1248,14 @@ class EventFn:
         database_dict = get_all_databases()
         version_choices = sorted(database_dict[system_name][backend_name].keys(), reverse=True)
         return gr.update(choices=version_choices, value=None, interactive=True)
+
+    @staticmethod
+    def update_eplb_mode(enable_wideep):
+        """Update enable_eplb interactivity based on enable_wideep state."""
+        if enable_wideep:
+            return gr.update(interactive=True)
+        else:
+            return gr.update(value=False, interactive=False)
 
     @staticmethod
     def update_version_choices_with_quant_toggles(system_name, backend_name):

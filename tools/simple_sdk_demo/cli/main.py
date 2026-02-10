@@ -114,7 +114,13 @@ def parse(args):
     parser.add_argument(
         "--enable_wideep",
         action="store_true",
-        help="Enable WideEP DeepSeek modeling (only effective when --backend sglang and model is DeepSeek).",
+        help="Enable WideEP DeepSeek modeling (effective for trtllm and sglang backends with DeepSeek model).",
+    )
+    parser.add_argument(
+        "--wideep_num_slots",
+        type=int,
+        default=None,
+        help="Number of expert slots for WideEP EPLB (defaults to num_experts if not specified).",
     )
     parser.add_argument(
         "--enable_eplb",
@@ -149,6 +155,7 @@ def main(args):
         overwrite_num_layers=args.overwrite_num_layers,
         enable_wideep=args.enable_wideep,
         enable_eplb=args.enable_eplb,
+        wideep_num_slots=args.wideep_num_slots,
         moe_backend=args.moe_backend,
     )
     runtime_config = config.RuntimeConfig(
