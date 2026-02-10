@@ -1440,13 +1440,16 @@ class PerfDatabase:
         self._extracted_metrics_cache = {}
 
         data_dir = os.path.join(systems_dir, self.system_spec["data_dir"], backend, version)
-        nccl_data_dir = os.path.join(
-            systems_dir,
-            self.system_spec["data_dir"],
-            "nccl",
-            self.system_spec["misc"]["nccl_version"],
-            common.PerfDataFilename.nccl.value,
-        )
+        if "misc" in self.system_spec:
+            nccl_data_dir = os.path.join(
+                systems_dir,
+                self.system_spec["data_dir"],
+                "nccl",
+                self.system_spec["misc"]["nccl_version"],
+                common.PerfDataFilename.nccl.value,
+            )
+        else:
+            nccl_data_dir = ""
 
         if backend == "sglang":
             # For SGLang, only load MoE data and provide empty structures for other data

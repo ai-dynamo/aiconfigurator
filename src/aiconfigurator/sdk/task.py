@@ -466,6 +466,11 @@ class TaskConfigFactory:
                 raise ValueError(f"total_gpus must be greater than 2 for disagg, got {ctx.total_gpus}")
             replica_cfg.max_gpu_per_replica = min(ctx.total_gpus, replica_cfg.get("max_gpu_per_replica"))
             logger.debug("Using max gpu per replica %s", replica_cfg.max_gpu_per_replica)
+            # Prefill/Decode num_gpu_per_worker should be strictly smaller than total_gpus
+            prefill_cfg.num_gpu_per_worker = [num for num in prefill_cfg.num_gpu_per_worker if num <= ctx.total_gpus]
+            logger.debug("Overwriting num gpu per prefill worker to %s", prefill_cfg.num_gpu_per_worker)
+            decode_cfg.num_gpu_per_worker = [num for num in decode_cfg.num_gpu_per_worker if num <= ctx.total_gpus]
+            logger.debug("Overwriting num gpu per decode worker to %s", decode_cfg.num_gpu_per_worker)
 
         cls._apply_quant_modes(
             target_cfg=prefill_cfg,
@@ -509,7 +514,6 @@ class TaskConfigFactory:
         existing = {key: getattr(target_cfg, key, None) for key in quant_keys}
         if all(value is not None and isinstance(value, str) for value in existing.values()):
             return
-
         database = get_database(system=system, backend=backend, version=version)
         if database is None:
             raise PerfDataNotAvailableError(
@@ -541,12 +545,14 @@ class TaskConfigFactory:
         fmha_quant_mode = "float16" if model_family == "DEEPSEEK" else "fp8"
         comm_quant_mode = "half"
 
-        sm_version = database.system_spec["gpu"]["sm_version"]
-        # SM version to GPU type mapping:
+        sm_version = database.system_spec["gpu"].get("sm_version", -1)
+        # SM version to Nvidia GPU type mapping:
         #   SM 80  = A100
         #   SM 89  = L40S (Ada Lovelace) - no TMA, limited FP8 support
         #   SM 90  = H100/H200 (Hopper) - full FP8 and TMA support
         #   SM 100 = B200/GB200 (Blackwell) - NVFP4 support
+        # For Intel GPU
+        #   SM -1  = B60 (Xe2) - limited FP8 support, fallback to bf16 for now
 
         supported = getattr(database, "supported_quant_mode", {}) or {}
         supported_gemm = set(supported.get("gemm", []) or [])

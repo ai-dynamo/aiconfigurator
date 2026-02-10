@@ -6,7 +6,11 @@ import os
 import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+
+try:
+    from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+except Exception:
+    print("No fp8_w8a8_moe_quant_config found, please check your vLLM version.")
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
@@ -24,6 +28,13 @@ except Exception:
 
 from collector.common_test_cases import get_common_moe_test_cases
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
+
+if torch.xpu.is_available():
+    try:
+        from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+    except Exception as e:
+        print(f"Please refer to vllm_xpu_kernels for MoE on XPU, \n{e}")
+
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
@@ -91,7 +102,10 @@ def run_moe_torch(
     device="cuda:0",
 ):
     """Run vLLM MoE performance benchmarking"""
-    torch.cuda.set_device(device)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
+    elif torch.xpu.is_available():
+        torch.xpu.set_device(device)
     torch.set_default_device(device)
 
     # Configure quantization parameters
@@ -214,19 +228,36 @@ def run_moe_torch(
 
         def run_single_iteration():
             if distributed == "power_law":
-                for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
-                    local_num_tokens = tw.shape[0]
-                    _ = fused_experts(
-                        hidden_states[:local_num_tokens],
-                        w1,
-                        w2,
-                        tw,
-                        ti,
-                        inplace=True,
-                        quant_config=quant_config,
-                        global_num_experts=num_experts,
-                        expert_map=expert_map,
-                    )
+                if torch.cuda.is_available():
+                    for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
+                        local_num_tokens = tw.shape[0]
+                        _ = fused_experts(
+                            hidden_states[:local_num_tokens],
+                            w1,
+                            w2,
+                            tw,
+                            ti,
+                            inplace=True,
+                            quant_config=quant_config,
+                            global_num_experts=num_experts,
+                            expert_map=expert_map,
+                        )
+                elif torch.xpu.is_available():
+                    for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
+                        local_num_tokens = tw.shape[0]
+                        # args check https://github.com/vllm-project/vllm-xpu-kernels/blob/main/tests/fused_moe/test_fused_moe.py
+                        _ = xpu_fused_moe(
+                            hidden_states=hidden_states[:local_num_tokens],
+                            w13=w1,
+                            w13_bias=None,
+                            w2=w2,
+                            w2_bias=None,
+                            topk_weights=tw,
+                            topk_ids=ti,
+                            n_experts_per_token=topk,
+                            activation="silu",
+                            num_experts=local_num_experts,
+                        )
             else:
                 _ = fused_experts(
                     hidden_states,
@@ -282,7 +313,9 @@ def run_moe_torch(
             ],
             framework="VLLM",
             version=vllm_version,
-            device_name=torch.cuda.get_device_name(device),
+            device_name=torch.cuda.get_device_name(device)
+            if torch.cuda.is_available()
+            else torch.xpu.get_device_name(device),
             op_name="moe",
             kernel_source=source,
             perf_filename=perf_filename,
