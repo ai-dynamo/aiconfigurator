@@ -1364,11 +1364,9 @@ class WideEPDeepSeekModel(BaseModel):
         moe_backend = self.config.moe_backend
         attn_backend = self.config.attention_backend
 
-        # Set power_law_alpha: prefill affected by eplb, decode always uses 1.01
         self._power_law_alpha_prefill = 0.6 if self.config.enable_eplb else 1.01
-        self._power_law_alpha_decode = 1.01  # decode not affected by eplb
+        self._power_law_alpha_decode = 1.01  
 
-        # Create separate workload distributions for prefill and decode
         context_workload_distribution = (
             self.config.workload_distribution + f"_{self._power_law_alpha_prefill}"
             if self.config.workload_distribution == "power_law"
@@ -1576,7 +1574,7 @@ class WideEPDeepSeekModel(BaseModel):
                     attention_dp_size,
                     is_context=False,
                     moe_backend=moe_backend,
-                    enable_eplb=False,  # eplb only affects prefill, not decode
+                    enable_eplb=False, 
                 )
             ]
         )
