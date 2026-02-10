@@ -201,6 +201,10 @@ def init_distributed():
         os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "29500")
         dist.init_process_group(backend="nccl", device_id=device)
 
+    print(
+        f"Rank {rank} initialized with MASTER_ADDR={os.environ['MASTER_ADDR']}, MASTER_PORT={os.environ['MASTER_PORT']}"
+    )
+
     return rank, world_size, device
 
 

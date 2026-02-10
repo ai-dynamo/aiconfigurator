@@ -30,12 +30,24 @@ def configure_parser(parser):
     parser.add_argument("--enable_profiling", action="store_true", help="Enable Profiling tab")
     parser.add_argument("--debug", help="Debug mode", action="store_true")
     parser.add_argument("--experimental", help="enable experimental features", action="store_true")
+    parser.add_argument(
+        "--systems-paths",
+        type=str,
+        default=None,
+        help=(
+            "Systems search paths (comma-separated). Use 'default' for the built-in systems path. "
+            "Example: default,/opt/aic/systems,/data/aic/systems."
+        ),
+    )
 
 
 def main(args):
     """
     Main function for the WebApp.
     """
+    from aiconfigurator.sdk import perf_database
+
+    perf_database.set_systems_paths(args.systems_paths)
     app_config = {
         "enable_agg": args.enable_agg,
         "enable_disagg_pd_ratio": args.enable_disagg_pd_ratio,

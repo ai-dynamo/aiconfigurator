@@ -33,6 +33,7 @@ class ModelConfig:
     moe_backend: str = None  # for sglang wideep only, deepep
     attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3', for sglang wideep only
     enable_wideep: bool = False
+    enable_eplb: bool = False  # Expert Parallel Load Balancing, only works during prefill
 
 
 @dataclass

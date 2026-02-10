@@ -1364,9 +1364,16 @@ class WideEPDeepSeekModel(BaseModel):
         moe_backend = self.config.moe_backend
         attn_backend = self.config.attention_backend
 
-        self._power_law_alpha = 1.01
-        workload_distribution = (
-            self.config.workload_distribution + f"_{self._power_law_alpha}"
+        self._power_law_alpha_prefill = 0.6 if self.config.enable_eplb else 1.01
+        self._power_law_alpha_decode = 1.01
+
+        context_workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha_prefill}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
+        generation_workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha_decode}"
             if self.config.workload_distribution == "power_law"
             else self.config.workload_distribution
         )
@@ -1480,10 +1487,11 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_tp_size,
                     moe_ep_size,
                     moe_quant_mode,
-                    workload_distribution,
+                    context_workload_distribution,
                     attention_dp_size,
                     is_context=True,
                     moe_backend=moe_backend,
+                    enable_eplb=self.config.enable_eplb,
                 )
             ]
         )
@@ -1562,10 +1570,11 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_tp_size,
                     moe_ep_size,
                     moe_quant_mode,
-                    workload_distribution,
+                    generation_workload_distribution,
                     attention_dp_size,
                     is_context=False,
                     moe_backend=moe_backend,
+                    enable_eplb=False,
                 )
             ]
         )
@@ -1944,15 +1953,28 @@ class NemotronHModel(BaseModel):
         # Embedding
         self.context_ops.append(ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3))
 
-        # Mamba layers (M)
+        # Mamba layers (M): norm, in_proj GEMM, conv1d, ssm, out_proj GEMM, ar
         if layer_counts["M"] > 0:
             count = layer_counts["M"]
+            nheads_per_gpu = cfg.mamba_num_heads // tp_size
+            d_inner_per_gpu = nheads_per_gpu * cfg.mamba_head_dim
+            n_groups_per_gpu = cfg.n_groups // tp_size
+            in_proj_out_per_gpu = 2 * d_inner_per_gpu + 2 * n_groups_per_gpu * cfg.ssm_state_size + nheads_per_gpu
             self.context_ops.extend(
                 [
                     ops.ElementWise("context_mamba_norm", count, 2 * h, 2 * h, 0.8),
-                    ops.Mamba2(
-                        "context_mamba2",
+                    ops.GEMM(
+                        "context_mamba_in_proj_gemm",
                         count,
+                        in_proj_out_per_gpu,
+                        h,
+                        gemm_quant_mode,
+                    ),
+                    ops.Mamba2Kernel(
+                        "context_mamba_conv1d",
+                        count,
+                        "causal_conv1d_fn",
+                        "context",
                         hidden_size=h,
                         nheads=cfg.mamba_num_heads,
                         head_dim=cfg.mamba_head_dim,
@@ -1960,10 +1982,27 @@ class NemotronHModel(BaseModel):
                         d_conv=cfg.conv_kernel,
                         n_groups=cfg.n_groups,
                         chunk_size=cfg.chunk_size,
-                        tp_size=tp_size,
-                        quant_mode=gemm_quant_mode,
                     ),
-                    # AllReduce needed after out_proj (ROW parallelism in TRT-LLM)
+                    ops.Mamba2Kernel(
+                        "context_mamba_ssm",
+                        count,
+                        "mamba_chunk_scan_combined",
+                        "context",
+                        hidden_size=h,
+                        nheads=cfg.mamba_num_heads,
+                        head_dim=cfg.mamba_head_dim,
+                        d_state=cfg.ssm_state_size,
+                        d_conv=cfg.conv_kernel,
+                        n_groups=cfg.n_groups,
+                        chunk_size=cfg.chunk_size,
+                    ),
+                    ops.GEMM(
+                        "context_mamba_out_proj_gemm",
+                        count,
+                        h,
+                        d_inner_per_gpu,
+                        gemm_quant_mode,
+                    ),
                     ops.CustomAllReduce("context_mamba_ar", count, h, tp_size),
                 ]
             )
@@ -2170,15 +2209,28 @@ class NemotronHModel(BaseModel):
         # Embedding
         self.generation_ops.append(ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3))
 
-        # Mamba layers (M)
+        # Mamba layers (M): norm, in_proj GEMM, conv1d, ssm, out_proj GEMM, ar
         if layer_counts["M"] > 0:
             count = layer_counts["M"]
+            nheads_per_gpu = cfg.mamba_num_heads // tp_size
+            d_inner_per_gpu = nheads_per_gpu * cfg.mamba_head_dim
+            n_groups_per_gpu = cfg.n_groups // tp_size
+            in_proj_out_per_gpu = 2 * d_inner_per_gpu + 2 * n_groups_per_gpu * cfg.ssm_state_size + nheads_per_gpu
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_mamba_norm", count, 2 * h, 2 * h, 0.8),
-                    ops.Mamba2(
-                        "generation_mamba2",
+                    ops.GEMM(
+                        "generation_mamba_in_proj_gemm",
                         count,
+                        in_proj_out_per_gpu,
+                        h,
+                        gemm_quant_mode,
+                    ),
+                    ops.Mamba2Kernel(
+                        "generation_mamba_conv1d",
+                        count,
+                        "causal_conv1d_update",
+                        "generation",
                         hidden_size=h,
                         nheads=cfg.mamba_num_heads,
                         head_dim=cfg.mamba_head_dim,
@@ -2186,10 +2238,27 @@ class NemotronHModel(BaseModel):
                         d_conv=cfg.conv_kernel,
                         n_groups=cfg.n_groups,
                         chunk_size=cfg.chunk_size,
-                        tp_size=tp_size,
-                        quant_mode=gemm_quant_mode,
                     ),
-                    # AllReduce needed after out_proj (ROW parallelism in TRT-LLM)
+                    ops.Mamba2Kernel(
+                        "generation_mamba_ssm",
+                        count,
+                        "selective_state_update",
+                        "generation",
+                        hidden_size=h,
+                        nheads=cfg.mamba_num_heads,
+                        head_dim=cfg.mamba_head_dim,
+                        d_state=cfg.ssm_state_size,
+                        d_conv=cfg.conv_kernel,
+                        n_groups=cfg.n_groups,
+                        chunk_size=cfg.chunk_size,
+                    ),
+                    ops.GEMM(
+                        "generation_mamba_out_proj_gemm",
+                        count,
+                        h,
+                        d_inner_per_gpu,
+                        gemm_quant_mode,
+                    ),
                     ops.CustomAllReduce("generation_mamba_ar", count, h, tp_size),
                 ]
             )

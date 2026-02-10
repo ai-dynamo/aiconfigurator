@@ -475,14 +475,11 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
             error_handler.setLevel(logging.ERROR)
             error_handler.setFormatter(file_formatter)
             logger.addHandler(error_handler)
+        logging.captureWarnings(True)
 
         logger.propagate = False  # Prevent duplicate logs
         # Silence noisy third-party loggers even if debug is true
-        logging.getLogger("matplotlib").setLevel(logging.WARNING)
-        logging.getLogger("h5py").setLevel(logging.WARNING)
-        logging.getLogger("datasets").setLevel(logging.WARNING)
-        logging.getLogger("flashinfer").setLevel(logging.ERROR)
-        logging.getLogger("tensorrt_llm").setLevel(logging.ERROR)
+        _silence_noisy_loggers()
 
         # Configure root logger for libraries
         root = logging.getLogger()
@@ -548,17 +545,21 @@ def setup_logging(scope=["all"], debug=False, worker_id=None):
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(file_formatter)
     root_logger.addHandler(error_handler)
+    logging.captureWarnings(True)
 
     # Silence noisy third-party loggers globally
-    logging.getLogger("matplotlib").setLevel(logging.WARNING)
-    logging.getLogger("h5py").setLevel(logging.WARNING)
-    logging.getLogger("datasets").setLevel(logging.WARNING)
-    logging.getLogger("flashinfer").setLevel(logging.ERROR)
-    logging.getLogger("tensorrt_llm").setLevel(logging.ERROR)
+    _silence_noisy_loggers()
 
     _LOGGING_CONFIGURED = True
 
     return root_logger
+
+
+def _silence_noisy_loggers():
+    for name in ("matplotlib", "h5py", "datasets", "numexpr"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    for name in ("flashinfer", "tensorrt_llm"):
+        logging.getLogger(name).setLevel(logging.ERROR)
 
 
 def get_logging_config():
