@@ -27,7 +27,7 @@ def configure_parser(parser):
     parser.add_argument("--server_port", type=int, default=7860, help="Server port")
     parser.add_argument("--enable_agg", action="store_true", help="Enable Agg tab")
     parser.add_argument("--enable_disagg_pd_ratio", action="store_true", help="Enable Disagg PD Ratio tab")
-    parser.add_argument("--enable_profiling", action="store_true", help="Enable Profiling tab")
+    parser.add_argument("--enable-profiling", action="store_true", help="Enable Profiling tab")
     parser.add_argument("--debug", help="Debug mode", action="store_true")
     parser.add_argument("--experimental", help="enable experimental features", action="store_true")
     parser.add_argument(

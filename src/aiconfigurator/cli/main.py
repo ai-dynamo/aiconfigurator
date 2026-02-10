@@ -213,23 +213,24 @@ def _add_support_mode_arguments(parser):
 _USAGE_EXAMPLES = """
 Examples:
 # Sweep across all backends for Dynamo v0.7.1
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 \\
+aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 \\
     --backend auto \\
-    --top_n 3 \\
-    --total_gpus 8 --system h200_sxm \\
+    --top-n 3 \\
+    --total-gpus 8 --system h200_sxm \\
     --ttft 600 --tpot 50 --isl 4000 --osl 500 \\
     --generator-dynamo-version v0.7.1 \\
     --generator-set K8sConfig.k8s_model_cache=model-cache \\
     --generator-set K8sConfig.k8s_hf_home=/opt/models \\
     --generator-set K8sConfig.k8s_namespace=ets-dynamo \\
-    --save_dir results
+    --save-dir results
 
 # Sweep for trtllm 1.2.0rc5 but generate config matching trtllm 1.2.0rc6
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 \\
+aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 \\
     --backend trtllm \\
-    --backend_version 1.2.0rc5 \\
-    --generated_config_version 1.2.0rc6 \\
-    --save_dir results
+    --total-gpus 8 --system h200_sxm \\
+    --backend-version 1.2.0rc5 \\
+    --generated-config-version 1.2.0rc6 \\
+    --save-dir results
 """
 
 

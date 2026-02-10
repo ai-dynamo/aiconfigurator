@@ -63,7 +63,7 @@ class Pipeline:
         args.service_mode = "default"
         save_dir = getattr(args, "save_dir", None)
         if not save_dir:
-            raise ValueError("--save_dir is required for eval to pick artifacts.")
+            raise ValueError("--save-dir is required for eval to pick artifacts.")
 
         pre_existing = set(p.name for p in Path(save_dir).glob("*") if p.is_dir())
 
@@ -587,7 +587,7 @@ class Pipeline:
         args = self.cfg.cli_args
         save_dir = Path(getattr(args, "save_dir", None) or "")
         if not save_dir:
-            raise ValueError("--save_dir is required")
+            raise ValueError("--save-dir is required")
 
         # 1) generate configs
         if not self.cfg.no_generate:

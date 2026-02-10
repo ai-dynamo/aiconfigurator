@@ -96,7 +96,7 @@ def main(args) -> int:
     )
 
     if not getattr(args, "save_dir", None):
-        LOG.error("--save_dir is required for eval")
+        LOG.error("--save-dir is required for eval")
         return 2
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")

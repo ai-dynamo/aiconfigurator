@@ -558,10 +558,10 @@ def save_results(
                     f"{exp_name}_{backend_name}": task_configs[f"{exp_name}_{backend_name}"]
                     for backend_name in actual_backend_versions
                 }
-                # generated backend versions for each backend, empty unless --generator_dynamo_version is provided
+                # generated backend versions for each backend, empty unless --generator-dynamo-version is provided
                 generated_backend_versions = {}
 
-            # case #1: --generated_config_version is provided
+            # case #1: --generated-config-version is provided
             if generated_backend_version:
                 effective_generated_version = generated_backend_version
                 logger.warning(
@@ -575,7 +575,7 @@ def save_results(
                     exp_name,
                     generated_backend_version,
                 )
-            # case #2: --generator_dynamo_version is provided, generating config matching the dynamo version,
+            # case #2: --generator-dynamo-version is provided, generating config matching the dynamo version,
             # but the data used for prediction may not match dynamo version due to imperfect coverage.
             elif dynamo_version := (generator_overrides or {}).get("generator_dynamo_version"):
                 if backend != "auto":
