@@ -50,5 +50,5 @@ class TestExps:
         self,
         exp_yaml,
     ):
-        cmd = ["aiconfigurator", "cli", "exp", "--yaml_path", exp_yaml]
+        cmd = ["aiconfigurator", "cli", "exp", "--yaml-path", exp_yaml]
         sp.run(cmd, check=True)

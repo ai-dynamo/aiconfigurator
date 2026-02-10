@@ -359,7 +359,7 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
         help="Print generator schema help (deploy, backend, or all) and exit.",
     )
     grp.add_argument(
-        "--generated_config_version",
+        "--generated-config-version",
         type=str,
         default=None,
         help="Backend template version for generated artifacts (e.g. 1.1.0rc5).",
