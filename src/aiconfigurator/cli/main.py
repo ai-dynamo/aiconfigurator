@@ -210,12 +210,40 @@ def _add_support_mode_arguments(parser):
     )
 
 
+_USAGE_EXAMPLES = """
+Examples:
+# Sweep across all backends for Dynamo v0.7.1
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 \\
+    --backend any \\
+    --top_n 3 \\
+    --total_gpus 8 --system h200_sxm \\
+    --ttft 600 --tpot 50 --isl 4000 --osl 500 \\
+    --generator-dynamo-version v0.7.1 \\
+    --generator-set K8sConfig.k8s_model_cache=model-cache \\
+    --generator-set K8sConfig.k8s_hf_home=/opt/models \\
+    --generator-set K8sConfig.k8s_namespace=ets-dynamo \\
+    --save_dir results
+
+# Sweep for trtllm 1.2.0rc5 but generate config matching trtllm 1.2.0rc6
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 \\
+    --backend trtllm \\
+    --backend_version 1.2.0rc5 \\
+    --generated_config_version 1.2.0rc6 \\
+    --save_dir results
+"""
+
+
 def configure_parser(parser):
     common_cli_parser = _build_common_cli_parser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
     default_parser = subparsers.add_parser(
-        "default", parents=[common_cli_parser], help="Run the default agg vs disagg comparison."
+        "default",
+        parents=[common_cli_parser],
+        help="Run the default agg vs disagg comparison.",
+        description="Run the default agg vs disagg comparison.",
+        epilog=_USAGE_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_default_mode_arguments(default_parser)
 
@@ -810,7 +838,11 @@ def main(args):
 if __name__ == "__main__":
     if generator_cli_helper(sys.argv[1:]):
         sys.exit(0)
-    parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for Disaggregated Serving Deployment")
+    parser = argparse.ArgumentParser(
+        description="Dynamo AIConfigurator for Disaggregated Serving Deployment",
+        epilog=_USAGE_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     configure_parser(parser)
     args = parser.parse_args()
     main(args)

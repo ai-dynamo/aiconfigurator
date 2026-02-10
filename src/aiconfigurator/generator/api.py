@@ -20,17 +20,19 @@ from prettytable import PrettyTable
 
 from .artifacts import ArtifactWriter
 from .rendering import _cast_literal, render_backend_parameters, render_backend_templates
-from .utils import DEFAULT_BACKEND, normalize_backend
+from .utils import (
+    DEFAULT_BACKEND,
+    _load_yaml_payload,
+    get_default_dynamo_version_mapping,
+    normalize_backend,
+    resolve_backend_version_for_dynamo,
+)
 
 GENERATOR_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
 DEFAULT_DEPLOYMENT_SCHEMA_PATH = os.path.join(GENERATOR_CONFIG_DIR, "deployment_config.yaml")
 DEFAULT_BACKEND_MAPPING_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_config_mapping.yaml")
+DEFAULT_BACKEND_VERSION_MATRIX_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_version_matrix.yaml")
 _VALID_GENERATOR_HELP_SECTIONS = {"all", "deploy", "backend"}
-
-
-def _load_yaml_payload(path: str) -> Any:
-    with open(path, encoding="utf-8") as fh:
-        return yaml.safe_load(fh) or {}
 
 
 def _format_default_value(value: Any) -> str:
@@ -364,6 +366,13 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Backend template version for generated artifacts (e.g. 1.1.0rc5).",
     )
+    grp.add_argument(
+        "--generator-dynamo-version",
+        dest="generator_dynamo_version",
+        type=str,
+        default=None,
+        help="Dynamo version used for backend template selection.",
+    )
 
 
 def load_generator_overrides(
@@ -396,10 +405,14 @@ def load_generator_overrides_from_args(args: argparse.Namespace) -> dict[str, An
     """
     Convenience wrapper that pulls generator override fields from an argparse namespace.
     """
-    return load_generator_overrides(
+    overrides = load_generator_overrides(
         getattr(args, "generator_config", None),
         getattr(args, "generator_set", None),
     )
+    dynamo_version = getattr(args, "generator_dynamo_version", None)
+    if dynamo_version:
+        overrides = _deep_merge_dicts(overrides, {"generator_dynamo_version": dynamo_version})
+    return overrides
 
 
 def parse_backend_arg(argv: list[str]) -> Optional[str]:
@@ -671,6 +684,7 @@ __all__ = [
     "generate_config_from_yaml",
     "generate_naive_config",
     "generator_cli_helper",
+    "get_default_dynamo_version_mapping",
     "load_generator_overrides",
     "load_generator_overrides_from_args",
     "parse_backend_arg",
@@ -678,5 +692,6 @@ __all__ = [
     "parse_mapping_arg",
     "prepare_generator_params",
     "print_generator_help",
+    "resolve_backend_version_for_dynamo",
     "resolve_mapping_yaml",
 ]
