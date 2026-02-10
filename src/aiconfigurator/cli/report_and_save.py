@@ -542,11 +542,11 @@ def save_results(
                 pareto_df.to_csv(os.path.join(exp_dir, "pareto.csv"), index=False)
 
             # 3. Save the config for this experiment
-            if backend != "any":
+            if backend != "auto":
                 exp_task_config = task_configs[exp_name]
                 backend_version_str = exp_task_config.backend_version
             else:
-                # There could be multiple backends in the same experiment if backend == "any" as the result is merged
+                # There could be multiple backends in the same experiment if backend == "auto" as the result is merged
                 actual_backend_versions = {
                     task_config.backend_name: task_config.backend_version for task_config in task_configs.values()
                 }
@@ -578,7 +578,7 @@ def save_results(
             # case #2: --generator_dynamo_version is provided, generating config matching the dynamo version,
             # but the data used for prediction may not match dynamo version due to imperfect coverage.
             elif dynamo_version := (generator_overrides or {}).get("generator_dynamo_version"):
-                if backend != "any":
+                if backend != "auto":
                     try:
                         effective_generated_version = resolve_backend_version_for_dynamo(
                             dynamo_version,
@@ -627,7 +627,7 @@ def save_results(
                 )
 
             # Save the experiment config for future aic repro
-            if backend != "any":
+            if backend != "auto":
                 with open(os.path.join(exp_dir, "exp_config.yaml"), "w") as f:
                     yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
             else:
@@ -639,7 +639,7 @@ def save_results(
             if best_config_df is not None:
                 for i, (idx, result_df) in enumerate(best_config_df.iterrows()):
                     # For multi-backend mode, get the task_config for this row's backend
-                    if backend == "any" and "backend" in result_df:
+                    if backend == "auto" and "backend" in result_df:
                         row_backend = result_df["backend"]
                         row_task_config_key = f"{exp_name}_{row_backend}"
                         row_task_config = task_configs[row_task_config_key]
