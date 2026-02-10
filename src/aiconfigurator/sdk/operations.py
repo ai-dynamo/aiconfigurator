@@ -939,6 +939,67 @@ class WideEPContextMLA(Operation):
         return self._weights * self._scale_factor
 
 
+class Mamba2Kernel(Operation):
+    """
+    Single Mamba2 kernel op (Conv1D or SSM) using collected mamba2_perf data.
+
+    One of four kernels: causal_conv1d_fn, mamba_chunk_scan_combined (context),
+    causal_conv1d_update, selective_state_update (generation).
+    Uses full (unsharded) dimensions for lookup; collector data is per-layer.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        kernel_source: str,
+        phase: str,
+        hidden_size: int,
+        nheads: int,
+        head_dim: int,
+        d_state: int,
+        d_conv: int,
+        n_groups: int,
+        chunk_size: int,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._kernel_source = kernel_source
+        self._phase = phase
+        self._hidden_size = hidden_size
+        self._nheads = nheads
+        self._head_dim = head_dim
+        self._d_state = d_state
+        self._d_conv = d_conv
+        self._n_groups = n_groups
+        self._chunk_size = chunk_size
+        self._weights = 0.0
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        batch_size = kwargs.get("batch_size")
+        s = kwargs.get("s")
+        seq_len = s if self._phase == "context" else None
+        result = database.query_mamba2(
+            phase=self._phase,
+            kernel_source=self._kernel_source,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            d_model=self._hidden_size,
+            d_state=self._d_state,
+            d_conv=self._d_conv,
+            nheads=self._nheads,
+            head_dim=self._head_dim,
+            n_groups=self._n_groups,
+            chunk_size=self._chunk_size,
+        )
+        return PerformanceResult(
+            latency=float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+        )
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
 class Mamba2(Operation):
     """
     Mamba2 operation for NemotronH hybrid models.
