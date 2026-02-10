@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
+import os
 import warnings
 
 
@@ -26,19 +27,25 @@ def setup_warning_filters():
     # Suppress flashinfer warnings
     warnings.filterwarnings("ignore", message="Prebuilt kernels not found", module="flashinfer")
 
+    # Suppress torch operator override warnings (flash_attn kernel re-registration)
+    warnings.filterwarnings(
+        "ignore",
+        message="Warning only once for all operators.*",
+        category=UserWarning,
+    )
+
+
+import torch
+from tqdm import tqdm
 
 setup_warning_filters()
 import argparse
 import json
 import multiprocessing as mp
-import os
 import signal
 import time
 import traceback
 from datetime import datetime
-
-import torch
-from tqdm import tqdm
 
 from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
 
@@ -73,6 +80,8 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
 
 def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, module_name="unknown"):
     """worker with automatic logging setup"""
+
+    setup_warning_filters()  # Must run in each spawned process
 
     # Setup logging for this worker - reads config from environment automatically
     worker_logger = setup_logging(worker_id=device_id)
@@ -296,7 +305,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
 
     # Wait for processes
     for p in processes:
-        p.join(timeout=10)
+        p.join(timeout=42)
         if p.is_alive():
             logger.warning(f"Process {p.pid} did not terminate, forcing...")
             p.terminate()
@@ -345,7 +354,6 @@ def collect_ops(
 
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
-
             errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
             all_errors.extend(errors)
 
@@ -675,6 +683,34 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
             else None,
         },
+        # MOE with EPLB (Expert Parallel Load Balancer) collection
+        {
+            "name": "trtllm",
+            "type": "moe_eplb",
+            "module": None,  # Will be determined based on version
+            "get_func": "get_moe_eplb_test_cases",
+            "run_func": "run_moe_torch",
+            "version_handler": lambda v: "collector.trtllm.collect_moe"
+            if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
+            else None,
+        },
+        # WideEP MOE Compute collection (computation only, excludes AlltoAll)
+        # Includes 3 EPLB modes: OFF, ON (baseline), ON (288 slots)
+        {
+            "name": "trtllm",
+            "type": "trtllm_moe_wideep",
+            "module": "collector.trtllm.collect_wideep_moe_compute",
+            "get_func": "get_wideep_moe_compute_all_test_cases",
+            "run_func": "run_wideep_moe_compute",
+        },
+        # Mamba2 collection
+        {
+            "name": "trtllm",
+            "type": "mamba2",
+            "module": "collector.trtllm.collect_mamba2",
+            "get_func": "get_mamba2_test_cases",
+            "run_func": "run_mamba2_torch",
+        },
     ]
 
     all_errors = collect_ops(num_processes, collections, ops, version)
@@ -746,11 +782,14 @@ def main():
             "mla_bmm_gen_pre",
             "mla_bmm_gen_post",
             "moe",
+            "moe_eplb",  # MoE with EPLB (Expert Parallel Load Balancer)
+            "trtllm_moe_wideep",  # WideEP MoE compute (includes all 3 EPLB modes)
+            "wideep_moe",  # TensorRT-LLM WideEP MoE computation (single GPU) - from aic
+            "mamba2",
             "wideep_mla_context",
             "wideep_mla_generation",
             "wideep_mlp_context",
             "wideep_mlp_generation",
-            "wideep_moe",
         ],
         help="Run only specified collection items. Leave empty to run all. "
         "Available ops vary by backend - see backend-specific collectors for details.",
@@ -787,6 +826,10 @@ def main():
         logger.info(f"Power monitoring enabled (min duration: {args.power_test_duration_sec}s)")
     else:
         os.environ["COLLECTOR_MEASURE_POWER"] = "false"
+
+    # Suppress torch operator override warnings in spawned workers
+    # (env var takes effect at interpreter startup, before any module imports)
+    os.environ["PYTHONWARNINGS"] = "ignore::UserWarning:torch.library"
 
     mp.set_start_method("spawn")
 

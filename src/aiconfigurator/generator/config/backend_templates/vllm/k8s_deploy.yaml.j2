@@ -1,21 +1,114 @@
-{#
-  vLLM backend Kubernetes DynamoGraphDeployment template
-  Uses shared macros for worker specs.
-#}
-{% from 'base_k8s.j2' import deployment_header, frontend_spec %}
-{% import 'vllm.j2' as vllm %}
+{%- set _default_vllm_workdir = '/workspace/examples/backends/vllm' -%}
+{%- if working_dir and working_dir != '/workspace/components/backends/vllm' -%}
+{%- set runtime_working_dir = working_dir -%}
+{%- else -%}
+{%- set runtime_working_dir = _default_vllm_workdir -%}
+{%- endif -%}
+{%- set model_cache_input = K8sConfig.k8s_model_cache | default('', true) | trim -%}
+{%- set k8s_use_model_cache = (model_cache_input != '') -%}
+{%- set k8s_model_cache_pvc = (model_cache_input if k8s_use_model_cache else 'model-cache') -%}
+{%- set k8s_model_cache_mount = '/workspace/model_cache' -%}
 
-{{ deployment_header(DynConfig, K8sConfig, name | default('dynamo-vllm')) }}
-{{ frontend_spec(ServiceConfig, DynConfig, K8sConfig, enable_router | default(false), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), frontend_replicas | default(1)) }}
+{%- macro render_worker(component_name, role, replicas, gpu, cli_args_list) -%}
+    {%- set parsed_args = cli_args_list | default([]) -%}
+{{ "    " ~ component_name ~ ":" }}
+      envFromSecret: hf-token-secret
+      {% if K8sConfig.k8s_hf_home %}
+      envs:
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+      {% endif %}
+      componentType: worker
+      {% if role %}
+      subComponentType: {{ role }}
+      {% endif %}
+      replicas: {{ replicas | default(1) }}
+      resources:
+        limits:
+          gpu: "{{ gpu }}"
+      extraPodSpec:
+        {% if k8s_use_model_cache %}
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: {{ k8s_model_cache_pvc }}
+        {% endif %}      
+        {% if K8sConfig.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ K8sConfig.k8s_image }}
+          workingDir: {{ runtime_working_dir }}
+          imagePullPolicy: IfNotPresent
+          {% if k8s_use_model_cache %}
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ k8s_model_cache_mount }}
+          {% endif %}
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - "{{ ServiceConfig.model_path }}"
+            {% for arg in parsed_args %}
+            - {{ arg | tojson }}
+            {% endfor %}
+            {% if role == 'prefill' %}
+            - --is-prefill-worker
+            {% elif role == 'decode' %}
+            - --is-decode-worker
+            {% endif %}
+{%- endmacro %}
 
-{% set mode = DynConfig.mode | default('disagg') %}
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ name }}
+  namespace: {{ K8sConfig.k8s_namespace }}
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      {% if K8sConfig.k8s_hf_home %}
+      envs:
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+      {% endif %}
+      componentType: frontend
+      replicas: {{ frontend_replicas | default(1) }}
+      extraPodSpec:
+        {% if K8sConfig.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ K8sConfig.k8s_image }}
+          imagePullPolicy: IfNotPresent
 
-{% if mode == 'agg' %}
-{# ============ AGGREGATE MODE ============ #}
-{{ vllm.k8s_worker(None, agg_gpu, agg_workers, agg_cli_args_list | default([]), ServiceConfig, K8sConfig, k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
-
-{% else %}
-{# ============ DISAGGREGATE MODE ============ #}
-{{ vllm.k8s_worker('prefill', prefill_gpu, prefill_workers, prefill_cli_args_list | default([]), ServiceConfig, K8sConfig, k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
-{{ vllm.k8s_worker('decode', decode_gpu, decode_workers, decode_cli_args_list | default([]), ServiceConfig, K8sConfig, k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
-{% endif %}
+    {% if DynConfig.mode | default('disagg') == 'agg' %}
+{{ render_worker(
+    "VllmDecodeWorker",
+    "decode",
+    agg_workers,
+    agg_gpu,
+    agg_cli_args_list | default([])
+) }}
+    {% else %}
+{{ render_worker(
+    "VllmPrefillWorker",
+    "prefill",
+    prefill_workers,
+    prefill_gpu,
+    prefill_cli_args_list | default([])
+) }}
+{{ render_worker(
+    "VllmDecodeWorker",
+    "decode",
+    decode_workers,
+    decode_gpu,
+    decode_cli_args_list | default([])
+) }}
+    {% endif %}

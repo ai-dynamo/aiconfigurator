@@ -1,21 +1,118 @@
-{#
-  SGLang backend Kubernetes DynamoGraphDeployment template
-  Uses shared macros for worker specs.
-#}
-{% from 'base_k8s.j2' import deployment_header, frontend_spec %}
-{% import 'sglang.j2' as sglang %}
+{%- set enable_router = DynConfig.enable_router | default(false) -%}
+{%- set runtime_working_dir = working_dir or '/workspace/components/backends/sglang' -%}
+{%- set model_cache_input = K8sConfig.k8s_model_cache | default('', true) | trim -%}
+{%- set k8s_use_model_cache = (model_cache_input != '') -%}
+{%- set k8s_model_cache_pvc = (model_cache_input if k8s_use_model_cache else 'model-cache') -%}
+{%- set k8s_model_cache_mount = '/workspace/model_cache' -%}
 
-{{ deployment_header(DynConfig, K8sConfig, name | default('dynamo-sglang')) }}
-{{ frontend_spec(ServiceConfig, DynConfig, K8sConfig, enable_router | default(false), k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), frontend_replicas | default(1)) }}
+{%- macro render_worker(component_name, role, replicas, gpu, cli_args) -%}
+{{ "    " ~ component_name ~ ":" }}
+      envFromSecret: hf-token-secret
+      {% if K8sConfig.k8s_hf_home %}
+      envs:
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+      {% endif %}
+      componentType: worker
+      {% if role %}
+      subComponentType: {{ role }}
+      {% endif %}
+      replicas: {{ replicas | default(1) }}
+      resources:
+        limits:
+          gpu: "{{ gpu }}"
+      extraPodSpec:
+        {% if k8s_use_model_cache %}
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: {{ k8s_model_cache_pvc }}
+        {% endif %}  
+        {% if K8sConfig.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ K8sConfig.k8s_image }}
+          workingDir: {{ runtime_working_dir }}
+          imagePullPolicy: IfNotPresent
+          {% if k8s_use_model_cache %}
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ k8s_model_cache_mount }}
+          {% endif %}
+          command: ["/bin/bash","-c"]
+          args:
+            - |
+              set -euo pipefail
+              args=(
+                --model-path "{{ ServiceConfig.model_path }}"
+                --served-model-name "{{ ServiceConfig.served_model_name }}"
+                {{ cli_args }}
+              )
+              {% if DynConfig.mode | default('disagg') != 'agg' %}
+              args+=(--host "0.0.0.0")
+              {% endif %}
+              {% if role == 'prefill' %}
+              args+=(--disaggregation-mode prefill)
+              {% elif role == 'decode' %}
+              args+=(--disaggregation-mode decode)
+              {% endif %}
+              exec python3 -m dynamo.sglang "${args[@]}"
+{%- endmacro %}
 
-{% set mode = DynConfig.mode | default('disagg') %}
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ name }}
+  namespace: {{ K8sConfig.k8s_namespace }}
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: {{ frontend_replicas | default(1) }}
+      extraPodSpec:     
+        {% if K8sConfig.k8s_image_pull_secret %}
+        imagePullSecrets:
+          - name: {{ K8sConfig.k8s_image_pull_secret }}
+        {% endif %}
+        mainContainer:
+          image: {{ K8sConfig.k8s_image }}
+          imagePullPolicy: IfNotPresent
+      {% if enable_router or K8sConfig.k8s_hf_home %}
+      envs:
+        {% if enable_router %}
+        - name: DYN_ROUTER_MODE
+          value: kv
+        {% endif %}
+        {% if K8sConfig.k8s_hf_home %}
+        - name: HF_HOME
+          value: {{ K8sConfig.k8s_hf_home }}
+        {% endif %}
+      {% endif %}
 
-{% if mode == 'agg' %}
-{# ============ AGGREGATE MODE ============ #}
-{{ sglang.k8s_worker(None, agg_gpu, agg_workers, agg_cli_args, ServiceConfig, K8sConfig, k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
-
-{% else %}
-{# ============ DISAGGREGATE MODE ============ #}
-{{ sglang.k8s_worker('prefill', prefill_gpu, prefill_workers, prefill_cli_args, ServiceConfig, K8sConfig, k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
-{{ sglang.k8s_worker('decode', decode_gpu, decode_workers, decode_cli_args, ServiceConfig, K8sConfig, k8s_use_model_cache | default(false), k8s_model_cache_pvc | default(''), k8s_model_cache_mount | default(''), runtime_working_dir | default('/workspace')) }}
-{% endif %}
+    {% if DynConfig.mode | default('disagg') == 'agg' %}
+{{ render_worker(
+    "SGLangWorker",
+    None,
+    agg_workers,
+    agg_gpu,
+    agg_cli_args
+) }}
+    {% else %}
+{{ render_worker(
+    "SGLangPrefillWorker",
+    "prefill",
+    prefill_workers,
+    prefill_gpu,
+    prefill_cli_args
+) }}
+{{ render_worker(
+    "SGLangDecodeWorker",
+    "decode",
+    decode_workers,
+    decode_gpu,
+    decode_cli_args
+) }}
+    {% endif %}

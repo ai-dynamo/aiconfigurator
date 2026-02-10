@@ -39,6 +39,15 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
         help="Number of top configurations to output for each experiment (in exp mode) "
         "or for each mode (agg/disagg) in default mode. Default: 5.",
     )
+    common_parser.add_argument(
+        "--systems-paths",
+        type=str,
+        default=None,
+        help=(
+            "Systems search paths (comma-separated). Use 'default' for the built-in systems path. "
+            "Example: default,/opt/aic/systems,/data/aic/systems."
+        ),
+    )
     add_generator_override_arguments(common_parser)
     return common_parser
 
@@ -88,7 +97,10 @@ def _add_default_mode_arguments(parser):
     )
     parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")
     parser.add_argument(
-        "--system", choices=common.SupportedSystems, type=str, required=True, help="Default system name (GPU type)."
+        "--system",
+        type=str,
+        required=True,
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200_sxm,a100_sxm,l40s.",
     )
     parser.add_argument(
         "--decode_system",
@@ -160,10 +172,9 @@ def _add_generate_mode_arguments(parser):
     )
     parser.add_argument(
         "--system",
-        choices=common.SupportedSystems,
         type=str,
         required=True,
-        help="System name (GPU type).",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200_sxm,a100_sxm,l40s.",
     )
     parser.add_argument(
         "--backend",
@@ -187,10 +198,9 @@ def _add_support_mode_arguments(parser):
     )
     parser.add_argument(
         "--system",
-        choices=common.SupportedSystems,
         type=str,
         required=True,
-        help="System name (GPU type).",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200_sxm,a100_sxm,l40s.",
     )
     parser.add_argument(
         "--backend",
@@ -256,16 +266,17 @@ def configure_parser(parser):
 
 
 def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str) -> str | None:
-    systems_dir = perf_database.get_system_config_path()
-    system_yaml = os.path.join(systems_dir, f"{system_name}.yaml")
-    if not os.path.exists(system_yaml):
-        return None
-    with open(system_yaml, encoding="utf-8") as fh:
-        system_spec = yaml.safe_load(fh) or {}
-    data_dir = system_spec.get("data_dir")
-    if not data_dir:
-        return None
-    return os.path.join(systems_dir, data_dir, backend_name, backend_version)
+    for systems_root in perf_database.get_systems_paths():
+        system_yaml = os.path.join(systems_root, f"{system_name}.yaml")
+        if not os.path.isfile(system_yaml):
+            continue
+        with open(system_yaml, encoding="utf-8") as fh:
+            system_spec = yaml.safe_load(fh) or {}
+        data_dir = system_spec.get("data_dir")
+        if not data_dir:
+            return None
+        return os.path.join(systems_root, data_dir, backend_name, backend_version)
+    return None
 
 
 def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str) -> None:
@@ -739,6 +750,8 @@ def main(args):
         format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
     )
 
+    perf_database.set_systems_paths(args.systems_paths)
+
     logger.info(f"Loading Dynamo AIConfigurator version: {__version__}")
     logger.info(f"Number of top configurations to output: {args.top_n} (change with --top_n)")
 
@@ -794,6 +807,7 @@ def main(args):
             task_configs=task_configs,
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,
+            backend=args.backend if args.mode == "default" else None,
         )
 
 

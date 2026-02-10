@@ -416,6 +416,7 @@ def save_results(
     task_configs: dict[str, TaskConfig],
     save_dir: str,
     generated_backend_version: str | None = None,
+    backend: str | None = None,
 ):
     """Save the results to a directory."""
 
@@ -423,14 +424,7 @@ def save_results(
     first_task = task_configs[first_exp_name]
     first_task_config = first_task.config
 
-    # Check if results contain "backend" column (indicates multi-backend mode)
-    has_backend_column = False
-    for exp_name, config_df in best_configs.items():
-        if not config_df.empty and "backend" in config_df.columns:
-            has_backend_column = True
-            break
-
-    backend_str = "multi_backend" if has_backend_column else first_task.backend_name
+    backend_str = backend or first_task.backend_name
 
     result_prefix = (
         f"{first_task_config.model_path}_{first_task.system_name}_{backend_str}_"
