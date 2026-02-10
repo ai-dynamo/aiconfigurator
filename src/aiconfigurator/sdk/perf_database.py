@@ -4107,6 +4107,7 @@ class PerfDatabase:
         moe_backend: str | None = None,
         database_mode: common.DatabaseMode | None = None,
         is_gated: bool = True,
+        enable_eplb: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query MoE (Mixture of Experts) layer latency and energy.
@@ -4126,6 +4127,8 @@ class PerfDatabase:
             database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
             is_gated: Whether MoE uses gated activation (SwiGLU=True, Relu2=False).
                       Low-latency kernel only available for gated MoE.
+            enable_eplb: Expert Parallel Load Balancing. When enabled, applies
+                        num_tokens correction (0.8x) during prefill phase only.
 
         Returns:
             PerformanceResult: Acts as float (latency in ms).
@@ -4241,6 +4244,9 @@ class PerfDatabase:
             try:
                 if self.backend == common.BackendName.sglang.value:
                     # deepep_moe is for sglang wideep only
+                    # Apply num_tokens correction when eplb is enabled (only during prefill)
+                    if enable_eplb and is_context:
+                        num_tokens = int(num_tokens * 0.8)
                     if moe_backend == "deepep_moe":
                         if is_context:
                             moe_data = self._wideep_context_moe_data
