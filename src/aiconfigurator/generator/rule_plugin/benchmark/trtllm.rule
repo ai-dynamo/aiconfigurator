@@ -9,6 +9,7 @@ agg disable_overlap_scheduler = false
 prefill max_num_tokens = SlaConfig.isl + 1500
 decode max_num_tokens = max_batch_size
 agg max_num_tokens = max_batch_size + SlaConfig.isl + 1500
+prefill_decode cache_transceiver_max_tokens_in_buffer = SlaConfig.isl + SlaConfig.osl + 1500
 
 agg_prefill_decode cuda_graph_batch_sizes = ((range(1, max_batch_size + 1) | list) if max_batch_size else [])
 
