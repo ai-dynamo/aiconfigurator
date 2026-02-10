@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from typing import Optional
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import PerfDatabase
@@ -146,6 +147,10 @@ class GEMM(Operation):
         """
         Query GEMM latency with energy data.
 
+        For `fp8_static` quant mode, subtracts compute_scale overhead.
+        For Qwen models, proj/fc2 GEMMs are treated as FP8 input under `fp8_static`, so we also
+        subtract the scale_matrix overhead for those specific GEMMs.
+
         Returns:
             PerformanceResult: Behaves like float (scaled latency in ms).
                               Energy data accessible via .energy attribute.
@@ -155,19 +160,307 @@ class GEMM(Operation):
         x //= self._scale_num_tokens
         overwrite_quant_mode = kwargs.get("quant_mode")
         quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
+        model_name = str(kwargs.get("model_name", ""))
+        is_fp8_static = quant_mode == common.GEMMQuantMode.fp8_static
+        subtract_scale_matrix = (
+            is_fp8_static
+            and "qwen" in model_name.lower()
+            and self._name
+            in {
+                "context_proj_gemm",
+                "generation_proj_gemm",
+                "context_ffn2_gemm",
+                "generation_ffn2_gemm",
+                "context_shared_ffn2_gemm",
+                "generation_shared_ffn2_gemm",
+            }
+        )
 
         # Query with energy
         result = database.query_gemm(x, self._n, self._k, quant_mode)
+        latency = float(result)
+        energy = result.energy
 
-        # Return PerformanceResult: scale BOTH latency and energy
-        # (energy scales with latency for serial execution)
+        # Adjust for fp8_static: subtract compute_scale overhead
+        if is_fp8_static:
+            compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
+            latency -= float(compute_scale_result)
+            energy -= compute_scale_result.energy
+            if subtract_scale_matrix:
+                scale_matrix_result = database.query_scale_matrix(x, self._k, quant_mode)
+                latency -= float(scale_matrix_result)
+                energy -= scale_matrix_result.energy
+
+        # Ensure non-negative latency and energy
+        latency_clamped = max(0.0, latency)
+        energy_clamped = max(0.0, energy)
+        if latency_clamped != latency or energy_clamped != energy:
+            logger.warning(
+                "GEMM.query clamped latency/energy to 0.0. "
+                "op=%s model=%s m=%s n=%s k=%s quant_mode=%s post_sub(lat=%.6f, eng=%.6f)",
+                self._name,
+                model_name,
+                x,
+                self._n,
+                self._k,
+                quant_mode.name,
+                latency,
+                energy,
+            )
+
+        latency = latency_clamped
+        energy = energy_clamped
+
         return PerformanceResult(
-            latency=float(result) * self._scale_factor,  # Scaled latency
-            energy=result.energy * self._scale_factor,  # Scaled energy (proportional to latency)
+            latency=latency * self._scale_factor,
+            energy=energy * self._scale_factor,
         )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
+
+
+class TrtLLMWideEPMoE(Operation):
+    """
+    TensorRT-LLM WideEP MoE operation with configurable EPLB modes.
+
+    This class is specifically designed for TensorRT-LLM backend's WideEP MoE computation.
+    It handles the pure computation aspect of MoE, excluding All2All communication which
+    is handled by TrtLLMWideEPMoEDispatch.
+
+    Supports three EPLB modes:
+    - EPLB off: workload_distribution without "_eplb" suffix, num_slots = num_experts
+    - EPLB on: workload_distribution with "_eplb" suffix, num_slots = num_experts
+    - EPLB redundant: workload_distribution with "_eplb" suffix, num_slots > num_experts
+
+    Args:
+        name: Operation name
+        scale_factor: Scaling factor for the operation
+        hidden_size: Hidden dimension size
+        inter_size: Intermediate dimension size
+        topk: Number of top experts to select
+        num_experts: Total number of experts
+        num_slots: Number of expert slots (= num_experts for EPLB off/on, > num_experts for redundant)
+        moe_tp_size: MoE tensor parallelism size
+        moe_ep_size: MoE expert parallelism size
+        quant_mode: Quantization mode for MoE computation
+        workload_distribution: Workload distribution pattern (e.g., "power_law_1.01" or "power_law_1.01_eplb")
+        attention_dp_size: Attention data parallelism size (scales input tokens)
+        is_gated: Whether MoE uses gated activation (default: True)
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str,
+        attention_dp_size: int,
+        num_slots: Optional[int] = None,  # EPLB slots, defaults to num_experts
+        is_gated: bool = True,
+        **kwargs,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._hidden_size = hidden_size
+        self._inter_size = inter_size
+        self._quant_mode = quant_mode
+        self._topk = topk
+        self._num_experts = num_experts
+        self._num_slots = num_slots if num_slots is not None else num_experts
+        self._moe_tp_size = moe_tp_size
+        self._moe_ep_size = moe_ep_size
+        self._attention_dp_size = attention_dp_size
+        self._workload_distribution = workload_distribution
+        self._is_gated = is_gated
+
+        # Calculate weights: 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down)
+        num_gemms = 3 if is_gated else 2
+        self._weights = (
+            self._hidden_size
+            * self._inter_size
+            * self._num_experts
+            * quant_mode.value.memory
+            * num_gemms
+            // self._moe_ep_size
+            // self._moe_tp_size
+        )
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """
+        Query TrtLLM WideEP MoE compute latency with energy data.
+
+        Supports three EPLB modes based on workload_distribution and num_slots:
+        - EPLB off: distribution without "_eplb" suffix, num_slots = num_experts
+        - EPLB on: distribution with "_eplb" suffix, num_slots = num_experts
+        - EPLB redundant: distribution with "_eplb" suffix, num_slots > num_experts
+
+        Args:
+            database: Performance database instance
+            **kwargs: Additional arguments including:
+                - x: Number of input tokens (will be scaled by attention_dp_size)
+                - quant_mode: Optional override for quantization mode
+
+        Returns:
+            PerformanceResult with latency and energy data
+        """
+        # Scale input tokens by attention_dp_size
+        x = kwargs.get("x") * self._attention_dp_size
+        overwrite_quant_mode = kwargs.get("quant_mode")
+        quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
+
+        logger.debug(f"TrtLLMWideEPMoE: Querying compute with num_slots={self._num_slots}")
+
+        # Query WideEP MoE compute performance
+        result = database.query_wideep_moe_compute(
+            num_tokens=x,
+            hidden_size=self._hidden_size,
+            inter_size=self._inter_size,
+            topk=self._topk,
+            num_experts=self._num_experts,
+            num_slots=self._num_slots,
+            moe_tp_size=self._moe_tp_size,
+            moe_ep_size=self._moe_ep_size,
+            quant_mode=quant_mode,
+            workload_distribution=self._workload_distribution,
+        )
+
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+
+    def get_weights(self, **kwargs):
+        """Get the weight memory size for this MoE layer."""
+        return self._weights * self._scale_factor
+
+
+class TrtLLMWideEPMoEDispatch(Operation):
+    """
+    TensorRT-LLM WideEP MoE dispatch operation using NVLink Two-Sided All2All.
+
+    This class handles WideEP-specific All2All communication for expert parallelism
+    in TensorRT-LLM, including prepare, dispatch, and combine phases.
+
+    Communication phases:
+    - Pre-dispatch: prepare + dispatch operations
+    - Post-dispatch: combine or combine_low_precision operation
+
+    Args:
+        name: Operation name
+        scale_factor: Scaling factor for the operation
+        hidden_size: Hidden dimension size
+        topk: Number of top experts to select
+        num_experts: Total number of experts
+        moe_tp_size: MoE tensor parallelism size
+        moe_ep_size: MoE expert parallelism size
+        attention_dp_size: Attention data parallelism size
+        pre_dispatch: If True, performs prepare+dispatch; if False, performs combine
+        quant_mode: Quantization mode for All2All operations (required)
+        use_low_precision_combine: If True, uses FP8 optimized combine (default: False)
+        node_num: Explicit node count for All2All; None means auto-compute from EP size
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+        attention_dp_size: int,
+        pre_dispatch: bool,
+        quant_mode: common.MoEQuantMode,
+        use_low_precision_combine: bool = False,
+        node_num: Optional[int] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._hidden_size = hidden_size
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_tp_size = moe_tp_size
+        self._moe_ep_size = moe_ep_size
+        self._attention_dp_size = attention_dp_size
+        self._pre_dispatch = pre_dispatch
+        self._quant_mode = quant_mode
+        self._use_low_precision_combine = use_low_precision_combine
+        self._node_num = node_num
+        self._weights = 0.0  # MoEDispatch has no weight memory
+        self.num_gpus = self._moe_ep_size * self._moe_tp_size
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """
+        Query TrtLLM WideEP All2All communication latency.
+
+        Args:
+            database: Performance database instance
+            **kwargs: Additional arguments including:
+                - x: Number of input tokens
+
+        Returns:
+            PerformanceResult with latency (no energy for communication ops)
+        """
+        num_tokens = kwargs.get("x")
+
+        phase = "Pre-dispatch" if self._pre_dispatch else "Post-dispatch"
+        precision = (
+            "low-precision combine"
+            if self._use_low_precision_combine and not self._pre_dispatch
+            else "standard precision"
+        )
+        logger.debug(f"TrtLLMWideEPMoEDispatch: {phase} with {precision}")
+
+        comm_latency = 0.0
+
+        if self._pre_dispatch:
+            # Pre-dispatch phase: prepare + dispatch
+            prepare_result = database.query_wideep_alltoall(
+                op_name="alltoall_prepare",
+                num_tokens=num_tokens,
+                hidden_size=self._hidden_size,
+                topk=self._topk,
+                num_experts=self._num_experts,
+                moe_ep_size=self._moe_ep_size,
+                quant_mode=self._quant_mode,
+                node_num=self._node_num,
+            )
+            dispatch_result = database.query_wideep_alltoall(
+                op_name="alltoall_dispatch",
+                num_tokens=num_tokens,
+                hidden_size=self._hidden_size,
+                topk=self._topk,
+                num_experts=self._num_experts,
+                moe_ep_size=self._moe_ep_size,
+                quant_mode=self._quant_mode,
+                node_num=self._node_num,
+            )
+            comm_latency = float(prepare_result) + float(dispatch_result)
+        else:
+            # Post-dispatch phase: combine or combine_low_precision
+            combine_op = "alltoall_combine_low_precision" if self._use_low_precision_combine else "alltoall_combine"
+            combine_result = database.query_wideep_alltoall(
+                op_name=combine_op,
+                num_tokens=num_tokens,
+                hidden_size=self._hidden_size,
+                topk=self._topk,
+                num_experts=self._num_experts,
+                moe_ep_size=self._moe_ep_size,
+                quant_mode=self._quant_mode,
+                node_num=self._node_num,
+            )
+            comm_latency = float(combine_result)
+
+        # MoEDispatch returns no energy (communication ops don't track energy)
+        return PerformanceResult(comm_latency * self._scale_factor, energy=0.0)
+
+    def get_weights(self, **kwargs):
+        """MoE dispatch has no weight memory."""
+        return 0.0
 
 
 class MoE(Operation):
@@ -205,6 +498,7 @@ class MoE(Operation):
         self._is_context = is_context
         self._is_gated = is_gated
         self._moe_backend = kwargs.get("moe_backend")
+        self._enable_eplb = kwargs.get("enable_eplb", False)
         # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down)
         num_gemms = 3 if is_gated else 2
         self._weights = (
@@ -237,6 +531,7 @@ class MoE(Operation):
             is_context=self._is_context,
             moe_backend=self._moe_backend,
             is_gated=self._is_gated,
+            enable_eplb=self._enable_eplb,
         )
 
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
@@ -885,6 +1180,67 @@ class WideEPContextMLA(Operation):
             attention_backend=self._attn_backend,
         )
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
+class Mamba2Kernel(Operation):
+    """
+    Single Mamba2 kernel op (Conv1D or SSM) using collected mamba2_perf data.
+
+    One of four kernels: causal_conv1d_fn, mamba_chunk_scan_combined (context),
+    causal_conv1d_update, selective_state_update (generation).
+    Uses full (unsharded) dimensions for lookup; collector data is per-layer.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        kernel_source: str,
+        phase: str,
+        hidden_size: int,
+        nheads: int,
+        head_dim: int,
+        d_state: int,
+        d_conv: int,
+        n_groups: int,
+        chunk_size: int,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._kernel_source = kernel_source
+        self._phase = phase
+        self._hidden_size = hidden_size
+        self._nheads = nheads
+        self._head_dim = head_dim
+        self._d_state = d_state
+        self._d_conv = d_conv
+        self._n_groups = n_groups
+        self._chunk_size = chunk_size
+        self._weights = 0.0
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        batch_size = kwargs.get("batch_size")
+        s = kwargs.get("s")
+        seq_len = s if self._phase == "context" else None
+        result = database.query_mamba2(
+            phase=self._phase,
+            kernel_source=self._kernel_source,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            d_model=self._hidden_size,
+            d_state=self._d_state,
+            d_conv=self._d_conv,
+            nheads=self._nheads,
+            head_dim=self._head_dim,
+            n_groups=self._n_groups,
+            chunk_size=self._chunk_size,
+        )
+        return PerformanceResult(
+            latency=float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+        )
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

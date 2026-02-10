@@ -56,18 +56,10 @@ def render_backend_templates(
         raise FileNotFoundError(f"Templates directory not found: {templates_dir}")
 
     # Set up Jinja2 environment with FileSystemLoader
-    # Support multiple search paths for template inclusion:
-    # 1. Backend-specific directory (e.g., backend_templates/sglang/)
-    # 2. _common/ for shared base templates
-    # 3. _workers/ for backend-specific worker macros
     env = _TEMPLATE_ENV_CACHE.get(templates_dir)
     if env is None:
         benchmark_dir = str(_TEMPLATE_ROOT / "benchmark")
-        search_paths = [
-            templates_dir,
-            str(_TEMPLATE_ROOT / "_common"),
-            str(_TEMPLATE_ROOT / "_workers"),
-        ]
+        search_paths = [templates_dir]
         if os.path.isdir(benchmark_dir):
             search_paths.append(benchmark_dir)
         env = Environment(loader=FileSystemLoader(search_paths), trim_blocks=True, lstrip_blocks=True)

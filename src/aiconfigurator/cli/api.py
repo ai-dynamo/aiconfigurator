@@ -144,7 +144,8 @@ def cli_default(
         total_gpus: Total number of GPUs for deployment.
         system: System name (GPU type), e.g., 'h200_sxm', 'b200_sxm'.
         decode_system: System name for disagg decode workers. Defaults to `system`.
-        backend: Backend name ('trtllm', 'sglang', 'vllm'). Default is 'trtllm'.
+        backend: Backend name ('trtllm', 'sglang', 'vllm', 'any'). Default is 'trtllm'.
+            Use 'any' to sweep across all three backends and compare results.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation
             ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
@@ -171,6 +172,18 @@ def cli_default(
         ... )
         >>> print(result.chosen_exp)  # 'agg' or 'disagg'
         >>> print(result.best_throughputs)
+
+        >>> # Compare all backends
+        >>> result = cli_default(
+        ...     model_path="Qwen/Qwen3-32B",
+        ...     total_gpus=8,
+        ...     system="h200_sxm",
+        ...     backend="any",
+        ...     ttft=2000,
+        ...     tpot=30,
+        ... )
+        >>> print(result.chosen_exp)  # e.g., 'agg_trtllm' or 'disagg_vllm'
+        >>> print(result.best_throughputs)  # Shows all 6 backend/mode combinations
     """
     # Reuse build_default_task_configs from main.py
     task_configs = build_default_task_configs(

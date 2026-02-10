@@ -24,6 +24,7 @@ class ModelConfig:
     moe_ep_size: int = None
     attention_dp_size: int = 1
     workload_distribution: str = "power_law"
+    # quantization options
     nextn: int = 0  # at most mtp5
     nextn_accept_rates: list = None
     overwrite_num_layers: int = 0
@@ -32,6 +33,8 @@ class ModelConfig:
     moe_backend: str = None  # for sglang wideep only, deepep
     attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3', for sglang wideep only
     enable_wideep: bool = False
+    enable_eplb: bool = False  # Expert Parallel Load Balancing
+    wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None
 
 
 @dataclass

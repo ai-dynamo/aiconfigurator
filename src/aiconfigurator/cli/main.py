@@ -15,17 +15,13 @@ import yaml
 
 from aiconfigurator import __version__
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
+from aiconfigurator.cli.utils import merge_experiment_results_by_mode, process_experiment_result
 from aiconfigurator.generator.api import (
     add_generator_override_arguments,
     generate_naive_config,
     generator_cli_helper,
 )
 from aiconfigurator.sdk import common, perf_database
-from aiconfigurator.sdk.pareto_analysis import (
-    get_best_configs_under_request_latency_constraint,
-    get_best_configs_under_tpot_constraint,
-    get_pareto_front,
-)
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
@@ -42,6 +38,15 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
         default=5,
         help="Number of top configurations to output for each experiment (in exp mode) "
         "or for each mode (agg/disagg) in default mode. Default: 5.",
+    )
+    common_parser.add_argument(
+        "--systems-paths",
+        type=str,
+        default=None,
+        help=(
+            "Systems search paths (comma-separated). Use 'default' for the built-in systems path. "
+            "Example: default,/opt/aic/systems,/data/aic/systems."
+        ),
     )
     add_generator_override_arguments(common_parser)
     return common_parser
@@ -90,7 +95,10 @@ def _add_default_mode_arguments(parser):
     )
     parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")
     parser.add_argument(
-        "--system", choices=common.SupportedSystems, type=str, required=True, help="Default system name (GPU type)."
+        "--system",
+        type=str,
+        required=True,
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200_sxm,a100_sxm,l40s.",
     )
     parser.add_argument(
         "--decode_system",
@@ -100,10 +108,10 @@ def _add_default_mode_arguments(parser):
     )
     parser.add_argument(
         "--backend",
-        choices=[backend.value for backend in common.BackendName],
+        choices=[backend.value for backend in common.BackendName] + ["any"],
         type=str,
         default=common.BackendName.trtllm.value,
-        help="Backend name.",
+        help="Backend name. Use 'any' to sweep across all backends (trtllm, vllm, sglang) and compare results.",
     )
     parser.add_argument(
         "--backend_version",
@@ -159,10 +167,9 @@ def _add_generate_mode_arguments(parser):
     )
     parser.add_argument(
         "--system",
-        choices=common.SupportedSystems,
         type=str,
         required=True,
-        help="System name (GPU type).",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200_sxm,a100_sxm,l40s.",
     )
     parser.add_argument(
         "--backend",
@@ -184,10 +191,9 @@ def _add_support_mode_arguments(parser):
     )
     parser.add_argument(
         "--system",
-        choices=common.SupportedSystems,
         type=str,
         required=True,
-        help="System name (GPU type).",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200_sxm,a100_sxm,l40s.",
     )
     parser.add_argument(
         "--backend",
@@ -253,16 +259,17 @@ def configure_parser(parser):
 
 
 def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str) -> str | None:
-    systems_dir = perf_database.get_system_config_path()
-    system_yaml = os.path.join(systems_dir, f"{system_name}.yaml")
-    if not os.path.exists(system_yaml):
-        return None
-    with open(system_yaml, encoding="utf-8") as fh:
-        system_spec = yaml.safe_load(fh) or {}
-    data_dir = system_spec.get("data_dir")
-    if not data_dir:
-        return None
-    return os.path.join(systems_dir, data_dir, backend_name, backend_version)
+    for systems_root in perf_database.get_systems_paths():
+        system_yaml = os.path.join(systems_root, f"{system_name}.yaml")
+        if not os.path.isfile(system_yaml):
+            continue
+        with open(system_yaml, encoding="utf-8") as fh:
+            system_spec = yaml.safe_load(fh) or {}
+        data_dir = system_spec.get("data_dir")
+        if not data_dir:
+            return None
+        return os.path.join(systems_root, data_dir, backend_name, backend_version)
+    return None
 
 
 def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str) -> None:
@@ -310,7 +317,8 @@ def build_default_task_configs(
         total_gpus: Total number of GPUs for deployment.
         system: System name (GPU type).
         decode_system: System for disagg decode workers. Defaults to `system`.
-        backend: Backend name ('trtllm', 'sglang', 'vllm').
+        backend: Backend name ('trtllm', 'sglang', 'vllm', 'any').
+            Use 'any' to sweep across all backends.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation.
         isl: Input sequence length.
@@ -321,18 +329,23 @@ def build_default_task_configs(
         prefix: Prefix cache length.
 
     Returns:
-        Dict with 'agg' and 'disagg' TaskConfig objects.
+        Dict with TaskConfig objects. When backend='any', returns 6 configs
+        (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
+        Otherwise returns 2 configs ('agg' and 'disagg').
     """
     decode_system = decode_system or system
+    # Expand "any" backend to all available backends
+    backends_to_sweep = [b.value for b in common.BackendName] if backend == "any" else [backend]
+
     if backend_version:
-        _ensure_backend_version_available(system, backend, backend_version)
-        if decode_system != system:
-            _ensure_backend_version_available(decode_system, backend, backend_version)
+        for backend_name in backends_to_sweep:
+            _ensure_backend_version_available(system, backend_name, backend_version)
+            if decode_system != system:
+                _ensure_backend_version_available(decode_system, backend_name, backend_version)
 
     common_kwargs: dict[str, Any] = {
         "model_path": model_path,
         "system_name": system,
-        "backend_name": backend,
         "backend_version": backend_version,
         "total_gpus": total_gpus,
         "isl": isl,
@@ -345,13 +358,22 @@ def build_default_task_configs(
     }
 
     task_configs: dict[str, TaskConfig] = {}
-    agg_task = TaskConfig(serving_mode="agg", **common_kwargs)
-    task_configs["agg"] = agg_task
 
-    disagg_kwargs = dict(common_kwargs)
-    disagg_kwargs["decode_system_name"] = decode_system
-    disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
-    task_configs["disagg"] = disagg_task
+    for backend_name in backends_to_sweep:
+        # Create agg task for this backend
+        agg_kwargs = dict(common_kwargs)
+        agg_kwargs["backend_name"] = backend_name
+        agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
+        exp_name = f"agg_{backend_name}" if backend == "any" else "agg"
+        task_configs[exp_name] = agg_task
+
+        # Create disagg task for this backend
+        disagg_kwargs = dict(common_kwargs)
+        disagg_kwargs["backend_name"] = backend_name
+        disagg_kwargs["decode_system_name"] = decode_system
+        disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
+        exp_name = f"disagg_{backend_name}" if backend == "any" else "disagg"
+        task_configs[exp_name] = disagg_task
 
     return task_configs
 
@@ -527,8 +549,22 @@ def _execute_task_configs(
     mode: str,
     top_n: int = 5,
 ) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float]]:
-    """Execute the task configs and return the chosen experiment, best configs, results, and best
-    throughputs."""
+    """
+    Execute task configs and return the chosen experiment, best configs, results, and best
+    throughputs.
+
+    Args:
+        task_configs: Dictionary mapping experiment names to TaskConfig objects to execute.
+        mode: Execution mode ('default' or 'exp').
+        top_n: Number of top configurations to return for each experiment.
+
+    Returns:
+        tuple:
+            - The experiment name with the overall best throughput ("chosen experiment").
+            - Dictionary of best config DataFrames per experiment (or per serving mode if merged).
+            - Dictionary of Pareto frontier DataFrames per experiment (or mode).
+            - Dictionary of best throughput values per experiment (or mode).
+    """
     results: dict[str, dict[str, pd.DataFrame]] = {}
     start_time = time.time()
     runner = TaskRunner()
@@ -559,57 +595,19 @@ def _execute_task_configs(
     pareto_fronts: dict[str, pd.DataFrame | None] = {}
     pareto_x_axis: dict[str, str] = {}
     for name, task_result in results.items():
-        pareto_df = task_result["pareto_df"]
-        runtime_cfg = task_configs[name].config.runtime_config
-        target_tpot = runtime_cfg.tpot
-        target_request_latency = runtime_cfg.request_latency
-        use_request_latency = target_request_latency is not None and target_request_latency > 0
-        total_gpus = getattr(task_configs[name], "total_gpus", None) or 0
-
-        # Compute tokens/s/gpu_cluster for pareto_df
-        if pareto_df is not None and not pareto_df.empty:
-            pareto_df["tokens/s/gpu_cluster"] = (
-                pareto_df["tokens/s/gpu"]
-                * (total_gpus // pareto_df["num_total_gpus"])
-                * pareto_df["num_total_gpus"]
-                / total_gpus
-            )
-            x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
-            pareto_frontier_df = get_pareto_front(
-                pareto_df,
-                x_axis_col,
-                "tokens/s/gpu_cluster",
-                maximize_x=not use_request_latency,
-                maximize_y=True,
-            )
-        else:
-            pareto_frontier_df = pd.DataFrame()
-            x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
-
-        group_by_key = "(d)parallel" if task_configs[name].serving_mode == "disagg" else "parallel"
-        if use_request_latency:
-            best_config_df = get_best_configs_under_request_latency_constraint(
-                total_gpus=total_gpus,
-                pareto_df=pareto_df,
-                target_request_latency=target_request_latency,
-                top_n=top_n,
-                group_by=group_by_key,
-            )
-        else:
-            best_config_df = get_best_configs_under_tpot_constraint(  # based on all data points
-                total_gpus=total_gpus,
-                pareto_df=pareto_df,
-                target_tpot=target_tpot,
-                top_n=top_n,
-                group_by=group_by_key,
-            )
+        task_config = task_configs[name]
+        best_config_df, best_throughput, pareto_frontier_df, x_axis_col = process_experiment_result(
+            task_config, task_result, top_n
+        )
         best_configs[name] = best_config_df
+        best_throughputs[name] = best_throughput
         pareto_fronts[name] = pareto_frontier_df
         pareto_x_axis[name] = x_axis_col
-        if not best_config_df.empty:
-            best_throughputs[name] = best_config_df["tokens/s/gpu_cluster"].values[0]
-        else:
-            best_throughputs[name] = 0.0
+
+    if mode == "default" and len(task_configs) > 2:
+        best_configs, best_throughputs, pareto_fronts, pareto_x_axis = merge_experiment_results_by_mode(
+            task_configs, best_configs, pareto_fronts, pareto_x_axis, top_n
+        )
 
     chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
 
@@ -748,6 +746,8 @@ def main(args):
         format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
     )
 
+    perf_database.set_systems_paths(args.systems_paths)
+
     logger.info(f"Loading Dynamo AIConfigurator version: {__version__}")
     logger.info(f"Number of top configurations to output: {args.top_n} (change with --top_n)")
 
@@ -789,7 +789,7 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
-    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs(
+    _, best_configs, pareto_fronts, _ = _execute_task_configs(
         task_configs,
         args.mode,
         top_n=args.top_n,
@@ -803,6 +803,7 @@ def main(args):
             task_configs=task_configs,
             save_dir=args.save_dir,
             generated_backend_version=args.generated_config_version,
+            backend=args.backend if args.mode == "default" else None,
         )
 
 

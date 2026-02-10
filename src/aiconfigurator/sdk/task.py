@@ -212,13 +212,13 @@ class TaskConfigFactory:
         else:
             if ctx.backend_name == "trtllm":
                 if ctx.enable_wideep:
-                    # trtllm + wideep (keep previous logic)
-                    worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32, 64]
+                    # trtllm + wideep: dp > 1 and moe_ep > 1 required
+                    worker_config["num_gpu_per_worker"] = [2, 4, 8, 16, 32, 64]
                     worker_config["tp_list"] = [1, 2, 4, 8]
                     worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
-                    worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
+                    worker_config["dp_list"] = [2, 4, 8, 16, 32, 64]
                     worker_config["moe_tp_list"] = [1]
-                    worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32, 64]
+                    worker_config["moe_ep_list"] = [2, 4, 8, 16, 32, 64]
                 else:
                     worker_config["num_gpu_per_worker"] = [1, 2, 4, 8]
                     worker_config["tp_list"] = [1, 2, 4, 8]
@@ -298,20 +298,20 @@ class TaskConfigFactory:
         else:
             if ctx.backend_name == "trtllm":
                 if ctx.enable_wideep:
-                    # trtllm + wideep (keep previous logic)
-                    prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32]
+                    # trtllm + wideep: dp > 1, moe_ep > 1, and moe_ep must be divisible by 4 (GPUs per node)
+                    prefill_worker_config["num_gpu_per_worker"] = [4, 8, 16, 32]
                     prefill_worker_config["tp_list"] = [1, 2, 4, 8]
                     prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
-                    prefill_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32]
+                    prefill_worker_config["dp_list"] = [4, 8, 16, 32]
                     prefill_worker_config["moe_tp_list"] = [1]
-                    prefill_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32]
+                    prefill_worker_config["moe_ep_list"] = [4, 8, 16, 32]
 
-                    decode_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16, 32, 64]
+                    decode_worker_config["num_gpu_per_worker"] = [4, 8, 16, 32, 64]
                     decode_worker_config["tp_list"] = [1, 2, 4, 8]
                     decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
-                    decode_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
+                    decode_worker_config["dp_list"] = [4, 8, 16, 32, 64]
                     decode_worker_config["moe_tp_list"] = [1]
-                    decode_worker_config["moe_ep_list"] = [1, 2, 4, 8, 16, 32, 64]
+                    decode_worker_config["moe_ep_list"] = [4, 8, 16, 32, 64]
                 else:
                     parallel_config_list = [1, 2, 4, 8]
 
@@ -872,6 +872,34 @@ class TaskConfig:
         # TODO: add more support matrix based validation
         if self.backend_name == "vllm" and get_model_family(self.model_path) == "DEEPSEEK":
             raise NotImplementedError("AIConfigurator does not yet support DEEPSEEK models for VLLM backend.")
+
+        # fp8_static GEMM mode is currently TRTLLM-only.
+        def _is_trtllm_backend(backend_name: object) -> bool:
+            return str(backend_name).lower() == common.BackendName.trtllm.value
+
+        def _is_fp8_static(mode: object) -> bool:
+            if mode is None:
+                return False
+            name = mode.name if hasattr(mode, "name") else str(mode)
+            return str(name).lower() == common.GEMMQuantMode.fp8_static.name
+
+        def _validate_fp8_static(worker_cfg: DefaultMunch, target: str) -> None:
+            gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)
+            if not _is_fp8_static(gemm_quant_mode):
+                return
+
+            backend_name = worker_cfg.get("backend_name", None)
+            if not _is_trtllm_backend(backend_name):
+                raise ValueError(
+                    f"{target}: gemm_quant_mode='{common.GEMMQuantMode.fp8_static.name}' is currently only supported "
+                    f"for backend '{common.BackendName.trtllm.value}', but got backend='{backend_name}'."
+                )
+
+        if self.serving_mode == "agg":
+            _validate_fp8_static(self.config.worker_config, "worker_config")
+        elif self.serving_mode == "disagg":
+            _validate_fp8_static(self.config.prefill_worker_config, "prefill_worker_config")
+            _validate_fp8_static(self.config.decode_worker_config, "decode_worker_config")
 
         # Validate requested quant modes against available perf data early, to avoid
         # late interpolation/assert failures and to provide actionable guidance.

@@ -103,6 +103,7 @@ def _plot_worker_setup_table(
 
     # Check if it is disagg config by checking for prefill/decode specific columns
     is_disagg = "(p)tp" in top_configs.columns
+    has_backend = "backend" in top_configs.columns
 
     if is_disagg:
         field_names = [
@@ -124,6 +125,8 @@ def _plot_worker_setup_table(
             "(d)parallel",
             "(d)bs",
         ]
+        if has_backend:
+            field_names.insert(1, "backend")  # Add after Rank
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -156,27 +159,33 @@ def _plot_worker_setup_table(
                 )
             row_data = [
                 i + 1,
-                f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
-                f"{row['tokens/s/user']:.2f}",
-                f"{row['ttft']:.2f}",
-                f"{row['request_latency']:.2f}",
-                f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
-                f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
-                row["replicas"],
-                (
-                    f"{row['num_total_gpus']} "
-                    f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
-                    f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
-                ),
-                row["(p)workers"],
-                p_gpus_worker,
-                p_parallel,
-                row["(p)bs"],
-                row["(d)workers"],
-                d_gpus_worker,
-                d_parallel,
-                row["(d)bs"],
             ]
+            if has_backend:
+                row_data.append(row["backend"])
+            row_data.extend(
+                [
+                    f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
+                    f"{row['tokens/s/user']:.2f}",
+                    f"{row['ttft']:.2f}",
+                    f"{row['request_latency']:.2f}",
+                    f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
+                    f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
+                    row["replicas"],
+                    (
+                        f"{row['num_total_gpus']} "
+                        f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
+                        f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
+                    ),
+                    row["(p)workers"],
+                    p_gpus_worker,
+                    p_parallel,
+                    row["(p)bs"],
+                    row["(d)workers"],
+                    d_gpus_worker,
+                    d_parallel,
+                    row["(d)bs"],
+                ]
+            )
             if show_power:
                 row_data.append(f"{row['power_w']:.1f}W")
             table.add_row(row_data)
@@ -195,6 +204,8 @@ def _plot_worker_setup_table(
             "parallel",
             "bs",
         ]
+        if has_backend:
+            field_names.insert(1, "backend")  # Add after Rank
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -216,18 +227,24 @@ def _plot_worker_setup_table(
                 )
             row_data = [
                 i + 1,
-                f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
-                f"{row['tokens/s/user']:.2f}",
-                f"{row['ttft']:.2f}",
-                f"{row['request_latency']:.2f}",
-                f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
-                f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
-                row["replicas"],
-                row["num_total_gpus"],
-                gpus_worker,
-                parallel,
-                row["bs"],
             ]
+            if has_backend:
+                row_data.append(row["backend"])
+            row_data.extend(
+                [
+                    f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
+                    f"{row['tokens/s/user']:.2f}",
+                    f"{row['ttft']:.2f}",
+                    f"{row['request_latency']:.2f}",
+                    f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
+                    f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
+                    row["replicas"],
+                    row["num_total_gpus"],
+                    gpus_worker,
+                    parallel,
+                    row["bs"],
+                ]
+            )
             if show_power:
                 row_data.append(f"{row['power_w']:.1f}W")
             table.add_row(row_data)
@@ -256,10 +273,24 @@ def log_final_summary(
 
     summary_box.append("  " + "-" * 76)
     summary_box.append("  Input Configuration & SLA Target:")
+
+    # For multi-backend mode, get task_config using the backend from best_configs
+    chosen_best_config = best_configs.get(chosen_exp)
+    if chosen_best_config is not None and "backend" in chosen_best_config.columns and not chosen_best_config.empty:
+        chosen_backend = chosen_best_config["backend"].iloc[0]
+        task_config_key = f"{chosen_exp}_{chosen_backend}"
+        # Verify the key exists (for multi-backend mode)
+        if task_config_key in task_configs:
+            chosen_task_config = task_configs[task_config_key]
+        else:
+            chosen_task_config = task_configs[chosen_exp]
+    else:
+        chosen_task_config = task_configs[chosen_exp]
+
     summary_box.append(
-        f"    Model: {task_configs[chosen_exp].config.model_path} (is_moe: {task_configs[chosen_exp].config.is_moe})"
+        f"    Model: {chosen_task_config.config.model_path} (is_moe: {chosen_task_config.config.is_moe})"
     )
-    summary_box.append(f"    Total GPUs: {task_configs[chosen_exp].total_gpus}")
+    summary_box.append(f"    Total GPUs: {chosen_task_config.total_gpus}")
     if mode == "default":
         agg_value = best_throughputs.get("agg", 0.0)
         disagg_value = best_throughputs.get("disagg", 0.0)
@@ -288,7 +319,7 @@ def log_final_summary(
     best_config_df = best_configs[chosen_exp]
     best_throughput = best_throughputs[chosen_exp]
 
-    summary_box.append(f"    - Best Throughput: {best_throughput * task_configs[chosen_exp].total_gpus:,.2f} tokens/s")
+    summary_box.append(f"    - Best Throughput: {best_throughput * chosen_task_config.total_gpus:,.2f} tokens/s")
     summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
     if not best_config_df.empty:
         best_conf_details = best_config_df.iloc[0]
@@ -320,7 +351,7 @@ def log_final_summary(
                 "label": f"{chosen_exp} best",
             }
         pareto_plot_buf = draw_pareto_to_string(
-            f"{task_configs[chosen_exp].config.model_path} Pareto Frontier",
+            f"{chosen_task_config.config.model_path} Pareto Frontier",
             series_payload,
             highlight=highlight_series,
             x_label=target_x_axis,
@@ -350,8 +381,19 @@ def log_final_summary(
 
     # Plot worker setup tables for all experiments
     for exp_name, config_df in best_configs.items():
-        exp_task_config = task_configs[exp_name].config
-        total_gpus = getattr(task_configs[exp_name], "total_gpus", None) or 0
+        # For multi-backend mode, use the first backend's config for table display
+        # (total_gpus, is_moe, etc. should be the same across backends)
+        if "backend" in config_df.columns and not config_df.empty:
+            first_backend = config_df["backend"].iloc[0]
+            task_config_key = f"{exp_name}_{first_backend}"
+            # Verify the key exists (for multi-backend mode)
+            if task_config_key not in task_configs:
+                task_config_key = exp_name
+        else:
+            task_config_key = exp_name
+
+        exp_task_config = task_configs[task_config_key].config
+        total_gpus = getattr(task_configs[task_config_key], "total_gpus", None) or 0
         table_buf = _plot_worker_setup_table(
             exp_name,
             config_df,
@@ -375,6 +417,7 @@ def save_results(
     task_configs: dict[str, TaskConfig],
     save_dir: str,
     generated_backend_version: str | None = None,
+    backend: str | None = None,
 ):
     """Save the results to a directory."""
 
@@ -382,8 +425,10 @@ def save_results(
     first_task = task_configs[first_exp_name]
     first_task_config = first_task.config
 
+    backend_str = backend or first_task.backend_name
+
     result_prefix = (
-        f"{first_task_config.model_path}_{first_task.system_name}_{first_task.backend_name}_"
+        f"{first_task_config.model_path}_{first_task.system_name}_{backend_str}_"
         f"isl{first_task_config.runtime_config.isl}_osl{first_task_config.runtime_config.osl}_"
         f"ttft{int(first_task_config.runtime_config.ttft)}_tpot{int(first_task_config.runtime_config.tpot)}"
     )
@@ -407,7 +452,19 @@ def save_results(
         global_x_axis = "request_latency" if all_request_latency else "tokens/s/user"
         maximize_x = not all_request_latency
         plt.title(f"{first_task_config.model_path} tokens/s/gpu vs {global_x_axis}")
-        colors = [
+
+        # Define markers for backends and colors for serving modes
+        backend_markers = {
+            "trtllm": "o",  # circle
+            "vllm": "s",  # square
+            "sglang": "^",  # triangle
+        }
+        serving_mode_colors = {
+            "agg": "#1f77b4",  # blue
+            "disagg": "#ff7f0e",  # orange
+        }
+        # Fallback colors for non-standard experiment names
+        exp_colors = [
             "blue",
             "red",
             "green",
@@ -420,20 +477,52 @@ def save_results(
             "magenta",
         ]
         color_idx = 0
+
         for exp_name, pareto_df in pareto_fronts.items():
             if pareto_axis.get(exp_name, global_x_axis) != global_x_axis:
                 continue
-            if not pareto_df.empty:
+            if pareto_df.empty:
+                continue
+
+            # Check if this is multi-backend mode (pareto_df has "backend" column)
+            if "backend" in pareto_df.columns:
+                # Plot each backend with different marker, color by serving mode (agg/disagg)
+                # Note: pareto_df is already the combined Pareto frontier, so we just plot points
+                # grouped by backend, without recomputing Pareto per backend
+                color = serving_mode_colors.get(exp_name, exp_colors[color_idx % len(exp_colors)])
+                for backend_name in pareto_df["backend"].unique():
+                    backend_df = pareto_df[pareto_df["backend"] == backend_name].sort_values(by=global_x_axis)
+                    marker = backend_markers.get(backend_name, "o")
+                    label = f"{exp_name} ({backend_name})"
+                    # Plot directly without recomputing Pareto
+                    ax.plot(
+                        backend_df[global_x_axis],
+                        backend_df["tokens/s/gpu"],
+                        color=color,
+                        marker=marker,
+                        label=label,
+                        linestyle="-",
+                        markersize=8,
+                    )
+                color_idx += 1
+            else:
+                # Single backend mode
                 pareto_analysis.draw_pareto(
                     pareto_df,
                     global_x_axis,
                     "tokens/s/gpu",
                     ax,
-                    colors[color_idx % len(colors)],
+                    exp_colors[color_idx % len(exp_colors)],
                     exp_name,
                     maximize_x=maximize_x,
                 )
                 color_idx += 1
+
+        # Add axis labels and legend
+        ax.set_xlabel(global_x_axis)
+        ax.set_ylabel("tokens/s/gpu")
+        ax.legend()
+
         plt.savefig(os.path.join(safe_result_dir, "pareto_frontier.png"))
         plt.close()
 
@@ -452,8 +541,23 @@ def save_results(
                 pareto_df.to_csv(os.path.join(exp_dir, "pareto.csv"), index=False)
 
             # 3. Save the config for this experiment
-            exp_task_config = task_configs[exp_name]
-            effective_generated_version = generated_backend_version or exp_task_config.backend_version
+            # For multi-backend mode, we'll get task_config per row later
+            # For single-backend mode, get it once here
+            is_multi_backend = best_config_df is not None and "backend" in best_config_df.columns
+            if not is_multi_backend:
+                exp_task_config = task_configs[exp_name]
+                effective_generated_version = generated_backend_version or exp_task_config.backend_version
+            else:
+                # For multi-backend, we'll use the first backend's version for warnings
+                # but actual generation will use per-row backend
+                first_backend = best_config_df["backend"].iloc[0]
+                task_config_key = f"{exp_name}_{first_backend}"
+                # Verify the key exists (for multi-backend mode)
+                if task_config_key not in task_configs:
+                    task_config_key = exp_name
+                    is_multi_backend = False  # Treat as single backend
+                exp_task_config = task_configs[task_config_key]
+                effective_generated_version = generated_backend_version or exp_task_config.backend_version
 
             if generated_backend_version:
                 logger.warning(
@@ -487,8 +591,23 @@ def save_results(
             # 4. Save the generated config for this experiment, sub-directory for each best config
             if best_config_df is not None:
                 for i, (idx, result_df) in enumerate(best_config_df.iterrows()):
+                    # For multi-backend mode, get the task_config for this row's backend
+                    if is_multi_backend and "backend" in result_df:
+                        row_backend = result_df["backend"]
+                        row_task_config_key = f"{exp_name}_{row_backend}"
+                        # Verify the key exists (for multi-backend mode)
+                        if row_task_config_key in task_configs:
+                            row_task_config = task_configs[row_task_config_key]
+                            row_backend_version = generated_backend_version or row_task_config.backend_version
+                        else:
+                            row_task_config = exp_task_config
+                            row_backend_version = effective_generated_version
+                    else:
+                        row_task_config = exp_task_config
+                        row_backend_version = effective_generated_version
+
                     cfg = task_config_to_generator_config(
-                        task_config=exp_task_config,
+                        task_config=row_task_config,
                         result_df=result_df,
                         generator_overrides=generator_overrides,
                     )
@@ -501,8 +620,8 @@ def save_results(
                     try:
                         generate_backend_artifacts(
                             params=cfg,
-                            backend=exp_task_config.backend_name,
-                            backend_version=effective_generated_version,
+                            backend=row_task_config.backend_name,
+                            backend_version=row_backend_version,
                             output_dir=top_config_dir,
                         )
                     except Exception as exc:

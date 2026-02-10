@@ -521,6 +521,12 @@ class PerfDataFilename(Enum):
     wideep_generation_moe = "wideep_generation_moe_perf.txt"
     wideep_deepep_normal = "wideep_deepep_normal_perf.txt"
     wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
+    # TensorRT-LLM WideEP specific
+    wideep_moe_compute = "wideep_moe_perf.txt"
+    wideep_alltoall = "wideep_alltoall_perf.txt"
+    compute_scale = "computescale_perf.txt"
+    scale_matrix = "scale_matrix_perf.txt"
+    mamba2 = "mamba2_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
@@ -535,6 +541,7 @@ class GEMMQuantMode(Enum):
     int8_wo = QuantMapping(1, 1, "int8_wo")  # w8a16
     int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
     fp8 = QuantMapping(1, 2, "fp8")  # w8fp8
+    fp8_static = QuantMapping(1, 2, "fp8_static")  # fp8 with static quantization (compute_scale/scale_matrix modeled)
     sq = QuantMapping(1, 2, "sq")  # w8int8
     fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for trtllm torch ds fp8
     fp8_ootb = QuantMapping(

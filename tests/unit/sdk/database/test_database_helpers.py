@@ -118,6 +118,18 @@ def test_get_supported_databases_edge_cases(temp_systems_dir: Path, perf_databas
     assert "bad_path" not in result
 
 
+def test_get_supported_databases_multiple_paths(temp_systems_dir: Path, perf_database):
+    setup_mock_filesystem(temp_systems_dir, {"h100": {"trtllm": ["1.0.0"]}})
+    other_dir = temp_systems_dir / "other"
+    other_dir.mkdir()
+    setup_mock_filesystem(other_dir, {"h200": {"vllm": ["0.6.0"]}})
+
+    result = perf_database.get_supported_databases([str(temp_systems_dir), str(other_dir)])
+
+    assert result["h100"]["trtllm"] == ["1.0.0"]
+    assert result["h200"]["vllm"] == ["0.6.0"]
+
+
 # ----------------------------- get_latest_database_version -----------------------------
 
 

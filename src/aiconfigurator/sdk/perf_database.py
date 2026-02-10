@@ -10,6 +10,7 @@ import logging
 import math
 import os
 from collections import defaultdict
+from collections.abc import Iterable
 from typing import Optional
 
 import numpy as np
@@ -22,58 +23,94 @@ from aiconfigurator.sdk.performance_result import PerformanceResult
 databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 logger = logging.getLogger(__name__)
 
+_SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator") / "systems")]
+
+
+def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
+    default_path = os.fspath(pkg_resources.files("aiconfigurator") / "systems")
+    if raw_paths is None:
+        return [default_path]
+    if isinstance(raw_paths, str):
+        entries = [part.strip() for part in raw_paths.split(",") if part.strip()]
+    else:
+        entries = [os.fspath(entry) for entry in raw_paths if entry is not None]
+    if not entries:
+        return [default_path]
+    resolved: list[str] = []
+    for entry in entries:
+        if str(entry).lower() == "default":
+            resolved.append(default_path)
+        else:
+            resolved.append(os.fspath(entry))
+    return resolved
+
+
+def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
+    """
+    Override the system search paths for the current process.
+    """
+    global _SYSTEMS_PATHS
+    _SYSTEMS_PATHS = _normalize_systems_paths(raw_paths)
+
+
+def get_systems_paths() -> list[str]:
+    return list(_SYSTEMS_PATHS)
+
 
 class PerfDataNotAvailableError(RuntimeError):
     """Raised when required performance data is missing or unsupported for a requested mode."""
 
 
-def get_system_config_path():
-    """
-    Get the system config path
-    """
-    return pkg_resources.files("aiconfigurator") / "systems"
-
-
 def get_supported_databases(
-    systems_dir: str = get_system_config_path(),
+    systems_paths: str | list[str] | None = None,
 ) -> dict[str, dict[str, list[str]]]:
     """
     Get all supported databases for all systems, backends and versions without loading them.
     """
-    supported_dict = defaultdict(lambda: defaultdict(list))
-    if not os.path.isdir(systems_dir):
-        logger.warning(f"Systems directory not found: {systems_dir}")
-        return supported_dict
+    supported_sets: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
 
-    system_yamls = [
-        f for f in os.listdir(systems_dir) if f.endswith(".yaml") and os.path.isfile(os.path.join(systems_dir, f))
-    ]
-    for system_yaml in system_yamls:
-        system = system_yaml.split(".")[0]
+    for systems_root in systems_paths:
         try:
-            with open(os.path.join(systems_dir, system_yaml)) as f:
-                system_spec = yaml.safe_load(f)
-
-            data_dir = os.path.join(systems_dir, system_spec.get("data_dir", ""))
-            if not os.path.isdir(data_dir):
+            entries = os.listdir(systems_root)
+        except Exception as e:
+            logger.warning("Could not list systems dir %s: %s", systems_root, e)
+            continue
+        for entry in entries:
+            if not entry.endswith(".yaml"):
                 continue
+            system = entry[:-5]
+            system_yaml_path = os.path.join(systems_root, entry)
+            try:
+                with open(system_yaml_path) as f:
+                    system_spec = yaml.safe_load(f)
 
-            for backend in common.BackendName:
-                backend_path = os.path.join(data_dir, backend.value)
-                if not os.path.isdir(backend_path):
+                data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+                if not os.path.isdir(data_dir):
                     continue
 
-                versions = sorted(
-                    [
+                for backend in common.BackendName:
+                    backend_path = os.path.join(data_dir, backend.value)
+                    if not os.path.isdir(backend_path):
+                        continue
+
+                    versions = [
                         v
                         for v in os.listdir(backend_path)
                         if not v.startswith(".") and os.path.isdir(os.path.join(backend_path, v))
                     ]
-                )
-                if versions:
-                    supported_dict[system][backend.value] = versions
-        except Exception as e:
-            logger.warning(f"Could not process system config {system_yaml}: {e}")
+                    if versions:
+                        supported_sets[system][backend.value].update(versions)
+            except Exception as e:
+                logger.warning(f"Could not process system config {os.path.basename(system_yaml_path)}: {e}")
+
+    supported_dict = defaultdict(lambda: defaultdict(list))
+    for system, backend_versions in supported_sets.items():
+        for backend, versions in backend_versions.items():
+            supported_dict[system][backend] = sorted(versions)
 
     return supported_dict
 
@@ -166,7 +203,10 @@ def get_latest_database_version(
 
 
 def get_database(
-    system: str, backend: str, version: str, systems_dir: str = get_system_config_path()
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version
@@ -175,60 +215,111 @@ def get_database(
         system (str): the system name
         backend (str): the backend name
         version (str): the version name
-        systems_dir (str): the systems directory
+        systems_paths (str | list[str] | None): the systems search paths
 
     Returns:
         PerfDatabase: the database for the given system, backend and version
     """
-    try:
-        database = databases_cache[system][backend][version]
-    except KeyError:
-        logger.info(f"loading {system=}, {backend=}, {version=}")
-        if os.path.exists(os.path.join(systems_dir, system + ".yaml")):
-            with open(os.path.join(systems_dir, system + ".yaml")) as f:
-                system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-            data_path = os.path.join(systems_dir, system_spec["data_dir"], backend, version)
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+
+    for systems_root in systems_paths:
+        system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
+        if not os.path.isfile(system_yaml_path):
+            continue
+        cache_key = (systems_root, system)
+        try:
+            database = databases_cache[cache_key][backend][version]
+            return database
+        except KeyError:
+            logger.info(f"loading {system=}, {backend=}, {version=}")
+            try:
+                with open(system_yaml_path) as f:
+                    system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+                data_dir = system_spec["data_dir"]
+            except Exception:
+                logger.warning(f"failed to read system spec at {system_yaml_path}, continuing searching")
+                continue
+            data_path = os.path.join(systems_root, data_dir, backend, version)
             if os.path.exists(data_path):
                 try:
-                    database = PerfDatabase(system, backend, version, systems_dir)
-                    databases_cache[system][backend][version] = database
+                    database = PerfDatabase(system, backend, version, systems_root)
+                    databases_cache[cache_key][backend][version] = database
+                    return database
                 except Exception:
-                    logger.exception(f"failed to load {system=}, {backend=}, {version=}")
-                    database = None
+                    logger.warning(f"failed to load {system=}, {backend=}, {version=}, continuing searching")
             else:
-                logger.exception(f"data path {data_path} not found")
-                database = None
-        else:
-            logger.exception(f"system yaml {os.path.join(systems_dir, system + '.yaml')} not found")
-            database = None
+                logger.warning(f"data path {data_path} not found, continuing searching")
 
-    return database
+    logger.error(f"failed to get {system=}, {backend=}, {version=}")
+    return None
 
 
 def get_all_databases(
-    systems_dir: str = get_system_config_path(),
+    systems_paths: str | os.PathLike | Iterable[str] | None = None,
 ) -> dict[str, dict[str, dict[str, PerfDatabase]]]:
     """
     Get all the databases for all the systems, backends and versions
     """
     database_dict = defaultdict(lambda: defaultdict(lambda: defaultdict()))
-    system_yamls = [system_yaml for system_yaml in os.listdir(systems_dir) if system_yaml.endswith(".yaml")]
-    for system_yaml in system_yamls:
-        system = system_yaml.split(".")[0]
-        with open(os.path.join(systems_dir, system_yaml)) as f:
-            system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-        data_dir = os.path.join(systems_dir, system_spec["data_dir"])
-        if not os.path.exists(data_dir):
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+
+    seen_systems: dict[str, str] = {}
+    for systems_root in systems_paths:
+        try:
+            entries = os.listdir(systems_root)
+        except Exception as e:
+            logger.warning("Could not list systems dir %s: %s", systems_root, e)
             continue
-        for backend in common.BackendName:
-            if not os.path.exists(os.path.join(data_dir, backend.value)):
+        for entry in entries:
+            if not entry.endswith(".yaml"):
                 continue
-            for version in os.listdir(os.path.join(data_dir, backend.value)):
-                if version.startswith("."):
+            system = entry[:-5]
+            if system in seen_systems:
+                logger.warning(
+                    "System config '%s' already loaded from %s; also found in %s",
+                    system,
+                    seen_systems[system],
+                    systems_root,
+                )
+            else:
+                seen_systems[system] = systems_root
+            system_yaml_path = os.path.join(systems_root, entry)
+            try:
+                with open(system_yaml_path) as f:
+                    system_spec = yaml.load(f, Loader=yaml.SafeLoader)
+                data_dir = os.path.join(systems_root, system_spec["data_dir"])
+                if not os.path.exists(data_dir):
                     continue
-                database = get_database(system, backend.value, version, systems_dir)
-                if database is not None:
-                    database_dict[system][backend.value][version] = database
+                for backend in common.BackendName:
+                    if not os.path.exists(os.path.join(data_dir, backend.value)):
+                        continue
+                    for version in os.listdir(os.path.join(data_dir, backend.value)):
+                        if version.startswith("."):
+                            continue
+                        database = get_database(system, backend.value, version, systems_root)
+                        if database is None:
+                            continue
+                        if version in database_dict[system][backend.value]:
+                            existing = database_dict[system][backend.value][version]
+                            existing_root = getattr(existing, "systems_root", None) or "unknown"
+                            logger.warning(
+                                "Database '%s/%s/%s' already loaded from %s; ignoring %s",
+                                system,
+                                backend.value,
+                                version,
+                                existing_root,
+                                systems_root,
+                            )
+                            continue
+                        database_dict[system][backend.value][version] = database
+            except Exception as e:
+                logger.warning(f"Could not process system config {os.path.basename(system_yaml_path)}: {e}")
 
     return database_dict
 
@@ -408,6 +499,118 @@ def load_gemm_data(gemm_file):
             }
 
     return gemm_data
+
+
+def load_compute_scale_data(compute_scale_file):
+    """
+    Load the compute scale data with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure {quant_mode: {m: {k: {latency, power, energy}}}}
+              For old database formats without power, defaults to power=0.0 and energy=0.0.
+    """
+    if not os.path.exists(compute_scale_file):
+        logger.warning(f"Compute scale data file {compute_scale_file} not found.")
+        return None
+    compute_scale_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+
+    with open(compute_scale_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug(f"Legacy database format detected in {compute_scale_file} - power will default to 0.0")
+
+    for row in rows:
+        quant_mode, m, k, latency = (
+            row["quant_dtype"],
+            row["m"],
+            row["k"],
+            row["latency"],
+        )
+        m = int(m)
+        k = int(k)
+        latency = float(latency)
+
+        # Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds (W·ms)
+
+        quant_mode = common.GEMMQuantMode[quant_mode]
+
+        try:
+            # Check for conflict
+            compute_scale_data[quant_mode][m][k]
+            logger.debug(f"value conflict in compute_scale data: {quant_mode} {m} {k}")
+        except KeyError:
+            # Store all three values
+            compute_scale_data[quant_mode][m][k] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+
+    return compute_scale_data
+
+
+def load_scale_matrix_data(scale_matrix_file):
+    """
+    Load the scale matrix data with power support (backward compatible).
+
+    Returns:
+        dict: Nested dict structure {quant_mode: {m: {k: {latency, power, energy}}}}
+              For old database formats without power, defaults to power=0.0 and energy=0.0.
+    """
+    if not os.path.exists(scale_matrix_file):
+        logger.warning(f"Scale matrix data file {scale_matrix_file} not found.")
+        return None
+    scale_matrix_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
+
+    with open(scale_matrix_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    # Check if power columns exist (backward compatibility)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug(f"Legacy database format detected in {scale_matrix_file} - power will default to 0.0")
+
+    for row in rows:
+        quant_mode, m, k, latency = (
+            row["quant_dtype"],
+            row["m"],
+            row["k"],
+            row["latency"],
+        )
+        m = int(m)
+        k = int(k)
+        latency = float(latency)
+
+        # Read power with backward compatibility
+        power = float(row.get("power", 0.0))
+
+        # Calculate energy from power and latency
+        energy = power * latency  # watt-milliseconds (W·ms)
+
+        quant_mode = common.GEMMQuantMode[quant_mode]
+
+        try:
+            # Check for conflict
+            scale_matrix_data[quant_mode][m][k]
+            logger.debug(f"value conflict in scale_matrix data: {quant_mode} {m} {k}")
+        except KeyError:
+            # Store all three values
+            scale_matrix_data[quant_mode][m][k] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+
+    return scale_matrix_data
 
 
 def load_moe_data(moe_file):
@@ -869,6 +1072,82 @@ def load_mla_bmm_data(mla_bmm_file):
     return mla_bmm_data
 
 
+def load_mamba2_data(mamba2_file: str):
+    """
+    Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.txt.
+
+    CSV columns: framework, version, device, op_name, kernel_source, phase,
+    batch_size, seq_len, num_tokens, d_model, d_state, d_conv, nheads, head_dim,
+    n_groups, chunk_size, model_name, latency (optional: power).
+    All rows must have the same columns (context and generation both include
+    seq_len and num_tokens so columns align).
+
+    Returns:
+        dict: data[kernel_source][phase][model_key] where model_key is
+              (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size).
+              For phase "context" the leaf is [batch_size][seq_len] -> {latency, power, energy}.
+              For phase "generation" the leaf is [batch_size] -> {latency, power, energy}.
+              Returns None if file does not exist.
+    """
+    if not os.path.exists(mamba2_file):
+        logger.warning(f"Mamba2 data file {mamba2_file} not found.")
+        return None
+
+    # data[kernel_source][phase][model_key] -> nested batch_size [seq_len] -> {latency, power, energy}
+    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+
+    with open(mamba2_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug(f"Legacy database format detected in {mamba2_file} - power will default to 0.0")
+
+    for row in rows:
+        kernel_source = row["kernel_source"]
+        phase = row["phase"]
+        batch_size = int(row["batch_size"])
+        seq_len = int(row["seq_len"])
+        d_model = int(row["d_model"])
+        d_state = int(row["d_state"])
+        d_conv = int(row["d_conv"])
+        nheads = int(row["nheads"])
+        head_dim = int(row["head_dim"])
+        n_groups = int(row["n_groups"])
+        chunk_size = int(row["chunk_size"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0))
+        energy = power * latency
+
+        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
+        entry = {"latency": latency, "power": power, "energy": energy}
+
+        try:
+            if phase == "context":
+                data[kernel_source][phase][model_key][batch_size][seq_len]
+                logger.debug(
+                    f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}"
+                )
+            else:
+                data[kernel_source][phase][model_key][batch_size]
+                logger.debug(f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size}")
+        except KeyError:
+            if phase == "context":
+                data[kernel_source][phase][model_key][batch_size][seq_len] = entry
+            else:
+                data[kernel_source][phase][model_key][batch_size] = entry
+
+    # Convert default dicts to regular dicts for predictable behavior; keep generation as 1D
+    result = {}
+    for ks, by_phase in data.items():
+        result[ks] = {}
+        for ph, by_key in by_phase.items():
+            result[ks][ph] = dict(by_key)
+
+    return result
+
+
 def load_wideep_context_moe_data(wideep_context_moe_file):
     """
     Load the SGLang wideep context MoE data from wideep_context_moe_perf.txt
@@ -1272,6 +1551,201 @@ def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
     return wideep_deepep_normal_data
 
 
+def load_wideep_moe_compute_data(wideep_moe_compute_file):
+    """
+    Load the TensorRT-LLM wideep MoE compute data from wideep_moe_compute_perf.txt.
+    This data represents pure computation time (excluding All2All communication).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+        Structure: [kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][inter_size]
+                   [num_slots][moe_tp_size][moe_ep_size][num_tokens] -> {latency, power, energy}
+
+    Note:
+        kernel_source identifies the MoE computation kernel:
+        - "moe_torch_flow": Cutlass-based kernel (default for SM < 100)
+        - "deepgemm": DeepGemm kernel (SM >= 100 with fp8_block)
+        If data file does not have 'kernel_source' column, it defaults to "moe_torch_flow".
+    """
+    if not os.path.exists(wideep_moe_compute_file):
+        logger.warning(f"TensorRT-LLM wideep MoE compute data file {wideep_moe_compute_file} not found.")
+        return None
+
+    wideep_moe_compute_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(
+                            lambda: defaultdict(
+                                lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+
+    logger.debug(f"Loading TensorRT-LLM wideep MoE compute data from: {wideep_moe_compute_file}")
+    with open(wideep_moe_compute_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+        # Check if power columns exist (backward compatibility)
+        has_power = len(rows) > 0 and "power" in rows[0]
+        if not has_power:
+            logger.debug(f"Legacy database format detected in {wideep_moe_compute_file} - power will default to 0.0")
+
+        # Check if kernel_source column exists
+        has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
+        if not has_kernel_source:
+            logger.debug(
+                f"kernel_source column not found in {wideep_moe_compute_file} - will default to 'moe_torch_flow'"
+            )
+
+        for row in rows:
+            quant_mode = row["moe_dtype"]
+            num_tokens = int(row["num_tokens"])
+            hidden_size = int(row["hidden_size"])
+            inter_size = int(row["inter_size"])
+            topk = int(row["topk"])
+            num_experts = int(row["num_experts"])
+            num_slots = int(row["num_slots"])
+            moe_tp_size = int(row["moe_tp_size"])
+            moe_ep_size = int(row["moe_ep_size"])
+            distribution = row["distribution"]
+            latency = float(row["latency"])
+            quant_mode = common.MoEQuantMode[quant_mode]
+
+            # Get kernel_source from data or use default
+            kernel_source = row.get("kernel_source", "moe_torch_flow")
+
+            # Read power with backward compatibility
+            power = float(row.get("power", 0.0))
+            energy = power * latency  # watt-milliseconds
+
+            # Store all three values with kernel_source dimension
+            wideep_moe_compute_data[kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][
+                inter_size
+            ][num_slots][moe_tp_size][moe_ep_size][num_tokens] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+            # logger.debug(
+            #     f"Loaded TensorRT-LLM wideep MoE compute data: kernel={kernel_source}, {quant_mode}, "
+            #     f"{distribution}, {topk}, {num_experts}, {hidden_size}, {inter_size}, {num_slots}, "
+            #     f"{moe_tp_size}, {moe_ep_size}, {num_tokens} -> {latency}"
+            # )
+
+    return wideep_moe_compute_data
+
+
+def load_wideep_alltoall_data(wideep_alltoall_file):
+    """
+    Load the TensorRT-LLM wideep All2All data from wideep_alltoall_perf.txt.
+    This data represents All2All communication time (prepare, dispatch, combine).
+
+    Returns:
+        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
+        Structure: [kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts]
+                   [moe_ep_size][num_tokens] -> {latency, power, energy}
+        op_name can be: alltoall_prepare, alltoall_dispatch, alltoall_combine, alltoall_combine_low_precision
+
+    Note:
+        kernel_source identifies the All2All communication method:
+        - "MnnvlMoe": NVLink Two-Sided via MNNVL (GB200, SM >= 100)
+        - "DeepEP": DeepEP normal mode (H100/H200, cross-node)
+        - "DeepEPLowLatency": DeepEP low-latency mode (H100/H200, intra-node)
+        - "NCCL": Standard NCCL communication (fallback)
+        If data file does not have 'kernel_source' column, it defaults to "MnnvlMoe".
+
+        If data file does not have 'num_nodes' column, it will be computed as moe_ep_size // 4.
+        This assumes 4 GPUs per node (e.g., GB200 NVL4).
+    """
+    if not os.path.exists(wideep_alltoall_file):
+        logger.warning(f"TensorRT-LLM wideep All2All data file {wideep_alltoall_file} not found.")
+        return None
+
+    wideep_alltoall_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
+                )
+            )
+        )
+    )
+
+    logger.debug(f"Loading TensorRT-LLM wideep All2All data from: {wideep_alltoall_file}")
+    with open(wideep_alltoall_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+        # Check if power columns exist (backward compatibility)
+        has_power = len(rows) > 0 and "power" in rows[0]
+        if not has_power:
+            logger.debug(f"Legacy database format detected in {wideep_alltoall_file} - power will default to 0.0")
+
+        # Check if num_nodes column exists
+        has_num_nodes = len(rows) > 0 and "num_nodes" in rows[0]
+        if not has_num_nodes:
+            logger.debug(f"num_nodes column not found in {wideep_alltoall_file} - will be computed as moe_ep_size // 4")
+
+        # Check if kernel_source column exists
+        has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
+        if not has_kernel_source:
+            logger.debug(f"kernel_source column not found in {wideep_alltoall_file} - will default to 'MnnvlMoe'")
+
+        for row in rows:
+            op_name = row["op_name"]  # alltoall_prepare, alltoall_dispatch, alltoall_combine, etc.
+            quant_mode = row["moe_dtype"]
+            num_tokens = int(row["num_tokens"])
+            hidden_size = int(row["hidden_size"])
+            topk = int(row["topk"])
+            num_experts = int(row["num_experts"])
+            moe_ep_size = int(row["moe_ep_size"])
+            latency = float(row["latency"])
+            quant_mode = common.MoEQuantMode[quant_mode]
+
+            # Get kernel_source from data or use default
+            kernel_source = row.get("kernel_source", "MnnvlMoe")
+
+            # Get num_nodes from data or compute from moe_ep_size
+            if has_num_nodes:
+                num_nodes = int(row["num_nodes"])
+            else:
+                # Default: assume 4 GPUs per node
+                if moe_ep_size % 4 != 0:
+                    logger.warning(
+                        f"moe_ep_size={moe_ep_size} is not divisible by 4, using moe_ep_size // 4 = {moe_ep_size // 4}"
+                    )
+                num_nodes = max(1, moe_ep_size // 4)
+
+            # Read power with backward compatibility
+            power = float(row.get("power", 0.0))
+            energy = power * latency  # watt-milliseconds
+
+            # Store all three values with kernel_source and num_nodes dimensions
+            wideep_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
+                moe_ep_size
+            ][num_tokens] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+            # logger.debug(
+            #     f"Loaded TensorRT-LLM wideep All2All data: kernel={kernel_source}, {op_name}, {quant_mode}, "
+            #     f"num_nodes={num_nodes}, {hidden_size}, {topk}, {num_experts}, {moe_ep_size}, "
+            #     f"{num_tokens} -> {latency}"
+            # )
+
+    return wideep_alltoall_data
+
+
 class PerfDatabase:
     """
     The perf database for a given system, backend and version
@@ -1298,6 +1772,9 @@ class PerfDatabase:
         _wideep_generation_mla_data (dict): the wideep generation mla data
         _wideep_deepep_normal_data (dict): the wideep deepep normal data
         _wideep_deepep_ll_data (dict): the wideep deepep ll data
+        TensorRT-LLM wideep:
+        _wideep_moe_compute_data (dict): the wideep moe compute data (pure computation, no all2all)
+        _wideep_alltoall_data (dict): the wideep all2all data (prepare, dispatch, combine)
 
     Methods:
         query_gemm: query the gemm data
@@ -1313,23 +1790,24 @@ class PerfDatabase:
         query_moe: query the moe data
     """
 
-    def __init__(self, system: str, backend: str, version: str, systems_dir: str = "./systems") -> None:
+    def __init__(self, system: str, backend: str, version: str, systems_root: str = "./systems") -> None:
         """
         Initialize the perf database
         """
         self.system = system
         self.backend = backend
         self.version = version
-        with open(os.path.join(systems_dir, system + ".yaml")) as f:
+        self.systems_root = systems_root
+        with open(os.path.join(systems_root, system + ".yaml")) as f:
             self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
         self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
 
         # Cache for extracted metric data to avoid repeated extraction in _interp_3d
         self._extracted_metrics_cache = {}
 
-        data_dir = os.path.join(systems_dir, self.system_spec["data_dir"], backend, version)
+        data_dir = os.path.join(systems_root, self.system_spec["data_dir"], backend, version)
         nccl_data_dir = os.path.join(
-            systems_dir,
+            systems_root,
             self.system_spec["data_dir"],
             "nccl",
             self.system_spec["misc"]["nccl_version"],
@@ -1380,6 +1858,8 @@ class PerfDatabase:
             self._wideep_deepep_ll_data = load_wideep_deepep_ll_data(
                 os.path.join(data_dir, common.PerfDataFilename.wideep_deepep_ll.value)
             )
+            self._compute_scale_data = None
+            self._scale_matrix_data = None
         elif backend == "vllm":
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1400,6 +1880,8 @@ class PerfDatabase:
             self._generation_mla_data = load_generation_mla_data(
                 os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
             )
+            self._compute_scale_data = None
+            self._scale_matrix_data = None
         else:  # TRTLLM
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1422,6 +1904,21 @@ class PerfDatabase:
             )
             self._nccl_data = load_nccl_data(nccl_data_dir)
             self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
+            self._mamba2_data = load_mamba2_data(os.path.join(data_dir, common.PerfDataFilename.mamba2.value))
+            self._compute_scale_data = load_compute_scale_data(
+                os.path.join(data_dir, common.PerfDataFilename.compute_scale.value)
+            )
+            self._scale_matrix_data = load_scale_matrix_data(
+                os.path.join(data_dir, common.PerfDataFilename.scale_matrix.value)
+            )
+
+            # TensorRT-LLM wideep path
+            self._wideep_moe_compute_data = load_wideep_moe_compute_data(
+                os.path.join(data_dir, common.PerfDataFilename.wideep_moe_compute.value)
+            )
+            self._wideep_alltoall_data = load_wideep_alltoall_data(
+                os.path.join(data_dir, common.PerfDataFilename.wideep_alltoall.value)
+            )
 
         # pre-correction
         self._correct_data()
@@ -1894,6 +2391,10 @@ class PerfDatabase:
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
             }
+            # `fp8_static` is a behavioral mode that reuses `fp8` GEMM perf tables.
+            gemm_modes = self.supported_quant_mode.get("gemm", []) or []
+            if common.GEMMQuantMode.fp8.name in gemm_modes and common.GEMMQuantMode.fp8_static.name not in gemm_modes:
+                gemm_modes.append(common.GEMMQuantMode.fp8_static.name)
         elif self.backend == "vllm":  # TODO: deepseek
             self.supported_quant_mode = {
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
@@ -1911,6 +2412,112 @@ class PerfDatabase:
         Check if the number of GPUs is an inter node
         """
         return num_gpus > self.system_spec["node"]["num_gpus_per_node"]
+
+    def _select_alltoall_kernel(
+        self,
+        quant_mode: common.MoEQuantMode,
+        moe_ep_size: int,
+        topk: int,
+    ) -> str:
+        """
+        Automatically select All2All communication method based on GPU architecture and configuration.
+
+        Selection logic (based on TensorRT-LLM's select_alltoall_method_type):
+        1. SM >= 100 (GB200 with MNNVL support) -> MnnvlMoe (NVLink Two-Sided)
+        2. SM >= 90 (H100/H200) with cross-node -> DeepEP
+        3. SM >= 90 (H100/H200) within single node -> DeepEPLowLatency
+        4. SM < 90 -> NCCL (fallback)
+
+        Args:
+            quant_mode: MoE quantization mode
+            moe_ep_size: MoE expert parallelism size
+            topk: Number of experts activated per token
+
+        Returns:
+            str: The selected kernel_source name
+        """
+        sm_version = self.system_spec["gpu"]["sm_version"]
+        num_gpus_per_node = self.system_spec["node"]["num_gpus_per_node"]
+        is_inter_node = moe_ep_size > num_gpus_per_node
+
+        # Preferred kernel based on hardware
+        if sm_version >= 100:
+            # GB200 supports MNNVL (Multi-Node NVLink)
+            preferred = "MnnvlMoe"
+        elif sm_version >= 90:
+            # H100/H200: Check DeepEP feasibility
+            # DeepEP requires: tp_size == 1, ep_size > 1, top_k in supported range
+            deepep_feasible = moe_ep_size > 1 and topk <= 8
+
+            if deepep_feasible and is_inter_node:
+                # Cross-node: use DeepEP normal mode
+                preferred = "DeepEP"
+            elif deepep_feasible:
+                # Intra-node: use DeepEP low-latency mode
+                preferred = "DeepEPLowLatency"
+            else:
+                preferred = "MnnvlMoe"
+        else:
+            # SM89 and below: use NCCL standard communication
+            preferred = "NCCL"
+
+        # Check if preferred kernel is available in data, otherwise fallback
+        if self._wideep_alltoall_data is not None:
+            available_kernels = list(self._wideep_alltoall_data.keys())
+            if preferred in available_kernels:
+                return preferred
+            elif available_kernels:
+                # Fallback to any available kernel
+                fallback = available_kernels[0]
+                logger.debug(f"Preferred All2All kernel '{preferred}' not available, falling back to '{fallback}'")
+                return fallback
+
+        return preferred
+
+    def _select_moe_kernel(
+        self,
+        quant_mode: common.MoEQuantMode,
+    ) -> str:
+        """
+        Automatically select MoE computation kernel based on GPU architecture and quantization mode.
+
+        Selection logic (based on TensorRT-LLM's MoEOpSelector.select_op):
+        1. SM >= 100 (Blackwell) with fp8_block -> deepgemm (DeepGemm kernel)
+        2. Otherwise -> moe_torch_flow (Cutlass kernel)
+
+        Args:
+            quant_mode: MoE quantization mode
+
+        Returns:
+            str: The selected kernel_source name
+        """
+        sm_version = self.system_spec["gpu"]["sm_version"]
+        is_blackwell = sm_version >= 100
+
+        # Convert quant_mode to string for comparison if needed
+        quant_mode_str = quant_mode.name if hasattr(quant_mode, "name") else str(quant_mode)
+        is_fp8_block = "fp8_block" in quant_mode_str
+
+        # Preferred kernel based on hardware and quant mode
+        if is_blackwell and is_fp8_block:
+            # Blackwell + FP8 block scales -> DeepGemm kernel
+            preferred = "deepgemm"
+        else:
+            # Default: Cutlass kernel
+            preferred = "moe_torch_flow"
+
+        # Check if preferred kernel is available in data, otherwise fallback
+        if self._wideep_moe_compute_data is not None:
+            available_kernels = list(self._wideep_moe_compute_data.keys())
+            if preferred in available_kernels:
+                return preferred
+            elif available_kernels:
+                # Fallback to any available kernel
+                fallback = available_kernels[0]
+                logger.debug(f"Preferred MoE kernel '{preferred}' not available, falling back to '{fallback}'")
+                return fallback
+
+        return preferred
 
     def _get_value(self, data_value, metric: str = "latency"):
         """
@@ -2472,6 +3079,17 @@ class PerfDatabase:
         """
         return self._default_database_mode
 
+    @staticmethod
+    def _normalize_gemm_quant_mode_for_table(quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
+        """
+        Normalize GEMM quant modes for perf table lookup.
+
+        `fp8_static` is a behavioral mode that reuses `fp8` perf tables.
+        """
+        if quant_mode == common.GEMMQuantMode.fp8_static:
+            return common.GEMMQuantMode.fp8
+        return quant_mode
+
     @functools.lru_cache(maxsize=32768)
     def query_gemm(
         self,
@@ -2523,6 +3141,8 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
 
+        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
+
         # SOL and EMPIRICAL modes don't have power/energy data
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0)
@@ -2539,7 +3159,7 @@ class PerfDatabase:
                         f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
                     )
                     raise PerfDataNotAvailableError(msg)
-                if quant_mode not in self._gemm_data:
+                if table_quant_mode not in self._gemm_data:
                     supported = sorted([k.name for k in self._gemm_data])
                     raise PerfDataNotAvailableError(
                         "GEMM perf data not available for requested quant mode. "
@@ -2547,7 +3167,7 @@ class PerfDatabase:
                         f"quant_mode='{quant_mode.name}'. "
                         f"Supported gemm modes: {supported}"
                     )
-                result = self._interp_3d(m, n, k, self._gemm_data[quant_mode], "cubic")
+                result = self._interp_3d(m, n, k, self._gemm_data[table_quant_mode], "cubic")
                 # Result is dict: {"latency": ..., "power": ..., "energy": ...}
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
             except Exception:
@@ -2557,6 +3177,208 @@ class PerfDatabase:
                 else:
                     logger.exception(
                         f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
+
+    @functools.lru_cache(maxsize=32768)
+    def query_compute_scale(
+        self,
+        m: int,
+        k: int,
+        quant_mode: common.GEMMQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """
+        Query compute scale latency (dynamic quantization - static quantization).
+
+        Args:
+            m: Number of rows in input matrix
+            k: Number of columns in input matrix
+            quant_mode: Quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
+        """
+
+        def get_sol(m: int, k: int) -> tuple[float, float, float]:
+            """
+            Get the sol time, sol math and sol mem
+            """
+            sol_mem = 2 * m * k / self.system_spec["gpu"]["mem_bw"] * 1000.0
+            sol_time = sol_mem
+            return sol_time, 0, sol_mem
+
+        def get_empirical(m: int, k: int) -> float:
+            """
+            Get the empirical time
+            """
+            sol_time = get_sol(m, k)[0]
+            scale_factor = 0.8
+            return sol_time / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
+
+        if database_mode == common.DatabaseMode.SOL:
+            return PerformanceResult(get_sol(m, k)[0], energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(m, k)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return PerformanceResult(get_empirical(m, k), energy=0.0)
+        else:
+            # SILICON or HYBRID mode - use database
+            try:
+                if self._compute_scale_data is None:
+                    msg = (
+                        "Compute scale perf table is missing for "
+                        f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
+                    )
+                    raise PerfDataNotAvailableError(msg)
+                if table_quant_mode not in self._compute_scale_data:
+                    supported = sorted([k.name for k in self._compute_scale_data])
+                    raise PerfDataNotAvailableError(
+                        "Compute scale perf data not available for requested quant mode. "
+                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                        f"quant_mode='{quant_mode.name}'. "
+                        f"Supported modes: {supported}"
+                    )
+                table = self._compute_scale_data[table_quant_mode]
+                m_i = int(m)
+                k_i = int(k)
+
+                m_keys = sorted(table.keys())
+                m_i = max(m_keys[0], min(m_i, m_keys[-1]))
+
+                k_min = None
+                k_max = None
+                for row in table.values():
+                    if not row:
+                        continue
+                    row_min = min(row.keys())
+                    row_max = max(row.keys())
+                    k_min = row_min if k_min is None else min(k_min, row_min)
+                    k_max = row_max if k_max is None else max(k_max, row_max)
+
+                if k_min is not None and k_max is not None:
+                    k_i = max(k_min, min(k_i, k_max))
+
+                result = self._interp_2d_linear(m_i, k_i, table)
+                return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query compute_scale data for {m=}, {k=}, {quant_mode=}, using empirical mode"
+                    )
+                    return PerformanceResult(get_empirical(m, k), energy=0.0)
+                else:
+                    logger.exception(
+                        "Failed to query compute_scale data for "
+                        f"{m=}, {k=}, {quant_mode=}. "
+                        "Please consider Hybrid mode."
+                    )
+                    raise
+
+    @functools.lru_cache(maxsize=32768)
+    def query_scale_matrix(
+        self,
+        m: int,
+        k: int,
+        quant_mode: common.GEMMQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """
+        Query scale matrix (static quantization) latency.
+
+        Args:
+            m: Number of rows in input matrix
+            k: Number of columns in input matrix
+            quant_mode: Quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
+        """
+
+        def get_sol(m: int, k: int) -> tuple[float, float, float]:
+            """
+            Get the sol time, sol math and sol mem
+            """
+            sol_mem = 3 * m * k / self.system_spec["gpu"]["mem_bw"] * 1000.0
+            sol_time = sol_mem
+            return sol_time, 0, sol_mem
+
+        def get_empirical(m: int, k: int) -> float:
+            """
+            Get the empirical time
+            """
+            sol_time = get_sol(m, k)[0]
+            scale_factor = 0.8
+            return sol_time / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        table_quant_mode = self._normalize_gemm_quant_mode_for_table(quant_mode)
+
+        if database_mode == common.DatabaseMode.SOL:
+            return PerformanceResult(get_sol(m, k)[0], energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(m, k)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return PerformanceResult(get_empirical(m, k), energy=0.0)
+        else:
+            # SILICON or HYBRID mode - use database
+            try:
+                if self._scale_matrix_data is None:
+                    msg = (
+                        "Scale matrix perf table is missing for "
+                        f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
+                    )
+                    raise PerfDataNotAvailableError(msg)
+                if table_quant_mode not in self._scale_matrix_data:
+                    supported = sorted([k.name for k in self._scale_matrix_data])
+                    raise PerfDataNotAvailableError(
+                        "Scale matrix perf data not available for requested quant mode. "
+                        f"system='{self.system}', backend='{self.backend}', version='{self.version}', "
+                        f"quant_mode='{quant_mode.name}'. "
+                        f"Supported modes: {supported}"
+                    )
+                table = self._scale_matrix_data[table_quant_mode]
+                m_i = int(m)
+                k_i = int(k)
+
+                m_keys = sorted(table.keys())
+                m_i = max(m_keys[0], min(m_i, m_keys[-1]))
+
+                k_min = None
+                k_max = None
+                for row in table.values():
+                    if not row:
+                        continue
+                    row_min = min(row.keys())
+                    row_max = max(row.keys())
+                    k_min = row_min if k_min is None else min(k_min, row_min)
+                    k_max = row_max if k_max is None else max(k_max, row_max)
+
+                if k_min is not None and k_max is not None:
+                    k_i = max(k_min, min(k_i, k_max))
+
+                result = self._interp_2d_linear(m_i, k_i, table)
+                return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query scale_matrix data for {m=}, {k=}, {quant_mode=}, using empirical mode"
+                    )
+                    return PerformanceResult(get_empirical(m, k), energy=0.0)
+                else:
+                    logger.exception(
+                        f"Failed to query scale_matrix data for {m=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
                     )
                     raise
 
@@ -3597,6 +4419,7 @@ class PerfDatabase:
         moe_backend: str | None = None,
         database_mode: common.DatabaseMode | None = None,
         is_gated: bool = True,
+        enable_eplb: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query MoE (Mixture of Experts) layer latency and energy.
@@ -3616,6 +4439,8 @@ class PerfDatabase:
             database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
             is_gated: Whether MoE uses gated activation (SwiGLU=True, Relu2=False).
                       Low-latency kernel only available for gated MoE.
+            enable_eplb: Expert Parallel Load Balancing. When enabled, applies
+                        num_tokens correction (0.8x) during prefill phase only.
 
         Returns:
             PerformanceResult: Acts as float (latency in ms).
@@ -3731,6 +4556,9 @@ class PerfDatabase:
             try:
                 if self.backend == common.BackendName.sglang.value:
                     # deepep_moe is for sglang wideep only
+                    # Apply num_tokens correction when eplb is enabled (only during prefill)
+                    if enable_eplb and is_context:
+                        num_tokens = int(num_tokens * 0.8)
                     if moe_backend == "deepep_moe":
                         if is_context:
                             moe_data = self._wideep_context_moe_data
@@ -4036,6 +4864,119 @@ class PerfDatabase:
             # hybrid and silicon modes have same logic
             return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
 
+    def query_mamba2(
+        self,
+        phase: str,
+        kernel_source: str,
+        batch_size: int,
+        seq_len: int | None,
+        d_model: int,
+        d_state: int,
+        d_conv: int,
+        nheads: int,
+        head_dim: int,
+        n_groups: int,
+        chunk_size: int,
+    ) -> PerformanceResult:
+        """
+        Query Mamba2 kernel (Conv1D or SSM) latency and energy.
+
+        Args:
+            phase: "context" or "generation"
+            kernel_source: "causal_conv1d_fn", "mamba_chunk_scan_combined",
+                           "causal_conv1d_update", or "selective_state_update"
+            batch_size: batch size
+            seq_len: sequence length (context only; use 0 or any for generation)
+            d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size: model config
+
+        Returns:
+            PerformanceResult with latency (ms) and energy (W·ms).
+            Uses SOL-based fallback when mamba2_perf data is not loaded.
+        """
+        mamba2_data = getattr(self, "_mamba2_data", None)
+
+        def _sol_fallback() -> PerformanceResult:
+            # SOL estimate for this kernel only (conv1d or ssm)
+            d_inner = nheads * head_dim
+            conv_dim = d_inner + 2 * n_groups * d_state
+            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
+            if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
+                conv_read_bytes = x * conv_dim * (d_conv + 1) * 2
+                conv_write_bytes = x * conv_dim * 2
+                return self.query_mem_op(conv_read_bytes + conv_write_bytes)
+            else:
+                ssm_read_bytes = x * (d_inner + n_groups * d_state * 2 + nheads) * 2
+                ssm_write_bytes = x * d_inner * 2
+                return self.query_mem_op(ssm_read_bytes + ssm_write_bytes)
+
+        if mamba2_data is None:
+            return _sol_fallback()
+
+        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
+        try:
+            by_phase = mamba2_data[kernel_source]
+        except KeyError:
+            return _sol_fallback()
+        try:
+            by_key = by_phase[phase]
+        except KeyError:
+            return _sol_fallback()
+        if model_key not in by_key:
+            # Nearest config by d_model
+            keys_with_d_model = [k for k in by_key if k[0] == d_model]
+            if keys_with_d_model:
+                model_key = keys_with_d_model[0]
+            else:
+                return _sol_fallback()
+
+        table = by_key[model_key]
+
+        if phase == "context":
+            if seq_len is None or seq_len <= 0:
+                return _sol_fallback()
+            try:
+                result = self._interp_2d_linear(batch_size, seq_len, table)
+            except (KeyError, ValueError):
+                return _sol_fallback()
+            return PerformanceResult(
+                latency=result["latency"],
+                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
+            )
+        else:
+            try:
+                batch_left, batch_right = self._nearest_1d_point_helper(
+                    batch_size, list(table.keys()), inner_only=False
+                )
+            except (KeyError, ValueError):
+                return _sol_fallback()
+
+            # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
+            def _mamba2_gen_entry(val):
+                if isinstance(val, dict) and "latency" in val:
+                    return val
+                if isinstance(val, dict) and val:
+                    inner = next(iter(val.values()))
+                    if isinstance(inner, dict) and "latency" in inner:
+                        return inner
+                return None
+
+            y_left = _mamba2_gen_entry(table[batch_left])
+            y_right = _mamba2_gen_entry(table[batch_right])
+            if y_left is None or y_right is None:
+                return _sol_fallback()
+            result = self._interp_1d(
+                [batch_left, batch_right],
+                [y_left, y_right],
+                batch_size,
+            )
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", result.get("power", 0.0) * lat)
+            else:
+                lat = result
+                energy = 0.0
+            return PerformanceResult(lat, energy=energy)
+
     @functools.lru_cache(maxsize=32768)
     def query_p2p(
         self, message_bytes: int, database_mode: common.DatabaseMode | None = None
@@ -4234,6 +5175,218 @@ class PerfDatabase:
                                                 self._generation_attention_data[quant_mode][n_kv][head_size][
                                                     window_size
                                                 ][n][b][s] = float(sol)
+
+    def query_wideep_moe_compute(
+        self,
+        num_tokens: int,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        num_slots: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """
+        Query WideEP MoE compute latency (pure computation, excluding All2All communication).
+
+        This is for TensorRT-LLM WideEP scenarios with three EPLB modes:
+        - EPLB off: workload_distribution without "_eplb" suffix, num_slots = num_experts
+        - EPLB on: workload_distribution with "_eplb" suffix, num_slots = num_experts
+        - EPLB redundant: workload_distribution with "_eplb" suffix, num_slots > num_experts
+
+        The MoE computation kernel is automatically selected based on GPU architecture and quantization mode:
+        - SM >= 100 (Blackwell) with fp8_block -> DeepGemm kernel
+        - Otherwise -> Cutlass kernel (wideep_compute_cutlass)
+
+        Args:
+            num_tokens: Number of tokens
+            hidden_size: Hidden dimension size
+            inter_size: Intermediate size (FFN)
+            topk: Number of experts activated per token
+            num_experts: Total number of experts
+            num_slots: Number of expert slots (= num_experts for EPLB off/on, > num_experts for EPLB redundant)
+            moe_tp_size: MoE tensor parallelism size
+            moe_ep_size: MoE expert parallelism size
+            quant_mode: MoE quantization mode
+            workload_distribution: Workload distribution pattern (e.g., "power_law_1.01" or "power_law_1.01_eplb")
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Latency in ms, energy accessible via .energy attribute.
+        """
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        if self._wideep_moe_compute_data is None:
+            raise PerfDataNotAvailableError(
+                f"WideEP MoE compute perf table is missing for system='{self.system}', "
+                f"backend='{self.backend}', version='{self.version}'. "
+                "Please provide the wideep_moe_compute_perf.txt data file."
+            )
+
+        # Automatically select MoE kernel based on GPU architecture and quant mode
+        kernel_source = self._select_moe_kernel(quant_mode)
+        logger.debug(f"query_wideep_moe_compute: auto-selected kernel_source='{kernel_source}'")
+
+        try:
+            # Find the best matching distribution
+            kernel_data = self._wideep_moe_compute_data[kernel_source]
+            available_distributions = list(kernel_data[quant_mode].keys())
+            if workload_distribution in available_distributions:
+                used_distribution = workload_distribution
+            else:
+                # Fallback: try to find a similar distribution or use the first available
+                used_distribution = available_distributions[0] if available_distributions else None
+                if used_distribution is None:
+                    raise KeyError(f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}")
+                logger.debug(f"Distribution '{workload_distribution}' not found, using '{used_distribution}' instead")
+
+            moe_dict = kernel_data[quant_mode][used_distribution][topk][num_experts][hidden_size][inter_size][
+                num_slots
+            ][moe_tp_size][moe_ep_size]
+
+            num_left, num_right = self._nearest_1d_point_helper(
+                num_tokens,
+                list(moe_dict.keys()),
+                inner_only=False,
+            )
+            result = self._interp_1d(
+                [num_left, num_right],
+                [moe_dict[num_left], moe_dict[num_right]],
+                num_tokens,
+            )
+
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", 0.0)
+            else:
+                lat = result
+                energy = 0.0
+
+            return PerformanceResult(lat, energy=energy)
+
+        except Exception as e:
+            if database_mode == common.DatabaseMode.HYBRID:
+                logger.debug(
+                    f"Failed to query wideep moe compute data (kernel={kernel_source}): {e}, "
+                    "falling back to empirical estimation"
+                )
+                # Simple empirical fallback based on SOL
+                total_tokens = num_tokens * topk
+                ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size
+                sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+                lat = sol_math / 0.4  # Empirical scale factor
+                return PerformanceResult(lat, energy=0.0)
+            else:
+                raise
+
+    def query_wideep_alltoall(
+        self,
+        op_name: str,
+        num_tokens: int,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        node_num: int | None = None,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """
+        Query WideEP All2All communication latency.
+
+        The All2All communication method is automatically selected based on GPU architecture:
+        - SM >= 100 (GB200 with MNNVL) -> MnnvlMoe (NVLink Two-Sided)
+        - SM >= 90 (H100/H200) cross-node -> DeepEP
+        - SM >= 90 (H100/H200) intra-node -> DeepEPLowLatency
+        - SM < 90 -> NCCL (fallback)
+
+        Args:
+            op_name: Operation name, one of:
+                - "alltoall_prepare": Prepare phase
+                - "alltoall_dispatch": Token dispatch phase
+                - "alltoall_combine": Result combine phase
+                - "alltoall_combine_low_precision": Low precision combine
+            num_tokens: Number of tokens
+            hidden_size: Hidden dimension size
+            topk: Number of experts activated per token
+            num_experts: Total number of experts
+            moe_ep_size: MoE expert parallelism size (must be divisible by 4 if node_num is None)
+            quant_mode: MoE quantization mode
+            node_num: Number of nodes. If None, computed as moe_ep_size // 4 (assuming 4 GPUs per node)
+            database_mode: Database mode
+
+        Returns:
+            PerformanceResult: Latency in ms, energy accessible via .energy attribute.
+
+        Raises:
+            ValueError: If moe_ep_size is not divisible by 4 when node_num is None
+        """
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        # Compute node_num if not provided
+        if node_num is None:
+            if moe_ep_size < 4:
+                node_num = 1
+            else:
+                node_num = moe_ep_size // 4
+            logger.debug(f"query_wideep_alltoall: node_num not specified, using {node_num} (moe_ep_size={moe_ep_size})")
+
+        if self._wideep_alltoall_data is None:
+            raise PerfDataNotAvailableError(
+                f"WideEP All2All perf table is missing for system='{self.system}', "
+                f"backend='{self.backend}', version='{self.version}'. "
+                "Please provide the wideep_alltoall_perf.txt data file."
+            )
+
+        valid_op_names = ["alltoall_prepare", "alltoall_dispatch", "alltoall_combine", "alltoall_combine_low_precision"]
+        if op_name not in valid_op_names:
+            raise ValueError(f"Invalid op_name '{op_name}'. Must be one of {valid_op_names}")
+
+        # Automatically select All2All kernel based on GPU architecture
+        kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk)
+        logger.debug(f"query_wideep_alltoall: auto-selected kernel_source='{kernel_source}'")
+
+        try:
+            kernel_data = self._wideep_alltoall_data[kernel_source]
+            alltoall_dict = kernel_data[op_name][quant_mode][node_num][hidden_size][topk][num_experts][moe_ep_size]
+
+            num_left, num_right = self._nearest_1d_point_helper(
+                num_tokens,
+                list(alltoall_dict.keys()),
+                inner_only=False,
+            )
+            result = self._interp_1d(
+                [num_left, num_right],
+                [alltoall_dict[num_left], alltoall_dict[num_right]],
+                num_tokens,
+            )
+
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", 0.0)
+            else:
+                lat = result
+                energy = 0.0
+
+            return PerformanceResult(lat, energy=energy)
+
+        except Exception as e:
+            if database_mode == common.DatabaseMode.HYBRID:
+                logger.debug(
+                    f"Failed to query wideep alltoall data for {op_name} (kernel={kernel_source}), "
+                    f"node_num={node_num}: {e}, using empirical estimation"
+                )
+                # Simple empirical fallback: ~0.1ms per operation as baseline
+                lat = 0.1
+                return PerformanceResult(lat, energy=0.0)
+            else:
+                raise
 
 
 if __name__ == "__main__":
