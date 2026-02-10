@@ -83,16 +83,23 @@ def get_default_dynamo_version_mapping(
 
 def resolve_backend_version_for_dynamo(
     dynamo_version: str,
-    backend: Optional[str],
+    backend: str | None = None,
     matrix_path: str = DEFAULT_BACKEND_VERSION_MATRIX_PATH,
 ) -> str:
     """
-    Resolve backend template version from a Dynamo version via the matrix file.
+    Given a Dynamo (generator) version, look up the corresponding backend version for a specified backend.
 
-    Args:
-        dynamo_version: Dynamo release string (e.g., "v0.8.1").
-        backend: Backend name (e.g., "trtllm", "vllm", "sglang").
-        matrix_path: Optional backend version matrix YAML file.
+    Parameters:
+        dynamo_version (str): The target Dynamo generator release (e.g., "v0.8.1").
+        backend (str | None): Name of the backend to look up ("trtllm", "vllm", "sglang", or "any").
+        matrix_path (str): Path to the backend version matrix YAML file.
+
+    Returns:
+        str | dict: The backend version(str) for the given backend, or a dict of versions if backend is "any" or None.
+
+    Raises:
+        ValueError: If the dynamo_version is missing or not present in the matrix.
+        TypeError: If the loaded matrix or entry is invalid, or if no mapping exists for the given backend.
     """
     version_key = str(dynamo_version).strip()
     if not version_key:
@@ -102,7 +109,12 @@ def resolve_backend_version_for_dynamo(
     if not isinstance(entry, dict):
         supported = ", ".join(sorted(matrix.keys()))
         raise TypeError(f"Unsupported dynamo_version '{version_key}'. Supported versions: {supported or 'none'}.")
+
     backend_key = normalize_backend(backend, DEFAULT_BACKEND)
+    # return all backend versions for "any" backend
+    if not backend or backend_key == "any":
+        return entry
+
     backend_version = entry.get(backend_key)
     if backend_version is None:
         supported_backends = ", ".join(sorted(entry.keys()))

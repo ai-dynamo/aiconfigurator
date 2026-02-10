@@ -14,7 +14,6 @@ from prettytable import PrettyTable
 
 from aiconfigurator.generator.api import (
     generate_backend_artifacts,
-    get_default_dynamo_version_mapping,
     load_generator_overrides_from_args,
     resolve_backend_version_for_dynamo,
 )
@@ -543,27 +542,31 @@ def save_results(
                 pareto_df.to_csv(os.path.join(exp_dir, "pareto.csv"), index=False)
 
             # 3. Save the config for this experiment
-            exp_task_config = task_configs[exp_name]
-            dynamo_version = (generator_overrides or {}).get("generator_dynamo_version")
-            
-            # there could be multiple backends in the same experiment if backend == "any" as the result is merged
-            if backend == "any":
+            if backend != "any":
+                exp_task_config = task_configs[exp_name]
+                backend_version_str = exp_task_config.backend_version
+            else:
+                # There could be multiple backends in the same experiment if backend == "any" as the result is merged
                 actual_backend_versions = {
-                    task_config.backend_name: task_config.backend_version
-                    for task_config in task_configs.values()
+                    task_config.backend_name: task_config.backend_version for task_config in task_configs.values()
                 }
                 backend_version_str = ", ".join(
-                    f"({backend_name}){backend_version}" for backend_name, backend_version in actual_backend_versions.items()
+                    f"({backend_name}){backend_version}"
+                    for backend_name, backend_version in actual_backend_versions.items()
                 )
-            else:
-                backend_version_str = exp_task_config.backend_version
+                exp_task_configs = {
+                    f"{exp_name}_{backend_name}": task_configs[f"{exp_name}_{backend_name}"]
+                    for backend_name in actual_backend_versions
+                }
+                # generated backend versions for each backend, empty unless --generator_dynamo_version is provided
+                generated_backend_versions = {}
 
-            # case #1: --generated_config_version is provided            
+            # case #1: --generated_config_version is provided
             if generated_backend_version:
                 effective_generated_version = generated_backend_version
                 logger.warning(
                     "\n" + "=" * 80 + "\n"
-                    "  ⚠️  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
+                    "  🟢  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
                     "  Experiment: %s\n"
                     "  Using generated_config_version: %s\n"
                     "\n"
@@ -574,13 +577,14 @@ def save_results(
                 )
             # case #2: --generator_dynamo_version is provided, generating config matching the dynamo version,
             # but the data used for prediction may not match dynamo version due to imperfect coverage.
-            elif dynamo_version:
+            elif dynamo_version := (generator_overrides or {}).get("generator_dynamo_version"):
                 if backend != "any":
                     try:
                         effective_generated_version = resolve_backend_version_for_dynamo(
                             dynamo_version,
                             exp_task_config.backend_name,
                         )
+                        backend_version_str = f"({exp_task_config.backend_name}){effective_generated_version}"
                     except ValueError as exc:
                         logger.exception(
                             "Failed to resolve backend version for generator_dynamo_version=%s.",
@@ -588,26 +592,30 @@ def save_results(
                         )
                         raise SystemExit(2) from exc
                 else:
-                    effective_generated_versions = get_
+                    generated_backend_versions = resolve_backend_version_for_dynamo(dynamo_version)
+                    backend_version_str = ", ".join(
+                        f"({backend_name}){backend_version}"
+                        for backend_name, backend_version in generated_backend_versions.items()
+                    )
                 logger.warning(
                     "\n" + "=" * 80 + "\n"
-                    "  ⚠️  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
+                    "  🟢  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
                     "  Experiment: %s\n"
                     "  Using generator_dynamo_version: %s\n"
-                    "  Resolved backend version: %s\n"
+                    "  Generated backend version: %s\n"
                     "\n"
                     "  Config formats differ across backend releases. Ensure the Dynamo version\n"
                     "  matches your deployment target!\n" + "=" * 80,
                     exp_name,
                     dynamo_version,
-                    effective_generated_version,
+                    backend_version_str,
                 )
             # case #3: no override is provided, use the backend version used by the experiment
             else:
                 effective_generated_version = exp_task_config.backend_version
                 logger.warning(
                     "\n" + "=" * 80 + "\n"
-                    "  ⚠️  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
+                    "  🟢  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
                     "  Experiment: %s\n"
                     "  --generated_config_version NOT provided\n"
                     "  Defaulting to backend_version: %s\n"
@@ -618,8 +626,14 @@ def save_results(
                     backend_version_str,
                 )
 
-            with open(os.path.join(exp_dir, "config.yaml"), "w") as f:  # for future aic repro
-                yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
+            # Save the experiment config for future aic repro
+            if backend != "any":
+                with open(os.path.join(exp_dir, "exp_config.yaml"), "w") as f:
+                    yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
+            else:
+                for exp_task_config in exp_task_configs.values():
+                    with open(os.path.join(exp_dir, f"{exp_task_config.backend_name}_exp_config.yaml"), "w") as f:
+                        yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
 
             # 4. Save the generated config for this experiment, sub-directory for each best config
             if best_config_df is not None:
@@ -629,7 +643,9 @@ def save_results(
                         row_backend = result_df["backend"]
                         row_task_config_key = f"{exp_name}_{row_backend}"
                         row_task_config = task_configs[row_task_config_key]
-                        row_backend_version = generated_backend_version or row_task_config.backend_version
+                        row_backend_version = generated_backend_versions.get(
+                            row_backend, row_task_config.backend_version
+                        )
                     else:
                         row_task_config = exp_task_config
                         row_backend_version = effective_generated_version
