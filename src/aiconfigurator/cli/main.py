@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 
 def _build_common_cli_parser() -> argparse.ArgumentParser:
     common_parser = argparse.ArgumentParser(add_help=False)
-    common_parser.add_argument("--save_dir", type=str, default=None, help="Directory to save the results.")
+    common_parser.add_argument("--save-dir", type=str, default=None, help="Directory to save the results.")
     common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     common_parser.add_argument(
-        "--top_n",
+        "--top-n",
         type=int,
         default=5,
         help="Number of top configurations to output for each experiment (in exp mode) "
@@ -87,13 +87,13 @@ def _validate_model_path(model_path: str) -> str:
 
 def _add_default_mode_arguments(parser):
     parser.add_argument(
-        "--model_path",
+        "--model-path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
         "local path to directory containing config.json.",
     )
-    parser.add_argument("--total_gpus", type=int, required=True, help="Total GPUs for deployment.")
+    parser.add_argument("--total-gpus", type=int, required=True, help="Total GPUs for deployment.")
     parser.add_argument(
         "--system",
         type=str,
@@ -101,7 +101,7 @@ def _add_default_mode_arguments(parser):
         help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200_sxm,a100_sxm,l40s.",
     )
     parser.add_argument(
-        "--decode_system",
+        "--decode-system",
         type=str,
         default=None,
         help="System name for disagg decode workers. Defaults to --system if omitted.",
@@ -114,13 +114,13 @@ def _add_default_mode_arguments(parser):
         help="Backend name. Use 'auto' to sweep across all backends (trtllm, vllm, sglang) and compare results.",
     )
     parser.add_argument(
-        "--backend_version",
+        "--backend-version",
         type=str,
         default=None,
         help="Backend database version. Default is latest",
     )
     parser.add_argument(
-        "--database_mode",
+        "--database-mode",
         choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
         type=str,
         default=common.DatabaseMode.SILICON.name,
@@ -133,7 +133,7 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms.")
     parser.add_argument("--tpot", type=float, default=30.0, help="Time per output token in ms.")
     parser.add_argument(
-        "--request_latency",
+        "--request-latency",
         type=float,
         default=None,
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
@@ -143,7 +143,7 @@ def _add_default_mode_arguments(parser):
 
 def _add_experiments_mode_arguments(parser):
     parser.add_argument(
-        "--yaml_path",
+        "--yaml-path",
         type=str,
         required=True,
         help="Path to a YAML file containing experiment definitions.",
@@ -153,14 +153,14 @@ def _add_experiments_mode_arguments(parser):
 def _add_generate_mode_arguments(parser):
     """Add arguments for the generate mode (naive config generation)."""
     parser.add_argument(
-        "--model_path",
+        "--model-path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
         "local path to directory containing config.json.",
     )
     parser.add_argument(
-        "--total_gpus",
+        "--total-gpus",
         type=int,
         required=True,
         help="Total GPUs for deployment.",
@@ -183,7 +183,7 @@ def _add_generate_mode_arguments(parser):
 def _add_support_mode_arguments(parser):
     """Add arguments for the support mode (support matrix check)."""
     parser.add_argument(
-        "--model_path",
+        "--model-path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
@@ -203,7 +203,7 @@ def _add_support_mode_arguments(parser):
         help="Backend name to filter by. Defaults to 'trtllm'.",
     )
     parser.add_argument(
-        "--backend_version",
+        "--backend-version",
         type=str,
         default=None,
         help="Optional backend version to filter by.",
@@ -319,7 +319,7 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
         logger.error("Available versions: %s", ", ".join(versions))
     else:
         logger.error("Available versions: none")
-    logger.error("Fix: remove --backend_version to use the latest, or provide one of the available versions.")
+    logger.error("Fix: remove --backend-version to use the latest, or provide one of the available versions.")
     raise SystemExit(1)
 
 
@@ -777,7 +777,7 @@ def main(args):
     perf_database.set_systems_paths(args.systems_paths)
 
     logger.info(f"Loading Dynamo AIConfigurator version: {__version__}")
-    logger.info(f"Number of top configurations to output: {args.top_n} (change with --top_n)")
+    logger.info(f"Number of top configurations to output: {args.top_n} (change with --top-n)")
 
     # Handle generate mode separately (no sweeping)
     if args.mode == "generate":
