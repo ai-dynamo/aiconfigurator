@@ -520,28 +520,81 @@ def test_sglang_moe_configs():
     assert decode_cfg2.moe_ep_list == [1], f"Expected [1], got {decode_cfg2.moe_ep_list}"
 
     # Test 3: trtllm + MoE + wideep (should use previous logic)
-    task_trtllm_wideep = TaskConfig(
-        serving_mode="disagg",
+    # task_trtllm_wideep = TaskConfig(
+    #     serving_mode="disagg",
+    #     model_path="deepseek-ai/DeepSeek-V3",
+    #     system_name="h200_sxm",
+    #     backend_name="trtllm",
+    #     enable_wideep=True,
+    #     total_gpus=64,
+    # )
+
+    # prefill_cfg3 = task_trtllm_wideep.config.prefill_worker_config
+    # decode_cfg3 = task_trtllm_wideep.config.decode_worker_config
+
+    # # Verify trtllm uses previous wideep logic
+    # assert prefill_cfg3.num_gpu_per_worker == [1, 2, 4, 8, 16, 32], (
+    #     f"Expected [1, 2, 4, 8, 16, 32], got {prefill_cfg3.num_gpu_per_worker}"
+    # )
+    # assert prefill_cfg3.moe_ep_list == [1, 2, 4, 8, 16, 32], (
+    #     f"Expected [1, 2, 4, 8, 16, 32], got {prefill_cfg3.moe_ep_list}"
+    # )
+    # assert decode_cfg3.num_gpu_per_worker == [1, 2, 4, 8, 16, 32, 64], (
+    #     f"Expected [1, 2, 4, 8, 16, 32, 64], got {decode_cfg3.num_gpu_per_worker}"
+    # )
+    # assert decode_cfg3.moe_ep_list == [1, 2, 4, 8, 16, 32, 64], (
+    #     f"Expected [1, 2, 4, 8, 16, 32, 64], got {decode_cfg3.moe_ep_list}"
+    # )
+
+
+@pytest.mark.unit
+def test_trtllm_moe_configs():
+    """Test trtllm MoE WideEP configurations on gb200_sxm."""
+    # Test 1: trtllm + MoE + wideep + agg on gb200
+    task_agg = TaskConfig(
+        serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
+        system_name="gb200_sxm",
         backend_name="trtllm",
         enable_wideep=True,
         total_gpus=64,
     )
 
-    prefill_cfg3 = task_trtllm_wideep.config.prefill_worker_config
-    decode_cfg3 = task_trtllm_wideep.config.decode_worker_config
+    agg_cfg = task_agg.config.worker_config
 
-    # Verify trtllm uses previous wideep logic
-    assert prefill_cfg3.num_gpu_per_worker == [1, 2, 4, 8, 16, 32], (
-        f"Expected [1, 2, 4, 8, 16, 32], got {prefill_cfg3.num_gpu_per_worker}"
+    # WideEP on gb200: dp > 1, moe_ep > 1
+    assert agg_cfg.num_gpu_per_worker == [2, 4, 8, 16, 32, 64], (
+        f"Expected [2, 4, 8, 16, 32, 64], got {agg_cfg.num_gpu_per_worker}"
     )
-    assert prefill_cfg3.moe_ep_list == [1, 2, 4, 8, 16, 32], (
-        f"Expected [1, 2, 4, 8, 16, 32], got {prefill_cfg3.moe_ep_list}"
+    assert agg_cfg.dp_list == [2, 4, 8, 16, 32, 64], f"Expected [2, 4, 8, 16, 32, 64], got {agg_cfg.dp_list}"
+    assert agg_cfg.moe_tp_list == [1], f"Expected [1], got {agg_cfg.moe_tp_list}"
+    assert agg_cfg.moe_ep_list == [2, 4, 8, 16, 32, 64], f"Expected [2, 4, 8, 16, 32, 64], got {agg_cfg.moe_ep_list}"
+
+    # Test 2: trtllm + MoE + wideep + disagg on gb200
+    task_disagg = TaskConfig(
+        serving_mode="disagg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="gb200_sxm",
+        backend_name="trtllm",
+        enable_wideep=True,
+        total_gpus=64,
     )
-    assert decode_cfg3.num_gpu_per_worker == [1, 2, 4, 8, 16, 32, 64], (
-        f"Expected [1, 2, 4, 8, 16, 32, 64], got {decode_cfg3.num_gpu_per_worker}"
+
+    prefill_cfg = task_disagg.config.prefill_worker_config
+    decode_cfg = task_disagg.config.decode_worker_config
+
+    # Verify prefill config
+    assert prefill_cfg.num_gpu_per_worker == [4, 8, 16, 32], (
+        f"Expected [4, 8, 16, 32], got {prefill_cfg.num_gpu_per_worker}"
     )
-    assert decode_cfg3.moe_ep_list == [1, 2, 4, 8, 16, 32, 64], (
-        f"Expected [1, 2, 4, 8, 16, 32, 64], got {decode_cfg3.moe_ep_list}"
+    assert prefill_cfg.dp_list == [4, 8, 16, 32], f"Expected [4, 8, 16, 32], got {prefill_cfg.dp_list}"
+    assert prefill_cfg.moe_tp_list == [1], f"Expected [1], got {prefill_cfg.moe_tp_list}"
+    assert prefill_cfg.moe_ep_list == [4, 8, 16, 32], f"Expected [4, 8, 16, 32], got {prefill_cfg.moe_ep_list}"
+
+    # Verify decode config
+    assert decode_cfg.num_gpu_per_worker == [4, 8, 16, 32, 64], (
+        f"Expected [4, 8, 16, 32, 64], got {decode_cfg.num_gpu_per_worker}"
     )
+    assert decode_cfg.dp_list == [4, 8, 16, 32, 64], f"Expected [4, 8, 16, 32, 64], got {decode_cfg.dp_list}"
+    assert decode_cfg.moe_tp_list == [1], f"Expected [1], got {decode_cfg.moe_tp_list}"
+    assert decode_cfg.moe_ep_list == [4, 8, 16, 32, 64], f"Expected [4, 8, 16, 32, 64], got {decode_cfg.moe_ep_list}"
