@@ -5,7 +5,7 @@
 * @ai-dynamo/contributors-aiconfigurator
 
 # aic sdk
-/src @tianhaox @jasonqinzhou @Arsene12358 @simone-chen
+/src @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
 /src/aiconfigurator/sdk/backends/base_backend.py @tianhaox @jasonqinzhou @Arsene12358
 /src/aiconfigurator/sdk/backends/factory.py @tianhaox @jasonqinzhou @Arsene12358
 /src/aiconfigurator/sdk/backends/sglang_backend.py @xutizhou @AichenF @jasonqinzhou @tianhaox @Arsene12358
