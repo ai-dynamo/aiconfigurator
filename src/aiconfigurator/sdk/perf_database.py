@@ -1072,6 +1072,82 @@ def load_mla_bmm_data(mla_bmm_file):
     return mla_bmm_data
 
 
+def load_mamba2_data(mamba2_file: str):
+    """
+    Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.txt.
+
+    CSV columns: framework, version, device, op_name, kernel_source, phase,
+    batch_size, seq_len, num_tokens, d_model, d_state, d_conv, nheads, head_dim,
+    n_groups, chunk_size, model_name, latency (optional: power).
+    All rows must have the same columns (context and generation both include
+    seq_len and num_tokens so columns align).
+
+    Returns:
+        dict: data[kernel_source][phase][model_key] where model_key is
+              (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size).
+              For phase "context" the leaf is [batch_size][seq_len] -> {latency, power, energy}.
+              For phase "generation" the leaf is [batch_size] -> {latency, power, energy}.
+              Returns None if file does not exist.
+    """
+    if not os.path.exists(mamba2_file):
+        logger.warning(f"Mamba2 data file {mamba2_file} not found.")
+        return None
+
+    # data[kernel_source][phase][model_key] -> nested batch_size [seq_len] -> {latency, power, energy}
+    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+
+    with open(mamba2_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug(f"Legacy database format detected in {mamba2_file} - power will default to 0.0")
+
+    for row in rows:
+        kernel_source = row["kernel_source"]
+        phase = row["phase"]
+        batch_size = int(row["batch_size"])
+        seq_len = int(row["seq_len"])
+        d_model = int(row["d_model"])
+        d_state = int(row["d_state"])
+        d_conv = int(row["d_conv"])
+        nheads = int(row["nheads"])
+        head_dim = int(row["head_dim"])
+        n_groups = int(row["n_groups"])
+        chunk_size = int(row["chunk_size"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0))
+        energy = power * latency
+
+        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
+        entry = {"latency": latency, "power": power, "energy": energy}
+
+        try:
+            if phase == "context":
+                data[kernel_source][phase][model_key][batch_size][seq_len]
+                logger.debug(
+                    f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}"
+                )
+            else:
+                data[kernel_source][phase][model_key][batch_size]
+                logger.debug(f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size}")
+        except KeyError:
+            if phase == "context":
+                data[kernel_source][phase][model_key][batch_size][seq_len] = entry
+            else:
+                data[kernel_source][phase][model_key][batch_size] = entry
+
+    # Convert default dicts to regular dicts for predictable behavior; keep generation as 1D
+    result = {}
+    for ks, by_phase in data.items():
+        result[ks] = {}
+        for ph, by_key in by_phase.items():
+            result[ks][ph] = dict(by_key)
+
+    return result
+
+
 def load_wideep_context_moe_data(wideep_context_moe_file):
     """
     Load the SGLang wideep context MoE data from wideep_context_moe_perf.txt
@@ -1630,6 +1706,7 @@ class PerfDatabase:
             )
             self._nccl_data = load_nccl_data(nccl_data_dir)
             self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
+            self._mamba2_data = load_mamba2_data(os.path.join(data_dir, common.PerfDataFilename.mamba2.value))
             self._compute_scale_data = load_compute_scale_data(
                 os.path.join(data_dir, common.PerfDataFilename.compute_scale.value)
             )
@@ -4468,6 +4545,119 @@ class PerfDatabase:
         else:
             # hybrid and silicon modes have same logic
             return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
+
+    def query_mamba2(
+        self,
+        phase: str,
+        kernel_source: str,
+        batch_size: int,
+        seq_len: int | None,
+        d_model: int,
+        d_state: int,
+        d_conv: int,
+        nheads: int,
+        head_dim: int,
+        n_groups: int,
+        chunk_size: int,
+    ) -> PerformanceResult:
+        """
+        Query Mamba2 kernel (Conv1D or SSM) latency and energy.
+
+        Args:
+            phase: "context" or "generation"
+            kernel_source: "causal_conv1d_fn", "mamba_chunk_scan_combined",
+                           "causal_conv1d_update", or "selective_state_update"
+            batch_size: batch size
+            seq_len: sequence length (context only; use 0 or any for generation)
+            d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size: model config
+
+        Returns:
+            PerformanceResult with latency (ms) and energy (W·ms).
+            Uses SOL-based fallback when mamba2_perf data is not loaded.
+        """
+        mamba2_data = getattr(self, "_mamba2_data", None)
+
+        def _sol_fallback() -> PerformanceResult:
+            # SOL estimate for this kernel only (conv1d or ssm)
+            d_inner = nheads * head_dim
+            conv_dim = d_inner + 2 * n_groups * d_state
+            x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
+            if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
+                conv_read_bytes = x * conv_dim * (d_conv + 1) * 2
+                conv_write_bytes = x * conv_dim * 2
+                return self.query_mem_op(conv_read_bytes + conv_write_bytes)
+            else:
+                ssm_read_bytes = x * (d_inner + n_groups * d_state * 2 + nheads) * 2
+                ssm_write_bytes = x * d_inner * 2
+                return self.query_mem_op(ssm_read_bytes + ssm_write_bytes)
+
+        if mamba2_data is None:
+            return _sol_fallback()
+
+        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
+        try:
+            by_phase = mamba2_data[kernel_source]
+        except KeyError:
+            return _sol_fallback()
+        try:
+            by_key = by_phase[phase]
+        except KeyError:
+            return _sol_fallback()
+        if model_key not in by_key:
+            # Nearest config by d_model
+            keys_with_d_model = [k for k in by_key if k[0] == d_model]
+            if keys_with_d_model:
+                model_key = keys_with_d_model[0]
+            else:
+                return _sol_fallback()
+
+        table = by_key[model_key]
+
+        if phase == "context":
+            if seq_len is None or seq_len <= 0:
+                return _sol_fallback()
+            try:
+                result = self._interp_2d_linear(batch_size, seq_len, table)
+            except (KeyError, ValueError):
+                return _sol_fallback()
+            return PerformanceResult(
+                latency=result["latency"],
+                energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
+            )
+        else:
+            try:
+                batch_left, batch_right = self._nearest_1d_point_helper(
+                    batch_size, list(table.keys()), inner_only=False
+                )
+            except (KeyError, ValueError):
+                return _sol_fallback()
+
+            # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
+            def _mamba2_gen_entry(val):
+                if isinstance(val, dict) and "latency" in val:
+                    return val
+                if isinstance(val, dict) and val:
+                    inner = next(iter(val.values()))
+                    if isinstance(inner, dict) and "latency" in inner:
+                        return inner
+                return None
+
+            y_left = _mamba2_gen_entry(table[batch_left])
+            y_right = _mamba2_gen_entry(table[batch_right])
+            if y_left is None or y_right is None:
+                return _sol_fallback()
+            result = self._interp_1d(
+                [batch_left, batch_right],
+                [y_left, y_right],
+                batch_size,
+            )
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", result.get("power", 0.0) * lat)
+            else:
+                lat = result
+                energy = 0.0
+            return PerformanceResult(lat, energy=energy)
 
     @functools.lru_cache(maxsize=32768)
     def query_p2p(

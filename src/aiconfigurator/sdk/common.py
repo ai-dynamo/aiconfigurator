@@ -523,6 +523,7 @@ class PerfDataFilename(Enum):
     wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
     compute_scale = "computescale_perf.txt"
     scale_matrix = "scale_matrix_perf.txt"
+    mamba2 = "mamba2_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
