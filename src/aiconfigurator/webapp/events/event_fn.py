@@ -697,6 +697,12 @@ class EventFn:
                 # For SGLang non-wideep disaggregated serving
                 # See: https://github.com/ai-dynamo/dynamo/issues/5870
                 require_same_tp = prefill_backend_name == "sglang" and not enable_wideep
+                if require_same_tp:
+                    logger.warning(
+                        "SGLang non-wideep disaggregated serving requires the same TP size "
+                        "for prefill and decode workers. Configurations with different TP "
+                        "sizes will be filtered out. "
+                    )
 
                 results_df = pareto_analysis.disagg_pareto(
                     model_path=model_path,

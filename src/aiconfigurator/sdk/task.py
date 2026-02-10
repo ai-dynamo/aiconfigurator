@@ -1290,10 +1290,10 @@ class TaskRunner:
         require_same_tp = backend_name == "sglang" and not enable_wideep
 
         if require_same_tp:
-            logger.info(
-                "Task %s: Enforcing same TP size for prefill and decode workers "
-                "(SGLang non-wideep disaggregated serving)",
-                task_config.task_name,
+            logger.warning(
+                "SGLang non-wideep disaggregated serving requires the same TP size "
+                "for prefill and decode workers. Configurations with different TP "
+                "sizes will be filtered out. "
             )
 
         logger.info("Task %s: Running disagg pareto", task_config.task_name)
