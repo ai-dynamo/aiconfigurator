@@ -94,9 +94,9 @@ def collect_config_paths(root_dir: Path) -> list[tuple[str, Path, str]]:
     if missing:
         raise ValueError(f"Missing expected config under {root_dir}: {', '.join(missing)}.")
     return [
-        ("agg", agg_path, "VLLMWorker"),
-        ("prefill", disagg_path, "VLLMPrefillWorker"),
-        ("decode", disagg_path, "VLLMDecodeWorker"),
+        ("agg", agg_path, "VllmDecodeWorker"),
+        ("prefill", disagg_path, "VllmPrefillWorker"),
+        ("decode", disagg_path, "VllmDecodeWorker"),
     ]
 
 
