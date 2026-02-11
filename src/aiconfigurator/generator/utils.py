@@ -90,7 +90,7 @@ def resolve_backend_version_for_dynamo(
     Given a Dynamo (generator) version, look up the corresponding backend version for a specified backend.
 
     Parameters:
-        dynamo_version (str): The target Dynamo generator release (e.g., "v0.8.1").
+        dynamo_version (str): The target Dynamo generator release (e.g., "0.8.1").
         backend (str | None): Name of the backend to look up ("trtllm", "vllm", "sglang", or "auto").
         matrix_path (str): Path to the backend version matrix YAML file.
 
@@ -102,6 +102,8 @@ def resolve_backend_version_for_dynamo(
         TypeError: If the loaded matrix or entry is invalid, or if no mapping exists for the given backend.
     """
     version_key = str(dynamo_version).strip()
+    if version_key.lower().startswith("v") and len(version_key) > 1 and version_key[1].isdigit():
+        version_key = version_key[1:]
     if not version_key:
         raise ValueError("dynamo_version must be a non-empty string.")
     matrix = load_backend_version_matrix(matrix_path)

@@ -20,6 +20,7 @@ from jinja2 import Environment, FileSystemLoader, Undefined
 from .rule_engine import apply_rule_plugins
 
 _JINJA_ENV = Environment(trim_blocks=True, lstrip_blocks=True)
+_JINJA_ENV.filters.setdefault("multiply", lambda value, factor: value * factor)
 _TEMPLATE_ENV_CACHE: dict[str, Environment] = {}
 logger = logging.getLogger(__name__)
 _YAML_CACHE: dict[str, Any] = {}
@@ -57,7 +58,11 @@ def render_backend_templates(
     # Set up Jinja2 environment with FileSystemLoader
     env = _TEMPLATE_ENV_CACHE.get(templates_dir)
     if env is None:
-        env = Environment(loader=FileSystemLoader(templates_dir), trim_blocks=True, lstrip_blocks=True)
+        benchmark_dir = str(_TEMPLATE_ROOT / "benchmark")
+        search_paths = [templates_dir]
+        if os.path.isdir(benchmark_dir):
+            search_paths.append(benchmark_dir)
+        env = Environment(loader=FileSystemLoader(search_paths), trim_blocks=True, lstrip_blocks=True)
         _TEMPLATE_ENV_CACHE[templates_dir] = env
 
     param_values = apply_rule_plugins(dict(param_values), backend)
@@ -253,7 +258,7 @@ def render_backend_templates(
     context["decode_gpu"] = decode_gpu
     context["agg_gpu"] = agg_gpu
 
-    # Render auxiliary templates (k8s deploy and run script)
+    # Render auxiliary templates (k8s deploy, benchmark, and run script)
     # k8s deploy: single file
     k8s_aux = template_path / "k8s_deploy.yaml.j2"
     if k8s_aux.exists():
@@ -263,6 +268,27 @@ def render_backend_templates(
             rendered_templates["k8s_deploy.yaml"] = rendered
         except Exception as e:
             logger.warning(f"Failed to render template k8s_deploy.yaml.j2: {e}")
+
+    # benchmark job: single file from shared benchmark template folder
+    bench_dir = _TEMPLATE_ROOT / "benchmark"
+    bench_aux = bench_dir / "k8s_bench.yaml.j2"
+    if bench_aux.exists():
+        try:
+            tmpl = env.get_template("k8s_bench.yaml.j2")
+            rendered = tmpl.render(**context)
+            rendered_templates["k8s_bench.yaml"] = rendered
+        except Exception as e:
+            logger.warning(f"Failed to render template k8s_bench.yaml.j2: {e}")
+
+    # benchmark run script: single file from shared benchmark template folder
+    bench_run_aux = bench_dir / "bench_run.sh.j2"
+    if bench_run_aux.exists():
+        try:
+            tmpl = env.get_template("bench_run.sh.j2")
+            rendered = tmpl.render(**context)
+            rendered_templates["bench_run.sh"] = rendered
+        except Exception as e:
+            logger.warning(f"Failed to render template bench_run.sh.j2: {e}")
 
     # run scripts: generate per-node scripts when disagg; single when agg
     run_aux = template_path / "run.sh.j2"
@@ -485,6 +511,14 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     node_config = param_values.get("NodeConfig", {})
     if isinstance(node_config, dict):
         context["NodeConfig"] = dict(node_config)
+
+    # SLA + benchmark configuration (used by k8s_bench.yaml)
+    sla_config = param_values.get("SlaConfig", {})
+    if isinstance(sla_config, dict):
+        context["SlaConfig"] = dict(sla_config)
+    bench_config = param_values.get("BenchConfig", {}) or {}
+    if isinstance(bench_config, dict):
+        context["BenchConfig"] = dict(bench_config)
 
     # Load backend_config_mapping.yaml to understand parameter mappings
     mapping_data = load_yaml_mapping(_BACKEND_MAPPING_FILE)
