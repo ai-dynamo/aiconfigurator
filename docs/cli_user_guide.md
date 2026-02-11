@@ -9,19 +9,19 @@ For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP
 This mode generates a working configuration without running the full parameter sweep. It's useful when you want a quick deployment config without SLA optimization.
 
 ```bash
-aiconfigurator cli generate --model_path Qwen/Qwen3-32B-FP8 --total_gpus 8 --system h200_sxm
+aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm
 ```
 
 The `generate` mode calculates the smallest tensor parallel (TP) size that fits the model in memory using the formula: `TP * VRAM_per_GPU > 1.5 * model_weight_size`. This ensures the model fits with room for KV cache and activations.
 
 **Required arguments:**
-- `--model_path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
-- `--total_gpus`: Total GPUs for deployment
+- `--model-path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
+- `--total-gpus`: Total GPUs for deployment
 - `--system`: System name (`h200_sxm`, `gb200_sxm`, `b200_sxm`)
 
 **Optional arguments:**
 - `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
-- `--save_dir`: Directory to save generated artifacts
+- `--save-dir`: Directory to save generated artifacts
 - `--systems-paths`: Override system YAML/data search paths (comma-separated; `default` maps to the built-in systems path). First match wins for identical system/backend/version.
 
 **Example output:**
@@ -60,16 +60,16 @@ print(result["parallelism"])  # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8
 This mode allows you to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
 
 ```bash
-aiconfigurator cli support --model_path Qwen/Qwen3-32B-FP8 --system h200_sxm
+aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
 
 **Required arguments:**
-- `--model_path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
+- `--model-path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
 - `--system`: System name (`h200_sxm`, `gb200_sxm`, `b200_sxm`, `h100_sxm`, `a100_sxm`, `l40s`)
 
 **Optional arguments:**
 - `--backend`: Filter by specific backend (`trtllm`, `vllm`, `sglang`). Defaults to `trtllm`.
-- `--backend_version`: Filter by a specific backend version. Defaults to the latest version found in the support matrix for the given model/architecture/system/backend combination.
+- `--backend-version`: Filter by a specific backend version. Defaults to the latest version found in the support matrix for the given model/architecture/system/backend combination.
 - `--systems-paths`: Override system YAML/data search paths (comma-separated; `default` maps to the built-in systems path). First match wins for identical system/backend/version.
 
 **Example output:**
@@ -102,9 +102,9 @@ print(f"Agg: {agg_supported}, Disagg: {disagg_supported}")
 ### Default mode
 This mode is triggered by
 ```bash
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm
+aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm
 or
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0
+aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0
 ```
 `model_path`, `total_gpus`, `system` are three required arguments to define the problem.  
 If you want to specify your problem with more details, we allow to define `ttft`, `tpot`, `isl`, `osl` and `prefix`.
@@ -115,13 +115,13 @@ You can specify which inference backend to use with the `--backend` flag:
 
 ```bash
 # Use TensorRT-LLM (default)
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --backend trtllm
+aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --backend trtllm
 
 # Use vLLM (dense models only, currently being evaluated)
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --backend vllm
+aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --backend vllm
 
 # Use SGLang (dense and MoE models, currently being evaluated)
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --backend sglang
+aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --backend sglang
 ```
 
 The command will create two experiments for the given problem, one is `agg` and another one is `disagg`. Compare them to find the better one and estimates the perf gain.
@@ -132,8 +132,8 @@ You can override where system YAMLs and performance data are loaded from using `
 
 ```bash
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B \
-  --total_gpus 32 \
+  --model-path Qwen/Qwen3-32B \
+  --total-gpus 32 \
   --system h200_sxm \
   --systems-paths "default,/opt/aic/systems,/data/aic/systems"
 ```
@@ -145,7 +145,7 @@ aiconfigurator cli default \
 The command will print out the result to your terminal with the basic info of the comparison, the pareto curve (the best point is tagged as `x`), 
 the worker setup for your reference. Let's split them into sections.
 
-Let's run `aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0`
+Let's run `aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0`
 > Note that the result might differ based on different versions of your aiconfigurator.
 1. Basic info of the comparison
 ```
@@ -254,7 +254,7 @@ Each replica has a system of 4 prefill workers and 1 decode workers. Each prefil
 `bs` is required to be set in framework as it limits the largest batch_size of the worker which is crucial to control the TPOT of the deployment.  
 `concurrency` = `concurrency * replicas` Use it to benchmark your deployment on total GPUs. If you only want to benchmark 1 replica, divide it by `replicas`
 
-As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save_dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. Here's a stucture of the output folder,
+As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. Here's a stucture of the output folder,
 ```text
 results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
@@ -284,12 +284,18 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_90449
 ```
 By default, we output top 5 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. `agg_config.yaml` and `node_0_run.sh` are the files you need to deploy with Dynamo. If you want to deploy using k8s, you can leverage `k8s_deploy.yaml`. Refer to [deployment guide](dynamo_deployment_guide.md) for info about deployment.
 
-`--save_dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated_config_version 1.0.0rc6` can give you the right result.
+`--save-dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated-config-version 1.0.0rc6` can give you the right result.
 
 **Generator Dynamo version**
+<<<<<<< HEAD
 - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
 - If `--generator-dynamo-version` is not provided, the default is the latest database version for the backend.
 - If `--generated_config_version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the first entry in `--generator-dynamo-version`.
+=======
+- Use `--generator-dynamo-version v0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
+- If `--generator-dynamo-version` is not provided, the default is the first entry in `generator/config/backend_version_matrix.yaml`.
+- If `--generated-config-version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the first entry in `backend_version_matrix.yaml`.
+>>>>>>> origin/main
 
 Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/DynConfig/WorkerConfig/Workers.<role> sections, or add inline overrides via `--generator-set KEY=VALUE`. Examples:
 
@@ -317,10 +323,10 @@ You can filter the backend-mapping output to a specific backend using `--generat
 - `aiconfigurator cli default --generator-help backend --generator-help-backend sglang`: Shows only sglang-specific parameter mappings
 - `aiconfigurator cli default --generator-help backend --generator-help-backend trtllm`: Shows only trtllm-specific parameter mappings
 
-The command exits after printing the help information, so you do not need to provide the required `default` mode arguments (like `--model_path`, `--backend`, etc.) when using this flag.
+The command exits after printing the help information, so you do not need to provide the required `default` mode arguments (like `--model-path`, `--backend`, etc.) when using this flag.
 
 #### Request latency constraint
-`--request_latency <ms>` gives you a single end-to-end SLA on TTFT + TPOT × (OSL − 1). When the flag is set, `default` mode automatically enumerates TTFT/TPOT pairs that satisfy that budget (respecting any explicit `--ttft`, if provided) and only keeps configurations whose estimated request latency stays within the bound. Because the CLI derives TPOT from the request latency target, any `--tpot` argument is ignored in this mode.
+`--request-latency <ms>` gives you a single end-to-end SLA on TTFT + TPOT × (OSL − 1). When the flag is set, `default` mode automatically enumerates TTFT/TPOT pairs that satisfy that budget (respecting any explicit `--ttft`, if provided) and only keeps configurations whose estimated request latency stays within the bound. Because the CLI derives TPOT from the request latency target, any `--tpot` argument is ignored in this mode.
 
 - The detailed tables printed for both agg and disagg add a `request_latency` column, and the global Pareto plot flips to “request latency vs tokens/s/gpu” whenever every experiment is operating under this constraint.
 - You can still set `--ttft` to reserve more headroom for prefill. Leaving it unset lets the enumerator try multiple TTFT splits automatically.
@@ -328,11 +334,11 @@ The command exits after printing the help information, so you do not need to pro
 Example: search for 16x H200 configs that meet a 12s end-to-end budget while capping TTFT at 4s.
 ```bash
 aiconfigurator cli default \
-  --model_path Qwen/Qwen3-32B-FP8 \
-  --total_gpus 16 \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --total-gpus 16 \
   --system h200_sxm \
   --backend trtllm \
-  --request_latency 12000 \
+  --request-latency 12000 \
   --isl 4000 \
   --osl 500 \
   --ttft 4000
@@ -420,7 +426,7 @@ disagg Top Configurations: (Sorted by tokens/s/gpu)
 
 #### Database Mode
 
-The `--database_mode` argument controls how performance is estimated:
+The `--database-mode` argument controls how performance is estimated:
 
 | Mode | Description |
 |------|-------------|
@@ -431,7 +437,7 @@ The `--database_mode` argument controls how performance is estimated:
 
 Example using hybrid mode:
 ```bash
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --database_mode HYBRID
+aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --database-mode HYBRID
 ```
 
 For exp mode, you can specify `database_mode` in your YAML file:
@@ -471,7 +477,7 @@ See `src/aiconfigurator/cli/exps/database_mode_comparison.yaml` for an example c
 ### Exp mode
 If you want to customize your experiment apart from simple command which only compares disagg and agg of a same model, you can use `exp` mode. The command is,
 ```bash
-aiconfigurator cli exp --yaml_path example.yaml
+aiconfigurator cli exp --yaml-path example.yaml
 ```
 An example yaml file looks like this, the template is [here](../src/aiconfigurator/cli/example.yaml)  
 Let's split the yaml file into several sections.  
@@ -655,4 +661,4 @@ In this example, we use a pre-defined profile to overwrite quantization of Qwen/
 
 You can refer to [src/aiconfigurator/cli/exps](../src/aiconfigurator/cli/exps) to find more reference yaml files.
 
-Use `exp` mode for flexible experiments, `default` mode for convenient agg vs disagg comparison with SLA optimization, and `generate` mode for quick config generation without sweeping. All modes support generating configs for frameworks automatically by `--save_dir DIR`.
+Use `exp` mode for flexible experiments, `default` mode for convenient agg vs disagg comparison with SLA optimization, and `generate` mode for quick config generation without sweeping. All modes support generating configs for frameworks automatically by `--save-dir DIR`.

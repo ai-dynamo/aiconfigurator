@@ -40,7 +40,7 @@ def cli_support(
     It's a light-weight check, need to verify under the CLI default or exp mode.
 
     This is the programmatic equivalent of:
-        aiconfigurator cli support --model_path ... --system ...
+        aiconfigurator cli support --model-path ... --system ...
 
     Args:
         model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
@@ -138,7 +138,7 @@ def cli_default(
     Run the default CLI mode: compare aggregated vs disaggregated serving.
 
     This is the programmatic equivalent of:
-        aiconfigurator cli default --model_path ... --total_gpus ... --system ...
+        aiconfigurator cli default --model-path ... --total-gpus ... --system ...
 
     Args:
         model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
@@ -248,7 +248,7 @@ def cli_exp(
     Run multiple experiments defined by YAML file or dict config.
 
     This is the programmatic equivalent of:
-        aiconfigurator cli exp --yaml_path experiments.yaml
+        aiconfigurator cli exp --yaml-path experiments.yaml
 
     You must provide either `yaml_path` or `config`, but not both.
 

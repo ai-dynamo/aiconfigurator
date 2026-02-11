@@ -68,7 +68,7 @@ class TestCLIArgumentParsing:
     def test_generate_mode_defaults(self, cli_parser):
         """Test that generate mode has correct defaults."""
         args = cli_parser.parse_args(
-            ["generate", "--model_path", "Qwen/Qwen3-32B", "--total_gpus", "8", "--system", "h200_sxm"]
+            ["generate", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "8", "--system", "h200_sxm"]
         )
         assert args.mode == "generate"
         assert args.model_path == "Qwen/Qwen3-32B"
@@ -77,7 +77,7 @@ class TestCLIArgumentParsing:
     def test_generate_mode_model_path(self, cli_parser):
         """Test that generate mode accepts model_path."""
         args = cli_parser.parse_args(
-            ["generate", "--model_path", "Qwen/Qwen2.5-7B", "--total_gpus", "8", "--system", "h200_sxm"]
+            ["generate", "--model-path", "Qwen/Qwen2.5-7B", "--total-gpus", "8", "--system", "h200_sxm"]
         )
         assert args.model_path == "Qwen/Qwen2.5-7B"
 
@@ -93,7 +93,7 @@ class TestCLIArgumentParsing:
     def test_supported_systems_parse_successfully(self, cli_parser, system_value):
         """System flag should accept supported platforms including b200 and gb200."""
         args = cli_parser.parse_args(
-            ["default", "--model_path", "Qwen/Qwen3-32B", "--total_gpus", "16", "--system", system_value]
+            ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "16", "--system", system_value]
         )
 
         assert args.system == system_value
@@ -101,7 +101,7 @@ class TestCLIArgumentParsing:
     def test_default_values_are_set(self, cli_parser):
         """Test that default values are properly set for optional arguments."""
         args = cli_parser.parse_args(
-            ["default", "--model_path", "Qwen/Qwen3-32B", "--total_gpus", "8", "--system", "h200_sxm"]
+            ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "8", "--system", "h200_sxm"]
         )
 
         assert args.backend == common.BackendName.trtllm.value
@@ -124,9 +124,9 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(
             [
                 "default",
-                "--model_path",
+                "--model-path",
                 "Qwen/Qwen3-32B",
-                "--total_gpus",
+                "--total-gpus",
                 "8",
                 "--system",
                 "h200_sxm",
@@ -141,13 +141,13 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(
             [
                 "default",
-                "--model_path",
+                "--model-path",
                 "Qwen/Qwen3-32B",
-                "--total_gpus",
+                "--total-gpus",
                 "8",
                 "--system",
                 "h200_sxm",
-                "--save_dir",
+                "--save-dir",
                 "/tmp/test",
             ]
         )
@@ -170,13 +170,13 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(
             [
                 "default",
-                "--model_path",
+                "--model-path",
                 "Qwen/Qwen3-32B",
-                "--total_gpus",
+                "--total-gpus",
                 "8",
                 "--system",
                 "h200_sxm",
-                f"--{optional_param}",
+                f"--{optional_param.replace('_', '-')}",
                 value,
             ]
         )
@@ -188,33 +188,33 @@ class TestCLIArgumentParsing:
     def test_decode_system_defaults_to_system(self, cli_parser):
         """Decode system defaults to system when omitted and can be overridden."""
         args = cli_parser.parse_args(
-            ["default", "--model_path", "Qwen/Qwen3-32B", "--total_gpus", "8", "--system", "h200_sxm"]
+            ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "8", "--system", "h200_sxm"]
         )
         assert args.decode_system is None
 
         args_with_decode = cli_parser.parse_args(
             [
                 "default",
-                "--model_path",
+                "--model-path",
                 "Qwen/Qwen3-32B",
-                "--total_gpus",
+                "--total-gpus",
                 "8",
                 "--system",
                 "h200_sxm",
-                "--decode_system",
+                "--decode-system",
                 "gb200_sxm",
             ]
         )
         assert args_with_decode.decode_system == "gb200_sxm"
 
     def test_model_path_accepts_huggingface_id(self, cli_parser):
-        """Test that --model_path accepts a HuggingFace model ID."""
+        """Test that --model-path accepts a HuggingFace model ID."""
         args = cli_parser.parse_args(
             [
                 "default",
-                "--model_path",
+                "--model-path",
                 "Qwen/Qwen2.5-7B",
-                "--total_gpus",
+                "--total-gpus",
                 "8",
                 "--system",
                 "h200_sxm",
@@ -231,13 +231,13 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(
             [
                 "default",
-                "--model_path",
+                "--model-path",
                 "Qwen/Qwen3-32B",
-                "--total_gpus",
+                "--total-gpus",
                 "8",
                 "--system",
                 "h200_sxm",
-                "--database_mode",
+                "--database-mode",
                 database_mode_value,
             ]
         )
@@ -249,13 +249,13 @@ class TestCLIArgumentParsing:
             cli_parser.parse_args(
                 [
                     "default",
-                    "--model_path",
+                    "--model-path",
                     "Qwen/Qwen3-32B",
-                    "--total_gpus",
+                    "--total-gpus",
                     "8",
                     "--system",
                     "h200_sxm",
-                    "--database_mode",
+                    "--database-mode",
                     "INVALID_MODE",
                 ]
             )
