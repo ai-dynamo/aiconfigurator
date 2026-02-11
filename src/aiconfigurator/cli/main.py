@@ -784,7 +784,10 @@ def main(args):
         format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
     )
 
-    perf_database.set_systems_paths(args.systems_paths)
+    try:
+        perf_database.set_systems_paths(args.systems_paths)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     logger.info(f"Loading Dynamo AIConfigurator version: {__version__}")
     logger.info(f"Number of top configurations to output: {args.top_n} (change with --top-n)")
