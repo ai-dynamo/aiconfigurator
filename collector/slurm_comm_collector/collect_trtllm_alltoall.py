@@ -25,7 +25,7 @@ import torch.distributed as dist
 # Add parent directory to path for helper imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helper import log_perf
+from helper import benchmark_with_power, log_perf
 
 
 class TokenDistribution(Enum):
@@ -479,11 +479,25 @@ def benchmark_nvlink_two_sided_alltoall(
     all_rank_num_tokens = [num_tokens] * ep_size
     all_rank_max_num_tokens = max(all_rank_num_tokens)
 
-    # Collect timing results
-    all_prepare_times = []
-    all_dispatch_times = []
-    all_combine_times = []
-    all_combine_low_precision_times = []
+    # ============================================================================
+    # Helper: benchmark using shared CUDA Graph infrastructure from helper.py.
+    # Reuses benchmark_with_power which handles graph capture, fallback to eager
+    # execution, warmup, timing, and optional power monitoring.
+    # ============================================================================
+    def _benchmark_op(func, label):
+        """Benchmark a single operation using shared benchmark_with_power."""
+        with benchmark_with_power(
+            device=device,
+            kernel_func=func,
+            num_warmups=num_warmup,
+            num_runs=num_iterations,
+            allow_graph_fail=True,
+        ) as results:
+            latency = results["latency_ms"]
+            if ep_rank == 0:
+                mode = "CUDA Graph" if results["used_cuda_graph"] else "Eager"
+                print(f"    [{label}] {mode} timing: {latency:.3f} ms")
+        return latency
 
     # ============================================================================
     # Benchmark: alltoall_prepare
@@ -501,21 +515,10 @@ def benchmark_nvlink_two_sided_alltoall(
             top_k,
         )
 
-    # Warmup
-    for _ in range(num_warmup):
-        alltoall_info, _ = prepare_func()
+    prepare_latency = _benchmark_op(prepare_func, "prepare")
+    # Run prepare once more to get valid alltoall_info for dispatch/combine
+    alltoall_info, _ = prepare_func()
     torch.cuda.synchronize()
-
-    # Benchmark prepare
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    for _ in range(num_iterations):
-        torch.cuda.synchronize()
-        start_event.record()
-        alltoall_info, _ = prepare_func()
-        end_event.record()
-        end_event.synchronize()
-        all_prepare_times.append(start_event.elapsed_time(end_event))
 
     # ============================================================================
     # Benchmark: alltoall_dispatch (All-to-All send)
@@ -529,19 +532,10 @@ def benchmark_nvlink_two_sided_alltoall(
             ep_size,
         )
 
-    # Warmup
-    for _ in range(num_warmup):
-        dispatched = dispatch_func()
+    dispatch_latency = _benchmark_op(dispatch_func, "dispatch")
+    # Run dispatch once more to get valid output for combine
+    dispatched = dispatch_func()
     torch.cuda.synchronize()
-
-    # Benchmark dispatch
-    for _ in range(num_iterations):
-        torch.cuda.synchronize()
-        start_event.record()
-        dispatched = dispatch_func()
-        end_event.record()
-        end_event.synchronize()
-        all_dispatch_times.append(start_event.elapsed_time(end_event))
 
     # Get dispatched hidden states for combine benchmark
     recv_hidden_states = dispatched[0]
@@ -565,26 +559,13 @@ def benchmark_nvlink_two_sided_alltoall(
             do_reduce=False,
         )
 
-    # Warmup
-    for _ in range(num_warmup):
-        combine_func()
-    torch.cuda.synchronize()
-
-    # Benchmark combine
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    for _ in range(num_iterations):
-        torch.cuda.synchronize()
-        start_event.record()
-        combine_func()
-        end_event.record()
-        end_event.synchronize()
-        all_combine_times.append(start_event.elapsed_time(end_event))
+    combine_latency = _benchmark_op(combine_func, "combine")
 
     # ============================================================================
     # Benchmark: alltoall_combine_low_precision (do_reduce=False, use_low_precision_combine=True)
     # Only benchmark for NVFP4 dtype as low_precision_combine is most relevant for it
     # ============================================================================
+    combine_low_precision_latency = 0.0
     if moe_dtype == MoEDtype.NVFP4:
 
         def combine_low_precision_func():
@@ -600,40 +581,15 @@ def benchmark_nvlink_two_sided_alltoall(
                 do_reduce=False,
             )
 
-        # Warmup
-        for _ in range(num_warmup):
-            try:
-                combine_low_precision_func()
-            except Exception:
-                # Low precision combine may not be supported
-                pass
-        torch.cuda.synchronize()
-
-        # Benchmark combine with low precision
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        for _ in range(num_iterations):
+        try:
+            # Test if low precision combine is supported
+            combine_low_precision_func()
             torch.cuda.synchronize()
-            start_event.record()
-            try:
-                combine_low_precision_func()
-                end_event.record()
-                end_event.synchronize()
-                all_combine_low_precision_times.append(start_event.elapsed_time(end_event))
-            except Exception:
-                # Low precision combine may fail for certain configurations
-                end_event.record()
-                end_event.synchronize()
-
-    # Calculate average latencies
-    prepare_latency = sum(all_prepare_times) / len(all_prepare_times) if all_prepare_times else 0.0
-    dispatch_latency = sum(all_dispatch_times) / len(all_dispatch_times) if all_dispatch_times else 0.0
-    combine_latency = sum(all_combine_times) / len(all_combine_times) if all_combine_times else 0.0
-    combine_low_precision_latency = (
-        sum(all_combine_low_precision_times) / len(all_combine_low_precision_times)
-        if all_combine_low_precision_times
-        else 0.0
-    )
+            combine_low_precision_latency = _benchmark_op(
+                combine_low_precision_func, "combine_lp"
+            )
+        except Exception:
+            combine_low_precision_latency = 0.0
 
     return AlltoallBenchmarkResult(
         prepare_latency_ms=prepare_latency,
@@ -739,14 +695,14 @@ def run_benchmark(
 
     # Run benchmarks
     for idx, test_case in enumerate(test_cases):
+        if rank == 0:
+            print(f"[{idx + 1}/{len(test_cases)}] {test_case.description}")
+
+        # Synchronize before benchmark
+        if world_size > 1:
+            dist.barrier()
+
         try:
-            if rank == 0:
-                print(f"[{idx + 1}/{len(test_cases)}] {test_case.description}")
-
-            # Synchronize before benchmark
-            if world_size > 1:
-                dist.barrier()
-
             result = benchmark_nvlink_two_sided_alltoall(
                 test_case,
                 mapping,
@@ -818,7 +774,6 @@ def run_benchmark(
         except Exception as e:
             if rank == 0:
                 print(f"  ERROR: {e}")
-            continue
 
     if rank == 0:
         print(f"\n{'=' * 70}")
