@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
 import glob
+import inspect
 import json
 import os
+import random
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import SimpleNamespace
-import inspect
-import gc
-import random
 
 import tensorrt_llm
 import torch
@@ -36,7 +36,7 @@ from collector.helper import (
 )
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
-AIC_RESTART_WORKER = int(os.getenv("AIC_RESTART_WORKER", "0"))  # noqa: SIM112
+AIC_RESTART_WORKER = int(os.getenv("AIC_RESTART_WORKER", "0"))
 
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
 
@@ -45,6 +45,7 @@ def gc_collect():
     for _ in range(2):
         gc.collect()
         torch.cuda.empty_cache()
+
 
 def _process_json_file(file_path):
     """Process a single JSON file, returning (deleted, message) tuple."""
@@ -507,6 +508,7 @@ def run_moe_torch(
     # This forces OS to reclaim all GPU memory, CUDA context, and other resources
     if AIC_RESTART_WORKER:
         sys.exit(EXIT_CODE_RESTART)
+
 
 if __name__ == "__main__":
     test_cases = get_moe_test_cases()
