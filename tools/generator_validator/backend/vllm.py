@@ -71,7 +71,7 @@ def _extract_vllm_cli_args(
 ) -> Optional[list[str]]:
     try:
         services = payload.get("spec", {}).get("services", {})
-        worker = services.get(service_key or "VLLMWorker", {})
+        worker = services.get(service_key or "VllmDecodeWorker", {})
         container = worker.get("extraPodSpec", {}).get("mainContainer", {})
         args = container.get("args")
     except AttributeError:
@@ -79,7 +79,7 @@ def _extract_vllm_cli_args(
     if not args:
         return None
     if not isinstance(args, list):
-        raise TypeError("VLLMWorker.extraPodSpec.mainContainer.args must be a list.")
+        raise TypeError("VllmDecodeWorker.extraPodSpec.mainContainer.args must be a list.")
     return [str(item) for item in args]
 
 
