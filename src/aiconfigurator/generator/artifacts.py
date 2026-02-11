@@ -64,14 +64,40 @@ class ArtifactWriter:
 
         # Reformat file to remove unnecessary newlines from j2 rendering
         suffix = self._get_file_suffix(artifact_name or path)
-        if suffix in ("yaml", "yml"):
+        if suffix in ("yaml", "yml") and not self._should_skip_yaml_reformat(artifact_name):
             self._reformat_yaml(path)
         elif suffix == "json":
             self._reformat_json(path)
 
+        if self._is_k8s_yaml(artifact_name):
+            self._cleanup_k8s_yaml(path)
+
         if path.endswith(".sh"):
             current_mode = os.stat(path).st_mode
             os.chmod(path, current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    @staticmethod
+    def _should_skip_yaml_reformat(artifact_name: str | None) -> bool:
+        if not artifact_name:
+            return False
+        return artifact_name in {"k8s_deploy.yaml", "k8s_bench.yaml"}
+
+    @staticmethod
+    def _is_k8s_yaml(artifact_name: str | None) -> bool:
+        return artifact_name in {"k8s_deploy.yaml", "k8s_bench.yaml"}
+
+    @staticmethod
+    def _cleanup_k8s_yaml(path: str) -> None:
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+            # Drop only fully empty lines to avoid touching literal block content.
+            cleaned = [line for line in lines if line not in {"\n", "\r\n"}]
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(cleaned)
+        except Exception:
+            # If cleanup fails, leave the file as-is
+            pass
 
     @staticmethod
     def _get_file_suffix(name_or_path: str) -> str:
