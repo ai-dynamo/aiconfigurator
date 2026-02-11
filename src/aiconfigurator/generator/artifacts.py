@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from dataclasses import dataclass
+
+import yaml
 
 
 @dataclass
@@ -20,7 +23,7 @@ class ArtifactWriter:
             destination = self._destination_for(artifact_name)
             if destination is None:
                 continue
-            self._emit_file(destination, content)
+            self._emit_file(destination, content, artifact_name)
 
     def _destination_for(self, artifact_name: str) -> str | None:
         if artifact_name.startswith("cli_args_"):
@@ -56,10 +59,76 @@ class ArtifactWriter:
             return "decode_config.yaml"
         return artifact_name
 
-    def _emit_file(self, path: str, content: str) -> None:
+    def _emit_file(self, path: str, content: str, artifact_name: str | None = None) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
+
+        # Reformat file to remove unnecessary newlines from j2 rendering
+        suffix = self._get_file_suffix(artifact_name or path)
+        if suffix in ("yaml", "yml") and not self._should_skip_yaml_reformat(artifact_name):
+            self._reformat_yaml(path)
+        elif suffix == "json":
+            self._reformat_json(path)
+
+        if self._is_k8s_yaml(artifact_name):
+            self._cleanup_k8s_yaml(path)
+
         if path.endswith(".sh"):
             current_mode = os.stat(path).st_mode
             os.chmod(path, current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    @staticmethod
+    def _should_skip_yaml_reformat(artifact_name: str | None) -> bool:
+        if not artifact_name:
+            return False
+        return artifact_name in {"k8s_deploy.yaml", "k8s_bench.yaml"}
+
+    @staticmethod
+    def _is_k8s_yaml(artifact_name: str | None) -> bool:
+        return artifact_name in {"k8s_deploy.yaml", "k8s_bench.yaml"}
+
+    @staticmethod
+    def _cleanup_k8s_yaml(path: str) -> None:
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+            # Drop only fully empty lines to avoid touching literal block content.
+            cleaned = [line for line in lines if line not in {"\n", "\r\n"}]
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(cleaned)
+        except Exception:
+            # If cleanup fails, leave the file as-is
+            pass
+
+    @staticmethod
+    def _get_file_suffix(name_or_path: str) -> str:
+        """Extract file suffix from artifact name or path."""
+        if "." not in name_or_path:
+            return ""
+        return name_or_path.rsplit(".", 1)[1].lower()
+
+    @staticmethod
+    def _reformat_yaml(path: str) -> None:
+        """Load and reformat YAML file to remove unnecessary newlines."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if data is not None:
+                with open(path, "w", encoding="utf-8") as f:
+                    yaml.dump(data, f, sort_keys=False, default_flow_style=False, width=4096)
+        except Exception:
+            # If parsing fails, leave the file as-is
+            pass
+
+    @staticmethod
+    def _reformat_json(path: str) -> None:
+        """Load and reformat JSON file to remove unnecessary newlines."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            # If parsing fails, leave the file as-is
+            pass
