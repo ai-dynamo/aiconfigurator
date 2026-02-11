@@ -663,7 +663,7 @@ def balanced_logits(num_tokens, num_experts, topk):
     stride = math.ceil(num_experts / topk)
 
     token_indices = torch.arange(num_tokens).unsqueeze(1)  # [num_tokens, 1]
-    topk_indices = torch.arange(topk).unsqueeze(0)         # [1, topk]
+    topk_indices = torch.arange(topk).unsqueeze(0)  # [1, topk]
 
     if num_tokens >= stride:
         h_selected_experts = (token_indices + topk_indices * stride) % num_experts
