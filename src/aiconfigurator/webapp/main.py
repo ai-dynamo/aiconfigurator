@@ -47,7 +47,6 @@ def main(args):
     """
     from aiconfigurator.sdk import perf_database
 
-    perf_database.set_systems_paths(args.systems_paths)
     app_config = {
         "enable_agg": args.enable_agg,
         "enable_disagg_pd_ratio": args.enable_disagg_pd_ratio,
@@ -68,6 +67,14 @@ def main(args):
             format="%(levelname)s %(asctime)s] %(message)s",
             datefmt="%m-%d %H:%M:%S",
         )
+
+    try:
+        perf_database.set_systems_paths(args.systems_paths)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if not perf_database.get_all_databases():
+        raise SystemExit(perf_database.build_no_databases_message())
 
     with gr.Blocks(
         title="Dynamo aiconfigurator for Disaggregated Serving Deployment",

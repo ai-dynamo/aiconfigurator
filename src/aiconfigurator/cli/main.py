@@ -313,6 +313,9 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
     if backend_version in versions:
         return
 
+    systems_paths = perf_database.get_systems_paths()
+    systems_paths_display = ", ".join(systems_paths) if systems_paths else "<none>"
+
     logger.error(
         "No perf database for system=%s backend=%s version=%s.",
         system_name,
@@ -322,11 +325,23 @@ def _ensure_backend_version_available(system_name: str, backend_name: str, backe
     data_path = _get_backend_data_path(system_name, backend_name, backend_version)
     if data_path:
         logger.error("Searched: %s", data_path)
+    logger.error("Configured systems paths: %s", systems_paths_display)
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
+        logger.error(
+            "Fix: switch --backend-version to one of the available versions, or remove --backend-version to use latest."
+        )
     else:
         logger.error("Available versions: none")
-    logger.error("Fix: remove --backend_version to use the latest, or provide one of the available versions.")
+        logger.error(
+            "Fix: no database was found for system=%s backend=%s in current --systems-paths.",
+            system_name,
+            backend_name,
+        )
+        logger.error(
+            "Try adding a path that contains this database via --systems-paths. "
+            'Example: --systems-paths "default,/path/to/extra/systems".'
+        )
     raise SystemExit(1)
 
 
@@ -778,7 +793,10 @@ def main(args):
         format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
     )
 
-    perf_database.set_systems_paths(args.systems_paths)
+    try:
+        perf_database.set_systems_paths(args.systems_paths)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     logger.info(f"Loading Dynamo AIConfigurator version: {__version__}")
     logger.info(f"Number of top configurations to output: {args.top_n} (change with --top_n)")

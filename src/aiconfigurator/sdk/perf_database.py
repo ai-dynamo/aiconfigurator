@@ -50,11 +50,39 @@ def set_systems_paths(raw_paths: str | Iterable[str] | None) -> None:
     Override the system search paths for the current process.
     """
     global _SYSTEMS_PATHS
-    _SYSTEMS_PATHS = _normalize_systems_paths(raw_paths)
+    resolved_paths = _normalize_systems_paths(raw_paths)
+    invalid_paths = [path for path in resolved_paths if not os.path.isdir(path)]
+    if invalid_paths:
+        raise ValueError(
+            "Invalid --systems-paths: each entry must be an existing directory. "
+            f"Invalid entries: {', '.join(invalid_paths)}"
+        )
+    _SYSTEMS_PATHS = resolved_paths
 
 
 def get_systems_paths() -> list[str]:
     return list(_SYSTEMS_PATHS)
+
+
+def build_no_databases_message() -> str:
+    """Build a concise error message for systems path/db validation failures."""
+    resolved_paths = get_systems_paths()
+    resolved_display = ", ".join(resolved_paths) if resolved_paths else "<none>"
+    default_path = os.fspath(pkg_resources.files("aiconfigurator") / "systems")
+    has_default = default_path in resolved_paths
+
+    lines = [
+        "No loadable performance databases found under --systems-paths.",
+        f"Configured systems paths: {resolved_display}",
+    ]
+    if has_default:
+        lines.append(
+            "Built-in `default` systems path is already included, and no databases "
+            "could be loaded from either default or extra paths."
+        )
+    else:
+        lines.append("Tip: try adding `default` to --systems-paths and run again.")
+    return "\n".join(lines)
 
 
 class PerfDataNotAvailableError(RuntimeError):
