@@ -219,13 +219,8 @@ def _add_support_mode_arguments(parser):
 
 _USAGE_EXAMPLES = """
 Examples:
-<<<<<<< HEAD
 # Sweep across all backends for Dynamo 0.7.1
 aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 \\
-=======
-# Sweep across all backends for Dynamo v0.7.1
-aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 \\
->>>>>>> origin/main
     --backend auto \\
     --top-n 3 \\
     --total-gpus 8 --system h200_sxm \\
