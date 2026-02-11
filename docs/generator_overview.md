@@ -77,17 +77,10 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
     --save-dir ./results
   ```
   Notes:
-<<<<<<< HEAD
   - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
   - If `--generator-dynamo-version` is not provided, the default is the latest database version for the backend.
   - If `--generated_config_version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the first entry in `--generator-dynamo-version`.
 - Webapp: start with `--enable_profiling` when launching the webapp to surface generator-driven configs.
-=======
-  - Use `--generator-dynamo-version v0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
-  - If `--generator-dynamo-version` is not provided, the default is the first entry in `generator/config/backend_version_matrix.yaml`.
-  - If `--generated-config-version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the first entry in `backend_version_matrix.yaml`.
-- Webapp: start with `--enable-profiling` when launching the webapp to surface generator-driven configs.
->>>>>>> origin/main
 - Standalone:
   - In code:
     ```python
