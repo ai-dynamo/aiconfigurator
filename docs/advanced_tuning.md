@@ -2,7 +2,7 @@
 In aiconfigurator, the inference framework and serving modeling is relatively complicated compared with the most simplified CLI entrypoint.  
 For example, behind the command,
 ```bash
-  aiconfigurator cli default --model_path Qwen/Qwen3-32B --total_gpus 512 --system h200_sxm
+  aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 512 --system h200_sxm
 ```
 We hide a lot of default settings of the execution. Such as the quantization of each component, the matrix multiply, attention, moe, etc. We  
 also hide the parallel config for how we search possible combinations.  
@@ -125,6 +125,9 @@ We have two types of setting, quantization and parallelism.
 ### quantization (gemm_quant_mode, etc.)
 We allow users to specify different quant methods for different components even the framework doesn't support it for users to study perf impact. Choose the one you want.
 Options are listed as comment. fp8 stands for fp8 per-tensor quant. fp8 block is for blockwise quant. float16 is bf16.
+
+Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
+Explicit quantization in `profiles` or the YAML `config` overrides those defaults.
 ### parallelism (num_gpus_per_worker, tp_list, etc.)
 This is the most complicated part of the search space definition.  
 First, `num_gpu_per_worker` is trying to define how many gpus in a worker, the searched result will do exact match.

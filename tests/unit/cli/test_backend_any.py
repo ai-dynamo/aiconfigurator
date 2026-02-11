@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Unit tests for --backend any functionality.
+Unit tests for --backend auto functionality.
 """
 
 import pytest
@@ -14,7 +14,7 @@ pytestmark = pytest.mark.unit
 
 
 class TestBackendAny:
-    """Tests for --backend any functionality."""
+    """Tests for --backend auto functionality."""
 
     def test_build_default_task_configs_single_backend(self):
         """Single backend should create 2 task configs (agg, disagg)."""
@@ -32,12 +32,12 @@ class TestBackendAny:
         assert task_configs["disagg"].backend_name == "trtllm"
 
     def test_build_default_task_configs_any_backend(self):
-        """Backend 'any' should create 6 internal task configs but they will be merged later."""
+        """Backend 'auto' should create 6 internal task configs but they will be merged later."""
         task_configs = build_default_task_configs(
             model_path="Qwen/Qwen3-32B",
             total_gpus=8,
             system="h200_sxm",
-            backend="any",
+            backend="auto",
         )
 
         # Should have 6 internal configs: agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang
@@ -64,12 +64,12 @@ class TestBackendAny:
             assert task_configs[f"disagg_{backend_name}"].serving_mode == "disagg"
 
     def test_build_default_task_configs_any_backend_parameters(self):
-        """Backend 'any' should preserve all parameters for each backend config."""
+        """Backend 'auto' should preserve all parameters for each backend config."""
         task_configs = build_default_task_configs(
             model_path="Qwen/Qwen3-32B",
             total_gpus=32,
             system="h200_sxm",
-            backend="any",
+            backend="auto",
             isl=4000,
             osl=1000,
             ttft=2000.0,

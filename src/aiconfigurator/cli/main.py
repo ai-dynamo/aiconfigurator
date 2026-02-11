@@ -88,6 +88,8 @@ def _validate_model_path(model_path: str) -> str:
 def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--model_path",
+        "--model",
+        dest="model_path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
@@ -108,10 +110,10 @@ def _add_default_mode_arguments(parser):
     )
     parser.add_argument(
         "--backend",
-        choices=[backend.value for backend in common.BackendName] + ["any"],
+        choices=[backend.value for backend in common.BackendName] + ["auto"],
         type=str,
         default=common.BackendName.trtllm.value,
-        help="Backend name. Use 'any' to sweep across all backends (trtllm, vllm, sglang) and compare results.",
+        help="Backend name. Use 'auto' to sweep across all backends (trtllm, vllm, sglang) and compare results.",
     )
     parser.add_argument(
         "--backend_version",
@@ -126,7 +128,8 @@ def _add_default_mode_arguments(parser):
         default=common.DatabaseMode.SILICON.name,
         help="Database mode for performance estimation. Options: SILICON (default, uses silicon data), "
         "HYBRID (uses silicon data when available, otherwise SOL+empirical factor), "
-        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only).",
+        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only), "
+        "Please be careful, only SILICON mode's results are reproducible.",
     )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
@@ -154,6 +157,8 @@ def _add_generate_mode_arguments(parser):
     """Add arguments for the generate mode (naive config generation)."""
     parser.add_argument(
         "--model_path",
+        "--model",
+        dest="model_path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
@@ -184,6 +189,8 @@ def _add_support_mode_arguments(parser):
     """Add arguments for the support mode (support matrix check)."""
     parser.add_argument(
         "--model_path",
+        "--model",
+        dest="model_path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
@@ -210,12 +217,40 @@ def _add_support_mode_arguments(parser):
     )
 
 
+_USAGE_EXAMPLES = """
+Examples:
+# Sweep across all backends for Dynamo 0.7.1
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 \\
+    --backend auto \\
+    --top_n 3 \\
+    --total_gpus 8 --system h200_sxm \\
+    --ttft 600 --tpot 50 --isl 4000 --osl 500 \\
+    --generator-dynamo-version 0.7.1 \\
+    --generator-set K8sConfig.k8s_model_cache=model-cache \\
+    --generator-set K8sConfig.k8s_hf_home=/opt/models \\
+    --generator-set K8sConfig.k8s_namespace=ets-dynamo \\
+    --save_dir results
+
+# Sweep for trtllm 1.2.0rc5 but generate config matching trtllm 1.2.0rc6
+aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 \\
+    --backend trtllm \\
+    --backend_version 1.2.0rc5 \\
+    --generated_config_version 1.2.0rc6 \\
+    --save_dir results
+"""
+
+
 def configure_parser(parser):
     common_cli_parser = _build_common_cli_parser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
     default_parser = subparsers.add_parser(
-        "default", parents=[common_cli_parser], help="Run the default agg vs disagg comparison."
+        "default",
+        parents=[common_cli_parser],
+        help="Run the default agg vs disagg comparison.",
+        description="Run the default agg vs disagg comparison.",
+        epilog=_USAGE_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_default_mode_arguments(default_parser)
 
@@ -317,8 +352,8 @@ def build_default_task_configs(
         total_gpus: Total number of GPUs for deployment.
         system: System name (GPU type).
         decode_system: System for disagg decode workers. Defaults to `system`.
-        backend: Backend name ('trtllm', 'sglang', 'vllm', 'any').
-            Use 'any' to sweep across all backends.
+        backend: Backend name ('trtllm', 'sglang', 'vllm', 'auto').
+            Use 'auto' to sweep across all backends.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation.
         isl: Input sequence length.
@@ -329,13 +364,13 @@ def build_default_task_configs(
         prefix: Prefix cache length.
 
     Returns:
-        Dict with TaskConfig objects. When backend='any', returns 6 configs
+        Dict with TaskConfig objects. When backend='auto', returns 6 configs
         (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
         Otherwise returns 2 configs ('agg' and 'disagg').
     """
     decode_system = decode_system or system
-    # Expand "any" backend to all available backends
-    backends_to_sweep = [b.value for b in common.BackendName] if backend == "any" else [backend]
+    # Expand "auto" backend to all available backends
+    backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
 
     if backend_version:
         for backend_name in backends_to_sweep:
@@ -364,7 +399,7 @@ def build_default_task_configs(
         agg_kwargs = dict(common_kwargs)
         agg_kwargs["backend_name"] = backend_name
         agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
-        exp_name = f"agg_{backend_name}" if backend == "any" else "agg"
+        exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
         task_configs[exp_name] = agg_task
 
         # Create disagg task for this backend
@@ -372,7 +407,7 @@ def build_default_task_configs(
         disagg_kwargs["backend_name"] = backend_name
         disagg_kwargs["decode_system_name"] = decode_system
         disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
-        exp_name = f"disagg_{backend_name}" if backend == "any" else "disagg"
+        exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
         task_configs[exp_name] = disagg_task
 
     return task_configs
@@ -394,7 +429,6 @@ _EXPERIMENT_RESERVED_KEYS = {
     "request_latency",
     "enable_wideep",
     "total_gpus",
-    "use_specific_quant_mode",
     "database_mode",
 }
 
@@ -527,8 +561,6 @@ def build_experiment_task_configs(
 
         if "enable_wideep" in exp_config:
             task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
-        if "use_specific_quant_mode" in exp_config:
-            task_kwargs["use_specific_quant_mode"] = exp_config["use_specific_quant_mode"]
         if "database_mode" in exp_config:
             task_kwargs["database_mode"] = exp_config["database_mode"]
 
@@ -706,7 +738,7 @@ def _run_support_mode(args):
     # Resolve architecture for better check
     try:
         model_info = get_model_config_from_model_path(model)
-        architecture = model_info[0]
+        architecture = model_info["architecture"]
     except Exception:
         architecture = None
 
@@ -810,7 +842,11 @@ def main(args):
 if __name__ == "__main__":
     if generator_cli_helper(sys.argv[1:]):
         sys.exit(0)
-    parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for Disaggregated Serving Deployment")
+    parser = argparse.ArgumentParser(
+        description="Dynamo AIConfigurator for Disaggregated Serving Deployment",
+        epilog=_USAGE_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     configure_parser(parser)
     args = parser.parse_args()
     main(args)

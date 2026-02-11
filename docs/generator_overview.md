@@ -66,7 +66,7 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
   aiconfigurator cli default \
     --backend sglang \
     --backend_version 0.5.6.post2 \
-    --model_path Qwen/Qwen3-32B \
+    --model_path Qwen/Qwen3-32B-FP8 \
     --system h200_sxm \
     --total_gpus 8 \
     --isl 5000 --osl 1000 --ttft 2000 --tpot 50 \
@@ -76,6 +76,10 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
     --generator-set K8sConfig.k8s_namespace=ets-dynamo \
     --save_dir ./results
   ```
+  Notes:
+  - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
+  - If `--generator-dynamo-version` is not provided, the default is the latest database version for the backend.
+  - If `--generated_config_version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the first entry in `--generator-dynamo-version`.
 - Webapp: start with `--enable_profiling` when launching the webapp to surface generator-driven configs.
 - Standalone:
   - In code:
@@ -121,7 +125,7 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
     # Sample sample_input.yaml
     
     ServiceConfig:
-      model_path: Qwen/Qwen3-32B
+      model_path: Qwen/Qwen3-32B-FP8
       served_model_name: qwen3-32b
       head_node_ip: 0.0.0.0
       port: 8000

@@ -16,7 +16,7 @@ exps:
 exp_silicon:
   mode: "patch"
   serving_mode: "agg"
-  model_path: "Qwen/Qwen3-32B"
+  model_path: "Qwen/Qwen3-32B-FP8"
   total_gpus: 8
   system_name: "h200_sxm"
   backend_name: "trtllm"
@@ -30,7 +30,7 @@ exp_silicon:
 exp_hybrid:
   mode: "patch"
   serving_mode: "agg"
-  model_path: "Qwen/Qwen3-32B"
+  model_path: "Qwen/Qwen3-32B-FP8"
   total_gpus: 8
   system_name: "h200_sxm"
   backend_name: "trtllm"
@@ -44,7 +44,7 @@ exp_hybrid:
 exp_empirical:
   mode: "patch"
   serving_mode: "agg"
-  model_path: "Qwen/Qwen3-32B"
+  model_path: "Qwen/Qwen3-32B-FP8"
   total_gpus: 8
   system_name: "h200_sxm"
   backend_name: "trtllm"
