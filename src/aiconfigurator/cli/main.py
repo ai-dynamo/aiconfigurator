@@ -88,6 +88,8 @@ def _validate_model_path(model_path: str) -> str:
 def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--model_path",
+        "--model",
+        dest="model_path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
@@ -126,7 +128,8 @@ def _add_default_mode_arguments(parser):
         default=common.DatabaseMode.SILICON.name,
         help="Database mode for performance estimation. Options: SILICON (default, uses silicon data), "
         "HYBRID (uses silicon data when available, otherwise SOL+empirical factor), "
-        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only).",
+        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only), "
+        "Please be careful, only SILICON mode's results are reproducible.",
     )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
@@ -154,6 +157,8 @@ def _add_generate_mode_arguments(parser):
     """Add arguments for the generate mode (naive config generation)."""
     parser.add_argument(
         "--model_path",
+        "--model",
+        dest="model_path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
@@ -184,6 +189,8 @@ def _add_support_mode_arguments(parser):
     """Add arguments for the support mode (support matrix check)."""
     parser.add_argument(
         "--model_path",
+        "--model",
+        dest="model_path",
         type=_validate_model_path,
         required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
@@ -422,7 +429,6 @@ _EXPERIMENT_RESERVED_KEYS = {
     "request_latency",
     "enable_wideep",
     "total_gpus",
-    "use_specific_quant_mode",
     "database_mode",
 }
 
@@ -555,8 +561,6 @@ def build_experiment_task_configs(
 
         if "enable_wideep" in exp_config:
             task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
-        if "use_specific_quant_mode" in exp_config:
-            task_kwargs["use_specific_quant_mode"] = exp_config["use_specific_quant_mode"]
         if "database_mode" in exp_config:
             task_kwargs["database_mode"] = exp_config["database_mode"]
 
@@ -734,7 +738,7 @@ def _run_support_mode(args):
     # Resolve architecture for better check
     try:
         model_info = get_model_config_from_model_path(model)
-        architecture = model_info[0]
+        architecture = model_info["architecture"]
     except Exception:
         architecture = None
 
