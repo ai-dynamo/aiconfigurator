@@ -11,7 +11,7 @@ concurrency_array=({{ base_concurrency | join(' ') }})
 for concurrency in "${concurrency_array[@]}"; do
   echo "Run concurrency: $concurrency"
   aiperf profile \
-    -m {{ (BenchConfig.model.split('/')[-1] if BenchConfig.model else '') }} \
+    -m {{ BenchConfig.model }} \
     --endpoint-type {{ BenchConfig.endpoint_type }} \
     -u http://{{ ServiceConfig.head_node_ip }}:{{ ServiceConfig.port }} \
     --tokenizer {{ BenchConfig.tokenizer }} \

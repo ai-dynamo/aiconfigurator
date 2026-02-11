@@ -20,7 +20,7 @@ inputs:
     default: ""
   - key: ServiceConfig.served_model_name
     required: true
-    default: ""
+    default: "ServiceConfig.model_name or ServiceConfig.served_model_path or ServiceConfig.model_path"
   - key: ServiceConfig.model_name
     required: false
     default: "ServiceConfig.served_model_name"

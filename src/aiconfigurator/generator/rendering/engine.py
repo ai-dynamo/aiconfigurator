@@ -520,30 +520,6 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     if isinstance(bench_config, dict):
         context["BenchConfig"] = dict(bench_config)
 
-    def _safe_int(value: Any, default: int) -> int:
-        if value is None or value == "":
-            return default
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return default
-
-    bench_estimated_concurrency = _safe_int(bench_config.get("estimated_concurrency"), 0)
-
-    context["bench_job_name"] = bench_config.get("name")
-    context["bench_image"] = bench_config.get("image")
-    context["bench_profile_start_timeout"] = _safe_int(bench_config.get("profile_start_timeout"), 400)
-    context["bench_model"] = bench_config.get("model")
-    context["bench_tokenizer"] = bench_config.get("tokenizer")
-    context["bench_endpoint_type"] = bench_config.get("endpoint_type")
-    context["bench_endpoint_url"] = bench_config.get("endpoint_url")
-    context["bench_isl"] = _safe_int(bench_config.get("isl"), 0)
-    context["bench_osl"] = _safe_int(bench_config.get("osl"), 0)
-    context["bench_isl_stddev"] = _safe_int(bench_config.get("isl_stddev"), 0)
-    context["bench_osl_stddev"] = _safe_int(bench_config.get("osl_stddev"), 0)
-    context["bench_estimated_concurrency"] = bench_estimated_concurrency
-    context["bench_ui"] = bench_config.get("ui")
-
     # Load backend_config_mapping.yaml to understand parameter mappings
     mapping_data = load_yaml_mapping(_BACKEND_MAPPING_FILE)
 
