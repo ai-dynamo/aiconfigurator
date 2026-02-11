@@ -71,7 +71,7 @@ def _extract_vllm_cli_args(
 ) -> Optional[list[str]]:
     try:
         services = payload.get("spec", {}).get("services", {})
-        worker = services.get(service_key or "VLLMWorker", {})
+        worker = services.get(service_key or "VllmDecodeWorker", {})
         container = worker.get("extraPodSpec", {}).get("mainContainer", {})
         args = container.get("args")
     except AttributeError:
@@ -79,7 +79,7 @@ def _extract_vllm_cli_args(
     if not args:
         return None
     if not isinstance(args, list):
-        raise TypeError("VLLMWorker.extraPodSpec.mainContainer.args must be a list.")
+        raise TypeError("VllmDecodeWorker.extraPodSpec.mainContainer.args must be a list.")
     return [str(item) for item in args]
 
 
@@ -94,9 +94,9 @@ def collect_config_paths(root_dir: Path) -> list[tuple[str, Path, str]]:
     if missing:
         raise ValueError(f"Missing expected config under {root_dir}: {', '.join(missing)}.")
     return [
-        ("agg", agg_path, "VLLMWorker"),
-        ("prefill", disagg_path, "VLLMPrefillWorker"),
-        ("decode", disagg_path, "VLLMDecodeWorker"),
+        ("agg", agg_path, "VllmDecodeWorker"),
+        ("prefill", disagg_path, "VllmPrefillWorker"),
+        ("decode", disagg_path, "VllmDecodeWorker"),
     ]
 
 
