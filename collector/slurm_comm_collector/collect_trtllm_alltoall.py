@@ -132,8 +132,8 @@ def get_default_test_cases(ep_size: int) -> list[AlltoallTestCase]:
 
     for num_tokens in token_counts:
         for hidden_size, num_experts, top_k in model_configs:
-            # Skip if num_experts < ep_size
-            if num_experts < ep_size:
+            # Skip if num_experts < ep_size or not evenly divisible
+            if num_experts < ep_size or num_experts % ep_size != 0:
                 continue
 
             for moe_dtype in DEFAULT_MOE_DTYPES:
@@ -255,29 +255,37 @@ def generate_balanced_expert_ids(
     num_tokens: int,
     num_experts: int,
     top_k: int,
+    ep_size: int,
     device: torch.device,
 ) -> torch.Tensor:
     """
     Generate balanced expert IDs for testing.
 
-    Each token selects top_k experts, distributed evenly across all experts.
+    Each token selects top_k experts distributed across different EP ranks,
+    mimicking realistic routing where a token's selected experts are spread
+    across multiple GPUs rather than concentrated on a single GPU.
 
     Args:
         num_tokens: Number of tokens
         num_experts: Total number of experts
         top_k: Number of experts per token
+        ep_size: Expert Parallelism size (number of GPUs)
         device: Target device
 
     Returns:
         Expert IDs tensor of shape [num_tokens, top_k]
     """
+    experts_per_rank = num_experts // ep_size
     expert_ids = torch.zeros((num_tokens, top_k), dtype=torch.int32, device=device)
 
     for i in range(num_tokens):
-        # Distribute tokens evenly across experts
-        base_expert = (i * top_k) % num_experts
         for k in range(top_k):
-            expert_ids[i, k] = (base_expert + k) % num_experts
+            # Each top_k selection targets a different EP rank (round-robin),
+            # so that one token's data is scattered across multiple NVLink peers
+            target_rank = (i + k) % ep_size
+            # Vary the expert within the target rank to cover all experts evenly
+            expert_offset = (i // ep_size + k) % experts_per_rank
+            expert_ids[i, k] = target_rank * experts_per_rank + expert_offset
 
     return expert_ids
 
@@ -301,6 +309,7 @@ def generate_expert_ids(
             test_case.num_tokens,
             test_case.num_experts,
             test_case.top_k,
+            test_case.ep_size,
             device,
         )
     else:
