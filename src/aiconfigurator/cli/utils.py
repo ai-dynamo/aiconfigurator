@@ -139,7 +139,7 @@ def merge_experiment_results_by_mode(
 ) -> tuple[dict[str, pd.DataFrame], dict[str, float], dict[str, pd.DataFrame], dict[str, str]]:
     """
     Merge results from multiple experiments into Top N agg and disagg.
-    For example, when backend="any", we have 6 experiments: agg_trtllm, agg_vllm, agg_sglang,
+    For example, when backend="auto", we have 6 experiments: agg_trtllm, agg_vllm, agg_sglang,
     disagg_trtllm, disagg_vllm, disagg_sglang. This function merges them into 2:
     agg (with top N from all backends) and disagg (with top N from all backends).
 

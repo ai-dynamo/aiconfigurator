@@ -37,6 +37,7 @@ def cli_support(
     Check if AIC supports the model/hardware combo for (agg, disagg).
     Support is determined by a majority vote of PASS status for the given
     architecture, system, backend, and version in the support matrix.
+    It's a light-weight check, need to verify under the CLI default or exp mode.
 
     This is the programmatic equivalent of:
         aiconfigurator cli support --model-path ... --system ...
@@ -55,7 +56,7 @@ def cli_support(
 
     try:
         model_info = get_model_config_from_model_path(model_path)
-        architecture = model_info[0]
+        architecture = model_info["architecture"]
     except Exception:
         architecture = None
 
@@ -144,8 +145,8 @@ def cli_default(
         total_gpus: Total number of GPUs for deployment.
         system: System name (GPU type), e.g., 'h200_sxm', 'b200_sxm'.
         decode_system: System name for disagg decode workers. Defaults to `system`.
-        backend: Backend name ('trtllm', 'sglang', 'vllm', 'any'). Default is 'trtllm'.
-            Use 'any' to sweep across all three backends and compare results.
+        backend: Backend name ('trtllm', 'sglang', 'vllm', 'auto'). Default is 'trtllm'.
+            Use 'auto' to sweep across all three backends and compare results.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation
             ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
@@ -178,7 +179,7 @@ def cli_default(
         ...     model_path="Qwen/Qwen3-32B",
         ...     total_gpus=8,
         ...     system="h200_sxm",
-        ...     backend="any",
+        ...     backend="auto",
         ...     ttft=2000,
         ...     tpot=30,
         ... )

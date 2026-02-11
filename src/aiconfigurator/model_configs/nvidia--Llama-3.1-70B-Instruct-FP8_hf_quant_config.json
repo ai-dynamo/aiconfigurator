@@ -1,0 +1,13 @@
+{
+  "producer": {
+      "name": "modelopt",
+      "version": "0.23.0"
+  },
+  "quantization": {
+      "quant_algo": "FP8",
+      "kv_cache_quant_algo": "FP8",
+      "exclude_modules": [
+          "lm_head"
+      ]
+  }
+}

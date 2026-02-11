@@ -13,7 +13,7 @@ exps:
 gb200_wideep_agg:
   mode: "patch"
   serving_mode: "agg"
-  model_path: "deepseek-ai/DeepSeek-V3"
+  model_path: "nvidia/DeepSeek-V3.1-NVFP4"
   total_gpus: 512
   system_name: "gb200_sxm"
   enable_wideep: true # enable wide ep for prefill/decode
@@ -61,7 +61,7 @@ gb200_wideep_eplb_slots288_agg:
 gb200_wideep_disagg:
   mode: "patch"
   serving_mode: "disagg"
-  model_path: "deepseek-ai/DeepSeek-V3"
+  model_path: "nvidia/DeepSeek-V3.1-NVFP4"
   total_gpus: 512
   system_name: "gb200_sxm"
   enable_wideep: true # enable wide ep for prefill/decode

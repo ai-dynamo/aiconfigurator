@@ -14,15 +14,10 @@ import pandas as pd
 from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.models import check_is_moe, get_model_family
+from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
-from aiconfigurator.sdk.perf_database import (
-    PerfDatabase,
-    PerfDataNotAvailableError,
-    get_database,
-    get_latest_database_version,
-)
-from aiconfigurator.sdk.utils import enumerate_parallel_config
+from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
+from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +51,6 @@ class TaskContext:
     decode_system_name: str | None
     backend_name: str
     backend_version: str | None
-    use_specific_quant_mode: str | None
     isl: int
     osl: int
     prefix: int
@@ -437,20 +431,8 @@ class TaskConfigFactory:
             ]
             logger.debug("Overwriting num gpu per worker to %s", worker_config.num_gpu_per_worker)
 
-        cls._apply_quant_modes(
-            target_cfg=worker_config,
-            model_path=ctx.model_path,
-            model_family=ctx.model_family,
-            system=worker_config.system_name,
-            backend=worker_config.backend_name,
-            version=worker_config.backend_version,
-            preferred_mode=ctx.use_specific_quant_mode,
-        )
-
     @classmethod
     def _finalize_disagg(cls, config: DefaultMunch, ctx: TaskContext) -> None:
-        prefill_cfg = config.prefill_worker_config
-        decode_cfg = config.decode_worker_config
         replica_cfg = config.replica_config
 
         # if replica_cfg.max_gpu_per_replica is overwritten by patch, extend the num_gpu_per_replica
@@ -467,195 +449,41 @@ class TaskConfigFactory:
             replica_cfg.max_gpu_per_replica = min(ctx.total_gpus, replica_cfg.get("max_gpu_per_replica"))
             logger.debug("Using max gpu per replica %s", replica_cfg.max_gpu_per_replica)
 
-        cls._apply_quant_modes(
-            target_cfg=prefill_cfg,
-            model_path=ctx.model_path,
-            model_family=ctx.model_family,
-            system=prefill_cfg.system_name,
-            backend=prefill_cfg.backend_name,
-            version=prefill_cfg.backend_version,
-            preferred_mode=ctx.use_specific_quant_mode,
-        )
-
-        cls._apply_quant_modes(
-            target_cfg=decode_cfg,
-            model_path=ctx.model_path,
-            model_family=ctx.model_family,
-            system=decode_cfg.system_name,
-            backend=decode_cfg.backend_name,
-            version=decode_cfg.backend_version,
-            preferred_mode=ctx.use_specific_quant_mode,
-        )
-
-    @staticmethod
-    def _apply_quant_modes(
-        target_cfg: DefaultMunch,
-        model_path: str,
-        model_family: str,
-        system: str,
-        backend: str,
-        version: str,
-        preferred_mode: str | None,
-    ) -> None:
-        quant_keys = [
-            "gemm_quant_mode",
-            "moe_quant_mode",
-            "kvcache_quant_mode",
-            "fmha_quant_mode",
-            "comm_quant_mode",
-        ]
-
-        # Check if all quant modes are already set with string values
-        existing = {key: getattr(target_cfg, key, None) for key in quant_keys}
-        if all(value is not None and isinstance(value, str) for value in existing.values()):
-            return
-
-        database = get_database(system=system, backend=backend, version=version)
-        if database is None:
-            raise PerfDataNotAvailableError(
-                f"Missing perf database for system={system} backend={backend} version={version}."
-            )
-        defaults = TaskConfigFactory._get_quant_mode(
-            model_path=model_path,
-            model_family=model_family,
-            backend=backend,
-            database=database,
-            use_specific_quant_mode=preferred_mode,
-        )
-
-        for key, value in zip(quant_keys, defaults, strict=False):
-            current = getattr(target_cfg, key, None)
-            if current is None or not isinstance(current, str):
-                setattr(target_cfg, key, value)
-
-    @staticmethod
-    def _get_quant_mode(
-        model_path: str,
-        model_family: str,
-        backend: str,
-        database: PerfDatabase,
-        use_specific_quant_mode: str | None = None,
-    ) -> tuple[str, str, str, str, str]:
-        gemm_quant_mode = "fp8_block"
-        kvcache_quant_mode = "fp8"
-        fmha_quant_mode = "float16" if model_family == "DEEPSEEK" else "fp8"
-        comm_quant_mode = "half"
-
-        sm_version = database.system_spec["gpu"]["sm_version"]
-        # SM version to GPU type mapping:
-        #   SM 80  = A100
-        #   SM 89  = L40S (Ada Lovelace) - no TMA, limited FP8 support
-        #   SM 90  = H100/H200 (Hopper) - full FP8 and TMA support
-        #   SM 100 = B200/GB200 (Blackwell) - NVFP4 support
-
-        supported = getattr(database, "supported_quant_mode", {}) or {}
-        supported_gemm = set(supported.get("gemm", []) or [])
-        supported_moe = set(supported.get("moe", []) or [])
-        # Note: attention support is more complex (depends on kv_cache_dtype etc),
-        # so we validate/pick those using the underlying perf tables instead.
-
-        def _pick(preferred: list[str], supported_set: set[str], fallback: str) -> str:
-            for m in preferred:
-                if not supported_set or m in supported_set:
-                    return m
-            return fallback
-
-        if backend == "vllm":
-            # TODO: collect fp8_block quant mode data for vllm
-            fp8_gemm_quant = "fp8"
-            fp8_moe_quant = "fp8"
-            fp8_fhma_quant = "float16"
-        else:
-            # fp8_block GEMM requires SM90+ (TMA). On SM89 (e.g., L40S) we use fp8 instead.
-            fp8_gemm_quant = "fp8_block" if sm_version >= 90 else "fp8"
-            # MOE fp8_block uses a different kernel path that works on SM89+.
-            fp8_moe_quant = "fp8_block" if sm_version >= 89 else "fp8"
-            # FP8 attention is effectively SM90+ only; on SM89 prefer float16/bf16.
-            fp8_fhma_quant = "fp8" if sm_version >= 90 else "float16"
-
-        if sm_version >= 100:
-            gemm_quant_mode = _pick(["nvfp4", "fp8_block", "fp8", "float16"], supported_gemm, "nvfp4")
-            moe_quant_mode = _pick(["nvfp4", "fp8_block", "float16"], supported_moe, "nvfp4")
-            kvcache_quant_mode = "fp8"
-            fmha_quant_mode = fp8_fhma_quant
-        elif sm_version >= 89:
-            gemm_quant_mode = _pick([fp8_gemm_quant, "fp8", "float16"], supported_gemm, fp8_gemm_quant)
-            moe_quant_mode = _pick([fp8_moe_quant, "fp8", "float16"], supported_moe, fp8_moe_quant)
-            fmha_quant_mode = fp8_fhma_quant
-            kvcache_quant_mode = "fp8"
-        else:
-            gemm_quant_mode = "float16"
-            moe_quant_mode = "float16"
-            kvcache_quant_mode = "float16"
-            fmha_quant_mode = "float16"
-
-        if model_family == "DEEPSEEK":
-            fmha_quant_mode = "float16"
-
-        if model_family in ["MOE", "LLAMA"] and sm_version < 100 and sm_version >= 89:
-            gemm_quant_mode = fp8_gemm_quant
-            moe_quant_mode = _pick([fp8_moe_quant, "fp8", "float16"], supported_moe, fp8_moe_quant)
-
-        if model_path in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
-            moe_quant_mode = "w4a16_mxfp4"
-
-        if use_specific_quant_mode is not None:
-            if use_specific_quant_mode != "w4afp8":
-                gemm_quant_mode = use_specific_quant_mode
-            moe_quant_mode = use_specific_quant_mode
-
-        # Pick a KV-cache dtype that is actually present in the attention perf tables.
-        # On l40s/sglang, attention tables are often only collected for kv_cache_dtype=float16.
-        available_kv: set[str] = set()
-        try:
-            if getattr(database, "_generation_attention_data", None):
-                available_kv |= {k.name for k in database._generation_attention_data}
-        except Exception:
-            pass
-        try:
-            if getattr(database, "_context_attention_data", None):
-                fmha_enum = common.FMHAQuantMode[fmha_quant_mode]
-                if fmha_enum in database._context_attention_data:
-                    available_kv |= {k.name for k in database._context_attention_data[fmha_enum]}
-        except Exception:
-            pass
-
-        if available_kv and kvcache_quant_mode not in available_kv:
-            kvcache_quant_mode = _pick(
-                [kvcache_quant_mode, "float16", "bf16", "fp8"],
-                available_kv,
-                kvcache_quant_mode,
-            )
-
-        return (
-            gemm_quant_mode,
-            moe_quant_mode,
-            kvcache_quant_mode,
-            fmha_quant_mode,
-            comm_quant_mode,
-        )
-
 
 _quants = {
-    "fp8_default": {
+    "fp8": {
         "gemm_quant_mode": "fp8",
         "moe_quant_mode": "fp8",
         "kvcache_quant_mode": "fp8",
         "fmha_quant_mode": "fp8",
         "comm_quant_mode": "half",
     },
-    "float16_default": {
+    "fp8_static": {
+        "gemm_quant_mode": "fp8_static",
+        "moe_quant_mode": "fp8",
+        "kvcache_quant_mode": "fp8",
+        "fmha_quant_mode": "fp8",
+        "comm_quant_mode": "half",
+    },
+    "float16": {
         "gemm_quant_mode": "float16",
         "moe_quant_mode": "float16",
         "kvcache_quant_mode": "float16",
         "fmha_quant_mode": "float16",
         "comm_quant_mode": "half",
     },
-    "nvfp4_default": {
+    "nvfp4": {
         "gemm_quant_mode": "nvfp4",
         "moe_quant_mode": "nvfp4",
         "kvcache_quant_mode": "fp8",
         "fmha_quant_mode": "fp8",
+        "comm_quant_mode": "half",
+    },
+    "mxfp4": {
+        "gemm_quant_mode": "float16",
+        "moe_quant_mode": "w4a16_mxfp4",
+        "kvcache_quant_mode": "float16",
+        "fmha_quant_mode": "float16",
         "comm_quant_mode": "half",
     },
 }
@@ -701,7 +529,6 @@ class TaskConfig:
         decode_system_name: str | None = None,
         backend_name: str = "trtllm",
         backend_version: str | None = None,
-        use_specific_quant_mode: str | None = None,
         isl: int = 4000,
         osl: int = 1000,
         prefix: int = 0,
@@ -732,7 +559,6 @@ class TaskConfig:
             decode_system_name: The name of the decode system.
             backend_name: The name of the backend.
             backend_version: The version of the backend.
-            use_specific_quant_mode: The specific quant mode to use.
             isl: The input sequence length.
             osl: The output sequence length.
             ttft: The target TTFT.
@@ -749,7 +575,6 @@ class TaskConfig:
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
         self.backend_version = backend_version
-        self.use_specific_quant_mode = use_specific_quant_mode
         yaml_mode = "patch"
         yaml_patch: dict = {}
         effective_profiles: list[str] = list(profiles or [])
@@ -777,7 +602,6 @@ class TaskConfig:
             decode_system_name=decode_system_name,
             backend_name=backend_name,
             backend_version=backend_version,
-            use_specific_quant_mode=use_specific_quant_mode,
             isl=isl,
             osl=osl,
             prefix=prefix,
@@ -800,7 +624,6 @@ class TaskConfig:
         self.system_name = system_name
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
-        self.use_specific_quant_mode = use_specific_quant_mode
         self.enable_wideep = enable_wideep
         self.total_gpus = total_gpus
         self.yaml_mode = yaml_mode
@@ -874,25 +697,18 @@ class TaskConfig:
             raise NotImplementedError("AIConfigurator does not yet support DEEPSEEK models for VLLM backend.")
 
         # fp8_static GEMM mode is currently TRTLLM-only.
-        def _is_trtllm_backend(backend_name: object) -> bool:
-            return str(backend_name).lower() == common.BackendName.trtllm.value
-
-        def _is_fp8_static(mode: object) -> bool:
-            if mode is None:
-                return False
-            name = mode.name if hasattr(mode, "name") else str(mode)
-            return str(name).lower() == common.GEMMQuantMode.fp8_static.name
-
         def _validate_fp8_static(worker_cfg: DefaultMunch, target: str) -> None:
             gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)
-            if not _is_fp8_static(gemm_quant_mode):
+            if gemm_quant_mode is None:
+                return
+            mode_name = gemm_quant_mode.name if hasattr(gemm_quant_mode, "name") else str(gemm_quant_mode)
+            if str(mode_name).lower() != common.GEMMQuantMode.fp8_static.name:
                 return
 
             backend_name = worker_cfg.get("backend_name", None)
-            if not _is_trtllm_backend(backend_name):
+            if str(backend_name).lower() != common.BackendName.trtllm.value:
                 raise ValueError(
-                    f"{target}: gemm_quant_mode='{common.GEMMQuantMode.fp8_static.name}' is currently only supported "
-                    f"for backend '{common.BackendName.trtllm.value}', but got backend='{backend_name}'."
+                    f"fp8_static is currently only supported in trtllm backend. we got backend='{backend_name}'."
                 )
 
         if self.serving_mode == "agg":
@@ -927,6 +743,46 @@ class TaskConfig:
                 return None
             return value.name if hasattr(value, "name") else str(value)
 
+        def _get_cfg_value(cfg: object, key: str) -> object:
+            if isinstance(cfg, Mapping):
+                return cfg.get(key, None)
+            return getattr(cfg, key, None)
+
+        model_info = {}
+        try:
+            model_info = get_model_config_from_model_path(self.model_path) or {}
+        except Exception:
+            model_info = {}
+        model_raw_config = model_info.get("raw_config")
+        model_architecture = model_info.get("architecture")
+
+        def _resolve_model_quant_modes(worker_cfg: object) -> dict[str, str | None]:
+            if model_raw_config is None:
+                return {}
+            model_config = config.ModelConfig(
+                gemm_quant_mode=_get_cfg_value(worker_cfg, "gemm_quant_mode"),
+                moe_quant_mode=_get_cfg_value(worker_cfg, "moe_quant_mode"),
+                kvcache_quant_mode=_get_cfg_value(worker_cfg, "kvcache_quant_mode"),
+                fmha_quant_mode=_get_cfg_value(worker_cfg, "fmha_quant_mode"),
+                comm_quant_mode=_get_cfg_value(worker_cfg, "comm_quant_mode"),
+            )
+            try:
+                _apply_model_quant_defaults(
+                    model_config,
+                    model_raw_config,
+                    model_architecture,
+                    self.backend_name,
+                )
+            except Exception:
+                return {}
+            return {
+                "gemm_quant_mode": _to_name(model_config.gemm_quant_mode),
+                "moe_quant_mode": _to_name(model_config.moe_quant_mode),
+                "kvcache_quant_mode": _to_name(model_config.kvcache_quant_mode),
+                "fmha_quant_mode": _to_name(model_config.fmha_quant_mode),
+                "comm_quant_mode": _to_name(model_config.comm_quant_mode),
+            }
+
         is_deepseek = get_model_family(self.model_path) == "DEEPSEEK"
         enable_wideep = bool(getattr(self.config, "enable_wideep", self.enable_wideep))
         moe_backend = getattr(self.config, "moe_backend", None)
@@ -944,9 +800,11 @@ class TaskConfig:
             generation_attn_key = "generation_attention"
 
         def _validate_worker_config(wc: object, *, validate_context: bool, validate_generation: bool) -> None:
-            _supported_or_raise("gemm", _to_name(getattr(wc, "gemm_quant_mode", None)))
+            model_modes = _resolve_model_quant_modes(wc)
+            gemm_mode = model_modes.get("gemm_quant_mode") or _to_name(_get_cfg_value(wc, "gemm_quant_mode"))
+            _supported_or_raise("gemm", gemm_mode)
 
-            moe_mode = _to_name(getattr(wc, "moe_quant_mode", None))
+            moe_mode = model_modes.get("moe_quant_mode") or _to_name(_get_cfg_value(wc, "moe_quant_mode"))
             if self.backend_name == "sglang" and enable_wideep and moe_backend == "deepep_moe":
                 if validate_context:
                     _supported_or_raise("wideep_context_moe", moe_mode)
@@ -956,10 +814,14 @@ class TaskConfig:
                 _supported_or_raise("moe", moe_mode)
 
             if validate_context:
-                _supported_or_raise(context_attn_key, _to_name(getattr(wc, "fmha_quant_mode", None)))
+                fmha_mode = model_modes.get("fmha_quant_mode") or _to_name(_get_cfg_value(wc, "fmha_quant_mode"))
+                _supported_or_raise(context_attn_key, fmha_mode)
 
             if validate_generation:
-                _supported_or_raise(generation_attn_key, _to_name(getattr(wc, "kvcache_quant_mode", None)))
+                kvcache_mode = model_modes.get("kvcache_quant_mode") or _to_name(
+                    _get_cfg_value(wc, "kvcache_quant_mode")
+                )
+                _supported_or_raise(generation_attn_key, kvcache_mode)
 
         # agg/disagg worker configs use the same field names
         if self.config.serving_mode == "agg":
@@ -1052,17 +914,36 @@ class TaskConfig:
         """Convert string quant mode values to enums, skip if already converted."""
         worker_cfg = _ensure_munch(worker_config)
 
+        # Ensure missing quant mode keys resolve to None instead of DefaultMunch.
+        for key in (
+            "gemm_quant_mode",
+            "moe_quant_mode",
+            "kvcache_quant_mode",
+            "fmha_quant_mode",
+            "comm_quant_mode",
+        ):
+            worker_cfg.setdefault(key, None)
+
         # Only convert if the value is a string
-        if isinstance(worker_cfg.gemm_quant_mode, str):
-            worker_cfg.gemm_quant_mode = common.GEMMQuantMode[worker_cfg.gemm_quant_mode]
-        if isinstance(worker_cfg.moe_quant_mode, str):
-            worker_cfg.moe_quant_mode = common.MoEQuantMode[worker_cfg.moe_quant_mode]
-        if isinstance(worker_cfg.kvcache_quant_mode, str):
-            worker_cfg.kvcache_quant_mode = common.KVCacheQuantMode[worker_cfg.kvcache_quant_mode]
-        if isinstance(worker_cfg.fmha_quant_mode, str):
-            worker_cfg.fmha_quant_mode = common.FMHAQuantMode[worker_cfg.fmha_quant_mode]
-        if isinstance(worker_cfg.comm_quant_mode, str):
-            worker_cfg.comm_quant_mode = common.CommQuantMode[worker_cfg.comm_quant_mode]
+        gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)
+        if isinstance(gemm_quant_mode, str):
+            worker_cfg["gemm_quant_mode"] = common.GEMMQuantMode[gemm_quant_mode]
+
+        moe_quant_mode = worker_cfg.get("moe_quant_mode", None)
+        if isinstance(moe_quant_mode, str):
+            worker_cfg["moe_quant_mode"] = common.MoEQuantMode[moe_quant_mode]
+
+        kvcache_quant_mode = worker_cfg.get("kvcache_quant_mode", None)
+        if isinstance(kvcache_quant_mode, str):
+            worker_cfg["kvcache_quant_mode"] = common.KVCacheQuantMode[kvcache_quant_mode]
+
+        fmha_quant_mode = worker_cfg.get("fmha_quant_mode", None)
+        if isinstance(fmha_quant_mode, str):
+            worker_cfg["fmha_quant_mode"] = common.FMHAQuantMode[fmha_quant_mode]
+
+        comm_quant_mode = worker_cfg.get("comm_quant_mode", None)
+        if isinstance(comm_quant_mode, str):
+            worker_cfg["comm_quant_mode"] = common.CommQuantMode[comm_quant_mode]
 
         worker_config.update(worker_cfg)
 
@@ -1283,6 +1164,19 @@ class TaskRunner:
             )
             return None
 
+        # For SGLang non-wideep disaggregated serving
+        # See: https://github.com/ai-dynamo/dynamo/issues/5870
+        backend_name = str(task_config.prefill_worker_config.backend_name)
+        enable_wideep = bool(getattr(task_config, "enable_wideep", False))
+        require_same_tp = backend_name == "sglang" and not enable_wideep
+
+        if require_same_tp:
+            logger.warning(
+                "SGLang non-wideep disaggregated serving requires the same TP size "
+                "for prefill and decode workers. Configurations with different TP "
+                "sizes will be filtered out. "
+            )
+
         logger.info("Task %s: Running disagg pareto", task_config.task_name)
         result_df = pa.disagg_pareto(
             model_path=task_config.model_path,
@@ -1304,6 +1198,7 @@ class TaskRunner:
             decode_max_num_tokens=task_config.advanced_tuning_config.decode_max_batch_size,
             prefill_latency_correction_scale=task_config.advanced_tuning_config.prefill_latency_correction_scale,
             decode_latency_correction_scale=task_config.advanced_tuning_config.decode_latency_correction_scale,
+            require_same_tp=require_same_tp,
         )
         return {"pareto_df": result_df}
 
@@ -1367,7 +1262,7 @@ if __name__ == "__main__":
         osl=500,
         prefix=0,
         total_gpus=16,
-        profiles=["fp8_default"],
+        profiles=["fp8"],
         yaml_config={
             "mode": "patch",
             "config": {

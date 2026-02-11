@@ -39,7 +39,7 @@ exp_disagg_wideep:
       moe_quant_mode: "fp8_block" 
       kvcache_quant_mode: "fp8" 
       fmha_quant_mode: "fp8_block" # wideep mode tag fmha quant mode as fp8_block as it includes fp8_block qkv
-      comm_quant_mode: "half" 
+      comm_quant_mode: "half"
       num_gpu_per_worker: [8, 16, 32, 64] # num gpus per worker, please refer to enumerate_parallel_config in utils.py
       tp_list: [1]
       pp_list: [1]

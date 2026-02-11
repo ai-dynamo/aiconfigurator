@@ -372,6 +372,7 @@ class DisaggInferenceSession:
         decode_max_num_tokens: int,
         decode_num_worker_list: list[int],
         num_gpu_list: list[int] | None,
+        require_same_tp: bool = False,
     ) -> InferenceSummary | None:
         """
         Run disagg with given constraints
@@ -540,6 +541,7 @@ class DisaggInferenceSession:
             num_gpu_list: list[int] | None,
             rate_matching_prefill_degradation_factor: float,
             rate_matching_decode_degradation_factor: float,
+            require_same_tp: bool = False,
         ) -> InferenceSummary:
             """
             Find the best result under constraints
@@ -601,6 +603,10 @@ class DisaggInferenceSession:
                     decode_throughput = float(decode_worker["seq/s"])
                     decode_gpus = decode_worker["num_total_gpus"]
                     for prefill_worker in prefill_candidates_list:
+                        # For SGLang non-wideep disaggregated serving
+                        # See: https://github.com/ai-dynamo/dynamo/issues/5870
+                        if require_same_tp and prefill_worker["tp"] != decode_worker["tp"]:
+                            continue
                         prefill_throughput = float(prefill_worker["seq/s"])
                         prefill_gpus = prefill_worker["num_total_gpus"]
                         prefill_num_worker, decode_num_worker = _match_workers(
@@ -716,6 +722,7 @@ class DisaggInferenceSession:
                 num_gpu_list=num_gpu_list,
                 rate_matching_prefill_degradation_factor=self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
                 rate_matching_decode_degradation_factor=self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
+                require_same_tp=require_same_tp,
             )
             if filtered_disagg_summary_df is not None:
                 disagg_summary_df = pd.concat(

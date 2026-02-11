@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 import yaml
 
+from ..utils import get_default_dynamo_version_mapping
 from .engine import evaluate_expression
 
 _SCHEMA_CACHE: dict[str, list[dict[str, Any]]] = {}
@@ -64,9 +65,20 @@ def _select_backend_default(entry: dict[str, Any], backend: str) -> Any:
     return entry.get("default")
 
 
-def apply_defaults(group: str, cfg: dict[str, Any], backend: Optional[str] = None) -> dict[str, Any]:
+def apply_defaults(
+    group: str,
+    cfg: dict[str, Any],
+    backend: Optional[str] = None,
+    extra_context: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     inputs = _load_schema_inputs(str(_SCHEMA_FILE))
     eval_ctx = {group: dict(cfg)}
+    if extra_context:
+        eval_ctx.update(extra_context)
+    if group == "K8sConfig" and not eval_ctx.get("generator_dynamo_version"):
+        default_version, _ = get_default_dynamo_version_mapping()
+        if default_version:
+            eval_ctx["generator_dynamo_version"] = default_version
     out = dict(cfg)
     backend_key = _normalize_backend(backend)
     for entry in inputs:

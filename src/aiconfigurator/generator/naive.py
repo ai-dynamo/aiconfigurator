@@ -78,23 +78,12 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
 
     try:
         config = get_model_config_from_model_path(model_path)
-        # config format: [architecture, layers, n_heads, n_kv, head_size, hidden_size,
-        #                 inter_size, vocab, context, topk, num_experts, moe_inter_size, extra]
-        (
-            _architecture,
-            num_layers,
-            _num_heads,
-            _num_kv_heads,
-            _head_size,
-            hidden_size,
-            inter_size,
-            vocab_size,
-            _context,
-            _topk,
-            num_experts,
-            moe_inter_size,
-            _extra,
-        ) = config
+        num_layers = config["layers"]
+        hidden_size = config["hidden_size"]
+        inter_size = config["inter_size"]
+        vocab_size = config["vocab"]
+        num_experts = config["num_experts"]
+        moe_inter_size = config["moe_inter_size"]
 
         # Embedding parameters
         embedding_params = vocab_size * hidden_size
