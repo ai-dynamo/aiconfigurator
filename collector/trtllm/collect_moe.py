@@ -1,9 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
 import glob
+import inspect
 import json
 import os
+import random
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import SimpleNamespace
 
 import tensorrt_llm
@@ -20,36 +25,47 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 # These are substring patterns that will be matched against the full model name
 NON_GATED_MOE_MODELS = ["Nemotron-3"]
 
-try:
-    from common_test_cases import get_common_moe_test_cases
-
-    from helper import (
-        EXIT_CODE_RESTART,
-        balanced_logits,
-        benchmark_with_power,
-        get_sm_version,
-        log_perf,
-        power_law_logits_v3,
-    )
-except ModuleNotFoundError:
-    import os
-    import sys
-
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from common_test_cases import get_common_moe_test_cases
-
-    from helper import (
-        EXIT_CODE_RESTART,
-        balanced_logits,
-        benchmark_with_power,
-        get_sm_version,
-        log_perf,
-        power_law_logits_v3,
-    )
+from collector.common_test_cases import get_common_moe_test_cases
+from collector.helper import (
+    EXIT_CODE_RESTART,
+    balanced_logits,
+    benchmark_with_power,
+    get_sm_version,
+    log_perf,
+    power_law_logits_v3,
+)
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
+AIC_RESTART_WORKER = int(os.getenv("AIC_RESTART_WORKER", "0"))
 
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
+
+
+def gc_collect():
+    for _ in range(2):
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+def _process_json_file(file_path):
+    """Process a single JSON file, returning (deleted, message) tuple."""
+    try:
+        if os.path.getsize(file_path) == 0:
+            os.remove(file_path)
+            return (True, f"Deleted empty file: {file_path}")
+        else:
+            with open(file_path) as f:
+                data = json.load(f)
+                if not data:
+                    os.remove(file_path)
+                    return (True, f"Deleted empty JSON content: {file_path}")
+        return (False, None)
+    except (OSError, json.JSONDecodeError) as e:
+        try:
+            os.remove(file_path)
+            return (True, f"Deleted invalid file: {file_path} (Error: {e})")
+        except OSError:
+            return (False, None)
 
 
 def cleanup_empty_json_files(directory):
@@ -59,26 +75,15 @@ def cleanup_empty_json_files(directory):
     json_files = glob.glob(os.path.join(directory, "*.json"))
     deleted_count = 0
 
-    for file_path in json_files:
-        try:
-            if os.path.getsize(file_path) == 0:
-                os.remove(file_path)
+    # Parallelize io operations
+    with ThreadPoolExecutor() as executor:
+        futures = {executor.submit(_process_json_file, fp): fp for fp in json_files}
+        for future in as_completed(futures):
+            deleted, message = future.result()
+            if deleted:
                 deleted_count += 1
-                print(f"Deleted empty file: {file_path}")
-            else:
-                with open(file_path) as f:
-                    data = json.load(f)
-                    if not data:
-                        os.remove(file_path)
-                        deleted_count += 1
-                        print(f"Deleted empty JSON content: {file_path}")
-        except (OSError, json.JSONDecodeError) as e:
-            try:
-                os.remove(file_path)
-                deleted_count += 1
-                print(f"Deleted invalid file: {file_path} (Error: {e})")
-            except OSError:
-                pass
+            if message:
+                print(message)
 
     if deleted_count > 0:
         print(f"Total deleted {deleted_count} invalid JSON files from {directory}")
@@ -119,6 +124,18 @@ def get_moe_test_cases():
             if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
                 continue
 
+            # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0
+            weight_bits = {
+                "float16": 16,
+                "fp8": 8,
+                "fp8_block": 8,
+                "w4a16_mxfp4": 4,
+                "w4afp8": 4,
+                "nvfp4": 4,
+            }[moe_type]
+            if (inter_s // moe_tp) % (256 // weight_bits) != 0:
+                continue
+
             min_latency_mode_options = [False]
 
             if moe_type == "nvfp4" and get_sm_version() == 100 and common_moe_testcase.num_experts <= 256:
@@ -147,6 +164,11 @@ def get_moe_test_cases():
                     ]
                 )
 
+    # Try to optimize number of autotune cache hits by shuffling test cases.
+    # This makes sure the same cache keys are far apart from each other.
+    random.seed(42)
+    random.shuffle(test_cases)
+
     return test_cases
 
 
@@ -169,6 +191,8 @@ def run_moe_torch(
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
+
+    gc_collect()
 
     if aic_debug == 1:
         print("MOE Allocated GDRAM:", torch.cuda.memory_allocated(device.index) / 1024**2, "MB")
@@ -329,7 +353,7 @@ def run_moe_torch(
             weights[f"{expert_id}.w3.bias"] = w3_bias[expert_id]
         moe.load_weights([weights])
 
-    # dty run
+    # dry run
     torch.cuda.synchronize()
     max_tokens = num_tokens_lists[-1]
     for i in range(len(num_tokens_lists)):
@@ -372,7 +396,13 @@ def run_moe_torch(
                     continue
                 else:
                     try:
-                        with torch.inference_mode(), autotune(cache_path=cache_path, rank=torch.device(device).index):
+                        # Check if autotune() accepts "rank" kwarg.
+                        # It was removed in trtllm 1.2.0rc6.
+                        autotune_kwargs = {"cache_path": cache_path}
+                        if "rank" in inspect.signature(autotune).parameters:
+                            autotune_kwargs["rank"] = torch.device(device).index
+
+                        with torch.inference_mode(), autotune(**autotune_kwargs):
                             moe.forward(
                                 hidden_states_max_tokens[:max_tokens_for_tuning],
                                 logits_max_tokens[:max_tokens_for_tuning],
@@ -386,6 +416,8 @@ def run_moe_torch(
     del hidden_states_max_tokens, logits_max_tokens
 
     for num_tokens in num_tokens_lists:
+        # gc_collect()
+
         if num_tokens > max_tokens:
             continue
         hidden_states = torch.randn([num_tokens, hidden_size]).bfloat16().to(torch.device(device))
@@ -472,21 +504,13 @@ def run_moe_torch(
 
         del hidden_states
 
-        import gc
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    del moe
-    import gc
-
-    for _ in range(5):
-        gc.collect()
-        torch.cuda.empty_cache()
-    AutoTuner.get().clear_cache()
-
     # Exit the worker process after completing MOE task to ensure complete resource cleanup
     # This forces OS to reclaim all GPU memory, CUDA context, and other resources
-    import sys
+    if AIC_RESTART_WORKER:
+        sys.exit(EXIT_CODE_RESTART)
 
-    sys.exit(EXIT_CODE_RESTART)
+
+if __name__ == "__main__":
+    test_cases = get_moe_test_cases()
+    for test_case in test_cases:
+        run_moe_torch(*test_case)

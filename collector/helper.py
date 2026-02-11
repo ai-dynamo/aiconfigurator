@@ -664,16 +664,15 @@ def balanced_logits(num_tokens, num_experts, topk):
     import torch
     import torch.nn.functional as F
 
-    # h_selected_experts = -torch.ones([num_tokens, topk]).to(torch.device(device))
-    h_selected_experts = -torch.ones([num_tokens, topk])
     stride = math.ceil(num_experts / topk)
 
-    for token_i in range(num_tokens):
-        for i in range(topk):
-            if num_tokens >= stride:
-                h_selected_experts[token_i][i] = (token_i + i * stride) % num_experts
-            else:
-                h_selected_experts[token_i][i] = (token_i * stride / num_tokens + i * stride) % num_experts
+    token_indices = torch.arange(num_tokens).unsqueeze(1)  # [num_tokens, 1]
+    topk_indices = torch.arange(topk).unsqueeze(0)  # [1, topk]
+
+    if num_tokens >= stride:
+        h_selected_experts = (token_indices + topk_indices * stride) % num_experts
+    else:
+        h_selected_experts = (token_indices * stride / num_tokens + topk_indices * stride) % num_experts
 
     expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
     router_logits = F.softmax(expert_map.bfloat16(), dim=1)
