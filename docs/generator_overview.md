@@ -65,16 +65,16 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
   ```
   aiconfigurator cli default \
     --backend sglang \
-    --backend_version 0.5.6.post2 \
-    --model_path Qwen/Qwen3-32B-FP8 \
+    --backend-version 0.5.6.post2 \
+    --model-path Qwen/Qwen3-32B-FP8 \
     --system h200_sxm \
-    --total_gpus 8 \
+    --total-gpus 8 \
     --isl 5000 --osl 1000 --ttft 2000 --tpot 50 \
     --generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8 \
     --generator-set ServiceConfig.served_model_name=Qwen/Qwen3-32B-FP8 \
     --generator-set K8sConfig.k8s_engine_mode=inline \
     --generator-set K8sConfig.k8s_namespace=ets-dynamo \
-    --save_dir ./results
+    --save-dir ./results
   ```
   Notes:
   - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.

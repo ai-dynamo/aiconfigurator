@@ -62,26 +62,26 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 ### CLI
 
 ```bash
-aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm
-aiconfigurator cli exp --yaml_path exp.yaml
-aiconfigurator cli generate --model Qwen/Qwen3-32B-FP8 --total_gpus 8 --system h200_sxm
-aiconfigurator cli support --model Qwen/Qwen3-32B-FP8 --system h200_sxm
+aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm
+aiconfigurator cli exp --yaml-path exp.yaml
+aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm
+aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
-- `--model` is an alias for `--model_path` in the CLI.
+- `--model` is an alias for `--model-path` in the CLI.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
-- Use `exp`, pass in exp.yaml by `--yaml_path` to customize your experiments and even a heterogenous one.
-- Use `--save_dir DIR` to generate framework configuration files for Dynamo.
-- Use `--database_mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only). Please be careful, only `SILICON` mode's result is reproducible. Other modes are for research purpose
+- Use `exp`, pass in exp.yaml by `--yaml-path` to customize your experiments and even a heterogenous one.
+- Use `--save-dir DIR` to generate framework configuration files for Dynamo.
+- Use `--database-mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only). Please be careful, only `SILICON` mode's result is reproducible. Other modes are for research purpose
 - Use `--systems-paths` to override where system YAMLs and data are loaded from (comma-separated; `default` maps to the built-in systems path). First match wins for identical system/backend/version.
 - Use `-h` for more options and customization.
 - SLA constraints:
   - `--ttft` and `--tpot` filter configurations that exceed either bound; omit a flag to leave that constraint unset.
-  - `--request_latency` applies an end-to-end per-request limit. The CLI searches for all configurations whose estimated 
+  - `--request-latency` applies an end-to-end per-request limit. The CLI searches for all configurations whose estimated 
   latency stays within that budget, optionally honoring a provided `--ttft`. 
   When this flag is set, `--tpot` becomes implicit and is ignored.
 
@@ -127,7 +127,7 @@ print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 
 An example here, 
 ```bash
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --isl 4000 --osl 500 --prefix 500 --ttft 300 --tpot 10
+aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --isl 4000 --osl 500 --prefix 500 --ttft 300 --tpot 10
 ```
 
 ```text
@@ -212,7 +212,7 @@ These results indicate that deploying Qwen3-32B-FP8 on h200_sxm in FP8 can achie
 Try different ISL:OSL values and SLA limits to fit your use case, for example:
 
 ```bash
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200 --prefix 500
+aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --ttft 200 --tpot 10 --isl 8000 --osl 200 --prefix 500
 ```
 
 You will get different results.
@@ -225,7 +225,7 @@ Built-in YAML files are under `src/aiconfigurator/cli/example.yaml` and `src/aic
 Refer to the YAML file and modify as needed. Pass your customized YAML file to `exp` mode:
 
 ```bash
-aiconfigurator cli exp --yaml_path customized_config.yaml
+aiconfigurator cli exp --yaml-path customized_config.yaml
 ```
 We can use `exp` mode to compare multiple results, including disagg vs. agg, homegenous vs. heterogenous, and more than 2 experiments. 
 We've crafted several examples in `src/aiconfigurator/cli/exps/*.yaml`  
@@ -235,35 +235,35 @@ For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).
 
 Please refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details about deployment and reproduction especially about the benchmark methodology.
 
-To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save_dir`, the tool generates configuration files for deploying with Dynamo.
+To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save-dir`, the tool generates configuration files for deploying with Dynamo.
 This feature bridges the gap between configuration and Dynamo deployment.
 The folder structure looks like this:
 
 ```text
 results/QWEN3_32B_FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
-│   ├── best_config_topn.csv
-│   ├── config.yaml
-│   ├── pareto.csv
-│   ├── top1
-│   │   ├── agg
-│   │   │   ├── agg_config.yaml
-│   │   │   ├── k8s_deploy.yaml
-│   │   │   └── node_0_run.sh 
-│   │   └── generator_config.yaml
-│   ...
+│   ├── best_config_topn.csv
+│   ├── config.yaml
+│   ├── pareto.csv
+│   ├── top1
+│   │   ├── agg
+│   │   │   ├── agg_config.yaml
+│   │   │   ├── k8s_deploy.yaml
+│   │   │   └── node_0_run.sh 
+│   │   └── generator_config.yaml
+│   ...
 ├── disagg
-│   ├── best_config_topn.csv
-│   ├── config.yaml
-│   ├── pareto.csv
-│   ├── top1
-│   │   ├── disagg
-│   │   │   ├── decode_config.yaml
-│   │   │   ├── k8s_deploy.yaml
-│   │   │   ├── node_0_run.sh
-│   │   │   └── prefill_config.yaml
-│   │   └── generator_config.yaml
-│   ...
+│   ├── best_config_topn.csv
+│   ├── config.yaml
+│   ├── pareto.csv
+│   ├── top1
+│   │   ├── disagg
+│   │   │   ├── decode_config.yaml
+│   │   │   ├── k8s_deploy.yaml
+│   │   │   ├── node_0_run.sh
+│   │   │   └── prefill_config.yaml
+│   │   └── generator_config.yaml
+│   ...
 └── pareto_frontier.png
 ```
 
@@ -382,7 +382,7 @@ For a comprehensive breakdown of which model/system/backend/version combinations
 
 You can also check if a system / framework version is supported via the `aiconfigurator cli support` command. For example:
 ```bash
-aiconfigurator cli support --model_path Qwen/Qwen3-32B-FP8 --system h100_sxm --backend_version 1.2.0rc5
+aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h100_sxm --backend-version 1.2.0rc5
 ```
 
 ## Contributing and Development
