@@ -19,3 +19,5 @@ when (ModelConfig.nextn or 0) > 0:
     speculative_decoding_type = "mtp"
     num_nextn_predict_layers = ModelConfig.nextn
 
+when kv_cache_dtype == "float16":
+    kv_cache_dtype = "auto"
