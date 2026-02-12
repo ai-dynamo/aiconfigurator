@@ -14,6 +14,7 @@ from prettytable import PrettyTable
 
 from aiconfigurator.generator.api import (
     generate_backend_artifacts,
+    get_default_dynamo_version_mapping,
     load_generator_overrides_from_args,
     resolve_backend_version_for_dynamo,
 )
@@ -609,19 +610,34 @@ def save_results(
                     dynamo_version,
                     backend_version_str,
                 )
-            # case #3: no override is provided, use the backend version used by the experiment
+            # case #3: no override is provided, use the default backend version mapping
             else:
-                effective_generated_version = exp_task_config.backend_version
+                default_dynamo_version, default_backend_versions = get_default_dynamo_version_mapping()
+                if backend != "auto":
+                    effective_generated_version = default_backend_versions.get(exp_task_config.backend_name)
+                    if effective_generated_version is None:
+                        raise ValueError(
+                            "No default backend version mapping for backend "
+                            f"'{exp_task_config.backend_name}' in dynamo '{default_dynamo_version}'."
+                        )
+                    backend_version_str = f"({exp_task_config.backend_name}){effective_generated_version}"
+                else:
+                    generated_backend_versions = dict(default_backend_versions)
+                    backend_version_str = ", ".join(
+                        f"({backend_name}){backend_version}"
+                        for backend_name, backend_version in generated_backend_versions.items()
+                    )
                 logger.warning(
                     "\n" + "=" * 80 + "\n"
                     "  🟢  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
                     "  Experiment: %s\n"
                     "  --generated-config-version NOT provided\n"
-                    "  Defaulting to backend_version: %s\n"
+                    "  Defaulting to backend versions from dynamo %s: %s\n"
                     "\n"
                     "  Config formats differ across backend releases. If you are targeting\n"
                     "  a different version, please pass --generated-config-version explicitly!\n" + "=" * 80,
                     exp_name,
+                    default_dynamo_version,
                     backend_version_str,
                 )
 
