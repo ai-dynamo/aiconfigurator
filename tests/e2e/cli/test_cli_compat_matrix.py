@@ -34,12 +34,12 @@ MODELS_TO_TEST = [
 ]
 
 SYSTEMS_TO_TEST = [
-    # "a100_sxm",
-    # "h100_sxm",
-    # "h200_sxm",
-    # "b200_sxm",
+    "a100_sxm",
+    "h100_sxm",
+    "h200_sxm",
+    "b200_sxm",
     "gb200",
-    # "l40s",
+    "l40s",
 ]
 
 BACKENDS_TO_TEST = [
