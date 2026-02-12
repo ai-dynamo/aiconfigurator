@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 matrix:
+  0.9.0:
+    vllm: "0.14.1"
+    sglang: "0.5.8"
+    trtllm: "1.3.0rc1"
   0.8.1.post1:
     vllm: "0.12.0"
     sglang: "0.5.6.post2"
