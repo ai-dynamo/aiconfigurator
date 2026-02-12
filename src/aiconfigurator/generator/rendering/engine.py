@@ -99,7 +99,7 @@ def render_backend_templates(
     backend: str,
     templates_dir: Optional[str] = None,
     version: Optional[str] = None,
-    use_dynamo_generator: bool = True,
+    use_dynamo_generator: bool = False,
 ) -> dict[str, str]:
     """
     Render templates for a specific backend with version-specific template selection.
