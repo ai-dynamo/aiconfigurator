@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aiconfigurator.cli.main import configure_parser
+from aiconfigurator.cli.main import build_default_task_configs, configure_parser
 from aiconfigurator.cli.main import main as cli_main
 
 pytestmark = pytest.mark.unit
@@ -208,3 +208,41 @@ exp_with_db_mode:
 
         mock_build_exp.assert_called_once()
         mock_execute.assert_called_once()
+
+
+class TestBuildDefaultTaskConfigs:
+    """Tests for build_default_task_configs function."""
+
+    @patch("aiconfigurator.cli.main.TaskConfig")
+    def test_skips_disagg_when_total_gpus_less_than_2(self, mock_task_config):
+        """Disagg config should be skipped when total_gpus < 2."""
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_task_configs(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=1,
+            system="h200_sxm",
+        )
+
+        # Should only have agg config, no disagg
+        assert "agg" in result
+        assert "disagg" not in result
+        # TaskConfig should only be called once (for agg)
+        assert mock_task_config.call_count == 1
+
+    @patch("aiconfigurator.cli.main.TaskConfig")
+    def test_includes_disagg_when_total_gpus_at_least_2(self, mock_task_config):
+        """Disagg config should be included when total_gpus >= 2."""
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_task_configs(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=2,
+            system="h200_sxm",
+        )
+
+        # Should have both agg and disagg configs
+        assert "agg" in result
+        assert "disagg" in result
+        # TaskConfig should be called twice (agg + disagg)
+        assert mock_task_config.call_count == 2

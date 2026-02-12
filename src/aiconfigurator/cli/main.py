@@ -418,6 +418,10 @@ def build_default_task_configs(
         exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
         task_configs[exp_name] = agg_task
 
+        if total_gpus < 2:
+            logger.warning("Skipping disagg since it requires at least 2 GPUs.")
+            continue
+
         # Create disagg task for this backend
         disagg_kwargs = dict(common_kwargs)
         disagg_kwargs["backend_name"] = backend_name
