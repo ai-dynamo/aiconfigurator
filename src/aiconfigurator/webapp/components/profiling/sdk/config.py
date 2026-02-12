@@ -15,7 +15,10 @@ import re
 
 import yaml
 
-from aiconfigurator.generator.api import generate_backend_artifacts, generate_config_from_input_dict
+from aiconfigurator.generator.api import (
+    generate_backend_artifacts,
+    generate_config_from_input_dict,
+)
 
 # Constants
 DECODE_MAX_CONCURRENCY = 1024
@@ -71,7 +74,7 @@ def generate_config_yaml(
         "K8sConfig": {
             "name_prefix": name_prefix,
             "k8s_namespace": "dynamo",
-            "k8s_image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0",
+            "k8s_image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.9.0",
             "k8s_model_cache": "model-cache",
             "k8s_engine_mode": "inline",
         },
