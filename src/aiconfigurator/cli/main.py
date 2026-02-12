@@ -100,7 +100,7 @@ def _add_default_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s.",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
     )
     parser.add_argument(
         "--decode-system",
@@ -174,7 +174,7 @@ def _add_generate_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s.",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
     )
     parser.add_argument(
         "--backend",
@@ -200,7 +200,7 @@ def _add_support_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s.",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
     )
     parser.add_argument(
         "--backend",
