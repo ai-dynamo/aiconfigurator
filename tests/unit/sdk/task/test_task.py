@@ -255,7 +255,7 @@ def test_taskconfig_disagg_wideep_expands_lists():
     task = TaskConfig(
         serving_mode="disagg",
         model_path="deepseek-ai/DeepSeek-V3",
-        system_name="gb200_sxm",
+        system_name="gb200",
         enable_wideep=True,
     )
     cfg = task.config
@@ -549,12 +549,12 @@ def test_sglang_moe_configs():
 
 @pytest.mark.unit
 def test_trtllm_moe_configs():
-    """Test trtllm MoE WideEP configurations on gb200_sxm."""
+    """Test trtllm MoE WideEP configurations on gb200."""
     # Test 1: trtllm + MoE + wideep + agg on gb200
     task_agg = TaskConfig(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
-        system_name="gb200_sxm",
+        system_name="gb200",
         backend_name="trtllm",
         enable_wideep=True,
         total_gpus=64,
@@ -574,7 +574,7 @@ def test_trtllm_moe_configs():
     task_disagg = TaskConfig(
         serving_mode="disagg",
         model_path="deepseek-ai/DeepSeek-V3",
-        system_name="gb200_sxm",
+        system_name="gb200",
         backend_name="trtllm",
         enable_wideep=True,
         total_gpus=64,

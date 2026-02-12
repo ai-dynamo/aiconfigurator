@@ -119,7 +119,7 @@ exp_disagg_simplified:
   serving_mode: "disagg"
   model_path: "nvidia/DeepSeek-V3.1-NVFP4"
   total_gpus: 512
-  system_name: "gb200_sxm"
+  system_name: "gb200"
   enable_wideep: false # enable wide ep for prefill/decode, default to false, optional
   config: # patch below default values
     nextn: 2 # mtp 1

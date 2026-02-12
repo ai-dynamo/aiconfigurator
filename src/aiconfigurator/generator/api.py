@@ -568,7 +568,7 @@ def generate_naive_config(
         model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or
             local path to directory containing config.json.
         total_gpus: Total number of GPUs for deployment.
-        system: System name (GPU type), e.g., 'h200_sxm', 'gb200_sxm'.
+        system: System name (GPU type), e.g., 'h200_sxm', 'gb200'.
         backend: Backend name ('trtllm', 'vllm', 'sglang'). Defaults to 'trtllm'.
         output_dir: Directory to save generated artifacts. If None, artifacts
             are generated but not saved to disk.
