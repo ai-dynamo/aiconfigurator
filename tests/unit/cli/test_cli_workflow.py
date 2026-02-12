@@ -82,7 +82,7 @@ class TestCLIIntegration:
 
         args = cli_args_factory(
             mode="exp",
-            extra_args=["--yaml_path", str(mock_exp_yaml_path)],
+            extra_args=["--yaml-path", str(mock_exp_yaml_path)],
             save_dir=str(mock_exp_yaml_path.parent),
         )
 
@@ -118,7 +118,7 @@ class TestCLIIntegration:
         with patch(build_patch) as mock_builder:
             mock_builder.return_value = {"agg": mock_task_config}
             if mode == "exp":
-                args = cli_args_factory(mode=mode, extra_args=["--yaml_path", str(mock_exp_yaml_path)])
+                args = cli_args_factory(mode=mode, extra_args=["--yaml-path", str(mock_exp_yaml_path)])
             else:
                 args = cli_args_factory(mode=mode)
             cli_main(args)
@@ -164,7 +164,7 @@ class TestCLIIntegration:
             else:
                 yaml_file = tmp_path / "exp.yaml"
                 yaml_file.write_text("exps: []")
-                args = cli_args_factory(mode="exp", extra_args=["--yaml_path", str(yaml_file)])
+                args = cli_args_factory(mode="exp", extra_args=["--yaml-path", str(yaml_file)])
 
             with pytest.raises(RuntimeError):
                 cli_main(args)
@@ -177,7 +177,7 @@ class TestCLIIntegration:
         """Test that database_mode is correctly parsed and passed through in default mode."""
         args = cli_args_factory(
             mode="default",
-            extra_args=["--database_mode", database_mode],
+            extra_args=["--database-mode", database_mode],
         )
         assert args.database_mode == database_mode
 
@@ -202,7 +202,7 @@ exp_with_db_mode:
 
         parser = argparse.ArgumentParser()
         configure_parser(parser)
-        args = parser.parse_args(["exp", "--yaml_path", str(yaml_file)])
+        args = parser.parse_args(["exp", "--yaml-path", str(yaml_file)])
 
         cli_main(args)
 

@@ -1,3 +1,4 @@
+BenchConfig.estimated_concurrency = ((WorkerConfig.agg_workers or 0) * (params.agg.max_batch_size or 0) if DynConfig.mode == 'agg' else (WorkerConfig.decode_workers or 0) * (params.decode.max_batch_size or 0))
 agg_decode cuda_graph_batch_sizes = ((range(1, 16 + 1, 1) | list) + (range(16, 32 + 1, 4) | list) + (range(32, 64 + 1, 8) | list) + (range(64, 128 + 1, 16) | list) + (range(128, 256 + 1, 32) | list) + (range(256, 512 + 1, 64) | list) + (range((1 if (max_batch_size or 0) <= 8 else (max_batch_size or 0) - 8), (max_batch_size or 0) + 8 + 1, 1) | list))
 
 agg_decode cuda_graph_enable_padding = true
@@ -14,6 +15,7 @@ agg_prefill_decode tokens_per_block = (tokens_per_block if tokens_per_block else
 prefill max_num_tokens = (((SlaConfig.isl + 1500) + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
 decode max_num_tokens = ((max_batch_size + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
 agg max_num_tokens = ((max_batch_size + SlaConfig.isl + 1500 + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
+prefill_decode cache_transceiver_max_tokens_in_buffer = SlaConfig.isl + SlaConfig.osl + 1500
 
 # Enforce TensorRT-LLM MoE parallelism: moe_tp × moe_ep = tp
 when ModelConfig.is_moe and (moe_tensor_parallel_size and moe_expert_parallel_size):

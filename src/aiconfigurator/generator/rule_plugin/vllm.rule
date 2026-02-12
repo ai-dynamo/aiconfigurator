@@ -1,7 +1,6 @@
+BenchConfig.estimated_concurrency = ((WorkerConfig.agg_workers or 0) * (params.agg.max_batch_size or 0) if DynConfig.mode == 'agg' else (WorkerConfig.decode_workers or 0) * (params.decode.max_batch_size or 0))
 agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
 prefill max_batch_size = (max_batch_size if max_batch_size else 1)
-agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
-
 
 agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_parallel_size or 1) * (data_parallel_size or 1)
 agg_prefill_decode enable_expert_parallel = ((moe_expert_parallel_size or 1) > 1)
