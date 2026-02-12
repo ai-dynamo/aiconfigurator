@@ -712,7 +712,7 @@ def test_load_mla_bmm_data_basic(tmp_path):
 def test_load_wideep_moe_compute_data(tmp_path):
     """
     Test loading wideep MoE compute data with the format from:
-    aiconfigurator/src/aiconfigurator/systems/data/gb200_sxm/trtllm/1.2.0rc6/wideep_moe_perf.txt
+    aiconfigurator/src/aiconfigurator/systems/data/gb200/trtllm/1.2.0rc6/wideep_moe_perf.txt
 
     CSV columns:
         framework,version,device,op_name,kernel_source,moe_dtype,moe_kernel,num_tokens,

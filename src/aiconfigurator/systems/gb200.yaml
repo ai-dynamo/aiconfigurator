@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-data_dir: data/gb200_sxm # relative to systems_dir
+data_dir: data/gb200 # relative to systems_dir
 gpu:
   mem_bw: 13400000000000 # 13.4TB/s
   mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations

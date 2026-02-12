@@ -199,7 +199,7 @@ class TaskConfigFactory:
         }
 
         if not ctx.is_moe:
-            if ctx.system_name == "gb200_sxm":
+            if ctx.system_name == "gb200":
                 worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
                 worker_config["tp_list"] = [1, 2, 4, 8, 16]
                 worker_config["pp_list"] = [1]
@@ -281,11 +281,11 @@ class TaskConfigFactory:
         }
 
         if not ctx.is_moe:
-            if ctx.system_name == "gb200_sxm":
+            if ctx.system_name == "gb200":
                 prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
                 prefill_worker_config["tp_list"] = [1, 2, 4, 8, 16]
                 prefill_worker_config["pp_list"] = [1]
-            if decode_system == "gb200_sxm":
+            if decode_system == "gb200":
                 decode_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
                 decode_worker_config["tp_list"] = [1, 2, 4, 8, 16]
                 decode_worker_config["pp_list"] = [1]

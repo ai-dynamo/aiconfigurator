@@ -30,7 +30,7 @@ def _get_system_config(system_name: str) -> dict[str, Any]:
     Read system configuration from YAML config file.
 
     Args:
-        system_name: Name of the system (e.g., 'h200_sxm', 'gb200_sxm').
+        system_name: Name of the system (e.g., 'h200_sxm', 'gb200').
 
     Returns:
         Dictionary with 'gpus_per_node' and 'vram_per_gpu' keys.
@@ -200,7 +200,7 @@ def build_naive_generator_params(
     Args:
         model_name: Name or HuggingFace ID of the model.
         total_gpus: Total number of GPUs available.
-        system_name: Name of the system (e.g., 'h200_sxm', 'gb200_sxm').
+        system_name: Name of the system (e.g., 'h200_sxm', 'gb200').
         backend_name: Name of the backend (e.g., 'trtllm', 'sglang', 'vllm').
 
     Returns:

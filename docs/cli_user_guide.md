@@ -17,7 +17,7 @@ The `generate` mode calculates the smallest tensor parallel (TP) size that fits 
 **Required arguments:**
 - `--model-path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
 - `--total-gpus`: Total GPUs for deployment
-- `--system`: System name (`h200_sxm`, `gb200_sxm`, `b200_sxm`)
+- `--system`: System name (`h200_sxm`, `gb200`, `b200_sxm`)
 
 **Optional arguments:**
 - `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
@@ -65,7 +65,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 
 **Required arguments:**
 - `--model-path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B-FP8`) or local path containing `config.json`
-- `--system`: System name (`h200_sxm`, `gb200_sxm`, `b200_sxm`, `h100_sxm`, `a100_sxm`, `l40s`)
+- `--system`: System name (`h200_sxm`, `gb200`, `b200_sxm`, `h100_sxm`, `a100_sxm`, `l40s`)
 
 **Optional arguments:**
 - `--backend`: Filter by specific backend (`trtllm`, `vllm`, `sglang`). Defaults to `trtllm`.
@@ -567,7 +567,7 @@ exp_disagg_simplified:
   serving_mode: "disagg"
   model_path: "deepseek-ai/DeepSeek-V3"
   total_gpus: 512
-  system_name: "gb200_sxm"
+  system_name: "gb200"
   enable_wideep: true # enable wide ep for prefill/decode, default to false, optional
   config: # patch below default values
     nextn: 2 # mtp 1

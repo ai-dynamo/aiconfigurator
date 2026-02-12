@@ -48,7 +48,7 @@ def list_supported_models():
 
 @app.post("/sla")
 def post_sla(
-    system: str = Body("h200_sxm", description="hardware name, h200_sxm, h100_sxm, b200_sxm, gb200_sxm, a100_sxm"),
+    system: str = Body("h200_sxm", description="hardware name, h200_sxm, h100_sxm, b200_sxm, gb200, a100_sxm"),
     backend: str = Body("trtllm", description="backend name, trtllm, sglang, vllm"),
     version: str = Body("0.20.0", description="trtllm version, 0.20.0"),
     model_path: str = Body("QWEN3_32B", description="model name"),

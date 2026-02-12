@@ -268,7 +268,7 @@ SupportedSystems = {
     "h100_sxm",
     "h200_sxm",
     "b200_sxm",
-    "gb200_sxm",
+    "gb200",
     "a100_sxm",
     "l40s",
 }
