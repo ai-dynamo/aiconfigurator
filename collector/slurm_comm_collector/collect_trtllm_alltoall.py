@@ -261,9 +261,18 @@ def generate_balanced_expert_ids(
     """
     Generate balanced expert IDs for testing.
 
-    Each token selects top_k experts distributed across different EP ranks,
-    mimicking realistic routing where a token's selected experts are spread
-    across multiple GPUs rather than concentrated on a single GPU.
+    Distributes tokens across ranks and experts in a round-robin pattern that
+    achieves balance at three levels:
+      1. Rank-level: each rank receives the same number of token-expert pairs.
+      2. Expert-level: each expert within a rank receives equal tokens.
+
+    Example (ep_size=16, top_k=8):
+      - 2 rank groups: [0-7] and [8-15]
+      - token 0 → ranks [0-7],  expert offset 0
+      - token 1 → ranks [8-15], expert offset 0
+      - token 2 → ranks [0-7],  expert offset 1
+      - token 3 → ranks [8-15], expert offset 1
+      - ...
 
     Args:
         num_tokens: Number of tokens
@@ -278,14 +287,24 @@ def generate_balanced_expert_ids(
     experts_per_rank = num_experts // ep_size
     expert_ids = torch.zeros((num_tokens, top_k), dtype=torch.int32, device=device)
 
-    for i in range(num_tokens):
-        for k in range(top_k):
-            # Each top_k selection targets a different EP rank (round-robin),
-            # so that one token's data is scattered across multiple NVLink peers
-            target_rank = (i + k) % ep_size
-            # Vary the expert within the target rank to cover all experts evenly
-            expert_offset = (i // ep_size + k) % experts_per_rank
-            expert_ids[i, k] = target_rank * experts_per_rank + expert_offset
+    if ep_size >= top_k:
+        # WideEP: group ranks into sets of top_k consecutive ranks
+        num_rank_groups = ep_size // top_k
+        for i in range(num_tokens):
+            group = i % num_rank_groups
+            expert_offset = (i // num_rank_groups) % experts_per_rank
+            for k in range(top_k):
+                target_rank = group * top_k + k
+                expert_ids[i, k] = target_rank * experts_per_rank + expert_offset
+    else:
+        # Small EP (ep_size < top_k): each token sends to all ranks,
+        # multiple experts per rank per token
+        for i in range(num_tokens):
+            for k in range(top_k):
+                target_rank = k % ep_size
+                intra_rank_idx = k // ep_size
+                expert_offset = (i + intra_rank_idx) % experts_per_rank
+                expert_ids[i, k] = target_rank * experts_per_rank + expert_offset
 
     return expert_ids
 
