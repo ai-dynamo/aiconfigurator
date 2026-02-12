@@ -73,6 +73,19 @@ _DEFAULT_BUILD_CASES = [
             "tpot": 10,
         },
     ),
+    pytest.param(
+        {
+            "model_path": "Qwen/Qwen3-32B",
+            "system": "h200_sxm",
+            "backend": "vllm",
+            "total_gpus": 1,  # agg only
+            "isl": 4000,
+            "osl": 1000,
+            "prefix": 0,
+            "ttft": 5000,
+            "tpot": 100,
+        },
+    ),
 ]
 
 
