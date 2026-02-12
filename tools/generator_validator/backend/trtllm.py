@@ -8,6 +8,10 @@ from typing import Any, Optional
 
 import yaml
 
+# Valid backend values accepted by TorchLlmArgs.  update_llm_args_with_extra_dict
+# may silently discard the field during merge, so we validate explicitly.
+_VALID_TRTLLM_BACKENDS = frozenset({"pytorch"})
+
 
 def _import_trtllm_args():
     from tensorrt_llm.llmapi import llm_args as llm_args_mod
@@ -53,6 +57,15 @@ def validate_torchllm_engine_args(
 
     extra_args = dict(engine_args)
     extra_args.setdefault("backend", backend)
+
+    # Validate the backend value early.  update_llm_args_with_extra_dict may
+    # silently ignore or overwrite this field, masking invalid values.
+    cfg_backend = extra_args.get("backend")
+    if cfg_backend not in _VALID_TRTLLM_BACKENDS:
+        raise ValueError(
+            f"Invalid backend '{cfg_backend}' in engine config, expected one of {sorted(_VALID_TRTLLM_BACKENDS)}"
+        )
+
     # Treat unknown keys as validation errors for clarity.
     dropped_keys = sorted(set(extra_args) - set(base_dict))
     if dropped_keys:
