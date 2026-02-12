@@ -308,10 +308,31 @@ def _get_backend_data_path(system_name: str, backend_name: str, backend_version:
     return None
 
 
-def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str) -> None:
+def _ensure_backend_version_available(system_name: str, backend_name: str, backend_version: str | None = None) -> None:
+    """
+    Validate that the backend is supported for the given system and version.
+
+    Args:
+        system_name: System name (e.g., 'gb200_sxm')
+        backend_name: Backend name (e.g., 'vllm')
+        backend_version: Backend database version. Default is None, which means latest version.
+
+    Raises:
+        SystemExit: If the backend is not supported for the given system and version.
+    """
     supported = perf_database.get_supported_databases()
+    backends = supported.get(system_name, {}).keys()
+    if backend_name not in backends:
+        logger.error(
+            "Backend %s is not supported for system %s. Supported backends: %s",
+            backend_name,
+            system_name,
+            ", ".join(sorted(backends)),
+        )
+        raise SystemExit(1)
+
     versions = supported.get(system_name, {}).get(backend_name, [])
-    if backend_version in versions:
+    if backend_version is None or backend_version in versions:
         return
 
     systems_paths = perf_database.get_systems_paths()
@@ -388,11 +409,10 @@ def build_default_task_configs(
     # Expand "auto" backend to all available backends
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
 
-    if backend_version:
-        for backend_name in backends_to_sweep:
-            _ensure_backend_version_available(system, backend_name, backend_version)
-            if decode_system != system:
-                _ensure_backend_version_available(decode_system, backend_name, backend_version)
+    for backend_name in backends_to_sweep:
+        _ensure_backend_version_available(system, backend_name, backend_version)
+        if decode_system != system:
+            _ensure_backend_version_available(decode_system, backend_name, backend_version)
 
     common_kwargs: dict[str, Any] = {
         "model_path": model_path,
