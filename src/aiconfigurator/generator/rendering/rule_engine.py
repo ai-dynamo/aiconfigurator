@@ -126,6 +126,7 @@ def _apply_line(
             "ModelConfig": "ModelConfig",
             "NodeConfig": "NodeConfig",
             "SlaConfig": "SlaConfig",
+            "BenchConfig": "BenchConfig",
         }
         target_key = config_targets.get(prefix)
         if target_key:

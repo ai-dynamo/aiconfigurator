@@ -99,4 +99,6 @@ def apply_defaults(
                 except Exception:
                     val = default_expr
                 out[subkey] = val
+                # Ensure subsequent defaults can reference earlier defaults in this group.
+                eval_ctx[group][subkey] = val
     return out

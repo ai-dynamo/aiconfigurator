@@ -557,20 +557,20 @@ def save_results(
                     f"{exp_name}_{backend_name}": task_configs[f"{exp_name}_{backend_name}"]
                     for backend_name in actual_backend_versions
                 }
-                # generated backend versions for each backend, empty unless --generator_dynamo_version is provided
+                # generated backend versions for each backend, empty unless --generator-dynamo-version is provided
                 generated_backend_versions = {}
 
-            # case #1: --generated_config_version is provided
+            # case #1: --generated-config-version is provided
             if generated_backend_version:
                 effective_generated_version = generated_backend_version
                 logger.warning(
                     "\n" + "=" * 80 + "\n"
                     "  🟢  IMPORTANT: Config Generation Version\n" + "=" * 80 + "\n"
                     "  Experiment: %s\n"
-                    "  Using generated_config_version: %s\n"
+                    "  Using generated-config-version: %s\n"
                     "\n"
                     "  Config formats differ across backend releases. Please ensure you pass\n"
-                    "  the correct --generated_config_version to match your deployment target!\n" + "=" * 80,
+                    "  the correct --generated-config-version to match your deployment target!\n" + "=" * 80,
                     exp_name,
                     generated_backend_version,
                 )
@@ -616,11 +616,11 @@ def save_results(
                     "\n" + "=" * 80 + "\n"
                     "  🟢  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
                     "  Experiment: %s\n"
-                    "  --generated_config_version NOT provided\n"
+                    "  --generated-config-version NOT provided\n"
                     "  Defaulting to backend_version: %s\n"
                     "\n"
                     "  Config formats differ across backend releases. If you are targeting\n"
-                    "  a different version, please pass --generated_config_version explicitly!\n" + "=" * 80,
+                    "  a different version, please pass --generated-config-version explicitly!\n" + "=" * 80,
                     exp_name,
                     backend_version_str,
                 )

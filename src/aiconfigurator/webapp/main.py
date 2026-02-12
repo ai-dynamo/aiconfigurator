@@ -23,11 +23,11 @@ def configure_parser(parser):
     """
     Configures the argument parser for the WebApp.
     """
-    parser.add_argument("--server_name", type=str, default="0.0.0.0", help="Server name")
-    parser.add_argument("--server_port", type=int, default=7860, help="Server port")
-    parser.add_argument("--enable_agg", action="store_true", help="Enable Agg tab")
-    parser.add_argument("--enable_disagg_pd_ratio", action="store_true", help="Enable Disagg PD Ratio tab")
-    parser.add_argument("--enable_profiling", action="store_true", help="Enable Profiling tab")
+    parser.add_argument("--server-name", type=str, default="0.0.0.0", help="Server name")
+    parser.add_argument("--server-port", type=int, default=7860, help="Server port")
+    parser.add_argument("--enable-agg", action="store_true", help="Enable Agg tab")
+    parser.add_argument("--enable-disagg-pd-ratio", action="store_true", help="Enable Disagg PD Ratio tab")
+    parser.add_argument("--enable-profiling", action="store_true", help="Enable Profiling tab")
     parser.add_argument("--debug", help="Debug mode", action="store_true")
     parser.add_argument("--experimental", help="enable experimental features", action="store_true")
     parser.add_argument(

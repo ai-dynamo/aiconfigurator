@@ -65,21 +65,21 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
   ```
   aiconfigurator cli default \
     --backend sglang \
-    --backend_version 0.5.6.post2 \
-    --model_path Qwen/Qwen3-32B-FP8 \
+    --backend-version 0.5.6.post2 \
+    --model-path Qwen/Qwen3-32B-FP8 \
     --system h200_sxm \
-    --total_gpus 8 \
+    --total-gpus 8 \
     --isl 5000 --osl 1000 --ttft 2000 --tpot 50 \
     --generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8 \
     --generator-set ServiceConfig.served_model_name=Qwen/Qwen3-32B-FP8 \
     --generator-set K8sConfig.k8s_engine_mode=inline \
     --generator-set K8sConfig.k8s_namespace=ets-dynamo \
-    --save_dir ./results
+    --save-dir ./results
   ```
   Notes:
-  - Use `--generator-dynamo-version v0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
-  - If `--generator-dynamo-version` is not provided, the default is the first entry in `generator/config/backend_version_matrix.yaml`.
-  - If `--generated_config_version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the first entry in `backend_version_matrix.yaml`.
+  - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
+  - If `--generator-dynamo-version` is not provided, the default is the latest database version for the backend.
+  - If `--generated_config_version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the first entry in `--generator-dynamo-version`.
 - Webapp: start with `--enable_profiling` when launching the webapp to surface generator-driven configs.
 - Standalone:
   - In code:
@@ -153,7 +153,11 @@ You can use the generator in three ways: AIConfigurator CLI, webapp, or standalo
 - [vllm & sglang] CLI argument strings per role (prefill/decode/agg) for debugging or manual runs.
 - [trtllm] Engine config files (`agg_config.yaml`, `prefill_config.yaml`, `decode_config.yaml`) when the backend provides `extra_engine_args*.j2`.
 - Run scripts (`run_0.sh`, `run_1.sh`, …) that assign workers to nodes and toggle frontend on the first node.
+  - Note: If `model_path` is empty and you expect to automatically download the HuggingFace model, multiple processes may fetch the same model concurrently and hit the HF cache lock. In that case, download the model once at the target path before running.
 - Kubernetes manifest (`k8s_deploy.yaml`) with images, namespace, volumes, engine args (inline or ConfigMap), and role-specific settings.
+- Benchmark helpers:
+  - `bench_run.sh` and `k8s_bench.yaml` are generated alongside deployment artifacts for running `aiperf` benchmarks.
+  - `concurrency_array` is built from a base list (`1 2 8 16 32 64 128`) plus `BenchConfig.estimated_concurrency` and its +/-5% neighbors when the estimate is available.
 
 ### TRT-LLM Deployment Notes
 When deploying with TRT-LLM, the generated run scripts (`run_x.sh`) reference engine config files at `/workspace/engine_configs/`. Before executing the run scripts, you must:

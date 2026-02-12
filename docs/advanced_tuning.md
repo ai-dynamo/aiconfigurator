@@ -2,14 +2,14 @@
 In aiconfigurator, the inference framework and serving modeling is relatively complicated compared with the most simplified CLI entrypoint.  
 For example, behind the command,
 ```bash
-  aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 --total_gpus 512 --system h200_sxm
+  aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 512 --system h200_sxm
 ```
 We hide a lot of default settings of the execution. Such as the quantization of each component, the matrix multiply, attention, moe, etc. We  
 also hide the parallel config for how we search possible combinations.  
 
 The optional params of cli contains the definition of ISL, OSL, TTFT and TPOT while we don't cover these params mentioned above. In CLI, We auto populate all these stuff for `default` mode and allow users to modify in `exp` mode. Since webapp follows the same logic, we take CLI as an example,
 ```bash
-  aiconfigurator cli exp --yaml_path example.yaml
+  aiconfigurator cli exp --yaml-path example.yaml
 ```
 The example.yaml is defined [here](../src/aiconfigurator/cli/example.yaml).  
 Let's take a look at example.yaml
