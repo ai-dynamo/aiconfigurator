@@ -83,7 +83,7 @@ def _extract_sglang_cli_args(
 ) -> Optional[list[str]]:
     try:
         services = payload.get("spec", {}).get("services", {})
-        worker = services.get(service_key or "SGLANGWorker", {})
+        worker = services.get(service_key or "SGLangWorker", {})
         container = worker.get("extraPodSpec", {}).get("mainContainer", {})
         args = container.get("args")
     except AttributeError:
@@ -91,7 +91,7 @@ def _extract_sglang_cli_args(
     if not args:
         return None
     if not isinstance(args, list):
-        raise TypeError("SGLANGWorker.extraPodSpec.mainContainer.args must be a list.")
+        raise TypeError("SGLangWorker.extraPodSpec.mainContainer.args must be a list.")
     if len(args) == 1 and isinstance(args[0], str) and "args=(" in args[0]:
         return _extract_cli_args_from_script(args[0])
     return [str(item) for item in args]
@@ -136,9 +136,9 @@ def collect_config_paths(root_dir: Path) -> list[tuple[str, Path, str]]:
     if missing:
         raise ValueError(f"Missing expected config under {root_dir}: {', '.join(missing)}.")
     return [
-        ("agg", agg_path, "SGLANGWorker"),
-        ("prefill", disagg_path, "SGLANGPrefillWorker"),
-        ("decode", disagg_path, "SGLANGDecodeWorker"),
+        ("agg", agg_path, "SGLangWorker"),
+        ("prefill", disagg_path, "SGLangPrefillWorker"),
+        ("decode", disagg_path, "SGLangDecodeWorker"),
     ]
 
 
