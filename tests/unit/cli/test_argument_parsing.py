@@ -89,7 +89,7 @@ class TestCLIArgumentParsing:
         expected_choices = [backend.value for backend in common.BackendName] + ["auto"]
         assert sorted(action.choices) == sorted(expected_choices)
 
-    @pytest.mark.parametrize("system_value", ["h200_sxm", "b200_sxm", "gb200_sxm"])
+    @pytest.mark.parametrize("system_value", ["h200_sxm", "b200_sxm", "gb200"])
     def test_supported_systems_parse_successfully(self, cli_parser, system_value):
         """System flag should accept supported platforms including b200 and gb200."""
         args = cli_parser.parse_args(
@@ -202,10 +202,10 @@ class TestCLIArgumentParsing:
                 "--system",
                 "h200_sxm",
                 "--decode-system",
-                "gb200_sxm",
+                "gb200",
             ]
         )
-        assert args_with_decode.decode_system == "gb200_sxm"
+        assert args_with_decode.decode_system == "gb200"
 
     def test_model_path_accepts_huggingface_id(self, cli_parser):
         """Test that --model-path accepts a HuggingFace model ID."""

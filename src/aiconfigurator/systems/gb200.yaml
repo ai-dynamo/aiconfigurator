@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
+
+data_dir: data/gb200 # relative to systems_dir
+gpu:
+  mem_bw: 8000000000000 # 8TB/s
+  mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_capacity: 198674743296 # 189471MiB reported by nvidia-smi
+  float16_tc_flops: 2500000000000000 # 2500TFLOPS
+  int8_tc_flops: 5000000000000000 # 5000TFLOPS
+  fp8_tc_flops: 5000000000000000 # 5000TFLOPS
+  fp4_tc_flops: 10000000000000000 # 10PFLOPS
+  power: 1200  # Watt
+  sm_version: 100
+
+node:
+  num_gpus_per_node: 4  # 4 GPUs per physical node (2 Grace CPUs x 2 GPUs each)
+  num_gpus_per_rack: 72  # 72 GPUs per rack (18 compute trays x 4 GPUs each)
+  inter_rack_bw: 25000000000  # Byte/s per GPU, single direction - InfiniBand between racks
+  inter_node_bw: 900000000000  # Byte/s per GPU, single direction - NVLink via NVSwitch within rack
+  intra_node_bw: 900000000000  # Byte/s per GPU, single direction - NVLink 5th gen within node
+  pcie_bw: 64000000000  # Byte/s, single direction, pcie 5.0
+  p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
+  inter_rack_latency: 0.000005  # 5us typical for InfiniBand between racks
+
+misc:
+  nccl_mem: # some nonofficial correction based on observations, you should try to modify based on your own observations
+    1: 0
+    2: 358612992 # 342MB
+    4: 411041792 # 392MB
+    8: 411041792 # 392MB
+  other_mem: 3758096384 # increase from 551MB to 3.5GB for safer deployment, this will cover part of the inaccurate mem calc.
+  nccl_version: '2.23'

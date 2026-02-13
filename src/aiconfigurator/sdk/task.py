@@ -338,7 +338,7 @@ class TaskConfigFactory:
         }
 
         if not ctx.is_moe:
-            if ctx.system_name == "gb200_sxm":
+            if ctx.system_name in ["gb200", "gb300"]:
                 worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
                 worker_config["tp_list"] = [1, 2, 4, 8, 16]
                 worker_config["pp_list"] = [1]
@@ -411,6 +411,99 @@ class TaskConfigFactory:
         decode_worker_config["system_name"] = decode_system
         decode_worker_config["backend_name"] = ctx.backend_name
         decode_worker_config["backend_version"] = ctx.resolved_backend_version_for(decode_system)
+
+        if not ctx.is_moe:
+            if ctx.system_name in ["gb200", "gb300"]:
+                prefill_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
+                prefill_worker_config["tp_list"] = [1, 2, 4, 8, 16]
+                prefill_worker_config["pp_list"] = [1]
+            if decode_system in ["gb200", "gb300"]:
+                decode_worker_config["num_gpu_per_worker"] = [1, 2, 4, 8, 16]
+                decode_worker_config["tp_list"] = [1, 2, 4, 8, 16]
+                decode_worker_config["pp_list"] = [1]
+        else:
+            if ctx.backend_name == "trtllm":
+                if ctx.enable_wideep:
+                    # trtllm + wideep: dp > 1, moe_ep > 1, and moe_ep must be divisible by 4 (GPUs per node)
+                    prefill_worker_config["num_gpu_per_worker"] = [4, 8, 16, 32]
+                    prefill_worker_config["tp_list"] = [1, 2, 4, 8]
+                    prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
+                    prefill_worker_config["dp_list"] = [4, 8, 16, 32]
+                    prefill_worker_config["moe_tp_list"] = [1]
+                    prefill_worker_config["moe_ep_list"] = [4, 8, 16, 32]
+
+                    decode_worker_config["num_gpu_per_worker"] = [4, 8, 16, 32, 64]
+                    decode_worker_config["tp_list"] = [1, 2, 4, 8]
+                    decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
+                    decode_worker_config["dp_list"] = [4, 8, 16, 32, 64]
+                    decode_worker_config["moe_tp_list"] = [1]
+                    decode_worker_config["moe_ep_list"] = [4, 8, 16, 32, 64]
+                else:
+                    parallel_config_list = [1, 2, 4, 8]
+
+                    prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
+                    prefill_worker_config["tp_list"] = parallel_config_list
+                    prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                    prefill_worker_config["dp_list"] = parallel_config_list
+                    prefill_worker_config["moe_tp_list"] = parallel_config_list
+                    prefill_worker_config["moe_ep_list"] = parallel_config_list
+
+                    decode_worker_config["num_gpu_per_worker"] = parallel_config_list
+                    decode_worker_config["tp_list"] = parallel_config_list
+                    decode_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                    decode_worker_config["dp_list"] = parallel_config_list
+                    decode_worker_config["moe_tp_list"] = parallel_config_list
+                    decode_worker_config["moe_ep_list"] = parallel_config_list
+            elif ctx.backend_name == "sglang":
+                if ctx.enable_wideep:
+                    # sglang + wideep (keep previous logic)
+                    prefill_worker_config["num_gpu_per_worker"] = [8, 16, 32]
+                    prefill_worker_config["tp_list"] = [1, 2, 4, 8]
+                    prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
+                    prefill_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32]
+                    prefill_worker_config["moe_tp_list"] = [1]
+                    prefill_worker_config["moe_ep_list"] = [8, 16, 32]
+
+                    decode_worker_config["num_gpu_per_worker"] = [8, 16, 32, 64]
+                    decode_worker_config["tp_list"] = [1, 2, 4, 8]
+                    decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
+                    decode_worker_config["dp_list"] = [1, 2, 4, 8, 16, 32, 64]
+                    decode_worker_config["moe_tp_list"] = [1]
+                    decode_worker_config["moe_ep_list"] = [8, 16, 32, 64]
+                else:
+                    parallel_config_list = [1, 2, 4, 8]
+
+                    prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
+                    prefill_worker_config["tp_list"] = parallel_config_list
+                    prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                    prefill_worker_config["dp_list"] = parallel_config_list
+                    prefill_worker_config["moe_tp_list"] = parallel_config_list
+                    prefill_worker_config["moe_ep_list"] = [1]
+
+                    decode_worker_config["num_gpu_per_worker"] = parallel_config_list
+                    decode_worker_config["tp_list"] = parallel_config_list
+                    decode_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                    decode_worker_config["dp_list"] = parallel_config_list
+                    decode_worker_config["moe_tp_list"] = parallel_config_list
+                    decode_worker_config["moe_ep_list"] = [1]
+            elif ctx.backend_name == "vllm":
+                parallel_config_list = [1, 2, 4, 8]
+
+                prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
+                prefill_worker_config["tp_list"] = parallel_config_list
+                prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                prefill_worker_config["dp_list"] = parallel_config_list
+                prefill_worker_config["moe_tp_list"] = parallel_config_list
+                prefill_worker_config["moe_ep_list"] = parallel_config_list
+
+                decode_worker_config["num_gpu_per_worker"] = parallel_config_list
+                decode_worker_config["tp_list"] = parallel_config_list
+                decode_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                decode_worker_config["dp_list"] = parallel_config_list
+                decode_worker_config["moe_tp_list"] = parallel_config_list
+                decode_worker_config["moe_ep_list"] = parallel_config_list
+            else:
+                raise ValueError(f"Invalid backend: {ctx.backend_name}")
 
         replica_config = {
             "num_gpu_per_replica": [

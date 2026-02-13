@@ -370,7 +370,7 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 | h100_sxm | TRTLLM(1.0.0rc3, 1.2.0rc5), SGLang(0.5.6.post2), vLLM(0.12.0) | ✅ |
 | h200_sxm | TRTLLM(1.0.0rc3, 1.2.0rc5), SGLang(0.5.6.post2), vLLM(0.12.0) | ✅ |
 | b200_sxm | TRTLLM(1.0.0rc3, 1.2.0rc5), SGLang(0.5.6.post2) | ✅ |
-| gb200_sxm | TRTLLM(1.0.0rc3, 1.2.0rc5) | ✅ |
+| gb200 | TRTLLM(1.0.0rc3, 1.2.0rc5) | ✅ |
 | a100_sxm | TRTLLM(1.0.0), vLLM(0.12.0) | ✅ |
 (last updated: 2026/02/02)
 
