@@ -310,7 +310,7 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
-    if use_fp8_kv_cache and backend_name_str == "FLASH_ATTN":
+    if use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
         query_vllm = query_vllm.to(current_platform.fp8_dtype())
         output = output.to(torch.bfloat16)
 
@@ -510,6 +510,11 @@ def get_generation_attention_test_cases():
                 target_s_list = target_s_list[:-1]
             for n_kv in n_kv_list:
                 if n_kv > n or n % n_kv != 0:
+                    continue
+                # On SM100 (Blackwell), vLLM uses FlashInfer which routes
+                # decode to trtllm_batch_decode_with_kv_cache. That kernel
+                # only supports GQA ratios up to 16.
+                if get_sm_version() >= 100 and n // n_kv > 16:
                     continue
                 for s in target_s_list:
                     for is_fp8_kv_cache in kv_cache_dtype_list:

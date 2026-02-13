@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import random
+
 import pkg_resources
 import torch
 import torch.nn.functional as F
@@ -30,6 +33,11 @@ from helper import benchmark_with_power, get_sm_version, log_perf
 compatible_versions = ["0.5.5.post2", "0.5.6.post2", "0.5.8"]
 
 
+# Disable DeepGEMM JIT precompilation (compiles ALL M values per unique N,K pair).
+# The collector only needs the specific M being tested.
+os.environ.setdefault("SGLANG_JIT_DEEPGEMM_PRECOMPILE", "0")
+
+
 def get_gemm_test_cases():
     test_cases = []
 
@@ -54,6 +62,10 @@ def get_gemm_test_cases():
                 continue
 
             test_cases.append([gemm_type, x, n, k, "gemm_perf.txt"])
+
+    # Try to optimize number of JIT precompile cache hits by shuffling test cases.
+    random.seed(42)
+    random.shuffle(test_cases)
 
     return test_cases
 
