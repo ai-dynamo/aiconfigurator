@@ -67,17 +67,28 @@ def collect_generator_params(
     name_prefix = k8s.get("name_prefix") or "dynamo"
     name = f"{name_prefix}-{mode_tag}{('-router' if enable_router else '')}"
     use_engine_cm = k8s.get("k8s_engine_mode", "inline") == "configmap"
-    _mc_raw = k8s.get("k8s_model_cache")
-    k8s_model_cache = _mc_raw.strip() if isinstance(_mc_raw, str) else ""
+    # PVC config: new unified names with backward compat fallbacks
+    _pvc_name_raw = k8s.get("k8s_pvc_name") or k8s.get("k8s_model_cache")
+    k8s_pvc_name = _pvc_name_raw.strip() if isinstance(_pvc_name_raw, str) else ""
 
-    _hf_home_raw = k8s.get("k8s_hf_home")
-    k8s_hf_home = _hf_home_raw.strip() if isinstance(_hf_home_raw, str) else ""
+    _pvc_mount_raw = k8s.get("k8s_pvc_mount_path")
+    k8s_pvc_mount_path = (
+        _pvc_mount_raw.strip()
+        if isinstance(_pvc_mount_raw, str) and _pvc_mount_raw.strip()
+        else "/workspace/model_cache"
+    )
 
-    # If model cache PVC mount is configured but HF_HOME is not set,
-    # set it to /workspace/model_cache, which is where the PVC is mounted.
-    # Note: k8s_model_cache is the PVC name, not the mount path.
-    if k8s_model_cache and not k8s_hf_home:
-        k8s_hf_home = "/workspace/model_cache"
+    _model_in_pvc_raw = k8s.get("k8s_model_path_in_pvc") or k8s.get("k8s_pvc_model_path") or k8s.get("k8s_hf_home")
+    k8s_model_path_in_pvc = _model_in_pvc_raw.strip() if isinstance(_model_in_pvc_raw, str) else ""
+
+    # Compute the full model path: {mount}/{path_in_pvc}
+    k8s_full_model_path = (
+        f"{k8s_pvc_mount_path}/{k8s_model_path_in_pvc}".rstrip("/")
+        if k8s_model_path_in_pvc
+        else k8s_pvc_mount_path
+        if k8s_pvc_name
+        else ""
+    )
 
     workers_dict = {
         "prefill_workers": int(prefill_workers),
@@ -107,8 +118,12 @@ def collect_generator_params(
             "k8s_image_pull_secret": k8s.get("k8s_image_pull_secret"),
             "k8s_engine_mode": k8s.get("k8s_engine_mode"),
             "use_engine_cm": use_engine_cm,
-            "k8s_model_cache": k8s_model_cache,
-            "k8s_hf_home": k8s_hf_home,
+            "k8s_pvc_name": k8s_pvc_name,
+            "k8s_pvc_mount_path": k8s_pvc_mount_path,
+            "k8s_model_path_in_pvc": k8s_model_path_in_pvc,
+            # Backward compat aliases for Jinja2 templates
+            "k8s_model_cache": k8s_pvc_name,
+            "k8s_hf_home": k8s_full_model_path,
             "prefill_engine_args": "/workspace/engine_configs/prefill_config.yaml",
             "decode_engine_args": "/workspace/engine_configs/decode_config.yaml",
             "agg_engine_args": "/workspace/engine_configs/agg_config.yaml",
