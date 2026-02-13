@@ -76,6 +76,16 @@ inputs:
     required: false
     default: "inline"
     backends: ["trtllm"]
+  - key: K8sConfig.k8s_pvc_name
+    required: false
+    default: ""
+  - key: K8sConfig.k8s_model_path_in_pvc
+    required: false
+    default: ""
+  - key: K8sConfig.k8s_pvc_mount_path
+    required: false
+    default: "/workspace/model_cache"
+  # Backward compat aliases (old names still accepted)
   - key: K8sConfig.k8s_model_cache
     required: false
     default: ""
