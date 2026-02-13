@@ -11,7 +11,7 @@ inputs:
   - key: SlaConfig.osl
     required: false
 
-  # ServiceConfig (required minimal)
+  # ServiceConfig
   - key: ServiceConfig.model_path
     required: true
     default: ""
@@ -20,7 +20,7 @@ inputs:
     default: ""
   - key: ServiceConfig.served_model_name
     required: true
-    default: ""
+    default: "ServiceConfig.model_name or ServiceConfig.served_model_path or ServiceConfig.model_path"
   - key: ServiceConfig.model_name
     required: false
     default: "ServiceConfig.served_model_name"
@@ -109,3 +109,49 @@ inputs:
   - key: NodeConfig.num_gpus_per_node
     required: false
     default: 8
+
+  # BenchConfig
+  - key: BenchConfig.name
+    required: false
+    default: "('dynamo-' ~ DynConfig.mode ~ '-benchmark')"
+  - key: BenchConfig.image
+    required: false
+    default: "python:3.12-slim"
+  - key: BenchConfig.profile_start_timeout
+    required: false
+    default: 400
+  - key: BenchConfig.endpoint_type
+    required: false
+    default: "'chat'"
+  - key: BenchConfig.endpoint_url
+    required: false
+    default: "('http://dynamo-' ~ DynConfig.mode ~ '-frontend.' ~ K8sConfig.k8s_namespace ~ '.svc.cluster.local:8000')"
+  - key: BenchConfig.model
+    required: false
+    default: "ServiceConfig.served_model_name or ServiceConfig.model_name or ServiceConfig.served_model_path or ServiceConfig.model_path"
+  - key: BenchConfig.tokenizer
+    required: false
+    default: "ServiceConfig.model_path or ServiceConfig.served_model_path or BenchConfig.model"
+  - key: BenchConfig.isl
+    required: false
+    default: "SlaConfig.isl"
+  - key: BenchConfig.osl
+    required: false
+    default: "SlaConfig.osl"
+  - key: BenchConfig.isl_stddev
+    required: false
+    default: 0
+  - key: BenchConfig.osl_stddev
+    required: false
+    default: 0
+  - key: BenchConfig.concurrency
+    required: false
+    default: "[1, 2, 4, 8, 32, 64, 128, 256]"
+  - key: BenchConfig.estimated_concurrency
+    required: false
+  - key: BenchConfig.num_requests
+    required: false
+    default: "BenchConfig.concurrency | map('multiply', 50) | list"
+  - key: BenchConfig.ui
+    required: false
+    default: "'simple'"

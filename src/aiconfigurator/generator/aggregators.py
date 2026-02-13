@@ -36,6 +36,7 @@ def collect_generator_params(
     num_gpus_per_node: int = 8,
     sla: Optional[dict[str, Any]] = None,
     dyn_config: Optional[dict[str, Any]] = None,
+    bench: Optional[dict[str, Any]] = None,
     backend: Optional[str] = None,
     generator_dynamo_version: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -43,14 +44,22 @@ def collect_generator_params(
     decode_params = decode_params or {}
     agg_params = agg_params or {}
     backend_key = normalize_backend(backend, DEFAULT_BACKEND)
-    service = apply_defaults("ServiceConfig", service, backend=backend_key)
-    dyn_cfg = apply_defaults("DynConfig", dyn_config or {}, backend=backend_key)
-    k8s = apply_defaults(
-        "K8sConfig",
-        k8s,
-        backend=backend_key,
-        extra_context={"generator_dynamo_version": generator_dynamo_version},
-    )
+    base_ctx = {
+        "ServiceConfig": dict(service),
+        "K8sConfig": dict(k8s),
+        "DynConfig": dict(dyn_config or {}),
+        "SlaConfig": dict(sla or {}),
+        "BenchConfig": dict(bench or {}),
+    }
+    if generator_dynamo_version:
+        base_ctx["generator_dynamo_version"] = generator_dynamo_version
+    service = apply_defaults("ServiceConfig", service, backend=backend_key, extra_context=base_ctx)
+    base_ctx["ServiceConfig"] = dict(service)
+    k8s = apply_defaults("K8sConfig", k8s, backend=backend_key, extra_context=base_ctx)
+    base_ctx["K8sConfig"] = dict(k8s)
+    dyn_cfg = apply_defaults("DynConfig", dyn_config or {}, backend=backend_key, extra_context=base_ctx)
+    base_ctx["DynConfig"] = dict(dyn_cfg)
+    bench_cfg = apply_defaults("BenchConfig", bench or {}, backend=backend_key, extra_context=base_ctx)
 
     mode_value = dyn_cfg.get("mode") or "disagg"
     enable_router = coerce_bool(dyn_cfg.get("enable_router"))
@@ -111,6 +120,7 @@ def collect_generator_params(
         "DynConfig": dict(dyn_cfg),
         "WorkerConfig": workers_dict,
         "SlaConfig": sla or {},
+        "BenchConfig": bench_cfg,
         "NodeConfig": {"num_gpus_per_node": int(num_gpus_per_node)},
         "params": {
             "prefill": prefill_params,
@@ -199,6 +209,8 @@ def generate_config_from_input_dict(
                 dest = ".".join(["WorkerConfig"] + rest)
             elif group == "SlaConfig":
                 dest = ".".join(["SlaConfig"] + rest)
+            elif group == "BenchConfig":
+                dest = ".".join(["BenchConfig"] + rest)
             elif group == "ModelConfig":
                 dest = ".".join(["ModelConfig"] + rest)
             elif group == "DynConfig":
@@ -216,6 +228,7 @@ def generate_config_from_input_dict(
     target.setdefault("WorkerConfig", {})
     target.setdefault("params", {})
     target.setdefault("SlaConfig", {})
+    target.setdefault("BenchConfig", {})
     target.setdefault("DynConfig", {})
     target.setdefault("NodeConfig", {})
     try:
@@ -242,6 +255,7 @@ def generate_config_from_input_dict(
         agg_workers=int(target.get("WorkerConfig", {}).get("agg_workers", 1)),
         num_gpus_per_node=int(target.get("NodeConfig", {}).get("num_gpus_per_node", 8)),
         sla=target.get("SlaConfig", {}),
+        bench=target.get("BenchConfig", {}),
         dyn_config=target.get("DynConfig", {}),
         backend=backend_key,
         generator_dynamo_version=target.get("generator_dynamo_version"),

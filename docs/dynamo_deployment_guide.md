@@ -81,7 +81,7 @@ cache reuse to make it fair.
 16 H200 in total. QWen3 32B FP8.  
 ISL=4000, OSL=512, TTFT=300ms, TPOT=10ms, optimize tokens/s/gpu
 
-If you would like to deploy by your own, when running the `aiconfigurator cli exp|default`, engine configuration files and executable scripts are automatically generated under the `--save_dir`, in the `topx` folder. The directory structure is:
+If you would like to deploy by your own, when running the `aiconfigurator cli exp|default`, engine configuration files and executable scripts are automatically generated under the `--save-dir`, in the `topx` folder. The directory structure is:
 
 ```
 results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
@@ -113,23 +113,23 @@ results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 
 Here, `agg_config.yaml`, `prefill_config.yaml`, and `decode_config.yaml` are TRTLLM engine configuration files, and `run_x.sh` are the executable scripts. `k8s_deploy.yaml` is for deployment in k8s. In this guide, we're not using k8s.
 
-For multi-node setups, there will be multiple `run_x.sh` scripts (one per node), each invoking the same TRTLLM engine config file. By default, `run_0.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, please specify `--head_node_ip` to indicate the IP address of node0.
+For multi-node setups, there will be multiple `run_x.sh` scripts (one per node), each invoking the same TRTLLM engine config file. By default, `run_0.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, please specify `--generator-set ServiceConfig.head_node_ip=<IP>` to indicate the IP address of node0.
 
 Typically, the command is:
 
 ````bash
 aiconfigurator cli default \
   --system h200_sxm \
-  --model_path Qwen/Qwen3-32B \
+  --model-path Qwen/Qwen3-32B \
   --isl 5000 \
   --osl 1000 \
   --ttft 2000 \
   --tpot 50 \
-  --save_dir results \
-  --total_gpus 16 \
+  --save-dir results \
+  --total-gpus 16 \
   --generator-set ServiceConfig.model_path=/workspace/model_hub/Qwen3-32B-FP8 \
   --generator-set ServiceConfig.served_model_name=Qwen3-32B-FP8 \
-  --head_node_ip x.x.x.x
+  --generator-set ServiceConfig.head_node_ip=x.x.x.x
 ````
 
 To customize parameters per worker type, override the `Workers.<role>` keys with `--generator-set`. To set worker counts, use `WorkerConfig.*` (e.g., `WorkerConfig.prefill_workers=2`). For example:
@@ -139,13 +139,13 @@ Run `aiconfigurator cli default --generator-help` to print information that is s
 ```bash
 aiconfigurator cli default \
   --system h200_sxm \
-  --model_path Qwen/Qwen3-32B \
+  --model-path Qwen/Qwen3-32B \
   --isl 5000 \
   --osl 1000 \
   --ttft 2000 \
   --tpot 50 \
-  --save_dir results \
-  --total_gpus 16 \
+  --save-dir results \
+  --total-gpus 16 \
   --generator-set ServiceConfig.model_path=/workspace/model_hub/Qwen3-32B-FP8 \
   --generator-set ServiceConfig.served_model_name=Qwen3-32B-FP8 \
   --generator-set Workers.prefill.kv_cache_free_gpu_memory_fraction=0.8 \
@@ -241,10 +241,10 @@ aiconfigurator cli default \
   --osl 1000 \
   --ttft 1000 \
   --tpot 10 \
-  --save_dir ./results \
-  --model_path Qwen/Qwen3-32B \
-  --total_gpus 8 \
-  --generated_config_version 1.0.0rc4 \
+  --save-dir ./results \
+  --model-path Qwen/Qwen3-32B \
+  --total-gpus 8 \
+  --generated-config-version 1.0.0rc4 \
   --generator-set ServiceConfig.head_node_ip=0.0.0.0 \
   --generator-set ServiceConfig.model_path=/workspace/model_hub/qwen3-32b-fp8 \
   --generator-set ServiceConfig.served_model_name=Qwen/Qwen3-32B-FP8 \
@@ -253,12 +253,12 @@ aiconfigurator cli default \
   --generator-set Workers.agg.kv_cache_free_gpu_memory_fraction=0.7
 ```
 We use 1.0.0rc3 (our latest data) for aiconfigurator and we can support generate configurations for running with trtllm 1.0.0rc4 worker.  
-*--model_path* is for aiconfigurator and *--served_model_name* is for dynamo deployment  
+*--model-path* is for aiconfigurator and *--served_model_name* is for dynamo deployment  
 > For other supported configurations, please run `aiconfigurator cli --help`.
 
 ### 3.2 Verify Generated Configuration
 
-Engine configuration files and executable scripts are automatically generated under the `--save_dir`. The directory structure is:
+Engine configuration files and executable scripts are automatically generated under the `--save-dir`. The directory structure is:
 
 ````
 ${save_dir}/
@@ -358,11 +358,11 @@ aiconfigurator cli default \
   --osl 1000 \
   --ttft 200 \
   --tpot 8 \
-  --save_dir ./ \
-  --model_path Qwen/Qwen3-32B \
-  --total_gpus 16 \
-  --head_node_ip NODE_0_IP \
-  --generated_config_version 1.0.0rc4 \
+  --save-dir ./ \
+  --model-path Qwen/Qwen3-32B \
+  --total-gpus 16 \
+  --generator-set ServiceConfig.head_node_ip=NODE_0_IP \
+  --generated-config-version 1.0.0rc4 \
   --generator-set ServiceConfig.model_path=/workspace/model_hub/qwen3-32b-fp8 \
   --generator-set ServiceConfig.served_model_name=Qwen/Qwen3-32B-FP8 \
   --generator-set Workers.prefill.kv_cache_free_gpu_memory_fraction=0.8 \
@@ -370,7 +370,7 @@ aiconfigurator cli default \
   --generator-set Workers.agg.kv_cache_free_gpu_memory_fraction=0.7
 ```
 
-> Note that even if `--total_gpus 16`, the optimal configuration generated by aiconfigurator may not require 16 GPUs. If only 8 GPUs are needed, it may produce just a `run_0.sh`, which can then be executed on each node.
+> Note that even if `--total-gpus 16`, the optimal configuration generated by aiconfigurator may not require 16 GPUs. If only 8 GPUs are needed, it may produce just a `run_0.sh`, which can then be executed on each node.
 
 Refer to the single node example to run the container on both node 0 and node 1.
 
@@ -433,7 +433,7 @@ For deploying Dynamo on Kubernetes, please refer to this [dynamo/deploy](https:/
 
 ### 5.1 Generate Configuration for K8S
 
-This produces `disagg/k8s_deploy.yaml` (and for Agg, `agg/k8s_deploy.yaml`) under  `--save_dir`. 
+This produces `disagg/k8s_deploy.yaml` (and for Agg, `agg/k8s_deploy.yaml`) under  `--save-dir`. 
 
 ```bash
 # Example (Disagg)
@@ -443,10 +443,10 @@ aiconfigurator cli default \
   --osl 1000 \
   --ttft 200 \
   --tpot 8 \
-  --save_dir ./ \
-  --model_path Qwen/Qwen3-32B \
-  --total_gpus 8 \
-  --generated_config_version 1.0.0rc6 \
+  --save-dir ./ \
+  --model-path Qwen/Qwen3-32B \
+  --total-gpus 8 \
+  --generated-config-version 1.0.0rc6 \
   --generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8 \
   --generator-set ServiceConfig.served_model_name=Qwen/Qwen3-32B-FP8 \
   --generator-set K8sConfig.k8s_image=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0 \
@@ -458,7 +458,7 @@ aiconfigurator cli default \
   --generator-set Workers.decode.cache_transceiver_backend=default
 ```
 
-Since different versions of TensorRT-LLM often have variations in configuration, please specify `--generated_config_version` to match the version used when generating configs. For the specific TensorRT-LLM version corresponding to a official dynamo image, you can refer to, for example, this [pyproject](https://github.com/ai-dynamo/dynamo/blob/v0.5.0/pyproject.toml#L51), or check directly inside the container by running: `python -c import tensorrt_llm; print(tensorrt_llm.__version__)`. In this case, since the image is nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0, you should set `--generated_config_version 1.0.0rc6`.
+Since different versions of TensorRT-LLM often have variations in configuration, please specify `--generated-config-version` to match the version used when generating configs. For the specific TensorRT-LLM version corresponding to a official dynamo image, you can refer to, for example, this [pyproject](https://github.com/ai-dynamo/dynamo/blob/v0.5.0/pyproject.toml#L51), or check directly inside the container by running: `python -c import tensorrt_llm; print(tensorrt_llm.__version__)`. In this case, since the image is nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0, you should set `--generated-config-version 1.0.0rc6`.
 
 
 ### Apply (inline mode - default)
