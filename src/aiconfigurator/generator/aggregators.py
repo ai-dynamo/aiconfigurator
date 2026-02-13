@@ -78,7 +78,7 @@ def collect_generator_params(
         else "/workspace/model_cache"
     )
 
-    _model_in_pvc_raw = k8s.get("k8s_model_path_in_pvc") or k8s.get("k8s_pvc_model_path") or k8s.get("k8s_hf_home")
+    _model_in_pvc_raw = k8s.get("k8s_model_path_in_pvc") or k8s.get("k8s_pvc_model_path")
     k8s_model_path_in_pvc = _model_in_pvc_raw.strip() if isinstance(_model_in_pvc_raw, str) else ""
 
     # Compute the full model path: {mount}/{path_in_pvc}
@@ -88,6 +88,14 @@ def collect_generator_params(
         else k8s_pvc_mount_path
         if k8s_pvc_name
         else ""
+    )
+
+    # k8s_hf_home: explicit user value takes priority, otherwise use computed path
+    _explicit_hf_home = k8s.get("k8s_hf_home")
+    k8s_hf_home_value = (
+        _explicit_hf_home.strip()
+        if isinstance(_explicit_hf_home, str) and _explicit_hf_home.strip()
+        else k8s_full_model_path
     )
 
     workers_dict = {
@@ -123,7 +131,7 @@ def collect_generator_params(
             "k8s_model_path_in_pvc": k8s_model_path_in_pvc,
             # Backward compat aliases for Jinja2 templates
             "k8s_model_cache": k8s_pvc_name,
-            "k8s_hf_home": k8s_full_model_path,
+            "k8s_hf_home": k8s_hf_home_value,
             "prefill_engine_args": "/workspace/engine_configs/prefill_config.yaml",
             "decode_engine_args": "/workspace/engine_configs/decode_config.yaml",
             "agg_engine_args": "/workspace/engine_configs/agg_config.yaml",
