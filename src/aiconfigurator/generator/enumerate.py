@@ -394,17 +394,15 @@ def enumerate_profiling_configs(
             model_info = get_model_config_from_model_path(model_path)
             architecture = model_info.get("architecture", "")
             # GQA+MoE architectures that support pure TP sweeping
-            _GQA_MOE_ARCHITECTURES = {"Qwen3MoeForCausalLM"}
-            allow_moe_pure_tp = architecture in _GQA_MOE_ARCHITECTURES
+            _gqa_moe_architectures = {"Qwen3MoeForCausalLM"}
+            allow_moe_pure_tp = architecture in _gqa_moe_architectures
         except Exception:
             allow_moe_pure_tp = False
 
     # ------------------------------------------------------------------
     # 1. Support check
     # ------------------------------------------------------------------
-    aic_supported = check_model_hardware_support(
-        model_path, system, backend, backend_version=backend_version
-    )
+    aic_supported = check_model_hardware_support(model_path, system, backend, backend_version=backend_version)
     logger.info(
         "AIC disagg support for %s on %s/%s: %s",
         model_path,
@@ -449,9 +447,14 @@ def enumerate_profiling_configs(
         "Parallel lists: is_moe=%s, enable_wideep=%s, min_gpus=%d, "
         "prefill_max_gpus=%d, decode_max_gpus=%d, "
         "prefill_num_gpu_list=%s, prefill_dp_list=%s, prefill_moe_ep_list=%s",
-        is_moe, enable_wideep, min_gpus,
-        prefill_max_gpus, decode_max_gpus,
-        prefill_wc["num_gpu_per_worker"], prefill_wc["dp_list"], prefill_wc["moe_ep_list"],
+        is_moe,
+        enable_wideep,
+        min_gpus,
+        prefill_max_gpus,
+        decode_max_gpus,
+        prefill_wc["num_gpu_per_worker"],
+        prefill_wc["dp_list"],
+        prefill_wc["moe_ep_list"],
     )
 
     prefill_parallel_configs = enumerate_parallel_config(
@@ -552,7 +555,11 @@ def enumerate_profiling_configs(
         tp, pp, dp, moe_tp, moe_ep = cfg
         logger.info(
             "Building prefill DGD: tp=%d pp=%d dp=%d moe_tp=%d moe_ep=%d",
-            tp, pp, dp, moe_tp, moe_ep,
+            tp,
+            pp,
+            dp,
+            moe_tp,
+            moe_ep,
         )
         try:
             dgd = _build_agg_dgd_for_candidate(
@@ -581,7 +588,11 @@ def enumerate_profiling_configs(
         tp, pp, dp, moe_tp, moe_ep = cfg
         logger.info(
             "Building decode DGD: tp=%d pp=%d dp=%d moe_tp=%d moe_ep=%d",
-            tp, pp, dp, moe_tp, moe_ep,
+            tp,
+            pp,
+            dp,
+            moe_tp,
+            moe_ep,
         )
         try:
             dgd = _build_agg_dgd_for_candidate(
