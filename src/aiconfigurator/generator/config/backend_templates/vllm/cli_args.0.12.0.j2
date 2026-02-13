@@ -11,7 +11,7 @@
 {%- if vllm['skip-tokenizer-init'] -%}{%- set _ = args.append('--skip-tokenizer-init') -%}{%- endif -%}
 {%- if vllm['trust-remote-code'] -%}{%- set _ = args.append('--trust-remote-code') -%}{%- endif -%}
 {%- if vllm['enforce-eager'] -%}{%- set _ = args.append('--enforce-eager') -%}{%- endif -%}
-{%- if vllm['cudagraph-capture-sizes'] is defined -%}{%- set _ = args.append('--cudagraph-capture-sizes "' ~ (vllm['cudagraph-capture-sizes'] | join(',')) ~ '"') -%}{%- endif -%}
+{%- if vllm['cudagraph-capture-sizes'] is defined -%}{%- set _ = args.append('--cudagraph-capture-sizes ' ~ (vllm['cudagraph-capture-sizes'] | join(' '))) -%}{%- endif -%}
 
 
 {%- if vllm['no-enable-prefix-caching'] -%}{%- set _ = args.append('--no-enable-prefix-caching') -%}{%- endif -%}
