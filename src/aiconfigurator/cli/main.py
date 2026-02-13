@@ -220,7 +220,7 @@ def _add_support_mode_arguments(parser):
 _USAGE_EXAMPLES = """
 Examples:
 # Sweep across all backends for Dynamo 0.7.1
-aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 \\
+aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --backend auto \\
     --top-n 3 \\
     --total-gpus 8 --system h200_sxm \\
@@ -232,7 +232,7 @@ aiconfigurator cli default --model_path Qwen/Qwen3-32B-FP8 \\
     --save-dir results
 
 # Sweep for trtllm 1.2.0rc5 but generate config matching trtllm 1.2.0rc6
-aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 \\
+aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --backend trtllm \\
     --total-gpus 8 --system h200_sxm \\
     --backend-version 1.2.0rc5 \\

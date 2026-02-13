@@ -34,6 +34,61 @@ def _load_json_with_infinity(file_path) -> dict:
     return json.loads(content)
 
 
+def filter_real_silicon_configs(
+    parallel_config_list: list[list[int]],
+    *,
+    is_moe: bool = False,
+    min_num_gpus: int | None = None,
+    max_num_gpus: int | None = None,
+    allow_moe_pure_tp: bool = True,
+) -> list[list[int]]:
+    """Filter parallel configs for real-silicon sweep runs.
+
+    Applies GPU count bounds and, for MoE models, restricts configs to pure
+    TEP, pure DEP, and optionally pure TP patterns.
+
+    Args:
+        parallel_config_list: List of ``[tp, pp, dp, moe_tp, moe_ep]`` configs.
+        is_moe: Whether the model is MoE.
+        min_num_gpus: Minimum total GPUs per config (inclusive).
+        max_num_gpus: Maximum total GPUs per config (inclusive).
+        allow_moe_pure_tp: When ``True`` (default, GQA+MoE models), pure TP
+            configs are kept.  Set to ``False`` for MLA+MoE models (e.g.
+            DeepSeek) to only allow TEP/DEP.
+
+    Returns:
+        Filtered list of parallel configurations.
+    """
+    filtered = []
+    for cfg in parallel_config_list:
+        tp, pp, dp, _moe_tp, _moe_ep = cfg
+        total_gpus = tp * pp * dp
+
+        # GPU count bounds
+        if min_num_gpus is not None and total_gpus < min_num_gpus:
+            continue
+        if max_num_gpus is not None and total_gpus > max_num_gpus:
+            continue
+
+        # For MoE: only allow pure TEP, pure DEP, and optionally pure TP.
+        # - Pure TEP: tp > 1, dp == 1, moe_tp == 1, moe_ep > 1
+        # - Pure DEP: tp == 1, dp > 1, moe_tp == 1, moe_ep > 1
+        # - Pure TP:  tp > 1, dp == 1, moe_tp > 1, moe_ep == 1
+        #   (only for GQA+MoE; disabled for MLA+MoE via allow_moe_pure_tp=False)
+        # Reject any config that doesn't match one of these patterns.
+        if is_moe:
+            is_pure_tep = tp > 1 and dp == 1 and _moe_tp == 1 and _moe_ep > 1
+            is_pure_dep = tp == 1 and dp > 1 and _moe_tp == 1 and _moe_ep > 1
+            is_pure_tp = tp > 1 and dp == 1 and _moe_tp > 1 and _moe_ep == 1
+            if not allow_moe_pure_tp:
+                is_pure_tp = False
+            if not (is_pure_tep or is_pure_dep or is_pure_tp):
+                continue
+
+        filtered.append(cfg)
+    return filtered
+
+
 def enumerate_parallel_config(
     num_gpu_list: list[int],
     tp_list: list[int],
@@ -107,34 +162,13 @@ def enumerate_parallel_config(
 
     # Apply real silicon sweep filters to reduce sweep time on real silicon
     if real_silicon_sweep:
-        filtered = []
-        for cfg in parallel_config_list:
-            tp, pp, dp, _moe_tp, _moe_ep = cfg
-            total_gpus = tp * pp * dp
-
-            # GPU count bounds
-            if min_num_gpus is not None and total_gpus < min_num_gpus:
-                continue
-            if max_num_gpus is not None and total_gpus > max_num_gpus:
-                continue
-
-            # For MoE: only allow pure TEP, pure DEP, and optionally pure TP.
-            # - Pure TEP: tp > 1, dp == 1, moe_tp == 1, moe_ep > 1
-            # - Pure DEP: tp == 1, dp > 1, moe_tp == 1, moe_ep > 1
-            # - Pure TP:  tp > 1, dp == 1, moe_tp > 1, moe_ep == 1
-            #   (only for GQA+MoE; disabled for MLA+MoE via allow_moe_pure_tp=False)
-            # Reject any config that doesn't match one of these patterns.
-            if is_moe:
-                is_pure_tep = tp > 1 and dp == 1 and _moe_tp == 1 and _moe_ep > 1
-                is_pure_dep = tp == 1 and dp > 1 and _moe_tp == 1 and _moe_ep > 1
-                is_pure_tp = tp > 1 and dp == 1 and _moe_tp > 1 and _moe_ep == 1
-                if not allow_moe_pure_tp:
-                    is_pure_tp = False
-                if not (is_pure_tep or is_pure_dep or is_pure_tp):
-                    continue
-
-            filtered.append(cfg)
-        parallel_config_list = filtered
+        parallel_config_list = filter_real_silicon_configs(
+            parallel_config_list,
+            is_moe=is_moe,
+            min_num_gpus=min_num_gpus,
+            max_num_gpus=max_num_gpus,
+            allow_moe_pure_tp=allow_moe_pure_tp,
+        )
 
     for parallel_config in parallel_config_list:
         tp, pp, dp, moe_tp, moe_ep = parallel_config

@@ -79,7 +79,7 @@ def collect_generator_params(
     )
 
     _model_in_pvc_raw = k8s.get("k8s_model_path_in_pvc") or k8s.get("k8s_pvc_model_path")
-    k8s_model_path_in_pvc = _model_in_pvc_raw.strip() if isinstance(_model_in_pvc_raw, str) else ""
+    k8s_model_path_in_pvc = _model_in_pvc_raw.strip(" /") if isinstance(_model_in_pvc_raw, str) else ""
 
     # Compute the full model path: {mount}/{path_in_pvc}
     k8s_full_model_path = (

@@ -28,7 +28,7 @@ from aiconfigurator.generator.rendering.engine import render_backend_templates
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task import build_disagg_parallel_lists
-from aiconfigurator.sdk.utils import enumerate_parallel_config
+from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +62,6 @@ def check_model_hardware_support(
     Returns:
         ``True`` if disaggregated mode is supported, ``False`` otherwise.
     """
-    from aiconfigurator.sdk.utils import get_model_config_from_model_path
-
     try:
         model_info = get_model_config_from_model_path(model_path)
         architecture = model_info.get("architecture")
@@ -174,6 +172,9 @@ def _build_param_values(
 
 # ---------------------------------------------------------------------------
 # Step 3: Build a single aggregated DGD for one candidate
+# Note that we want an "agg" DGD to simulate the behavior of one prefill/decode
+# engine in an disagg deployment to run real-silicon profiling.
+# Although we call it agg DGD here it is actually part of a disagg DGD.
 # ---------------------------------------------------------------------------
 
 
@@ -395,8 +396,6 @@ def enumerate_profiling_configs(
     # GQA+MoE models (e.g. Qwen3Moe) also allow pure TP; MLA+MoE (e.g. DeepSeek) do not
     allow_moe_pure_tp = False
     if is_moe:
-        from aiconfigurator.sdk.utils import get_model_config_from_model_path
-
         try:
             model_info = get_model_config_from_model_path(model_path)
             architecture = model_info.get("architecture", "")

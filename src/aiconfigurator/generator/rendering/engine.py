@@ -92,7 +92,7 @@ def _generate_k8s_via_dynamo(
             or k8s_cfg.get("k8s_pvc_model_path")
             or k8s_cfg.get("k8s_hf_home")
             or ""
-        ).strip()
+        ).strip(" /")
         kwargs["pvc_name"] = pvc_name
         kwargs["pvc_mount_path"] = pvc_mount
         kwargs["model_path"] = f"{pvc_mount}/{model_in_pvc}".rstrip("/") if model_in_pvc else pvc_mount
