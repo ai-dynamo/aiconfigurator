@@ -87,33 +87,31 @@ If you would like to deploy by your own, when running the `aiconfigurator cli ex
 results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
 │   ├── best_config_topn.csv
-│   ├── config.yaml
+│   ├── exp_config.yaml
 │   ├── pareto.csv
-│   ├── top1
-│   │   ├── agg
-│   │   │   ├── agg_config.yaml
-│   │   │   ├── k8s_deploy.yaml
-│   │   │   └── node_0_run.sh 
-│   │   └── generator_config.yaml
+│   ├── top1
+│   │   ├── agg_config.yaml
+│   │   ├── generator_config.yaml
+│   │   ├── k8s_deploy.yaml
+│   │   └── run_0.sh
 │   ...
 ├── disagg
 │   ├── best_config_topn.csv
-│   ├── config.yaml
+│   ├── exp_config.yaml
 │   ├── pareto.csv
 │   ├── top1
-│   │   ├── disagg
-│   │   │   ├── decode_config.yaml
-│   │   │   ├── k8s_deploy.yaml
-│   │   │   ├── node_0_run.sh
-│   │   │   └── prefill_config.yaml
-│   │   └── generator_config.yaml
+│   │   ├── decode_config.yaml
+│   │   ├── generator_config.yaml
+│   │   ├── k8s_deploy.yaml
+│   │   ├── prefill_config.yaml
+│   │   └── run_0.sh
 │   ...
 └── pareto_frontier.png
 ```
 
-Here, `agg_config.yaml`, `prefill_config.yaml`, and `decode_config.yaml` are TRTLLM engine configuration files, and `node_x_run.sh` are the executable scripts. `k8s_deploy.yaml` is for deployment in k8s. In this guide, we're not using k8s.
+Here, `agg_config.yaml`, `prefill_config.yaml`, and `decode_config.yaml` are TRTLLM engine configuration files, and `run_0.sh` / `run_1.sh` are the executable scripts (one per node for multi-node). `k8s_deploy.yaml` is for deployment in k8s. In this guide, we're not using k8s.
 
-For multi-node setups, there will be multiple `node_x_run.sh` scripts (one per node), each invoking the same TRTLLM engine config file. By default, `node_0_run.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, please specify `--head_node_ip` to indicate the IP address of node0.
+For multi-node setups, there will be multiple run scripts (`run_0.sh`, `run_1.sh`, ...), each invoking the same TRTLLM engine config file. By default, `run_0.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, please specify `--head_node_ip` to indicate the IP address of node0.
 
 Typically, the command is:
 
@@ -152,14 +150,14 @@ aiconfigurator cli default \
   --generator-set ServiceConfig.head_node_ip=0.0.0.0
 ```
 
-At runtime, copy the generated `backend_configs` directory to each node and execute the corresponding script:
+At runtime, copy the generated engine configs to each node (e.g. into `engine_configs/`) and run the corresponding script from the experiment's `agg/top1/` or `disagg/top1/` directory:
 
 ```bash
 # On node0
-bash node_0_run.sh
+bash run_0.sh
 
 # On other nodes
-bash node_x_run.sh
+bash run_1.sh
 ```
 
 > Note: The generated configs are for deploying 1 replica instead of the cluster (defined as total_gpus). We'll bridge this gap in future.
@@ -249,21 +247,10 @@ We use 1.0.0rc3 (our latest data) for aiconfigurator and we can support generate
 
 ### 3.2 Verify Generated Configuration
 
-engine configuration files and executable scripts are automatically generated under the `--save_dir`, in the `backend_configs` folder. The directory structure is:
+engine configuration files and executable scripts are automatically generated under the `--save_dir`. Under each run directory (e.g. `Qwen_Qwen3-32B_h200_sxm_trtllm_...`), the structure is:
 
-````
-backend_configs/
-├── agg/
-│   ├── agg_config.yaml
-│   └── node_0_run.sh
-└── disagg/
-│   ├── decode_config.yaml
-│   ├── prefill_config.yaml
-│   ├── node_0_run.sh
-│   ├── node_1_run.sh
-│   └── ...
-└──
-````
+- **agg/** and **disagg/** each contain `exp_config.yaml`, `pareto.csv`, `best_config_topn.csv`, and **top1/** (or top2, top3, ...).
+- Inside **top1/** (no nested `agg/` or `disagg/`), you will find `agg_config.yaml` (for agg) or `decode_config.yaml`, `prefill_config.yaml` (for disagg), `generator_config.yaml`, `k8s_deploy.yaml`, and `run_0.sh` (plus `run_1.sh` etc. for multi-node).
 
 ### 3.3 Launch the Dynamo Container
 
@@ -283,11 +270,18 @@ Inside the container:
 ```bash
 cd /workspace/mount_dir/dynamo/components/backends/trtllm
 
-# Copy generated configs from save_dir
-cp -r ${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot50_*/backend_configs/* ./
+# Create the engine_configs directory expected by the run scripts (if needed)
+mkdir -p /workspace/engine_configs
 
-# Launch dynamo
-bash disagg/node_0_run.sh
+# Copy generated configs from save_dir (artifacts are directly under agg/top1/ or disagg/top1/, no nested agg/ or disagg/)
+# For disaggregated mode (recommended):
+cp ${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot50_*/disagg/top1/*_config.yaml /workspace/engine_configs/
+# For aggregated mode:
+# cp ${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot50_*/agg/top1/agg_config.yaml /workspace/engine_configs/
+
+# Navigate to the generated artifacts directory and launch dynamo
+cd ${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot50_*/disagg/top1
+bash run_0.sh
 ```
 
 > **Tip:** If you see a Triton version mismatch error, reinstall Triton:
@@ -347,17 +341,20 @@ Refer to the single node example to run the container on both node 0 and node 1.
 ### 4.2 Deploy on Node 0
 Inside the container:
 ```bash
-cd /workspace/mount_dir/dynamo/components/backends/trtllm
-cp -r Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
-bash disagg/node_0_run.sh
+# Copy engine configs if not already present
+mkdir -p /workspace/engine_configs
+cp /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1/*_config.yaml /workspace/engine_configs/
+
+# Navigate to the generated top1 directory and launch
+cd /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1
+bash run_0.sh
 ```
 
 ### 4.3 Deploy on Node 1
 Inside the container:
 ```bash
-cd /workspace/mount_dir/dynamo/components/backends/trtllm
-cp -r Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/backend_configs/* ./
-bash disagg/node_1_run.sh
+cd /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1
+bash run_1.sh
 ```
 
 ### 4.4 Test the Service
@@ -387,7 +384,7 @@ For deploying Dynamo on Kubernetes, please refer to this [dynamo/deploy](https:/
 
 ### 5.1 Generate Configuration for K8S
 
-This produces `disagg/k8s_deploy.yaml` (and for Agg, `agg/k8s_deploy.yaml`) under  `--save_dir`. 
+This produces `disagg/top1/k8s_deploy.yaml` (and for Agg, `agg/top1/k8s_deploy.yaml`) under the run directory in `--save_dir`. 
 
 ```bash
 # Example (Disagg)
@@ -422,9 +419,9 @@ Since different versions of TensorRT-LLM often have variations in configuration,
 Inline mode embeds the engine configs into the Pod startup script; **no ConfigMap is needed**:
 
 ```bash
-kubectl apply -f disagg/k8s_deploy.yaml
+kubectl apply -f disagg/top1/k8s_deploy.yaml
 # or
-kubectl apply -f agg/k8s_deploy.yaml
+kubectl apply -f agg/top1/k8s_deploy.yaml
 ```
 
 
