@@ -95,6 +95,7 @@ def _build_param_values(
     image: str,
     num_gpus_per_node: int,
     isl: int,
+    osl: int,
     worker_type: str,
     tp: int,
     pp: int,
@@ -166,7 +167,7 @@ def _build_param_values(
         "params": params,
         "WorkerConfig": worker_config,
         "NodeConfig": {"num_gpus_per_node": num_gpus_per_node},
-        "SlaConfig": {"isl": isl, "osl": 1000},
+        "SlaConfig": {"isl": isl, "osl": osl},
         "backend": backend,
     }
 
@@ -182,6 +183,7 @@ def _build_agg_dgd_for_candidate(
     image: str,
     num_gpus_per_node: int,
     isl: int,
+    osl: int,
     is_moe: bool,
     worker_type: str,
     tp: int,
@@ -211,6 +213,7 @@ def _build_agg_dgd_for_candidate(
         image: Container image for all DGD services.
         num_gpus_per_node: GPUs per physical node.
         isl: Input sequence length.
+        osl: Output sequence length.
         is_moe: Whether the model is MoE.
         worker_type: ``"prefill"`` or ``"decode"``.
         tp: Tensor-parallel size.
@@ -244,6 +247,7 @@ def _build_agg_dgd_for_candidate(
         image=image,
         num_gpus_per_node=num_gpus_per_node,
         isl=isl,
+        osl=osl,
         worker_type=worker_type,
         tp=tp,
         pp=pp,
@@ -321,6 +325,7 @@ def enumerate_profiling_configs(
     *,
     image: str = "",
     isl: int = 4000,
+    osl: int = 1000,
     enable_wideep: bool = False,
     backend_version: str | None = None,
     num_gpus_per_node: int | None = None,
@@ -353,6 +358,8 @@ def enumerate_profiling_configs(
         backend: Backend name (``"trtllm"``, ``"sglang"``, ``"vllm"``).
         image: Container image for all DGD services.
         isl: Input sequence length (used for prefill heuristic).
+        osl: Output sequence length (used by rule plugins, e.g.
+            ``cache_transceiver_max_tokens_in_buffer``).
         enable_wideep: Enable wide expert-parallelism search space.
         backend_version: Optional backend database version.
         num_gpus_per_node: GPUs per physical node.  If ``None`` it is
@@ -568,6 +575,7 @@ def enumerate_profiling_configs(
                 image=image,
                 num_gpus_per_node=num_gpus_per_node,
                 isl=isl,
+                osl=osl,
                 is_moe=is_moe,
                 worker_type="prefill",
                 tp=tp,
@@ -601,6 +609,7 @@ def enumerate_profiling_configs(
                 image=image,
                 num_gpus_per_node=num_gpus_per_node,
                 isl=isl,
+                osl=osl,
                 is_moe=is_moe,
                 worker_type="decode",
                 tp=tp,
