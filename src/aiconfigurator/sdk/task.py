@@ -393,6 +393,7 @@ class TaskConfigFactory:
     @staticmethod
     def _disagg_defaults_layer(ctx: TaskContext) -> dict:
         decode_system = ctx.decode_system_name or ctx.system_name
+        should_enable_pp = False  # FIXME: need to improve pp alignment and then enable
 
         prefill_worker_config, decode_worker_config = build_disagg_parallel_lists(
             backend_name=ctx.backend_name,
