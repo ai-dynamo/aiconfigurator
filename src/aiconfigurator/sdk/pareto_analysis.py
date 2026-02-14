@@ -139,9 +139,15 @@ def agg_pareto(
         results_df = results_df.drop_duplicates(ignore_index=True)
         results_df = results_df.sort_values(by="tokens/s/gpu", ascending=False).reset_index(drop=True)
     else:
+        if exceptions:
+            raise RuntimeError(
+                f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
+            ) from exceptions[-1]
         raise RuntimeError(
-            f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
-        ) from exceptions[-1]
+            "No results found for any parallel configuration. No configuration satisfied the "
+            "TTFT/TPOT or request-latency constraints. Try relaxing --ttft, --tpot, or "
+            "--request_latency (e.g., higher ttft/tpot or higher request_latency)."
+        )
 
     return results_df
 
