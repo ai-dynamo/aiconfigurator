@@ -87,26 +87,25 @@ If you would like to deploy by your own, when running the `aiconfigurator cli ex
 results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
 │   ├── best_config_topn.csv
-│   ├── config.yaml
+│   ├── exp_config.yaml
 │   ├── pareto.csv
 │   ├── top1
-│   │   ├── agg
-│   │   │   ├── agg_config.yaml
-│   │   │   ├── k8s_deploy.yaml
-│   │   │   └── run_0.sh 
-│   │   └── generator_config.yaml
+│   │   ├── agg_config.yaml
+│   │   ├── generator_config.yaml
+│   │   ├── k8s_deploy.yaml
+│   │   └── run_0.sh
 │   ...
 ├── disagg
 │   ├── best_config_topn.csv
-│   ├── config.yaml
+│   ├── exp_config.yaml
 │   ├── pareto.csv
 │   ├── top1
-│   │   ├── disagg
-│   │   │   ├── decode_config.yaml
-│   │   │   ├── k8s_deploy.yaml
-│   │   │   ├── run_0.sh
-│   │   │   └── prefill_config.yaml
-│   │   └── generator_config.yaml
+│   │   ├── decode_config.yaml
+│   │   ├── generator_config.yaml
+│   │   ├── k8s_deploy.yaml
+│   │   ├── prefill_config.yaml
+│   │   ├── run_0.sh
+│   │   └── run_1.sh  (for multi-node setups)
 │   ...
 └── pareto_frontier.png
 ```
@@ -158,17 +157,18 @@ At runtime, copy the generated artifacts to each node, set up the engine configs
 # Create the engine_configs directory expected by the run scripts
 mkdir -p /workspace/engine_configs
 
-# Copy engine config files to the expected location (adjust paths as needed)
+# Copy engine config files to the expected location (artifacts are directly under top1/, no nested agg/ or disagg/)
 # For aggregated mode:
-cp ${your_save_dir}/agg/top1/agg/agg_config.yaml /workspace/engine_configs/
+# cp ${your_save_dir}/.../agg/top1/agg_config.yaml /workspace/engine_configs/
 # For disaggregated mode:
-cp ${your_save_dir}/disagg/top1/disagg/*_config.yaml /workspace/engine_configs/
+cp ${your_save_dir}/.../disagg/top1/*_config.yaml /workspace/engine_configs/
 
-# On node0
+# Navigate to the generated top1 directory, then on node0:
+cd ${your_save_dir}/.../disagg/top1
 bash run_0.sh
 
 # On other nodes
-bash run_x.sh
+bash run_1.sh
 ```
 
 > Note: The generated configs are for deploying 1 replica instead of the cluster (defined as total_gpus). We'll bridge this gap in future.
@@ -264,25 +264,23 @@ Engine configuration files and executable scripts are automatically generated un
 ${save_dir}/
 ├── agg/
 │   ├── top1/
-│   │   ├── agg/
-│   │   │   ├── agg_config.yaml
-│   │   │   ├── k8s_deploy.yaml
-│   │   │   └── run_0.sh
-│   │   └── generator_config.yaml
+│   │   ├── agg_config.yaml
+│   │   ├── generator_config.yaml
+│   │   ├── k8s_deploy.yaml
+│   │   └── run_0.sh
 │   ├── best_config_topn.csv
-│   ├── config.yaml
+│   ├── exp_config.yaml
 │   └── pareto.csv
 ├── disagg/
 │   ├── top1/
-│   │   ├── disagg/
-│   │   │   ├── decode_config.yaml
-│   │   │   ├── prefill_config.yaml
-│   │   │   ├── k8s_deploy.yaml
-│   │   │   ├── run_0.sh
-│   │   │   └── run_1.sh  (for multi-node setups)
-│   │   └── generator_config.yaml
+│   │   ├── decode_config.yaml
+│   │   ├── generator_config.yaml
+│   │   ├── k8s_deploy.yaml
+│   │   ├── prefill_config.yaml
+│   │   ├── run_0.sh
+│   │   └── run_1.sh  (for multi-node setups)
 │   ├── best_config_topn.csv
-│   ├── config.yaml
+│   ├── exp_config.yaml
 │   └── pareto.csv
 └── pareto_frontier.png
 ````
@@ -306,17 +304,15 @@ Inside the container:
 # Create the engine_configs directory expected by the run scripts
 mkdir -p /workspace/engine_configs
 
-# Copy engine config files to the expected location
+# Copy engine config files to the expected location (artifacts are directly under top1/, no nested agg/ or disagg/)
 # For disaggregated mode (recommended):
-cp /workspace/mount_dir/${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot10_*/disagg/top1/disagg/*_config.yaml /workspace/engine_configs/
+cp /workspace/mount_dir/${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot10_*/disagg/top1/*_config.yaml /workspace/engine_configs/
 
 # For aggregated mode:
-# cp /workspace/mount_dir/${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot10_*/agg/top1/agg/agg_config.yaml /workspace/engine_configs/
+# cp /workspace/mount_dir/${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot10_*/agg/top1/agg_config.yaml /workspace/engine_configs/
 
-# Navigate to the generated artifacts directory
-cd /workspace/mount_dir/${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot10_*/disagg/top1/disagg
-
-# Launch dynamo
+# Navigate to the generated artifacts directory and launch dynamo
+cd /workspace/mount_dir/${your_save_dir}/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft1000_tpot10_*/disagg/top1
 bash run_0.sh
 ```
 
@@ -380,27 +376,19 @@ Inside the container:
 # Create the engine_configs directory expected by the run scripts
 mkdir -p /workspace/engine_configs
 
-# Copy engine config files to the expected location
-cp /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1/disagg/*_config.yaml /workspace/engine_configs/
+# Copy engine config files to the expected location (artifacts are directly under top1/, no nested disagg/)
+cp /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1/*_config.yaml /workspace/engine_configs/
 
-# Navigate to the generated artifacts directory
-cd /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1/disagg
-
-# Launch dynamo on node 0 (includes frontend)
+# Navigate to the generated artifacts directory and launch dynamo on node 0 (includes frontend)
+cd /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1
 bash run_0.sh
 ```
 
 ### 4.3 Deploy on Node 1
 Inside the container:
 ```bash
-# Create the engine_configs directory expected by the run scripts
-mkdir -p /workspace/engine_configs
-
-# Copy engine config files to the expected location
-cp /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1/disagg/*_config.yaml /workspace/engine_configs/
-
-# Navigate to the generated artifacts directory
-cd /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1/disagg
+# Navigate to the same top1 directory and launch worker on node 1
+cd /workspace/mount_dir/Qwen_Qwen3-32B_h200_sxm_trtllm_isl5000_osl1000_ttft200_tpot8_*/disagg/top1
 
 # Launch dynamo on node 1 (workers only)
 bash run_1.sh
