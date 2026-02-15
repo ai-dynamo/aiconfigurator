@@ -483,6 +483,18 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])
+    elif architecture == "DeepseekV32ForCausalLM":
+        # DeepSeek V3.2 specific: DSA (DeepSeek Sparse Attention) parameters
+        extra_params = common.DeepSeekV32Config(
+            index_n_heads=config.get("index_n_heads", 64),
+            index_head_dim=config.get("index_head_dim", 128),
+            index_topk=config.get("index_topk", 2048),
+            first_k_dense_replace=config.get("first_k_dense_replace", 3),
+        )
+        logger.info(
+            f"DeepSeek V3.2 DSA config: index_n_heads={extra_params.index_n_heads}, "
+            f"index_topk={extra_params.index_topk}, first_k_dense={extra_params.first_k_dense_replace}"
+        )
 
     logger.info(
         f"Model architecture: architecture={architecture}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "

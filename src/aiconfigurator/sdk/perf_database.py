@@ -3907,6 +3907,267 @@ class PerfDatabase:
                     raise
 
     @functools.lru_cache(maxsize=32768)
+    def query_context_dsa(
+        self,
+        b: int,
+        s: int,
+        prefix: int,
+        num_heads: int,
+        index_n_heads: int,
+        index_topk: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """
+        Query context DSA (DeepSeek Sparse Attention) latency and energy.
+
+        DSA uses an index network to select top-k relevant KV positions,
+        reducing attention complexity from O(n²) to O(n×k).
+
+        Args:
+            b: Batch size
+            s: Sequence length to be computed
+            prefix: Prefix cache length
+            num_heads: Number of attention heads
+            index_n_heads: Number of heads in the DSA index network
+            index_topk: Number of top-k KV positions to select
+            kvcache_quant_mode: KV cache quantization mode
+            fmha_quant_mode: Attention computation quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
+        """
+
+        def get_sol(
+            b: int,
+            s: int,
+            prefix: int,
+            num_heads: int,
+            index_n_heads: int,
+            index_topk: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+            fmha_quant_mode: common.FMHAQuantMode,
+        ) -> tuple[float, float, float]:
+            """
+            Get the SOL time for DSA context phase.
+            
+            DSA reduces attention from O(n²) to O(n×k) where k=index_topk.
+            Additional cost: index network computation.
+            """
+            full_s = s + prefix
+            
+            # Index network: projects query to select top-k positions
+            # Index network uses index_n_heads with index_head_dim=128
+            index_ops = 2 * b * index_n_heads * 128 * full_s  # Index scoring
+            
+            # Sparse attention: only attend to top-k positions per query
+            # This is the key efficiency: O(n×k) instead of O(n²)
+            sparse_attn_ops = (
+                b * num_heads * 2 * (full_s * index_topk) * 128  # Q @ K^T
+                + b * num_heads * 2 * (full_s * index_topk) * 128  # Softmax @ V
+            )
+            
+            ops = index_ops + sparse_attn_ops
+            
+            # Memory access pattern for DSA:
+            # - Q: s × num_heads × 128
+            # - K/V: full_s × num_heads × 128 (but only top-k accessed)
+            # - Index network weights: index_n_heads × 128 × hidden_size
+            q_bytes = b * s * num_heads * 128 * 2
+            kv_bytes = b * full_s * num_heads * 128 * kvcache_quant_mode.value.memory
+            # Only load top-k positions for sparse attention
+            sparse_kv_bytes = b * full_s * index_topk * 128 * 2
+            # Index network weights (shared across batch)
+            index_weight_bytes = index_n_heads * 128 * 7168 * 2  # hidden_size=7168
+            
+            mem_bytes = q_bytes + kv_bytes + sparse_kv_bytes + index_weight_bytes
+            
+            sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
+            sol_time = max(sol_math, sol_mem)
+            
+            return sol_time, sol_math, sol_mem
+
+        def get_empirical(
+            b: int,
+            s: int,
+            prefix: int,
+            num_heads: int,
+            index_n_heads: int,
+            index_topk: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+            fmha_quant_mode: common.FMHAQuantMode,
+        ) -> float:
+            """
+            Get the empirical time for DSA context phase.
+            
+            DSA has higher constant overhead due to index network,
+            so use a lower scale factor than dense attention.
+            """
+            latency = get_sol(b, s, prefix, num_heads, index_n_heads, index_topk, kvcache_quant_mode, fmha_quant_mode)[0]
+            # DSA has more overhead due to index network and sparse gather/scatter
+            scale_factor = 0.4  # Lower than MLA's 0.6 due to sparse overhead
+            return latency / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            sol_latency = get_sol(b, s, prefix, num_heads, index_n_heads, index_topk, kvcache_quant_mode, fmha_quant_mode)[0]
+            return PerformanceResult(sol_latency, energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, prefix, num_heads, index_n_heads, index_topk, kvcache_quant_mode, fmha_quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            emp_latency = get_empirical(b, s, prefix, num_heads, index_n_heads, index_topk, kvcache_quant_mode, fmha_quant_mode)
+            return PerformanceResult(emp_latency, energy=0.0)
+        else:
+            # HYBRID mode: try to load empirical data, fall back to SOL
+            try:
+                # TODO: Add DSA empirical data loading
+                # For now, use empirical estimation
+                logger.debug(
+                    f"DSA empirical data not yet available, using SOL estimation for "
+                    f"{b=}, {s=}, {prefix=}, {num_heads=}, {index_topk=}"
+                )
+                emp_latency = get_empirical(b, s, prefix, num_heads, index_n_heads, index_topk, kvcache_quant_mode, fmha_quant_mode)
+                return PerformanceResult(emp_latency, energy=0.0)
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query context DSA data, using empirical mode"
+                    )
+                    latency = get_empirical(b, s, prefix, num_heads, index_n_heads, index_topk, kvcache_quant_mode, fmha_quant_mode)
+                    return PerformanceResult(latency, energy=0.0)
+                else:
+                    logger.exception(
+                        f"Failed to query context DSA data for {b=}, {s=}, {prefix=}, {num_heads=}, \
+                        {index_topk=}, {database_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
+
+    @functools.lru_cache(maxsize=32768)
+    def query_generation_dsa(
+        self,
+        b: int,
+        s: int,
+        num_heads: int,
+        index_n_heads: int,
+        index_topk: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """
+        Query generation DSA (DeepSeek Sparse Attention) latency and energy.
+
+        Args:
+            b: Batch size
+            s: KV cache length
+            num_heads: Number of attention heads
+            index_n_heads: Number of heads in the DSA index network
+            index_topk: Number of top-k KV positions to select
+            kvcache_quant_mode: KV cache quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult: Acts as float (latency in ms).
+                              Energy accessible via .energy attribute (W·ms).
+        """
+
+        def get_sol(
+            b: int,
+            s: int,
+            num_heads: int,
+            index_n_heads: int,
+            index_topk: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+        ) -> tuple[float, float, float]:
+            """
+            Get the SOL time for DSA generation phase.
+            
+            In generation, we have 1 new token attending to s KV positions.
+            DSA selects top-k positions from s.
+            """
+            if kvcache_quant_mode == common.KVCacheQuantMode.fp8:
+                quant_mode_gen = common.FMHAQuantMode.fp8
+            else:
+                quant_mode_gen = common.FMHAQuantMode.float16
+            
+            # Index network for the new query token
+            index_ops = 2 * b * index_n_heads * 128 * s  # Score all s positions
+            
+            # Sparse attention: new token attends to top-k positions
+            sparse_attn_ops = (
+                2 * b * num_heads * 128 * index_topk  # Q @ K^T (1 × top-k)
+                + 2 * b * num_heads * 128 * index_topk  # Softmax @ V
+            )
+            
+            ops = index_ops + sparse_attn_ops
+            
+            # Memory: load KV cache (but only top-k for actual attention)
+            q_bytes = b * num_heads * 128 * 2
+            # Need to scan entire KV cache for index network
+            kv_cache_bytes = b * s * num_heads * 128 * kvcache_quant_mode.value.memory
+            # But only load top-k for sparse attention
+            sparse_attn_bytes = b * index_topk * num_heads * 128 * 2
+            
+            mem_bytes = q_bytes + kv_cache_bytes + sparse_attn_bytes
+            
+            sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
+            sol_time = max(sol_math, sol_mem)
+            
+            return sol_time, sol_math, sol_mem
+
+        def get_empirical(
+            b: int,
+            s: int,
+            num_heads: int,
+            index_n_heads: int,
+            index_topk: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+        ) -> float:
+            """
+            Get the empirical time for DSA generation phase.
+            """
+            latency = get_sol(b, s, num_heads, index_n_heads, index_topk, kvcache_quant_mode)[0]
+            scale_factor = 0.5
+            return latency / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            sol_latency = get_sol(b, s, num_heads, index_n_heads, index_topk, kvcache_quant_mode)[0]
+            return PerformanceResult(sol_latency, energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, num_heads, index_n_heads, index_topk, kvcache_quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            emp_latency = get_empirical(b, s, num_heads, index_n_heads, index_topk, kvcache_quant_mode)
+            return PerformanceResult(emp_latency, energy=0.0)
+        else:
+            try:
+                # TODO: Add DSA empirical data loading
+                logger.debug(
+                    f"DSA generation empirical data not yet available, using SOL estimation"
+                )
+                emp_latency = get_empirical(b, s, num_heads, index_n_heads, index_topk, kvcache_quant_mode)
+                return PerformanceResult(emp_latency, energy=0.0)
+            except Exception:
+                if database_mode == common.DatabaseMode.HYBRID:
+                    logger.debug(
+                        f"Failed to query generation DSA data, using empirical mode"
+                    )
+                    latency = get_empirical(b, s, num_heads, index_n_heads, index_topk, kvcache_quant_mode)
+                    return PerformanceResult(latency, energy=0.0)
+                else:
+                    logger.exception(
+                        f"Failed to query generation DSA data for {b=}, {s=}, {num_heads=}, \
+                        {index_topk=}, {database_mode=}. Please consider Hybrid mode."
+                    )
+                    raise
+
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_generation_mla(
         self,
         b: int,

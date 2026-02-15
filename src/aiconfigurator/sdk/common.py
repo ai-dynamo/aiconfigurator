@@ -30,6 +30,27 @@ class BlockConfig:
 
 
 @dataclass(frozen=True)
+class DeepSeekV32Config:
+    """
+    Configuration for DeepSeek V3.2 specific parameters (DSA - DeepSeek Sparse Attention).
+
+    V3.2 introduces DSA (DeepSeek Sparse Attention) which uses an index network
+    to select top-k relevant KV positions, reducing attention complexity from O(n²) to O(n×k).
+
+    Attributes:
+        index_n_heads (int): Number of attention heads in the DSA index network (default: 64)
+        index_head_dim (int): Head dimension for the DSA index network (default: 128)
+        index_topk (int): Number of top-k KV positions to select (default: 2048)
+        first_k_dense_replace (int): Number of initial layers using dense MLA (default: 3)
+    """
+
+    index_n_heads: int = 64
+    index_head_dim: int = 128
+    index_topk: int = 2048
+    first_k_dense_replace: int = 3
+
+
+@dataclass(frozen=True)
 class NemotronHConfig:
     """
     Configuration for NemotronH hybrid model (Mamba + MoE + Transformer).
@@ -284,6 +305,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Qwen3ForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
+    "DeepseekV32ForCausalLM": "DEEPSEEK",  # V3.2 with DSA
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",

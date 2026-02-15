@@ -215,6 +215,15 @@ def get_model(
             model_config,
         )
     elif model_family == "DEEPSEEK":
+        # Check if this is DeepSeek V3.2 with DSA support
+        is_v32 = architecture == "DeepseekV32ForCausalLM"
+        
+        if is_v32:
+            logger.info(
+                f"DeepSeek V3.2 detected. DSA parameters: {extra_params if extra_params else 'not loaded'}. "
+                f"Note: DSA Operation not yet implemented, using MLA as fallback."
+            )
+        
         if backend_name == "sglang" and model_config.enable_wideep:
             logger.debug(f"WideEP is enabled for model {model_path} with backend {backend_name}")
             model = WideEPDeepSeekModel(
@@ -255,6 +264,10 @@ def get_model(
             )
         else:
             logger.debug(f"WideEP is not enabled for model {model_path} with backend {backend_name}")
+            
+            # Check if this is DeepSeek V3.2 with DSA
+            is_v32 = architecture == "DeepseekV32ForCausalLM"
+            
             model = DeepSeekModel(
                 topk,
                 num_experts,
@@ -271,6 +284,7 @@ def get_model(
                 vocab,
                 context,
                 model_config,
+                extra_params=extra_params if is_v32 else None,  # Pass DSA config for V3.2
             )
     elif model_family == "NEMOTRONNAS":
         model = NemotronNas(
@@ -1031,11 +1045,33 @@ class MOEModel(BaseModel):
 
 class DeepSeekModel(BaseModel):
     """
-    DeepSeek V3/R1 uses this model impl.
+    DeepSeek V3/R1/V3.2 uses this model impl.
+    
+    For V3/R1: All layers use MLA (Multi-head Latent Attention)
+    For V3.2: Layer 0-2 use MLA, Layer 3-60 use DSA (DeepSeek Sparse Attention)
     """
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(
+        self, 
+        topk: int, 
+        num_experts: int, 
+        moe_inter_size: int, 
+        *args,
+        extra_params: common.DeepSeekV32Config | None = None,
+    ) -> None:
         super().__init__(*args)
+        
+        # Store DSA config for V3.2
+        self._dsa_config = extra_params
+        self._use_dsa = extra_params is not None and isinstance(extra_params, common.DeepSeekV32Config)
+        
+        if self._use_dsa:
+            logger.info(
+                f"DeepSeek V3.2 model initialized with DSA: "
+                f"index_n_heads={extra_params.index_n_heads}, "
+                f"index_topk={extra_params.index_topk}, "
+                f"first_k_dense_replace={extra_params.first_k_dense_replace}"
+            )
 
         # make sure the paralel width is same
         assert (
@@ -1115,13 +1151,52 @@ class DeepSeekModel(BaseModel):
                     512,
                     gemm_quant_mode,
                 ),  # agg ctx attn part
+            ]
+        )
+        
+        # Add attention operations based on V3 vs V3.2
+        if self._use_dsa:
+            # V3.2: Layer 0-(first_k_dense_replace-1) use MLA, rest use DSA
+            num_mla_layers = self._dsa_config.first_k_dense_replace
+            num_dsa_layers = self._num_layers - num_mla_layers
+            
+            if num_mla_layers > 0:
+                self.context_ops.append(
+                    ops.ContextMLA(
+                        "context_mla_attention",
+                        num_mla_layers,  # Only first k layers
+                        128 // tp_size,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                    )
+                )
+            
+            if num_dsa_layers > 0:
+                self.context_ops.append(
+                    ops.ContextDSA(
+                        "context_dsa_attention",
+                        num_dsa_layers,  # Rest of layers
+                        128 // tp_size,
+                        self._dsa_config.index_n_heads,
+                        self._dsa_config.index_topk,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                    )
+                )
+        else:
+            # V3/R1: All layers use MLA
+            self.context_ops.append(
                 ops.ContextMLA(
                     "context_attention",
                     self._num_layers,
                     128 // tp_size,
                     kvcache_quant_mode,
                     fmha_quant_mode,
-                ),  # agg ctx attn part
+                )
+            )
+        
+        self.context_ops.extend(
+            [
                 ops.GEMM(
                     "context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode
                 ),  # agg ctx attn part
@@ -1265,26 +1340,77 @@ class DeepSeekModel(BaseModel):
                     1536,
                     gemm_quant_mode,
                 ),
+            ]
+        )
+        
+        # Add generation attention operations based on V3 vs V3.2
+        if self._use_dsa:
+            # V3.2: Layer 0-(first_k_dense_replace-1) use MLA, rest use DSA
+            num_mla_layers = self._dsa_config.first_k_dense_replace
+            num_dsa_layers = self._num_layers - num_mla_layers
+            
+            if num_mla_layers > 0:
+                self.generation_ops.extend([
+                    ops.MLABmm(
+                        "generation_mla_bmm_pre",
+                        num_mla_layers * self._mtp_scale_factor,
+                        self._num_heads // tp_size,
+                        mla_bmm_quant_mode,
+                        if_pre=True,
+                    ),
+                    ops.GenerationMLA(
+                        "generation_mla_attention",
+                        num_mla_layers * self._mtp_scale_factor,
+                        128 // tp_size,
+                        kvcache_quant_mode,
+                    ),
+                    ops.MLABmm(
+                        "generation_mla_bmm_post",
+                        num_mla_layers * self._mtp_scale_factor,
+                        self._num_heads // tp_size,
+                        mla_bmm_quant_mode,
+                        if_pre=False,
+                    ),
+                ])
+            
+            if num_dsa_layers > 0:
+                self.generation_ops.append(
+                    ops.GenerationDSA(
+                        "generation_dsa_attention",
+                        num_dsa_layers * self._mtp_scale_factor,
+                        128 // tp_size,
+                        self._dsa_config.index_n_heads,
+                        self._dsa_config.index_topk,
+                        kvcache_quant_mode,
+                    )
+                )
+        else:
+            # V3/R1: All layers use MLA
+            self.generation_ops.extend([
                 ops.MLABmm(
                     "generation_bmm_pre",
                     self._num_layers * self._mtp_scale_factor,
                     self._num_heads // tp_size,
                     mla_bmm_quant_mode,
                     if_pre=True,
-                ),  # agg gen attn part
+                ),
                 ops.GenerationMLA(
                     "generation_attention",
                     self._num_layers * self._mtp_scale_factor,
                     128 // tp_size,
                     kvcache_quant_mode,
-                ),  # agg gen attn part
+                ),
                 ops.MLABmm(
                     "generation_bmm_post",
                     self._num_layers * self._mtp_scale_factor,
                     self._num_heads // tp_size,
                     mla_bmm_quant_mode,
                     if_pre=False,
-                ),  # agg gen attn part
+                ),
+            ])
+        
+        self.generation_ops.extend(
+            [
                 ops.GEMM(
                     "generation_proj_gemm",
                     self._num_layers * self._mtp_scale_factor,

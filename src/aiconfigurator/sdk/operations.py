@@ -1018,6 +1018,104 @@ class MLABmm(Operation):
         return self._weights * self._scale_factor
 
 
+class ContextDSA(Operation):
+    """
+    Context DSA (DeepSeek Sparse Attention) operation.
+    
+    DSA uses an index network to select top-k relevant KV positions,
+    reducing attention complexity from O(n²) to O(n×k).
+    
+    Only available on Hopper (SM90) and Blackwell GPUs.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        num_heads: int,
+        index_n_heads: int,
+        index_topk: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._num_heads = num_heads
+        self._index_n_heads = index_n_heads
+        self._index_topk = index_topk
+        self._kvcache_quant_mode = kvcache_quant_mode
+        self._fmha_quant_mode = fmha_quant_mode
+        # TODO: Calculate actual weights for DSA
+        self._weights = 0.0
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """Query context DSA latency with energy data."""
+        batch_size = kwargs.get("batch_size")
+        isl = kwargs.get("s")
+        prefix = kwargs.get("prefix")
+
+        result = database.query_context_dsa(
+            b=batch_size,
+            s=isl,
+            prefix=prefix,
+            num_heads=self._num_heads,
+            index_n_heads=self._index_n_heads,
+            index_topk=self._index_topk,
+            kvcache_quant_mode=self._kvcache_quant_mode,
+            fmha_quant_mode=self._fmha_quant_mode,
+        )
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
+class GenerationDSA(Operation):
+    """
+    Generation DSA (DeepSeek Sparse Attention) operation.
+    
+    DSA for generation phase with sparse attention pattern.
+    
+    Only available on Hopper (SM90) and Blackwell GPUs.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        num_heads: int,
+        index_n_heads: int,
+        index_topk: int,
+        kv_cache_dtype: common.KVCacheQuantMode,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._num_heads = num_heads
+        self._index_n_heads = index_n_heads
+        self._index_topk = index_topk
+        self._kv_cache_dtype = kv_cache_dtype
+        # TODO: Calculate actual weights for DSA
+        self._weights = 0.0
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """Query generation DSA latency with energy data."""
+        beam_width = kwargs.get("beam_width")
+        assert beam_width == 1, "only support beam_width=1"
+        batch_size = kwargs.get("batch_size")
+        s = kwargs.get("s")
+
+        result = database.query_generation_dsa(
+            batch_size,
+            s,
+            self._num_heads,
+            self._index_n_heads,
+            self._index_topk,
+            self._kv_cache_dtype,
+        )
+        return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
 class Embedding(Operation):
     """
     Embedding operation.
