@@ -1,0 +1,1269 @@
+{
+  "backend": "trtllm",
+  "package": "tensorrt-llm",
+  "version": "1.2.0rc5",
+  "schemas": {
+    "BuildConfig": {
+      "$defs": {
+        "KVCacheType": {
+          "description": "Python enum wrapper for KVCacheType.\n\nThis is a pure Python enum that mirrors the C++ KVCacheType enum exposed\nthrough pybind11.",
+          "enum": [
+            "continuous",
+            "paged",
+            "disabled"
+          ],
+          "title": "KVCacheType",
+          "type": "string"
+        },
+        "LoraConfig": {
+          "properties": {
+            "lora_dir": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Lora Dir",
+              "type": "array"
+            },
+            "lora_ckpt_source": {
+              "default": "hf",
+              "enum": [
+                "hf",
+                "nemo"
+              ],
+              "title": "Lora Ckpt Source",
+              "type": "string"
+            },
+            "max_lora_rank": {
+              "default": 64,
+              "title": "Max Lora Rank",
+              "type": "integer"
+            },
+            "lora_target_modules": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Lora Target Modules",
+              "type": "array"
+            },
+            "trtllm_modules_to_hf_modules": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Trtllm Modules To Hf Modules",
+              "type": "object"
+            },
+            "max_loras": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Loras"
+            },
+            "max_cpu_loras": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Cpu Loras"
+            },
+            "swap_gate_up_proj_lora_b_weight": {
+              "default": true,
+              "title": "Swap Gate Up Proj Lora B Weight",
+              "type": "boolean"
+            }
+          },
+          "title": "LoraConfig",
+          "type": "object"
+        },
+        "PluginConfig": {
+          "description": "The config that manages plugin-related options.\n\nThere are two option categories:\n* Plugin options (typically with xxx_plugin naming). These options can be assigned with:\n    * \"float16\"/\"bfloat16\"/\"float32\"/\"int32\", which means the plugin is enabled with the specified precision; (Some plugins only support limited dtype, i.e., gemm_swiglu_plugin and low_latency_gemm_swiglu_plugin only supports fp8 now)\n    * \"auto\", which means the plugin is enabled with the precision of `dtype` field (the `dtype` field must be same to model dtype, i.e., the one in PretrainedConfig);\n    * None, which means the plugin is disabled.\n* Other features. These options can be assigned with boolean:\n    * True, which means the plugin is enabled;\n    * False, which means the plugin is disabled.",
+          "properties": {
+            "dtype": {
+              "default": "float16",
+              "description": "Base dtype for the model and plugins",
+              "title": "Dtype",
+              "type": "string"
+            },
+            "bert_attention_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "auto",
+              "description": "The plugin that uses efficient kernels and enables an in-place update of the KV cache for attention layer of BERT-like encoder models.",
+              "title": "Bert Attention Plugin"
+            },
+            "gpt_attention_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "auto",
+              "description": "The plugin that uses efficient kernels and enables an in-place update of the KV cache for attention layer of GPT-like decoder models.",
+              "title": "Gpt Attention Plugin"
+            },
+            "gemm_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    "fp8",
+                    "nvfp4",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The GEMM plugin that utilizes NVIDIA cuBLASLt to perform GEMM operations. Note: it's only affective for non-quantized gemm operations (except FP8).Note: For FP8, it also requires same calibration in checkpoint.",
+              "title": "Gemm Plugin"
+            },
+            "gemm_swiglu_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "fp8",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The GEMM + SwiGLU fusion in Gated-MLP combines two Matmul operations and one SwiGLU operation into a single kernel. Currently this is only supported for FP8 precision on Hopper.",
+              "title": "Gemm Swiglu Plugin"
+            },
+            "fp8_rowwise_gemm_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The quantized GEMM for fp8, which uses per token dynamic scales for activation and per channel static scales for weights.Note: It also requires same calibration in checkpoint.",
+              "title": "Fp8 Rowwise Gemm Plugin"
+            },
+            "qserve_gemm_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The quantized GEMM from [QServe](https://arxiv.org/abs/2405.04532), which employs 4-bit quantization for weights and 8-bit quantization for activations.",
+              "title": "Qserve Gemm Plugin"
+            },
+            "identity_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The identity plugin simply copies inputs to outputs, it's used mostly for debugging purpose.",
+              "title": "Identity Plugin"
+            },
+            "nccl_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "auto",
+              "description": "The NCCL plugin wraps NCCL operators to support multi-GPU and even multi-nodes.",
+              "title": "Nccl Plugin"
+            },
+            "lora_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Enable LoRA.",
+              "title": "Lora Plugin"
+            },
+            "dora_plugin": {
+              "default": false,
+              "description": "Enable DoRA.",
+              "title": "Dora Plugin",
+              "type": "boolean"
+            },
+            "weight_only_groupwise_quant_matmul_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Enable weight-only groupwise quantization matmul operators.",
+              "title": "Weight Only Groupwise Quant Matmul Plugin"
+            },
+            "weight_only_quant_matmul_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Enable weight-only quantization matmul operators.",
+              "title": "Weight Only Quant Matmul Plugin"
+            },
+            "smooth_quant_plugins": {
+              "default": true,
+              "description": "Enable a group of plugins to support smooth quantization.",
+              "title": "Smooth Quant Plugins",
+              "type": "boolean"
+            },
+            "smooth_quant_gemm_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Enable plugin that supports smooth quantization gemm kernels.",
+              "title": "Smooth Quant Gemm Plugin"
+            },
+            "layernorm_quantization_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Enable plugin that supports layernorm quantization kernels.",
+              "title": "Layernorm Quantization Plugin"
+            },
+            "rmsnorm_quantization_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Enable plugin that supports rmsnorm quantization kernels.",
+              "title": "Rmsnorm Quantization Plugin"
+            },
+            "quantize_per_token_plugin": {
+              "default": false,
+              "description": "Enable plugin that supports per-token quantization.",
+              "title": "Quantize Per Token Plugin",
+              "type": "boolean"
+            },
+            "quantize_tensor_plugin": {
+              "default": false,
+              "description": "Enable plugin that supports per-tensor quantization.",
+              "title": "Quantize Tensor Plugin",
+              "type": "boolean"
+            },
+            "moe_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "auto",
+              "description": "Enable some customized kernels to speed up the MoE layer of MoE models.",
+              "title": "Moe Plugin"
+            },
+            "mamba_conv1d_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "auto",
+                    "float16",
+                    "float32",
+                    "bfloat16",
+                    "int32",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "auto",
+              "description": "Enable customized kernels to speed up conv1d operator for Mamba.",
+              "title": "Mamba Conv1D Plugin"
+            },
+            "low_latency_gemm_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "fp8",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The GEMM plugin that optimized specially for low latency scenarios.",
+              "title": "Low Latency Gemm Plugin"
+            },
+            "low_latency_gemm_swiglu_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "fp8",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The GEMM + SwiGLU fusion plugin that optimized specially for low latency scenarios.",
+              "title": "Low Latency Gemm Swiglu Plugin"
+            },
+            "gemm_allreduce_plugin": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "float16",
+                    "bfloat16",
+                    null
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The GEMM + AllReduce kernel fusion plugin.",
+              "title": "Gemm Allreduce Plugin"
+            },
+            "context_fmha": {
+              "default": true,
+              "description": "Enable the fused multi-head attention during the context phase, will trigger a kernel that performs the MHA/MQA/GQA block using a single kernel.",
+              "title": "Context Fmha",
+              "type": "boolean"
+            },
+            "bert_context_fmha_fp32_acc": {
+              "default": false,
+              "description": "Enable the FP32 accumulator for context FMHA in the bert_attention_plugin. If disabled, FP16 is used, better performance but potentially worse accuracy is expected.",
+              "title": "Bert Context Fmha Fp32 Acc",
+              "type": "boolean"
+            },
+            "paged_kv_cache": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Enable paged KV cache, which helps manage memory for the KV cache more efficiently, and usually leads to an increase in the batch size and an improved efficiency.",
+              "title": "Paged Kv Cache"
+            },
+            "remove_input_padding": {
+              "default": true,
+              "description": "Pack different tokens together, which reduces both the amount of computations and memory consumption.",
+              "title": "Remove Input Padding",
+              "type": "boolean"
+            },
+            "norm_quant_fusion": {
+              "default": false,
+              "description": "Fuse the LayerNorm and quantization kernels into a single kernel, resulting in improved end-to-end performance.",
+              "title": "Norm Quant Fusion",
+              "type": "boolean"
+            },
+            "reduce_fusion": {
+              "default": false,
+              "description": "Fuse the ResidualAdd and LayerNorm kernels after AllReduce into a single kernel, resulting in improved end-to-end performance.",
+              "title": "Reduce Fusion",
+              "type": "boolean"
+            },
+            "user_buffer": {
+              "default": false,
+              "description": "Eliminate extra copies from the local buffer to the shared buffer in the communication kernel, leading to improved end-to-end performance. This feature must be enabled with `--reduce_fusion enable` and is currently only supported for the FP8 LLAMA model.",
+              "title": "User Buffer",
+              "type": "boolean"
+            },
+            "tokens_per_block": {
+              "default": 32,
+              "description": "Define how many tokens are contained in each paged kv cache block.",
+              "title": "Tokens Per Block",
+              "type": "integer"
+            },
+            "use_paged_context_fmha": {
+              "default": true,
+              "description": "Allow advanced features like KV cache reuse and chunked context.",
+              "title": "Use Paged Context Fmha",
+              "type": "boolean"
+            },
+            "use_fp8_context_fmha": {
+              "default": true,
+              "description": "When FP8 quantization is activated, the attention can be further accelerated by enabling FP8 Context FMHA",
+              "title": "Use Fp8 Context Fmha",
+              "type": "boolean"
+            },
+            "fuse_fp4_quant": {
+              "default": false,
+              "description": "Whether to fuse FP4 quantization into attention kernel.",
+              "title": "Fuse Fp4 Quant",
+              "type": "boolean"
+            },
+            "multiple_profiles": {
+              "default": false,
+              "description": "Enables multiple TensorRT optimization profiles in the built engines, will benefits the performance especially when GEMM plugin is disabled, because more optimization profiles help TensorRT have more chances to select better kernels. Note: This feature increases engine build time but no other adverse effects are expected.",
+              "title": "Multiple Profiles",
+              "type": "boolean"
+            },
+            "paged_state": {
+              "default": true,
+              "description": "Enable paged state, which helps manage memory for the RNN state more efficiently.",
+              "title": "Paged State",
+              "type": "boolean"
+            },
+            "streamingllm": {
+              "default": false,
+              "description": "Enable [StreamingLLM](https://arxiv.org/abs/2309.17453), which uses a window attention to perform efficient and stable LLM on long texts.",
+              "title": "Streamingllm",
+              "type": "boolean"
+            },
+            "manage_weights": {
+              "default": false,
+              "description": "Enable TensorRT LLM managed weights to speed up engine building process.",
+              "title": "Manage Weights",
+              "type": "boolean"
+            },
+            "use_fused_mlp": {
+              "default": true,
+              "description": "Enable horizontal fusion in Gated-MLP that combines two Matmul operations into a single one followed by a separate SwiGLU kernel.",
+              "title": "Use Fused Mlp",
+              "type": "boolean"
+            },
+            "pp_reduce_scatter": {
+              "default": false,
+              "description": "Enable a pipeline parallelism optimization with ReduceScatter + AllGather targeting large MoE models.",
+              "title": "Pp Reduce Scatter",
+              "type": "boolean"
+            }
+          },
+          "title": "PluginConfig",
+          "type": "object"
+        },
+        "SpeculativeDecodingMode": {
+          "enum": [
+            1,
+            2,
+            4,
+            8,
+            16,
+            32,
+            64,
+            128,
+            256,
+            512
+          ],
+          "title": "SpeculativeDecodingMode",
+          "type": "integer"
+        }
+      },
+      "description": "Configuration class for TensorRT LLM engine building parameters.\n\nThis class contains all the configuration parameters needed to build a TensorRT LLM engine,\nincluding sequence length limits, batch sizes, optimization settings, and various features.",
+      "properties": {
+        "max_input_len": {
+          "default": 1024,
+          "description": "Maximum length of input sequences.",
+          "title": "Max Input Len",
+          "type": "integer"
+        },
+        "max_seq_len": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The maximum possible sequence length for a single request, including both input and generated output tokens.",
+          "title": "Max Seq Len"
+        },
+        "opt_batch_size": {
+          "default": 8,
+          "description": "Optimal batch size for engine optimization.",
+          "title": "Opt Batch Size",
+          "type": "integer"
+        },
+        "max_batch_size": {
+          "default": 2048,
+          "description": "Maximum batch size the engine can handle.",
+          "title": "Max Batch Size",
+          "type": "integer"
+        },
+        "max_beam_width": {
+          "default": 1,
+          "description": "Maximum beam width for beam search decoding.",
+          "title": "Max Beam Width",
+          "type": "integer"
+        },
+        "max_num_tokens": {
+          "default": 8192,
+          "description": "Maximum number of batched input tokens after padding is removed in each batch.",
+          "title": "Max Num Tokens",
+          "type": "integer"
+        },
+        "opt_num_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optimal number of batched input tokens for engine optimization.",
+          "title": "Opt Num Tokens"
+        },
+        "max_prompt_embedding_table_size": {
+          "default": 0,
+          "description": "Maximum size of prompt embedding table for prompt tuning.",
+          "title": "Max Prompt Embedding Table Size",
+          "type": "integer"
+        },
+        "kv_cache_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KVCacheType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Type of KV cache to use (CONTINUOUS or PAGED). If None, defaults to PAGED."
+        },
+        "gather_context_logits": {
+          "default": false,
+          "description": "Whether to gather logits during context phase.",
+          "title": "Gather Context Logits",
+          "type": "boolean"
+        },
+        "gather_generation_logits": {
+          "default": false,
+          "description": "Whether to gather logits during generation phase.",
+          "title": "Gather Generation Logits",
+          "type": "boolean"
+        },
+        "strongly_typed": {
+          "default": true,
+          "description": "Whether to use strongly_typed.",
+          "title": "Strongly Typed",
+          "type": "boolean"
+        },
+        "force_num_profiles": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Force a specific number of optimization profiles. If None, auto-determined.",
+          "title": "Force Num Profiles"
+        },
+        "profiling_verbosity": {
+          "default": "layer_names_only",
+          "description": "Verbosity level for TensorRT profiling ('layer_names_only', 'detailed', 'none').",
+          "title": "Profiling Verbosity",
+          "type": "string"
+        },
+        "enable_debug_output": {
+          "default": false,
+          "description": "Whether to enable debug output during building.",
+          "title": "Enable Debug Output",
+          "type": "boolean"
+        },
+        "max_draft_len": {
+          "default": 0,
+          "description": "Maximum length of draft tokens for speculative decoding.",
+          "title": "Max Draft Len",
+          "type": "integer"
+        },
+        "speculative_decoding_mode": {
+          "$ref": "#/$defs/SpeculativeDecodingMode",
+          "default": 1,
+          "description": "Mode for speculative decoding (NONE, MEDUSA, EAGLE, etc.)."
+        },
+        "use_refit": {
+          "default": false,
+          "description": "Whether to enable engine refitting capabilities.",
+          "title": "Use Refit",
+          "type": "boolean"
+        },
+        "input_timing_cache": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Path to input timing cache file. If None, no input cache used.",
+          "title": "Input Timing Cache"
+        },
+        "output_timing_cache": {
+          "default": "model.cache",
+          "description": "Path to output timing cache file.",
+          "title": "Output Timing Cache",
+          "type": "string"
+        },
+        "lora_config": {
+          "$ref": "#/$defs/LoraConfig",
+          "description": "Configuration for LoRA (Low-Rank Adaptation) fine-tuning."
+        },
+        "weight_sparsity": {
+          "default": false,
+          "description": "Whether to enable weight sparsity optimization.",
+          "title": "Weight Sparsity",
+          "type": "boolean"
+        },
+        "weight_streaming": {
+          "default": false,
+          "description": "Whether to enable weight streaming for large models.",
+          "title": "Weight Streaming",
+          "type": "boolean"
+        },
+        "plugin_config": {
+          "$ref": "#/$defs/PluginConfig",
+          "description": "Configuration for TensorRT LLM plugins."
+        },
+        "use_strip_plan": {
+          "default": false,
+          "description": "Whether to use stripped plan for engine building.",
+          "title": "Use Strip Plan",
+          "type": "boolean"
+        },
+        "max_encoder_input_len": {
+          "default": 1024,
+          "description": "Maximum encoder input length for encoder-decoder models.",
+          "title": "Max Encoder Input Len",
+          "type": "integer"
+        },
+        "dry_run": {
+          "default": false,
+          "description": "Whether to perform a dry run without actually building the engine.",
+          "title": "Dry Run",
+          "type": "boolean"
+        },
+        "visualize_network": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Path to save network visualization. If None, no visualization generated.",
+          "title": "Visualize Network"
+        },
+        "monitor_memory": {
+          "default": false,
+          "description": "Whether to monitor memory usage during building.",
+          "title": "Monitor Memory",
+          "type": "boolean"
+        },
+        "use_mrope": {
+          "default": false,
+          "description": "Whether to use Multi-RoPE (Rotary Position Embedding) optimization.",
+          "title": "Use Mrope",
+          "type": "boolean"
+        }
+      },
+      "title": "BuildConfig",
+      "type": "object"
+    },
+    "KvCacheConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for the KV cache.",
+      "properties": {
+        "enable_block_reuse": {
+          "default": true,
+          "description": "Controls if KV cache blocks can be reused for different requests.",
+          "title": "Enable Block Reuse",
+          "type": "boolean"
+        },
+        "max_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The maximum number of tokens that should be stored in the KV cache. If both `max_tokens` and `free_gpu_memory_fraction` are specified, memory corresponding to the minimum will be used.",
+          "title": "Max Tokens"
+        },
+        "max_attention_window": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Size of the attention window for each sequence. Only the last tokens will be stored in the KV cache. If the number of elements in `max_attention_window` is less than the number of layers, `max_attention_window` will be repeated multiple times to the number of layers.",
+          "title": "Max Attention Window"
+        },
+        "sink_token_length": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Number of sink tokens (tokens to always keep in attention window).",
+          "title": "Sink Token Length"
+        },
+        "free_gpu_memory_fraction": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 0.9,
+          "description": "The fraction of GPU memory fraction that should be allocated for the KV cache. Default is 90%. If both `max_tokens` and `free_gpu_memory_fraction` are specified, memory corresponding to the minimum will be used.",
+          "title": "Free Gpu Memory Fraction"
+        },
+        "host_cache_size": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Size of the host cache in bytes. If both `max_tokens` and `host_cache_size` are specified, memory corresponding to the minimum will be used.",
+          "title": "Host Cache Size"
+        },
+        "onboard_blocks": {
+          "default": true,
+          "description": "Controls if blocks are onboarded.",
+          "title": "Onboard Blocks",
+          "type": "boolean"
+        },
+        "cross_kv_cache_fraction": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The fraction of the KV Cache memory should be reserved for cross attention. If set to p, self attention will use 1-p of KV Cache memory and cross attention will use p of KV Cache memory. Default is 50%. Should only be set when using encoder-decoder model.",
+          "title": "Cross Kv Cache Fraction"
+        },
+        "secondary_offload_min_priority": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Only blocks with priority > mSecondaryOfflineMinPriority can be offloaded to secondary memory.",
+          "title": "Secondary Offload Min Priority"
+        },
+        "event_buffer_max_size": {
+          "default": 0,
+          "description": "Maximum size of the event buffer. If set to 0, the event buffer will not be used.",
+          "title": "Event Buffer Max Size",
+          "type": "integer"
+        },
+        "attention_dp_events_gather_period_ms": {
+          "default": 5,
+          "description": "The period in milliseconds to gather attention DP events across ranks.",
+          "title": "Attention Dp Events Gather Period Ms",
+          "type": "integer"
+        },
+        "enable_partial_reuse": {
+          "default": true,
+          "description": "Whether blocks that are only partially matched can be reused.",
+          "title": "Enable Partial Reuse",
+          "type": "boolean"
+        },
+        "copy_on_partial_reuse": {
+          "default": true,
+          "description": "Whether partially matched blocks that are in use can be reused after copying them.",
+          "title": "Copy On Partial Reuse",
+          "type": "boolean"
+        },
+        "use_uvm": {
+          "default": false,
+          "description": "Whether to use UVM for the KV cache.",
+          "title": "Use Uvm",
+          "type": "boolean"
+        },
+        "max_gpu_total_bytes": {
+          "default": 0,
+          "description": "The maximum size in bytes of GPU memory that can be allocated for the KV cache. If both `max_gpu_total_bytes` and `free_gpu_memory_fraction` are specified, memory corresponding to the minimum will be allocated.",
+          "title": "Max Gpu Total Bytes",
+          "type": "integer"
+        },
+        "dtype": {
+          "default": "auto",
+          "description": "The data type to use for the KV cache.",
+          "title": "Dtype",
+          "type": "string"
+        },
+        "mamba_ssm_cache_dtype": {
+          "default": "auto",
+          "description": "The data type to use for the Mamba SSM cache. If set to 'auto', the data type will be inferred from the model config.",
+          "enum": [
+            "auto",
+            "float16",
+            "bfloat16",
+            "float32"
+          ],
+          "title": "Mamba Ssm Cache Dtype",
+          "type": "string"
+        },
+        "tokens_per_block": {
+          "default": 32,
+          "description": "The number of tokens per block.",
+          "title": "Tokens Per Block",
+          "type": "integer"
+        }
+      },
+      "title": "KvCacheConfig",
+      "type": "object"
+    },
+    "CudaGraphConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for CUDA graphs.",
+      "properties": {
+        "batch_sizes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "List of batch sizes to create CUDA graphs for.",
+          "title": "Batch Sizes"
+        },
+        "max_batch_size": {
+          "default": 0,
+          "description": "Maximum batch size for CUDA graphs.",
+          "title": "Max Batch Size",
+          "type": "integer"
+        },
+        "enable_padding": {
+          "default": false,
+          "description": "If true, batches are rounded up to the nearest cuda_graph_batch_size. This is usually a net win for performance.",
+          "title": "Enable Padding",
+          "type": "boolean"
+        }
+      },
+      "title": "CudaGraphConfig",
+      "type": "object"
+    },
+    "CacheTransceiverConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for the cache transceiver.",
+      "properties": {
+        "backend": {
+          "anyOf": [
+            {
+              "enum": [
+                "DEFAULT",
+                "UCX",
+                "NIXL",
+                "MPI"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The communication backend type to use for the cache transceiver.",
+          "title": "Backend"
+        },
+        "max_tokens_in_buffer": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The max number of tokens the transfer buffer can fit.",
+          "title": "Max Tokens In Buffer"
+        },
+        "kv_transfer_timeout_ms": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Timeout in milliseconds for KV cache transfer. Requests exceeding this timeout will be cancelled.",
+          "title": "Kv Transfer Timeout Ms"
+        },
+        "kv_transfer_sender_future_timeout_ms": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 1000,
+          "description": "Timeout in milliseconds to wait for the sender future to be ready when scheduled batch size is 0. This allows the request to be eventually cancelled by the user or because of kv_transfer_timeout_ms",
+          "title": "Kv Transfer Sender Future Timeout Ms"
+        }
+      },
+      "title": "CacheTransceiverConfig",
+      "type": "object"
+    },
+    "MoeConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for MoE.",
+      "properties": {
+        "backend": {
+          "default": "CUTLASS",
+          "description": "MoE backend to use.",
+          "enum": [
+            "CUTLASS",
+            "CUTEDSL",
+            "WIDEEP",
+            "TRTLLM",
+            "DEEPGEMM",
+            "VANILLA",
+            "TRITON"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "max_num_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "If set, at most max_num_tokens tokens will be sent to torch.ops.trtllm.fused_moe at the same time. If the number of tokens exceeds max_num_tokens, the input tensors will be split into chunks and a for loop will be used.",
+          "title": "Max Num Tokens"
+        },
+        "load_balancer": {
+          "anyOf": [
+            {},
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Configuration for MoE load balancing.",
+          "title": "Load Balancer",
+          "type": "Union[MoeLoadBalancerConfig, dict, str]"
+        },
+        "disable_finalize_fusion": {
+          "default": false,
+          "description": "Disable FC2+finalize kernel fusion in CUTLASS MoE backend. Setting this to True recovers deterministic numerical behavior with top-k > 2.",
+          "title": "Disable Finalize Fusion",
+          "type": "boolean"
+        },
+        "use_low_precision_moe_combine": {
+          "default": false,
+          "description": "Use low precision combine in MoE operations (only for NVFP4 quantization). When enabled, uses lower precision for combining expert outputs to improve performance.",
+          "title": "Use Low Precision Moe Combine",
+          "type": "boolean"
+        }
+      },
+      "title": "MoeConfig",
+      "type": "object"
+    },
+    "DecodingConfig": {
+      "error": "no signature found for builtin <nanobind.nb_method object at 0x7ffd100587b0>"
+    },
+    "SchedulerConfig": {
+      "$defs": {
+        "CapacitySchedulerPolicy": {
+          "enum": [
+            "MAX_UTILIZATION",
+            "GUARANTEED_NO_EVICT",
+            "STATIC_BATCH"
+          ],
+          "title": "CapacitySchedulerPolicy",
+          "type": "string"
+        },
+        "ContextChunkingPolicy": {
+          "description": "Context chunking policy. ",
+          "enum": [
+            "FIRST_COME_FIRST_SERVED",
+            "EQUAL_PROGRESS"
+          ],
+          "title": "ContextChunkingPolicy",
+          "type": "string"
+        },
+        "DynamicBatchConfig": {
+          "additionalProperties": false,
+          "description": "Dynamic batch configuration.\n\nControls how batch size and token limits are dynamically adjusted at runtime.",
+          "properties": {
+            "enable_batch_size_tuning": {
+              "description": "Controls if the batch size should be tuned dynamically",
+              "title": "Enable Batch Size Tuning",
+              "type": "boolean"
+            },
+            "enable_max_num_tokens_tuning": {
+              "description": "Controls if the max num tokens should be tuned dynamically",
+              "title": "Enable Max Num Tokens Tuning",
+              "type": "boolean"
+            },
+            "dynamic_batch_moving_average_window": {
+              "description": "The window size for moving average of input and output length which is used to calculate dynamic batch size and max num tokens",
+              "title": "Dynamic Batch Moving Average Window",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "enable_batch_size_tuning",
+            "enable_max_num_tokens_tuning",
+            "dynamic_batch_moving_average_window"
+          ],
+          "title": "DynamicBatchConfig",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "capacity_scheduler_policy": {
+          "$ref": "#/$defs/CapacitySchedulerPolicy",
+          "default": "GUARANTEED_NO_EVICT",
+          "description": "The capacity scheduler policy to use"
+        },
+        "context_chunking_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextChunkingPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The context chunking policy to use"
+        },
+        "dynamic_batch_config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DynamicBatchConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The dynamic batch config to use"
+        }
+      },
+      "title": "SchedulerConfig",
+      "type": "object"
+    }
+  }
+}

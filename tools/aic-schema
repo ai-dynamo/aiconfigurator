@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""
+aic-schema: Extract and diff framework config schemas.
+
+A standalone tool that works with any agent (OpenClaw, Cursor, etc.).
+
+Usage:
+    aic-schema current <backend>              # Extract from installed version
+    aic-schema extract <backend> <version>    # Extract specific version (venv)
+    aic-schema diff <backend> <old> <new>     # Compare versions
+    aic-schema list <backend>                 # List cached versions
+
+Output: JSON to stdout (machine-readable)
+"""
+
+import argparse
+import importlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+# Cache directory for venvs and schemas
+CACHE_DIR = Path.home() / ".cache" / "aic-schema"
+
+
+def get_backend_config(backend: str) -> dict:
+    """Get backend-specific configuration."""
+    configs = {
+        "trtllm": {
+            "package": "tensorrt-llm",
+            "import_name": "tensorrt_llm",
+            "config_classes": [
+                "tensorrt_llm.llmapi.llm_args:BuildConfig",
+                "tensorrt_llm.llmapi.llm_args:KvCacheConfig",
+                "tensorrt_llm.llmapi.llm_args:CudaGraphConfig",
+                "tensorrt_llm.llmapi.llm_args:CacheTransceiverConfig",
+                "tensorrt_llm.llmapi.llm_args:MoeConfig",
+                "tensorrt_llm.llmapi.llm_args:DecodingConfig",
+                "tensorrt_llm.llmapi.llm_args:SchedulerConfig",
+            ],
+        },
+        "vllm": {
+            "package": "vllm",
+            "import_name": "vllm",
+            "config_classes": [
+                "vllm.config:EngineArgs",
+            ],
+        },
+        "sglang": {
+            "package": "sglang",
+            "import_name": "sglang",
+            "config_classes": [
+                "sglang.launch_args:EngineArgs",
+            ],
+        },
+    }
+    if backend not in configs:
+        raise ValueError(f"Unknown backend: {backend}. Available: {list(configs.keys())}")
+    return configs[backend]
+
+
+def import_class(class_path: str):
+    """Import a class from module:class string."""
+    module_path, class_name = class_path.rsplit(":", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+
+
+def extract_schema_from_class(cls) -> dict:
+    """Extract schema from a Pydantic class."""
+    if hasattr(cls, 'model_json_schema'):
+        schema = cls.model_json_schema()
+    elif hasattr(cls, 'schema'):
+        schema = cls.schema()
+    else:
+        # Fallback: try to get __init__ signature
+        import inspect
+        sig = inspect.signature(cls.__init__)
+        properties = {}
+        for name, param in sig.parameters.items():
+            if name == 'self':
+                continue
+            properties[name] = {
+                "type": str(param.annotation) if param.annotation != inspect.Parameter.empty else "any",
+                "default": param.default if param.default != inspect.Parameter.empty else None,
+            }
+        schema = {"type": "object", "properties": properties}
+    
+    return schema
+
+
+def clean_for_json(obj: Any) -> Any:
+    """Clean object for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: clean_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_for_json(item) for item in obj]
+    elif isinstance(obj, type):
+        return obj.__name__
+    elif hasattr(obj, '__name__'):
+        return obj.__name__
+    else:
+        return obj
+
+
+def extract_schema_current(backend: str) -> dict:
+    """
+    Extract schema from currently installed version.
+    Fast - no venv needed.
+    """
+    config = get_backend_config(backend)
+    schemas = {}
+    
+    for class_path in config["config_classes"]:
+        try:
+            cls = import_class(class_path)
+            schema = extract_schema_from_class(cls)
+            class_name = class_path.split(":")[-1]
+            schemas[class_name] = clean_for_json(schema)
+        except Exception as e:
+            class_name = class_path.split(":")[-1]
+            schemas[class_name] = {"error": str(e)}
+    
+    # Try to get version
+    version = None
+    try:
+        import importlib.metadata
+        version = importlib.metadata.version(config["package"])
+    except:
+        pass
+    
+    return {
+        "backend": backend,
+        "package": config["package"],
+        "version": version,
+        "schemas": schemas,
+    }
+
+
+def extract_schema_venv(backend: str, version: str) -> dict:
+    """
+    Extract schema by installing version in venv.
+    Slower but works for any version.
+    """
+    config = get_backend_config(backend)
+    venv_dir = CACHE_DIR / "venvs" / f"{config['package']}-{version}"
+    
+    # Create venv if needed
+    if not venv_dir.exists():
+        print(f"Creating venv for {config['package']}=={version}...", file=sys.stderr)
+        venv_dir.mkdir(parents=True, exist_ok=True)
+        
+        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, capture_output=True)
+        
+        pip = venv_dir / "bin" / "pip"
+        subprocess.run([str(pip), "install", "--upgrade", "pip", "wheel"], check=True, capture_output=True)
+        subprocess.run([str(pip), "install", f"{config['package']}=={version}"], check=True, capture_output=True)
+    
+    # Run extraction script in venv
+    python = venv_dir / "bin" / "python"
+    
+    script = '''
+import json
+import sys
+import os
+
+# Suppress all output except our JSON
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+# Suppress warnings
+import warnings
+warnings.filterwarnings('ignore')
+
+# Import and extract
+class_paths = %s
+
+schemas = {}
+for class_path in class_paths:
+    try:
+        module_path, class_name = class_path.rsplit(":", 1)
+        module = __import__(module_path, fromlist=[class_name])
+        cls = getattr(module, class_name)
+        
+        if hasattr(cls, 'model_json_schema'):
+            schema = cls.model_json_schema()
+        elif hasattr(cls, 'schema'):
+            schema = cls.schema()
+        else:
+            schema = {"type": "unknown"}
+        
+        # Clean for JSON
+        def clean(obj):
+            if isinstance(obj, dict):
+                return {k: clean(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [clean(x) for x in obj]
+            elif isinstance(obj, type):
+                return obj.__name__
+            else:
+                return obj
+        
+        schemas[class_name] = clean(schema)
+    except Exception as e:
+        schemas[class_name] = {"error": str(e)}
+
+# Only print JSON to stdout
+sys.stdout.write(json.dumps(schemas))
+sys.stdout.flush()
+''' % config["config_classes"]
+    
+    result = subprocess.run(
+        [str(python), "-c", script],
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to extract schema: {result.stderr}")
+    
+    schemas = json.loads(result.stdout)
+    
+    return {
+        "backend": backend,
+        "package": config["package"],
+        "version": version,
+        "schemas": schemas,
+    }
+
+
+def flatten_schema(schema: dict, prefix: str = "") -> dict:
+    """Flatten nested schema into dot-notation paths."""
+    result = {}
+    
+    properties = schema.get("properties", {})
+    for name, prop in properties.items():
+        path = f"{prefix}.{name}" if prefix else name
+        prop_type = prop.get("type", "unknown")
+        default = prop.get("default")
+        
+        result[path] = {
+            "type": str(prop_type) if not isinstance(prop_type, str) else prop_type,
+            "default": default,
+        }
+        
+        # Recurse into nested objects
+        if isinstance(prop, dict) and "properties" in prop:
+            nested = flatten_schema(prop, path)
+            result.update(nested)
+    
+    return result
+
+
+def diff_schemas(old: dict, new: dict) -> dict:
+    """Compare two schemas and return differences."""
+    changes = []
+    
+    # Flatten schemas
+    old_flat = {}
+    new_flat = {}
+    
+    for class_name, schema in old.get("schemas", {}).items():
+        if "error" not in schema:
+            old_flat.update(flatten_schema(schema, class_name))
+    
+    for class_name, schema in new.get("schemas", {}).items():
+        if "error" not in schema:
+            new_flat.update(flatten_schema(schema, class_name))
+    
+    old_keys = set(old_flat.keys())
+    new_keys = set(new_flat.keys())
+    
+    # Added
+    for key in sorted(new_keys - old_keys):
+        changes.append({
+            "type": "added",
+            "field": key,
+            "details": new_flat[key],
+        })
+    
+    # Removed
+    for key in sorted(old_keys - new_keys):
+        changes.append({
+            "type": "removed",
+            "field": key,
+            "details": old_flat[key],
+        })
+    
+    # Changed
+    for key in sorted(old_keys & new_keys):
+        if old_flat[key] != new_flat[key]:
+            changes.append({
+                "type": "changed",
+                "field": key,
+                "old": old_flat[key],
+                "new": new_flat[key],
+            })
+    
+    return {
+        "backend": old.get("backend"),
+        "old_version": old.get("version"),
+        "new_version": new.get("version"),
+        "changes": changes,
+        "summary": {
+            "added": sum(1 for c in changes if c["type"] == "added"),
+            "removed": sum(1 for c in changes if c["type"] == "removed"),
+            "changed": sum(1 for c in changes if c["type"] == "changed"),
+        },
+    }
+
+
+def list_cached(backend: str) -> list:
+    """List cached venv versions."""
+    config = get_backend_config(backend)
+    venvs_dir = CACHE_DIR / "venvs"
+    
+    if not venvs_dir.exists():
+        return []
+    
+    prefix = f"{config['package']}-"
+    versions = []
+    for d in venvs_dir.iterdir():
+        if d.name.startswith(prefix):
+            versions.append(d.name[len(prefix):])
+    
+    return sorted(versions)
+
+
+# CLI Commands
+
+def cmd_current(args):
+    schema = extract_schema_current(args.backend)
+    output = json.dumps(schema, indent=2)
+    
+    if args.output:
+        Path(args.output).write_text(output)
+        print(f"Schema written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+
+
+def cmd_extract(args):
+    schema = extract_schema_venv(args.backend, args.version)
+    output = json.dumps(schema, indent=2)
+    
+    if args.output:
+        Path(args.output).write_text(output)
+        print(f"Schema written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+
+
+def cmd_diff(args):
+    old = extract_schema_venv(args.backend, args.old_version)
+    new = extract_schema_venv(args.backend, args.new_version)
+    result = diff_schemas(old, new)
+    output = json.dumps(result, indent=2)
+    
+    if args.output:
+        Path(args.output).write_text(output)
+        print(f"Diff written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+
+
+def cmd_diff_files(args):
+    """Diff two saved schema files."""
+    with open(args.old_file) as f:
+        old = json.load(f)
+    with open(args.new_file) as f:
+        new = json.load(f)
+    
+    result = diff_schemas(old, new)
+    output = json.dumps(result, indent=2)
+    
+    if args.output:
+        Path(args.output).write_text(output)
+        print(f"Diff written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+
+
+def cmd_list(args):
+    versions = list_cached(args.backend)
+    print(json.dumps({
+        "backend": args.backend,
+        "cached_versions": versions,
+    }, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Extract and diff framework config schemas",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
+    
+    # current
+    p = subparsers.add_parser("current", help="Extract from currently installed version")
+    p.add_argument("backend")
+    p.add_argument("-o", "--output", help="Output file")
+    p.set_defaults(func=cmd_current)
+    
+    # extract
+    p = subparsers.add_parser("extract", help="Extract from specific version (creates venv)")
+    p.add_argument("backend")
+    p.add_argument("version")
+    p.add_argument("-o", "--output", help="Output file")
+    p.set_defaults(func=cmd_extract)
+    
+    # diff
+    p = subparsers.add_parser("diff", help="Compare two versions (creates venvs)")
+    p.add_argument("backend")
+    p.add_argument("old_version")
+    p.add_argument("new_version")
+    p.add_argument("-o", "--output", help="Output file")
+    p.set_defaults(func=cmd_diff)
+    
+    # diff-files
+    p = subparsers.add_parser("diff-files", help="Compare two saved schema files")
+    p.add_argument("old_file", help="Old schema JSON file")
+    p.add_argument("new_file", help="New schema JSON file")
+    p.add_argument("-o", "--output", help="Output file")
+    p.set_defaults(func=cmd_diff_files)
+    
+    # list
+    p = subparsers.add_parser("list", help="List cached versions")
+    p.add_argument("backend")
+    p.set_defaults(func=cmd_list)
+    
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
