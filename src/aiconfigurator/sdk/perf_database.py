@@ -1100,6 +1100,75 @@ def load_mla_bmm_data(mla_bmm_file):
     return mla_bmm_data
 
 
+def load_vllm_bmm_data(vllm_bmm_file):
+    """
+    Load vLLM BMM performance data for Hopper (SM90) with BF16 and FP8 support.
+
+    CSV format:
+    framework,version,device,op_name,kernel_source,bmm_dtype,backend,
+    batch_size,m,n,k,latency,power
+
+    Returns:
+        dict: Nested dict data[(quant_mode, backend)][batch_size][m][n][k] = {
+            "latency": float, "power": float, "energy": float
+        }
+    """
+    if not os.path.exists(vllm_bmm_file):
+        logger.warning(f"vLLM BMM data file {vllm_bmm_file} not found.")
+        return None
+
+    vllm_bmm_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(lambda: defaultdict(dict))
+            )
+        )
+    )
+
+    with open(vllm_bmm_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    # Check if power column exists
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if not has_power:
+        logger.debug(f"Legacy database format detected in {vllm_bmm_file} - power will default to 0.0")
+
+    for row in rows:
+        bmm_dtype = row["bmm_dtype"]
+        backend = row.get("backend", "default")
+        batch_size = int(row["batch_size"])
+        m = int(row["m"])
+        n = int(row["n"])
+        k = int(row["k"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0))
+        energy = power * latency  # watt-milliseconds
+
+        # Parse quant mode
+        quant_mode = common.GEMMQuantMode[bmm_dtype]
+        key = (quant_mode, backend)
+
+        # Store with conflict check
+        try:
+            existing = vllm_bmm_data[key][batch_size][m][n][k]
+            if existing:
+                logger.debug(
+                    f"Value conflict in vLLM BMM data: {key} batch={batch_size} "
+                    f"m={m} n={n} k={k}"
+                )
+        except KeyError:
+            pass
+
+        vllm_bmm_data[key][batch_size][m][n][k] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return vllm_bmm_data
+
+
 def load_mamba2_data(mamba2_file: str):
     """
     Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.txt.
@@ -1888,6 +1957,7 @@ class PerfDatabase:
             )
             self._compute_scale_data = None
             self._scale_matrix_data = None
+            self._vllm_bmm_data = None  # vLLM-specific
         elif backend == "vllm":
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1901,7 +1971,10 @@ class PerfDatabase:
             )
             self._nccl_data = load_nccl_data(nccl_data_dir)
             self._moe_data, _ = load_moe_data(os.path.join(data_dir, common.PerfDataFilename.moe.value))
-            self._mla_bmm_data = None
+            # MLA BMM for vLLM (same format as trtllm/sglang)
+            self._mla_bmm_data = load_mla_bmm_data(
+                os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value)
+            )
             self._context_mla_data = load_context_mla_data(
                 os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
             )
@@ -1910,6 +1983,7 @@ class PerfDatabase:
             )
             self._compute_scale_data = None
             self._scale_matrix_data = None
+            self._vllm_bmm_data = None  # Deprecated: use _mla_bmm_data instead
         else:  # TRTLLM
             self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
             self._context_attention_data = load_context_attention_data(
@@ -1947,6 +2021,7 @@ class PerfDatabase:
             self._wideep_alltoall_data = load_wideep_alltoall_data(
                 os.path.join(data_dir, common.PerfDataFilename.wideep_alltoall.value)
             )
+            self._vllm_bmm_data = None  # vLLM-specific
 
         # pre-correction
         self._correct_data()
@@ -2930,6 +3005,61 @@ class PerfDatabase:
                 latency = self._interp_2d_1d(x, y, z, data, method)
 
             return {"latency": latency, "power": 0.0, "energy": 0.0}
+
+    def _interp_4d(self, w: int, x: int, y: int, z: int, data: dict, method: str = "cubic") -> dict:
+        """
+        Interpolate 4D data (batch_size, m, n, k) -> latency/energy.
+
+        Used for vLLM BMM performance data where:
+        - w = batch_size
+        - x = m (rows in output)
+        - y = n (columns in output)
+        - z = k (inner dimension)
+
+        Args:
+            w: First dimension (batch_size)
+            x: Second dimension (m)
+            y: Third dimension (n)
+            z: Fourth dimension (k)
+            data: Nested dict data[batch][m][n][k] = {"latency": ..., "energy": ...}
+            method: Interpolation method ("linear" or "cubic")
+
+        Returns:
+            dict: {"latency": float, "power": float, "energy": float}
+        """
+        # Check if data uses new dict format
+        sample_value = self._get_sample_leaf_value(data)
+
+        if isinstance(sample_value, dict):
+            # Extract latency and energy data
+            latency_data = {}
+            energy_data = {}
+
+            for b_key, b_val in data.items():
+                latency_data[b_key] = {}
+                energy_data[b_key] = {}
+                for m_key, m_val in b_val.items():
+                    latency_data[b_key][m_key] = {}
+                    energy_data[b_key][m_key] = {}
+                    for n_key, n_val in m_val.items():
+                        latency_data[b_key][m_key][n_key] = {}
+                        energy_data[b_key][m_key][n_key] = {}
+                        for k_key, k_val in n_val.items():
+                            if isinstance(k_val, dict):
+                                latency_data[b_key][m_key][n_key][k_key] = k_val.get("latency", 0.0)
+                                energy_data[b_key][m_key][n_key][k_key] = k_val.get("energy", 0.0)
+                            else:
+                                latency_data[b_key][m_key][n_key][k_key] = k_val
+                                energy_data[b_key][m_key][n_key][k_key] = 0.0
+
+            latency = self._interp_3d(x, y, z, latency_data.get(w, latency_data.get(1, {})), method)["latency"]
+            energy = self._interp_3d(x, y, z, energy_data.get(w, energy_data.get(1, {})), method)["energy"]
+
+            return {"latency": latency, "power": 0.0, "energy": energy}
+        else:
+            # Legacy format: use 3D interpolation on the specific batch
+            batch_data = data.get(w, data.get(1, {}))
+            return self._interp_3d(x, y, z, batch_data, method)
 
     def _get_sample_leaf_value(self, data: dict):
         """Get a sample leaf value from nested dict to determine format."""
@@ -4891,6 +5021,140 @@ class PerfDatabase:
         else:
             # hybrid and silicon modes have same logic
             return PerformanceResult(get_empirical(mem_bytes), energy=0.0)
+
+    def query_vllm_bmm(
+        self,
+        m: int,
+        n: int,
+        k: int,
+        batch_size: int = 1,
+        quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16,
+        backend: str = "default",
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """
+        Query vLLM Batch Matrix Multiplication latency and energy for Hopper (SM90).
+
+        BMM computes: output[b] = input_a[b] @ input_b[b]
+        where each batch is (M, K) @ (K, N) -> (M, N).
+
+        Supports BF16 (float16 quant_mode) and FP8 (fp8/fp8_block quant_mode) precision.
+
+        Args:
+            m: Number of rows in output matrix (first dim of A)
+            n: Number of columns in output matrix (second dim of B)
+            k: Inner dimension (columns of A, rows of B)
+            batch_size: Number of batch elements (default: 1)
+            quant_mode: Quantization mode (float16 for BF16, fp8/fp8_block for FP8)
+            backend: vLLM backend variant (default: "default")
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Returns:
+            PerformanceResult with latency (ms) and energy (W·ms).
+
+        Example:
+            For attention Q@K^T: batch=num_heads, m=seq_len, n=seq_len, k=head_dim
+            For attention Scores@V: batch=num_heads, m=seq_len, n=head_dim, k=seq_len
+        """
+        # Check for SM90 (Hopper) requirement for FP8
+        sm_version = self.system_spec["gpu"]["sm_version"]
+        if quant_mode in (common.GEMMQuantMode.fp8, common.GEMMQuantMode.fp8_block) and sm_version < 90:
+            logger.warning(
+                f"FP8 BMM requires SM90+ (Hopper), but current system has SM{sm_version}. "
+                "Falling back to float16."
+            )
+            quant_mode = common.GEMMQuantMode.float16
+
+        def get_sol(m: int, n: int, k: int, batch_size: int, quant_mode: common.GEMMQuantMode) -> tuple[float, float, float]:
+            """
+            Get SOL time, math-bound time, and memory-bound time.
+
+            BMM FLOPs = 2 * batch_size * M * N * K (2 for FMA)
+            BMM Memory = batch_size * (M*K + K*N + M*N) * dtype_bytes
+            """
+            flops = 2 * batch_size * m * n * k
+            mem_bytes = batch_size * (m * k + k * n + m * n) * quant_mode.value.memory
+
+            # Hopper TC throughput
+            peak_tflops = self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute
+            mem_bw = self.system_spec["gpu"]["mem_bw"]
+
+            sol_math = flops / peak_tflops * 1000  # ms
+            sol_mem = mem_bytes / mem_bw * 1000  # ms
+            sol_time = max(sol_math, sol_mem)
+
+            return sol_time, sol_math, sol_mem
+
+        def get_empirical(m: int, n: int, k: int, batch_size: int, quant_mode: common.GEMMQuantMode) -> float:
+            """
+            Get empirical time with scaling factor for real-world overhead.
+
+            Empirical observations show BMM typically achieves 70-85% of SOL
+            due to kernel launch overhead, shared memory bank conflicts, etc.
+            """
+            sol_time = get_sol(m, n, k, batch_size, quant_mode)[0]
+            # Empirical scaling: BMM typically achieves ~80% of SOL
+            scale_factor = 0.8
+            return sol_time / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        # SOL-only modes
+        if database_mode == common.DatabaseMode.SOL:
+            return PerformanceResult(get_sol(m, n, k, batch_size, quant_mode)[0], energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(m, n, k, batch_size, quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            return PerformanceResult(get_empirical(m, n, k, batch_size, quant_mode), energy=0.0)
+
+        # Try database lookup for SILICON/HYBRID modes
+        try:
+            vllm_bmm_data = getattr(self, "_vllm_bmm_data", None)
+            if vllm_bmm_data is None:
+                raise PerfDataNotAvailableError(
+                    f"vLLM BMM perf table is missing for system='{self.system}', "
+                    f"backend='{self.backend}', version='{self.version}'. "
+                    "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
+                )
+
+            # Look up by quant_mode and backend
+            key = (quant_mode, backend)
+            if key not in vllm_bmm_data:
+                # Fallback to default backend
+                key = (quant_mode, "default")
+
+            if key not in vllm_bmm_data:
+                # Fallback to float16
+                key = (common.GEMMQuantMode.float16, "default")
+
+            bmm_table = vllm_bmm_data[key]
+
+            # 4D interpolation: (batch_size, m, n, k)
+            result = self._interp_4d(batch_size, m, n, k, bmm_table, method="cubic")
+
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", 0.0)
+            else:
+                lat = result
+                energy = 0.0
+
+            return PerformanceResult(lat, energy=energy)
+
+        except Exception:
+            if database_mode == common.DatabaseMode.HYBRID:
+                logger.debug(
+                    f"Failed to query vLLM BMM data for {m=}, {n=}, {k=}, {batch_size=}, "
+                    f"{quant_mode=}, {backend=}, using empirical mode"
+                )
+                return PerformanceResult(get_empirical(m, n, k, batch_size, quant_mode), energy=0.0)
+            else:
+                logger.exception(
+                    f"Failed to query vLLM BMM data for {m=}, {n=}, {k=}, {batch_size=}, "
+                    f"{quant_mode=}, {backend=}. Please consider Hybrid mode."
+                )
+                raise
 
     def query_mamba2(
         self,

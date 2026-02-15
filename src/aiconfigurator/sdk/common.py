@@ -492,6 +492,8 @@ class PerfDataFilename(Enum):
     compute_scale = "computescale_perf.txt"
     scale_matrix = "scale_matrix_perf.txt"
     mamba2 = "mamba2_perf.txt"
+    # vLLM BMM for Hopper (SM90)
+    vllm_bmm = "vllm_bmm_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

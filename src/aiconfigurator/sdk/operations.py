@@ -1018,6 +1018,122 @@ class MLABmm(Operation):
         return self._weights * self._scale_factor
 
 
+class VLLMBmm(Operation):
+    """
+    vLLM Batch Matrix Multiplication operation for Hopper (SM90).
+
+    Supports BF16 and FP8 precision modes for general-purpose BMM operations
+    used in attention mechanisms (Q@K^T, Scores@V) and other batch matrix ops.
+
+    BMM computes: output[b] = input_a[b] @ input_b[b]
+    where each batch element is a matrix multiply of shape (M, K) @ (K, N) -> (M, N).
+
+    Args:
+        name: Operation name
+        scale_factor: Scaling factor for the operation (e.g., number of layers)
+        m: Number of rows in output matrix (first dimension of A)
+        n: Number of columns in output matrix (second dimension of B)
+        k: Inner dimension (columns of A, rows of B)
+        batch_size: Number of batch elements
+        quant_mode: Quantization mode (float16, fp8, fp8_block)
+        backend: vLLM backend variant (default: "default")
+
+    Example:
+        For attention Q@K^T with batch=1, heads=32, seq=4096, head_dim=128:
+        - M = seq_len (4096)
+        - N = seq_len (4096)
+        - K = head_dim (128)
+        - batch = num_heads (32)
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        m: int,
+        n: int,
+        k: int,
+        batch_size: int = 1,
+        quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16,
+        backend: str = "default",
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._m = m
+        self._n = n
+        self._k = k
+        self._batch_size = batch_size
+        self._quant_mode = quant_mode
+        self._backend = backend
+        # BMM has no persistent weights (activation-only operation)
+        self._weights = 0.0
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """
+        Query vLLM BMM latency with power data.
+
+        Supports both database lookup (SILICON/HYBRID mode) and SOL estimation
+        (EMPIRICAL/SOL mode).
+
+        Args:
+            database: Performance database instance
+            **kwargs: Additional arguments (can override m, n, k, batch_size)
+
+        Returns:
+            PerformanceResult with latency (ms) and energy (W·ms)
+        """
+        # Allow runtime overrides
+        m = kwargs.get("m", self._m)
+        n = kwargs.get("n", self._n)
+        k = kwargs.get("k", self._k)
+        batch_size = kwargs.get("batch_size", self._batch_size)
+        quant_mode = kwargs.get("quant_mode", self._quant_mode)
+
+        result = database.query_vllm_bmm(
+            m=m,
+            n=n,
+            k=k,
+            batch_size=batch_size,
+            quant_mode=quant_mode,
+            backend=self._backend,
+        )
+        return PerformanceResult(
+            latency=float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+        )
+
+    def get_weights(self, **kwargs):
+        """BMM is activation-only, no weight memory."""
+        return self._weights * self._scale_factor
+
+    def sol_estimate(self, system_spec: dict) -> float:
+        """
+        Compute SOL (Speed-of-Light) estimate for BMM.
+
+        BMM FLOPs = 2 * batch_size * M * N * K (2 for FMA)
+        BMM Memory = batch_size * (M*K + K*N + M*N) * dtype_size
+
+        For Hopper SM90:
+        - BF16 TC: 146.5 TFLOPS
+        - FP8 TC: 293 TFLOPS
+        - Memory BW: 4800 GB/s
+        """
+        flops = 2 * self._batch_size * self._m * self._n * self._k
+        mem_bytes = (
+            self._batch_size
+            * (self._m * self._k + self._k * self._n + self._m * self._n)
+            * self._quant_mode.value.memory
+        )
+
+        # Get system specs
+        peak_tflops = system_spec["gpu"]["float16_tc_flops"] * self._quant_mode.value.compute
+        mem_bw = system_spec["gpu"]["mem_bw"]
+
+        sol_math = flops / peak_tflops * 1000  # ms
+        sol_mem = mem_bytes / mem_bw * 1000  # ms
+
+        return max(sol_math, sol_mem)
+
+
 class Embedding(Operation):
     """
     Embedding operation.
