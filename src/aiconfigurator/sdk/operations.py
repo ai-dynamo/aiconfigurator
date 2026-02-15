@@ -1380,5 +1380,110 @@ class Mamba2(Operation):
             energy=total_energy * self._scale_factor,
         )
 
+    def get_weights(self, **kwargs):  # Mamba2 weights
+        return self._weights * self._scale_factor
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# DSA (DeepSeek Sparse Attention) Operations for DeepSeek-V3.2
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class ContextDSA(Operation):
+    """
+    Context phase DSA (DeepSeek Sparse Attention) operation for V3.2.
+
+    Models the full DSA attention block including:
+    - kv_a_proj_with_mqa GEMM (includes indexer K projection)
+    - LayerNorm + q_b_proj GEMM
+    - Indexer: wq_b GEMM, weights_proj GEMM, FP8 MQA logits, TopK selection
+    - Sparse MLA attention (attends to top-k tokens instead of full sequence)
+    - BMM pre/post (weight absorption + V projection)
+    - o_proj GEMM
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        num_heads: int,
+        index_n_heads: int,
+        index_topk: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._num_heads = num_heads
+        self._index_n_heads = index_n_heads
+        self._index_topk = index_topk
+        self._kvcache_quant_mode = kvcache_quant_mode
+        self._fmha_quant_mode = fmha_quant_mode
+        self._weights = 0.0
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """Query context DSA latency with energy data."""
+        batch_size = kwargs.get("batch_size")
+        isl = kwargs.get("s")
+
+        result = database.query_context_dsa(
+            b=batch_size,
+            s=isl,
+            num_heads=self._num_heads,
+            kvcache_quant_mode=self._kvcache_quant_mode,
+            fmha_quant_mode=self._fmha_quant_mode,
+        )
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+        )
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
+class GenerationDSA(Operation):
+    """
+    Generation phase DSA (DeepSeek Sparse Attention) operation for V3.2.
+
+    Models the full DSA attention block during decode:
+    - Same components as ContextDSA
+    - Uses paged MQA logits for indexer
+    - Sparse MLA with KV cache lookup
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        num_heads: int,
+        index_n_heads: int,
+        index_topk: int,
+        kv_cache_dtype: common.KVCacheQuantMode,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._num_heads = num_heads
+        self._index_n_heads = index_n_heads
+        self._index_topk = index_topk
+        self._kv_cache_dtype = kv_cache_dtype
+        self._weights = 0.0
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """Query generation DSA latency with energy data."""
+        beam_width = kwargs.get("beam_width")
+        assert beam_width == 1, "only support beam_width=1"
+        batch_size = kwargs.get("batch_size")
+        s = kwargs.get("s")
+
+        result = database.query_generation_dsa(
+            b=batch_size,
+            s=s,
+            num_heads=self._num_heads,
+            kv_cache_dtype=self._kv_cache_dtype,
+        )
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+        )
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

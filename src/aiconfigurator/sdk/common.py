@@ -60,6 +60,26 @@ class NemotronHConfig:
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
 
 
+@dataclass(frozen=True)
+class DeepSeekV32Config:
+    """
+    Configuration for DeepSeek-V3.2 specific parameters (DSA - DeepSeek Sparse Attention).
+
+    Only includes fields unique to V3.2 that are not in the standard DeepSeek (V3) model.
+    Standard DeepSeek fields (q_lora_rank, kv_lora_rank, MoE params, etc.) are handled
+    by the base DEEPSEEK model family.
+
+    Attributes:
+        index_n_heads (int): Number of indexer heads for sparse attention selection
+        index_head_dim (int): Dimension per indexer head
+        index_topk (int): Number of top-k tokens to attend to (sparse attention window)
+    """
+
+    index_n_heads: int
+    index_head_dim: int
+    index_topk: int
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -269,6 +289,7 @@ Supported systems (GPU types)
 SupportedSystems = {
     "h100_sxm",
     "h200_sxm",
+    "h20e",
     "b200_sxm",
     "gb200",
     "gb300",
@@ -279,13 +300,14 @@ SupportedSystems = {
 """
 Model family for model definition
 """
-ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS", "NEMOTRONH"}
+ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "DEEPSEEK_V32", "NEMOTRONNAS", "NEMOTRONH"}
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
     "Qwen3ForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
+    "DeepseekV32ForCausalLM": "DEEPSEEK_V32",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",
@@ -494,6 +516,9 @@ class PerfDataFilename(Enum):
     compute_scale = "computescale_perf.txt"
     scale_matrix = "scale_matrix_perf.txt"
     mamba2 = "mamba2_perf.txt"
+    # DeepSeek-V3.2 DSA (DeepSeek Sparse Attention)
+    dsa_context = "dsa_context_perf.txt"
+    dsa_generation = "dsa_generation_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

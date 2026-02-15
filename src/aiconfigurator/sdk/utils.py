@@ -480,6 +480,16 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"NemotronH hybrid config: pattern={extra_params.hybrid_override_pattern}, "
             f"mamba_heads={extra_params.mamba_num_heads}"
         )
+    elif architecture == "DeepseekV32ForCausalLM":
+        extra_params = common.DeepSeekV32Config(
+            index_n_heads=config["index_n_heads"],
+            index_head_dim=config["index_head_dim"],
+            index_topk=config["index_topk"],
+        )
+        logger.info(
+            f"DeepSeek-V3.2 DSA config: index_n_heads={extra_params.index_n_heads}, "
+            f"index_head_dim={extra_params.index_head_dim}, index_topk={extra_params.index_topk}"
+        )
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])

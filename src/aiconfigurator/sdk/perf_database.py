@@ -1100,6 +1100,93 @@ def load_mla_bmm_data(mla_bmm_file):
     return mla_bmm_data
 
 
+def load_context_dsa_data(dsa_file: str):
+    """
+    Load context DSA data. Produces the SAME dict structure as load_context_mla_data
+    so that the same interpolation and query infrastructure can be reused.
+
+    Dict structure: data[fmha_quant_mode][kv_cache_quant_mode][num_heads][s][b]
+    (mirrors context MLA exactly)
+    """
+    if not os.path.exists(dsa_file):
+        logger.debug(f"DSA context data file {dsa_file} not found.")
+        return None
+
+    # Same 5-level defaultdict as MLA — leaf is defaultdict() so try/except KeyError works
+    dsa_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+
+    with open(dsa_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        num_heads = int(row["num_heads"])
+        b = int(row["batch_size"])
+        s = int(row["isl"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        entry = {"latency": latency, "power": power, "energy": energy}
+
+        # DSA only supports BF16 KV cache in TRT-LLM 1.2.0rc5.
+        # Register under float16 quant keys only.
+        quant_mode = common.FMHAQuantMode.float16
+        kv_dtype = common.KVCacheQuantMode.float16
+        try:
+            dsa_data[quant_mode][kv_dtype][num_heads][s][b]
+        except KeyError:
+            dsa_data[quant_mode][kv_dtype][num_heads][s][b] = entry
+
+    return dsa_data
+
+
+def load_generation_dsa_data(dsa_file: str):
+    """
+    Load generation DSA data. Produces the SAME dict structure as load_generation_mla_data
+    so that the same interpolation and query infrastructure can be reused.
+
+    Dict structure: data[kv_cache_quant_mode][num_heads][b][s]
+    (mirrors generation MLA exactly)
+    """
+    if not os.path.exists(dsa_file):
+        logger.debug(f"DSA generation data file {dsa_file} not found.")
+        return None
+
+    # Same 4-level defaultdict as MLA — leaf is defaultdict() so try/except KeyError works
+    dsa_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+
+    with open(dsa_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        num_heads = int(row["num_heads"])
+        b = int(row["batch_size"])
+        isl = int(row["isl"])
+        step = int(row["step"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        # s = isl + step (same as MLA generation: total kv_cache position)
+        s = isl + step
+
+        entry = {"latency": latency, "power": power, "energy": energy}
+
+        kv_dtype = common.KVCacheQuantMode.float16
+        try:
+            dsa_data[kv_dtype][num_heads][b][s]
+        except KeyError:
+            dsa_data[kv_dtype][num_heads][b][s] = entry
+
+    return dsa_data
+
+
 def load_mamba2_data(mamba2_file: str):
     """
     Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.txt.
@@ -1933,6 +2020,14 @@ class PerfDatabase:
             self._nccl_data = load_nccl_data(nccl_data_dir)
             self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
             self._mamba2_data = load_mamba2_data(os.path.join(data_dir, common.PerfDataFilename.mamba2.value))
+            # DSA (DeepSeek Sparse Attention) for V3.2
+            # Uses same dict structure as MLA so interpolation/query can be reused
+            self._context_dsa_data = load_context_dsa_data(
+                os.path.join(data_dir, common.PerfDataFilename.dsa_context.value)
+            )
+            self._generation_dsa_data = load_generation_dsa_data(
+                os.path.join(data_dir, common.PerfDataFilename.dsa_generation.value)
+            )
             self._compute_scale_data = load_compute_scale_data(
                 os.path.join(data_dir, common.PerfDataFilename.compute_scale.value)
             )
@@ -2351,6 +2446,50 @@ class PerfDatabase:
 
                 self._extrapolate_data_grid(
                     data_dict=data_dict,  # tpsize, bs
+                    target_x_list=target_x_list,
+                    target_y_list=target_y_list,
+                    target_z_list=target_z_list,
+                )
+
+        # DSA (DeepSeek Sparse Attention) data interpolation
+        # Uses EXACT same pattern as MLA since dict structure is identical
+        if getattr(self, "_context_dsa_data", None) is not None:
+            for quant_mode in self._context_dsa_data:
+                for kv_cache_dtype in self._context_dsa_data[quant_mode]:
+                    num_heads_list = list(self._context_dsa_data[quant_mode][kv_cache_dtype].keys())
+                    data_dict = self._context_dsa_data[quant_mode][kv_cache_dtype]
+                    target_x_list = num_heads_list
+                    target_y_list = (
+                        [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
+                        + [4096 + i * 2048 for i in range(14)]
+                        + [32768 + 16384 * i for i in range(6)]
+                        + [131072 + 32768 * i for i in range(12)]
+                        + [524288 + 65536 * i for i in range(9)]
+                    )
+                    target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]
+
+                    self._extrapolate_data_grid(
+                        data_dict=data_dict,
+                        target_x_list=target_x_list,
+                        target_y_list=target_y_list,
+                        target_z_list=target_z_list,
+                        sqrt_y_value=True,
+                    )
+
+        if getattr(self, "_generation_dsa_data", None) is not None:
+            for kv_cache_dtype in self._generation_dsa_data:
+                tp_list = list(self._generation_dsa_data[kv_cache_dtype].keys())
+                data_dict = self._generation_dsa_data[kv_cache_dtype]
+                target_x_list = tp_list
+                target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]
+                target_z_list = [
+                    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024,
+                    2048, 4096, 8192, 16384, 32768, 65536, 131072,
+                    262144, 2097152 * 8,
+                ]
+
+                self._extrapolate_data_grid(
+                    data_dict=data_dict,
                     target_x_list=target_x_list,
                     target_y_list=target_y_list,
                     target_z_list=target_z_list,
@@ -5415,6 +5554,74 @@ class PerfDatabase:
                 return PerformanceResult(lat, energy=0.0)
             else:
                 raise
+
+
+    # ═══════════════════════════════════════════════════════════════════
+    # DSA (DeepSeek Sparse Attention) Queries
+    # ═══════════════════════════════════════════════════════════════════
+
+    def query_context_dsa(
+        self,
+        b: int,
+        s: int,
+        num_heads: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """
+        Query context DSA latency.
+        DSA data includes the full attention block (GEMMs + indexer + sparse MLA),
+        so it must NOT fall back to MLA (which only covers the attention kernel).
+        """
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        dsa_data = getattr(self, "_context_dsa_data", None)
+        if dsa_data is None:
+            raise PerfDataNotAvailableError(
+                f"Context DSA perf data not loaded for system='{self.system}', "
+                f"backend='{self.backend}', version='{self.version}'. "
+                f"DSA data is required for DeepSeek-V3.2 — cannot fall back to MLA "
+                f"(different op granularity)."
+            )
+
+        dsa_dict = dsa_data[fmha_quant_mode][kvcache_quant_mode]
+        result = self._interp_3d(num_heads, s, b, dsa_dict, "cubic")
+        latency = result["latency"]
+        energy = result.get("energy", 0.0)
+        return PerformanceResult(latency, energy=energy)
+
+    @functools.lru_cache(maxsize=32768)
+    def query_generation_dsa(
+        self,
+        b: int,
+        s: int,
+        num_heads: int,
+        kv_cache_dtype: common.KVCacheQuantMode,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """
+        Query generation DSA latency.
+        DSA data includes the full attention block — must NOT fall back to MLA.
+        """
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        dsa_data = getattr(self, "_generation_dsa_data", None)
+        if dsa_data is None:
+            raise PerfDataNotAvailableError(
+                f"Generation DSA perf data not loaded for system='{self.system}', "
+                f"backend='{self.backend}', version='{self.version}'. "
+                f"DSA data is required for DeepSeek-V3.2 — cannot fall back to MLA "
+                f"(different op granularity)."
+            )
+
+        dsa_dict = dsa_data[kv_cache_dtype]
+        result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
+        latency = result["latency"]
+        energy = result.get("energy", 0.0)
+        return PerformanceResult(latency, energy=energy)
 
 
 if __name__ == "__main__":

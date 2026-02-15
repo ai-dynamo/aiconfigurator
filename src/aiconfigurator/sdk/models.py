@@ -272,6 +272,135 @@ def get_model(
                 context,
                 model_config,
             )
+    elif model_family == "DEEPSEEK_V32":
+        # DeepSeek-V3.2 with DSA (DeepSeek Sparse Attention).
+        # Currently uses the same model structure as DEEPSEEK (V3) — both have MLA + MoE.
+        # DSA-specific operations (Indexer + Sparse Attention) will be added in a future phase.
+        # For now, the V3 model provides a reasonable upper-bound estimate since DSA
+        # reduces attention cost for long sequences.
+        if backend_name == "trtllm" and model_config.enable_wideep:
+            logger.debug(f"TensorRT-LLM WideEP is enabled for DeepSeek-V3.2 model {model_path}")
+            model = TrtllmWideEPDeepSeekModel(
+                topk,
+                num_experts,
+                moe_inter_size,
+                model_path,
+                model_family,
+                architecture,
+                layers,
+                n,
+                n_kv,
+                d,
+                hidden,
+                inter,
+                vocab,
+                context,
+                model_config,
+            )
+        elif backend_name == "sglang" and model_config.enable_wideep:
+            logger.debug(f"WideEP is enabled for DeepSeek-V3.2 model {model_path} with backend {backend_name}")
+            model = WideEPDeepSeekModel(
+                topk,
+                num_experts,
+                moe_inter_size,
+                model_path,
+                model_family,
+                architecture,
+                layers,
+                n,
+                n_kv,
+                d,
+                hidden,
+                inter,
+                vocab,
+                context,
+                model_config,
+            )
+        else:
+            logger.debug(f"Using DeepSeekModel for DeepSeek-V3.2 model {model_path}")
+            model = DeepSeekModel(
+                topk,
+                num_experts,
+                moe_inter_size,
+                model_path,
+                model_family,
+                architecture,
+                layers,
+                n,
+                n_kv,
+                d,
+                hidden,
+                inter,
+                vocab,
+                context,
+                model_config,
+            )
+        if extra_params is not None:
+            logger.info(
+                f"DeepSeek-V3.2 DSA config stored: index_n_heads={extra_params.index_n_heads}, "
+                f"index_topk={extra_params.index_topk}"
+            )
+            model._dsa_config = extra_params
+
+            # DSA in TRT-LLM 1.2.0rc5 only supports BF16 KV cache.
+            # Force kvcache/fmha quant modes to float16 for DSA ops regardless
+            # of what was auto-inferred from the HuggingFace config.
+            tp_size = model_config.tp_size
+            kvcache_quant_mode = common.KVCacheQuantMode.float16
+            fmha_quant_mode = common.FMHAQuantMode.float16
+            if model_config.kvcache_quant_mode != common.KVCacheQuantMode.float16:
+                logger.info(
+                    f"DeepSeek-V3.2 DSA: overriding kvcache_quant_mode from "
+                    f"{model_config.kvcache_quant_mode} to float16 (DSA only supports BF16 KV cache)"
+                )
+
+            # GEMMs that are INSIDE the DSA attention block (profiled together).
+            # These must be removed to avoid double-counting.
+            # DSA data = DeepseekV32Attention.forward() which includes:
+            #   kv_a_proj_with_mqa, q/kv layernorms, q_b_proj,
+            #   indexer (wq_b + weights_proj + MQA logits + topk),
+            #   sparse MLA (BMM pre + attention + BMM post), o_proj
+            _DSA_INCLUDED_OP_NAMES = {
+                "context_downscale_gemm", "generation_downscale_gemm",
+                "context_q_b_proj_gemm", "generation_q_b_proj_gemm",
+                "context_kv_b_proj_gemm", "generation_kv_b_proj_gemm",
+                "context_proj_gemm", "generation_proj_gemm",
+            }
+
+            def _replace_attn_ops(op_list, is_context):
+                """Replace MLA/MLABmm ops with DSA, remove GEMMs already in DSA data."""
+                new_ops = []
+                for op in op_list:
+                    if isinstance(op, (ops.ContextMLA, ops.GenerationMLA)):
+                        if is_context:
+                            new_ops.append(ops.ContextDSA(
+                                "context_dsa_attention",
+                                op._scale_factor,
+                                n // tp_size,
+                                extra_params.index_n_heads,
+                                extra_params.index_topk,
+                                kvcache_quant_mode,
+                                fmha_quant_mode,
+                            ))
+                        else:
+                            new_ops.append(ops.GenerationDSA(
+                                "generation_dsa_attention",
+                                op._scale_factor,
+                                n // tp_size,
+                                extra_params.index_n_heads,
+                                extra_params.index_topk,
+                                kvcache_quant_mode,
+                            ))
+                    elif isinstance(op, ops.MLABmm):
+                        continue  # included in DSA
+                    elif op._name in _DSA_INCLUDED_OP_NAMES:
+                        continue  # GEMM already profiled inside DSA block
+                    else:
+                        new_ops.append(op)
+                return new_ops
+
+            model.context_ops = _replace_attn_ops(model.context_ops, is_context=True)
+            model.generation_ops = _replace_attn_ops(model.generation_ops, is_context=False)
     elif model_family == "NEMOTRONNAS":
         model = NemotronNas(
             model_path,
@@ -330,7 +459,7 @@ def check_is_moe(model_path: str) -> bool:
     E.g., Nemotron_H is not an MoE model, but Nemotron_3 is an MoE model.
     """
     family = get_model_family(model_path)
-    if family in ("MOE", "DEEPSEEK"):
+    if family in ("MOE", "DEEPSEEK", "DEEPSEEK_V32"):
         return True
     if family == "NEMOTRONH":
         model_info = _get_model_info(model_path)
