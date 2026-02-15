@@ -11,6 +11,11 @@ import pandas as pd
 from aiconfigurator.sdk import common, config, models, perf_database
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.inference_summary import InferenceSummary
+from aiconfigurator.sdk.picking import (
+    _AUTOSCALE_TTFT_CORRECTION_FACTOR,
+    _RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
+    _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
+)
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
@@ -166,10 +171,9 @@ class DisaggInferenceSession:
         self._prefill_latency_correction_scale = 1.0
         self._decode_latency_correction_scale = 1.0
 
-        # comes from pipeline bubble, especially when benchmarking with concurrency
-        self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR = 0.9
-        # comes from not saturating the batchsize slot of decode worker
-        self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR = 0.92
+        # See picking.py for rationale
+        self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR = _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR
+        self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR = _RATE_MATCHING_DECODE_DEGRADATION_FACTOR
 
     def set_latency_correction_scales(
         self, prefill_latency_correction_scale: float, decode_latency_correction_scale: float
@@ -189,107 +193,20 @@ class DisaggInferenceSession:
     ) -> dict:
         """
         Get the disagg summary as a dict based on prefill and decode summary dicts.
-        The summary dict is used for efficient batch operations.
+
+        Delegates to :func:`aiconfigurator.sdk.picking.build_disagg_summary_dict`
+        passing this session's degradation factors.
         """
-        seq_s = min(
-            prefill_summary_dict["seq/s"] * prefill_num_worker * self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
-            decode_summary_dict["seq/s"] * decode_num_worker * self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
+        from aiconfigurator.sdk.picking import build_disagg_summary_dict
+
+        return build_disagg_summary_dict(
+            prefill_summary_dict=prefill_summary_dict,
+            prefill_num_worker=prefill_num_worker,
+            decode_summary_dict=decode_summary_dict,
+            decode_num_worker=decode_num_worker,
+            prefill_degradation_factor=self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
+            decode_degradation_factor=self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
         )
-        prefill_gpus = prefill_summary_dict["pp"] * prefill_summary_dict["tp"] * prefill_summary_dict["dp"]
-        decode_gpus = decode_summary_dict["pp"] * decode_summary_dict["tp"] * decode_summary_dict["dp"]
-        seq_s_gpu = seq_s / (prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker)
-
-        tokens_s = seq_s * prefill_summary_dict["osl"]
-        tokens_s_gpu = tokens_s / (prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker)
-        num_total_gpus = prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker
-        osl = prefill_summary_dict["osl"]
-        request_latency = prefill_summary_dict["ttft"] + decode_summary_dict["tpot"] * max(osl - 1, 0)
-
-        # Calculate weighted average power for DISAGG mode
-        # Power is weighted by time spent in each phase
-        # Note: prefill_power and decode_power are already per-GPU averages
-        ttft = prefill_summary_dict["ttft"]
-        tpot = decode_summary_dict["tpot"]
-        decode_time = tpot * max(osl - 1, 0)
-
-        prefill_power = prefill_summary_dict.get("power_w", 0.0)
-        decode_power = decode_summary_dict.get("power_w", 0.0)
-
-        # DEBUG: Log the power values we're getting
-        logger.debug(
-            f"DISAGG Power Calc: prefill_power={prefill_power}W, "
-            f"decode_power={decode_power}W, ttft={ttft}ms, decode_time={decode_time}ms"
-        )
-
-        # Simple time-weighted average (power values are already per-GPU)
-        total_time = ttft + decode_time
-
-        if total_time > 0:
-            disagg_power_avg = (prefill_power * ttft + decode_power * decode_time) / total_time
-        else:
-            disagg_power_avg = 0.0
-
-        logger.debug(
-            f"DISAGG Power Result: {disagg_power_avg}W (time-weighted from {prefill_power}W and {decode_power}W)"
-        )
-
-        return {
-            "model": prefill_summary_dict["model"],
-            "isl": prefill_summary_dict["isl"],
-            "osl": prefill_summary_dict["osl"],
-            "prefix": prefill_summary_dict["prefix"],
-            # This is not exact matching. You can use this concurrency to benchmark the system.
-            "concurrency": decode_summary_dict["concurrency"] * decode_num_worker,
-            "request_rate": seq_s,
-            "(p)bs": prefill_summary_dict["bs"],
-            "(p)global_bs": prefill_summary_dict["global_bs"],
-            "(p)workers": prefill_num_worker,
-            "(d)bs": decode_summary_dict["bs"],
-            "(d)global_bs": decode_summary_dict["global_bs"],
-            "(d)workers": decode_num_worker,
-            "ttft": prefill_summary_dict["ttft"],
-            "tpot": decode_summary_dict["tpot"],
-            "request_latency": request_latency,
-            "seq/s": seq_s,
-            "seq/s/gpu": seq_s_gpu,
-            "tokens/s": tokens_s,
-            "tokens/s/gpu": tokens_s_gpu,
-            "tokens/s/user": decode_summary_dict["tokens/s/user"],
-            "(p)seq/s/worker": prefill_summary_dict["seq/s"],
-            "(d)seq/s/worker": decode_summary_dict["seq/s"],
-            "num_total_gpus": num_total_gpus,
-            "(p)tp": prefill_summary_dict["tp"],
-            "(p)pp": prefill_summary_dict["pp"],
-            "(p)dp": prefill_summary_dict["dp"],
-            "(p)moe_tp": prefill_summary_dict["moe_tp"],
-            "(p)moe_ep": prefill_summary_dict["moe_ep"],
-            "(p)parallel": prefill_summary_dict["parallel"],
-            "(p)gemm": prefill_summary_dict["gemm"],
-            "(p)kvcache": prefill_summary_dict["kvcache"],
-            "(p)fmha": prefill_summary_dict["fmha"],
-            "(p)moe": prefill_summary_dict["moe"],
-            "(p)comm": prefill_summary_dict["comm"],
-            "(p)memory": prefill_summary_dict["memory"],
-            "(p)backend": prefill_summary_dict["backend"],
-            "(p)version": prefill_summary_dict["version"],
-            "(p)system": prefill_summary_dict["system"],
-            "(d)tp": decode_summary_dict["tp"],
-            "(d)pp": decode_summary_dict["pp"],
-            "(d)dp": decode_summary_dict["dp"],
-            "(d)moe_tp": decode_summary_dict["moe_tp"],
-            "(d)moe_ep": decode_summary_dict["moe_ep"],
-            "(d)parallel": decode_summary_dict["parallel"],
-            "(d)gemm": decode_summary_dict["gemm"],
-            "(d)kvcache": decode_summary_dict["kvcache"],
-            "(d)fmha": decode_summary_dict["fmha"],
-            "(d)moe": decode_summary_dict["moe"],
-            "(d)comm": decode_summary_dict["comm"],
-            "(d)memory": decode_summary_dict["memory"],
-            "(d)backend": decode_summary_dict["backend"],
-            "(d)version": decode_summary_dict["version"],
-            "(d)system": decode_summary_dict["system"],
-            "power_w": disagg_power_avg,  # Weighted average power for DISAGG mode
-        }
 
     def _get_disagg_summary_df(
         self,
@@ -358,6 +275,151 @@ class DisaggInferenceSession:
         disagg_summary.set_summary_df(disagg_summary_df)
         return disagg_summary
 
+    def get_worker_candidates(
+        self,
+        model_path: str,
+        model_config: config.ModelConfig,
+        parallel_config_list: list[tuple[int, int, int, int, int]],
+        b_list: list[int] | range,
+        runtime_config: config.RuntimeConfig,
+        mode: str,
+        latency_correction_scale: float = 1.0,
+    ) -> pd.DataFrame:
+        """Get all worker candidates for a given search space.
+
+        It enumerates all (parallel_config, batch_size) combinations,
+        runs static inference, and returns a DataFrame with columns from
+        :data:`common.ColumnsStatic`.
+
+        Args:
+            model_path: HuggingFace model ID or local path.
+            model_config: Model configuration (quant modes etc.).
+            parallel_config_list: List of (tp, pp, dp, moe_tp, moe_ep) tuples.
+            b_list: Batch sizes to sweep.
+            runtime_config: Runtime config (isl, osl, etc.).
+            mode: ``"static_ctx"`` for prefill or ``"static_gen"`` for decode.
+            latency_correction_scale: Multiplicative correction applied to
+                latencies (default 1.0).
+
+        Returns:
+            DataFrame with one row per (parallel_config, batch_size) that fits
+            in memory.
+
+        Raises:
+            RuntimeError: If no valid results are found for any config.
+        """
+        summary_df = pd.DataFrame(columns=common.ColumnsStatic)
+        exceptions: list[Exception] = []
+
+        for parallel_config in parallel_config_list:
+            tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
+            logger.debug(
+                "Getting candidate workers with parallel config: tp=%d, pp=%d, dp=%d, moe_tp=%d, moe_ep=%d",
+                tp_size,
+                pp_size,
+                dp_size,
+                moe_tp_size,
+                moe_ep_size,
+            )
+
+            try:
+                overwritten_model_config = copy.deepcopy(model_config)
+                overwritten_model_config.pp_size = pp_size
+                overwritten_model_config.tp_size = tp_size
+                overwritten_model_config.moe_tp_size = moe_tp_size
+                overwritten_model_config.moe_ep_size = moe_ep_size
+                overwritten_model_config.attention_dp_size = dp_size
+                model = models.get_model(
+                    model_path=model_path,
+                    model_config=overwritten_model_config,
+                    backend_name=self._prefill_backend.name.value,
+                )
+                if mode == "static_ctx":
+                    sess = InferenceSession(
+                        model=model,
+                        database=self._prefill_database,
+                        backend=self._prefill_backend,
+                    )
+                else:
+                    sess = InferenceSession(
+                        model=model,
+                        database=self._decode_database,
+                        backend=self._decode_backend,
+                    )
+
+                for b in b_list:
+                    overwritten_runtime_config = copy.deepcopy(runtime_config)
+                    overwritten_runtime_config.batch_size = b
+                    summary = sess.run_static(
+                        mode=mode,
+                        runtime_config=overwritten_runtime_config,
+                        latency_correction_scale=latency_correction_scale,
+                    )
+                    if not summary.check_oom():
+                        summary_df = pd.concat(
+                            [summary_df, summary.get_summary_df()],
+                            axis=0,
+                            ignore_index=True,
+                        )
+                    else:  # larger b will always OOM
+                        break
+            except Exception as e:
+                logger.warning(
+                    "Error getting candidate workers with parallel config: "
+                    "tp=%d, pp=%d, dp=%d, moe_tp=%d, moe_ep=%d; "
+                    "skipping this combination. Error: %s",
+                    tp_size,
+                    pp_size,
+                    dp_size,
+                    moe_tp_size,
+                    moe_ep_size,
+                    e,
+                )
+                exceptions.append(e)
+                continue
+        if summary_df.empty:
+            raise RuntimeError(
+                f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
+            ) from exceptions[-1]
+        return summary_df
+
+    def _pick_autoscale(
+        self,
+        prefill_summary_df: pd.DataFrame,
+        decode_summary_df: pd.DataFrame,
+        runtime_config: config.RuntimeConfig,
+        disagg_summary: InferenceSummary,
+        target_ttft: float | None = None,
+        target_tpot: float | None = None,
+        top_n: int = 5,
+    ) -> InferenceSummary:
+        """Pick best prefill and decode engines independently for autoscaling.
+
+        Delegates to :func:`aiconfigurator.sdk.picking.pick_autoscale` and
+        wraps the result in an ``InferenceSummary``.
+        """
+        from aiconfigurator.sdk.picking import pick_autoscale
+
+        if target_ttft is None:
+            target_ttft = runtime_config.ttft
+
+        if target_tpot is None:
+            tpot_values = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
+            target_tpot = max(tpot_values)
+
+        result = pick_autoscale(
+            prefill_df=prefill_summary_df,
+            decode_df=decode_summary_df,
+            target_ttft=target_ttft,
+            target_tpot=target_tpot,
+            top_n=top_n,
+        )
+
+        disagg_summary_df = result["best_config_df"]
+        if not disagg_summary_df.empty:
+            disagg_summary.set_summary_df(disagg_summary_df)
+        return disagg_summary
+
     # optimization
     def find_best_disagg_result_under_constraints(
         self,
@@ -373,6 +435,8 @@ class DisaggInferenceSession:
         decode_num_worker_list: list[int],
         num_gpu_list: list[int] | None,
         require_same_tp: bool = False,
+        autoscale: bool = False,
+        target_tpot: float | None = None,
     ) -> InferenceSummary | None:
         """
         Run disagg with given constraints
@@ -456,82 +520,6 @@ class DisaggInferenceSession:
 
             return prefill_opt_num_worker, decode_opt_num_worker
 
-        def _get_summary_df(
-            model_config: config.ModelConfig,
-            parallel_config_list: list[tuple[int, int, int, int, int]],
-            b_list: list[int],
-            runtime_config: config.RuntimeConfig,
-            mode: str,
-            latency_correction_scale: float = 1.0,
-        ) -> pd.DataFrame:
-            """
-            Get all worker candidates based on give search space
-            """
-            summary_df = pd.DataFrame(columns=common.ColumnsStatic)
-            exceptions = []
-
-            for parallel_config in parallel_config_list:
-                tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
-                logger.debug(
-                    f"Getting candidate workers with parallel config: tp={tp_size}, pp={pp_size}, "
-                    f"dp={dp_size}, moe_tp={moe_tp_size}, moe_ep={moe_ep_size}"
-                )
-
-                try:
-                    overwritten_model_config = copy.deepcopy(model_config)
-                    overwritten_model_config.pp_size = pp_size
-                    overwritten_model_config.tp_size = tp_size
-                    overwritten_model_config.moe_tp_size = moe_tp_size
-                    overwritten_model_config.moe_ep_size = moe_ep_size
-                    overwritten_model_config.attention_dp_size = dp_size
-                    model = models.get_model(
-                        model_path=model_path,
-                        model_config=overwritten_model_config,
-                        backend_name=self._prefill_backend.name.value,
-                    )
-                    if mode == "static_ctx":
-                        sess = InferenceSession(
-                            model=model,
-                            database=self._prefill_database,
-                            backend=self._prefill_backend,
-                        )
-                    else:
-                        sess = InferenceSession(
-                            model=model,
-                            database=self._decode_database,
-                            backend=self._decode_backend,
-                        )
-
-                    for b in b_list:
-                        overwritten_runtime_config = copy.deepcopy(runtime_config)
-                        overwritten_runtime_config.batch_size = b
-                        summary = sess.run_static(
-                            mode=mode,
-                            runtime_config=overwritten_runtime_config,
-                            latency_correction_scale=latency_correction_scale,
-                        )
-                        if not summary.check_oom():
-                            summary_df = pd.concat(
-                                [summary_df, summary.get_summary_df()],
-                                axis=0,
-                                ignore_index=True,
-                            )
-                        else:  # larger b will always OOM
-                            break
-                except Exception as e:
-                    logger.warning(
-                        f"Error getting candidate workers with parallel config: "
-                        f"tp={tp_size}, pp={pp_size}, dp={dp_size}, moe_tp={moe_tp_size}, "
-                        f"moe_ep={moe_ep_size}; skipping this combination. Error: {e}"
-                    )
-                    exceptions.append(e)
-                    continue
-            if summary_df.empty:
-                raise RuntimeError(
-                    f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
-                ) from exceptions[-1]
-            return summary_df
-
         def _find_best_result_under_constraints(
             ttft: float,
             tpot: float,
@@ -566,7 +554,7 @@ class DisaggInferenceSession:
             # if we use N=10, it's lc/20+0.95. assume lc can be 15-20, 1.8 is a reasonable
             # correction factor. as we need to get the lc after rate matching, we cannot get the
             # exact value now. Let's make it simple to do pre-correction instead of post-correction.
-            correction_factor = 1.8  # let's make it simple for now.
+            correction_factor = _AUTOSCALE_TTFT_CORRECTION_FACTOR
             prefill_candidates = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * correction_factor)
 
             prefill_candidates = prefill_candidates[prefill_candidates["ttft"] < ttft]
@@ -670,25 +658,37 @@ class DisaggInferenceSession:
         disagg_summary.set_summary_df(disagg_summary_df)
 
         # find prefill and decode workers
-        prefill_summary_df = _get_summary_df(
-            prefill_model_config,
-            prefill_parallel_config_list,
-            prefill_batch_size_range,
-            runtime_config,
-            "static_ctx",
+        prefill_summary_df = self.get_worker_candidates(
+            model_path=model_path,
+            model_config=prefill_model_config,
+            parallel_config_list=prefill_parallel_config_list,
+            b_list=prefill_batch_size_range,
+            runtime_config=runtime_config,
+            mode="static_ctx",
             latency_correction_scale=self._prefill_latency_correction_scale,
         )
-        decode_summary_df = _get_summary_df(
-            decode_model_config,
-            decode_parallel_config_list,
-            decode_batch_size_range,
-            runtime_config,
-            "static_gen",
+        decode_summary_df = self.get_worker_candidates(
+            model_path=model_path,
+            model_config=decode_model_config,
+            parallel_config_list=decode_parallel_config_list,
+            b_list=decode_batch_size_range,
+            runtime_config=runtime_config,
+            mode="static_gen",
             latency_correction_scale=self._decode_latency_correction_scale,
         )
         if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:
             logger.debug(f"No prefill or decode workers found for {model_path} with given configs.")
             return disagg_summary
+
+        # ----- autoscale mode: pick P and D independently, no rate matching -----
+        if autoscale:
+            return self._pick_autoscale(
+                prefill_summary_df=prefill_summary_df,
+                decode_summary_df=decode_summary_df,
+                runtime_config=runtime_config,
+                disagg_summary=disagg_summary,
+                target_tpot=target_tpot,
+            )
 
         # find best result under constraints
         constraint_pairs: list[tuple[float, float]] = []

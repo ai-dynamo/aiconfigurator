@@ -1070,7 +1070,7 @@ class TaskRunner:
             "pareto_df": result_df,
         }
 
-    def run_disagg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
+    def run_disagg(self, task_config: DefaultMunch, autoscale: bool = False) -> dict[str, pd.DataFrame | None]:
         logger.info("Task %s: Setting up runtime config", task_config.task_name)
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
@@ -1238,21 +1238,30 @@ class TaskRunner:
             prefill_latency_correction_scale=task_config.advanced_tuning_config.prefill_latency_correction_scale,
             decode_latency_correction_scale=task_config.advanced_tuning_config.decode_latency_correction_scale,
             require_same_tp=require_same_tp,
+            autoscale=autoscale,
+            target_tpot=task_config.runtime_config.tpot if autoscale else None,
         )
         return {"pareto_df": result_df}
 
-    def run(self, task_config: TaskConfig) -> dict[str, pd.DataFrame | None]:
+    def run(
+        self,
+        task_config: TaskConfig,
+        autoscale: bool = False,
+    ) -> dict[str, pd.DataFrame | None]:
         serving_mode = task_config.config.serving_mode
         logger.info(
-            "Starting Pareto Analysis for %s in %s mode...",
+            "Starting Pareto Analysis for %s in %s mode (autoscale=%s)...",
             task_config.task_name,
             serving_mode,
+            autoscale,
         )
         try:
             if serving_mode == "agg":
+                if autoscale:
+                    raise ValueError("autoscale mode is only supported for disagg serving mode.")
                 result = self.run_agg(task_config.config)
             elif serving_mode == "disagg":
-                result = self.run_disagg(task_config.config)
+                result = self.run_disagg(task_config.config, autoscale=autoscale)
             else:
                 raise ValueError(f"Invalid serving mode: {serving_mode}")
         except Exception:

@@ -246,6 +246,8 @@ def disagg_pareto(
     decode_num_worker_list = get_working_list(decode_num_worker_list, decode_max_num_worker)
 
     require_same_tp = kwargs.get("require_same_tp", False)
+    autoscale = kwargs.get("autoscale", False)
+    target_tpot = kwargs.get("target_tpot")
 
     summary = disagg_sess.find_best_disagg_result_under_constraints(
         model_path=model_path,
@@ -260,6 +262,8 @@ def disagg_pareto(
         decode_num_worker_list=decode_num_worker_list,
         num_gpu_list=num_gpu_list,
         require_same_tp=require_same_tp,
+        autoscale=autoscale,
+        target_tpot=target_tpot,
     )
 
     return summary.get_summary_df()
@@ -466,32 +470,46 @@ def _get_best_configs_under_constraint(
         logger.error("top_n is less than 1")
         return pd.DataFrame()
 
-    if not candidate_configs.empty:
-        # compute achieved cluster-scale tokens/s/gpu
-        candidate_configs["tokens/s/gpu_cluster"] = (
-            candidate_configs["tokens/s/gpu"]
-            * (total_gpus // candidate_configs["num_total_gpus"])
-            * candidate_configs["num_total_gpus"]
-            / total_gpus
+    if candidate_configs.empty:
+        # No config meets the constraint strictly -- fall back to closest matches.
+        logger.info(
+            "No config found with %s <= %s. Returning top-%d closest configs.",
+            constraint_col,
+            target_value,
+            top_n,
         )
-        if group_by is not None:
-            top_indexes = candidate_configs.groupby(group_by)["tokens/s/gpu_cluster"].idxmax()
-            candidate_configs = candidate_configs.loc[top_indexes]
+        candidate_configs = pareto_df.copy()
+        candidate_configs["_sla_exceeded"] = True
+    else:
+        candidate_configs["_sla_exceeded"] = False
+
+    # compute achieved cluster-scale tokens/s/gpu
+    candidate_configs["tokens/s/gpu_cluster"] = (
+        candidate_configs["tokens/s/gpu"]
+        * (total_gpus // candidate_configs["num_total_gpus"])
+        * candidate_configs["num_total_gpus"]
+        / total_gpus
+    )
+    if group_by is not None and group_by in candidate_configs.columns:
+        top_indexes = candidate_configs.groupby(group_by)["tokens/s/gpu_cluster"].idxmax()
+        candidate_configs = candidate_configs.loc[top_indexes]
+
+    if candidate_configs["_sla_exceeded"].all():
+        # All configs exceed the SLA -- sort by closest to target
+        sort_columns = [constraint_col]
+        sort_ascending = [True]
+    else:
         sort_columns = ["tokens/s/gpu_cluster"]
         sort_ascending = [False]
         if secondary_sort_col and secondary_sort_col in candidate_configs.columns:
             sort_columns.append(secondary_sort_col)
             sort_ascending.append(secondary_sort_ascending)
-        candidate_configs = (
-            candidate_configs.sort_values(by=sort_columns, ascending=sort_ascending).head(top_n).reset_index(drop=True)
-        )
-        return candidate_configs
-    else:
-        # No config meets constraint
-        # Optionally, one could return the one closest to target_tpot if no strict candidates exist.
-        # For now, return empty if no config meets the criteria.
-        logger.info("No config found on Pareto front with %s <= %s.", constraint_col, target_value)
-        return pd.DataFrame()
+
+    candidate_configs = (
+        candidate_configs.sort_values(by=sort_columns, ascending=sort_ascending).head(top_n).reset_index(drop=True)
+    )
+    candidate_configs.drop(columns=["_sla_exceeded"], inplace=True)
+    return candidate_configs
 
 
 def get_best_configs_under_tpot_constraint(
@@ -532,3 +550,147 @@ def get_best_configs_under_request_latency_constraint(
         secondary_sort_col="request_latency",
         secondary_sort_ascending=True,
     )
+
+
+def get_best_configs_for_target_load(
+    pareto_df: pd.DataFrame,
+    constraint_col: str,
+    constraint_value: float,
+    target_request_rate: float | None = None,
+    target_concurrency: float | None = None,
+    top_n: int = 5,
+    max_total_gpus: int | None = None,
+    group_by: str | None = None,
+) -> pd.DataFrame:
+    """Find configs that serve a target load with minimum GPUs under SLA.
+
+    Exactly one of ``target_request_rate`` or ``target_concurrency`` must be
+    provided.  For each candidate config the number of replicas needed to
+    meet the load target is computed from the per-replica ``seq/s`` or
+    ``concurrency`` column, then ``total_gpus_needed`` is derived.  Results
+    are ranked by ``total_gpus_needed`` ascending (fewer GPUs is better).
+
+    Args:
+        pareto_df: DataFrame from the sweep (agg or disagg).
+        constraint_col: SLA column to filter on (``"tpot"`` or
+            ``"request_latency"``).
+        constraint_value: Maximum allowed value for *constraint_col*.
+        target_request_rate: Target system request rate in req/s.
+        target_concurrency: Target number of concurrent requests.
+        top_n: Number of top configurations to return.
+        max_total_gpus: Optional upper bound on total GPUs.
+        group_by: Optional column to group-by before ranking (takes best
+            per group, same semantics as
+            :func:`_get_best_configs_under_constraint`).
+
+    Returns:
+        DataFrame of top-N configs with added columns
+        ``replicas_needed``, ``total_gpus_needed`` and
+        ``tokens/s/gpu_cluster``.
+    """
+    if pareto_df is None or pareto_df.empty:
+        return pd.DataFrame()
+
+    has_rate = target_request_rate is not None
+    has_conc = target_concurrency is not None
+    if has_rate == has_conc:
+        raise ValueError("Exactly one of target_request_rate or target_concurrency must be provided.")
+
+    if constraint_col not in pareto_df.columns:
+        logger.warning("Pareto DataFrame is missing constraint column '%s'.", constraint_col)
+        return pd.DataFrame()
+
+    # 1. Filter by SLA constraint (fall back to closest if none meet it)
+    candidates = pareto_df[pareto_df[constraint_col] <= constraint_value].copy()
+    if candidates.empty:
+        logger.info(
+            "No config found with %s <= %s for load-match. Returning top-%d closest configs.",
+            constraint_col,
+            constraint_value,
+            top_n,
+        )
+        candidates = pareto_df.copy()
+        candidates["_sla_exceeded"] = True
+    else:
+        candidates["_sla_exceeded"] = False
+
+    # 2. Compute replicas needed per-row
+    if has_rate:
+        load_col = "seq/s"
+        if load_col not in candidates.columns:
+            logger.warning("Pareto DataFrame is missing '%s' column for load-match.", load_col)
+            return pd.DataFrame()
+        candidates["replicas_needed"] = np.ceil(target_request_rate / candidates[load_col]).astype(int)
+    else:
+        load_col = "concurrency"
+        if load_col not in candidates.columns:
+            logger.warning("Pareto DataFrame is missing '%s' column for load-match.", load_col)
+            return pd.DataFrame()
+        candidates["replicas_needed"] = np.ceil(target_concurrency / candidates[load_col]).astype(int)
+
+    candidates["replicas_needed"] = candidates["replicas_needed"].clip(lower=1)
+
+    # 3. Total GPUs needed
+    candidates["total_gpus_needed"] = candidates["replicas_needed"] * candidates["num_total_gpus"]
+
+    # 4. tokens/s/gpu_cluster = per-replica efficiency (no cluster-wide scaling)
+    candidates["tokens/s/gpu_cluster"] = candidates["tokens/s/gpu"]
+
+    # 5. GPU ceiling: prefer configs that fit; if none do, warn and cap to max_total_gpus
+    gpu_capped = False
+    if max_total_gpus is not None and not candidates["_sla_exceeded"].all():
+        fits = candidates[candidates["total_gpus_needed"] <= max_total_gpus]
+        if fits.empty:
+            logger.warning(
+                "Target load requires more GPUs than available (%d). "
+                "Returning best config scaled to use all %d GPUs. "
+                "The target load may NOT be fully served.",
+                max_total_gpus,
+                max_total_gpus,
+            )
+            # Cap replicas to what fits in the GPU budget and keep going.
+            # Switch to maximizing throughput since all configs exceed budget.
+            # Save uncapped replicas to compute load_served_pct.
+            uncapped_replicas = candidates["replicas_needed"].copy()
+            candidates["replicas_needed"] = (max_total_gpus // candidates["num_total_gpus"]).clip(lower=1).astype(int)
+            candidates["total_gpus_needed"] = candidates["replicas_needed"] * candidates["num_total_gpus"]
+            # Percentage of target load that the capped deployment can serve
+            candidates["load_served_pct"] = ((candidates["replicas_needed"] / uncapped_replicas) * 100).round(1)
+            # Recompute cluster throughput with capped replicas
+            candidates["tokens/s/gpu_cluster"] = (
+                candidates["tokens/s/gpu"]
+                * candidates["replicas_needed"]
+                * candidates["num_total_gpus"]
+                / max_total_gpus
+            )
+            gpu_capped = True
+        else:
+            candidates = fits
+
+    # 6. Group-by (take best per group)
+    if group_by is not None and group_by in candidates.columns:
+        if candidates["_sla_exceeded"].all():
+            top_indexes = candidates.groupby(group_by)[constraint_col].idxmin()
+        elif gpu_capped:
+            top_indexes = candidates.groupby(group_by)["tokens/s/gpu_cluster"].idxmax()
+        else:
+            top_indexes = candidates.groupby(group_by)["total_gpus_needed"].idxmin()
+        candidates = candidates.loc[top_indexes]
+
+    # 7. Rank
+    if candidates["_sla_exceeded"].all():
+        # Sort by closest to SLA target
+        sort_cols = [constraint_col]
+        sort_asc = [True]
+    elif gpu_capped:
+        # GPU budget exceeded: maximize throughput with available GPUs
+        sort_cols = ["tokens/s/gpu_cluster"]
+        sort_asc = [False]
+    else:
+        # Normal load-match: fewest GPUs first, tiebreak by higher tokens/s/gpu
+        sort_cols = ["total_gpus_needed", "tokens/s/gpu"]
+        sort_asc = [True, False]
+
+    candidates = candidates.sort_values(by=sort_cols, ascending=sort_asc).head(top_n).reset_index(drop=True)
+    candidates.drop(columns=["_sla_exceeded"], inplace=True, errors="ignore")
+    return candidates
