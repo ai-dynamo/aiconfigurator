@@ -247,7 +247,7 @@ def run_dsa(
     if is_context_phase:
         # position_ids should be flattened to [num_tokens] for batch_size > 1
         position_ids = torch.arange(input_len, device=device, dtype=torch.int32)
-        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1).reshape(-1)
+        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1).reshape(-1).contiguous()
     else:
         position_ids = torch.tensor([[input_len]] * batch_size, device=device, dtype=torch.int32)
 
@@ -354,7 +354,8 @@ def main():
     
     for b in batch_sizes:
         for s in seq_lens:
-            if b * s > 65536:
+            # MLA collector limit: b * s <= 1024 * 4096 * 2 * 2 = 8388608
+            if b * s > 1024 * 4096 * 2 * 2:
                 continue
             
             try:
