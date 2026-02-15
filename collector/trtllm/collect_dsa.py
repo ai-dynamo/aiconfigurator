@@ -339,8 +339,9 @@ def run_dsa(
     mapping = Mapping(world_size=1, rank=0, tp_size=1)
 
     # Use DSACacheManager
+    max_seq_len = input_len + output_len + 1  # +1 for safety
     kv_cache_config = KvCacheConfig(
-        max_tokens=int((input_len + output_len - 1) / tokens_per_block + 1)
+        max_tokens=int((max_seq_len - 1) / tokens_per_block + 1)
         * tokens_per_block * batch_size * 2,
         enable_block_reuse=False,
     )
@@ -352,7 +353,7 @@ def run_dsa(
         num_kv_heads=1,
         head_dim=KV_LORA_RANK + QK_ROPE_HEAD_DIM,
         tokens_per_block=tokens_per_block,
-        max_seq_len=input_len + output_len,
+        max_seq_len=max_seq_len,
         max_batch_size=batch_size,
         mapping=mapping,
         dtype=kv_cache_dtype,
@@ -389,18 +390,22 @@ def run_dsa(
         )
         num_tokens = input_len * batch_size
     else:
+        # Generation phase: num_contexts=0, all requests are generation
+        # seq_lens = current step tokens (1 for each request)
+        # num_cached_tokens_per_seq = already cached tokens (input_len)
+        # Note: seq_lens should be 1 (the new token), not total length
         attn_metadata = DSAtrtllmAttentionMetadata(
             max_num_requests=batch_size,
             max_num_tokens=total_num_tokens,
             kv_cache_manager=kv_cache_manager,
             mapping=mapping,
             enable_flash_mla=True,
-            seq_lens=torch.tensor([1] * batch_size, dtype=torch.int32),
+            seq_lens=torch.tensor([1] * batch_size, dtype=torch.int32),  # 1 new token per request
             position_ids=None,
-            num_contexts=0,
+            num_contexts=0,  # No context requests
             kv_cache_params=KVCacheParams(
                 use_cache=True,
-                num_cached_tokens_per_seq=input_seq_lens,
+                num_cached_tokens_per_seq=input_seq_lens,  # Already cached tokens
             ),
             cross=None,
             request_ids=request_ids,
@@ -410,7 +415,7 @@ def run_dsa(
             workspace=torch.tensor([], device=device, dtype=torch.int8),
             sparse_attention_config=sparse_attention_config,
         )
-        num_tokens = batch_size
+        num_tokens = batch_size  # 1 token per request
 
     attn_metadata.prepare()
 
