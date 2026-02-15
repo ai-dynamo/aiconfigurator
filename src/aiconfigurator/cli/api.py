@@ -85,6 +85,9 @@ class CLIResult:
     task_configs: dict[str, TaskConfig]
     """TaskConfig objects used for each experiment."""
 
+    best_latencies: dict[str, dict[str, float]] = field(default_factory=dict)
+    """Estimated latencies (ttft, tpot, request_latency) from the rank-1 config per experiment."""
+
     raw_results: dict[str, dict[str, pd.DataFrame | None]] = field(default_factory=dict)
     """Raw pareto_df results from TaskRunner, keyed by experiment name."""
 
@@ -102,7 +105,7 @@ def _execute_and_wrap_result(
     top_n: int = 5,
 ) -> CLIResult:
     """Execute task configs using main.py's function and wrap result in CLIResult."""
-    chosen_exp, best_configs, pareto_fronts, best_throughputs = _execute_task_configs_internal(
+    chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies = _execute_task_configs_internal(
         task_configs, mode, top_n=top_n
     )
 
@@ -111,6 +114,7 @@ def _execute_and_wrap_result(
         best_configs=best_configs,
         pareto_fronts=pareto_fronts,
         best_throughputs=best_throughputs,
+        best_latencies=best_latencies,
         task_configs=task_configs,
         raw_results={},
     )
