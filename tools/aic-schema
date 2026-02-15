@@ -382,6 +382,175 @@ def cmd_diff_files(args):
         print(output)
 
 
+def cmd_diff_git(args):
+    """Diff by cloning git tags from GitHub."""
+    import tempfile
+    import shutil
+    
+    backend = args.backend
+    old_tag = args.old_tag
+    new_tag = args.new_tag
+    
+    # Get repo URL for backend
+    repo_urls = {
+        "trtllm": "https://github.com/NVIDIA/TensorRT-LLM.git",
+        "vllm": "https://github.com/vllm-project/vllm.git",
+        "sglang": "https://github.com/sgl-project/sglang.git",
+    }
+    
+    if backend not in repo_urls:
+        print(f"Error: Unknown backend: {backend}", file=sys.stderr)
+        sys.exit(1)
+    
+    repo_url = repo_urls[backend]
+    cache_dir = CACHE_DIR / "git"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    old_dir = cache_dir / f"{backend}-{old_tag}"
+    new_dir = cache_dir / f"{backend}-{new_tag}"
+    
+    # Clone old version if needed
+    if not old_dir.exists():
+        print(f"Cloning {backend} {old_tag}...", file=sys.stderr)
+        result = subprocess.run([
+            "git", "clone", "--depth", "1", "--branch", old_tag,
+            repo_url, str(old_dir)
+        ], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Failed to clone {old_tag}: {result.stderr}", file=sys.stderr)
+            sys.exit(1)
+    
+    # Clone new version if needed
+    if not new_dir.exists():
+        print(f"Cloning {backend} {new_tag}...", file=sys.stderr)
+        result = subprocess.run([
+            "git", "clone", "--depth", "1", "--branch", new_tag,
+            repo_url, str(new_dir)
+        ], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Failed to clone {new_tag}: {result.stderr}", file=sys.stderr)
+            sys.exit(1)
+    
+    # Extract schemas
+    old_schemas = extract_schemas_from_git(old_dir, backend)
+    new_schemas = extract_schemas_from_git(new_dir, backend)
+    
+    # Diff
+    changes = []
+    old_classes = set(old_schemas.keys())
+    new_classes = set(new_schemas.keys())
+    
+    for cls in sorted(new_classes - old_classes):
+        changes.append({"type": "added_class", "class": cls})
+    for cls in sorted(old_classes - new_classes):
+        changes.append({"type": "removed_class", "class": cls})
+    
+    for cls in sorted(old_classes & new_classes):
+        old_fields = set(old_schemas[cls].get("properties", {}).keys())
+        new_fields = set(new_schemas[cls].get("properties", {}).keys())
+        
+        for f in sorted(new_fields - old_fields):
+            changes.append({"type": "added_field", "class": cls, "field": f})
+        for f in sorted(old_fields - new_fields):
+            changes.append({"type": "removed_field", "class": cls, "field": f})
+    
+    result = {
+        "backend": backend,
+        "old_version": old_tag,
+        "new_version": new_tag,
+        "changes": changes,
+        "summary": {
+            "added_classes": len([c for c in changes if c["type"] == "added_class"]),
+            "removed_classes": len([c for c in changes if c["type"] == "removed_class"]),
+            "added_fields": len([c for c in changes if c["type"] == "added_field"]),
+            "removed_fields": len([c for c in changes if c["type"] == "removed_field"]),
+        }
+    }
+    
+    output = json.dumps(result, indent=2)
+    
+    if args.output:
+        Path(args.output).write_text(output)
+        print(f"Diff written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+
+
+def extract_schemas_from_git(repo_dir: Path, backend: str) -> dict:
+    """Extract schemas from git repo using AST parsing."""
+    import ast
+    
+    # Define config files to parse for each backend
+    config_files = {
+        "trtllm": [
+            "llmapi/llm_args.py",
+            "builder.py",
+        ],
+        "vllm": [
+            "config.py",
+        ],
+        "sglang": [
+            "launch_args.py",
+        ],
+    }
+    
+    schemas = {}
+    
+    for rel_path in config_files.get(backend, []):
+        file_path = repo_dir / backend.replace("trtllm", "tensorrt_llm") / rel_path
+        if backend == "trtllm":
+            file_path = repo_dir / "tensorrt_llm" / rel_path
+        elif not file_path.exists():
+            file_path = repo_dir / rel_path
+        
+        if not file_path.exists():
+            continue
+        
+        with open(file_path) as f:
+            content = f.read()
+        
+        tree = ast.parse(content)
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                # Check if it's a Pydantic class
+                is_pydantic = False
+                for base in node.bases:
+                    base_name = ""
+                    if isinstance(base, ast.Name):
+                        base_name = base.id
+                    elif isinstance(base, ast.Attribute):
+                        base_name = base.attr
+                    if 'BaseModel' in base_name:
+                        is_pydantic = True
+                        break
+                
+                if is_pydantic:
+                    fields = {}
+                    for item in node.body:
+                        if isinstance(item, ast.AnnAssign):
+                            if isinstance(item.target, ast.Name):
+                                field_name = item.target.id
+                                if field_name.startswith('_'):
+                                    continue
+                                
+                                # Get type
+                                type_str = "unknown"
+                                if item.annotation:
+                                    if isinstance(item.annotation, ast.Name):
+                                        type_str = item.annotation.id
+                                    elif isinstance(item.annotation, ast.Subscript):
+                                        if isinstance(item.annotation.value, ast.Name):
+                                            type_str = item.annotation.value.id
+                                
+                                fields[field_name] = {"type": type_str}
+                    
+                    if fields:
+                        schemas[node.name] = {"type": "object", "properties": fields}
+    
+    return schemas
+
+
 def cmd_list(args):
     versions = list_cached(args.backend)
     print(json.dumps({
@@ -425,6 +594,14 @@ def main():
     p.add_argument("new_file", help="New schema JSON file")
     p.add_argument("-o", "--output", help="Output file")
     p.set_defaults(func=cmd_diff_files)
+    
+    # diff-git
+    p = subparsers.add_parser("diff-git", help="Compare by cloning git tags from GitHub")
+    p.add_argument("backend", help="Backend name (trtllm, vllm, sglang)")
+    p.add_argument("old_tag", help="Old git tag (e.g., v1.2.0rc5)")
+    p.add_argument("new_tag", help="New git tag (e.g., v1.3.0rc3)")
+    p.add_argument("-o", "--output", help="Output file")
+    p.set_defaults(func=cmd_diff_git)
     
     # list
     p = subparsers.add_parser("list", help="List cached versions")
