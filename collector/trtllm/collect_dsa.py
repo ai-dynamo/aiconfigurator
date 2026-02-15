@@ -64,6 +64,7 @@ from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.llmapi.llm_args import DeepSeekSparseAttentionConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantConfig
+from tensorrt_llm.quantization.mode import QuantAlgo
 from tensorrt_llm._utils import get_sm_version
 
 # Import FlashMLA sparse kernel
@@ -273,12 +274,12 @@ def run_dsa(
     torch.cuda.set_device(device)
     layer_idx = 0
 
-    assert kv_cache_dtype == tensorrt_llm.bindings.DataType.BF16, "only support bfloat16"
     # FlashMLA sparse requires num_heads to be multiple of 64
     assert num_heads % 64 == 0, f"num_heads ({num_heads}) must be multiple of 64 for FlashMLA sparse"
 
     print(f"\n[DSA] batch={batch_size}, seq_len={input_len}, num_heads={num_heads}")
     print(f"      device={device}")
+    print(f"      kv_cache_dtype={kv_cache_dtype}, is_context={is_context_phase}")
 
     # Positional embedding params
     pos_embd_params = PositionalEmbeddingParams(
@@ -296,7 +297,13 @@ def run_dsa(
         ),
     )
 
-    quant_config = QuantConfig(kv_cache_quant_algo=None)
+    # FP8 KV cache quantization
+    if kv_cache_dtype == tensorrt_llm.bindings.DataType.FP8:
+        quant_config = QuantConfig(kv_cache_quant_algo=QuantAlgo.FP8)
+        print(f"      Using FP8 KV cache")
+    else:
+        quant_config = QuantConfig(kv_cache_quant_algo=None)
+        print(f"      Using BF16 KV cache")
 
     mla_params = MLAParams(
         q_lora_rank=Q_LORA_RANK,
@@ -482,6 +489,8 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./dsa_perf_data")
     parser.add_argument("--num_heads", type=int, default=128,
                         help="Number of heads (must be multiple of 64)")
+    parser.add_argument("--kv_cache_dtype", choices=["bf16", "fp8"], default="bf16",
+                        help="KV cache data type")
     parser.add_argument("--batch_sizes", type=str, default="1")
     parser.add_argument("--seq_lens", type=str, default="4096")
     parser.add_argument("--num_warmup", type=int, default=10)
@@ -502,15 +511,19 @@ def main():
     batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
     seq_lens = [int(x) for x in args.seq_lens.split(",")]
     
+    # Convert kv_cache_dtype string to DataType
+    kv_dtype = tensorrt_llm.bindings.DataType.FP8 if args.kv_cache_dtype == "fp8" else tensorrt_llm.bindings.DataType.BF16
+    
     print("=" * 60)
     print("DSA Performance Collector")
     print("=" * 60)
     print(f"Mode: {args.mode}, num_heads: {args.num_heads}")
+    print(f"KV cache dtype: {args.kv_cache_dtype}")
     print(f"Batch sizes: {batch_sizes}, Seq lens: {seq_lens}")
     print()
     
     results = []
-    output_file = os.path.join(args.output_dir, f"dsa_{args.mode}_perf.txt")
+    output_file = os.path.join(args.output_dir, f"dsa_{args.mode}_{args.kv_cache_dtype}_perf.txt")
     
     for b in batch_sizes:
         for s in seq_lens:
@@ -522,7 +535,7 @@ def main():
                     input_len=s,
                     batch_size=b,
                     output_len=1,
-                    kv_cache_dtype=tensorrt_llm.bindings.DataType.BF16,
+                    kv_cache_dtype=kv_dtype,
                     num_heads=args.num_heads,
                     world_size=1,
                     tp_size=1,
