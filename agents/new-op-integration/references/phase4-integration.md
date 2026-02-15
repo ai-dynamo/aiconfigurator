@@ -424,3 +424,60 @@ aiconfigurator cli default --model-path <model> --total-gpus 8 --system h200_sxm
 2. **插值**: 在 `__init__` 的插值块中添加，用 `_extrapolate_data_grid()`，维度顺序跟 dict 嵌套一致
 3. **query**: 用 `_interp_3d()` + `PerformanceResult` 包装，不要 fallback 到粒度不同的 Op
 4. **quant key**: 如果 Op 不支持某些量化模式（如 FP8 KV cache），只注册支持的 key，在 model 层面强制 override
+
+## query 必须支持完整的 database mode
+
+每个 query 方法必须处理所有 5 种 mode，不能只实现 SILICON。参考 `query_context_mla` 的完整模式：
+
+```python
+@functools.lru_cache(maxsize=32768)
+def query_context_xxx(self, b, s, num_heads, ..., database_mode=None):
+    
+    def get_sol(b, s, num_heads, ...) -> tuple[float, float, float]:
+        """推导 SOL：分解为 FLOPs + memory bytes，取 max(compute_bound, memory_bound)"""
+        total_ops = ...   # 所有子计算的 FLOPs 之和
+        total_mem = ...   # 所有数据读写的 bytes 之和
+        sol_math = total_ops / gpu_flops * 1000
+        sol_mem = total_mem / gpu_mem_bw * 1000
+        return max(sol_math, sol_mem), sol_math, sol_mem
+    
+    def get_empirical(b, s, num_heads, ...) -> float:
+        """经验估算 = SOL / scale_factor（补偿 kernel 效率损失）"""
+        return get_sol(...)[0] / scale_factor
+    
+    if database_mode == DatabaseMode.SOL:
+        return PerformanceResult(get_sol(...)[0], energy=0.0)
+    elif database_mode == DatabaseMode.SOL_FULL:
+        return get_sol(...)  # 返回三元组
+    elif database_mode == DatabaseMode.EMPIRICAL:
+        return PerformanceResult(get_empirical(...), energy=0.0)
+    else:  # SILICON or HYBRID
+        try:
+            # 查实际数据 + 插值
+            result = self._interp_3d(...)
+            return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+        except:
+            if database_mode == DatabaseMode.HYBRID:
+                return PerformanceResult(get_empirical(...), energy=0.0)  # fallback
+            raise
+```
+
+### SOL 公式推导要点
+
+SOL（Speed of Light）是理论最快时间，用于没有实测数据时的估算。关键原则：
+
+1. **分解子计算**: 把 Op 拆成 GEMM / attention / elementwise 等子操作，分别计算 FLOPs
+2. **Compute bound**: `total_flops / gpu_peak_flops * 1000`（ms）
+3. **Memory bound**: `total_bytes / gpu_mem_bw * 1000`（ms）
+4. **SOL = max(compute, memory)**：取瓶颈
+5. **scale_factor**: EMPIRICAL 模式用 SOL / scale_factor 补偿。MLA 用 0.6~0.8，DSA 因 kernel 更多用 0.5
+
+### Context vs Generation 的 SOL 差异
+
+| | Context | Generation |
+|---|---------|-----------|
+| tokens | b × s（大） | b（小） |
+| 瓶颈 | 通常 compute-bound | 通常 memory-bound |
+| attention | O(tokens × s) 或 O(tokens × topk) | O(b × s) 或 O(b × topk) |
+| GEMM | 大 M，compute 高效 | 小 M（=b），memory 主导 |
+| 特殊项 | indexer logits O(b·s²) | indexer 扫描全部 KV cache |
