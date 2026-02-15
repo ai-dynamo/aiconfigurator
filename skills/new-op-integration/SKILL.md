@@ -1,5 +1,5 @@
 ---
-name: dsa-op-integration
+name: new-op-integration
 description: |
   Integrate new operations into aiconfigurator. Use when adding support for new models or attention mechanisms. 5-phase workflow: Analysis → Mock → Profile → Integrate → Collect.
 ---
