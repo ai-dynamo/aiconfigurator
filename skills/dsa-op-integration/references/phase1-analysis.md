@@ -1,108 +1,66 @@
-# Phase 1: Model Architecture Analysis
+# Phase 1: 模型架构分析模板
 
-## Objective
+## 步骤
 
-Understand the DSA architecture and extract configuration parameters from the model.
-
-## Step-by-Step Process
-
-### 1. Locate Model Config
+### 1. 获取配置
 
 ```bash
-# HuggingFace model config
-wget https://huggingface.co/deepseek-ai/DeepSeek-V3.2/raw/main/config.json
+# HuggingFace
+wget https://huggingface.co/<org>/<model>/raw/main/config.json
+
+# 或本地模型
+cat /path/to/model/config.json
 ```
 
-### 2. Identify DSA Parameters
+### 2. 识别新字段
 
-Key parameters in `config.json`:
+对比已知模型，找出新增配置：
 
 ```json
 {
-  "architectures": ["DeepseekV32ForCausalLM"],
-  "model_type": "deepseek_v32",
-  
-  // Standard MLA params
-  "hidden_size": 7168,
-  "num_attention_heads": 128,
-  "q_lora_rank": 1536,
-  "kv_lora_rank": 512,
-  "qk_rope_head_dim": 64,
-  "qk_nope_head_dim": 128,
-  "v_head_dim": 128,
-  
-  // DSA-specific params
-  "index_n_heads": 64,
-  "index_head_dim": 128,
-  "index_topk": 2048,
-  "first_k_dense_replace": 3
+  "architectures": ["NewModelForCausalLM"],
+  "known_field": "...",
+  "new_field_1": 64,      // 新增
+  "new_field_2": 2048     // 新增
 }
 ```
 
-### 3. Architecture Mapping
-
-Add to `src/aiconfigurator/sdk/common.py`:
+### 3. 添加架构映射
 
 ```python
-# Architecture to model family mapping
+# common.py
 ARCH_MAPPING = {
-    "DeepseekV3ForCausalLM": ModelFamily.DEEPSEEK,
-    "DeepseekV32ForCausalLM": ModelFamily.DEEPSEEK,  # V3.2
+    "ExistingModel": ModelFamily.EXISTING,
+    "NewModelForCausalLM": ModelFamily.NEW,  # 添加
 }
-
-# DSA config dataclass
-@dataclass
-class DeepSeekV32Config:
-    index_n_heads: int = 64
-    index_head_dim: int = 128
-    index_topk: int = 2048
-    first_k_dense_replace: int = 3
 ```
 
-### 4. Config Parsing
-
-Add to `src/aiconfigurator/sdk/utils.py`:
+### 4. 添加 Config Dataclass
 
 ```python
+@dataclass
+class NewModelConfig:
+    new_field_1: int = 64
+    new_field_2: int = 2048
+```
+
+### 5. 添加解析逻辑
+
+```python
+# utils.py
 def _parse_hf_config_json(config: dict) -> dict:
     # ... existing parsing ...
     
-    # V3.2 DSA params
-    if "index_n_heads" in config:
-        extra_params["index_n_heads"] = config["index_n_heads"]
-        extra_params["index_head_dim"] = config.get("index_head_dim", 128)
-        extra_params["index_topk"] = config.get("index_topk", 2048)
-        extra_params["first_k_dense_replace"] = config.get("first_k_dense_replace", 3)
+    # 新模型参数
+    if "new_field_1" in config:
+        extra_params["new_field_1"] = config["new_field_1"]
+        extra_params["new_field_2"] = config.get("new_field_2", 2048)
     
-    return {
-        # ... existing fields ...
-        "extra_params": extra_params,
-    }
+    return {..., "extra_params": extra_params}
 ```
 
-## Architecture Differences: V3 vs V3.2
+## 验证
 
-| Feature | V3 | V3.2 |
-|---------|----|----|
-| Architecture | `DeepseekV3ForCausalLM` | `DeepseekV32ForCausalLM` |
-| Attention | All layers MLA | Layer 0-2: MLA, Layer 3-60: **DSA** |
-| DSA params | ❌ None | `index_n_heads`, `index_topk`, `first_k_dense_replace` |
-| Complexity | O(n²) | O(n×k) for DSA layers |
-
-## Validation
-
-Test config parsing:
-
-```python
-from aiconfigurator.sdk.utils import _parse_hf_config_json
-
-config = {
-    "architectures": ["DeepseekV32ForCausalLM"],
-    "index_n_heads": 64,
-    "index_topk": 2048,
-}
-
-parsed = _parse_hf_config_json(config)
-assert parsed["extra_params"]["index_n_heads"] == 64
-assert parsed["extra_params"]["index_topk"] == 2048
+```bash
+aiconfigurator cli support --model-path <new-model> --system h200_sxm --backend trtllm
 ```
