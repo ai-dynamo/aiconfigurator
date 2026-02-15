@@ -16,57 +16,51 @@ aic-schema <command> [options]
 Commands:
   current <backend>              Extract schema from currently installed version
   extract <backend> <version>    Extract schema for a specific version (creates venv)
-  diff <backend> <old> <new>     Compare schemas between two versions
+  diff <backend> <old> <new>     Compare schemas between two versions (via venv)
+  diff-git <backend> <old_tag> <new_tag>  Compare by cloning git tags from GitHub
   diff-files <old.json> <new.json>  Compare two saved schema files
   list <backend>                 List cached versions
 ```
 
 ## Workflow
 
-### Step 1: Extract Schema from Each Version
-
-**Method A: Current Environment (Recommended)**
-
-In each environment with a specific version installed:
-```bash
-aic-schema current trtllm -o schema-1.2.0rc5.json
-```
-
-**Method B: Venv (May have compatibility issues)**
+### Step 1: Compare Versions (Recommended: diff-git)
 
 ```bash
-aic-schema extract trtllm 1.2.0rc5 -o schema-1.2.0rc5.json
-```
-
-### Step 2: Compare Schemas
-
-```bash
-aic-schema diff-files schema-1.2.0rc5.json schema-1.3.0rc1.json
+# Compare by cloning git tags (no pip install needed)
+aic-schema diff-git trtllm v1.2.0rc5 v1.3.0rc3
 ```
 
 Output (JSON):
 ```json
 {
   "backend": "trtllm",
-  "old_version": "1.2.0rc5",
-  "new_version": "1.3.0rc1",
+  "old_version": "v1.2.0rc5",
+  "new_version": "v1.3.0rc3",
   "changes": [
-    {
-      "type": "changed",
-      "field": "BuildConfig.max_batch_size",
-      "old": {"type": "integer", "default": 2048},
-      "new": {"type": "integer", "default": 2048}
-    }
+    {"type": "added_class", "class": "BaseSparseAttentionConfig"},
+    {"type": "added_field", "class": "KvCacheConfig", "field": "max_util_for_resume"},
+    {"type": "removed_field", "class": "DecodingBaseConfig", "field": "speculative_model_dir"}
   ],
   "summary": {
-    "added": 2,
-    "removed": 1,
-    "changed": 3
+    "added_classes": 3,
+    "removed_classes": 0,
+    "added_fields": 7,
+    "removed_fields": 1
   }
 }
 ```
 
-### Step 3: Update Templates
+### Alternative: Extract from Current Environment
+
+### Alternative: Extract from Current Environment
+
+In each environment with a specific version installed:
+```bash
+aic-schema current trtllm -o schema-1.2.0rc5.json
+```
+
+### Step 2: Update Templates
 
 Based on the diff output, update:
 
@@ -78,7 +72,7 @@ Based on the diff output, update:
    - Add new parameters
    - Update paths if field locations changed
 
-### Step 4: Test
+### Step 3: Test
 
 ```bash
 # Test the new templates

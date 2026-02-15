@@ -176,6 +176,27 @@ parameters:
   sglang: speculative-num-steps
   trtllm: speculative_config.num_nextn_predict_layers
 
+- param_key: speculative_model
+  vllm: null
+  sglang: null
+  trtllm: speculative_config.speculative_model
+
+- param_key: allow_advanced_sampling
+  vllm: null
+  sglang: null
+  trtllm: speculative_config.allow_advanced_sampling
+
+# KV Cache v2 (trtllm >= 1.3.0)
+- param_key: max_util_for_resume
+  vllm: null
+  sglang: null
+  trtllm: kv_cache_config.max_util_for_resume
+
+- param_key: use_kv_cache_manager_v2
+  vllm: null
+  sglang: null
+  trtllm: kv_cache_config.use_kv_cache_manager_v2
+
 # Others
 - param_key: disable_overlap_scheduler
   vllm: null
