@@ -245,8 +245,9 @@ def run_dsa(
     hidden_states = torch.randn([num_tokens, HIDDEN_SIZE], dtype=torch.bfloat16, device=device)
     
     if is_context_phase:
+        # position_ids should be flattened to [num_tokens] for batch_size > 1
         position_ids = torch.arange(input_len, device=device, dtype=torch.int32)
-        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1).reshape(-1)
     else:
         position_ids = torch.tensor([[input_len]] * batch_size, device=device, dtype=torch.int32)
 
