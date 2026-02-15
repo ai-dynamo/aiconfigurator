@@ -2,38 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-DeepSeek V3.2 DSA (DeepSeek Sparse Attention) Performance Collector
+DeepSeek V3.2 DSA (DeepSeek Sparse Attention) Performance Collector v3
 
-This collector benchmarks complete DSA attention kernels using TensorRT-LLM's native
-DSA backend on single GPU.
-
-DSA is only available on Hopper (SM90) and Blackwell GPUs.
-
-DSA Flow:
-1. Indexer: Compute topk_indices (Q/K projection + TopK via DeepGEMM)
-2. FlashMLA Sparse: Sparse attention using topk_indices
-
-Key Requirements:
-- FlashMLA sparse requires num_heads to be multiple of 64 on SM90
-- For TP=8: use 128 heads total (16 per GPU after TP)
-- For TP=1: use 128 heads total
+This collector uses the complete MLA module with DSA enabled,
+following the pattern of the official DeepSeek V3.2 implementation.
 
 Usage:
-    # Run benchmark
-    python collect_dsa.py --mode context --tp_size 8
+    # Run context benchmark
+    python collect_dsa_v3.py --mode context --num_heads 128 --batch_sizes 1 --seq_lens 4096
 
-    # Profile with nsys (cuda-graph mode)
-    nsys profile -o dsa_profile --cuda-graph-trace=node -t cuda,nvtx \
-        python collect_dsa.py --mode context --batch_size 1 --seq_len 4096 --profile
+    # Run generation benchmark
+    python collect_dsa_v3.py --mode generation --num_heads 128 --batch_sizes 1 --seq_lens 4096
 """
 
 import tensorrt_llm
 import torch
-import torch.nn as nn
 import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Add parent directory for helper import
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -45,43 +33,31 @@ if sm_version < 90:
     print(f"DSA requires SM90+ (Hopper/Blackwell), but got SM{sm_version}")
     sys.exit(1)
 
+from tensorrt_llm._torch.attention_backend import AttentionInputType
+from tensorrt_llm._torch.attention_backend.sparse.dsa import DSAtrtllmAttentionMetadata
 from tensorrt_llm._torch.attention_backend.interface import (
-    MLAParams,
+    AttentionRuntimeFeatures,
     PositionalEmbeddingParams,
     RopeParams,
 )
-from tensorrt_llm._torch.attention_backend.sparse.dsa import (
-    DSAtrtllmAttentionMetadata,
-    DSACacheManager,
-    Indexer,
-    transform_local_topk_and_prepare_pool_view,
-)
-from tensorrt_llm._torch.attention_backend.utils import create_attention
 from tensorrt_llm._torch.metadata import KVCacheParams
-from tensorrt_llm._torch.attention_backend.interface import AttentionRuntimeFeatures
+from tensorrt_llm._torch.attention_backend.sparse.dsa import DSACacheManager
 from tensorrt_llm.functional import PositionEmbeddingType, RotaryScalingType
 from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.llmapi.llm_args import DeepSeekSparseAttentionConfig
 from tensorrt_llm.mapping import Mapping
+from tensorrt_llm._torch.model_config import ModelConfig
+from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV32Attention
 from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
-from tensorrt_llm._utils import get_sm_version
-
-# Import FlashMLA sparse kernel
-try:
-    from tensorrt_llm.flash_mla import flash_mla_sparse_fwd
-    HAS_FLASH_MLA_SPARSE = True
-except ImportError:
-    flash_mla_sparse_fwd = None
-    HAS_FLASH_MLA_SPARSE = False
+from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV32Attention
+from transformers import PretrainedConfig
 
 
 # DSA Configuration (DeepSeek V3.2 defaults)
-# FlashMLA sparse requires num_heads to be multiple of 64 on SM90
 INDEX_N_HEADS = 64
 INDEX_HEAD_DIM = 128
 INDEX_TOPK = 2048
-NUM_HEADS = 128  # Must be multiple of 64 for FlashMLA sparse
 
 # MLA Configuration
 HIDDEN_SIZE = 7168
@@ -90,167 +66,8 @@ KV_LORA_RANK = 512
 QK_NOPE_HEAD_DIM = 128
 QK_ROPE_HEAD_DIM = 64
 V_HEAD_DIM = 128
-SOFTMAX_SCALE = (KV_LORA_RANK + QK_ROPE_HEAD_DIM) ** -0.5
-
-
-class DSAOp(nn.Module):
-    """Complete DSA operation: Indexer + FlashMLA Sparse"""
-    
-    def __init__(
-        self,
-        num_heads: int,
-        quant_config: QuantConfig,
-        pos_embd_params: PositionalEmbeddingParams,
-        mla_params: MLAParams,
-        sparse_attention_config: DeepSeekSparseAttentionConfig,
-        layer_idx: int = 0,
-        dtype: torch.dtype = torch.bfloat16,
-    ):
-        super().__init__()
-        
-        self.num_heads = num_heads
-        self.qk_head_dim = mla_params.qk_nope_head_dim + mla_params.qk_rope_head_dim
-        self.qk_nope_head_dim = mla_params.qk_nope_head_dim
-        self.qk_rope_head_dim = mla_params.qk_rope_head_dim
-        self.kv_lora_rank = mla_params.kv_lora_rank
-        self.v_head_dim = mla_params.v_head_dim
-        self.layer_idx = layer_idx
-        self.softmax_scale = SOFTMAX_SCALE
-        
-        # Indexer
-        self.indexer = Indexer(
-            quant_config=quant_config,
-            pos_embd_params=pos_embd_params,
-            mla_params=mla_params,
-            skip_create_weights_in_init=False,
-            sparse_attention_config=sparse_attention_config,
-            dtype=dtype,
-            layer_idx=layer_idx,
-        )
-        
-        # DSATrtllmAttention for MLA operations
-        self.mqa = create_attention(
-            backend_name="TRTLLM",
-            layer_idx=layer_idx,
-            num_heads=num_heads,
-            head_dim=KV_LORA_RANK + QK_ROPE_HEAD_DIM,
-            num_kv_heads=1,
-            pos_embd_params=pos_embd_params,
-            quant_config=quant_config,
-            is_mla_enable=True,
-            q_lora_rank=mla_params.q_lora_rank,
-            kv_lora_rank=mla_params.kv_lora_rank,
-            qk_nope_head_dim=mla_params.qk_nope_head_dim,
-            qk_rope_head_dim=mla_params.qk_rope_head_dim,
-            v_head_dim=mla_params.kv_lora_rank,
-            hidden_size=mla_params.hidden_size,
-            predicted_tokens_per_seq=1,
-            sparse_attention_config=sparse_attention_config,
-        )
-        
-        # K_b projection: [num_heads, kv_lora_rank, qk_nope_head_dim]
-        self.k_b_proj_trans = nn.Parameter(
-            torch.empty(num_heads, mla_params.kv_lora_rank, mla_params.qk_nope_head_dim, dtype=dtype),
-            requires_grad=False,
-        )
-        
-        # V_b projection: [num_heads, v_head_dim, kv_lora_rank]
-        self.v_b_proj = nn.Parameter(
-            torch.empty(num_heads, mla_params.v_head_dim, mla_params.kv_lora_rank, dtype=dtype),
-            requires_grad=False,
-        )
-        
-        # Initialize weights
-        nn.init.normal_(self.k_b_proj_trans, mean=0.0, std=0.02)
-        nn.init.normal_(self.v_b_proj, mean=0.0, std=0.02)
-    
-    def forward(
-        self,
-        qr: torch.Tensor,
-        hidden_states: torch.Tensor,
-        attn_metadata: DSAtrtllmAttentionMetadata,
-        position_ids: torch.Tensor,
-        indexer_k: torch.Tensor,
-        q: torch.Tensor,
-        latent_cache: torch.Tensor,
-        output: torch.Tensor,
-        is_generation: bool = False,
-    ) -> torch.Tensor:
-        """Full DSA forward"""
-        num_tokens = q.shape[0]
-        
-        # 1. Indexer: compute topk_indices
-        topk_indices = self.indexer(qr, hidden_states, attn_metadata, position_ids, indexer_k=indexer_k)
-        
-        # 2. MLA RoPE + KV append
-        self.mqa.mla_rope_append_paged_kv_assign_q(
-            q, latent_cache, attn_metadata, is_generation=is_generation
-        )
-        
-        # 3. Q nope projection
-        q_nope, q_rope = q.view(-1, self.num_heads, self.qk_head_dim).split(
-            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
-        
-        q_nope_out = torch.empty(
-            [num_tokens, self.num_heads, self.kv_lora_rank],
-            dtype=q.dtype,
-            device=q.device,
-        )
-        
-        # BMM for q_nope projection
-        q_nope_t = q_nope.transpose(0, 1)
-        q_nope_out_t = q_nope_out.transpose(0, 1)
-        torch.ops.trtllm.bmm_out(q_nope_t, self.k_b_proj_trans.transpose(1, 2), q_nope_out_t)
-        q_nope_out = q_nope_out_t.transpose(0, 1)
-        
-        # Concat q_nope_out + q_rope
-        q_concat = torch.cat([q_nope_out, q_rope], dim=-1)
-        
-        # Pad num_heads to multiple of 64 for FlashMLA sparse (SM90)
-        sm_ver = get_sm_version()
-        if sm_ver >= 100:
-            padding = 128
-        else:
-            padding = ((self.num_heads + 63) // 64) * 64
-        
-        if self.num_heads != padding:
-            q_padded = q_concat.new_zeros((num_tokens, padding, q_concat.shape[2]))
-            q_padded[:, :self.num_heads, :] = q_concat
-            q_concat = q_padded
-        
-        # 4. Convert topk_indices and get KV cache pool
-        topk_indices_pool, kv_cache_pool = transform_local_topk_and_prepare_pool_view(
-            topk_indices,
-            attn_metadata,
-            layer_idx=self.layer_idx,
-            is_generation=is_generation,
-        )
-        topk_indices_pool = topk_indices_pool.view(num_tokens, 1, -1)
-        
-        # 5. FlashMLA sparse attention
-        if flash_mla_sparse_fwd is not None:
-            attn_out_latent = flash_mla_sparse_fwd(
-                q_concat, kv_cache_pool, topk_indices_pool, self.softmax_scale
-            )[0]
-        else:
-            raise RuntimeError("flash_mla_sparse_fwd not available")
-        
-        # Remove padding
-        attn_out_latent = attn_out_latent[:, :self.num_heads, :]
-        attn_out_latent = attn_out_latent.view([-1, self.num_heads, self.kv_lora_rank])
-        if self.num_heads != padding:
-            attn_out_latent = attn_out_latent.contiguous()
-        
-        # 6. V projection
-        attn_output = output.view([num_tokens, self.num_heads, self.v_head_dim])
-        torch.ops.trtllm.bmm_out(
-            attn_out_latent.transpose(0, 1),
-            self.v_b_proj.transpose(1, 2),
-            attn_output.transpose(0, 1),
-        )
-        
-        return output
+NUM_ATTENTION_HEADS = 128
+MAX_POSITION_EMBEDDINGS = 163840
 
 
 def run_dsa(
@@ -267,37 +84,54 @@ def run_dsa(
     is_context_phase,
     perf_filename,
     device="cuda:0",
-    profile=False,
 ):
-    """Run DSA benchmark on single GPU."""
+    """Run DSA benchmark using complete MLA module with DSA enabled."""
     device = torch.device(device)
     torch.cuda.set_device(device)
     layer_idx = 0
 
     # FlashMLA sparse requires num_heads to be multiple of 64
     assert num_heads % 64 == 0, f"num_heads ({num_heads}) must be multiple of 64 for FlashMLA sparse"
-
+    
     print(f"\n[DSA] batch={batch_size}, seq_len={input_len}, num_heads={num_heads}")
-    print(f"      device={device}")
-    print(f"      kv_cache_dtype={kv_cache_dtype}, is_context={is_context_phase}")
+    print(f"      device={device}, is_context={is_context_phase}")
 
-    # Positional embedding params
-    pos_embd_params = PositionalEmbeddingParams(
-        type=PositionEmbeddingType.yarn,
-        embedder=None,
-        rope=RopeParams(
-            dim=QK_ROPE_HEAD_DIM,
-            theta=10000,
-            scale_type=RotaryScalingType.yarn,
-            scale=40,
-            max_positions=163840,
-            original_max_positions=4096,
-            beta_fast=32,
-            beta_slow=1,
-        ),
+    # Create DSA config
+    sparse_attention_config = DeepSeekSparseAttentionConfig(
+        index_n_heads=INDEX_N_HEADS,
+        index_head_dim=INDEX_HEAD_DIM,
+        index_topk=INDEX_TOPK,
     )
 
-    # FP8 KV cache quantization
+    # Create PretrainedConfig with all required fields
+    pretrained_config = PretrainedConfig()
+    pretrained_config.rms_norm_eps = 1e-6
+    pretrained_config.torch_dtype = torch.bfloat16
+    pretrained_config.hidden_size = HIDDEN_SIZE
+    pretrained_config.num_attention_heads = num_heads
+    pretrained_config.num_key_value_heads = num_heads
+    pretrained_config.qk_rope_head_dim = QK_ROPE_HEAD_DIM
+    pretrained_config.qk_nope_head_dim = QK_NOPE_HEAD_DIM
+    pretrained_config.q_lora_rank = Q_LORA_RANK
+    pretrained_config.kv_lora_rank = KV_LORA_RANK
+    pretrained_config.v_head_dim = V_HEAD_DIM
+    pretrained_config.max_position_embeddings = MAX_POSITION_EMBEDDINGS
+    # RopeParams.from_config needs these
+    pretrained_config.rope_theta = 10000
+    pretrained_config.rope_scaling = {
+        "type": "yarn",
+        "factor": 40.0,
+        "original_max_position_embeddings": 4096,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "mscale": 1.0,
+        "mscale_all_dim": 1.0,
+    }
+
+    # Create mapping
+    mapping = Mapping(world_size=world_size, rank=0, tp_size=tp_size)
+
+    # QuantConfig for FP8 KV cache
     if kv_cache_dtype == tensorrt_llm.bindings.DataType.FP8:
         quant_config = QuantConfig(kv_cache_quant_algo=QuantAlgo.FP8)
         print(f"      Using FP8 KV cache")
@@ -305,41 +139,31 @@ def run_dsa(
         quant_config = QuantConfig(kv_cache_quant_algo=None)
         print(f"      Using BF16 KV cache")
 
-    mla_params = MLAParams(
-        q_lora_rank=Q_LORA_RANK,
-        kv_lora_rank=KV_LORA_RANK,
-        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
-        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
-        v_head_dim=V_HEAD_DIM,
-        predicted_tokens_per_seq=1,
-        hidden_size=HIDDEN_SIZE,
-    )
-
-    sparse_attention_config = DeepSeekSparseAttentionConfig(
-        index_n_heads=INDEX_N_HEADS,
-        index_head_dim=INDEX_HEAD_DIM,
-        index_topk=INDEX_TOPK,
-    )
-
-    # Create DSA Op
-    dsa_op = DSAOp(
-        num_heads=num_heads,
-        quant_config=quant_config,
-        pos_embd_params=pos_embd_params,
-        mla_params=mla_params,
+    # Create model config
+    model_config = ModelConfig(
+        pretrained_config=pretrained_config,
+        mapping=mapping,
         sparse_attention_config=sparse_attention_config,
-        layer_idx=layer_idx,
-        dtype=torch.bfloat16,
+        quant_config=quant_config,
     )
-    dsa_op.cuda()
+
+    # Create DeepseekV32Attention (with DSA support)
+    mla = DeepseekV32Attention(
+        model_config=model_config,
+        layer_idx=layer_idx,
+        aux_stream=None,
+        reduce_output=True,
+    )
     
-    print(f"      Indexer: n_heads={dsa_op.indexer.n_heads}, topk={dsa_op.indexer.index_topk}")
+    # Move to CUDA
+    mla.to(device)
+    
+    print(f"      Indexer: n_heads={mla.indexer.n_heads}, topk={mla.indexer.index_topk}")
 
     total_num_tokens = (input_len + output_len) * batch_size
-    mapping = Mapping(world_size=1, rank=0, tp_size=1)
 
-    # Use DSACacheManager
-    max_seq_len = input_len + output_len + 1  # +1 for safety
+    # KV cache config
+    max_seq_len = input_len + output_len + 1
     kv_cache_config = KvCacheConfig(
         max_tokens=int((max_seq_len - 1) / tokens_per_block + 1)
         * tokens_per_block * batch_size * 2,
@@ -365,8 +189,9 @@ def run_dsa(
     request_ids = list(range(batch_size))
     kv_cache_manager.add_dummy_requests(request_ids, total_seq_lens)
 
-    # Create DSA metadata
+    # Create metadata
     if is_context_phase:
+        num_cached_tokens_per_seq = [0 for _ in range(batch_size)]
         attn_metadata = DSAtrtllmAttentionMetadata(
             max_num_requests=batch_size,
             max_num_tokens=total_num_tokens,
@@ -378,7 +203,7 @@ def run_dsa(
             num_contexts=batch_size,
             kv_cache_params=KVCacheParams(
                 use_cache=True,
-                num_cached_tokens_per_seq=[0] * batch_size,
+                num_cached_tokens_per_seq=num_cached_tokens_per_seq,
             ),
             cross=None,
             request_ids=request_ids,
@@ -390,22 +215,19 @@ def run_dsa(
         )
         num_tokens = input_len * batch_size
     else:
-        # Generation phase: num_contexts=0, all requests are generation
-        # seq_lens = current step tokens (1 for each request)
-        # num_cached_tokens_per_seq = already cached tokens (input_len)
-        # Note: seq_lens should be 1 (the new token), not total length
+        gen_seq_lens = [1 for _ in range(batch_size)]
         attn_metadata = DSAtrtllmAttentionMetadata(
             max_num_requests=batch_size,
             max_num_tokens=total_num_tokens,
             kv_cache_manager=kv_cache_manager,
             mapping=mapping,
             enable_flash_mla=True,
-            seq_lens=torch.tensor([1] * batch_size, dtype=torch.int32),  # 1 new token per request
+            seq_lens=torch.tensor(gen_seq_lens, dtype=torch.int32),
             position_ids=None,
-            num_contexts=0,  # No context requests
+            num_contexts=0,
             kv_cache_params=KVCacheParams(
                 use_cache=True,
-                num_cached_tokens_per_seq=input_seq_lens,  # Already cached tokens
+                num_cached_tokens_per_seq=input_seq_lens,
             ),
             cross=None,
             request_ids=request_ids,
@@ -415,7 +237,7 @@ def run_dsa(
             workspace=torch.tensor([], device=device, dtype=torch.int8),
             sparse_attention_config=sparse_attention_config,
         )
-        num_tokens = batch_size  # 1 token per request
+        num_tokens = batch_size
 
     attn_metadata.prepare()
 
@@ -428,32 +250,21 @@ def run_dsa(
     else:
         position_ids = torch.tensor([[input_len]] * batch_size, device=device, dtype=torch.int32)
 
-    qr = torch.randn([num_tokens, Q_LORA_RANK], dtype=torch.bfloat16, device=device)
-    indexer_k = torch.randn([num_tokens, INDEX_HEAD_DIM], dtype=torch.bfloat16, device=device)
-    q = torch.randn([num_tokens, num_heads * (QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM)], dtype=torch.bfloat16, device=device)
-    compressed_kv = torch.randn([num_tokens, KV_LORA_RANK], dtype=torch.bfloat16, device=device)
-    k_pe = torch.randn([num_tokens, QK_ROPE_HEAD_DIM], dtype=torch.bfloat16, device=device)
-    latent_cache = torch.cat([compressed_kv, k_pe], dim=-1)
-    output = torch.empty([num_tokens, num_heads * V_HEAD_DIM], dtype=torch.bfloat16, device=device)
-
     # Dry run
-    dsa_op(qr, hidden_states, attn_metadata, position_ids, indexer_k, q, latent_cache, output)
+    _ = mla.forward(
+        position_ids=position_ids,
+        hidden_states=hidden_states,
+        attn_metadata=attn_metadata,
+    )
     torch.cuda.synchronize()
-
-    # Profile mode
-    if profile:
-        print(f"      Running {test_ite} iterations for profiling...")
-        for i in range(test_ite):
-            dsa_op(qr, hidden_states, attn_metadata, position_ids, indexer_k, q, latent_cache, output)
-            if (i + 1) % 5 == 0:
-                print(f"        Iteration {i+1}/{test_ite}")
-        torch.cuda.synchronize()
-        print(f"      Done.")
-        return None
 
     # Benchmark
     def kernel_func():
-        dsa_op(qr, hidden_states, attn_metadata, position_ids, indexer_k, q, latent_cache, output)
+        _ = mla.forward(
+            position_ids=position_ids,
+            hidden_states=hidden_states,
+            attn_metadata=attn_metadata,
+        )
 
     with benchmark_with_power(
         device=device,
@@ -466,6 +277,14 @@ def run_dsa(
 
     latency = results["latency_ms"]
 
+    # Log result
+    if is_context_phase:
+        isl = input_len
+        step = 0
+    else:
+        isl = 1
+        step = input_len
+
     log_perf(
         item_list=[{
             "dsa_dtype": "bfloat16",
@@ -473,7 +292,9 @@ def run_dsa(
             "index_n_heads": INDEX_N_HEADS,
             "index_topk": INDEX_TOPK,
             "batch_size": batch_size,
-            "isl": input_len if is_context_phase else 1,
+            "isl": isl,
+            "tp_size": tp_size,
+            "step": step,
             "latency": latency,
         }],
         framework="TRTLLM",
@@ -489,7 +310,7 @@ def run_dsa(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Collect DSA performance data")
+    parser = argparse.ArgumentParser(description="Collect DSA performance data (v3 - using MLA module)")
     parser.add_argument("--mode", choices=["context", "generation"], default="context")
     parser.add_argument("--output_dir", type=str, default="./dsa_perf_data")
     parser.add_argument("--num_heads", type=int, default=128,
@@ -501,7 +322,6 @@ def main():
     parser.add_argument("--num_warmup", type=int, default=10)
     parser.add_argument("--num_iterations", type=int, default=6)
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--profile", action="store_true")
     parser.add_argument("--quick", action="store_true")
     
     args = parser.parse_args()
@@ -520,7 +340,7 @@ def main():
     kv_dtype = tensorrt_llm.bindings.DataType.FP8 if args.kv_cache_dtype == "fp8" else tensorrt_llm.bindings.DataType.BF16
     
     print("=" * 60)
-    print("DSA Performance Collector")
+    print("DSA Performance Collector v3 (MLA module with DSA)")
     print("=" * 60)
     print(f"Mode: {args.mode}, num_heads: {args.num_heads}")
     print(f"KV cache dtype: {args.kv_cache_dtype}")
@@ -550,7 +370,6 @@ def main():
                     is_context_phase=(args.mode == "context"),
                     perf_filename=output_file,
                     device=args.device,
-                    profile=args.profile,
                 )
                 
                 if latency is not None:
