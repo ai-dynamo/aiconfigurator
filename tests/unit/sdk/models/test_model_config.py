@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
+from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model, get_model_family
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
@@ -181,6 +181,25 @@ class TestQuantizationModes:
 
         assert "float16" in mode_names
         assert "fp8" in mode_names
+
+
+class TestDeepSeekV32QuantDerive:
+    """Test DeepSeek-V3.2 quant defaults derived from HF config."""
+
+    def test_deepseek_v32_forces_float16_attention_and_kv_cache(self):
+        model_cfg = config.ModelConfig()
+        raw_config = {
+            "quant_algo": "fp8",
+            "quant_dynamic": True,
+            "kv_cache_quant_algo": "fp8",
+        }
+
+        _apply_model_quant_defaults(model_cfg, raw_config, "DeepseekV32ForCausalLM", "trtllm")
+
+        assert model_cfg.gemm_quant_mode == common.GEMMQuantMode.fp8
+        assert model_cfg.moe_quant_mode == common.MoEQuantMode.fp8
+        assert model_cfg.fmha_quant_mode == common.FMHAQuantMode.float16
+        assert model_cfg.kvcache_quant_mode == common.KVCacheQuantMode.float16
 
 
 class TestMOEModelFP8BlockQuantizationValidation:

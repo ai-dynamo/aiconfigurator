@@ -119,6 +119,21 @@ def _apply_model_quant_defaults(
     if architecture == "DeepseekV3ForCausalLM" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
 
+    # FIXME: DeepSeek V3.2 DSA currently requires float16 FMHA + float16 KV cache in TRT-LLM.
+    if architecture == "DeepseekV32ForCausalLM":
+        if model_config.fmha_quant_mode != common.FMHAQuantMode.float16:
+            logger.info(
+                "DeepSeek-V3.2 quant override: forcing fmha_quant_mode=%s -> float16",
+                model_config.fmha_quant_mode,
+            )
+            model_config.fmha_quant_mode = common.FMHAQuantMode.float16
+        if model_config.kvcache_quant_mode != common.KVCacheQuantMode.float16:
+            logger.info(
+                "DeepSeek-V3.2 quant override: forcing kvcache_quant_mode=%s -> float16",
+                model_config.kvcache_quant_mode,
+            )
+            model_config.kvcache_quant_mode = common.KVCacheQuantMode.float16
+
     # FIXME: temporary workaround for Qwen3 32B FP8, only float16+fp8kvcache is supported
     # VLLM perf tables only include float16 FMHA; fall back to float16 for estimation.
     if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
@@ -338,7 +353,7 @@ def get_model(
         if extra_params is not None:
             logger.info(
                 f"DeepSeek-V3.2 DSA config stored: index_n_heads={extra_params.index_n_heads}, "
-                f"index_topk={extra_params.index_topk}"
+                f"index_head_dim={extra_params.index_head_dim}, index_topk={extra_params.index_topk}"
             )
             model._dsa_config = extra_params
 
@@ -378,6 +393,7 @@ def get_model(
                                 op._scale_factor,
                                 n // tp_size,
                                 extra_params.index_n_heads,
+                                extra_params.index_head_dim,
                                 extra_params.index_topk,
                                 kvcache_quant_mode,
                                 fmha_quant_mode,
@@ -388,6 +404,7 @@ def get_model(
                                 op._scale_factor,
                                 n // tp_size,
                                 extra_params.index_n_heads,
+                                extra_params.index_head_dim,
                                 extra_params.index_topk,
                                 kvcache_quant_mode,
                             ))

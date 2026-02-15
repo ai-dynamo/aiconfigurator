@@ -1408,6 +1408,7 @@ class ContextDSA(Operation):
         scale_factor: float,
         num_heads: int,
         index_n_heads: int,
+        index_head_dim: int,
         index_topk: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
@@ -1415,6 +1416,7 @@ class ContextDSA(Operation):
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
         self._index_n_heads = index_n_heads
+        self._index_head_dim = index_head_dim
         self._index_topk = index_topk
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
@@ -1424,11 +1426,16 @@ class ContextDSA(Operation):
         """Query context DSA latency with energy data."""
         batch_size = kwargs.get("batch_size")
         isl = kwargs.get("s")
+        prefix = kwargs.get("prefix", 0)
 
         result = database.query_context_dsa(
             b=batch_size,
             s=isl,
+            prefix=prefix,
             num_heads=self._num_heads,
+            index_n_heads=self._index_n_heads,
+            index_head_dim=self._index_head_dim,
+            index_topk=self._index_topk,
             kvcache_quant_mode=self._kvcache_quant_mode,
             fmha_quant_mode=self._fmha_quant_mode,
         )
@@ -1457,12 +1464,14 @@ class GenerationDSA(Operation):
         scale_factor: float,
         num_heads: int,
         index_n_heads: int,
+        index_head_dim: int,
         index_topk: int,
         kv_cache_dtype: common.KVCacheQuantMode,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
         self._index_n_heads = index_n_heads
+        self._index_head_dim = index_head_dim
         self._index_topk = index_topk
         self._kv_cache_dtype = kv_cache_dtype
         self._weights = 0.0
@@ -1478,6 +1487,9 @@ class GenerationDSA(Operation):
             b=batch_size,
             s=s,
             num_heads=self._num_heads,
+            index_n_heads=self._index_n_heads,
+            index_head_dim=self._index_head_dim,
+            index_topk=self._index_topk,
             kv_cache_dtype=self._kv_cache_dtype,
         )
         return PerformanceResult(

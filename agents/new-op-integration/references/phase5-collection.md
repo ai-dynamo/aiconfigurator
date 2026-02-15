@@ -1,47 +1,66 @@
-# Phase 5: 性能数据采集
+# Phase 5: Performance Data Collection
 
-## 目标
+## Goal
 
-收集新算子在目标 GPU 上各种参数组合下的 latency 数据，生成 `*_perf.txt` 文件供 aiconfigurator 查询。
+Collect latency data for the new operation across parameter combinations on target GPUs, and generate `*_perf.txt` files for aiconfigurator queries.
 
-## 架构概览
+## Architecture Overview
 
 ```
 collector/
-├── collect.py                  # 统一采集入口（多进程调度）
+├── collect.py                  # unified collection entrypoint (multi-process scheduling)
 ├── helper.py                   # benchmark_with_power(), log_perf()
-├── common_test_cases.py        # 标准测试用例定义
+├── common_test_cases.py        # standard test-case definitions
 ├── trtllm/
-│   ├── collect_mla.py          # MLA 采集（参考实现）
-│   ├── collect_dsa.py          # DSA 采集（V3.2，实战示例）
+│   ├── collect_mla.py          # MLA collection (reference implementation)
+│   ├── collect_dsa.py          # DSA collection (V3.2 practical example)
 │   ├── collect_moe.py
-│   └── collect_xxx.py          # ← 新增你的采集脚本
+│   └── collect_xxx.py          # <- add your script here
 └── ...
 ```
 
-**关键**: 新 Op 的采集脚本必须适配 `collect.py` 的调度模式，不要写独立的并行脚本。
+**Key point**: New-op collection scripts must conform to `collect.py` orchestration. Do not create an unrelated standalone parallel pipeline.
 
-## Step 1: 编写采集脚本
+## Step 1: Implement the collection script
 
-**文件**: `collector/trtllm/collect_new_op.py`
+**File**: `collector/trtllm/collect_new_op.py`
 
-需要导出 3 个东西：
-1. `get_context_xxx_test_cases()` — 返回 test case 列表
-2. `get_generation_xxx_test_cases()` — 同上
-3. `run_xxx()` — 运行单个 test case
+Export these three entrypoints:
+1. `get_context_xxx_test_cases()` — returns a test-case list
+2. `get_generation_xxx_test_cases()` — same for generation
+3. `run_xxx()` — runs one test case
 
-### Test case 格式
+### Test-case format
 
-每个 test case 是一个 **positional arg list**，`run_xxx(*test_case)` 展开调用。参考 MLA 的格式：
+Each test case is a **positional-argument list** and is expanded via `run_xxx(*test_case)`. Follow MLA conventions:
 
 ```python
 # MLA: [input_len, batch_size, output_len, dtype, num_heads, world_size, tp_size, ...]
 # DSA: [seq_len, batch_size, tp_size, is_context, perf_filename]
 ```
 
-关键原则：
-- list 的顺序必须跟 `run_xxx()` 的参数顺序一致
-- `perf_filename` 放在 list 里（不是硬编码在 run 函数中）
+Core rules:
+- List order must exactly match `run_xxx()` parameter order.
+- Include `perf_filename` in the list (do not hardcode it in `run_xxx`).
+
+### Choose collection axes from modeling decision
+
+Collection axes must follow the axis decision made in Phase 2 mock-layer design:
+
+- If op is token-equivalent (`x=b*s`), sweep `x` as the primary axis.
+- If op is token-non-equivalent, sweep `b` and `s` as separate axes.
+
+Do not use an `x`-only grid for attention-like ops.
+
+### Reuse existing range baselines
+
+For new ops, start from the nearest existing op range:
+
+- GEMM-like: reuse GEMM/linear token ranges.
+- Attention-like: reuse attention/MLA/DSA `b`/`s` ranges.
+- Keep existing guardrails (`b*s` limits, TP list, context/generation split).
+
+Only expand ranges when required by a clear model-specific reason.
 
 ```python
 def get_context_xxx_test_cases():
@@ -55,15 +74,15 @@ def get_context_xxx_test_cases():
     return test_cases
 ```
 
-### run 函数
+### `run_xxx` function
 
 ```python
 def run_xxx(seq_len, batch_size, tp_size, is_context, perf_filename, device="cuda:0"):
     """Run a single benchmark. Args match test case list order."""
-    # 1. 创建 mock layer（单卡模拟 TP）
-    layer = create_xxx_layer(tp_size, device)  # local_heads = global / tp
+    # 1. Build mock layer (single-GPU TP emulation)
+    layer = create_xxx_layer(tp_size, device)  # local_heads = global_heads / tp_size
     
-    # 2. 准备输入 + metadata
+    # 2. Prepare inputs + metadata
     # ...
     
     # 3. benchmark_with_power
@@ -79,18 +98,18 @@ def run_xxx(seq_len, batch_size, tp_size, is_context, perf_filename, device="cud
              perf_filename=perf_filename, power_stats=res["power_stats"])
 ```
 
-### TP 模拟（关键）
+### TP Emulation (Critical)
 
-**不需要多卡**。跟 MLA 一致：
+**Multi-GPU is not required**. Follow MLA/GQA:
 ```python
 local_num_heads = GLOBAL_HEADS // tp_size
-mapping = Mapping(world_size=1, rank=0, tp_size=1)  # 始终单卡
-# 把 local_num_heads 传给 layer 构造函数
+mapping = Mapping(world_size=1, rank=0, tp_size=1)  # always single-GPU
+# pass local_num_heads into layer constructor
 ```
 
-## Step 2: 注册到 collect.py
+## Step 2: Register in `collect.py`
 
-在 `collect.py` 的 `collect_trtllm()` 函数中的 `collections` 列表添加：
+Add entries in the `collections` list inside `collect_trtllm()`:
 
 ```python
 {
@@ -109,46 +128,46 @@ mapping = Mapping(world_size=1, rank=0, tp_size=1)  # 始终单卡
 },
 ```
 
-同时在 `--ops` choices 中添加 `"xxx_context"`, `"xxx_generation"`。
+Also add `"xxx_context"` and `"xxx_generation"` into `--ops` choices.
 
-## Step 3: 运行采集
+## Step 3: Run collection
 
 ```bash
-# 通过 collect.py 统一入口（推荐，自动多 GPU 并行）
+# Via unified collect.py entrypoint (recommended; handles multi-GPU scheduling)
 cd collector/
 python3 collect.py --backend trtllm --ops xxx_context xxx_generation
 
-# 或单独运行（调试用）
+# Or run standalone (debug only)
 cd collector/trtllm/
-python3 collect_xxx.py --mode context --tp 8
+python3 collect_xxx.py
 ```
 
-## Step 4: 验证
+## Step 4: Validate
 
-采集完成后验证数据：
-1. 检查数据行数是否符合预期（~110 context + ~181 generation per tp_size）
-2. 用相同参数重新跑几个点，对比 latency 偏差应 < 2%
-3. 安装后用 `aiconfigurator cli default` 确认端到端可运行
+After collection, validate:
+1. Check row counts are as expected (you need to calculate how many cases there should be)
+2. Re-run several points with the same parameters; latency deviation should be < 10%
+3. After installation, run `aiconfigurator cli default` to confirm E2E works
 
 ```python
-# 快速验证：重跑几个点对比
+# Quick verification: rerun a few points and compare
 run_xxx(4096, 1, 8, True, "/tmp/verify.txt")
-# 对比 /tmp/verify.txt 最后一行 vs 已有数据
+# Compare last row of /tmp/verify.txt against existing data
 ```
 
-## Step 5: 放置数据文件
+## Step 5: Place data files
 
 ```bash
 cp xxx_context_perf.txt src/aiconfigurator/systems/data/{system}/{backend}/{version}/
 cp xxx_generation_perf.txt src/aiconfigurator/systems/data/{system}/{backend}/{version}/
 ```
 
-## 常见问题
+## Common Issues
 
-| 问题 | 原因 | 解决 |
+| Issue | Cause | Fix |
 |------|------|------|
-| CUDA OOM | batch*seq 太大 | test case 里加 `if b*s > limit: continue` |
-| latency 波动大 | GPU 节流或后台进程 | 检查 `results["throttled"]`；确保 GPU 空闲 |
-| `log_perf` 写入错乱 | 多进程写同一文件 | `log_perf` 用 `fcntl.flock` 文件锁，NFS 上不安全 |
-| collect.py 找不到模块 | import path | 脚本顶部加 `sys.path.insert(0, str(Path(__file__).resolve().parent.parent))` |
-| MPI 初始化失败 | TRT-LLM 需要 MPI | `export OPAL_PREFIX=/opt/hpcx/ompi` |
+| CUDA OOM | `batch * seq` too large | Add `if b*s > limit: continue` in test-case generation |
+| High latency jitter | GPU throttling or background load | Check `results["throttled"]`; keep GPU idle |
+| Corrupted `log_perf` writes | Multiple processes writing same file | `log_perf` uses `fcntl.flock`; note NFS is not safe |
+| `collect.py` cannot import module | Import path issue | Add `sys.path.insert(0, str(Path(__file__).resolve().parent.parent))` at script top |
+| MPI init failure | TRT-LLM requires MPI | `export OPAL_PREFIX=/opt/hpcx/ompi` |

@@ -1,32 +1,32 @@
-# Phase 3: nsys Profile 对齐
+# Phase 3: nsys Profile Alignment
 
-## 目标
+## Goal
 
-验证 Phase 2 构建的 mock layer 的 GPU kernel 行为与完整模型 E2E 推理一致。
-这是确保采集数据有效的关键步骤 — 如果 mock layer 启动的 kernel 与真实推理不同，采集的数据将不可靠。
+Validate that the GPU-kernel behavior of the Phase 2 mock layer matches full-model E2E inference.
+This is critical for data validity: if mock-layer kernels differ from real inference kernels, collected data will be unreliable.
 
-## 基本原理
+## Core Principle
 
-aiconfigurator 通过将完整推理分解为 Operation 来建模。每个 Operation（如 attention、MoE）对应一组 GPU kernel。
-对齐的目标是：**mock layer 启动的 kernel 集合 ≈ E2E 推理中该 Operation 对应的 kernel 集合**。
+aiconfigurator models inference by decomposing it into Operations. Each operation (such as attention or MoE) corresponds to a set of GPU kernels.
+Alignment target: **kernel set launched by mock layer ≈ kernel set for that operation in E2E inference**.
 
 ## Step 1: Profile Mock Layer
 
 ```bash
-# 对 Phase 2 的测试脚本做 profiling
+# Profile the Phase 2 test script
 nsys profile -o mock_layer_report \
   -t cuda,nvtx \
   --force-overwrite true \
   python3 test_xxx_op.py
 ```
 
-> **注意**: 确保测试脚本中有 warmup 步骤，profiling 只采集稳定态。
+> **Note**: Ensure warmup steps exist in the test script so profiling captures steady-state behavior.
 
 ## Step 2: Profile E2E Model
 
-根据模型的部署方式选择不同的 profiling 策略：
+Choose profiling strategy based on deployment mode:
 
-### 方式 A: 单进程模型
+### Option A: Single-process model
 
 ```bash
 nsys profile -o e2e_report \
@@ -35,18 +35,18 @@ nsys profile -o e2e_report \
   python3 run_full_model.py
 ```
 
-### 方式 B: MPI/多进程模型（如 trtllm-serve）
+### Option B: MPI / Multi-process model (for example `trtllm-serve`)
 
-多进程模型需要使用系统级采样，因为 worker 进程由框架内部 spawn：
+Multi-process deployments require system-wide sampling because workers are spawned internally by the framework:
 
 ```bash
-# 1. 先启动服务
+# 1. Start service first
 trtllm-serve /path/to/model --tp_size 8 &
 
-# 2. 等待模型加载和 warmup 完成
+# 2. Wait for model load + warmup
 sleep 300
 
-# 3. 系统级 profiling
+# 3. Run system-wide profiling
 nsys profile -o e2e_report \
   -y 60 -d 20 \
   --sample=system-wide \
@@ -57,99 +57,94 @@ nsys profile -o e2e_report \
   trtllm-serve /path/to/model --tp_size 8
 ```
 
-参数说明：
-- `-y 60`: 延迟 60 秒后开始采集（等待 warmup）
-- `-d 20`: 采集 20 秒
-- `--sample=system-wide`: 系统级采样，捕获所有进程
-- `--cuda-graph-trace=node`: 展开 CUDA Graph 节点
+Parameter notes:
+- `-y 60`: delay collection start by 60 seconds (to pass warmup)
+- `-d 20`: collect for 20 seconds
+- `--sample=system-wide`: capture all processes
+- `--cuda-graph-trace=node`: expand CUDA Graph nodes
 
-## Step 3: 提取 Kernel 统计
+## Step 3: Extract Kernel Statistics
 
 ```bash
-# Mock layer kernel 统计
+# Mock-layer kernel summary
 nsys stats --report cuda_gpu_kern_sum mock_layer_report.nsys-rep > mock_kernels.txt
 
-# E2E model kernel 统计
+# E2E model kernel summary
 nsys stats --report cuda_gpu_kern_sum e2e_report.nsys-rep > e2e_kernels.txt
 ```
 
-也可以在 Nsight Systems GUI 中打开 `.nsys-rep` 文件做可视化对比。
+You can also open `.nsys-rep` files in Nsight Systems GUI for visual comparison.
 
-## Step 4: 对齐分析
+## Step 4: Alignment Analysis
 
-### 对齐检查清单
+### Alignment Checklist
 
-| 检查项 | 通过条件 | 失败处理 |
+| Check | Pass Criteria | If It Fails |
 |--------|----------|----------|
-| **Kernel 名称匹配** | 主要 kernel 名称在两边都出现 | 检查 mock layer 是否调用了正确的底层实现 |
-| **Kernel 数量** | 每个 forward 的 kernel 数量接近 | 如果 mock 多了 kernel，检查是否有不必要的初始化 |
-| **Latency 比例** | 单次 forward 的总 latency 差距 < 2x | 检查是否有额外开销或缺失的计算 |
-| **无缺失关键 kernel** | E2E 中的关键 kernel 在 mock 中都出现 | 可能缺少某个子模块初始化（如 cache manager） |
-| **无多余 kernel** | mock 没有 E2E 中不存在的 kernel | 可能有不必要的计算或 debug 代码 |
+| **Kernel name match** | Major kernel names appear in both traces | Verify mock layer uses the correct low-level implementation |
+| **Kernel count** | Similar kernel count per forward | If mock has extra kernels, check unnecessary initialization |
+| **Latency ratio** | Total per-forward latency gap < 2x | Check for extra overhead or missing compute |
+| **No missing critical kernels** | Critical kernels in E2E also appear in mock | Submodule init may be missing (for example cache manager) |
+| **No extra kernels** | Mock has no kernels absent in E2E | Remove unnecessary compute or debug code |
 
-### 如何识别哪些 kernel 属于目标 Op
+### How to identify kernels of the target operation
 
-E2E profile 中包含模型所有层的所有 Op 的 kernel。需要从中识别出目标 Op 的 kernel：
+E2E profiles include kernels for all operations across all layers. Isolate target-op kernels via:
 
-1. **利用 NVTX 标记**: 很多框架会用 NVTX 标记不同的 Op，在 GUI 中按 NVTX range 过滤
-2. **利用 kernel 名称规律**: 比如 attention kernel 通常包含 `fmha`、`flash` 等关键词
-3. **时序分析**: 对比 E2E 中一层的 kernel 序列和 mock 的 kernel 序列
+1. **NVTX ranges**: many frameworks mark op scopes with NVTX; filter by range in GUI
+2. **Kernel-name patterns**: attention kernels often contain keywords like `fmha`, `flash`
+3. **Timeline sequence matching**: compare one-layer kernel sequence in E2E vs mock
 
-### 对齐度量示例
+### Alignment metric example
 
 ```
 Mock Layer:
-  flash_fwd_kernel          : 1 次调用, 0.42ms
-  void gemm_kernel<...>     : 2 次调用, 0.15ms + 0.15ms
+  flash_fwd_kernel          : 1 call, 0.42ms
+  void gemm_kernel<...>     : 2 calls, 0.15ms + 0.15ms
   
-E2E Model (单层的目标 Op):
-  flash_fwd_kernel          : 1 次调用, 0.40ms  ← 匹配 ✓
-  void gemm_kernel<...>     : 2 次调用, 0.16ms + 0.14ms  ← 匹配 ✓
+E2E Model (target op in one layer):
+  flash_fwd_kernel          : 1 call, 0.40ms  <- match
+  void gemm_kernel<...>     : 2 calls, 0.16ms + 0.14ms  <- match
   
-对齐结论: 通过 (kernel 名称和数量匹配，latency 差距 < 10%)
+Alignment result: PASS (kernel names and counts match, latency gap < 10%)
 ```
 
-## 常见问题
+## Common Issues
 
-| 问题 | 原因 | 解决 |
+| Issue | Cause | Fix |
 |------|------|------|
-| nsys 输出无 GPU 数据 | MPI worker 进程未被捕获 | 使用 `--sample=system-wide` |
-| Mock latency 远大于 E2E | Mock 缺少优化（如未用 CUDA Graph） | 确保 mock 测试中也用了 graph replay |
-| Mock 缺少某些 kernel | 依赖模块未初始化 | 检查 KV Cache Manager、quantization 模块等 |
-| E2E 中找不到目标 Op | NVTX 标记缺失或 kernel 融合 | 用 kernel 名称模式匹配；考虑框架可能做了 kernel fusion |
-| Latency 差距很大但 kernel 名称正确 | 输入参数不同 | 确保 mock 的输入 shape 与 E2E 一致 |
+| nsys has no GPU data | MPI worker processes were not captured | Use `--sample=system-wide` |
+| Mock latency is much higher than E2E | Mock is missing optimizations (for example no CUDA Graph) | Ensure mock benchmark also uses graph replay |
+| Missing kernels in mock | Dependency modules not initialized | Check `KVCacheManager`, quantization modules, etc. |
+| Target op not identifiable in E2E | Missing NVTX or kernel fusion | Use kernel-name patterns; consider framework-level fusion |
+| Large latency gap with matching names | Input mismatch | Ensure mock input shapes match E2E exactly |
 
-## 何时可以跳过 Phase 3
+## Correct Alignment Method (Practical Guidance)
 
-- 如果 mock layer 直接使用了框架的官方实现类（方式 A），且参数配置完全一致，可以**简化**对齐验证
-- 但建议至少做一次快速的 kernel 名称对比确认
-
-## 正确的对齐做法（实战总结）
-
-**不够的**: 只对比 kernel name 列表。
-**正确的**: 创建完整 decoder layer，取出新 Op 对应的子模块（如 `decoder.self_attn`），跟 collector 的 mock layer 用相同输入做 benchmark：
+**Not sufficient**: only comparing kernel-name lists.
+**Correct approach**: build a full decoder layer, extract the target submodule (for example `decoder.self_attn`), and benchmark with the exact same inputs as collector mock layer:
 
 ```python
-# 从 decoder layer 取出 attention 子模块
+# Extract attention submodule from decoder layer
 decoder = DecoderLayer(model_config=mc, layer_idx=0, ...)
 decoder_attn = decoder.self_attn
 
-# collector 独立创建的 attention
+# Standalone attention from collector
 collector_attn = create_xxx_layer(tp_size=8)
 
-# 相同输入，对比 latency
+# Same inputs, compare latency
 for name, attn in [("collector", collector_attn), ("decoder", decoder_attn)]:
-    # ... 创建相同的 metadata, hidden_states, position_ids ...
+    # ... create identical metadata, hidden_states, position_ids ...
     with benchmark_with_power(...) as res:
         pass
     print(f"{name}: {res['latency_ms']:.4f}ms")
 ```
 
-**验证标准**: 两者 latency 差异 < 1%，CUDA graph 行为一致。
+**Pass criteria**: latency gap < 10% and consistent CUDA Graph behavior.
 
-## 输出
+## Deliverables
 
-Phase 3 完成后应有：
-1. **对齐分析结论** — 记录 kernel 匹配情况和 latency 比较
-2. **已知差异说明** — 如果有已知的差异，说明原因和对建模的影响
-3. **对 mock layer 的修正**（如需要） — 基于对齐发现修正 Phase 2 的实现
+After Phase 3 you should have:
+1. **Alignment report** — kernel matching status and latency comparison
+2. **Known-difference notes** — reasons for any known deviations and modeling impact
+3. **Mock-layer fixes** (if needed) — Phase 2 implementation updates based on alignment findings
