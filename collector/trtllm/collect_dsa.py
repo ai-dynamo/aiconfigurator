@@ -283,8 +283,9 @@ def run_dsa(
         isl = input_len
         step = 0
     else:
-        isl = 1
-        step = input_len
+        # Generation phase: isl is the cached sequence length, step is always 1
+        isl = input_len
+        step = 1
 
     log_perf(
         item_list=[{
