@@ -1,0 +1,58 @@
+{% if is_moe is defined %}  # is_moe from sdk
+moe_expert_parallel_size: {{ moe_expert_parallel_size }}
+moe_tensor_parallel_size: {{ moe_tensor_parallel_size }}
+
+moe_config:
+    backend: {{ moe_config.backend | default('CUTLASS') }} # MOE backend to use (CUTLASS, CUTEDSL, WIDEEP, TRTLLM, VANILLA)
+    {% if moe_config.load_balancer is defined %}  # Configuration for MoE load balancing
+    load_balancer: {{ moe_config.load_balancer }} # moe load balancer
+    {% endif %}
+{% endif %}
+
+tensor_parallel_size: {{ tensor_parallel_size }}
+pipeline_parallel_size: {{ pipeline_parallel_size }}
+enable_attention_dp: {{ enable_attention_dp | default(false) }}
+enable_chunked_prefill: {{ enable_chunked_prefill | default(false) }}
+
+{% set _max_seq_len = build_config.max_seq_len | default(none) %}
+
+build_config:
+  max_batch_size: {{ build_config.max_batch_size }}
+  max_num_tokens: {{ build_config.max_num_tokens }}
+  {% if _max_seq_len is not none and _max_seq_len != '' %}
+  max_seq_len: {{ _max_seq_len }}
+  {% endif %}
+
+kv_cache_config:
+  free_gpu_memory_fraction: {{ kv_cache_config.free_gpu_memory_fraction | default(0.80) }}  # Fraction of GPU memory usable for KV‑cache
+  dtype: {{ kv_cache_config.dtype | default('auto') }}
+  {% if kv_cache_config.tokens_per_block is defined %}
+  tokens_per_block: {{ kv_cache_config.tokens_per_block }}
+  {% endif %}
+  enable_block_reuse: {{ kv_cache_config.enable_block_reuse | default(false) }}
+
+cache_transceiver_config:
+  backend: {{ cache_transceiver_config.backend | default('DEFAULT') }} # The communication backend type to use for the cache transceiver ("DEFAULT","UCX","NIXL","MPI")
+  {% if cache_transceiver_config.max_tokens_in_buffer is defined %}
+  max_tokens_in_buffer: {{ cache_transceiver_config.max_tokens_in_buffer }}
+  {% endif %}
+
+cuda_graph_config:
+  enable_padding: {{ cuda_graph_config.enable_padding | default(false) }} # Pad CUDA graph
+  batch_sizes: [{% for s in cuda_graph_config.batch_sizes
+                               | default([1,2,4,8,16,32,64,128,256]) -%}
+                    {{- s }}{{ ',' if not loop.last else '' }} {%- endfor %}]
+
+disable_overlap_scheduler: {{ disable_overlap_scheduler | default(true) }}
+print_iter_log: {{ print_iter_log | default(false) }}
+
+{% if speculative_config.decoding_type is defined %}  # speculative decoding
+speculative_config:
+  decoding_type: {{ speculative_config.decoding_type }}
+  {% if speculative_config.decoding_type == 'MTP' %}
+  num_nextn_predict_layers: {{ num_nextn_predict_layers }}
+  {% endif %}
+  {% if speculative_config.allow_advanced_sampling is defined %}
+  allow_advanced_sampling: {{ speculative_config.allow_advanced_sampling }}
+  {% endif %}
+{% endif %}
