@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from aiconfigurator.sdk import common
@@ -234,8 +233,11 @@ def pick_default(
 
         x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
         pareto_frontier_df = get_pareto_front(
-            pareto_df, x_axis_col, "tokens/s/gpu_cluster",
-            maximize_x=not use_request_latency, maximize_y=True,
+            pareto_df,
+            x_axis_col,
+            "tokens/s/gpu_cluster",
+            maximize_x=not use_request_latency,
+            maximize_y=True,
         )
     else:
         pareto_frontier_df = pd.DataFrame()
@@ -244,15 +246,19 @@ def pick_default(
 
     if use_request_latency:
         best_config_df = get_best_configs_under_request_latency_constraint(
-            total_gpus=total_gpus, pareto_df=pareto_df,
+            total_gpus=total_gpus,
+            pareto_df=pareto_df,
             target_request_latency=target_request_latency,
-            top_n=top_n, group_by=group_by_key,
+            top_n=top_n,
+            group_by=group_by_key,
         )
     else:
         best_config_df = get_best_configs_under_tpot_constraint(
-            total_gpus=total_gpus, pareto_df=pareto_df,
+            total_gpus=total_gpus,
+            pareto_df=pareto_df,
             target_tpot=target_tpot,
-            top_n=top_n, group_by=group_by_key,
+            top_n=top_n,
+            group_by=group_by_key,
         )
 
     best_throughput = float(best_config_df["tokens/s/gpu_cluster"].values[0]) if not best_config_df.empty else 0.0
@@ -317,8 +323,11 @@ def pick_load_match(
         pareto_df["tokens/s/gpu_cluster"] = pareto_df["tokens/s/gpu"]
         x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
         pareto_frontier_df = get_pareto_front(
-            pareto_df, x_axis_col, "tokens/s/gpu_cluster",
-            maximize_x=not use_request_latency, maximize_y=True,
+            pareto_df,
+            x_axis_col,
+            "tokens/s/gpu_cluster",
+            maximize_x=not use_request_latency,
+            maximize_y=True,
         )
 
     constraint_col = "request_latency" if use_request_latency else "tpot"
@@ -403,19 +412,18 @@ def pick_autoscale(
         logger.warning(
             "pick_autoscale: no prefill candidates meet TTFT < %sms (after %.1fx correction). "
             "Returning closest matches.",
-            target_ttft, correction_factor,
+            target_ttft,
+            correction_factor,
         )
         prefill_candidates = (
-            prefill_candidates
-            .sort_values(by=["ttft_corrected", "seq/s/gpu"], ascending=[True, False])
+            prefill_candidates.sort_values(by=["ttft_corrected", "seq/s/gpu"], ascending=[True, False])
             .drop_duplicates(subset=["parallel"], keep="first")
             .head(top_n)
             .reset_index(drop=True)
         )
     else:
         prefill_candidates = (
-            prefill_meets_sla
-            .sort_values(by=["seq/s/gpu", "global_bs"], ascending=[False, True])
+            prefill_meets_sla.sort_values(by=["seq/s/gpu", "global_bs"], ascending=[False, True])
             .drop_duplicates(subset=["parallel"], keep="first")
             .head(top_n)
             .reset_index(drop=True)
@@ -438,8 +446,7 @@ def pick_autoscale(
         )
     else:
         decode_candidates = (
-            decode_meets_sla
-            .sort_values(by=["seq/s/gpu", "global_bs"], ascending=[False, True])
+            decode_meets_sla.sort_values(by=["seq/s/gpu", "global_bs"], ascending=[False, True])
             .drop_duplicates(subset=["parallel"], keep="first")
             .head(top_n)
             .reset_index(drop=True)
@@ -461,12 +468,7 @@ def pick_autoscale(
         return empty_result
 
     disagg_df = pd.DataFrame(all_combos, columns=common.ColumnsDisagg).round(3)
-    disagg_df = (
-        disagg_df
-        .sort_values(by=["tokens/s/gpu"], ascending=[False])
-        .head(top_n)
-        .reset_index(drop=True)
-    )
+    disagg_df = disagg_df.sort_values(by=["tokens/s/gpu"], ascending=[False]).head(top_n).reset_index(drop=True)
 
     return {
         "best_config_df": disagg_df,
