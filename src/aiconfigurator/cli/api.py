@@ -394,6 +394,9 @@ class EstimateResult:
     raw: dict
     """Full result dict from the InferenceSummary."""
 
+    per_ops_data: dict | None = None
+    """Per-operation latency breakdown (populated when available)."""
+
     def __repr__(self) -> str:
         return (
             f"EstimateResult(ttft={self.ttft:.3f}ms, tpot={self.tpot:.3f}ms, "
@@ -557,6 +560,7 @@ def cli_estimate(
         backend_name=backend_name,
         backend_version=resolved_version,
         raw=result_dict,
+        per_ops_data=summary.get_per_ops_data(),
     )
 
 

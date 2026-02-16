@@ -241,6 +241,12 @@ def _add_estimate_mode_arguments(parser):
         "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only). "
         "Please be careful, only SILICON mode's results are reproducible.",
     )
+    parser.add_argument(
+        "--print-per-ops-latency",
+        action="store_true",
+        default=False,
+        help="Print per-operation latency breakdown for mix step and generation-only step.",
+    )
 
 
 def _add_support_mode_arguments(parser):
@@ -883,6 +889,35 @@ def _run_support_mode(args):
     print("=" * 60 + "\n")
 
 
+def _print_per_ops_latency(per_ops_data: dict) -> None:
+    """Print per-operation latency breakdown from run_agg."""
+    scheduling = per_ops_data.get("scheduling", {})
+    num_mix = scheduling.get("num_mix_steps", 0)
+    num_genonly = scheduling.get("num_genonly_steps", 0)
+    mix_total = scheduling.get("mix_step_latency_ms", 0)
+    genonly_total = scheduling.get("genonly_step_latency_ms", 0)
+
+    print("\n" + "-" * 60)
+    print("  Per-Operation Latency Breakdown")
+    print("-" * 60)
+    print(f"  Scheduling: {num_mix:.0f} mix steps + {num_genonly:.0f} gen-only steps")
+    print()
+
+    mix_ops = per_ops_data.get("mix_step", {})
+    if mix_ops:
+        print(f"  Mix Step (total: {mix_total:.3f} ms)")
+        for op_name, latency in sorted(mix_ops.items(), key=lambda x: -x[1]):
+            pct = latency / mix_total * 100 if mix_total > 0 else 0
+            print(f"    {op_name:<40s} {latency:>10.3f} ms  ({pct:>5.1f}%)")
+
+    genonly_ops = per_ops_data.get("genonly_step", {})
+    if genonly_ops:
+        print(f"\n  Gen-Only Step (total: {genonly_total:.3f} ms)")
+        for op_name, latency in sorted(genonly_ops.items(), key=lambda x: -x[1]):
+            pct = latency / genonly_total * 100 if genonly_total > 0 else 0
+            print(f"    {op_name:<40s} {latency:>10.3f} ms  ({pct:>5.1f}%)")
+
+
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
@@ -930,7 +965,12 @@ def _run_estimate_mode(args):
     print(f"  TTFT:             {result.ttft:.3f} ms")
     print(f"  TPOT:             {result.tpot:.3f} ms")
     print(f"  Power (per GPU):  {result.power_w:.1f} W")
-    print("=" * 60 + "\n")
+    print("=" * 60)
+
+    if args.print_per_ops_latency and result.per_ops_data:
+        _print_per_ops_latency(result.per_ops_data)
+
+    print()
 
 
 def main(args):
