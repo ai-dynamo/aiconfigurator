@@ -185,6 +185,54 @@ def _add_generate_mode_arguments(parser):
     )
 
 
+def _add_estimate_mode_arguments(parser):
+    """Add arguments for the estimate mode (single-point TTFT/TPOT/power estimation)."""
+    parser.add_argument(
+        "--model-path",
+        "--model",
+        dest="model_path",
+        type=_validate_model_path,
+        required=True,
+        help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
+        "local path to directory containing config.json.",
+    )
+    parser.add_argument(
+        "--system",
+        type=str,
+        required=True,
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=[backend.value for backend in common.BackendName],
+        type=str,
+        default=common.BackendName.trtllm.value,
+        help="Backend name (default: trtllm).",
+    )
+    parser.add_argument(
+        "--backend-version",
+        type=str,
+        default=None,
+        help="Backend database version. Default is latest.",
+    )
+    parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
+    parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
+    parser.add_argument(
+        "--batch-size", type=int, default=128, help="Batch size (max concurrent requests). Default: 128."
+    )
+    parser.add_argument(
+        "--ctx-tokens",
+        type=int,
+        default=None,
+        help="Context tokens budget for IFB scheduling. Default: same as ISL.",
+    )
+    parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallelism size. Default: 1.")
+    parser.add_argument("--pp-size", type=int, default=1, help="Pipeline parallelism size. Default: 1.")
+    parser.add_argument("--attention-dp-size", type=int, default=1, help="Attention data parallelism size. Default: 1.")
+    parser.add_argument("--moe-tp-size", type=int, default=None, help="MoE tensor parallelism size.")
+    parser.add_argument("--moe-ep-size", type=int, default=None, help="MoE expert parallelism size.")
+
+
 def _add_support_mode_arguments(parser):
     """Add arguments for the support mode (support matrix check)."""
     parser.add_argument(
@@ -283,6 +331,19 @@ def configure_parser(parser):
         ),
     )
     _add_generate_mode_arguments(generate_parser)
+
+    # Estimate mode - single-point performance estimation
+    estimate_parser = subparsers.add_parser(
+        "estimate",
+        parents=[common_cli_parser],
+        help="Estimate TTFT, TPOT, and power for a single model/system/config.",
+        description=(
+            "Run a single-point performance estimation to predict TTFT (time to first token), "
+            "TPOT (time per output token), and power consumption for a given model, system, "
+            "and configuration. No parameter sweep or SLA optimization is performed."
+        ),
+    )
+    _add_estimate_mode_arguments(estimate_parser)
 
     # Support mode - support matrix check
     support_parser = subparsers.add_parser(
@@ -812,6 +873,55 @@ def _run_support_mode(args):
     print("=" * 60 + "\n")
 
 
+def _run_estimate_mode(args):
+    """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
+    from aiconfigurator.cli.api import cli_estimate
+
+    logger.info(
+        "Estimating performance for %s on %s (backend=%s, tp=%d, bs=%d)",
+        args.model_path,
+        args.system,
+        args.backend,
+        args.tp_size,
+        args.batch_size,
+    )
+
+    result = cli_estimate(
+        model_path=args.model_path,
+        system_name=args.system,
+        backend_name=args.backend,
+        backend_version=args.backend_version,
+        isl=args.isl,
+        osl=args.osl,
+        batch_size=args.batch_size,
+        ctx_tokens=args.ctx_tokens,
+        tp_size=args.tp_size,
+        pp_size=args.pp_size,
+        attention_dp_size=args.attention_dp_size,
+        moe_tp_size=args.moe_tp_size,
+        moe_ep_size=args.moe_ep_size,
+    )
+
+    print("\n" + "=" * 60)
+    print("  Performance Estimate")
+    print("=" * 60)
+    print(f"  Model:            {result.model_path}")
+    print(f"  System:           {result.system_name}")
+    print(f"  Backend:          {result.backend_name} ({result.backend_version})")
+    print("-" * 60)
+    print(f"  ISL:              {result.isl}")
+    print(f"  OSL:              {result.osl}")
+    print(f"  Batch Size:       {result.batch_size}")
+    print(f"  Context Tokens:   {result.ctx_tokens}")
+    print(f"  TP Size:          {result.tp_size}")
+    print(f"  PP Size:          {result.pp_size}")
+    print("-" * 60)
+    print(f"  TTFT:             {result.ttft:.3f} ms")
+    print(f"  TPOT:             {result.tpot:.3f} ms")
+    print(f"  Power (per GPU):  {result.power_w:.1f} W")
+    print("=" * 60 + "\n")
+
+
 def main(args):
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
@@ -829,6 +939,11 @@ def main(args):
     # Handle generate mode separately (no sweeping)
     if args.mode == "generate":
         _run_generate_mode(args)
+        return
+
+    # Handle estimate mode separately (single-point estimation)
+    if args.mode == "estimate":
+        _run_estimate_mode(args)
         return
 
     # Handle support mode separately (no sweeping)

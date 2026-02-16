@@ -5,7 +5,7 @@
 Python API for calling CLI workflows programmatically.
 
 This module provides simple function interfaces to the CLI's "default", "exp",
-"generate", and "support" modes, making it easy to use from Python code without going through argparse.
+"generate", "estimate", and "support" modes, making it easy to use from Python code without going through argparse.
 """
 
 from __future__ import annotations
@@ -348,13 +348,203 @@ def cli_exp(
     return result
 
 
+@dataclass
+class EstimateResult:
+    """Result from running a single-point performance estimate."""
+
+    ttft: float
+    """Time to first token (ms)."""
+
+    tpot: float
+    """Time per output token (ms)."""
+
+    power_w: float
+    """End-to-end weighted average power per GPU (watts)."""
+
+    isl: int
+    """Input sequence length used."""
+
+    osl: int
+    """Output sequence length used."""
+
+    batch_size: int
+    """Batch size used."""
+
+    ctx_tokens: int
+    """Context tokens budget for IFB scheduling."""
+
+    tp_size: int
+    """Tensor parallelism degree."""
+
+    pp_size: int
+    """Pipeline parallelism degree."""
+
+    model_path: str
+    """Model path used."""
+
+    system_name: str
+    """System name used."""
+
+    backend_name: str
+    """Backend name used."""
+
+    backend_version: str
+    """Backend version used."""
+
+    raw: dict
+    """Full result dict from the InferenceSummary."""
+
+    def __repr__(self) -> str:
+        return (
+            f"EstimateResult(ttft={self.ttft:.3f}ms, tpot={self.tpot:.3f}ms, "
+            f"power={self.power_w:.1f}W, model={self.model_path}, "
+            f"system={self.system_name}, backend={self.backend_name})"
+        )
+
+
+def cli_estimate(
+    model_path: str,
+    system_name: str,
+    *,
+    backend_name: str = "trtllm",
+    backend_version: str | None = None,
+    isl: int = 1024,
+    osl: int = 1024,
+    batch_size: int = 128,
+    ctx_tokens: int | None = None,
+    tp_size: int = 1,
+    pp_size: int = 1,
+    attention_dp_size: int = 1,
+    moe_tp_size: int | None = None,
+    moe_ep_size: int | None = None,
+    systems_paths: str | None = None,
+) -> EstimateResult:
+    """
+    Estimate TTFT, TPOT, and power for a single model/system/config combination.
+
+    This runs the SDK's aggregated (IFB) inference estimation and returns
+    the predicted latency and power metrics without performing any parameter
+    sweep or SLA optimization.
+
+    This is the programmatic equivalent of:
+        aiconfigurator cli estimate --model-path ... --system ... --batch-size ...
+
+    Args:
+        model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
+        system_name: System name (GPU type), e.g., 'h200_sxm', 'h100_sxm'.
+        backend_name: Backend name ('trtllm', 'sglang', 'vllm'). Default is 'trtllm'.
+        backend_version: Backend database version. Default is latest.
+        isl: Input sequence length. Default is 1024.
+        osl: Output sequence length. Default is 1024.
+        batch_size: Batch size (max concurrent requests). Default is 128.
+        ctx_tokens: Context tokens budget for IFB scheduling.
+            Default is None, which uses ``isl`` as the budget.
+        tp_size: Tensor parallelism size. Default is 1.
+        pp_size: Pipeline parallelism size. Default is 1.
+        attention_dp_size: Attention data parallelism size. Default is 1.
+        moe_tp_size: MoE tensor parallelism size. Default is None (auto).
+        moe_ep_size: MoE expert parallelism size. Default is None (auto).
+        systems_paths: Comma-separated systems search paths. Use 'default' for built-in.
+
+    Returns:
+        EstimateResult with ttft, tpot, power_w, and the full raw result dict.
+
+    Example:
+        >>> result = cli_estimate(
+        ...     model_path="Qwen/Qwen3-32B",
+        ...     system_name="h100_sxm",
+        ...     batch_size=64,
+        ...     isl=2048,
+        ...     osl=512,
+        ...     tp_size=2,
+        ... )
+        >>> print(f"TTFT: {result.ttft:.2f}ms, TPOT: {result.tpot:.2f}ms, Power: {result.power_w:.1f}W")
+    """
+    from aiconfigurator.sdk.backends.factory import get_backend
+    from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
+    from aiconfigurator.sdk.inference_session import InferenceSession
+    from aiconfigurator.sdk.models import get_model
+    from aiconfigurator.sdk.perf_database import (
+        get_database,
+        get_latest_database_version,
+        set_systems_paths,
+    )
+
+    if systems_paths is not None:
+        set_systems_paths(systems_paths)
+
+    if ctx_tokens is None:
+        ctx_tokens = isl
+
+    # Resolve backend version
+    resolved_version = backend_version
+    if resolved_version is None:
+        resolved_version = get_latest_database_version(system=system_name, backend=backend_name)
+        if resolved_version is None:
+            raise ValueError(
+                f"No database found for system={system_name}, backend={backend_name}. "
+                "Check --systems-paths or available databases."
+            )
+
+    # Build model config — quant defaults are auto-applied inside get_model
+    model_config = ModelConfig(
+        tp_size=tp_size,
+        pp_size=pp_size,
+        attention_dp_size=attention_dp_size,
+    )
+    if moe_tp_size is not None:
+        model_config.moe_tp_size = moe_tp_size
+    if moe_ep_size is not None:
+        model_config.moe_ep_size = moe_ep_size
+
+    runtime_config = RuntimeConfig(
+        isl=isl,
+        osl=osl,
+        batch_size=batch_size,
+    )
+
+    model = get_model(model_path, model_config, backend_name)
+    database = get_database(system_name, backend_name, resolved_version)
+    if database is None:
+        raise ValueError(
+            f"Failed to load perf database for system={system_name}, "
+            f"backend={backend_name}, version={resolved_version}."
+        )
+    backend = get_backend(backend_name)
+    session = InferenceSession(model, database, backend)
+    summary = session.run_agg(runtime_config, ctx_tokens=ctx_tokens)
+
+    result_dict = summary.get_result_dict()
+    if result_dict is None:
+        raise RuntimeError("Estimation produced no results. The configuration may be invalid or OOM.")
+
+    return EstimateResult(
+        ttft=result_dict["ttft"],
+        tpot=result_dict["tpot"],
+        power_w=result_dict.get("power_w", 0.0),
+        isl=isl,
+        osl=osl,
+        batch_size=batch_size,
+        ctx_tokens=ctx_tokens,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        model_path=model_path,
+        system_name=system_name,
+        backend_name=backend_name,
+        backend_version=resolved_version,
+        raw=result_dict,
+    )
+
+
 # Re-export generate_naive_config as cli_generate for consistency
 # This is already a clean Python function in generator.api
 from aiconfigurator.generator.api import generate_naive_config as cli_generate
 
 __all__ = [
     "CLIResult",
+    "EstimateResult",
     "cli_default",
+    "cli_estimate",
     "cli_exp",
     "cli_generate",
     "cli_support",
