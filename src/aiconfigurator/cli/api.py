@@ -408,6 +408,7 @@ def cli_estimate(
     *,
     backend_name: str = "trtllm",
     backend_version: str | None = None,
+    database_mode: str = "SILICON",
     isl: int = 1024,
     osl: int = 1024,
     batch_size: int = 128,
@@ -434,6 +435,8 @@ def cli_estimate(
         system_name: System name (GPU type), e.g., 'h200_sxm', 'h100_sxm'.
         backend_name: Backend name ('trtllm', 'sglang', 'vllm'). Default is 'trtllm'.
         backend_version: Backend database version. Default is latest.
+        database_mode: Database mode for performance estimation
+            ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
         isl: Input sequence length. Default is 1024.
         osl: Output sequence length. Default is 1024.
         batch_size: Batch size (max concurrent requests). Default is 128.
@@ -486,16 +489,33 @@ def cli_estimate(
                 "Check --systems-paths or available databases."
             )
 
+    # Default moe_tp_size/moe_ep_size to match attention parallelism width
+    if moe_tp_size is None and moe_ep_size is None:
+        moe_tp_size = tp_size
+        moe_ep_size = attention_dp_size
+    elif moe_tp_size is None:
+        moe_tp_size = tp_size * attention_dp_size // moe_ep_size
+    elif moe_ep_size is None:
+        moe_ep_size = tp_size * attention_dp_size // moe_tp_size
+
+    # Validate MoE parallelism width matches attention parallelism width
+    attn_width = tp_size * attention_dp_size
+    moe_width = moe_tp_size * moe_ep_size
+    if attn_width != moe_width:
+        raise ValueError(
+            f"Parallelism width mismatch: tp_size({tp_size}) * attention_dp_size({attention_dp_size}) = {attn_width}, "
+            f"but moe_tp_size({moe_tp_size}) * moe_ep_size({moe_ep_size}) = {moe_width}. "
+            f"These must be equal. Adjust --moe-tp-size/--moe-ep-size or --tp-size/--attention-dp-size."
+        )
+
     # Build model config — quant defaults are auto-applied inside get_model
     model_config = ModelConfig(
         tp_size=tp_size,
         pp_size=pp_size,
         attention_dp_size=attention_dp_size,
+        moe_tp_size=moe_tp_size,
+        moe_ep_size=moe_ep_size,
     )
-    if moe_tp_size is not None:
-        model_config.moe_tp_size = moe_tp_size
-    if moe_ep_size is not None:
-        model_config.moe_ep_size = moe_ep_size
 
     runtime_config = RuntimeConfig(
         isl=isl,
@@ -510,6 +530,10 @@ def cli_estimate(
             f"Failed to load perf database for system={system_name}, "
             f"backend={backend_name}, version={resolved_version}."
         )
+    if database_mode != "SILICON":
+        from aiconfigurator.sdk.common import DatabaseMode
+
+        database.set_default_database_mode(DatabaseMode[database_mode])
     backend = get_backend(backend_name)
     session = InferenceSession(model, database, backend)
     summary = session.run_agg(runtime_config, ctx_tokens=ctx_tokens)

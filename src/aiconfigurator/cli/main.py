@@ -231,6 +231,16 @@ def _add_estimate_mode_arguments(parser):
     parser.add_argument("--attention-dp-size", type=int, default=1, help="Attention data parallelism size. Default: 1.")
     parser.add_argument("--moe-tp-size", type=int, default=None, help="MoE tensor parallelism size.")
     parser.add_argument("--moe-ep-size", type=int, default=None, help="MoE expert parallelism size.")
+    parser.add_argument(
+        "--database-mode",
+        choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
+        type=str,
+        default=common.DatabaseMode.SILICON.name,
+        help="Database mode for performance estimation. Options: SILICON (default, uses silicon data), "
+        "HYBRID (uses silicon data when available, otherwise SOL+empirical factor), "
+        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only). "
+        "Please be careful, only SILICON mode's results are reproducible.",
+    )
 
 
 def _add_support_mode_arguments(parser):
@@ -891,6 +901,7 @@ def _run_estimate_mode(args):
         system_name=args.system,
         backend_name=args.backend,
         backend_version=args.backend_version,
+        database_mode=args.database_mode,
         isl=args.isl,
         osl=args.osl,
         batch_size=args.batch_size,
