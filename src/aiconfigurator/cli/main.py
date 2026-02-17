@@ -197,10 +197,23 @@ def _add_estimate_mode_arguments(parser):
         "local path to directory containing config.json.",
     )
     parser.add_argument(
+        "--estimate-mode",
+        choices=["agg", "disagg"],
+        type=str,
+        default="agg",
+        help="Estimation mode: 'agg' for aggregated (default), 'disagg' for disaggregated.",
+    )
+    parser.add_argument(
         "--system",
         type=str,
         required=True,
         help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
+    )
+    parser.add_argument(
+        "--decode-system",
+        type=str,
+        default=None,
+        help="System name for disagg decode workers. Defaults to --system if omitted.",
     )
     parser.add_argument(
         "--backend",
@@ -218,7 +231,7 @@ def _add_estimate_mode_arguments(parser):
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
     parser.add_argument(
-        "--batch-size", type=int, default=128, help="Batch size (max concurrent requests). Default: 128."
+        "--batch-size", type=int, default=128, help="Batch size (max concurrent requests, used for agg). Default: 128."
     )
     parser.add_argument(
         "--ctx-tokens",
@@ -226,11 +239,73 @@ def _add_estimate_mode_arguments(parser):
         default=None,
         help="Context tokens budget for IFB scheduling. Default: same as ISL.",
     )
+
+    # Shared parallelism defaults (also used as fallback for prefill/decode-specific args)
     parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallelism size. Default: 1.")
     parser.add_argument("--pp-size", type=int, default=1, help="Pipeline parallelism size. Default: 1.")
     parser.add_argument("--attention-dp-size", type=int, default=1, help="Attention data parallelism size. Default: 1.")
     parser.add_argument("--moe-tp-size", type=int, default=None, help="MoE tensor parallelism size.")
     parser.add_argument("--moe-ep-size", type=int, default=None, help="MoE expert parallelism size.")
+
+    # Disagg: prefill-specific overrides (fall back to shared args when None)
+    parser.add_argument(
+        "--prefill-tp-size", type=int, default=None, help="Prefill TP size (disagg). Defaults to --tp-size."
+    )
+    parser.add_argument(
+        "--prefill-pp-size", type=int, default=None, help="Prefill PP size (disagg). Defaults to --pp-size."
+    )
+    parser.add_argument(
+        "--prefill-attention-dp-size",
+        type=int,
+        default=None,
+        help="Prefill attention DP size (disagg). Defaults to --attention-dp-size.",
+    )
+    parser.add_argument(
+        "--prefill-moe-tp-size", type=int, default=None, help="Prefill MoE TP size (disagg). Defaults to --moe-tp-size."
+    )
+    parser.add_argument(
+        "--prefill-moe-ep-size", type=int, default=None, help="Prefill MoE EP size (disagg). Defaults to --moe-ep-size."
+    )
+    parser.add_argument(
+        "--prefill-batch-size", type=int, default=None, help="Prefill batch size (disagg). Required for disagg mode."
+    )
+    parser.add_argument(
+        "--prefill-num-workers",
+        type=int,
+        default=None,
+        help="Number of prefill workers (disagg). Required for disagg mode.",
+    )
+
+    # Disagg: decode-specific overrides (fall back to shared args when None)
+    parser.add_argument(
+        "--decode-tp-size", type=int, default=None, help="Decode TP size (disagg). Defaults to --tp-size."
+    )
+    parser.add_argument(
+        "--decode-pp-size", type=int, default=None, help="Decode PP size (disagg). Defaults to --pp-size."
+    )
+    parser.add_argument(
+        "--decode-attention-dp-size",
+        type=int,
+        default=None,
+        help="Decode attention DP size (disagg). Defaults to --attention-dp-size.",
+    )
+    parser.add_argument(
+        "--decode-moe-tp-size", type=int, default=None, help="Decode MoE TP size (disagg). Defaults to --moe-tp-size."
+    )
+    parser.add_argument(
+        "--decode-moe-ep-size", type=int, default=None, help="Decode MoE EP size (disagg). Defaults to --moe-ep-size."
+    )
+    parser.add_argument(
+        "--decode-batch-size", type=int, default=None, help="Decode batch size (disagg). Required for disagg mode."
+    )
+    parser.add_argument(
+        "--decode-num-workers",
+        type=int,
+        default=None,
+        help="Number of decode workers (disagg). Required for disagg mode.",
+    )
+
+    # Quantization
     parser.add_argument(
         "--gemm-quant-mode",
         choices=[m.name for m in common.GEMMQuantMode],
@@ -924,41 +999,58 @@ def _run_support_mode(args):
     print("=" * 60 + "\n")
 
 
-def _print_per_ops_latency(per_ops_data: dict) -> None:
-    """Print per-operation latency breakdown from run_agg."""
-    scheduling = per_ops_data.get("scheduling", {})
-    num_mix = scheduling.get("num_mix_steps", 0)
-    num_genonly = scheduling.get("num_genonly_steps", 0)
-    mix_total = scheduling.get("mix_step_latency_ms", 0)
-    genonly_total = scheduling.get("genonly_step_latency_ms", 0)
+def _print_per_ops_section(title: str, ops: dict) -> None:
+    """Print a single section of per-op latency breakdown."""
+    total = sum(ops.values())
+    print(f"  {title} (total: {total:.3f} ms)")
+    for op_name, latency in sorted(ops.items(), key=lambda x: -x[1]):
+        pct = latency / total * 100 if total > 0 else 0
+        print(f"    {op_name:<40s} {latency:>10.3f} ms  ({pct:>5.1f}%)")
 
+
+def _print_per_ops_latency(per_ops_data: dict) -> None:
+    """Print per-operation latency breakdown from run_agg or run_disagg."""
     print("\n" + "-" * 60)
     print("  Per-Operation Latency Breakdown")
     print("-" * 60)
-    print(f"  Scheduling: {num_mix:.0f} mix steps + {num_genonly:.0f} gen-only steps")
-    print()
+
+    # Agg mode: mix_step + genonly_step + scheduling
+    scheduling = per_ops_data.get("scheduling")
+    if scheduling:
+        num_mix = scheduling.get("num_mix_steps", 0)
+        num_genonly = scheduling.get("num_genonly_steps", 0)
+        print(f"  Scheduling: {num_mix:.0f} mix steps + {num_genonly:.0f} gen-only steps")
+        print()
 
     mix_ops = per_ops_data.get("mix_step", {})
     if mix_ops:
-        print(f"  Mix Step (total: {mix_total:.3f} ms)")
-        for op_name, latency in sorted(mix_ops.items(), key=lambda x: -x[1]):
-            pct = latency / mix_total * 100 if mix_total > 0 else 0
-            print(f"    {op_name:<40s} {latency:>10.3f} ms  ({pct:>5.1f}%)")
+        _print_per_ops_section("Mix Step", mix_ops)
 
     genonly_ops = per_ops_data.get("genonly_step", {})
     if genonly_ops:
-        print(f"\n  Gen-Only Step (total: {genonly_total:.3f} ms)")
-        for op_name, latency in sorted(genonly_ops.items(), key=lambda x: -x[1]):
-            pct = latency / genonly_total * 100 if genonly_total > 0 else 0
-            print(f"    {op_name:<40s} {latency:>10.3f} ms  ({pct:>5.1f}%)")
+        print()
+        _print_per_ops_section("Gen-Only Step", genonly_ops)
+
+    # Disagg mode: prefill + decode
+    prefill_ops = per_ops_data.get("prefill", {})
+    if prefill_ops:
+        _print_per_ops_section("Prefill (static_ctx)", prefill_ops)
+
+    decode_ops = per_ops_data.get("decode", {})
+    if decode_ops:
+        print()
+        _print_per_ops_section("Decode (static_gen)", decode_ops)
 
 
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
 
+    estimate_mode = args.estimate_mode
+
     logger.info(
-        "Estimating performance for %s on %s (backend=%s, tp=%d, bs=%d)",
+        "Estimating performance (%s) for %s on %s (backend=%s, tp=%d, bs=%d)",
+        estimate_mode,
         args.model_path,
         args.system,
         args.backend,
@@ -966,9 +1058,11 @@ def _run_estimate_mode(args):
         args.batch_size,
     )
 
-    result = cli_estimate(
+    # Build kwargs shared between agg and disagg
+    estimate_kwargs = dict(
         model_path=args.model_path,
         system_name=args.system,
+        mode=estimate_mode,
         backend_name=args.backend,
         backend_version=args.backend_version,
         database_mode=args.database_mode,
@@ -988,8 +1082,29 @@ def _run_estimate_mode(args):
         comm_quant_mode=args.comm_quant_mode,
     )
 
+    if estimate_mode == "disagg":
+        estimate_kwargs.update(
+            decode_system_name=args.decode_system,
+            prefill_tp_size=args.prefill_tp_size,
+            prefill_pp_size=args.prefill_pp_size,
+            prefill_attention_dp_size=args.prefill_attention_dp_size,
+            prefill_moe_tp_size=args.prefill_moe_tp_size,
+            prefill_moe_ep_size=args.prefill_moe_ep_size,
+            prefill_batch_size=args.prefill_batch_size,
+            prefill_num_workers=args.prefill_num_workers,
+            decode_tp_size=args.decode_tp_size,
+            decode_pp_size=args.decode_pp_size,
+            decode_attention_dp_size=args.decode_attention_dp_size,
+            decode_moe_tp_size=args.decode_moe_tp_size,
+            decode_moe_ep_size=args.decode_moe_ep_size,
+            decode_batch_size=args.decode_batch_size,
+            decode_num_workers=args.decode_num_workers,
+        )
+
+    result = cli_estimate(**estimate_kwargs)
+
     print("\n" + "=" * 60)
-    print("  Performance Estimate")
+    print(f"  Performance Estimate ({result.mode})")
     print("=" * 60)
     print(f"  Model:            {result.model_path}")
     print(f"  System:           {result.system_name}")
@@ -997,10 +1112,24 @@ def _run_estimate_mode(args):
     print("-" * 60)
     print(f"  ISL:              {result.isl}")
     print(f"  OSL:              {result.osl}")
-    print(f"  Batch Size:       {result.batch_size}")
-    print(f"  Context Tokens:   {result.ctx_tokens}")
-    print(f"  TP Size:          {result.tp_size}")
-    print(f"  PP Size:          {result.pp_size}")
+
+    if result.mode == "agg":
+        print(f"  Batch Size:       {result.batch_size}")
+        print(f"  Context Tokens:   {result.ctx_tokens}")
+        print(f"  TP Size:          {result.tp_size}")
+        print(f"  PP Size:          {result.pp_size}")
+    else:
+        raw = result.raw
+        print(f"  (p) TP:           {raw.get('(p)tp', 'N/A')}")
+        print(f"  (p) PP:           {raw.get('(p)pp', 'N/A')}")
+        print(f"  (p) BS:           {raw.get('(p)bs', 'N/A')}")
+        print(f"  (p) Workers:      {raw.get('(p)workers', 'N/A')}")
+        print(f"  (d) TP:           {raw.get('(d)tp', 'N/A')}")
+        print(f"  (d) PP:           {raw.get('(d)pp', 'N/A')}")
+        print(f"  (d) BS:           {raw.get('(d)bs', 'N/A')}")
+        print(f"  (d) Workers:      {raw.get('(d)workers', 'N/A')}")
+        print(f"  Total GPUs:       {raw.get('num_total_gpus', 'N/A')}")
+
     print("-" * 60)
     print(f"  TTFT:             {result.ttft:.3f} ms")
     print(f"  TPOT:             {result.tpot:.3f} ms")

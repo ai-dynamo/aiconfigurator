@@ -394,21 +394,87 @@ class EstimateResult:
     raw: dict
     """Full result dict from the InferenceSummary."""
 
+    mode: str = "agg"
+    """Estimation mode: 'agg' or 'disagg'."""
+
     per_ops_data: dict | None = None
     """Per-operation latency breakdown (populated when available)."""
 
     def __repr__(self) -> str:
         return (
-            f"EstimateResult(ttft={self.ttft:.3f}ms, tpot={self.tpot:.3f}ms, "
+            f"EstimateResult(mode={self.mode!r}, ttft={self.ttft:.3f}ms, tpot={self.tpot:.3f}ms, "
             f"power={self.power_w:.1f}W, model={self.model_path}, "
             f"system={self.system_name}, backend={self.backend_name})"
         )
+
+
+def _resolve_moe_parallelism(
+    tp_size: int,
+    attention_dp_size: int,
+    moe_tp_size: int | None,
+    moe_ep_size: int | None,
+) -> tuple[int, int]:
+    """Resolve and validate MoE parallelism widths, returning (moe_tp_size, moe_ep_size)."""
+    if moe_tp_size is None and moe_ep_size is None:
+        moe_tp_size = tp_size
+        moe_ep_size = attention_dp_size
+    elif moe_tp_size is None:
+        moe_tp_size = tp_size * attention_dp_size // moe_ep_size
+    elif moe_ep_size is None:
+        moe_ep_size = tp_size * attention_dp_size // moe_tp_size
+
+    attn_width = tp_size * attention_dp_size
+    moe_width = moe_tp_size * moe_ep_size
+    if attn_width != moe_width:
+        raise ValueError(
+            f"Parallelism width mismatch: tp_size({tp_size}) * attention_dp_size({attention_dp_size}) = {attn_width}, "
+            f"but moe_tp_size({moe_tp_size}) * moe_ep_size({moe_ep_size}) = {moe_width}. "
+            f"These must be equal."
+        )
+    return moe_tp_size, moe_ep_size
+
+
+def _build_model_config(
+    tp_size: int,
+    pp_size: int,
+    attention_dp_size: int,
+    moe_tp_size: int,
+    moe_ep_size: int,
+    gemm_quant_mode: str | None = None,
+    kvcache_quant_mode: str | None = None,
+    fmha_quant_mode: str | None = None,
+    moe_quant_mode: str | None = None,
+    comm_quant_mode: str | None = None,
+):
+    """Build a ModelConfig with optional quant mode overrides."""
+    from aiconfigurator.sdk.common import (
+        CommQuantMode,
+        FMHAQuantMode,
+        GEMMQuantMode,
+        KVCacheQuantMode,
+        MoEQuantMode,
+    )
+    from aiconfigurator.sdk.config import ModelConfig
+
+    return ModelConfig(
+        tp_size=tp_size,
+        pp_size=pp_size,
+        attention_dp_size=attention_dp_size,
+        moe_tp_size=moe_tp_size,
+        moe_ep_size=moe_ep_size,
+        gemm_quant_mode=GEMMQuantMode[gemm_quant_mode] if gemm_quant_mode else None,
+        kvcache_quant_mode=KVCacheQuantMode[kvcache_quant_mode] if kvcache_quant_mode else None,
+        fmha_quant_mode=FMHAQuantMode[fmha_quant_mode] if fmha_quant_mode else None,
+        moe_quant_mode=MoEQuantMode[moe_quant_mode] if moe_quant_mode else None,
+        comm_quant_mode=CommQuantMode[comm_quant_mode] if comm_quant_mode else None,
+    )
 
 
 def cli_estimate(
     model_path: str,
     system_name: str,
     *,
+    mode: str = "agg",
     backend_name: str = "trtllm",
     backend_version: str | None = None,
     database_mode: str = "SILICON",
@@ -426,14 +492,28 @@ def cli_estimate(
     fmha_quant_mode: str | None = None,
     moe_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
+    # Disagg-specific parameters (ignored when mode='agg')
+    decode_system_name: str | None = None,
+    prefill_tp_size: int | None = None,
+    prefill_pp_size: int | None = None,
+    prefill_attention_dp_size: int | None = None,
+    prefill_moe_tp_size: int | None = None,
+    prefill_moe_ep_size: int | None = None,
+    prefill_batch_size: int | None = None,
+    prefill_num_workers: int | None = None,
+    decode_tp_size: int | None = None,
+    decode_pp_size: int | None = None,
+    decode_attention_dp_size: int | None = None,
+    decode_moe_tp_size: int | None = None,
+    decode_moe_ep_size: int | None = None,
+    decode_batch_size: int | None = None,
+    decode_num_workers: int | None = None,
     systems_paths: str | None = None,
 ) -> EstimateResult:
     """
     Estimate TTFT, TPOT, and power for a single model/system/config combination.
 
-    This runs the SDK's aggregated (IFB) inference estimation and returns
-    the predicted latency and power metrics without performing any parameter
-    sweep or SLA optimization.
+    Supports both aggregated (IFB) and disaggregated serving estimation.
 
     This is the programmatic equivalent of:
         aiconfigurator cli estimate --model-path ... --system ... --batch-size ...
@@ -441,49 +521,59 @@ def cli_estimate(
     Args:
         model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
         system_name: System name (GPU type), e.g., 'h200_sxm', 'h100_sxm'.
+        mode: Estimation mode — 'agg' (default) or 'disagg'.
         backend_name: Backend name ('trtllm', 'sglang', 'vllm'). Default is 'trtllm'.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation
             ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
         isl: Input sequence length. Default is 1024.
         osl: Output sequence length. Default is 1024.
-        batch_size: Batch size (max concurrent requests). Default is 128.
-        ctx_tokens: Context tokens budget for IFB scheduling.
+        batch_size: Batch size (max concurrent requests, used for agg mode). Default is 128.
+        ctx_tokens: Context tokens budget for IFB scheduling (agg mode only).
             Default is None, which uses ``isl`` as the budget.
-        tp_size: Tensor parallelism size. Default is 1.
+        tp_size: Tensor parallelism size. Default is 1. Also serves as fallback for
+            prefill/decode TP when their specific args are omitted.
         pp_size: Pipeline parallelism size. Default is 1.
         attention_dp_size: Attention data parallelism size. Default is 1.
         moe_tp_size: MoE tensor parallelism size. Default is None (auto).
         moe_ep_size: MoE expert parallelism size. Default is None (auto).
-        gemm_quant_mode: GEMM quantization mode (e.g., 'fp8', 'float16', 'int8_wo').
-            Default is None (auto-inferred from model config).
-        kvcache_quant_mode: KV cache quantization mode (e.g., 'fp8', 'float16').
-            Default is None (auto-inferred from model config).
-        fmha_quant_mode: FMHA quantization mode (e.g., 'fp8', 'float16').
-            Default is None (auto-inferred from model config).
-        moe_quant_mode: MoE quantization mode (e.g., 'fp8', 'float16', 'fp8_block').
-            Default is None (auto-inferred from model config).
-        comm_quant_mode: Communication quantization mode (e.g., 'fp8', 'half').
-            Default is None (auto-inferred, defaults to 'half').
+        gemm_quant_mode: GEMM quantization mode. Default is None (auto-inferred).
+        kvcache_quant_mode: KV cache quantization mode. Default is None (auto-inferred).
+        fmha_quant_mode: FMHA quantization mode. Default is None (auto-inferred).
+        moe_quant_mode: MoE quantization mode. Default is None (auto-inferred).
+        comm_quant_mode: Communication quantization mode. Default is None (auto-inferred).
+        decode_system_name: System for disagg decode workers. Defaults to ``system_name``.
+        prefill_tp_size: Prefill TP size (disagg). Defaults to ``tp_size``.
+        prefill_pp_size: Prefill PP size (disagg). Defaults to ``pp_size``.
+        prefill_attention_dp_size: Prefill attention DP size (disagg). Defaults to ``attention_dp_size``.
+        prefill_moe_tp_size: Prefill MoE TP size (disagg). Defaults to ``moe_tp_size``.
+        prefill_moe_ep_size: Prefill MoE EP size (disagg). Defaults to ``moe_ep_size``.
+        prefill_batch_size: Prefill batch size (disagg). Required when mode='disagg'.
+        prefill_num_workers: Number of prefill workers (disagg). Required when mode='disagg'.
+        decode_tp_size: Decode TP size (disagg). Defaults to ``tp_size``.
+        decode_pp_size: Decode PP size (disagg). Defaults to ``pp_size``.
+        decode_attention_dp_size: Decode attention DP size (disagg). Defaults to ``attention_dp_size``.
+        decode_moe_tp_size: Decode MoE TP size (disagg). Defaults to ``moe_tp_size``.
+        decode_moe_ep_size: Decode MoE EP size (disagg). Defaults to ``moe_ep_size``.
+        decode_batch_size: Decode batch size (disagg). Required when mode='disagg'.
+        decode_num_workers: Number of decode workers (disagg). Required when mode='disagg'.
         systems_paths: Comma-separated systems search paths. Use 'default' for built-in.
 
     Returns:
-        EstimateResult with ttft, tpot, power_w, and the full raw result dict.
+        EstimateResult with ttft, tpot, power_w, mode, and the full raw result dict.
 
-    Example:
+    Example (agg):
+        >>> result = cli_estimate("Qwen/Qwen3-32B", "h100_sxm", batch_size=64, isl=2048, osl=512, tp_size=2)
+
+    Example (disagg):
         >>> result = cli_estimate(
-        ...     model_path="Qwen/Qwen3-32B",
-        ...     system_name="h100_sxm",
-        ...     batch_size=64,
-        ...     isl=2048,
-        ...     osl=512,
-        ...     tp_size=2,
+        ...     "Qwen/Qwen3-32B", "h100_sxm", mode="disagg",
+        ...     isl=2048, osl=512, tp_size=2,
+        ...     prefill_batch_size=4, prefill_num_workers=2,
+        ...     decode_batch_size=64, decode_num_workers=2,
         ... )
-        >>> print(f"TTFT: {result.ttft:.2f}ms, TPOT: {result.tpot:.2f}ms, Power: {result.power_w:.1f}W")
     """
     from aiconfigurator.sdk.backends.factory import get_backend
-    from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
-    from aiconfigurator.sdk.inference_session import InferenceSession
     from aiconfigurator.sdk.models import get_model
     from aiconfigurator.sdk.perf_database import (
         get_database,
@@ -493,9 +583,6 @@ def cli_estimate(
 
     if systems_paths is not None:
         set_systems_paths(systems_paths)
-
-    if ctx_tokens is None:
-        ctx_tokens = isl
 
     # Resolve backend version
     resolved_version = backend_version
@@ -507,64 +594,142 @@ def cli_estimate(
                 "Check --systems-paths or available databases."
             )
 
-    # Default moe_tp_size/moe_ep_size to match attention parallelism width
-    if moe_tp_size is None and moe_ep_size is None:
-        moe_tp_size = tp_size
-        moe_ep_size = attention_dp_size
-    elif moe_tp_size is None:
-        moe_tp_size = tp_size * attention_dp_size // moe_ep_size
-    elif moe_ep_size is None:
-        moe_ep_size = tp_size * attention_dp_size // moe_tp_size
+    def _load_database(sys_name: str):
+        db = get_database(sys_name, backend_name, resolved_version)
+        if db is None:
+            raise ValueError(
+                f"Failed to load perf database for system={sys_name}, "
+                f"backend={backend_name}, version={resolved_version}."
+            )
+        if database_mode != "SILICON":
+            from aiconfigurator.sdk.common import DatabaseMode
 
-    # Validate MoE parallelism width matches attention parallelism width
-    attn_width = tp_size * attention_dp_size
-    moe_width = moe_tp_size * moe_ep_size
-    if attn_width != moe_width:
-        raise ValueError(
-            f"Parallelism width mismatch: tp_size({tp_size}) * attention_dp_size({attention_dp_size}) = {attn_width}, "
-            f"but moe_tp_size({moe_tp_size}) * moe_ep_size({moe_ep_size}) = {moe_width}. "
-            f"These must be equal. Adjust --moe-tp-size/--moe-ep-size or --tp-size/--attention-dp-size."
+            db.set_default_database_mode(DatabaseMode[database_mode])
+        return db
+
+    if mode == "agg":
+        return _run_agg_estimate(
+            model_path=model_path,
+            system_name=system_name,
+            backend_name=backend_name,
+            resolved_version=resolved_version,
+            isl=isl,
+            osl=osl,
+            batch_size=batch_size,
+            ctx_tokens=ctx_tokens if ctx_tokens is not None else isl,
+            tp_size=tp_size,
+            pp_size=pp_size,
+            attention_dp_size=attention_dp_size,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            gemm_quant_mode=gemm_quant_mode,
+            kvcache_quant_mode=kvcache_quant_mode,
+            fmha_quant_mode=fmha_quant_mode,
+            moe_quant_mode=moe_quant_mode,
+            comm_quant_mode=comm_quant_mode,
+            load_database=_load_database,
+            get_backend=get_backend,
+            get_model=get_model,
         )
+    elif mode == "disagg":
+        # Validate required disagg params
+        for name, val in [
+            ("prefill_batch_size", prefill_batch_size),
+            ("prefill_num_workers", prefill_num_workers),
+            ("decode_batch_size", decode_batch_size),
+            ("decode_num_workers", decode_num_workers),
+        ]:
+            if val is None:
+                raise ValueError(f"{name} is required for disagg mode.")
 
-    # Build model config — quant defaults are auto-applied inside get_model for any None fields
-    from aiconfigurator.sdk.common import (
-        CommQuantMode,
-        FMHAQuantMode,
-        GEMMQuantMode,
-        KVCacheQuantMode,
-        MoEQuantMode,
-    )
+        return _run_disagg_estimate(
+            model_path=model_path,
+            system_name=system_name,
+            decode_system_name=decode_system_name or system_name,
+            backend_name=backend_name,
+            resolved_version=resolved_version,
+            isl=isl,
+            osl=osl,
+            # Prefill config (fall back to shared args)
+            prefill_tp_size=prefill_tp_size if prefill_tp_size is not None else tp_size,
+            prefill_pp_size=prefill_pp_size if prefill_pp_size is not None else pp_size,
+            prefill_attention_dp_size=prefill_attention_dp_size
+            if prefill_attention_dp_size is not None
+            else attention_dp_size,
+            prefill_moe_tp_size=prefill_moe_tp_size if prefill_moe_tp_size is not None else moe_tp_size,
+            prefill_moe_ep_size=prefill_moe_ep_size if prefill_moe_ep_size is not None else moe_ep_size,
+            prefill_batch_size=prefill_batch_size,
+            prefill_num_workers=prefill_num_workers,
+            # Decode config (fall back to shared args)
+            decode_tp_size=decode_tp_size if decode_tp_size is not None else tp_size,
+            decode_pp_size=decode_pp_size if decode_pp_size is not None else pp_size,
+            decode_attention_dp_size=decode_attention_dp_size
+            if decode_attention_dp_size is not None
+            else attention_dp_size,
+            decode_moe_tp_size=decode_moe_tp_size if decode_moe_tp_size is not None else moe_tp_size,
+            decode_moe_ep_size=decode_moe_ep_size if decode_moe_ep_size is not None else moe_ep_size,
+            decode_batch_size=decode_batch_size,
+            decode_num_workers=decode_num_workers,
+            # Shared quant
+            gemm_quant_mode=gemm_quant_mode,
+            kvcache_quant_mode=kvcache_quant_mode,
+            fmha_quant_mode=fmha_quant_mode,
+            moe_quant_mode=moe_quant_mode,
+            comm_quant_mode=comm_quant_mode,
+            load_database=_load_database,
+            get_backend=get_backend,
+            get_model=get_model,
+        )
+    else:
+        raise ValueError(f"Unsupported estimate mode: {mode!r}. Use 'agg' or 'disagg'.")
 
-    model_config = ModelConfig(
-        tp_size=tp_size,
-        pp_size=pp_size,
-        attention_dp_size=attention_dp_size,
-        moe_tp_size=moe_tp_size,
-        moe_ep_size=moe_ep_size,
-        gemm_quant_mode=GEMMQuantMode[gemm_quant_mode] if gemm_quant_mode else None,
-        kvcache_quant_mode=KVCacheQuantMode[kvcache_quant_mode] if kvcache_quant_mode else None,
-        fmha_quant_mode=FMHAQuantMode[fmha_quant_mode] if fmha_quant_mode else None,
-        moe_quant_mode=MoEQuantMode[moe_quant_mode] if moe_quant_mode else None,
-        comm_quant_mode=CommQuantMode[comm_quant_mode] if comm_quant_mode else None,
-    )
 
-    runtime_config = RuntimeConfig(
-        isl=isl,
-        osl=osl,
-        batch_size=batch_size,
+def _run_agg_estimate(
+    *,
+    model_path,
+    system_name,
+    backend_name,
+    resolved_version,
+    isl,
+    osl,
+    batch_size,
+    ctx_tokens,
+    tp_size,
+    pp_size,
+    attention_dp_size,
+    moe_tp_size,
+    moe_ep_size,
+    gemm_quant_mode,
+    kvcache_quant_mode,
+    fmha_quant_mode,
+    moe_quant_mode,
+    comm_quant_mode,
+    load_database,
+    get_backend,
+    get_model,
+) -> EstimateResult:
+    """Run aggregated (IFB) estimation."""
+    from aiconfigurator.sdk.config import RuntimeConfig
+    from aiconfigurator.sdk.inference_session import InferenceSession
+
+    moe_tp_size, moe_ep_size = _resolve_moe_parallelism(tp_size, attention_dp_size, moe_tp_size, moe_ep_size)
+
+    model_config = _build_model_config(
+        tp_size,
+        pp_size,
+        attention_dp_size,
+        moe_tp_size,
+        moe_ep_size,
+        gemm_quant_mode,
+        kvcache_quant_mode,
+        fmha_quant_mode,
+        moe_quant_mode,
+        comm_quant_mode,
     )
+    runtime_config = RuntimeConfig(isl=isl, osl=osl, batch_size=batch_size)
 
     model = get_model(model_path, model_config, backend_name)
-    database = get_database(system_name, backend_name, resolved_version)
-    if database is None:
-        raise ValueError(
-            f"Failed to load perf database for system={system_name}, "
-            f"backend={backend_name}, version={resolved_version}."
-        )
-    if database_mode != "SILICON":
-        from aiconfigurator.sdk.common import DatabaseMode
-
-        database.set_default_database_mode(DatabaseMode[database_mode])
+    database = load_database(system_name)
     backend = get_backend(backend_name)
     session = InferenceSession(model, database, backend)
     summary = session.run_agg(runtime_config, ctx_tokens=ctx_tokens)
@@ -588,6 +753,131 @@ def cli_estimate(
         backend_name=backend_name,
         backend_version=resolved_version,
         raw=result_dict,
+        mode="agg",
+        per_ops_data=summary.get_per_ops_data(),
+    )
+
+
+def _run_disagg_estimate(
+    *,
+    model_path,
+    system_name,
+    decode_system_name,
+    backend_name,
+    resolved_version,
+    isl,
+    osl,
+    prefill_tp_size,
+    prefill_pp_size,
+    prefill_attention_dp_size,
+    prefill_moe_tp_size,
+    prefill_moe_ep_size,
+    prefill_batch_size,
+    prefill_num_workers,
+    decode_tp_size,
+    decode_pp_size,
+    decode_attention_dp_size,
+    decode_moe_tp_size,
+    decode_moe_ep_size,
+    decode_batch_size,
+    decode_num_workers,
+    gemm_quant_mode,
+    kvcache_quant_mode,
+    fmha_quant_mode,
+    moe_quant_mode,
+    comm_quant_mode,
+    load_database,
+    get_backend,
+    get_model,
+) -> EstimateResult:
+    """Run disaggregated estimation."""
+    from aiconfigurator.sdk.config import RuntimeConfig
+    from aiconfigurator.sdk.inference_session import DisaggInferenceSession
+
+    # Resolve MoE parallelism for prefill and decode separately
+    p_moe_tp, p_moe_ep = _resolve_moe_parallelism(
+        prefill_tp_size,
+        prefill_attention_dp_size,
+        prefill_moe_tp_size,
+        prefill_moe_ep_size,
+    )
+    d_moe_tp, d_moe_ep = _resolve_moe_parallelism(
+        decode_tp_size,
+        decode_attention_dp_size,
+        decode_moe_tp_size,
+        decode_moe_ep_size,
+    )
+
+    prefill_model_config = _build_model_config(
+        prefill_tp_size,
+        prefill_pp_size,
+        prefill_attention_dp_size,
+        p_moe_tp,
+        p_moe_ep,
+        gemm_quant_mode,
+        kvcache_quant_mode,
+        fmha_quant_mode,
+        moe_quant_mode,
+        comm_quant_mode,
+    )
+    decode_model_config = _build_model_config(
+        decode_tp_size,
+        decode_pp_size,
+        decode_attention_dp_size,
+        d_moe_tp,
+        d_moe_ep,
+        gemm_quant_mode,
+        kvcache_quant_mode,
+        fmha_quant_mode,
+        moe_quant_mode,
+        comm_quant_mode,
+    )
+
+    runtime_config = RuntimeConfig(isl=isl, osl=osl)
+
+    prefill_database = load_database(system_name)
+    decode_database = load_database(decode_system_name)
+    prefill_backend = get_backend(backend_name)
+    decode_backend = get_backend(backend_name)
+
+    session = DisaggInferenceSession(
+        prefill_database=prefill_database,
+        prefill_backend=prefill_backend,
+        decode_database=decode_database,
+        decode_backend=decode_backend,
+    )
+
+    summary = session.run_disagg(
+        model_path=model_path,
+        runtime_config=runtime_config,
+        prefill_model_config=prefill_model_config,
+        prefill_batch_size=prefill_batch_size,
+        prefill_num_worker=prefill_num_workers,
+        decode_model_config=decode_model_config,
+        decode_batch_size=decode_batch_size,
+        decode_num_worker=decode_num_workers,
+    )
+
+    result_dict = summary.get_result_dict()
+    if result_dict is None:
+        raise RuntimeError("Disagg estimation produced no results. The configuration may be invalid or OOM.")
+
+    return EstimateResult(
+        ttft=result_dict["ttft"],
+        tpot=result_dict["tpot"],
+        power_w=result_dict.get("power_w", 0.0),
+        isl=isl,
+        osl=osl,
+        batch_size=prefill_batch_size,
+        ctx_tokens=0,
+        tp_size=prefill_tp_size,
+        pp_size=prefill_pp_size,
+        model_path=model_path,
+        system_name=system_name,
+        backend_name=backend_name,
+        backend_version=resolved_version,
+        raw=result_dict,
+        mode="disagg",
         per_ops_data=summary.get_per_ops_data(),
     )
 

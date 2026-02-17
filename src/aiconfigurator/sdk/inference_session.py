@@ -356,6 +356,18 @@ class DisaggInferenceSession:
 
         disagg_summary = InferenceSummary(runtime_config=runtime_config)
         disagg_summary.set_summary_df(disagg_summary_df)
+
+        # Carry per-op latency breakdowns from prefill/decode static runs
+        per_ops_data = {}
+        prefill_ctx_latency = prefill_summary.get_context_latency_dict()
+        if prefill_ctx_latency:
+            per_ops_data["prefill"] = dict(prefill_ctx_latency)
+        decode_gen_latency = decode_summary.get_generation_latency_dict()
+        if decode_gen_latency:
+            per_ops_data["decode"] = dict(decode_gen_latency)
+        if per_ops_data:
+            disagg_summary.set_per_ops_data(per_ops_data)
+
         return disagg_summary
 
     # optimization
