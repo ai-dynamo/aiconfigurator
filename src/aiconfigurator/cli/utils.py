@@ -46,6 +46,8 @@ def process_experiment_result(
               load-match mode so that ``max()`` picks fewest GPUs).
             - pareto_frontier_df: Pareto frontier dataframe.
             - x_axis_col: X-axis column name.
+            - best_latencies: Dict with ``ttft``, ``tpot``, ``request_latency``
+              (and load-match fields when applicable) from the rank-1 config.
     """
     load_match = target_request_rate is not None or target_concurrency is not None
 
@@ -82,9 +84,10 @@ def process_experiment_result(
 
     best_config_df = picking_result["best_config_df"]
     best_throughput = picking_result["best_throughput"]
+    best_latencies = picking_result.get("best_latencies", {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0})
     pareto_frontier_df = picking_result.get("pareto_frontier_df", pd.DataFrame())
 
-    return best_config_df, best_throughput, pareto_frontier_df, x_axis_col
+    return best_config_df, best_throughput, pareto_frontier_df, x_axis_col, best_latencies
 
 
 def _merge_into_top_n(

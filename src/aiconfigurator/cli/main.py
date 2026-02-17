@@ -675,11 +675,12 @@ def _execute_task_configs(
 
     best_configs: dict[str, pd.DataFrame] = {}
     best_throughputs: dict[str, float] = {}
+    best_latencies: dict[str, dict[str, float]] = {}
     pareto_fronts: dict[str, pd.DataFrame | None] = {}
     pareto_x_axis: dict[str, str] = {}
     for name, task_result in results.items():
         task_config = task_configs[name]
-        best_config_df, best_throughput, pareto_frontier_df, x_axis_col = process_experiment_result(
+        best_config_df, best_throughput, pareto_frontier_df, x_axis_col, latencies = process_experiment_result(
             task_config,
             task_result,
             top_n,
@@ -689,6 +690,7 @@ def _execute_task_configs(
         )
         best_configs[name] = best_config_df
         best_throughputs[name] = best_throughput
+        best_latencies[name] = latencies
         pareto_fronts[name] = pareto_frontier_df
         pareto_x_axis[name] = x_axis_col
 
@@ -711,27 +713,6 @@ def _execute_task_configs(
         target_request_rate=target_request_rate,
         target_concurrency=target_concurrency,
     )
-
-    # Build best_latencies from rank-1 config of each experiment
-    best_latencies: dict[str, dict[str, float]] = {}
-    for name, df in best_configs.items():
-        if df is not None and not df.empty:
-            row = df.iloc[0]
-            entry: dict[str, float] = {
-                "ttft": float(row["ttft"]),
-                "tpot": float(row["tpot"]),
-                "request_latency": float(row["request_latency"]),
-            }
-            # Load-match fields (present when target_request_rate/target_concurrency is set)
-            if "replicas_needed" in row.index:
-                entry["replicas_needed"] = int(row["replicas_needed"])
-            if "total_gpus_needed" in row.index:
-                entry["total_gpus_needed"] = int(row["total_gpus_needed"])
-            if "load_served_pct" in row.index:
-                entry["load_served_pct"] = float(row["load_served_pct"])
-            best_latencies[name] = entry
-        else:
-            best_latencies[name] = {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
 
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)

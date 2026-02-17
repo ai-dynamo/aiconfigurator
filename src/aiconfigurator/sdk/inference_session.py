@@ -15,6 +15,7 @@ from aiconfigurator.sdk.picking import (
     _AUTOSCALE_TTFT_CORRECTION_FACTOR,
     _RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
     _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
+    build_disagg_summary_dict,
 )
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
@@ -171,10 +172,6 @@ class DisaggInferenceSession:
         self._prefill_latency_correction_scale = 1.0
         self._decode_latency_correction_scale = 1.0
 
-        # See picking.py for rationale
-        self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR = _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR
-        self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR = _RATE_MATCHING_DECODE_DEGRADATION_FACTOR
-
     def set_latency_correction_scales(
         self, prefill_latency_correction_scale: float, decode_latency_correction_scale: float
     ):
@@ -183,30 +180,6 @@ class DisaggInferenceSession:
         """
         self._prefill_latency_correction_scale = prefill_latency_correction_scale
         self._decode_latency_correction_scale = decode_latency_correction_scale
-
-    def _get_disagg_summary_dict(
-        self,
-        prefill_summary_dict: dict,
-        prefill_num_worker: int,
-        decode_summary_dict: dict,
-        decode_num_worker: int,
-    ) -> dict:
-        """
-        Get the disagg summary as a dict based on prefill and decode summary dicts.
-
-        Delegates to :func:`aiconfigurator.sdk.picking.build_disagg_summary_dict`
-        passing this session's degradation factors.
-        """
-        from aiconfigurator.sdk.picking import build_disagg_summary_dict
-
-        return build_disagg_summary_dict(
-            prefill_summary_dict=prefill_summary_dict,
-            prefill_num_worker=prefill_num_worker,
-            decode_summary_dict=decode_summary_dict,
-            decode_num_worker=decode_num_worker,
-            prefill_degradation_factor=self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
-            decode_degradation_factor=self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
-        )
 
     def _get_disagg_summary_df(
         self,
@@ -221,7 +194,14 @@ class DisaggInferenceSession:
         prefill_dict = prefill_summary_df.iloc[0].to_dict()
         decode_dict = decode_summary_df.iloc[0].to_dict()
 
-        summary_dict = self._get_disagg_summary_dict(prefill_dict, prefill_num_worker, decode_dict, decode_num_worker)
+        summary_dict = build_disagg_summary_dict(
+            prefill_dict,
+            prefill_num_worker,
+            decode_dict,
+            decode_num_worker,
+            prefill_degradation_factor=_RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
+            decode_degradation_factor=_RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
+        )
         return pd.DataFrame([summary_dict], columns=common.ColumnsDisagg).round(3)
 
     def run_disagg(
@@ -608,8 +588,13 @@ class DisaggInferenceSession:
                         if prefill_num_worker == -1 or decode_num_worker == -1:
                             continue
 
-                        disagg_dict = self._get_disagg_summary_dict(
-                            prefill_worker, prefill_num_worker, decode_worker, decode_num_worker
+                        disagg_dict = build_disagg_summary_dict(
+                            prefill_worker,
+                            prefill_num_worker,
+                            decode_worker,
+                            decode_num_worker,
+                            prefill_degradation_factor=rate_matching_prefill_degradation_factor,
+                            decode_degradation_factor=rate_matching_decode_degradation_factor,
                         )
                         category_results.append(disagg_dict)
 
@@ -720,8 +705,8 @@ class DisaggInferenceSession:
                 decode_summary_df=decode_summary_df,
                 return_top_k=5,
                 num_gpu_list=num_gpu_list,
-                rate_matching_prefill_degradation_factor=self._RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
-                rate_matching_decode_degradation_factor=self._RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
+                rate_matching_prefill_degradation_factor=_RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
+                rate_matching_decode_degradation_factor=_RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
                 require_same_tp=require_same_tp,
             )
             if filtered_disagg_summary_df is not None:
