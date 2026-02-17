@@ -65,7 +65,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
     setup_distributed(device)
 
-    dtype = torch.bfloat16
+    dtype = torch.float16
     torch.set_default_dtype(dtype)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
