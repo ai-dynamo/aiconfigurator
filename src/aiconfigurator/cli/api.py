@@ -421,6 +421,11 @@ def cli_estimate(
     attention_dp_size: int = 1,
     moe_tp_size: int | None = None,
     moe_ep_size: int | None = None,
+    gemm_quant_mode: str | None = None,
+    kvcache_quant_mode: str | None = None,
+    fmha_quant_mode: str | None = None,
+    moe_quant_mode: str | None = None,
+    comm_quant_mode: str | None = None,
     systems_paths: str | None = None,
 ) -> EstimateResult:
     """
@@ -450,6 +455,16 @@ def cli_estimate(
         attention_dp_size: Attention data parallelism size. Default is 1.
         moe_tp_size: MoE tensor parallelism size. Default is None (auto).
         moe_ep_size: MoE expert parallelism size. Default is None (auto).
+        gemm_quant_mode: GEMM quantization mode (e.g., 'fp8', 'float16', 'int8_wo').
+            Default is None (auto-inferred from model config).
+        kvcache_quant_mode: KV cache quantization mode (e.g., 'fp8', 'float16').
+            Default is None (auto-inferred from model config).
+        fmha_quant_mode: FMHA quantization mode (e.g., 'fp8', 'float16').
+            Default is None (auto-inferred from model config).
+        moe_quant_mode: MoE quantization mode (e.g., 'fp8', 'float16', 'fp8_block').
+            Default is None (auto-inferred from model config).
+        comm_quant_mode: Communication quantization mode (e.g., 'fp8', 'half').
+            Default is None (auto-inferred, defaults to 'half').
         systems_paths: Comma-separated systems search paths. Use 'default' for built-in.
 
     Returns:
@@ -511,13 +526,26 @@ def cli_estimate(
             f"These must be equal. Adjust --moe-tp-size/--moe-ep-size or --tp-size/--attention-dp-size."
         )
 
-    # Build model config — quant defaults are auto-applied inside get_model
+    # Build model config — quant defaults are auto-applied inside get_model for any None fields
+    from aiconfigurator.sdk.common import (
+        CommQuantMode,
+        FMHAQuantMode,
+        GEMMQuantMode,
+        KVCacheQuantMode,
+        MoEQuantMode,
+    )
+
     model_config = ModelConfig(
         tp_size=tp_size,
         pp_size=pp_size,
         attention_dp_size=attention_dp_size,
         moe_tp_size=moe_tp_size,
         moe_ep_size=moe_ep_size,
+        gemm_quant_mode=GEMMQuantMode[gemm_quant_mode] if gemm_quant_mode else None,
+        kvcache_quant_mode=KVCacheQuantMode[kvcache_quant_mode] if kvcache_quant_mode else None,
+        fmha_quant_mode=FMHAQuantMode[fmha_quant_mode] if fmha_quant_mode else None,
+        moe_quant_mode=MoEQuantMode[moe_quant_mode] if moe_quant_mode else None,
+        comm_quant_mode=CommQuantMode[comm_quant_mode] if comm_quant_mode else None,
     )
 
     runtime_config = RuntimeConfig(

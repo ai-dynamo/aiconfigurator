@@ -232,6 +232,41 @@ def _add_estimate_mode_arguments(parser):
     parser.add_argument("--moe-tp-size", type=int, default=None, help="MoE tensor parallelism size.")
     parser.add_argument("--moe-ep-size", type=int, default=None, help="MoE expert parallelism size.")
     parser.add_argument(
+        "--gemm-quant-mode",
+        choices=[m.name for m in common.GEMMQuantMode],
+        type=str,
+        default=None,
+        help="GEMM quantization mode. Auto-inferred from model config if omitted.",
+    )
+    parser.add_argument(
+        "--kvcache-quant-mode",
+        choices=[m.name for m in common.KVCacheQuantMode],
+        type=str,
+        default=None,
+        help="KV cache quantization mode. Auto-inferred from model config if omitted.",
+    )
+    parser.add_argument(
+        "--fmha-quant-mode",
+        choices=[m.name for m in common.FMHAQuantMode],
+        type=str,
+        default=None,
+        help="FMHA quantization mode. Auto-inferred from model config if omitted.",
+    )
+    parser.add_argument(
+        "--moe-quant-mode",
+        choices=[m.name for m in common.MoEQuantMode],
+        type=str,
+        default=None,
+        help="MoE quantization mode. Auto-inferred from model config if omitted.",
+    )
+    parser.add_argument(
+        "--comm-quant-mode",
+        choices=[m.name for m in common.CommQuantMode],
+        type=str,
+        default=None,
+        help="Communication quantization mode. Auto-inferred (default: half) if omitted.",
+    )
+    parser.add_argument(
         "--database-mode",
         choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
         type=str,
@@ -946,6 +981,11 @@ def _run_estimate_mode(args):
         attention_dp_size=args.attention_dp_size,
         moe_tp_size=args.moe_tp_size,
         moe_ep_size=args.moe_ep_size,
+        gemm_quant_mode=args.gemm_quant_mode,
+        kvcache_quant_mode=args.kvcache_quant_mode,
+        fmha_quant_mode=args.fmha_quant_mode,
+        moe_quant_mode=args.moe_quant_mode,
+        comm_quant_mode=args.comm_quant_mode,
     )
 
     print("\n" + "=" * 60)
