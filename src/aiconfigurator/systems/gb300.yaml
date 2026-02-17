@@ -14,7 +14,7 @@ gpu:
   fp8_tc_flops: 5000000000000000 # 5PFLOPS
   fp4_tc_flops: 15000000000000000 # 15PFLOPS
   power: 1400  # Watt
-  sm_version: 100
+  sm_version: 103
 
 node:
   num_gpus_per_node: 4  # 4 GPUs per physical node (2 Grace CPUs x 2 GPUs each)
