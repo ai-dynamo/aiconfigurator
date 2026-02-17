@@ -13,12 +13,12 @@ import os
 import pytest
 import yaml
 
-from aiconfigurator.cli.main import build_default_task_configs, _execute_task_configs
+from aiconfigurator.cli.main import _execute_task_configs, build_default_task_configs
 from aiconfigurator.generator.api import generate_backend_artifacts
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
-pytestmark = [pytest.mark.e2e, pytest.mark.build]
+pytestmark = pytest.mark.integration
 
 MODEL = "Qwen/Qwen3-32B"
 SYSTEM = "h200_sxm"
@@ -71,11 +71,19 @@ class TestDefaultPicking:
     def test_agg_vs_disagg(self, tmp_path):
         """8 GPUs, compare agg vs disagg under relaxed SLA."""
         task_configs = build_default_task_configs(
-            model_path=MODEL, total_gpus=8, system=SYSTEM, backend=BACKEND,
-            isl=4000, osl=1000, ttft=2000, tpot=50,
+            model_path=MODEL,
+            total_gpus=8,
+            system=SYSTEM,
+            backend=BACKEND,
+            isl=4000,
+            osl=1000,
+            ttft=2000,
+            tpot=50,
         )
         chosen, best_configs, _, _, best_latencies = _execute_task_configs(
-            task_configs, mode="default", top_n=3,
+            task_configs,
+            mode="default",
+            top_n=3,
         )
         assert chosen in ("agg", "disagg")
         assert best_latencies[chosen]["ttft"] > 0
@@ -88,13 +96,19 @@ class TestDefaultPicking:
         """Default mode with request_latency as the SLA constraint."""
         request_latency = 35000
         task_configs = build_default_task_configs(
-            model_path=MODEL, total_gpus=8, system=SYSTEM, backend=BACKEND,
-            isl=4000, osl=1000,
+            model_path=MODEL,
+            total_gpus=8,
+            system=SYSTEM,
+            backend=BACKEND,
+            isl=4000,
+            osl=1000,
             ttft=request_latency,
             request_latency=request_latency,
         )
         chosen, best_configs, _, _, best_latencies = _execute_task_configs(
-            task_configs, mode="default", top_n=3,
+            task_configs,
+            mode="default",
+            top_n=3,
         )
         assert chosen in ("agg", "disagg")
 
@@ -108,11 +122,19 @@ class TestLoadMatchPicking:
     def test_by_request_rate(self, tmp_path):
         """Find min GPUs for target_request_rate=5.0 req/s."""
         task_configs = build_default_task_configs(
-            model_path=MODEL, total_gpus=64, system=SYSTEM, backend=BACKEND,
-            isl=4000, osl=1000, ttft=2000, tpot=50,
+            model_path=MODEL,
+            total_gpus=64,
+            system=SYSTEM,
+            backend=BACKEND,
+            isl=4000,
+            osl=1000,
+            ttft=2000,
+            tpot=50,
         )
         chosen, best_configs, _, _, best_latencies = _execute_task_configs(
-            task_configs, mode="default", top_n=3,
+            task_configs,
+            mode="default",
+            top_n=3,
             target_request_rate=5.0,
             max_total_gpus=64,
         )
@@ -129,11 +151,19 @@ class TestLoadMatchPicking:
     def test_by_concurrency(self, tmp_path):
         """Find min GPUs for target_concurrency=50."""
         task_configs = build_default_task_configs(
-            model_path=MODEL, total_gpus=64, system=SYSTEM, backend=BACKEND,
-            isl=4000, osl=1000, ttft=2000, tpot=50,
+            model_path=MODEL,
+            total_gpus=64,
+            system=SYSTEM,
+            backend=BACKEND,
+            isl=4000,
+            osl=1000,
+            ttft=2000,
+            tpot=50,
         )
         chosen, best_configs, _, _, best_latencies = _execute_task_configs(
-            task_configs, mode="default", top_n=3,
+            task_configs,
+            mode="default",
+            top_n=3,
             target_concurrency=50,
             max_total_gpus=64,
         )
@@ -153,9 +183,14 @@ class TestAutoscalePicking:
         """Relaxed SLA: should find valid P and D engines."""
         task = TaskConfig(
             serving_mode="disagg",
-            model_path=MODEL, system_name=SYSTEM, backend_name=BACKEND,
+            model_path=MODEL,
+            system_name=SYSTEM,
+            backend_name=BACKEND,
             total_gpus=8,
-            isl=4000, osl=1000, ttft=2000, tpot=50,
+            isl=4000,
+            osl=1000,
+            ttft=2000,
+            tpot=50,
         )
         runner = TaskRunner()
         result = runner.run(task, autoscale=True)
@@ -175,9 +210,14 @@ class TestAutoscalePicking:
         """Tight SLA: should still return closest-match configs (not empty)."""
         task = TaskConfig(
             serving_mode="disagg",
-            model_path=MODEL, system_name=SYSTEM, backend_name=BACKEND,
+            model_path=MODEL,
+            system_name=SYSTEM,
+            backend_name=BACKEND,
             total_gpus=8,
-            isl=4000, osl=1000, ttft=600, tpot=25,
+            isl=4000,
+            osl=1000,
+            ttft=600,
+            tpot=25,
         )
         runner = TaskRunner()
         result = runner.run(task, autoscale=True)
