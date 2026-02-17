@@ -25,7 +25,7 @@ import torch.distributed as dist
 # Add parent directory to path for helper imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from helper import log_perf
+from helper import benchmark_with_power, log_perf
 
 
 class TokenDistribution(Enum):
@@ -132,8 +132,8 @@ def get_default_test_cases(ep_size: int) -> list[AlltoallTestCase]:
 
     for num_tokens in token_counts:
         for hidden_size, num_experts, top_k in model_configs:
-            # Skip if num_experts < ep_size
-            if num_experts < ep_size:
+            # Skip if num_experts < ep_size or not evenly divisible
+            if num_experts < ep_size or num_experts % ep_size != 0:
                 continue
 
             for moe_dtype in DEFAULT_MOE_DTYPES:
@@ -255,29 +255,56 @@ def generate_balanced_expert_ids(
     num_tokens: int,
     num_experts: int,
     top_k: int,
+    ep_size: int,
     device: torch.device,
 ) -> torch.Tensor:
     """
     Generate balanced expert IDs for testing.
 
-    Each token selects top_k experts, distributed evenly across all experts.
+    Distributes tokens across ranks and experts in a round-robin pattern that
+    achieves balance at three levels:
+      1. Rank-level: each rank receives the same number of token-expert pairs.
+      2. Expert-level: each expert within a rank receives equal tokens.
+
+    Example (ep_size=16, top_k=8):
+      - 2 rank groups: [0-7] and [8-15]
+      - token 0 → ranks [0-7],  expert offset 0
+      - token 1 → ranks [8-15], expert offset 0
+      - token 2 → ranks [0-7],  expert offset 1
+      - token 3 → ranks [8-15], expert offset 1
+      - ...
 
     Args:
         num_tokens: Number of tokens
         num_experts: Total number of experts
         top_k: Number of experts per token
+        ep_size: Expert Parallelism size (number of GPUs)
         device: Target device
 
     Returns:
         Expert IDs tensor of shape [num_tokens, top_k]
     """
+    experts_per_rank = num_experts // ep_size
     expert_ids = torch.zeros((num_tokens, top_k), dtype=torch.int32, device=device)
 
-    for i in range(num_tokens):
-        # Distribute tokens evenly across experts
-        base_expert = (i * top_k) % num_experts
-        for k in range(top_k):
-            expert_ids[i, k] = (base_expert + k) % num_experts
+    if ep_size >= top_k:
+        # WideEP: group ranks into sets of top_k consecutive ranks
+        num_rank_groups = ep_size // top_k
+        for i in range(num_tokens):
+            group = i % num_rank_groups
+            expert_offset = (i // num_rank_groups) % experts_per_rank
+            for k in range(top_k):
+                target_rank = group * top_k + k
+                expert_ids[i, k] = target_rank * experts_per_rank + expert_offset
+    else:
+        # Small EP (ep_size < top_k): each token sends to all ranks,
+        # multiple experts per rank per token
+        for i in range(num_tokens):
+            for k in range(top_k):
+                target_rank = k % ep_size
+                intra_rank_idx = k // ep_size
+                expert_offset = (i + intra_rank_idx) % experts_per_rank
+                expert_ids[i, k] = target_rank * experts_per_rank + expert_offset
 
     return expert_ids
 
@@ -301,19 +328,24 @@ def generate_expert_ids(
             test_case.num_tokens,
             test_case.num_experts,
             test_case.top_k,
+            test_case.ep_size,
             device,
         )
     else:
         raise ValueError(f"Unknown distribution: {test_case.distribution}")
 
 
-def get_dispatch_data_size_bytes(num_tokens: int, hidden_size: int, moe_dtype: MoEDtype) -> int:
+def get_dispatch_data_size_bytes(num_tokens: int, hidden_size: int, top_k: int, moe_dtype: MoEDtype) -> int:
     """
-    Calculate data size in bytes for AlltoAll dispatch based on MoE dtype.
+    Calculate total AlltoAll dispatch data volume per rank.
+
+    Each token is sent to top_k experts (potentially on different ranks),
+    so the actual data volume is top_k times the per-token data size.
 
     Args:
         num_tokens: Number of tokens
         hidden_size: Hidden dimension size
+        top_k: Number of experts per token
         moe_dtype: MoE data type
 
     Returns:
@@ -321,35 +353,36 @@ def get_dispatch_data_size_bytes(num_tokens: int, hidden_size: int, moe_dtype: M
     """
     if moe_dtype == MoEDtype.FLOAT16:
         # bfloat16: 2 bytes per element
-        return num_tokens * hidden_size * 2
+        per_token = hidden_size * 2
     elif moe_dtype == MoEDtype.FP8:
         # fp8: 1 byte per element
-        return num_tokens * hidden_size * 1
+        per_token = hidden_size * 1
     elif moe_dtype == MoEDtype.NVFP4:
         # NVFP4: 0.5 bytes per element (2 values packed in 1 byte) + scale factors
         # Scale factors: 1 scale per 16 elements, stored as uint8
-        data_bytes = num_tokens * (hidden_size // 2)  # packed FP4
-        sf_bytes = num_tokens * (hidden_size // 16)  # scale factors
-        return data_bytes + sf_bytes
+        per_token = (hidden_size // 2) + (hidden_size // 16)
     else:
-        return num_tokens * hidden_size * 2
+        per_token = hidden_size * 2
+    return num_tokens * top_k * per_token
 
 
-def get_combine_data_size_bytes(num_tokens: int, hidden_size: int) -> int:
+def get_combine_data_size_bytes(num_tokens: int, hidden_size: int, top_k: int) -> int:
     """
-    Calculate data size in bytes for AlltoAll combine.
+    Calculate total AlltoAll combine data volume per rank.
 
+    Combine gathers expert outputs back; each token has top_k results to collect.
     Combine always uses bfloat16 (expert output precision).
 
     Args:
         num_tokens: Number of tokens
         hidden_size: Hidden dimension size
+        top_k: Number of experts per token
 
     Returns:
         Data size in bytes
     """
     # Combine always uses bfloat16: 2 bytes per element
-    return num_tokens * hidden_size * 2
+    return num_tokens * top_k * hidden_size * 2
 
 
 def calculate_bandwidth_gbps(data_size_bytes: int, latency_ms: float) -> float:
@@ -470,11 +503,25 @@ def benchmark_nvlink_two_sided_alltoall(
     all_rank_num_tokens = [num_tokens] * ep_size
     all_rank_max_num_tokens = max(all_rank_num_tokens)
 
-    # Collect timing results
-    all_prepare_times = []
-    all_dispatch_times = []
-    all_combine_times = []
-    all_combine_low_precision_times = []
+    # ============================================================================
+    # Helper: benchmark using shared CUDA Graph infrastructure from helper.py.
+    # Reuses benchmark_with_power which handles graph capture, fallback to eager
+    # execution, warmup, timing, and optional power monitoring.
+    # ============================================================================
+    def _benchmark_op(func, label):
+        """Benchmark a single operation using shared benchmark_with_power."""
+        with benchmark_with_power(
+            device=device,
+            kernel_func=func,
+            num_warmups=num_warmup,
+            num_runs=num_iterations,
+            allow_graph_fail=True,
+        ) as results:
+            latency = results["latency_ms"]
+            if ep_rank == 0:
+                mode = "CUDA Graph" if results["used_cuda_graph"] else "Eager"
+                print(f"    [{label}] {mode} timing: {latency:.3f} ms")
+        return latency
 
     # ============================================================================
     # Benchmark: alltoall_prepare
@@ -492,21 +539,10 @@ def benchmark_nvlink_two_sided_alltoall(
             top_k,
         )
 
-    # Warmup
-    for _ in range(num_warmup):
-        alltoall_info, _ = prepare_func()
+    prepare_latency = _benchmark_op(prepare_func, "prepare")
+    # Run prepare once more to get valid alltoall_info for dispatch/combine
+    alltoall_info, _ = prepare_func()
     torch.cuda.synchronize()
-
-    # Benchmark prepare
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    for _ in range(num_iterations):
-        torch.cuda.synchronize()
-        start_event.record()
-        alltoall_info, _ = prepare_func()
-        end_event.record()
-        end_event.synchronize()
-        all_prepare_times.append(start_event.elapsed_time(end_event))
 
     # ============================================================================
     # Benchmark: alltoall_dispatch (All-to-All send)
@@ -520,19 +556,10 @@ def benchmark_nvlink_two_sided_alltoall(
             ep_size,
         )
 
-    # Warmup
-    for _ in range(num_warmup):
-        dispatched = dispatch_func()
+    dispatch_latency = _benchmark_op(dispatch_func, "dispatch")
+    # Run dispatch once more to get valid output for combine
+    dispatched = dispatch_func()
     torch.cuda.synchronize()
-
-    # Benchmark dispatch
-    for _ in range(num_iterations):
-        torch.cuda.synchronize()
-        start_event.record()
-        dispatched = dispatch_func()
-        end_event.record()
-        end_event.synchronize()
-        all_dispatch_times.append(start_event.elapsed_time(end_event))
 
     # Get dispatched hidden states for combine benchmark
     recv_hidden_states = dispatched[0]
@@ -556,26 +583,13 @@ def benchmark_nvlink_two_sided_alltoall(
             do_reduce=False,
         )
 
-    # Warmup
-    for _ in range(num_warmup):
-        combine_func()
-    torch.cuda.synchronize()
-
-    # Benchmark combine
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    for _ in range(num_iterations):
-        torch.cuda.synchronize()
-        start_event.record()
-        combine_func()
-        end_event.record()
-        end_event.synchronize()
-        all_combine_times.append(start_event.elapsed_time(end_event))
+    combine_latency = _benchmark_op(combine_func, "combine")
 
     # ============================================================================
     # Benchmark: alltoall_combine_low_precision (do_reduce=False, use_low_precision_combine=True)
     # Only benchmark for NVFP4 dtype as low_precision_combine is most relevant for it
     # ============================================================================
+    combine_low_precision_latency = 0.0
     if moe_dtype == MoEDtype.NVFP4:
 
         def combine_low_precision_func():
@@ -591,40 +605,13 @@ def benchmark_nvlink_two_sided_alltoall(
                 do_reduce=False,
             )
 
-        # Warmup
-        for _ in range(num_warmup):
-            try:
-                combine_low_precision_func()
-            except Exception:
-                # Low precision combine may not be supported
-                pass
-        torch.cuda.synchronize()
-
-        # Benchmark combine with low precision
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        for _ in range(num_iterations):
+        try:
+            # Test if low precision combine is supported
+            combine_low_precision_func()
             torch.cuda.synchronize()
-            start_event.record()
-            try:
-                combine_low_precision_func()
-                end_event.record()
-                end_event.synchronize()
-                all_combine_low_precision_times.append(start_event.elapsed_time(end_event))
-            except Exception:
-                # Low precision combine may fail for certain configurations
-                end_event.record()
-                end_event.synchronize()
-
-    # Calculate average latencies
-    prepare_latency = sum(all_prepare_times) / len(all_prepare_times) if all_prepare_times else 0.0
-    dispatch_latency = sum(all_dispatch_times) / len(all_dispatch_times) if all_dispatch_times else 0.0
-    combine_latency = sum(all_combine_times) / len(all_combine_times) if all_combine_times else 0.0
-    combine_low_precision_latency = (
-        sum(all_combine_low_precision_times) / len(all_combine_low_precision_times)
-        if all_combine_low_precision_times
-        else 0.0
-    )
+            combine_low_precision_latency = _benchmark_op(combine_low_precision_func, "combine_lp")
+        except Exception:
+            combine_low_precision_latency = 0.0
 
     return AlltoallBenchmarkResult(
         prepare_latency_ms=prepare_latency,
@@ -730,14 +717,14 @@ def run_benchmark(
 
     # Run benchmarks
     for idx, test_case in enumerate(test_cases):
+        if rank == 0:
+            print(f"[{idx + 1}/{len(test_cases)}] {test_case.description}")
+
+        # Synchronize before benchmark
+        if world_size > 1:
+            dist.barrier()
+
         try:
-            if rank == 0:
-                print(f"[{idx + 1}/{len(test_cases)}] {test_case.description}")
-
-            # Synchronize before benchmark
-            if world_size > 1:
-                dist.barrier()
-
             result = benchmark_nvlink_two_sided_alltoall(
                 test_case,
                 mapping,
@@ -750,9 +737,11 @@ def run_benchmark(
             if rank == 0:
                 # Calculate data sizes and bandwidths
                 dispatch_data_size = get_dispatch_data_size_bytes(
-                    test_case.num_tokens, test_case.hidden_size, test_case.moe_dtype
+                    test_case.num_tokens, test_case.hidden_size, test_case.top_k, test_case.moe_dtype
                 )
-                combine_data_size = get_combine_data_size_bytes(test_case.num_tokens, test_case.hidden_size)
+                combine_data_size = get_combine_data_size_bytes(
+                    test_case.num_tokens, test_case.hidden_size, test_case.top_k
+                )
 
                 dispatch_bw = calculate_bandwidth_gbps(dispatch_data_size, result.dispatch_latency_ms)
                 combine_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_latency_ms)
@@ -809,7 +798,6 @@ def run_benchmark(
         except Exception as e:
             if rank == 0:
                 print(f"  ERROR: {e}")
-            continue
 
     if rank == 0:
         print(f"\n{'=' * 70}")
