@@ -5,6 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # aiconfigurator
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/aiconfigurator)
+
 In disaggregated serving, configuring an effective deployment is challenging: you need to decide how many prefill and decode
 workers to run, and the parallelism for each worker. Combined with SLA targets for TTFT (Time to First Token) and
 TPOT (Time per Output Token), optimizing throughput at a given latency becomes even more complex.
