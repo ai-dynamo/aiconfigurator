@@ -900,13 +900,17 @@ def compute_eplb(
 def _assign_experts_from_counts(num_tokens_per_expert, num_tokens, topk):
     """Vectorized expert-to-token assignment from per-expert counts.
 
-    Replaces the O(num_tokens) Python loop that called torch.topk per token.
     Uses column-major fill: sort experts descending by count, repeat each expert
     by its count into a flat array, then reshape as (topk, num_tokens).T.
-    This ensures no row has duplicate experts because high-demand experts fill
-    consecutive rows across different columns.
 
-    ~200-300x faster than the original loop for large token counts.
+    Example: num_tokens = 5, topk = 2, num_tokens_per_expert = [4, 1, 3, 2]
+    Then expert_ids_flat = [0, 0, 0, 0, 2, 2, 2, 3, 3, 1]
+    and h_selected = [[0, 2],
+                      [0, 2],
+                      [0, 3],
+                      [0, 3],
+                      [2, 1]]
+    Notice that there are no duplicate experts in any row.
     """
     import numpy as np
     import torch

@@ -125,7 +125,9 @@ def get_moe_test_cases():
                 continue
 
             # fp8_block requires hidden_size divisible by block group_size (128)
-            if moe_type == "fp8_block" and (common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0):
+            if moe_type == "fp8_block" and (
+                common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
+            ):
                 continue
 
             # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0

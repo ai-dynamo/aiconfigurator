@@ -83,7 +83,9 @@ def get_moe_test_cases():
 
         for moe_type, num_tokens in itertools.product(moe_list, num_tokens_list):
             # fp8_block requires hidden_size divisible by block group_size (128)
-            if moe_type == "fp8_block" and (common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0):
+            if moe_type == "fp8_block" and (
+                common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
+            ):
                 continue
 
             # nvfp4 fp4_quantize requires weight dims divisible by 16 after TP sharding
