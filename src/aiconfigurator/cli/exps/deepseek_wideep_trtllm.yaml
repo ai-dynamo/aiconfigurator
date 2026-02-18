@@ -19,7 +19,7 @@ gb200_wideep_agg:
   enable_wideep: true # enable wide ep for prefill/decode
   isl: 4000 # input sequence length
   osl: 1000 # output sequence length
-  ttft: 300.0  # Target TTFT in ms
+  ttft: 1000.0  # Target TTFT in ms
   tpot: 40.0   # Target TPOT in ms
   config:
     nextn: 1 # mtp 1
@@ -35,7 +35,7 @@ gb200_wideep_eplb_agg:
   enable_eplb: true
   isl: 4000
   osl: 1000
-  ttft: 300.0
+  ttft: 1000.0
   tpot: 40.0
   config:
     nextn: 1
@@ -52,7 +52,7 @@ gb200_wideep_eplb_slots288_agg:
   wideep_num_slots: 288
   isl: 4000
   osl: 1000
-  ttft: 300.0
+  ttft: 1000.0
   tpot: 40.0
   config:
     nextn: 1
@@ -67,7 +67,7 @@ gb200_wideep_disagg:
   enable_wideep: true # enable wide ep for prefill/decode
   isl: 4000 # input sequence length
   osl: 1000 # output sequence length
-  ttft: 300.0  # Target TTFT in ms
+  ttft: 1000.0  # Target TTFT in ms
   tpot: 40.0   # Target TPOT in ms
   config:
     nextn: 1 # mtp 1
@@ -85,7 +85,7 @@ gb200_wideep_eplb_disagg:
   enable_eplb: true # enable EPLB
   isl: 4000
   osl: 1000
-  ttft: 300.0
+  ttft: 1000.0
   tpot: 40.0
   config:
     nextn: 1
@@ -104,7 +104,7 @@ gb200_wideep_eplb_slots288_disagg:
   wideep_num_slots: 288 # EPLB with 288 slots (> 256 experts, redundant mode)
   isl: 4000
   osl: 1000
-  ttft: 300.0
+  ttft: 1000.0
   tpot: 40.0
   config:
     nextn: 1
