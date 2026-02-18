@@ -99,8 +99,8 @@ def get_moe_test_cases():
             moe_list += [
                 # "w4afp8", FIXME: trtllm 1.2 has bugs for w4afp8
                 "fp8_block",
-                "w4a16_mxfp4",
             ]
+        moe_list += ["w4a16_mxfp4"]
 
     if get_sm_version() >= 100:
         moe_list += ["nvfp4"]
