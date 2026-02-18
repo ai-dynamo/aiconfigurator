@@ -57,10 +57,10 @@
 
 # docs
 /docs @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
-/docs/add_a_new_model.md @Arsene12358 @tianhaox @jasonqinzhou
-/docs/advanced_tunning.md @tianhaox @jasonqinzhou @Arsene12358
-/docs/cli_user_guide.md @tianhaox @jasonqinzhou @Arsene12358
-/docs/dynamo_deployment_guide.md @Ethan-ES @davilu-nvidia @tianhaox @jasonqinzhou @Arsene12358
+/docs/add_a_new_model.md @Arsene12358 @tianhaox @jasonqinzhou @simone-chen
+/docs/advanced_tunning.md @tianhaox @jasonqinzhou @Arsene12358 @simone-chen
+/docs/cli_user_guide.md @tianhaox @jasonqinzhou @Arsene12358 @simone-chen
+/docs/dynamo_deployment_guide.md @Ethan-ES @davilu-nvidia @tianhaox @jasonqinzhou @Arsene12358 @simone-chen
 
 # docker
 /docker @jasonqinzhou @anish-shanbhag @ilyasher @ai-dynamo/Devops @tianhaox @Arsene12358 @simone-chen @harrilee
@@ -70,11 +70,11 @@
 
 # tools
 /tools @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
-/tools/generator_validator @Ethan-ES @jasonqinzhou @Arsene12358
-/tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358
-/tools/sanity_check @tianhaox @YijiaZhao @jasonqinzhou @Arsene12358
-/tools/simple_sdk_demo @tianhaox @jasonqinzhou @Arsene12358
-/tools/support_matrix/generate_support_matrix.py @Harrilee @tianhaox @jasonqinzhou @Arsene12358
+/tools/generator_validator @Ethan-ES @jasonqinzhou @Arsene12358 @simone-chen
+/tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358 @simone-chen
+/tools/sanity_check @tianhaox @YijiaZhao @jasonqinzhou @Arsene12358 @simone-chen
+/tools/simple_sdk_demo @tianhaox @jasonqinzhou @Arsene12358 @simone-chen
+/tools/support_matrix/generate_support_matrix.py @Harrilee @tianhaox @jasonqinzhou @Arsene12358 @simone-chen
 
 # misc
 /ATTRIBUTIONS.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @harrilee @ilyasher
