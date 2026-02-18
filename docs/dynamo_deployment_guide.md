@@ -112,7 +112,7 @@ results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 
 Here, `agg_config.yaml`, `prefill_config.yaml`, and `decode_config.yaml` are TRTLLM engine configuration files, and `run_x.sh` are the executable scripts. `k8s_deploy.yaml` is for deployment in k8s. In this guide, we're not using k8s.
 
-For multi-node setups, there will be multiple `run_x.sh` scripts (one per node), each invoking the same TRTLLM engine config file. By default, `run_0.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, please specify `--generator-set ServiceConfig.head_node_ip=<IP>` to indicate the IP address of node0.
+For multi-node setups, there will be multiple `run_x.sh` scripts (one per node), each invoking the same TRTLLM engine config file. By default, `run_0.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, set the head node IP via **`--generator-set ServiceConfig.head_node_ip=<IP>`** (there is no standalone `--head_node_ip` CLI flag).
 
 Typically, the command is:
 
@@ -347,7 +347,7 @@ curl http://localhost:8000/v1/chat/completions \
 ### 4.1 Generate Configuration for Two Nodes
 
 ```bash
-# For head_node_ip, ensure that the IP passed here corresponds to node 0, etcd and NATS.io have already been started on node 0 in Step 2
+# ServiceConfig.head_node_ip (set via --generator-set below) must be the IP of node 0; etcd and NATS.io must already be running on node 0 (Step 2)
 aiconfigurator cli default \
   --system h200_sxm \
   --isl 5000 \
