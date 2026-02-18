@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Create Charts for System Data Changes
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'src/aiconfigurator/systems/**'
+  workflow_dispatch:  # Allow manual triggering for testing
+
+jobs:
+  create-charts:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history to detect changes
+    
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+    
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          # Ensure import_ipynb is available
+          pip install import-ipynb
+    
+      - name: Check for changes in systems directory
+        id: check-changes
+        run: |
+          # For PR events, check diff against base branch
+          # For workflow_dispatch (manual), check if any systems files exist
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_REF="${{ github.event.pull_request.base.ref }}"
+            if git diff --name-only origin/${BASE_REF}...HEAD | grep -q "^src/aiconfigurator/systems/"; then
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+            else
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            # For manual dispatch, check if systems directory has any perf files
+            if find src/aiconfigurator/systems -name "*_perf.txt" -type f | head -1 | grep -q .; then
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+            else
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+    
+      - name: Create charts
+        if: steps.check-changes.outputs.has_changes == 'true'
+        id: create-charts
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          if [ -z "$PR_NUMBER" ]; then
+            # Manual dispatch - use current branch
+            BASE_REF="${BASE_REF:-main}"
+            python tools/sanity_check/create_charts.py --base-ref origin/${BASE_REF} --head-ref HEAD --output-dir charts_output
+          else
+            python tools/sanity_check/create_charts.py --base-ref origin/${BASE_REF} --head-ref HEAD --output-dir charts_output
+          fi
+        continue-on-error: true
+    
+      - name: Upload charts as artifacts
+        if: steps.check-changes.outputs.has_changes == 'true' && steps.create-charts.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-charts
+          path: charts_output/*.png
+          retention-days: 30
+    
+      - name: Get artifact download URL
+        if: steps.check-changes.outputs.has_changes == 'true' && steps.create-charts.outcome == 'success'
+        id: artifacts
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Get the workflow run artifacts
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            
+            const performanceChartsArtifact = artifacts.data.artifacts.find(
+              a => a.name === 'performance-charts'
+            );
+            
+            if (!performanceChartsArtifact) {
+              console.log('No performance-charts artifact found');
+              core.setOutput('artifact_id', '');
+              core.setOutput('workflow_run_url', '');
+              return;
+            }
+            
+            console.log(`Found artifact: ${performanceChartsArtifact.name} (ID: ${performanceChartsArtifact.id})`);
+            
+            // Workflow run page URL where artifacts can be viewed/downloaded
+            const workflowRunUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            
+            core.setOutput('artifact_id', performanceChartsArtifact.id.toString());
+            core.setOutput('workflow_run_url', workflowRunUrl);
+    
+      - name: Post comment with charts
+        if: steps.check-changes.outputs.has_changes == 'true' && steps.create-charts.outcome == 'success' && steps.artifacts.outputs.artifact_id != ''
+        uses: actions/github-script@v7
+        env:
+          CHARTS_DIR: charts_output
+          WORKFLOW_RUN_URL: ${{ steps.artifacts.outputs.workflow_run_url }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            const chartsDir = process.env.CHARTS_DIR || 'charts_output';
+            const workflowRunUrl = process.env.WORKFLOW_RUN_URL;
+            
+            // Only post comment for PR events
+            if (context.eventName !== 'pull_request') {
+              console.log('Not a PR event, skipping comment. Charts are available in artifacts.');
+              return;
+            }
+            
+            if (!fs.existsSync(chartsDir)) {
+              console.log('No charts directory found');
+              return;
+            }
+            
+            const files = fs.readdirSync(chartsDir);
+            const pngFiles = files.filter(f => f.endsWith('.png')).sort();
+            
+            if (pngFiles.length === 0) {
+              console.log('No PNG files found');
+              return;
+            }
+            
+            // Create simple comment with download link
+            let comment = '## 📊 Performance Data Visualizations\n\n';
+            comment += 'Charts have been generated for the new performance data in this PR.\n\n';
+            comment += `**Generated ${pngFiles.length} chart(s) from performance data files.**\n\n`;
+            comment += `📥 [Download all charts from workflow artifacts](${workflowRunUrl})\n\n`;
+            comment += '> **Note:** GitHub artifacts are provided as ZIP files. Download the artifact to view individual chart images.\n';
+            
+            // Find existing comment from this bot
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.data.find(
+              c => c.user.type === 'Bot' && c.body.includes('Performance Data Visualizations')
+            );
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment,
+              });
+              console.log('Updated existing comment');
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment,
+              });
+              console.log('Created new comment');
+            }
