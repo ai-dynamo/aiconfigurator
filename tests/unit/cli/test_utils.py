@@ -44,7 +44,7 @@ class TestProcessExperimentResult:
 
         result = {"pareto_df": pareto_df}
 
-        best_config_df, best_throughput, pareto_frontier_df, x_axis_col = process_experiment_result(
+        best_config_df, best_throughput, pareto_frontier_df, x_axis_col, _ = process_experiment_result(
             mock_task_config, result, top_n=2
         )
 
@@ -77,7 +77,7 @@ class TestProcessExperimentResult:
 
         result = {"pareto_df": pareto_df}
 
-        best_config_df, best_throughput, pareto_frontier_df, x_axis_col = process_experiment_result(
+        best_config_df, best_throughput, pareto_frontier_df, x_axis_col, _ = process_experiment_result(
             mock_task_config, result, top_n=3
         )
 
@@ -97,7 +97,7 @@ class TestProcessExperimentResult:
 
         result = {"pareto_df": pd.DataFrame()}
 
-        best_config_df, best_throughput, pareto_frontier_df, x_axis_col = process_experiment_result(
+        best_config_df, best_throughput, pareto_frontier_df, x_axis_col, _ = process_experiment_result(
             mock_task_config, result, top_n=5
         )
 
@@ -117,7 +117,7 @@ class TestProcessExperimentResult:
 
         result = {"pareto_df": None}
 
-        best_config_df, best_throughput, pareto_frontier_df, x_axis_col = process_experiment_result(
+        best_config_df, best_throughput, pareto_frontier_df, x_axis_col, _ = process_experiment_result(
             mock_task_config, result, top_n=5
         )
 
@@ -146,7 +146,7 @@ class TestProcessExperimentResult:
 
         result = {"pareto_df": pareto_df}
 
-        best_config_df, _, _, _ = process_experiment_result(mock_task_config, result, top_n=5)
+        best_config_df, _, _, _, _ = process_experiment_result(mock_task_config, result, top_n=5)
 
         # Verify that results are returned (group_by should work correctly)
         assert not best_config_df.empty
@@ -172,7 +172,7 @@ class TestProcessExperimentResult:
 
         result = {"pareto_df": pareto_df}
 
-        best_config_df, _, _, _ = process_experiment_result(mock_task_config, result, top_n=3)
+        best_config_df, _, _, _, _ = process_experiment_result(mock_task_config, result, top_n=3)
 
         # Should return at most 3 configs
         assert len(best_config_df) <= 3
@@ -197,7 +197,7 @@ class TestProcessExperimentResult:
 
         result = {"pareto_df": pareto_df}
 
-        best_config_df, _, _, _ = process_experiment_result(mock_task_config, result, top_n=5)
+        best_config_df, _, _, _, _ = process_experiment_result(mock_task_config, result, top_n=5)
 
         # Verify tokens/s/gpu_cluster is computed
         assert "tokens/s/gpu_cluster" in best_config_df.columns

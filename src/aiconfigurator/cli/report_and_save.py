@@ -259,8 +259,11 @@ def log_final_summary(
     mode: str,
     pareto_x_axis: dict[str, str] | None = None,
     top_n: int = 5,
+    target_request_rate: float | None = None,
+    target_concurrency: float | None = None,
 ):
     """Log final summary of configuration results"""
+    load_match = target_request_rate is not None or target_concurrency is not None
 
     # Consolidate and format results into a summary box for clear presentation
     summary_box = []
@@ -288,7 +291,27 @@ def log_final_summary(
         f"    Model: {chosen_task_config.config.model_path} (is_moe: {chosen_task_config.config.is_moe})"
     )
     summary_box.append(f"    Total GPUs: {chosen_task_config.total_gpus}")
-    if mode == "default":
+
+    if load_match:
+        # Load-match mode summary
+        if target_request_rate is not None:
+            summary_box.append(f"    Target Load: {target_request_rate} req/s")
+        else:
+            summary_box.append(f"    Target Concurrency: {target_concurrency}")
+        # Show GPUs needed for each mode (and load_served_pct if capacity exceeded)
+        for exp_name, df in best_configs.items():
+            if df is not None and not df.empty and "total_gpus_needed" in df.columns:
+                row = df.iloc[0]
+                gpus = int(row["total_gpus_needed"])
+                replicas = int(row["replicas_needed"])
+                line = f"    {exp_name} GPUs needed: {gpus} (replicas: {replicas})"
+                if "load_served_pct" in df.columns:
+                    pct = float(row["load_served_pct"])
+                    if pct < 100.0:
+                        line += f" -- WARNING: only {pct:.1f}% of target load can be served"
+                summary_box.append(line)
+        summary_box.append(f"    Best Experiment Chosen: \033[1m{chosen_exp}\033[0m")
+    elif mode == "default":
         agg_value = best_throughputs.get("agg", 0.0)
         disagg_value = best_throughputs.get("disagg", 0.0)
         if agg_value > 0 and disagg_value > 0:
@@ -419,6 +442,7 @@ def save_results(
     save_dir: str,
     generated_backend_version: str | None = None,
     backend: str | None = None,
+    use_dynamo_generator: bool = False,
 ):
     """Save the results to a directory."""
 
@@ -682,6 +706,7 @@ def save_results(
                             backend=row_task_config.backend_name,
                             backend_version=row_backend_version,
                             output_dir=top_config_dir,
+                            use_dynamo_generator=use_dynamo_generator,
                         )
                     except Exception as exc:
                         logger.warning(

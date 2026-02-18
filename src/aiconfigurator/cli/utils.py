@@ -6,80 +6,88 @@ import logging
 import pandas as pd
 
 from aiconfigurator.sdk.pareto_analysis import (
-    get_best_configs_under_request_latency_constraint,
-    get_best_configs_under_tpot_constraint,
     get_pareto_front,
 )
+from aiconfigurator.sdk.picking import pick_default, pick_load_match
 from aiconfigurator.sdk.task import TaskConfig
 
 logger = logging.getLogger(__name__)
 
 
-def process_experiment_result(task_config: TaskConfig, result: dict[str, pd.DataFrame], top_n: int = 5) -> tuple:
+def process_experiment_result(
+    task_config: TaskConfig,
+    result: dict[str, pd.DataFrame],
+    top_n: int = 5,
+    target_request_rate: float | None = None,
+    target_concurrency: float | None = None,
+    max_total_gpus: int | None = None,
+) -> tuple:
     """
     Process the result of a single experiment.
+
+    This is a thin wrapper around :func:`picking.pick_default` and
+    :func:`picking.pick_load_match` that extracts parameters from the
+    ``TaskConfig``.
+
     Args:
         task_config: TaskConfig object for the experiment.
         result: Dictionary containing the pareto_df result of the experiment.
         top_n: Number of top configurations to return.
+        target_request_rate: If set, activates load-match picking (minimize
+            GPUs for the given request rate in req/s).
+        target_concurrency: If set, activates load-match picking (minimize
+            GPUs for the given number of concurrent requests).
+        max_total_gpus: Optional upper bound on total GPUs for load-match.
+
     Returns:
         tuple:
             - best_config_df: Best configuration dataframe.
-            - best_throughput: Best throughput.
+            - best_throughput: Best throughput (or 1/total_gpus_needed for
+              load-match mode so that ``max()`` picks fewest GPUs).
             - pareto_frontier_df: Pareto frontier dataframe.
             - x_axis_col: X-axis column name.
+            - best_latencies: Dict with ``ttft``, ``tpot``, ``request_latency``
+              (and load-match fields when applicable) from the rank-1 config.
     """
+    load_match = target_request_rate is not None or target_concurrency is not None
+
     pareto_df = result["pareto_df"]
     runtime_cfg = task_config.config.runtime_config
     target_tpot = runtime_cfg.tpot
     target_request_latency = runtime_cfg.request_latency
     use_request_latency = target_request_latency is not None and target_request_latency > 0
     total_gpus = getattr(task_config, "total_gpus", None) or 0
+    serving_mode = task_config.serving_mode
 
-    # Compute tokens/s/gpu_cluster for pareto_df
-    if pareto_df is not None and not pareto_df.empty:
-        pareto_df["tokens/s/gpu_cluster"] = (
-            pareto_df["tokens/s/gpu"]
-            * (total_gpus // pareto_df["num_total_gpus"])
-            * pareto_df["num_total_gpus"]
-            / total_gpus
-        )
-        x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
-        pareto_frontier_df = get_pareto_front(
-            pareto_df,
-            x_axis_col,
-            "tokens/s/gpu_cluster",
-            maximize_x=not use_request_latency,
-            maximize_y=True,
+    x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
+
+    if load_match:
+        picking_result = pick_load_match(
+            pareto_df=pareto_df,
+            serving_mode=serving_mode,
+            target_tpot=target_tpot,
+            target_request_latency=target_request_latency,
+            target_request_rate=target_request_rate,
+            target_concurrency=target_concurrency,
+            max_total_gpus=max_total_gpus,
+            top_n=top_n,
         )
     else:
-        pareto_frontier_df = pd.DataFrame()
-        x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
-
-    group_by_key = "(d)parallel" if task_config.serving_mode == "disagg" else "parallel"
-    if use_request_latency:
-        best_config_df = get_best_configs_under_request_latency_constraint(
-            total_gpus=total_gpus,
+        picking_result = pick_default(
             pareto_df=pareto_df,
+            total_gpus=total_gpus,
+            serving_mode=serving_mode,
+            target_tpot=target_tpot,
             target_request_latency=target_request_latency,
             top_n=top_n,
-            group_by=group_by_key,
-        )
-    else:
-        best_config_df = get_best_configs_under_tpot_constraint(  # based on all data points
-            total_gpus=total_gpus,
-            pareto_df=pareto_df,
-            target_tpot=target_tpot,
-            top_n=top_n,
-            group_by=group_by_key,
         )
 
-    if not best_config_df.empty:
-        best_throughput = best_config_df["tokens/s/gpu_cluster"].values[0]
-    else:
-        best_throughput = 0.0
+    best_config_df = picking_result["best_config_df"]
+    best_throughput = picking_result["best_throughput"]
+    best_latencies = picking_result.get("best_latencies", {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0})
+    pareto_frontier_df = picking_result.get("pareto_frontier_df", pd.DataFrame())
 
-    return best_config_df, best_throughput, pareto_frontier_df, x_axis_col
+    return best_config_df, best_throughput, pareto_frontier_df, x_axis_col, best_latencies
 
 
 def _merge_into_top_n(

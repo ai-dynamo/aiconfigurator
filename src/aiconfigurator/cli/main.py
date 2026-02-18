@@ -807,15 +807,23 @@ def _execute_task_configs(
     task_configs: dict[str, TaskConfig],
     mode: str,
     top_n: int = 5,
-) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float]]:
+    target_request_rate: float | None = None,
+    target_concurrency: float | None = None,
+    max_total_gpus: int | None = None,
+) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float], dict[str, dict[str, float]]]:
     """
-    Execute task configs and return the chosen experiment, best configs, results, and best
-    throughputs.
+    Execute task configs and return the chosen experiment, best configs, results, best
+    throughputs, and estimated latencies.
 
     Args:
         task_configs: Dictionary mapping experiment names to TaskConfig objects to execute.
         mode: Execution mode ('default' or 'exp').
         top_n: Number of top configurations to return for each experiment.
+        target_request_rate: If set, activates load-match picking (minimize
+            GPUs for the given request rate in req/s).
+        target_concurrency: If set, activates load-match picking (minimize
+            GPUs for the given number of concurrent requests).
+        max_total_gpus: Optional upper bound on total GPUs for load-match.
 
     Returns:
         tuple:
@@ -823,6 +831,9 @@ def _execute_task_configs(
             - Dictionary of best config DataFrames per experiment (or per serving mode if merged).
             - Dictionary of Pareto frontier DataFrames per experiment (or mode).
             - Dictionary of best throughput values per experiment (or mode).
+            - Dictionary of estimated latencies per experiment. Each value is a
+              dict with keys ``"ttft"``, ``"tpot"``, ``"request_latency"``
+              extracted from the rank-1 config.
     """
     results: dict[str, dict[str, pd.DataFrame]] = {}
     start_time = time.time()
@@ -851,15 +862,22 @@ def _execute_task_configs(
 
     best_configs: dict[str, pd.DataFrame] = {}
     best_throughputs: dict[str, float] = {}
+    best_latencies: dict[str, dict[str, float]] = {}
     pareto_fronts: dict[str, pd.DataFrame | None] = {}
     pareto_x_axis: dict[str, str] = {}
     for name, task_result in results.items():
         task_config = task_configs[name]
-        best_config_df, best_throughput, pareto_frontier_df, x_axis_col = process_experiment_result(
-            task_config, task_result, top_n
+        best_config_df, best_throughput, pareto_frontier_df, x_axis_col, latencies = process_experiment_result(
+            task_config,
+            task_result,
+            top_n,
+            target_request_rate=target_request_rate,
+            target_concurrency=target_concurrency,
+            max_total_gpus=max_total_gpus,
         )
         best_configs[name] = best_config_df
         best_throughputs[name] = best_throughput
+        best_latencies[name] = latencies
         pareto_fronts[name] = pareto_frontier_df
         pareto_x_axis[name] = x_axis_col
 
@@ -879,12 +897,14 @@ def _execute_task_configs(
         mode=mode,
         pareto_x_axis=pareto_x_axis,
         top_n=top_n,
+        target_request_rate=target_request_rate,
+        target_concurrency=target_concurrency,
     )
 
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
 
-    return chosen_exp, best_configs, pareto_fronts, best_throughputs
+    return chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies
 
 
 def _run_generate_mode(args):
@@ -1199,7 +1219,7 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
-    _, best_configs, pareto_fronts, _ = _execute_task_configs(
+    _, best_configs, pareto_fronts, _, _ = _execute_task_configs(
         task_configs,
         args.mode,
         top_n=args.top_n,
