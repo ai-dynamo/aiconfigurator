@@ -191,14 +191,20 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
         10240,
         12288,
     ]
-    nk_list_ext = [16384, 65536]  # for coverage and interp purpose
+    nk_list_ext = [
+        12800,  # Qwen3-32B: down_proj @ TP=2 (K=12800), gate+up @ TP=4
+        16384,
+        25600,  # Qwen3-32B: intermediate_size (gate+up @ TP=2, down_proj @ TP=1)
+        51200,  # Qwen3-32B: gate+up @ TP=1 (2*25600)
+        65536,
+    ]
 
     test_cases = []
     # x_list_orig+add+ext  <==> nk_list+ext
     for x in sorted(x_list, reverse=True):
         for n in sorted(nk_list + nk_list_ext, reverse=True):
             for k in sorted(nk_list + nk_list_ext, reverse=True):
-                if n * k == 65536 * 65536:
+                if n * k > 65536 * 16384:
                     continue
                 test_cases.append(GemmCommonTestCase(x=x, n=n, k=k))
 
