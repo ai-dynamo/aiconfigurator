@@ -15,7 +15,7 @@ from aiconfigurator.sdk.picking import (
     _AUTOSCALE_TTFT_CORRECTION_FACTOR,
     _RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
     _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
-    build_disagg_summary_dict,
+    _build_disagg_summary_dict,
 )
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
@@ -194,7 +194,7 @@ class DisaggInferenceSession:
         prefill_dict = prefill_summary_df.iloc[0].to_dict()
         decode_dict = decode_summary_df.iloc[0].to_dict()
 
-        summary_dict = build_disagg_summary_dict(
+        summary_dict = _build_disagg_summary_dict(
             prefill_dict,
             prefill_num_worker,
             decode_dict,
@@ -588,7 +588,7 @@ class DisaggInferenceSession:
                         if prefill_num_worker == -1 or decode_num_worker == -1:
                             continue
 
-                        disagg_dict = build_disagg_summary_dict(
+                        disagg_dict = _build_disagg_summary_dict(
                             prefill_worker,
                             prefill_num_worker,
                             decode_worker,
