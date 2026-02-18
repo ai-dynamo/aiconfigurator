@@ -55,6 +55,12 @@ def get_moe_test_cases():
             continue
 
         for moe_type in moe_list:
+            # fp8_block requires hidden_size divisible by block group_size (128)
+            if moe_type == "fp8_block" and (
+                common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
+            ):
+                continue
+
             test_cases.append(
                 [
                     moe_type,
