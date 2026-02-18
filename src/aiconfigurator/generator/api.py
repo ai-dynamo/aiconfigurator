@@ -263,6 +263,7 @@ def generate_backend_artifacts(
     templates_dir: Optional[str] = None,
     output_dir: Optional[str] = None,
     backend_version: Optional[str] = None,
+    use_dynamo_generator: bool = False,
 ) -> dict[str, str]:
     """
     Generate complete backend artifacts including run scripts, configs, and k8s YAML.
@@ -273,12 +274,20 @@ def generate_backend_artifacts(
         templates_dir: Optional directory containing templates
         output_dir: Optional directory to save generated files
         backend_version: Optional version string for version-specific template selection
+        use_dynamo_generator: If True, use the Dynamo DPP config generator
+            for the k8s deploy YAML instead of Jinja2 templates.
 
     Returns:
         Dictionary mapping artifact names to their content
     """
     logger = logging.getLogger(__name__)
-    artifacts = render_backend_templates(params, backend, templates_dir, backend_version)
+    artifacts = render_backend_templates(
+        params,
+        backend,
+        templates_dir,
+        backend_version,
+        use_dynamo_generator=use_dynamo_generator,
+    )
 
     if output_dir:
         params_obj = params.get("params", {})
