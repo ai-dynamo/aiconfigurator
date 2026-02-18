@@ -512,7 +512,7 @@ class GEMMQuantMode(Enum):
     fp8_ootb = QuantMapping(
         1, 2, "fp8_ootb"
     )  # in future, should deprecate this mode as it's specific for trtllm trt backend
-    nvfp4 = QuantMapping(0.5, 4, "nvfp4")  # nvfp4 on blackwell
+    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
 
 
 class MoEQuantMode(Enum):
@@ -525,7 +525,7 @@ class MoEQuantMode(Enum):
     int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
     fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for trtllm torch ds fp8
     w4afp8 = QuantMapping(0.5, 2, "w4afp8")  # specific for trtllm torch ds w4a8
-    nvfp4 = QuantMapping(0.5, 4, "nvfp4")  # nvfp4 on blackwell
+    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
     w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4")  # native data format for gpt oss
 
 

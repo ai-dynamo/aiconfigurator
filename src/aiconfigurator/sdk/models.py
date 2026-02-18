@@ -649,7 +649,7 @@ class LLAMAModel(BaseModel):
         self.generation_ops.extend(
             [
                 ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("generation_add_nrom_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise("generation_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
                     "generation_qkv_gemm",
                     self._num_layers,
@@ -2349,7 +2349,7 @@ class NemotronNas(BaseModel):
                     num_kv_heads_per_gpu = (num_kv_heads + tp_size - 1) // tp_size
                     self._generation_ops.extend(
                         [
-                            ops.ElementWise("generation_add_nrom_1", count, 2 * h, 2 * h, 0.8),
+                            ops.ElementWise("generation_add_norm_1", count, 2 * h, 2 * h, 0.8),
                             ops.GEMM(
                                 "generation_qkv_gemm",
                                 count,
