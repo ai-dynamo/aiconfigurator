@@ -48,7 +48,7 @@ class TestCLIArgumentParsing:
     def test_mode_choices(self, cli_parser):
         """Ensure supported CLI modes are exposed."""
         action = next(action for action in cli_parser._actions if action.dest == "mode")
-        assert set(action.choices.keys()) == {"default", "exp", "generate", "support"}
+        assert set(action.choices.keys()) == {"default", "exp", "generate", "support", "estimate"}
 
     def test_generate_mode_required_args(self, cli_parser):
         """Test that generate mode requires the correct arguments."""

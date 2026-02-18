@@ -80,6 +80,9 @@ class VLLMBackend(BaseBackend):
                 num_genonly_tokens = 1
                 num_mix_steps_for_tpot_calc = 0
 
+            # Per-ops latency collection
+            per_ops_data = {}
+
             # FIXME, fix for DS. DS has different ops for attn in ctx and gen.
             def _get_mix_step_latency(
                 model: BaseModel,
@@ -111,10 +114,12 @@ class VLLMBackend(BaseBackend):
                 energy_wms_dict = summary.get_context_energy_wms_dict()
                 non_attention_latency_ms = 0.0
                 non_attention_energy_wms = 0.0
+                mix_non_attn_ops = {}
                 for layer_name, latency in latency_dict.items():
                     if layer_name != "context_attention":
                         non_attention_latency_ms += latency
                         non_attention_energy_wms += energy_wms_dict.get(layer_name, 0.0)
+                        mix_non_attn_ops[layer_name] = latency
 
                 # second pass to get ctx attn, split full isl over
                 # num_steps(=np.ceil(isl/ctx_tokens))
@@ -149,6 +154,13 @@ class VLLMBackend(BaseBackend):
                     gen_attention_latency_ms = latency_dict["generation_attention"]
                     gen_attention_energy_wms = energy_wms_dict.get("generation_attention", 0.0)
 
+                # Collect per-op breakdown for mix step
+                per_ops_data["mix_step"] = {
+                    **mix_non_attn_ops,
+                    "context_attention (scaled)": ctx_attention_latency_ms,
+                    "generation_attention": gen_attention_latency_ms,
+                }
+
                 # Combine all components (simple addition)
                 total_latency_ms = non_attention_latency_ms + ctx_attention_latency_ms + gen_attention_latency_ms
                 total_energy_wms = non_attention_energy_wms + ctx_attention_energy_wms + gen_attention_energy_wms
@@ -177,9 +189,13 @@ class VLLMBackend(BaseBackend):
                 energy_wms_dict = summary.get_generation_energy_wms_dict()
                 genonly_step_latency_ms = 0.0
                 genonly_step_energy_wms = 0.0
+                genonly_ops = {}
                 for layer_name, latency in latency_dict.items():
                     genonly_step_latency_ms += latency
                     genonly_step_energy_wms += energy_wms_dict.get(layer_name, 0.0)
+                    genonly_ops[layer_name] = latency
+
+                per_ops_data["genonly_step"] = genonly_ops
 
                 return genonly_step_latency_ms, genonly_step_energy_wms
 
@@ -330,6 +346,15 @@ class VLLMBackend(BaseBackend):
             summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])
             summary.set_summary_df(result)
             summary.set_result_dict(result_dict)
+
+            # Store per-ops latency breakdown
+            per_ops_data["scheduling"] = {
+                "num_mix_steps": float(num_mix_steps),
+                "num_genonly_steps": float(num_genonly_steps),
+                "mix_step_latency_ms": float(mix_step_latency_ms),
+                "genonly_step_latency_ms": float(genonly_step_latency_ms),
+            }
+            summary.set_per_ops_data(per_ops_data)
 
             # caching
             self._agg_cache[isl][osl][b][ctx_tokens] = summary
