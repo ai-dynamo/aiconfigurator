@@ -70,7 +70,7 @@ class InferenceSummary:
         # cached result dict for efficient batch operations
         self._result_dict = None
 
-        # per-ops latency breakdown (populated by run_agg when requested)
+        # per-ops latency breakdown (populated by run_agg or run_disagg)
         self._per_ops_data: dict | None = None
 
     def set_memory_and_check_oom(self, memory_dict: dict, mem_capacity: int) -> None:
