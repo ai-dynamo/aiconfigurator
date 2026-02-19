@@ -51,7 +51,7 @@ def create_charts(
     system: str,
     perf_files: list[str],
     output_dir: str,
-    pr_body_file: str,
+    output_md_file: str,
 ):
     new_nccl_perf_collected = False  # FIXME
     database = get_database(system=system, backend=backend, version=backend_version)
@@ -86,11 +86,11 @@ def create_charts(
         ],
     }
 
-    with open(pr_body_file, "a") as f:
-        f.write("### Sanity check plots\n")
+    with open(output_md_file, "a") as f:
+        f.write(f"## Report for system: {system}, backend: {backend}, backend_version: {backend_version}\n")
 
     # Create sanity check plots for each op and save them to the output directory.
-    # Append the plot image URLs to the PR body file.
+    # Append the plot image URLs to the output md file.
     for op, funcs_to_create_charts in op_to_chart_function.items():
         op_perf_file = f"{op}_perf.txt"
         if op_perf_file not in perf_files and not (op == "nccl" and new_nccl_perf_collected):
@@ -109,27 +109,26 @@ def create_charts(
             try:
                 create_chart_func(database)
             except Exception as e:
-                err_msg = f"Error creating chart for {chart_op_name}: ```{e}```"
-                print(err_msg)
-                with open(pr_body_file, "a") as f:
-                    f.write(err_msg + "\n")
-                print(err_msg)
+                # Extract 1-line error summary
+                short_error_str = str(e).split('\n')[0].strip()
+                if len(short_error_str) > 100:
+                    short_error_str = short_error_str[:97] + "..."
+                with open(output_md_file, "a") as f:
+                    f.write(f"- `{chart_op_name}` Error ❌: {short_error_str}\n")
+
+                print(f"Error creating chart for {chart_op_name}: {e}")
                 continue
 
             plt.savefig(os.path.join(output_dir, img_path))
 
-            img_description = f"Sanity check plot for {system}, {backend}:{backend_version}, {chart_op_name}"
-            with open(pr_body_file, "a") as f:
-                f.write(f"#### {img_description}\n")
-                # FIXME: replace with actual URL
-                f.write(f'<img alt="{img_description}" src="https://example.com/{img_path}" />\n')
-                f.write("\n")
+            with open(output_md_file, "a") as f:
+                f.write(f"- `{chart_op_name}` ✅\n")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, default="./charts_output")
-    parser.add_argument("--output-pr-body", type=str, default="./pr_body.md")
+    parser.add_argument("--output-md-file", type=str, default="./comment.md")
     parser.add_argument("--base-ref", type=str, default="origin/main")
     parser.add_argument("--head-ref", type=str, default="HEAD")
     args = parser.parse_args()
@@ -137,8 +136,8 @@ def main():
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    with open(args.output_pr_body, "w") as f:
-        f.write("# Sanity Check Charts and Error Summary\n")
+    with open(args.output_md_file, "w") as f:
+        f.write("# Sanity Check Chart Generation Report\n")
 
     changed_files = get_changed_files(args.base_ref, args.head_ref)
 
@@ -177,8 +176,6 @@ def main():
             continue
 
     for (system, backend, backend_version), perf_files in system_backend_version_to_changed_files.items():
-        with open(args.output_pr_body, "a") as f:
-            f.write(f"## Summary and charts for {system} {backend}:{backend_version}\n")
         try:
             print(f"Creating charts for {system} {backend} {backend_version} with perf files: {perf_files}")
             create_charts(
@@ -187,12 +184,12 @@ def main():
                 system,
                 perf_files,
                 output_dir,
-                args.output_pr_body,
+                args.output_md_file,
             )
         except Exception as e:
             err_msg = f"Error creating charts for {system} {backend} {backend_version}: ```{e}```"
             print(err_msg)
-            with open(args.output_pr_body, "a") as f:
+            with open(args.output_md_file, "a") as f:
                 f.write(err_msg + "\n")
 
 
