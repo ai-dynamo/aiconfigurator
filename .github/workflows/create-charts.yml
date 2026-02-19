@@ -22,7 +22,10 @@ jobs:
         with:
           fetch-depth: 0  # Need full history to detect changes
           lfs: true
-    
+
+      - name: Git LFS Pull
+        run: git lfs pull
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
