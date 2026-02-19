@@ -88,7 +88,7 @@ def create_charts(
     }
 
     with open(output_md_file, "a") as f:
-        f.write(f"### Report for system: {system}, backend: {backend}, backend_version: {backend_version}\n")
+        f.write(f"### Chart Generation Report for system: {system}, backend: {backend}, backend_version: {backend_version}\n")
 
     # Create sanity check plots for each op and save them to the output directory.
     # Append the plot image URLs to the output md file.
