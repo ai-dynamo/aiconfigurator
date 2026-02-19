@@ -158,7 +158,7 @@ def main():
     changed_files = get_changed_files(args.base_ref, args.head_ref)
 
     # Organize changed files by (system, backend, backend_version) so that
-    # they are grouped togather in the output text.
+    # they are grouped together in the output text.
     # map (system, backend, backend_version) -> [changed_file]
     system_backend_version_to_changed_files = defaultdict(list)
 
