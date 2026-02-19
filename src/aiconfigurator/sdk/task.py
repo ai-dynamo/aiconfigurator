@@ -303,7 +303,8 @@ class TaskConfigFactory:
 
     @staticmethod
     def _base_common_layer(ctx: TaskContext) -> dict:
-        nextn = 1 if ctx.model_family == "DEEPSEEK" else 0
+        raw_config = get_model_config_from_model_path(ctx.model_path).get("raw_config", {})
+        nextn = raw_config.get("num_nextn_predict_layers", 0)
         return {
             "serving_mode": ctx.serving_mode,
             "model_path": ctx.model_path,
@@ -487,6 +488,24 @@ class TaskConfigFactory:
                 raise ValueError(f"total_gpus must be greater than 2 for disagg, got {ctx.total_gpus}")
             replica_cfg.max_gpu_per_replica = min(ctx.total_gpus, replica_cfg.get("max_gpu_per_replica"))
             logger.debug("Using max gpu per replica %s", replica_cfg.max_gpu_per_replica)
+
+            # Extend per-worker parallel config lists with powers-of-2 up to total_gpus.
+            # The default search space is [1,2,4,8], which is insufficient for large MoE
+            # models (e.g. Kimi-K2.5 with 384 experts, DeepSeek-V3 with 256 experts) that
+            # require 32+ GPUs per worker to avoid OOM. Only extend lists that already
+            # contain values > 1 (lists pinned to [1] are intentionally single-valued).
+            for worker_cfg in (config.prefill_worker_config, config.decode_worker_config):
+                for key in ("num_gpu_per_worker", "tp_list", "dp_list", "moe_ep_list"):
+                    current = list(getattr(worker_cfg, key, None) or [])
+                    if not current or max(current) <= 1:
+                        continue
+                    v = max(current) * 2
+                    while v <= ctx.total_gpus:
+                        if v not in current:
+                            current.append(v)
+                        v *= 2
+                    setattr(worker_cfg, key, current)
+                    logger.debug("Extended worker %s to %s", key, current)
 
 
 _quants = {
