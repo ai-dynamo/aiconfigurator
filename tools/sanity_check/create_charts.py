@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 from collections import defaultdict
+import textwrap
 
 from aiconfigurator.sdk.perf_database import get_database
 
@@ -87,7 +88,7 @@ def create_charts(
     }
 
     with open(output_md_file, "a") as f:
-        f.write(f"## Report for system: {system}, backend: {backend}, backend_version: {backend_version}\n")
+        f.write(f"### Report for system: {system}, backend: {backend}, backend_version: {backend_version}\n")
 
     # Create sanity check plots for each op and save them to the output directory.
     # Append the plot image URLs to the output md file.
@@ -137,7 +138,17 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     with open(args.output_md_file, "w") as f:
-        f.write("# Sanity Check Chart Generation Report\n")
+        f.write("## Sanity Check Chart Generation Report\n")
+        # github action will insert a link here
+        f.write("download_link_placeholder\n")
+        f.write(textwrap.dedent("""
+            New perf data files were detected in this PR. Please use the link above to
+            download sanity check charts for the new perf data to compare the collected
+            perf data vs SOL (theoretical max performance).
+
+            Below is a report of whether the chart generation was successful for each op.
+            If doesn't validate whether the perf data itself is sane.
+        """))
 
     changed_files = get_changed_files(args.base_ref, args.head_ref)
 

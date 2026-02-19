@@ -75,19 +75,22 @@ jobs:
             
             let comment = fs.readFileSync(prBodyFile, 'utf8');
             
-            // Add artifact download link if charts were successfully generated
+            // Replace download link placeholder if charts were successfully generated
             const chartsDir = 'charts_output';
             if (fs.existsSync(chartsDir)) {
               const files = fs.readdirSync(chartsDir);
               const pngFiles = files.filter(f => f.endsWith('.png'));
               if (pngFiles.length > 0) {
                 const workflowRunUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-                // Insert download link after the first line (title)
-                const lines = comment.split('\n');
-                const title = lines[0];
-                const rest = lines.slice(1).join('\n');
-                comment = `${title}\n\n📥 [Download all charts from workflow artifacts](${workflowRunUrl})\n\n${rest}`;
+                const downloadLink = `📥 [Download all sanity charts from workflow artifacts](${workflowRunUrl})`;
+                comment = comment.replace('download_link_placeholder', downloadLink);
+              } else {
+                // Remove placeholder line if no charts were generated
+                comment = comment.replace('download_link_placeholder\n', '');
               }
+            } else {
+              // Remove placeholder line if charts directory doesn't exist
+              comment = comment.replace('download_link_placeholder\n', '');
             }
             
             // Find existing comment from this bot
