@@ -16,6 +16,8 @@ gpu:
   power: 1200  # Watt
   sm_version: 100
 
+# very important comment
+
 node:
   num_gpus_per_node: 4  # 4 GPUs per physical node (2 Grace CPUs x 2 GPUs each)
   num_gpus_per_rack: 72  # 72 GPUs per rack (18 compute trays x 4 GPUs each)
