@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import shlex
+from dataclasses import dataclass
 from typing import Any
 
 from aiconfigurator.generator.naive import (
@@ -35,6 +36,23 @@ logger = logging.getLogger(__name__)
 # Default heuristics from AIC's advanced_tuning_config
 _AIC_PREFILL_MAX_BATCH_SIZE = 1
 _AIC_DECODE_MAX_BATCH_SIZE = 512
+
+
+@dataclass
+class EnumeratedCandidate:
+    """A DGD config together with its parallelization metadata.
+
+    Returned by :func:`enumerate_profiling_configs` so that callers do not
+    need to parse backend-specific CLI args to recover TP/PP/DP values.
+    """
+
+    dgd_config: dict[str, Any]
+    tp: int
+    pp: int
+    dp: int
+    moe_tp: int
+    moe_ep: int
+    num_gpus: int
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +351,7 @@ def enumerate_profiling_configs(
     k8s_pvc_name: str | None = None,
     k8s_pvc_mount_path: str = "/workspace/model_cache",
     k8s_model_path_in_pvc: str | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[EnumeratedCandidate], list[EnumeratedCandidate]]:
     """Enumerate parallelization candidates and return aggregated DGD configs.
 
     This function is the primary entry point for the Dynamo profiler to obtain
@@ -375,8 +393,9 @@ def enumerate_profiling_configs(
             to load weights.
 
     Returns:
-        ``(prefill_configs, decode_configs)`` -- two lists of aggregated DGD
-        config dicts ready for YAML serialization and deployment.
+        ``(prefill_candidates, decode_candidates)`` -- two lists of
+        :class:`EnumeratedCandidate` objects, each bundling an aggregated
+        DGD config dict with its parallelization metadata.
     """
     # ------------------------------------------------------------------
     # 0. Resolve system config
@@ -556,7 +575,7 @@ def enumerate_profiling_configs(
     # ------------------------------------------------------------------
     # 5. Build DGD configs via AIC rendering + dynamo build_dgd_config
     # ------------------------------------------------------------------
-    prefill_configs: list[dict[str, Any]] = []
+    prefill_candidates: list[EnumeratedCandidate] = []
     for cfg in prefill_parallel_configs:
         tp, pp, dp, moe_tp, moe_ep = cfg
         logger.info(
@@ -586,11 +605,21 @@ def enumerate_profiling_configs(
                 k8s_pvc_mount_path=k8s_pvc_mount_path,
                 k8s_model_path_in_pvc=k8s_model_path_in_pvc,
             )
-            prefill_configs.append(dgd)
+            prefill_candidates.append(
+                EnumeratedCandidate(
+                    dgd_config=dgd,
+                    tp=tp,
+                    pp=pp,
+                    dp=dp,
+                    moe_tp=moe_tp,
+                    moe_ep=moe_ep,
+                    num_gpus=tp * pp * dp,
+                )
+            )
         except Exception:
             logger.exception("Failed to build prefill DGD for config %s", cfg)
 
-    decode_configs: list[dict[str, Any]] = []
+    decode_candidates: list[EnumeratedCandidate] = []
     for cfg in decode_parallel_configs:
         tp, pp, dp, moe_tp, moe_ep = cfg
         logger.info(
@@ -620,13 +649,23 @@ def enumerate_profiling_configs(
                 k8s_pvc_mount_path=k8s_pvc_mount_path,
                 k8s_model_path_in_pvc=k8s_model_path_in_pvc,
             )
-            decode_configs.append(dgd)
+            decode_candidates.append(
+                EnumeratedCandidate(
+                    dgd_config=dgd,
+                    tp=tp,
+                    pp=pp,
+                    dp=dp,
+                    moe_tp=moe_tp,
+                    moe_ep=moe_ep,
+                    num_gpus=tp * pp * dp,
+                )
+            )
         except Exception:
             logger.exception("Failed to build decode DGD for config %s", cfg)
 
     logger.info(
         "Enumeration complete: %d prefill DGDs, %d decode DGDs",
-        len(prefill_configs),
-        len(decode_configs),
+        len(prefill_candidates),
+        len(decode_candidates),
     )
-    return prefill_configs, decode_configs
+    return prefill_candidates, decode_candidates
