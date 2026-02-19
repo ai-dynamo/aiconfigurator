@@ -147,68 +147,27 @@ class GemmCommonTestCase:
 
 
 def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
-    x_list = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        384,
-        512,
-        768,
-        1024,
-        2048,
-        4096,
-        8192,
+    # Qwen3-32B targeted test cases for FFN1/FFN2 gap analysis.
+    # Model config: hidden_size=5120, intermediate_size=25600, ISL=512.
+    #
+    # gate_ffn1 GEMM shape (from LLAMAModel):
+    #   N = 2 * intermediate_size / tp_size  (fused gate+up projection)
+    #   K = hidden_size = 5120
+    #
+    # ffn2 GEMM shape (from LLAMAModel):
+    #   N = hidden_size = 5120
+    #   K = intermediate_size / tp_size  (down projection)
+    #
+    # TP=1: gate_ffn1 M=512,N=51200,K=5120 | ffn2 M=512,N=5120,K=25600
+    # TP=2: gate_ffn1 M=512,N=25600,K=5120 | ffn2 M=512,N=5120,K=12800
+    num_repeats = 10
+    shapes = [
+        (512, 51200, 5120),  # TP=1 gate_ffn1
+        (512, 5120, 25600),  # TP=1 ffn2
+        (512, 25600, 5120),  # TP=2 gate_ffn1
+        (512, 5120, 12800),  # TP=2 ffn2
     ]
-    nk_list = [
-        32,
-        64,
-        128,
-        256,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        2560,
-        3072,
-        3584,
-        4096,
-        5120,
-        6144,
-        7168,
-        8192,
-        10240,
-        12288,
-    ]
-    nk_list_ext = [
-        12800,  # Qwen3-32B: down_proj @ TP=2 (K=12800), gate+up @ TP=4
-        16384,
-        25600,  # Qwen3-32B: intermediate_size (gate+up @ TP=2, down_proj @ TP=1)
-        51200,  # Qwen3-32B: gate+up @ TP=1 (2*25600)
-        65536,
-    ]
-
-    test_cases = []
-    # x_list_orig+add+ext  <==> nk_list+ext
-    for x in sorted(x_list, reverse=True):
-        for n in sorted(nk_list + nk_list_ext, reverse=True):
-            for k in sorted(nk_list + nk_list_ext, reverse=True):
-                if n * k > 65536 * 16384:
-                    continue
-                test_cases.append(GemmCommonTestCase(x=x, n=n, k=k))
-
-    return test_cases
+    return [GemmCommonTestCase(x=x, n=n, k=k) for x, n, k in shapes for _ in range(num_repeats)]
 
 
 @dataclasses.dataclass
