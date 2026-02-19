@@ -226,6 +226,7 @@ def _get_mla_common_test_cases(is_context: bool):
     # num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim
     model_config_list = [
         [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-V3"],
+        [64, 1536, 512, 128, 64, 128, "moonshotai/Kimi-K2.5"],
     ]
 
     if is_context:
