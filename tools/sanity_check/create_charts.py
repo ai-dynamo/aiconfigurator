@@ -140,21 +140,6 @@ def main():
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    with open(args.output_md_file, "w") as f:
-        f.write("## Sanity Check Chart Generation Report\n")
-        # github action will insert a link here
-        f.write("download_link_placeholder\n")
-        f.write(
-            textwrap.dedent("""
-            New perf data files were detected in this PR. Please use the link above to
-            download sanity check charts for the new perf data to compare the collected
-            perf data vs SOL (theoretical max performance).
-
-            Below is a report of whether the chart generation was successful for each op.
-            If doesn't validate whether the perf data itself is sane.
-        """)
-        )
-
     changed_files = get_changed_files(args.base_ref, args.head_ref)
 
     # Organize changed files by (system, backend, backend_version) so that
@@ -190,6 +175,26 @@ def main():
         else:
             print(f"Unhandled changed file: {changed_file}")
             continue
+
+    # Only create comment file if there are files to process
+    if not system_backend_version_to_changed_files:
+        print("No matching perf data files found to process. Skipping chart generation.")
+        return 0
+
+    with open(args.output_md_file, "w") as f:
+        f.write("## Sanity Check Chart Generation Report\n")
+        # github action will insert a link here
+        f.write("download_link_placeholder\n")
+        f.write(
+            textwrap.dedent("""
+            New perf data files were detected in this PR. Please use the link above to
+            download sanity check charts for the new perf data to compare the collected
+            perf data vs SOL (theoretical max performance).
+
+            Below is a report of whether the chart generation was successful for each op.
+            If doesn't validate whether the perf data itself is sane.
+        """)
+        )
 
     for (system, backend, backend_version), perf_files in system_backend_version_to_changed_files.items():
         try:
