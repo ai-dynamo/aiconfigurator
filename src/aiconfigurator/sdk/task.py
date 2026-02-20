@@ -494,18 +494,20 @@ class TaskConfigFactory:
             # models (e.g. Kimi-K2.5 with 384 experts, DeepSeek-V3 with 256 experts) that
             # require 32+ GPUs per worker to avoid OOM. Only extend lists that already
             # contain values > 1 (lists pinned to [1] are intentionally single-valued).
-            for worker_cfg in (config.prefill_worker_config, config.decode_worker_config):
-                for key in ("num_gpu_per_worker", "tp_list", "dp_list", "moe_ep_list"):
-                    current = list(getattr(worker_cfg, key, None) or [])
-                    if not current or max(current) <= 1:
-                        continue
-                    v = max(current) * 2
-                    while v <= ctx.total_gpus:
-                        if v not in current:
-                            current.append(v)
-                        v *= 2
-                    setattr(worker_cfg, key, current)
-                    logger.debug("Extended worker %s to %s", key, current)
+            # Wideep paths have carefully curated per-worker GPU lists; skip extension.
+            if not ctx.enable_wideep:
+                for worker_cfg in (config.prefill_worker_config, config.decode_worker_config):
+                    for key in ("num_gpu_per_worker", "tp_list", "dp_list", "moe_ep_list"):
+                        current = list(getattr(worker_cfg, key, None) or [])
+                        if not current or max(current) <= 1:
+                            continue
+                        v = max(current) * 2
+                        while v <= ctx.total_gpus:
+                            if v not in current:
+                                current.append(v)
+                            v *= 2
+                        setattr(worker_cfg, key, current)
+                        logger.debug("Extended worker %s to %s", key, current)
 
 
 _quants = {
