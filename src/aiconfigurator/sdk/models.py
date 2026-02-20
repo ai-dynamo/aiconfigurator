@@ -1581,7 +1581,8 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     kvcache_quant_mode,
                     fmha_quant_mode,
                 ),
-                ops.GEMM("context_proj_gemm", self._num_layers, h, self._num_heads * 128 // tp_size, gemm_quant_mode),  # 128 = v_head_dim
+                # 128 = v_head_dim
+                ops.GEMM("context_proj_gemm", self._num_layers, h, self._num_heads * 128 // tp_size, gemm_quant_mode),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
             ]
         )

@@ -459,11 +459,19 @@ def _parse_hf_config_json(config: dict) -> dict:
     # Handle nullable fields (e.g., Nemotron has null for these)
     n_kv = effective_config.get("num_key_value_heads") or 0
     inter_size = effective_config.get("intermediate_size") or 0
-    d = effective_config.get("head_dim") or effective_config.get("attention_head_dim") or (hidden_size // n if n > 0 else 0)
+    d = (
+        effective_config.get("head_dim")
+        or effective_config.get("attention_head_dim")
+        or (hidden_size // n if n > 0 else 0)
+    )
 
     # MoE parameters
     topk = effective_config.get("num_experts_per_tok", 0)
-    num_experts = effective_config.get("num_local_experts") or effective_config.get("n_routed_experts") or effective_config.get("num_experts", 0)
+    num_experts = (
+        effective_config.get("num_local_experts")
+        or effective_config.get("n_routed_experts")
+        or effective_config.get("num_experts", 0)
+    )
     moe_inter_size = effective_config.get("moe_intermediate_size", 0) or effective_config.get("intermediate_size", 0)
 
     # Handle NemotronH-specific configuration (only fields unique to NemotronH)
