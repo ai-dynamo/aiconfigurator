@@ -3069,13 +3069,11 @@ class HybridMoEModel(BaseModel):
 
         # QKV GEMM output per TP: q(n*head_dim) + k(n_kv*head_dim) + v(n_kv*v_head_dim)
         # head_dim == swa_head_dim (same q/k dimension for both attention types)
-        global_qkv_out = (
-            self._num_heads * self._head_size // tp_size
-            + global_n_kv_per_gpu * (self._head_size + cfg.global_v_head_dim)
+        global_qkv_out = self._num_heads * self._head_size // tp_size + global_n_kv_per_gpu * (
+            self._head_size + cfg.global_v_head_dim
         )
-        swa_qkv_out = (
-            self._num_heads * cfg.swa_head_dim // tp_size
-            + swa_n_kv_per_gpu * (cfg.swa_head_dim + cfg.swa_v_head_dim)
+        swa_qkv_out = self._num_heads * cfg.swa_head_dim // tp_size + swa_n_kv_per_gpu * (
+            cfg.swa_head_dim + cfg.swa_v_head_dim
         )
 
         # Proj GEMM input per TP: n * v_head_dim / tp
@@ -3107,9 +3105,7 @@ class HybridMoEModel(BaseModel):
                     ),
                     ops.CustomAllReduce("context_global_attn_ar", count, h, tp_size),
                     ops.ElementWise("context_global_moe_norm", count, 2 * h, 2 * h, 0.8),
-                    ops.GEMM(
-                        "context_global_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.float16
-                    ),
+                    ops.GEMM("context_global_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.float16),
                     ops.MoEDispatch(
                         "context_global_moe_pre_dispatch",
                         count,
@@ -3282,13 +3278,11 @@ class HybridMoEModel(BaseModel):
         global_n_kv_per_gpu = (self._num_kv_heads + tp_size - 1) // tp_size
         swa_n_kv_per_gpu = (cfg.swa_num_kv_heads + tp_size - 1) // tp_size
 
-        global_qkv_out = (
-            self._num_heads * self._head_size // tp_size
-            + global_n_kv_per_gpu * (self._head_size + cfg.global_v_head_dim)
+        global_qkv_out = self._num_heads * self._head_size // tp_size + global_n_kv_per_gpu * (
+            self._head_size + cfg.global_v_head_dim
         )
-        swa_qkv_out = (
-            self._num_heads * cfg.swa_head_dim // tp_size
-            + swa_n_kv_per_gpu * (cfg.swa_head_dim + cfg.swa_v_head_dim)
+        swa_qkv_out = self._num_heads * cfg.swa_head_dim // tp_size + swa_n_kv_per_gpu * (
+            cfg.swa_head_dim + cfg.swa_v_head_dim
         )
         global_proj_in = self._num_heads * cfg.global_v_head_dim // tp_size
         swa_proj_in = self._num_heads * cfg.swa_v_head_dim // tp_size
