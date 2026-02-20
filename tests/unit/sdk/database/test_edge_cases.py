@@ -302,7 +302,7 @@ class TestDatabaseCache:
             self.system = args[0]
             self.backend = args[1]
             self.version = args[2]
-            self._default_database_mode = common.DatabaseMode.SILICON
+            self._default_database_mode = common.DatabaseMode.HYBRID
 
         monkeypatch.setattr(PerfDatabase, "__init__", counting_init)
 

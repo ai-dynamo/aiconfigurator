@@ -424,8 +424,8 @@ The `--database-mode` argument controls how performance is estimated:
 
 | Mode | Description |
 |------|-------------|
-| `SILICON` | **(Default)** Uses actual collected silicon data. Most accurate when data is available for your configuration. |
-| `HYBRID` | Uses silicon data when available, falls back to SOL+empirical factor when data is missing. Best for exploring configurations that may not have complete silicon data. |
+| `SILICON` | Uses actual collected silicon data. Most accurate when data is available for your configuration. |
+| `HYBRID` | **(Default)** Uses silicon data when available, falls back to SOL+empirical factor when data is missing. Best for exploring configurations that may not have complete silicon data. |
 | `EMPIRICAL` | Uses Speed-of-Light (SOL) + empirical correction factors for all estimations. Useful for rough estimates without relying on collected data. |
 | `SOL` | Provides theoretical Speed-of-Light time only. Useful for understanding theoretical limits. |
 

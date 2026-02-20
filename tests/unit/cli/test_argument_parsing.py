@@ -106,7 +106,7 @@ class TestCLIArgumentParsing:
 
         assert args.backend == common.BackendName.trtllm.value
         assert args.backend_version is None
-        assert args.database_mode == common.DatabaseMode.SILICON.name
+        assert args.database_mode == common.DatabaseMode.HYBRID.name
         assert args.debug is False
         assert args.decode_system is None
         assert args.generated_config_version is None

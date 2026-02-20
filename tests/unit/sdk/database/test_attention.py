@@ -309,8 +309,8 @@ class TestGenerationMLA:
 
 def test_default_database_mode(comprehensive_perf_db):
     """Test setting and getting default database mode, and that query cache is cleared when default mode is changed."""
-    # Initially should be SILICON
-    assert comprehensive_perf_db.get_default_database_mode() == common.DatabaseMode.SILICON
+    # Initially should be HYBRID
+    assert comprehensive_perf_db.get_default_database_mode() == common.DatabaseMode.HYBRID
 
     non_sol_result = comprehensive_perf_db.query_context_attention(
         1, 32, 0, 8, 4, common.KVCacheQuantMode.float16, common.FMHAQuantMode.float16

@@ -61,7 +61,7 @@ def create_system_config(app_config, gpu_config=False):
                     common.DatabaseMode.SOL.name,
                 ],
                 label="Database Mode",
-                value=common.DatabaseMode.SILICON.name,
+                value=common.DatabaseMode.HYBRID.name,
                 interactive=True,
             )
         if gpu_config:
