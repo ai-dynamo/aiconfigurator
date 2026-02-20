@@ -490,10 +490,7 @@ def _parse_hf_config_json(config: dict) -> dict:
         layer_types = cfg.get("layer_types")
         if layer_types is None:
             interval = cfg.get("full_attention_interval", 4)
-            layer_types = [
-                "full_attention" if (i + 1) % interval == 0 else "linear_attention"
-                for i in range(layers)
-            ]
+            layer_types = ["full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(layers)]
         extra_params = common.Qwen35MoEConfig(
             layer_types=tuple(layer_types),
             linear_num_kv_heads=cfg.get("linear_num_key_heads", 0),
