@@ -232,8 +232,11 @@ DefaultHFModels = {
     "mistralai/Mixtral-8x22B-v0.1",
     # DeepSeek Models
     "deepseek-ai/DeepSeek-V3",
+    "deepseek-ai/DeepSeek-V3.1",
     "deepseek-ai/DeepSeek-V3.2",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
     "nvidia/DeepSeek-V3.1-NVFP4",
+    "nvidia/DeepSeek-V3-0324-NVFP4",
     # Qwen 2.5 Models
     "Qwen/Qwen2.5-1.5B",
     "Qwen/Qwen2.5-7B",
