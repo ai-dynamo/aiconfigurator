@@ -232,6 +232,7 @@ DefaultHFModels = {
     "mistralai/Mixtral-8x22B-v0.1",
     # DeepSeek Models
     "deepseek-ai/DeepSeek-V3",
+    "deepseek-ai/DeepSeek-V3.2",
     "nvidia/DeepSeek-V3.1-NVFP4",
     # Qwen 2.5 Models
     "Qwen/Qwen2.5-1.5B",
@@ -284,6 +285,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Qwen3ForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
+    "DeepseekV32ForCausalLM": "DEEPSEEK",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",
