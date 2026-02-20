@@ -157,6 +157,7 @@ def get_model(
     num_experts = model_info["num_experts"]
     moe_inter_size = model_info["moe_inter_size"]
     extra_params = model_info["extra_params"]
+    vision_config = model_info.get("vision_config")
     # Convert architecture (e.g., 'LlamaForCausalLM') to model family (e.g., 'LLAMA')
     model_family = _architecture_to_model_family(architecture)
 
@@ -310,6 +311,12 @@ def get_model(
         # extra_params is NemotronHConfig with hybrid layer configuration
         model.set_hybrid_config(extra_params)
 
+    # Attach vision encoder for VLM architectures
+    if vision_config is not None:
+        gemm_qm = model_config.gemm_quant_mode or common.GEMMQuantMode.float16
+        VisionEncoder(vision_config, gemm_qm).apply(model)
+        logger.info(f"VisionEncoder attached to {architecture} (family={model_family})")
+
     return model
 
 
@@ -359,6 +366,92 @@ def calc_expectation(nextn: int, nextn_accept_rates: list[float]) -> float:
         return prob
 
 
+class VisionEncoder:
+    """
+    Vision Transformer (ViT) encoder plugin for VLM models.
+
+    Builds a list of ops that model the ViT computation during the prefill
+    phase: patch embedding, N transformer layers (QKV + attention + proj +
+    FFN), and a final vision-to-LLM projection.
+
+    Usage::
+
+        ve = VisionEncoder(vision_cfg, gemm_quant_mode)
+        ve.apply(model)   # attaches ops to model.vision_ops
+    """
+
+    def __init__(
+        self,
+        vision_config: common.VisionEncoderConfig,
+        gemm_quant_mode: common.GEMMQuantMode,
+    ) -> None:
+        self.config = vision_config
+        self.ops: list[ops.Operation] = []
+        self._build_ops(gemm_quant_mode)
+
+    def _build_ops(self, quant_mode: common.GEMMQuantMode) -> None:
+        vc = self.config
+        h = vc.hidden_size
+        depth = vc.depth
+        heads = vc.num_heads
+        head_dim = h // heads
+        ffn_inter = vc.intermediate_size
+
+        # Patch embedding: projects each patch (patch_size^2 * channels) → hidden_size.
+        # Modeled as a GEMM with scale_factor=1 (runs once).
+        patch_dim = vc.patch_size * vc.patch_size * vc.in_channels
+        self.ops.append(
+            ops.GEMM("vision_patch_embed", 1, h, patch_dim, quant_mode)
+        )
+
+        # ViT transformer layers
+        self.ops.append(ops.ElementWise("vision_norm_1", depth, 2 * h, 2 * h, 0.8))
+
+        # QKV GEMM: ViT uses dense attention (n_kv == num_heads)
+        self.ops.append(
+            ops.GEMM("vision_qkv_gemm", depth, 3 * h, h, quant_mode)
+        )
+
+        # ViT self-attention (non-causal, dense, no KV cache)
+        self.ops.append(
+            ops.ContextAttention(
+                "vision_attention",
+                depth,
+                heads,
+                heads,
+                common.KVCacheQuantMode.float16,
+                common.FMHAQuantMode.float16,
+                head_size=head_dim,
+            )
+        )
+
+        # Projection after attention
+        self.ops.append(
+            ops.GEMM("vision_proj_gemm", depth, h, h, quant_mode)
+        )
+
+        self.ops.append(ops.ElementWise("vision_norm_2", depth, 2 * h, 2 * h, 0.8))
+
+        # FFN (gated: up + gate + down). ViT typically uses non-gated MLP
+        # but we model it as two GEMMs (up-project + down-project).
+        self.ops.append(
+            ops.GEMM("vision_ffn_up", depth, ffn_inter, h, quant_mode)
+        )
+        self.ops.append(
+            ops.GEMM("vision_ffn_down", depth, h, ffn_inter, quant_mode)
+        )
+
+        # Vision → LLM projection
+        self.ops.append(
+            ops.GEMM("vision_llm_proj", 1, vc.out_hidden_size, h, quant_mode)
+        )
+
+    def apply(self, model: BaseModel) -> None:
+        """Attach this vision encoder to a model instance."""
+        model.vision_encoder = self
+        model.vision_ops = self.ops
+
+
 class BaseModel:
     """
     Base model class.
@@ -385,6 +478,8 @@ class BaseModel:
         self.config = model_config
         self.context_ops = []
         self.generation_ops = []
+        self.vision_ops: list[ops.Operation] = []
+        self.vision_encoder: VisionEncoder | None = None
 
         # internal only
         self._num_layers = num_layers

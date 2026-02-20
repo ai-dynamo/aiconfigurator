@@ -475,6 +475,8 @@ class TRTLLMBackend(BaseBackend):
         weights, activations, kvcache = 0.0, 0.0, 0.0
         for op in model.context_ops:
             weights += op.get_weights()
+        for op in model.vision_ops:
+            weights += op.get_weights()
 
         # count weights on a single GPU
         weights /= model.config.pp_size
