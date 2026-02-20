@@ -857,7 +857,7 @@ def _execute_task_configs(
                 db_mode = getattr(task_config, "database_mode", None)
                 hybrid_hint = (
                     " For frontier/new models without silicon data, try --database-mode HYBRID."
-                    if db_mode != common.DatabaseMode.HYBRID.name
+                    if db_mode == common.DatabaseMode.SILICON.name
                     else ""
                 )
                 logger.warning(
@@ -871,7 +871,7 @@ def _execute_task_configs(
     if len(results) < 1:
         first_config = next(iter(task_configs.values()), None)
         db_mode = getattr(first_config, "database_mode", None) if first_config else None
-        if db_mode != common.DatabaseMode.HYBRID.name:
+        if db_mode == common.DatabaseMode.SILICON.name:
             logger.error(
                 "No successful experiment runs to compare. "
                 "If this is a frontier or newly-released model, retry with --database-mode HYBRID "
