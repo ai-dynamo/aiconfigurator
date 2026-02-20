@@ -720,17 +720,26 @@ class LLAMAModel(BaseModel):
 # mostly for mixtral models
 class MOEModel(BaseModel):
     """
-    Traditional MoE models uses this model impl: Mixtral, LLAMA4_MOE, etc.
+    Traditional MoE models uses this model impl: Mixtral, LLAMA4_MOE, MiniMax-M2, etc.
     Some rules to follow,
     Due to implementation, attn layer name needs to be context_attention or generation_attention,
     exact match is required. Same for logits_gemm.
-    Other than DS V3, all other models don't support mtp
+    Supports MTP (Multi-Token Prediction) when nextn > 0 (e.g. MiniMax-M2).
+    When nextn == 0, _mtp_scale_factor is 1.0 and behavior is unchanged.
     TODO: redesign shared moe part.
     """
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
-        assert self._nextn == 0, "Only DS V3 supports mtp"
+
+        self._mtp_scale_factor = (
+            1.0
+            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
+            * (self._nextn + self._num_layers)
+            / self._num_layers
+            if self._nextn > 0
+            else 1.0
+        )
 
         # make sure the paralel width is same
         assert (
@@ -792,7 +801,7 @@ class MOEModel(BaseModel):
             self.generation_ops.append(
                 ops.GenerationAttention(
                     "generation_attention",
-                    self._num_layers / attn_scale_factor,
+                    self._num_layers * self._mtp_scale_factor / attn_scale_factor,
                     self._num_heads // tp_size,
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
@@ -892,18 +901,24 @@ class MOEModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("generation_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
+                ops.ElementWise(
+                    "generation_add_norm_1",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * h,
+                    2 * h,
+                    0.8,
+                ),
                 ops.GEMM(
                     "generation_qkv_gemm",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
                 ),
                 ops.GenerationAttention(
                     "generation_attention",
-                    self._num_layers / attn_scale_factor,
+                    self._num_layers * self._mtp_scale_factor / attn_scale_factor,
                     self._num_heads // tp_size,
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
@@ -911,13 +926,19 @@ class MOEModel(BaseModel):
                 ),
                 ops.GEMM(
                     "generation_proj_gemm",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
                 ),
-                ops.ElementWise("generation_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise(
+                    "generation_add_norm_2",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * h,
+                    2 * h,
+                    0.8,
+                ),
             ]
         )
 
@@ -927,7 +948,7 @@ class MOEModel(BaseModel):
                 [
                     ops.GEMM(
                         "generation_router_gemm",
-                        self._num_layers,
+                        self._num_layers * self._mtp_scale_factor,
                         self._num_experts,
                         h,
                         common.GEMMQuantMode.float16,
@@ -940,7 +961,7 @@ class MOEModel(BaseModel):
             [
                 ops.MoEDispatch(
                     "generation_moe_pre_dispatch",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._topk,
                     self._num_experts,
@@ -951,7 +972,7 @@ class MOEModel(BaseModel):
                 ),
                 ops.MoE(
                     "generation_moe",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._moe_inter_size,
                     self._topk,
@@ -964,7 +985,7 @@ class MOEModel(BaseModel):
                 ),
                 ops.MoEDispatch(
                     "generation_moe_post_dispatch",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._topk,
                     self._num_experts,
@@ -980,7 +1001,7 @@ class MOEModel(BaseModel):
             [
                 ops.GEMM(
                     "generation_logits_gemm",
-                    1,
+                    1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
                     common.GEMMQuantMode.float16,
@@ -997,7 +1018,7 @@ class MOEModel(BaseModel):
         # pp
         pp_scale_factor = pp_size - 1
         self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
-        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor, h, pp_size))
+        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
     def _validate_fp8_block_quantized_moe_config(self) -> None:
         """
