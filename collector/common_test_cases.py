@@ -160,14 +160,17 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
     #
     # TP=1: gate_ffn1 M=512,N=51200,K=5120 | ffn2 M=512,N=5120,K=25600
     # TP=2: gate_ffn1 M=512,N=25600,K=5120 | ffn2 M=512,N=5120,K=12800
-    num_repeats = 10
-    shapes = [
-        (512, 51200, 5120),  # TP=1 gate_ffn1
-        (512, 5120, 25600),  # TP=1 ffn2
-        (512, 25600, 5120),  # TP=2 gate_ffn1
-        (512, 5120, 12800),  # TP=2 ffn2
+    # Sweep M from 256 to 1024 to capture deep_gemm JIT discontinuities.
+    # The auto-tuner picks different BLOCK_N at M=512 vs M=513 (ceil(M/128) changes),
+    # so dense sampling across this range reveals the step function in real latency.
+    m_list = list(range(256, 1025))
+    nk_shapes = [
+        (51200, 5120),  # TP=1 gate_ffn1
+        (5120, 25600),  # TP=1 ffn2
+        (25600, 5120),  # TP=2 gate_ffn1
+        (5120, 12800),  # TP=2 ffn2
     ]
-    return [GemmCommonTestCase(x=x, n=n, k=k) for x, n, k in shapes for _ in range(num_repeats)]
+    return [GemmCommonTestCase(x=m, n=n, k=k) for n, k in nk_shapes for m in m_list]
 
 
 @dataclasses.dataclass
