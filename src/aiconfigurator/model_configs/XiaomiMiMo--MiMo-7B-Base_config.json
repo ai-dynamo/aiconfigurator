@@ -1,0 +1,28 @@
+{
+  "architectures": [
+    "MiMoForCausalLM"
+  ],
+  "model_type": "mimo",
+  "num_hidden_layers": 36,
+  "hidden_size": 4096,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 8,
+  "head_dim": 128,
+  "intermediate_size": 11008,
+  "vocab_size": 151680,
+  "max_position_embeddings": 32768,
+  "rope_theta": 640000,
+  "rms_norm_eps": 1e-05,
+  "hidden_act": "silu",
+  "attention_bias": true,
+  "attention_dropout": 0.0,
+  "sliding_window": 32768,
+  "max_window_layers": 32,
+  "use_sliding_window": false,
+  "use_mrope": false,
+  "num_nextn_predict_layers": 1,
+  "tie_word_embeddings": false,
+  "torch_dtype": "bfloat16",
+  "transformers_version": "4.40.1",
+  "use_cache": true
+}
