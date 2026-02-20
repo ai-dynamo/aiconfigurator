@@ -254,6 +254,8 @@ DefaultHFModels = {
     "deepseek-ai/DeepSeek-V3",
     "nvidia/DeepSeek-V3.1-NVFP4",
     # GLM Models
+    "zai-org/GLM-4.7-Flash",
+    "zai-org/GLM-4.7-FP8",
     "zai-org/GLM-5-FP8",
     # Qwen 2.5 Models
     "Qwen/Qwen2.5-1.5B",
@@ -313,6 +315,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
     "GlmMoeDsaForCausalLM": "DEEPSEEK",
+    "Glm4MoeLiteForCausalLM": "DEEPSEEK",
+    "Glm4MoeForCausalLM": "MOE",
 }
 
 """
