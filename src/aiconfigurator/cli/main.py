@@ -126,10 +126,12 @@ def _add_default_mode_arguments(parser):
         choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
         type=str,
         default=common.DatabaseMode.SILICON.name,
-        help="Database mode for performance estimation. Options: SILICON (default, uses silicon data), "
-        "HYBRID (uses silicon data when available, otherwise SOL+empirical factor), "
-        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only), "
-        "Please be careful, only SILICON mode's results are reproducible.",
+        help="Database mode for performance estimation. "
+        "SILICON (default): uses silicon-collected data; results are fully reproducible. "
+        "HYBRID (recommended for frontier/new models): extends SILICON coverage with "
+        "SOL+empirical estimates for configurations not yet in the database — use this "
+        "for models released after the last silicon data collection. "
+        "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
     )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
     parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
@@ -346,10 +348,12 @@ def _add_estimate_mode_arguments(parser):
         choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
         type=str,
         default=common.DatabaseMode.SILICON.name,
-        help="Database mode for performance estimation. Options: SILICON (default, uses silicon data), "
-        "HYBRID (uses silicon data when available, otherwise SOL+empirical factor), "
-        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only). "
-        "Please be careful, only SILICON mode's results are reproducible.",
+        help="Database mode for performance estimation. "
+        "SILICON (default): uses silicon-collected data; results are fully reproducible. "
+        "HYBRID (recommended for frontier/new models): extends SILICON coverage with "
+        "SOL+empirical estimates for configurations not yet in the database — use this "
+        "for models released after the last silicon data collection. "
+        "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
     )
     parser.add_argument(
         "--print-per-ops-latency",
@@ -850,14 +854,31 @@ def _execute_task_configs(
                 results[exp_name] = task_result
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_df))
             else:
+                db_mode = getattr(task_config, "database_mode", None)
+                hybrid_hint = (
+                    " For frontier/new models without silicon data, try --database-mode HYBRID."
+                    if db_mode == common.DatabaseMode.SILICON.name
+                    else ""
+                )
                 logger.warning(
-                    "Experiment %s returned no results. The TTFT and TPOT constraints may need to be relaxed.", exp_name
+                    "Experiment %s returned no results. The TTFT and TPOT constraints may need to be relaxed.%s",
+                    exp_name,
+                    hybrid_hint,
                 )
         except Exception:
             logger.exception("Error running experiment %s", exp_name)
 
     if len(results) < 1:
-        logger.error("No successful experiment runs to compare.")
+        first_config = next(iter(task_configs.values()), None)
+        db_mode = getattr(first_config, "database_mode", None) if first_config else None
+        if db_mode == common.DatabaseMode.SILICON.name:
+            logger.error(
+                "No successful experiment runs to compare. "
+                "If this is a frontier or newly-released model, retry with --database-mode HYBRID "
+                "to extend coverage beyond the silicon database."
+            )
+        else:
+            logger.error("No successful experiment runs to compare.")
         raise SystemExit(1)
 
     best_configs: dict[str, pd.DataFrame] = {}
