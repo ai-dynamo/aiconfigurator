@@ -1104,27 +1104,27 @@ class DeepSeekModel(BaseModel):
                 ops.GEMM(
                     "context_q_b_proj_gemm",
                     self._num_layers,
-                    24576 // tp_size,
+                    self._num_heads * 192 // tp_size,  # num_heads * (qk_nope_head_dim + qk_rope_head_dim)
                     1536,
                     gemm_quant_mode,
                 ),
                 ops.GEMM(
                     "context_kv_b_proj_gemm",
                     self._num_layers,
-                    32768 // tp_size,
+                    self._num_heads * 256 // tp_size,  # num_heads * (qk_nope_head_dim + v_head_dim)
                     512,
                     gemm_quant_mode,
                 ),  # agg ctx attn part
                 ops.ContextMLA(
                     "context_attention",
                     self._num_layers,
-                    128 // tp_size,
+                    self._num_heads // tp_size,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                 ),  # agg ctx attn part
                 ops.GEMM(
-                    "context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode
-                ),  # agg ctx attn part
+                    "context_proj_gemm", self._num_layers, h, self._num_heads * 128 // tp_size, gemm_quant_mode
+                ),  # agg ctx attn part; 128 = v_head_dim
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
             ]
         )
@@ -1261,7 +1261,7 @@ class DeepSeekModel(BaseModel):
                 ops.GEMM(
                     "generation_q_b_proj_gemm",
                     self._num_layers * self._mtp_scale_factor,
-                    24576 // tp_size,
+                    self._num_heads * 192 // tp_size,  # num_heads * (qk_nope_head_dim + qk_rope_head_dim)
                     1536,
                     gemm_quant_mode,
                 ),
@@ -1275,7 +1275,7 @@ class DeepSeekModel(BaseModel):
                 ops.GenerationMLA(
                     "generation_attention",
                     self._num_layers * self._mtp_scale_factor,
-                    128 // tp_size,
+                    self._num_heads // tp_size,
                     kvcache_quant_mode,
                 ),  # agg gen attn part
                 ops.MLABmm(
@@ -1563,25 +1563,26 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 ops.GEMM(
                     "context_q_b_proj_gemm",
                     self._num_layers,
-                    24576 // tp_size,
+                    self._num_heads * 192 // tp_size,  # num_heads * (qk_nope_head_dim + qk_rope_head_dim)
                     1536,
                     gemm_quant_mode,
                 ),
                 ops.GEMM(
                     "context_kv_b_proj_gemm",
                     self._num_layers,
-                    32768 // tp_size,
+                    self._num_heads * 256 // tp_size,  # num_heads * (qk_nope_head_dim + v_head_dim)
                     512,
                     gemm_quant_mode,
                 ),
                 ops.ContextMLA(
                     "context_attention",
                     self._num_layers,
-                    128 // tp_size,
+                    self._num_heads // tp_size,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                 ),
-                ops.GEMM("context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode),
+                # 128 = v_head_dim
+                ops.GEMM("context_proj_gemm", self._num_layers, h, self._num_heads * 128 // tp_size, gemm_quant_mode),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
             ]
         )
@@ -1722,7 +1723,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 ops.GEMM(
                     "generation_q_b_proj_gemm",
                     self._num_layers * self._mtp_scale_factor,
-                    24576 // tp_size,
+                    self._num_heads * 192 // tp_size,  # num_heads * (qk_nope_head_dim + qk_rope_head_dim)
                     1536,
                     gemm_quant_mode,
                 ),
@@ -1736,7 +1737,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 ops.GenerationMLA(
                     "generation_attention",
                     self._num_layers * self._mtp_scale_factor,
-                    128 // tp_size,
+                    self._num_heads // tp_size,
                     kvcache_quant_mode,
                 ),
                 ops.MLABmm(

@@ -303,7 +303,8 @@ class TaskConfigFactory:
 
     @staticmethod
     def _base_common_layer(ctx: TaskContext) -> dict:
-        nextn = 1 if ctx.model_family == "DEEPSEEK" else 0
+        raw_config = get_model_config_from_model_path(ctx.model_path).get("raw_config", {})
+        nextn = raw_config.get("num_nextn_predict_layers", 0)
         return {
             "serving_mode": ctx.serving_mode,
             "model_path": ctx.model_path,

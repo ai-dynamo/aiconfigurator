@@ -446,21 +446,33 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"Supported architectures: {', '.join(ARCHITECTURE_TO_MODEL_FAMILY.keys())}"
         )
 
-    layers = config["num_hidden_layers"]
-    hidden_size = config["hidden_size"]
-    n = config["num_attention_heads"]
-    vocab = config["vocab_size"]
-    context = config["max_position_embeddings"]
+    # For multimodal VLMs (e.g., KimiK25ForConditionalGeneration), model params are
+    # nested under "text_config"; fall back to top-level config for pure text models.
+    effective_config = config.get("text_config", config)
+
+    layers = effective_config["num_hidden_layers"]
+    hidden_size = effective_config["hidden_size"]
+    n = effective_config["num_attention_heads"]
+    vocab = effective_config["vocab_size"]
+    context = effective_config["max_position_embeddings"]
 
     # Handle nullable fields (e.g., Nemotron has null for these)
-    n_kv = config.get("num_key_value_heads") or 0
-    inter_size = config.get("intermediate_size") or 0
-    d = config.get("head_dim") or config.get("attention_head_dim") or (hidden_size // n if n > 0 else 0)
+    n_kv = effective_config.get("num_key_value_heads") or 0
+    inter_size = effective_config.get("intermediate_size") or 0
+    d = (
+        effective_config.get("head_dim")
+        or effective_config.get("attention_head_dim")
+        or (hidden_size // n if n > 0 else 0)
+    )
 
     # MoE parameters
-    topk = config.get("num_experts_per_tok", 0)
-    num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
-    moe_inter_size = config.get("moe_intermediate_size", 0) or config.get("intermediate_size", 0)
+    topk = effective_config.get("num_experts_per_tok", 0)
+    num_experts = (
+        effective_config.get("num_local_experts")
+        or effective_config.get("n_routed_experts")
+        or effective_config.get("num_experts", 0)
+    )
+    moe_inter_size = effective_config.get("moe_intermediate_size", 0) or effective_config.get("intermediate_size", 0)
 
     # Handle NemotronH-specific configuration (only fields unique to NemotronH)
     extra_params = None

@@ -233,6 +233,10 @@ DefaultHFModels = {
     # DeepSeek Models
     "deepseek-ai/DeepSeek-V3",
     "nvidia/DeepSeek-V3.1-NVFP4",
+    # Kimi Models
+    "moonshotai/Kimi-K2-Instruct",
+    "moonshotai/Kimi-K2-Thinking",
+    "moonshotai/Kimi-K2.5",
     # Qwen 2.5 Models
     "Qwen/Qwen2.5-1.5B",
     "Qwen/Qwen2.5-7B",
@@ -284,6 +288,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Qwen3ForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
+    "KimiK25ForConditionalGeneration": "DEEPSEEK",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",
