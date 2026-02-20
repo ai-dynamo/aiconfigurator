@@ -490,7 +490,6 @@ class TaskConfigFactory:
             logger.debug("Using max gpu per replica %s", replica_cfg.max_gpu_per_replica)
 
 
-
 _quants = {
     "fp8": {
         "gemm_quant_mode": "fp8",
