@@ -60,6 +60,32 @@ class NemotronHConfig:
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
 
 
+@dataclass(frozen=True)
+class Qwen35MoEConfig:
+    """
+    Configuration for Qwen3.5-MoE hybrid model (linear attention + full attention + MoE).
+
+    Qwen3.5-MoE uses a hybrid attention pattern where every 4th layer is full (standard)
+    attention and the rest are linear attention layers (recurrent, no KV cache growth).
+    All layers use MoE FFN with a shared expert.
+
+    Attributes:
+        layer_types (tuple[str, ...]): Per-layer attention type: "linear_attention" or "full_attention"
+        linear_num_kv_heads (int): Number of key heads for linear attention layers (16)
+        linear_num_value_heads (int): Number of value heads for linear attention layers (64)
+        linear_key_head_dim (int): Key/query head dimension for linear attention (128)
+        linear_value_head_dim (int): Value head dimension for linear attention (128)
+        shared_expert_inter_size (int): Intermediate size of the always-active shared expert (1024)
+    """
+
+    layer_types: tuple[str, ...]
+    linear_num_kv_heads: int
+    linear_num_value_heads: int
+    linear_key_head_dim: int
+    linear_value_head_dim: int
+    shared_expert_inter_size: int
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -251,6 +277,8 @@ DefaultHFModels = {
     "Qwen/Qwen3-Coder-480B-A35B-Instruct",
     "nvidia/Qwen3-235B-A22B-NVFP4",
     "Qwen/Qwen3-32B-FP8-Static-PerTensor",
+    # Qwen 3.5 Models
+    "Qwen/Qwen3.5-397B-A17B",
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -277,7 +305,7 @@ SupportedSystems = {
 """
 Model family for model definition
 """
-ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS", "NEMOTRONH"}
+ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS", "NEMOTRONH", "QWEN35MOE"}
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
@@ -290,6 +318,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MixtralForCausalLM": "MOE",
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
+    "Qwen3_5MoeForConditionalGeneration": "QWEN35MOE",
+    "Qwen3NextForCausalLM": "QWEN35MOE",
 }
 
 """
