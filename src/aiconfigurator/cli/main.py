@@ -125,10 +125,11 @@ def _add_default_mode_arguments(parser):
         "--database-mode",
         choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
         type=str,
-        default=common.DatabaseMode.SILICON.name,
-        help="Database mode for performance estimation. Options: SILICON (default, uses silicon data), "
-        "HYBRID (uses silicon data when available, otherwise SOL+empirical factor), "
-        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only), "
+        default=common.DatabaseMode.HYBRID.name,
+        help="Database mode for performance estimation. Options: "
+        "HYBRID (default, uses silicon data when available, otherwise SOL+empirical factor), "
+        "SILICON (uses silicon data), "
+        "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only). "
         "Please be careful, only SILICON mode's results are reproducible.",
     )
     parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
@@ -345,9 +346,10 @@ def _add_estimate_mode_arguments(parser):
         "--database-mode",
         choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
         type=str,
-        default=common.DatabaseMode.SILICON.name,
-        help="Database mode for performance estimation. Options: SILICON (default, uses silicon data), "
-        "HYBRID (uses silicon data when available, otherwise SOL+empirical factor), "
+        default=common.DatabaseMode.HYBRID.name,
+        help="Database mode for performance estimation. Options: "
+        "HYBRID (default, uses silicon data when available, otherwise SOL+empirical factor), "
+        "SILICON (uses silicon data), "
         "EMPIRICAL (SOL+empirical factor), SOL (provide SOL time only). "
         "Please be careful, only SILICON mode's results are reproducible.",
     )

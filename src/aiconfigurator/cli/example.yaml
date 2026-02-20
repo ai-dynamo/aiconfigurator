@@ -17,7 +17,7 @@ exp_agg_full:
   system_name: "h200_sxm" # required
   backend_name: "trtllm" # optional, default to trtllm
   backend_version: "1.2.0rc5" # optional, default to the latest version in the database
-  database_mode: "SILICON" # optional, default to SILICON. Options: SILICON (uses silicon data), HYBRID (uses silicon data when available, otherwise SOL+empirical factor), EMPIRICAL (SOL+empirical factor), SOL (SOL time only), SOL_FULL (SOL time and details)
+  database_mode: "HYBRID" # optional, default to HYBRID. Options: HYBRID (uses silicon data when available, otherwise SOL+empirical factor), SILICON (uses silicon data), EMPIRICAL (SOL+empirical factor), SOL (SOL time only), SOL_FULL (SOL time and details)
   isl: 4000 # input sequence length, optional, default to 4000
   osl: 1000 # output sequence length, optional, default to 1000
   prefix: 0 # prefix len of isl, optional, default to 0
@@ -59,7 +59,7 @@ exp_disagg_full:
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
   backend_name: "trtllm" # optional, default to trtllm
   backend_version: "1.2.0rc5" # optional, default to the latest version in the database
-  database_mode: "SILICON" # optional, default to SILICON. Options: SILICON, HYBRID, EMPIRICAL, SOL, SOL_FULL
+  database_mode: "HYBRID" # optional, default to HYBRID. Options: HYBRID, SILICON, EMPIRICAL, SOL, SOL_FULL
   isl: 4000 # input sequence length, optional, default to 4000
   osl: 1000 # output sequence length, optional, default to 1000
   prefix: 0 # prefix cache len, default to 0

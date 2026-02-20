@@ -1828,7 +1828,7 @@ class PerfDatabase:
         self.systems_root = systems_root
         with open(os.path.join(systems_root, system + ".yaml")) as f:
             self.system_spec = yaml.load(f, Loader=yaml.SafeLoader)
-        self._default_database_mode = common.DatabaseMode.SILICON  # default mode is SILICON
+        self._default_database_mode = common.DatabaseMode.HYBRID  # default mode is HYBRID
 
         # Cache for extracted metric data to avoid repeated extraction in _interp_3d
         self._extracted_metrics_cache = {}

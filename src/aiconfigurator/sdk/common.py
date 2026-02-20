@@ -449,8 +449,8 @@ class DatabaseMode(Enum):
     Database mode.
     """
 
-    SILICON = 0  # default mode using silicon data
-    HYBRID = 1  # use silicon data when available, otherwise use SOL+empirical factor
+    SILICON = 0  # uses silicon data
+    HYBRID = 1  # default mode; use silicon data when available, otherwise use SOL+empirical factor
     EMPIRICAL = 2  # SOL+empirical factor
     SOL = 3  # Provide SOL time only
     SOL_FULL = 4  # Provide SOL time and details

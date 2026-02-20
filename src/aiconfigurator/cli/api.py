@@ -128,7 +128,7 @@ def cli_default(
     decode_system: str | None = None,
     backend: str = "trtllm",
     backend_version: str | None = None,
-    database_mode: str = "SILICON",
+    database_mode: str = "HYBRID",
     isl: int = 4000,
     osl: int = 1000,
     ttft: float = 2000.0,
@@ -153,7 +153,7 @@ def cli_default(
             Use 'auto' to sweep across all three backends and compare results.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation
-            ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
+            ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'HYBRID'.
         isl: Input sequence length. Default is 4000.
         osl: Output sequence length. Default is 1000.
         ttft: Time to first token target in ms. Default is 2000.
@@ -481,7 +481,7 @@ def cli_estimate(
     mode: str = "agg",
     backend_name: str = "trtllm",
     backend_version: str | None = None,
-    database_mode: str = "SILICON",
+    database_mode: str = "HYBRID",
     isl: int = 1024,
     osl: int = 1024,
     batch_size: int = 128,
@@ -529,7 +529,7 @@ def cli_estimate(
         backend_name: Backend name ('trtllm', 'sglang', 'vllm'). Default is 'trtllm'.
         backend_version: Backend database version. Default is latest.
         database_mode: Database mode for performance estimation
-            ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
+            ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'HYBRID'.
         isl: Input sequence length. Default is 1024.
         osl: Output sequence length. Default is 1024.
         batch_size: Batch size (max concurrent requests, used for agg mode). Default is 128.
@@ -605,7 +605,7 @@ def cli_estimate(
                 f"Failed to load perf database for system={sys_name}, "
                 f"backend={backend_name}, version={resolved_version}."
             )
-        if database_mode != "SILICON":
+        if database_mode != "HYBRID":
             from aiconfigurator.sdk.common import DatabaseMode
 
             db.set_default_database_mode(DatabaseMode[database_mode])
