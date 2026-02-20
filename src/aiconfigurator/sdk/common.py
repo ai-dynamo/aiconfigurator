@@ -60,6 +60,30 @@ class NemotronHConfig:
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
 
 
+@dataclass(frozen=True)
+class MiMoConfig:
+    """
+    Configuration for MiMo-V2-Flash hybrid model (SWA + Global Attention + MoE).
+
+    Attributes:
+        hybrid_layer_pattern: Per-layer attention type (0=SWA, 1=Global), length = num_layers
+        moe_layer_freq: Per-layer FFN type (0=Dense, 1=MoE), length = num_layers
+        swa_num_kv_heads: Number of KV heads for SWA attention layers
+        swa_head_dim: Q/K head dimension for SWA attention
+        swa_v_head_dim: V head dimension for SWA attention
+        global_v_head_dim: V head dimension for global attention
+        sliding_window_size: Token window size for SWA layers
+    """
+
+    hybrid_layer_pattern: tuple[int, ...]
+    moe_layer_freq: tuple[int, ...]
+    swa_num_kv_heads: int
+    swa_head_dim: int
+    swa_v_head_dim: int
+    global_v_head_dim: int
+    sliding_window_size: int
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -254,6 +278,8 @@ DefaultHFModels = {
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
+    # MiMo Models
+    "XiaomiMiMo/MiMo-V2-Flash",
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
@@ -277,7 +303,7 @@ SupportedSystems = {
 """
 Model family for model definition
 """
-ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS", "NEMOTRONH"}
+ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS", "NEMOTRONH", "HYBRIDMOE"}
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
@@ -290,6 +316,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MixtralForCausalLM": "MOE",
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
+    "MiMoV2FlashForCausalLM": "HYBRIDMOE",
 }
 
 """
