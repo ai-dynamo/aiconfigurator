@@ -279,6 +279,8 @@ DefaultHFModels = {
     "Qwen/Qwen3-32B-FP8-Static-PerTensor",
     # Qwen 3.5 Models
     "Qwen/Qwen3.5-397B-A17B",
+    # Qwen 3-Next Models
+    "Qwen/Qwen3-Next-80B-A3B-Thinking",
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
