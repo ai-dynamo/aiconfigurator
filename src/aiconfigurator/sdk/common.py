@@ -60,6 +60,41 @@ class NemotronHConfig:
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
 
 
+@dataclass(frozen=True)
+class VisionEncoderConfig:
+    """
+    Configuration for a Vision Transformer (ViT) encoder in VLM models.
+
+    Extracted from the HuggingFace ``vision_config`` section.  The ViT runs
+    during the context/prefill phase only and produces image tokens that are
+    concatenated with text tokens before entering the LLM decoder.
+    """
+
+    depth: int
+    hidden_size: int
+    num_heads: int
+    intermediate_size: int
+    patch_size: int
+    out_hidden_size: int
+    spatial_merge_size: int = 2
+    temporal_patch_size: int = 2
+    in_channels: int = 3
+
+    def num_patches(self, height: int, width: int) -> int:
+        """Number of patches the ViT processes (before spatial merge)."""
+        return (height // self.patch_size) * (width // self.patch_size)
+
+    def num_image_tokens(self, height: int, width: int) -> int:
+        """Number of tokens injected into the LLM per image (after spatial merge)."""
+        return self.num_patches(height, width) // (self.spatial_merge_size ** 2)
+
+
+VLM_ARCHITECTURES = {
+    "Qwen3VLMoeForConditionalGeneration",
+    "Qwen3VLForConditionalGeneration",
+}
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -233,6 +268,10 @@ DefaultHFModels = {
     # DeepSeek Models
     "deepseek-ai/DeepSeek-V3",
     "nvidia/DeepSeek-V3.1-NVFP4",
+    # GLM Models
+    "zai-org/GLM-4.7-Flash",
+    "zai-org/GLM-4.7-FP8",
+    "zai-org/GLM-5-FP8",
     # Qwen 2.5 Models
     "Qwen/Qwen2.5-1.5B",
     "Qwen/Qwen2.5-7B",
@@ -248,6 +287,9 @@ DefaultHFModels = {
     "Qwen/Qwen3-30B-A3B-FP8",
     "Qwen/Qwen3-235B-A22B",
     "Qwen/Qwen3-235B-A22B-FP8",
+    "Qwen/Qwen3-235B-A22B-Instruct-2507",
+    "Qwen/Qwen3-235B-A22B-Thinking-2507",
+    "Qwen/Qwen3-VL-235B-A22B-Thinking",
     "Qwen/Qwen3-Coder-480B-A35B-Instruct",
     "nvidia/Qwen3-235B-A22B-NVFP4",
     "Qwen/Qwen3-32B-FP8-Static-PerTensor",
@@ -290,6 +332,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MixtralForCausalLM": "MOE",
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
+    "Qwen3VLMoeForConditionalGeneration": "MOE",
+    "Qwen3VLForConditionalGeneration": "LLAMA",
 }
 
 """

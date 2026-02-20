@@ -75,6 +75,34 @@ class BaseBackend(ABC):
             if isl <= 0:
                 raise ValueError(f"isl must be greater than 0 after removing prefix, but got {isl}")
 
+            # --- Vision encoder phase ---
+            num_images = getattr(runtime_config, "num_images", 0)
+            if model.vision_ops and num_images > 0:
+                ve_cfg = model.vision_encoder.config
+                img_h = getattr(runtime_config, "image_height", 384)
+                img_w = getattr(runtime_config, "image_width", 384)
+                num_patches = ve_cfg.num_patches(img_h, img_w)
+                vision_x = batch_size * num_images * num_patches
+
+                for op in model.vision_ops:
+                    result = op.query(
+                        database,
+                        x=vision_x,
+                        batch_size=batch_size,
+                        beam_width=1,
+                        s=num_patches,
+                        prefix=0,
+                        model_name=getattr(model, "model_name", ""),
+                    )
+                    latency_ms = float(result)
+                    energy_wms = getattr(result, "energy", 0.0)
+                    context_latency_dict[op._name] += latency_ms
+                    context_energy_wms_dict[op._name] += energy_wms
+
+                image_tokens = num_images * ve_cfg.num_image_tokens(img_h, img_w)
+                isl += image_tokens
+
+            # --- LLM decoder context ops ---
             for op in model.context_ops:
                 # query latency and store the latency
                 x = batch_size * isl if "logits_gemm" not in op._name else batch_size
@@ -88,9 +116,8 @@ class BaseBackend(ABC):
                     model_name=getattr(model, "model_name", ""),
                 )
 
-                # ✅ IMMEDIATELY extract values - do NOT use PerformanceResult arithmetic!
-                latency_ms = float(result)  # Extract latency in milliseconds
-                energy_wms = getattr(result, "energy", 0.0)  # Extract energy in watt-milliseconds
+                latency_ms = float(result)
+                energy_wms = getattr(result, "energy", 0.0)
 
                 # Aggregate in separate dicts (simple addition)
                 context_latency_dict[op._name] += latency_ms
@@ -154,32 +181,44 @@ class BaseBackend(ABC):
             runtime_config.prefix,
         )
 
+        # For VLM: image tokens are part of the KV cache during generation
+        num_images = getattr(runtime_config, "num_images", 0)
+        image_tokens = 0
+        if model.vision_encoder and num_images > 0:
+            ve_cfg = model.vision_encoder.config
+            img_h = getattr(runtime_config, "image_height", 384)
+            img_w = getattr(runtime_config, "image_width", 384)
+            image_tokens = num_images * ve_cfg.num_image_tokens(img_h, img_w)
+
+        gen_isl = isl + image_tokens
+        mem_isl = isl + image_tokens
+
         # Execute phases (UPDATED to return energy_wms dicts)
         context_latency_dict, context_energy_wms_dict = {}, {}
         generation_latency_dict, generation_energy_wms_dict = {}, {}
 
         if mode == "static_ctx":
             context_latency_dict, context_energy_wms_dict = _run_context(batch_size, isl, prefix)
-            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, 1)
+            memory = self._get_memory_usage(model, database, batch_size, beam_width, mem_isl, 1)
         elif mode == "static_gen":
             generation_latency_dict, generation_energy_wms_dict = _run_generation(
-                batch_size, beam_width, isl, osl, stride
+                batch_size, beam_width, gen_isl, osl, stride
             )
             memory = self._get_memory_usage(
                 model,
                 database,
                 batch_size,
                 beam_width,
-                isl,
+                mem_isl,
                 osl,
                 num_tokens=batch_size * beam_width,
             )  # for gen only, all kvcache is needed.
         else:
             context_latency_dict, context_energy_wms_dict = _run_context(batch_size, isl, prefix)
             generation_latency_dict, generation_energy_wms_dict = _run_generation(
-                batch_size, beam_width, isl, osl, stride
+                batch_size, beam_width, gen_isl, osl, stride
             )
-            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl)
+            memory = self._get_memory_usage(model, database, batch_size, beam_width, mem_isl, osl)
 
         if latency_correction_scale != 1.0:
             logger.debug(f"latency_correction_scale: {latency_correction_scale} is applied")

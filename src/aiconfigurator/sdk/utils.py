@@ -12,7 +12,13 @@ from functools import cache
 from pathlib import Path
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.common import ARCHITECTURE_TO_MODEL_FAMILY, BlockConfig, DefaultHFModels
+from aiconfigurator.sdk.common import (
+    ARCHITECTURE_TO_MODEL_FAMILY,
+    BlockConfig,
+    DefaultHFModels,
+    VLM_ARCHITECTURES,
+    VisionEncoderConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -446,21 +452,49 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"Supported architectures: {', '.join(ARCHITECTURE_TO_MODEL_FAMILY.keys())}"
         )
 
-    layers = config["num_hidden_layers"]
-    hidden_size = config["hidden_size"]
-    n = config["num_attention_heads"]
-    vocab = config["vocab_size"]
-    context = config["max_position_embeddings"]
+    # VLM models nest LLM params under "text_config" and vision params under "vision_config"
+    is_vlm = architecture in VLM_ARCHITECTURES
+    text_cfg = config.get("text_config", config) if is_vlm else config
+
+    layers = text_cfg["num_hidden_layers"]
+    hidden_size = text_cfg["hidden_size"]
+    n = text_cfg["num_attention_heads"]
+    vocab = text_cfg["vocab_size"]
+    context = text_cfg["max_position_embeddings"]
 
     # Handle nullable fields (e.g., Nemotron has null for these)
-    n_kv = config.get("num_key_value_heads") or 0
-    inter_size = config.get("intermediate_size") or 0
-    d = config.get("head_dim") or config.get("attention_head_dim") or (hidden_size // n if n > 0 else 0)
+    n_kv = text_cfg.get("num_key_value_heads") or 0
+    inter_size = text_cfg.get("intermediate_size") or 0
+    d = text_cfg.get("head_dim") or text_cfg.get("attention_head_dim") or (hidden_size // n if n > 0 else 0)
 
     # MoE parameters
-    topk = config.get("num_experts_per_tok", 0)
-    num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
-    moe_inter_size = config.get("moe_intermediate_size", 0) or config.get("intermediate_size", 0)
+    topk = text_cfg.get("num_experts_per_tok", 0)
+    num_experts = (
+        text_cfg.get("num_local_experts") or text_cfg.get("n_routed_experts") or text_cfg.get("num_experts", 0)
+    )
+    moe_inter_size = text_cfg.get("moe_intermediate_size", 0) or text_cfg.get("intermediate_size", 0)
+
+    # Parse VLM vision encoder config
+    vision_encoder_config = None
+    if is_vlm and "vision_config" in config:
+        vc = config["vision_config"]
+        vision_encoder_config = VisionEncoderConfig(
+            depth=vc["depth"],
+            hidden_size=vc["hidden_size"],
+            num_heads=vc["num_heads"],
+            intermediate_size=vc["intermediate_size"],
+            patch_size=vc["patch_size"],
+            out_hidden_size=vc.get("out_hidden_size", hidden_size),
+            spatial_merge_size=vc.get("spatial_merge_size", 2),
+            temporal_patch_size=vc.get("temporal_patch_size", 2),
+            in_channels=vc.get("in_channels", 3),
+        )
+        logger.info(
+            f"VLM vision config: depth={vision_encoder_config.depth}, "
+            f"hidden_size={vision_encoder_config.hidden_size}, "
+            f"num_heads={vision_encoder_config.num_heads}, "
+            f"patch_size={vision_encoder_config.patch_size}"
+        )
 
     # Handle NemotronH-specific configuration (only fields unique to NemotronH)
     extra_params = None
@@ -504,6 +538,7 @@ def _parse_hf_config_json(config: dict) -> dict:
         "num_experts": num_experts,
         "moe_inter_size": moe_inter_size,
         "extra_params": extra_params,
+        "vision_config": vision_encoder_config,
     }
 
 

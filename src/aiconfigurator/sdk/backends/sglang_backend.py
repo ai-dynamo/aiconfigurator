@@ -481,6 +481,8 @@ class SGLANGBackend(BaseBackend):
         # Calculate weights memory - same as TRTLLM
         for op in model.context_ops:
             weights += op.get_weights()
+        for op in model.vision_ops:
+            weights += op.get_weights()
 
         # Count weights on a single GPU
         weights /= model.config.pp_size
