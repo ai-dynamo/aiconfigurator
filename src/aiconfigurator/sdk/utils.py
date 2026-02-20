@@ -446,21 +446,24 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"Supported architectures: {', '.join(ARCHITECTURE_TO_MODEL_FAMILY.keys())}"
         )
 
-    layers = config["num_hidden_layers"]
-    hidden_size = config["hidden_size"]
-    n = config["num_attention_heads"]
-    vocab = config["vocab_size"]
-    context = config["max_position_embeddings"]
+    # For VLM models like Qwen3.5-MoE, model params are nested under text_config
+    cfg = config.get("text_config", config) if architecture == "Qwen3_5MoeForConditionalGeneration" else config
+
+    layers = cfg["num_hidden_layers"]
+    hidden_size = cfg["hidden_size"]
+    n = cfg["num_attention_heads"]
+    vocab = cfg["vocab_size"]
+    context = cfg["max_position_embeddings"]
 
     # Handle nullable fields (e.g., Nemotron has null for these)
-    n_kv = config.get("num_key_value_heads") or 0
-    inter_size = config.get("intermediate_size") or 0
-    d = config.get("head_dim") or config.get("attention_head_dim") or (hidden_size // n if n > 0 else 0)
+    n_kv = cfg.get("num_key_value_heads") or 0
+    inter_size = cfg.get("intermediate_size") or 0
+    d = cfg.get("head_dim") or cfg.get("attention_head_dim") or (hidden_size // n if n > 0 else 0)
 
     # MoE parameters
-    topk = config.get("num_experts_per_tok", 0)
-    num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
-    moe_inter_size = config.get("moe_intermediate_size", 0) or config.get("intermediate_size", 0)
+    topk = cfg.get("num_experts_per_tok", 0)
+    num_experts = cfg.get("num_local_experts") or cfg.get("n_routed_experts") or cfg.get("num_experts", 0)
+    moe_inter_size = cfg.get("moe_intermediate_size", 0) or cfg.get("intermediate_size", 0)
 
     # Handle NemotronH-specific configuration (only fields unique to NemotronH)
     extra_params = None
@@ -483,6 +486,25 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])
+    elif architecture in ("Qwen3_5MoeForConditionalGeneration", "Qwen3NextForCausalLM"):
+        layer_types = cfg.get("layer_types")
+        if layer_types is None:
+            interval = cfg.get("full_attention_interval", 4)
+            layer_types = ["full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(layers)]
+        extra_params = common.Qwen35MoEConfig(
+            layer_types=tuple(layer_types),
+            linear_num_kv_heads=cfg.get("linear_num_key_heads", 0),
+            linear_num_value_heads=cfg.get("linear_num_value_heads", 0),
+            linear_key_head_dim=cfg.get("linear_key_head_dim", 0),
+            linear_value_head_dim=cfg.get("linear_value_head_dim", 0),
+            shared_expert_inter_size=cfg.get("shared_expert_intermediate_size", 0),
+        )
+        n_linear = extra_params.layer_types.count("linear_attention")
+        n_full = extra_params.layer_types.count("full_attention")
+        logger.info(
+            f"Qwen3.5-MoE hybrid config: {n_linear} linear_attention + {n_full} full_attention layers, "
+            f"linear_kv_heads={extra_params.linear_num_kv_heads}, linear_v_heads={extra_params.linear_num_value_heads}"
+        )
 
     logger.info(
         f"Model architecture: architecture={architecture}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "

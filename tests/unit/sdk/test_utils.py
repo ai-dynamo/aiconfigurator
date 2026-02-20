@@ -151,6 +151,95 @@ class TestParseHFConfig:
         assert extra_params.mamba_num_heads == 64
         assert extra_params.moe_shared_expert_intermediate_size == 3712
 
+    def test_parse_qwen35_moe_config(self):
+        """Test parsing a Qwen3.5-MoE hybrid model config (VLM with text_config)."""
+        config = {
+            "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+            "text_config": {
+                "num_hidden_layers": 60,
+                "num_key_value_heads": 2,
+                "hidden_size": 4096,
+                "num_attention_heads": 32,
+                "intermediate_size": 1024,
+                "vocab_size": 248320,
+                "max_position_embeddings": 262144,
+                "head_dim": 256,
+                "num_experts_per_tok": 10,
+                "num_experts": 512,
+                "moe_intermediate_size": 1024,
+                "shared_expert_intermediate_size": 1024,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 64,
+                "linear_key_head_dim": 128,
+                "linear_value_head_dim": 128,
+                "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention"] * 15,
+            },
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result["architecture"] == "Qwen3_5MoeForConditionalGeneration"
+        assert result["layers"] == 60
+        assert result["hidden_size"] == 4096
+        assert result["d"] == 256
+        assert result["topk"] == 10
+        assert result["num_experts"] == 512
+        extra_params = result["extra_params"]
+        assert extra_params is not None
+        assert extra_params.linear_num_kv_heads == 16
+        assert extra_params.linear_num_value_heads == 64
+        assert extra_params.shared_expert_inter_size == 1024
+        assert extra_params.layer_types.count("linear_attention") == 45
+        assert extra_params.layer_types.count("full_attention") == 15
+
+    def test_parse_qwen3_next_config(self):
+        """Test parsing a Qwen3-Next hybrid model config (flat config, no explicit layer_types)."""
+        config = {
+            "architectures": ["Qwen3NextForCausalLM"],
+            "num_hidden_layers": 48,
+            "num_key_value_heads": 2,
+            "hidden_size": 2048,
+            "num_attention_heads": 16,
+            "intermediate_size": 5120,
+            "vocab_size": 151936,
+            "max_position_embeddings": 262144,
+            "head_dim": 256,
+            "num_experts_per_tok": 10,
+            "num_experts": 512,
+            "moe_intermediate_size": 512,
+            "shared_expert_intermediate_size": 512,
+            "full_attention_interval": 4,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 32,
+            "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128,
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result["architecture"] == "Qwen3NextForCausalLM"
+        assert result["layers"] == 48
+        assert result["hidden_size"] == 2048
+        assert result["d"] == 256
+        assert result["topk"] == 10
+        assert result["num_experts"] == 512
+        assert result["moe_inter_size"] == 512
+        extra_params = result["extra_params"]
+        assert extra_params is not None
+        assert extra_params.linear_num_kv_heads == 16
+        assert extra_params.linear_num_value_heads == 32
+        assert extra_params.linear_key_head_dim == 128
+        assert extra_params.linear_value_head_dim == 128
+        assert extra_params.shared_expert_inter_size == 512
+        # layer_types should be generated from full_attention_interval
+        assert len(extra_params.layer_types) == 48
+        assert extra_params.layer_types.count("linear_attention") == 36
+        assert extra_params.layer_types.count("full_attention") == 12
+        # Verify pattern: every 4th layer is full attention
+        for i in range(48):
+            expected = "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
+            assert extra_params.layer_types[i] == expected
+
     def test_parse_nemotronh_without_moe(self):
         """Test parsing a NemotronH config without MoE layers (no 'E' in pattern)."""
         config = {

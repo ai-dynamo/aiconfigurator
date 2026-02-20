@@ -142,6 +142,13 @@ def _add_default_mode_arguments(parser):
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
+    parser.add_argument(
+        "--enable-wideep",
+        action="store_true",
+        default=False,
+        help="Enable wide expert-parallelism search space for large MoE models. "
+        "Expands GPU-per-worker candidates to support EP up to 32/64.",
+    )
 
 
 def _add_experiments_mode_arguments(parser):
@@ -568,6 +575,7 @@ def build_default_task_configs(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
+    enable_wideep: bool = False,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
 
@@ -586,6 +594,7 @@ def build_default_task_configs(
         tpot: Time per output token target in ms.
         request_latency: Optional end-to-end request latency target (ms).
         prefix: Prefix cache length.
+        enable_wideep: Enable wide expert-parallelism search space for large MoE models.
 
     Returns:
         Dict with TaskConfig objects. When backend='auto', returns 6 configs
@@ -613,6 +622,7 @@ def build_default_task_configs(
         "request_latency": request_latency,
         "prefix": prefix,
         "database_mode": database_mode,
+        "enable_wideep": enable_wideep,
     }
 
     task_configs: dict[str, TaskConfig] = {}
@@ -1206,6 +1216,7 @@ def main(args):
             tpot=args.tpot,
             request_latency=args.request_latency,
             prefix=args.prefix,
+            enable_wideep=args.enable_wideep,
         )
     elif args.mode == "exp":
         try:
