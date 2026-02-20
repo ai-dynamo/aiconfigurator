@@ -279,6 +279,7 @@ DefaultHFModels = {
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
     # MiMo Models
+    "XiaomiMiMo/MiMo-7B-Base",
     "XiaomiMiMo/MiMo-V2-Flash",
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
@@ -316,6 +317,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MixtralForCausalLM": "MOE",
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
+    "MiMoForCausalLM": "LLAMA",
     "MiMoV2FlashForCausalLM": "HYBRIDMOE",
 }
 
