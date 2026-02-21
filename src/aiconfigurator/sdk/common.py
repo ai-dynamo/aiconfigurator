@@ -284,12 +284,19 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Qwen3ForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
+    "KimiK25ForConditionalGeneration": "DEEPSEEK",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",
     "MixtralForCausalLM": "MOE",
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
+}
+
+# Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
+# _parse_hf_config_json will flatten these before parsing.
+MULTIMODAL_TEXT_CONFIG_KEY = {
+    "KimiK25ForConditionalGeneration": "text_config",
 }
 
 """
