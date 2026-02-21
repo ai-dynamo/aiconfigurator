@@ -215,12 +215,14 @@ def get_model(
             model_config,
         )
     elif model_family == "DEEPSEEK":
+        mla_config = extra_params if isinstance(extra_params, common.DeepSeekMLAConfig) else None
         if backend_name == "sglang" and model_config.enable_wideep:
             logger.debug(f"WideEP is enabled for model {model_path} with backend {backend_name}")
             model = WideEPDeepSeekModel(
                 topk,
                 num_experts,
                 moe_inter_size,
+                mla_config,
                 model_path,
                 model_family,
                 architecture,
@@ -240,6 +242,7 @@ def get_model(
                 topk,
                 num_experts,
                 moe_inter_size,
+                mla_config,
                 model_path,
                 model_family,
                 architecture,
@@ -259,6 +262,7 @@ def get_model(
                 topk,
                 num_experts,
                 moe_inter_size,
+                mla_config,
                 model_path,
                 model_family,
                 architecture,
@@ -1034,7 +1038,7 @@ class DeepSeekModel(BaseModel):
     DeepSeek V3/R1 uses this model impl.
     """
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, mla_config, *args) -> None:
         super().__init__(*args)
 
         # make sure the paralel width is same
@@ -1055,6 +1059,13 @@ class DeepSeekModel(BaseModel):
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
+
+        # MLA attention parameters (model-specific, defaults to DeepSeek-V3 values)
+        _q_lora_rank = mla_config.q_lora_rank if mla_config else 1536
+        _kv_lora_rank = mla_config.kv_lora_rank if mla_config else 512
+        _qk_nope_head_dim = mla_config.qk_nope_head_dim if mla_config else 128
+        _qk_rope_head_dim = mla_config.qk_rope_head_dim if mla_config else 64
+        _v_head_dim = mla_config.v_head_dim if mla_config else 128
 
         # used to scale the tpot to reflect mtp effect:
         # 1. mtp will reduce the overall time by expected_tokens_per_step
@@ -1100,30 +1111,41 @@ class DeepSeekModel(BaseModel):
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),  # on every gpu, fused_a
+                # fused_a: kv_lora_rank + q_lora_rank + qk_rope_head_dim, on every gpu
+                ops.GEMM(
+                    "context_downscale_gemm",
+                    self._num_layers,
+                    _kv_lora_rank + _q_lora_rank + _qk_rope_head_dim,
+                    h,
+                    gemm_quant_mode,
+                ),
                 ops.GEMM(
                     "context_q_b_proj_gemm",
                     self._num_layers,
-                    24576 // tp_size,
-                    1536,
+                    self._num_heads * (_qk_nope_head_dim + _qk_rope_head_dim) // tp_size,
+                    _q_lora_rank,
                     gemm_quant_mode,
                 ),
                 ops.GEMM(
                     "context_kv_b_proj_gemm",
                     self._num_layers,
-                    32768 // tp_size,
-                    512,
+                    self._num_heads * (_qk_nope_head_dim + _v_head_dim) // tp_size,
+                    _kv_lora_rank,
                     gemm_quant_mode,
                 ),  # agg ctx attn part
                 ops.ContextMLA(
                     "context_attention",
                     self._num_layers,
-                    128 // tp_size,
+                    self._num_heads // tp_size,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                 ),  # agg ctx attn part
                 ops.GEMM(
-                    "context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode
+                    "context_proj_gemm",
+                    self._num_layers,
+                    h,
+                    self._num_heads * _v_head_dim // tp_size,
+                    gemm_quant_mode,
                 ),  # agg ctx attn part
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
             ]
@@ -1254,15 +1276,15 @@ class DeepSeekModel(BaseModel):
                 ops.GEMM(
                     "generation_downscale_gemm",
                     self._num_layers * self._mtp_scale_factor,
-                    2112,
+                    _kv_lora_rank + _q_lora_rank + _qk_rope_head_dim,
                     h,
                     gemm_quant_mode,
                 ),  # on every gpu
                 ops.GEMM(
                     "generation_q_b_proj_gemm",
                     self._num_layers * self._mtp_scale_factor,
-                    24576 // tp_size,
-                    1536,
+                    self._num_heads * (_qk_nope_head_dim + _qk_rope_head_dim) // tp_size,
+                    _q_lora_rank,
                     gemm_quant_mode,
                 ),
                 ops.MLABmm(
@@ -1275,7 +1297,7 @@ class DeepSeekModel(BaseModel):
                 ops.GenerationMLA(
                     "generation_attention",
                     self._num_layers * self._mtp_scale_factor,
-                    128 // tp_size,
+                    self._num_heads // tp_size,
                     kvcache_quant_mode,
                 ),  # agg gen attn part
                 ops.MLABmm(
@@ -1450,7 +1472,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
     - All2All kernel: MnnvlMoe (SM>=100), DeepEP/DeepEPLowLatency (SM>=90), NCCL (fallback)
     """
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, mla_config, *args) -> None:
         super().__init__(*args)
 
         # make sure the parallel width is same
@@ -1471,6 +1493,13 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
+
+        # MLA attention parameters (model-specific, defaults to DeepSeek-V3 values)
+        _q_lora_rank = mla_config.q_lora_rank if mla_config else 1536
+        _kv_lora_rank = mla_config.kv_lora_rank if mla_config else 512
+        _qk_nope_head_dim = mla_config.qk_nope_head_dim if mla_config else 128
+        _qk_rope_head_dim = mla_config.qk_rope_head_dim if mla_config else 64
+        _v_head_dim = mla_config.v_head_dim if mla_config else 128
 
         # MTP scale factor for generation phase
         self._mtp_scale_factor = (
@@ -1559,29 +1588,41 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
+                ops.GEMM(
+                    "context_downscale_gemm",
+                    self._num_layers,
+                    _kv_lora_rank + _q_lora_rank + _qk_rope_head_dim,
+                    h,
+                    gemm_quant_mode,
+                ),
                 ops.GEMM(
                     "context_q_b_proj_gemm",
                     self._num_layers,
-                    24576 // tp_size,
-                    1536,
+                    self._num_heads * (_qk_nope_head_dim + _qk_rope_head_dim) // tp_size,
+                    _q_lora_rank,
                     gemm_quant_mode,
                 ),
                 ops.GEMM(
                     "context_kv_b_proj_gemm",
                     self._num_layers,
-                    32768 // tp_size,
-                    512,
+                    self._num_heads * (_qk_nope_head_dim + _v_head_dim) // tp_size,
+                    _kv_lora_rank,
                     gemm_quant_mode,
                 ),
                 ops.ContextMLA(
                     "context_attention",
                     self._num_layers,
-                    128 // tp_size,
+                    self._num_heads // tp_size,
                     kvcache_quant_mode,
                     fmha_quant_mode,
                 ),
-                ops.GEMM("context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode),
+                ops.GEMM(
+                    "context_proj_gemm",
+                    self._num_layers,
+                    h,
+                    self._num_heads * _v_head_dim // tp_size,
+                    gemm_quant_mode,
+                ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
             ]
         )
@@ -1715,15 +1756,15 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 ops.GEMM(
                     "generation_downscale_gemm",
                     self._num_layers * self._mtp_scale_factor,
-                    2112,
+                    _kv_lora_rank + _q_lora_rank + _qk_rope_head_dim,
                     h,
                     gemm_quant_mode,
                 ),
                 ops.GEMM(
                     "generation_q_b_proj_gemm",
                     self._num_layers * self._mtp_scale_factor,
-                    24576 // tp_size,
-                    1536,
+                    self._num_heads * (_qk_nope_head_dim + _qk_rope_head_dim) // tp_size,
+                    _q_lora_rank,
                     gemm_quant_mode,
                 ),
                 ops.MLABmm(
@@ -1736,7 +1777,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 ops.GenerationMLA(
                     "generation_attention",
                     self._num_layers * self._mtp_scale_factor,
-                    128 // tp_size,
+                    self._num_heads // tp_size,
                     kvcache_quant_mode,
                 ),
                 ops.MLABmm(
@@ -1889,7 +1930,7 @@ class WideEPDeepSeekModel(BaseModel):
     DeepSeek V3/R1 disaggregated model for SGLang backend.
     """
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, mla_config, *args) -> None:
         super().__init__(*args)
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
