@@ -91,18 +91,23 @@ def cleanup_empty_json_files(directory):
 
 def get_moe_test_cases():
     moe_list = ["float16"]
-    if get_sm_version() > 86:
+    sm_version = get_sm_version()
+    
+    if sm_version > 86:
         moe_list += ["fp8"]
-        if get_sm_version() < 100:
-            # though trtllm gen kernel source supports fp8_block, it only provides min-latency
-            # data. not practical.
-            moe_list += [
-                # "w4afp8", FIXME: trtllm 1.2 has bugs for w4afp8
-                "fp8_block",
-                "w4a16_mxfp4",
-            ]
+        
+    # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block
+    # SM90: uses CUTLASS backend with FP32 scale
+    # SM100: uses DEEPGEMM/TRTLLM backend with UE8M0 scale (MXFP8 style)
+    if sm_version > 86:
+        moe_list += ["fp8_block"]
+        
+    # SM90 specific: w4a16_mxfp4
+    if 86 < sm_version < 100:
+        moe_list += ["w4a16_mxfp4"]
 
-    if get_sm_version() >= 100:
+    # SM100 (Blackwell) specific
+    if sm_version >= 100:
         moe_list += ["nvfp4"]
 
     test_cases = []
@@ -264,6 +269,8 @@ def run_moe_torch(
         activation_type = ActivationType.Swiglu
         is_gated = True
 
+    sm_version = get_sm_version()
+    
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
         # use triton backend for best performance on Hopper
         model_config.moe_backend = "triton"
@@ -272,12 +279,25 @@ def run_moe_torch(
         )
         swiglu_beta = torch.tensor([1.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
         swiglu_limit = torch.tensor([7.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
-        if 86 < get_sm_version() < 100:
+        if 86 < sm_version < 100:
             model_config.moe_backend = "triton"
         else:
             model_config.moe_backend = "cutlass" if not min_latency_mode else "trtllm"
     else:
-        model_config.moe_backend = "cutlass" if not min_latency_mode else "trtllm"
+        # Select backend based on platform and moe_type
+        if min_latency_mode:
+            model_config.moe_backend = "trtllm"
+        elif moe_type == "fp8_block":
+            # SM100 (Blackwell): DEEPGEMM is preferred for fp8_block
+            # SM90 (Hopper): CUTLASS is preferred
+            if sm_version >= 100:
+                # Blackwell: DeepGEMM uses MXFP8 style (E4M3 + UE8M0 scale)
+                model_config.moe_backend = "deepgemm"
+            else:
+                # Hopper: CUTLASS uses FP32 scale
+                model_config.moe_backend = "cutlass"
+        else:
+            model_config.moe_backend = "cutlass"
 
     router_logits_dtype = torch.bfloat16
     # current min_latency mode only support experts <= 256. Thus K2 will not have min_latency mode.
@@ -471,8 +491,12 @@ def run_moe_torch(
             source = "moe_torch_flow_min_latency"  # trtllm gen
         elif not is_gated:
             source = "moe_torch_flow_nongated"  # non-gated MoE (relu2)
+        elif model_config.moe_backend == "deepgemm":
+            source = "moe_torch_flow_deepgemm"  # SM100 DeepGEMM (MXFP8 style scale)
+        elif model_config.moe_backend == "cutlass":
+            source = "moe_torch_flow_cutlass"  # SM90 CUTLASS (FP32 scale)
         else:
-            source = "moe_torch_flow"  # cutlass (gated SwiGLU)
+            source = "moe_torch_flow"  # default
 
         log_perf(
             item_list=[

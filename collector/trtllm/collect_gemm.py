@@ -18,11 +18,19 @@ def pad_up(x: int, y: int) -> int:
 
 def get_gemm_test_cases():
     gemm_list = ["float16"]
-    if get_sm_version() > 86:
+    sm_version = get_sm_version()
+    
+    if sm_version > 86:
         gemm_list += ["fp8"]
-        if get_sm_version() < 100:
-            gemm_list += ["fp8_block"]
-    if get_sm_version() >= 100:
+        
+    # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block
+    # SM90: CUTLASS backend with FP32 scale
+    # SM100: TRTLLM/DeepGEMM backend with UE8M0 scale (MXFP8 style)
+    if sm_version > 86:
+        gemm_list += ["fp8_block"]
+        
+    # SM100 (Blackwell) specific
+    if sm_version >= 100:
         gemm_list += ["nvfp4"]
 
     test_cases = []
