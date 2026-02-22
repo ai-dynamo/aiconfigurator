@@ -140,6 +140,12 @@ def get_moe_test_cases():
             ):
                 continue
 
+            # Blackwell DeepGEMM fp8_block has an additional TP-shard alignment requirement.
+            # Skip shapes that are known to trigger layout assert:
+            #   Assertion error ... layout.hpp:78: sf.size(-2) == ceil_div(mn, gran_mn)
+            if moe_type == "fp8_block" and sm_version >= 100 and (common_moe_testcase.inter_size // moe_tp) % 128 != 0:
+                continue
+
             # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0
             weight_bits = {
                 "float16": 16,
@@ -504,7 +510,9 @@ def run_moe_torch(
             if not results["used_cuda_graph"] and aic_debug == 1:
                 print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
 
-        if min_latency_mode:
+        if moe_type == "fp8_block" and sm_version >= 100:
+            source = "deepgemm"
+        elif min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
         elif not is_gated:
             source = "moe_torch_flow_nongated"  # non-gated MoE (relu2)
