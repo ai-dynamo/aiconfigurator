@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+import os
 
 import tensorrt_llm
 import torch
@@ -18,12 +19,19 @@ def pad_up(x: int, y: int) -> int:
 
 def get_gemm_test_cases():
     gemm_list = ["float16"]
-    if get_sm_version() > 86:
+    sm_version = get_sm_version()
+    if sm_version > 86:
         gemm_list += ["fp8"]
-        if get_sm_version() < 100:
-            gemm_list += ["fp8_block"]
-    if get_sm_version() >= 100:
+        # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block.
+        # SM90 uses CUTLASS backend with FP32 scale.
+        # SM100 uses TRTLLM/DeepGEMM backend with UE8M0 scale (MXFP8 style).
+        gemm_list += ["fp8_block"]
+    if sm_version >= 100:
         gemm_list += ["nvfp4"]
+
+    only_fp8_block = os.getenv("AIC_ONLY_FP8_BLOCK", "0") == "1"
+    if only_fp8_block:
+        gemm_list = [x for x in gemm_list if x == "fp8_block"]
 
     test_cases = []
     for gemm_common_testcase in get_gemm_common_test_cases():
@@ -34,6 +42,10 @@ def get_gemm_test_cases():
             if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
                 continue
             test_cases.append([gemm_type, x, n, k, "gemm_perf.txt"])
+
+    max_cases = int(os.getenv("AIC_DEBUG_MAX_CASES", "0"))
+    if max_cases > 0:
+        test_cases = test_cases[:max_cases]
 
     return test_cases
 
@@ -138,3 +150,8 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )
+
+
+if __name__ == "__main__":
+    for test_case in get_gemm_test_cases():
+        run_gemm(*test_case)
