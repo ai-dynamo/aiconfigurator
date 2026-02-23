@@ -988,6 +988,20 @@ class TaskConfig:
 
 
 class TaskRunner:
+    @staticmethod
+    def _get_database(system: str, backend: str, version: str, database_mode: str | None = None):
+        """Fetch a database from the global cache.
+
+        When *database_mode* is set the returned object is a deep copy (because
+        `set_default_database_mode` mutates state).  Otherwise the cached
+        instance is returned directly.
+        """
+        db = get_database(system=system, backend=backend, version=version)
+        if database_mode is not None:
+            db = copy.deepcopy(db)
+            db.set_default_database_mode(common.DatabaseMode[database_mode])
+        return db
+
     def run_agg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
         logger.info("Task %s: Setting up runtime config", task_config.task_name)
         runtime_config = config.RuntimeConfig(
@@ -1000,18 +1014,14 @@ class TaskRunner:
         )
         logger.info("Task %s: Setting up database", task_config.task_name)
         try:
-            database = copy.deepcopy(
-                get_database(
-                    system=task_config.worker_config.system_name,
-                    backend=task_config.worker_config.backend_name,
-                    version=task_config.worker_config.backend_version,
-                )
-            )
-            # Set database mode if specified
             database_mode = getattr(task_config, "database_mode", None)
+            database = self._get_database(
+                system=task_config.worker_config.system_name,
+                backend=task_config.worker_config.backend_name,
+                version=task_config.worker_config.backend_version,
+                database_mode=database_mode,
+            )
             if database_mode is not None:
-                db_mode = common.DatabaseMode[database_mode]
-                database.set_default_database_mode(db_mode)
                 logger.info("Task %s: Using database mode: %s", task_config.task_name, database_mode)
         except Exception:  # pragma: no cover
             logger.exception(
@@ -1086,17 +1096,13 @@ class TaskRunner:
 
         logger.info("Task %s: Setting up prefill database", task_config.task_name)
         try:
-            prefill_database = copy.deepcopy(
-                get_database(
-                    system=task_config.prefill_worker_config.system_name,
-                    backend=task_config.prefill_worker_config.backend_name,
-                    version=task_config.prefill_worker_config.backend_version,
-                )
+            prefill_database = self._get_database(
+                system=task_config.prefill_worker_config.system_name,
+                backend=task_config.prefill_worker_config.backend_name,
+                version=task_config.prefill_worker_config.backend_version,
+                database_mode=database_mode,
             )
-            # Set database mode if specified
             if database_mode is not None:
-                db_mode = common.DatabaseMode[database_mode]
-                prefill_database.set_default_database_mode(db_mode)
                 logger.info("Task %s: Using prefill database mode: %s", task_config.task_name, database_mode)
         except Exception:  # pragma: no cover
             logger.exception(
@@ -1146,16 +1152,13 @@ class TaskRunner:
 
         logger.info("Task %s: Setting up decode database", task_config.task_name)
         try:
-            decode_database = copy.deepcopy(
-                get_database(
-                    system=task_config.decode_worker_config.system_name,
-                    backend=task_config.decode_worker_config.backend_name,
-                    version=task_config.decode_worker_config.backend_version,
-                )
+            decode_database = self._get_database(
+                system=task_config.decode_worker_config.system_name,
+                backend=task_config.decode_worker_config.backend_name,
+                version=task_config.decode_worker_config.backend_version,
+                database_mode=database_mode,
             )
-            # Set database mode if specified (using same database_mode from above)
             if database_mode is not None:
-                decode_database.set_default_database_mode(db_mode)
                 logger.info("Task %s: Using decode database mode: %s", task_config.task_name, database_mode)
         except Exception:  # pragma: no cover
             logger.exception(
