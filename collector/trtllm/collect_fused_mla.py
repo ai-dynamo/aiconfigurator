@@ -24,11 +24,15 @@ Usage:
     # DSA (V3.2) generation phase
     python collect_fused_mla.py --mode generation --model-path deepseek-ai/DeepSeek-V3 --is-v32
 
-    # Quick single-point test
-    python collect_fused_mla.py --mode context --quick --batch-size 4 --seq-len 2048 --num-heads 64
+    # FP8 KV cache only
+    python collect_fused_mla.py --mode context --kv-cache-dtype fp8
+
+    # Quick single-point test with FP8 KV cache
+    python collect_fused_mla.py --mode context --quick --batch-size 4 --seq-len 2048 --num-heads 64 --kv-cache-dtype fp8
 """
 
 import argparse
+import dataclasses
 import gc
 import sys
 import traceback
@@ -51,47 +55,78 @@ from tensorrt_llm._torch.pyexecutor._util import get_kv_cache_manager_cls
 from tensorrt_llm._torch.pyexecutor.model_loader import initialize_dummy_weights
 from tensorrt_llm._torch.utils import AuxStreamType, get_model_extra_attrs, model_extra_attrs
 from tensorrt_llm._utils import torch_dtype_to_binding
+from tensorrt_llm.bindings import DataType
 from tensorrt_llm.bindings.executor import KvCacheConfig
 from tensorrt_llm.bindings.internal.batch_manager import CacheType
 from tensorrt_llm.functional import AllReduceStrategy
 from tensorrt_llm.mapping import Mapping
+from tensorrt_llm.quantization.mode import QuantAlgo
 
-from helper import benchmark_with_power, log_perf
+from helper import benchmark_with_power, get_sm_version, log_perf
 
 # ═══════════════════════════════════════════════════════════════════════
 # Test Cases
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def get_context_test_cases():
+def _get_kv_cache_dtypes(is_v32: bool = False):
+    """Return the list of KV cache dtypes to benchmark based on GPU capability.
+
+    FP8 KV cache support depends on both the architecture (MLA vs DSA) and GPU:
+
+      MLA (V3):  Hopper (86 < SM < 100) only — the old FMHA kernel includes
+                 FP8 MLA generation variants.  Blackwell (SM100+) trtllm-gen
+                 kernels lack the ``sparseMla=0`` FP8 MLA variant.
+
+      DSA (V3.2): Blackwell (SM >= 100) only — uses ``forward_absorption_*``
+                  with trtllm-gen ``sparseMla=1`` kernels that support FP8.
+                  Hopper falls back to ``forward_sparse_mla_kvcache_bf16``
+                  which is BF16-only.
+    """
+    dtypes = ["bfloat16"]
+    sm = get_sm_version()
+    if is_v32:
+        if sm >= 100:
+            dtypes.append("fp8")
+    else:
+        if 86 < sm < 100:
+            dtypes.append("fp8")
+    return dtypes
+
+
+def get_context_test_cases(is_v32: bool = False):
     """Context-phase test cases.
-    Returns list of (seq_len, batch_size, num_heads, is_v32, perf_filename).
+    Returns list of (seq_len, batch_size, num_heads, is_v32, kv_cache_dtype, perf_filename).
     """
     cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
-    for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-        for b in b_list:
-            for s in s_list:
-                if b * s > 131072:
-                    continue
-                cases.append([s, b, num_heads, False, "fused_mla_context_perf.txt"])
+    base_fname = "fused_dsa_context_perf.txt" if is_v32 else "fused_mla_context_perf.txt"
+    for kv_dtype in _get_kv_cache_dtypes(is_v32=is_v32):
+        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
+            for b in b_list:
+                for s in s_list:
+                    if b * s > 131072:
+                        continue
+                    cases.append([s, b, num_heads, is_v32, kv_dtype, base_fname])
     return cases
 
 
-def get_generation_test_cases():
+def get_generation_test_cases(is_v32: bool = False):
     """Generation-phase test cases.
-    Returns list of (kv_cache_len, batch_size, num_heads, is_v32, perf_filename).
+    Returns list of (kv_cache_len, batch_size, num_heads, is_v32, kv_cache_dtype, perf_filename).
     """
     cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
-    for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-        for b in b_list:
-            for s in s_list:
-                if b * s > 1024 * 4096 * 2 * 2 * 2:
-                    continue
-                cases.append([s, b, num_heads, False, "fused_mla_generation_perf.txt"])
+    base_fname = "fused_dsa_generation_perf.txt" if is_v32 else "fused_mla_generation_perf.txt"
+    for kv_dtype in _get_kv_cache_dtypes(is_v32=is_v32):
+        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
+            for b in b_list:
+                for s in s_list:
+                    if b * s > 1024 * 4096 * 2 * 2 * 2:
+                        continue
+                    cases.append([s, b, num_heads, is_v32, kv_dtype, base_fname])
     return cases
 
 
@@ -112,6 +147,7 @@ def create_attention_layer(
     model_path: str,
     num_heads: int = 128,
     is_v32: bool = False,
+    use_fp8_kv_cache: bool = False,
     device: str = "cuda:0",
 ):
     """
@@ -155,6 +191,12 @@ def create_attention_layer(
     pretrained_config.num_hidden_layers = 1
     pretrained_config.num_attention_heads = num_heads
     pretrained_config.num_key_value_heads = num_heads
+
+    if use_fp8_kv_cache:
+        model_config.quant_config = dataclasses.replace(
+            model_config.quant_config,
+            kv_cache_quant_algo=QuantAlgo.FP8,
+        )
 
     if is_v32:
         # If loaded from V3 repo, patch model_type so DecoderLayer picks
@@ -229,6 +271,7 @@ def create_kv_cache_and_metadata(
     batch_size: int,
     seq_len: int,
     is_context: bool,
+    use_fp8_kv_cache: bool = False,
     device: str = "cuda:0",
 ):
     """
@@ -261,7 +304,7 @@ def create_kv_cache_and_metadata(
         max_tokens=batch_size * _round_up(max_seq, tokens_per_block),
         enable_block_reuse=False,
     )
-    kv_cache_dtype = torch_dtype_to_binding(torch.bfloat16)
+    kv_cache_dtype = DataType.FP8 if use_fp8_kv_cache else torch_dtype_to_binding(torch.bfloat16)
 
     layer_mask = [True]  # single layer
     kv_cache_manager = kv_cache_manager_cls(
@@ -344,6 +387,7 @@ def run_fused_mla(
     batch_size: int,
     num_heads: int,
     is_v32: bool,
+    kv_cache_dtype: str,
     perf_filename: str,
     *,
     model_path: str = "deepseek-ai/DeepSeek-V3",
@@ -355,16 +399,19 @@ def run_fused_mla(
     torch.cuda.set_device(device)
     torch_device = torch.device(device)
 
+    use_fp8_kv_cache = kv_cache_dtype == "fp8"
+
     is_context = "context" in perf_filename
     phase = "context" if is_context else "generation"
     variant = "DSA" if is_v32 else "MLA"
-    print(f"\n[Fused {variant}] {phase} b={batch_size}, s={seq_len}, heads={num_heads}")
+    print(f"\n[Fused {variant}] {phase} b={batch_size}, s={seq_len}, heads={num_heads}, kv={kv_cache_dtype}")
 
     # 1. Create attention layer
     attn_module, model_config = create_attention_layer(
         model_path=model_path,
         num_heads=num_heads,
         is_v32=is_v32,
+        use_fp8_kv_cache=use_fp8_kv_cache,
         device=device,
     )
 
@@ -375,6 +422,7 @@ def run_fused_mla(
         batch_size=batch_size,
         seq_len=seq_len,
         is_context=is_context,
+        use_fp8_kv_cache=use_fp8_kv_cache,
         device=device,
     )
 
@@ -448,7 +496,7 @@ def run_fused_mla(
         item_list=[
             {
                 "mla_dtype": "bfloat16",
-                "kv_cache_dtype": "bfloat16",
+                "kv_cache_dtype": kv_cache_dtype,
                 "num_heads": num_heads,
                 "batch_size": batch_size,
                 "isl": isl,
@@ -466,7 +514,7 @@ def run_fused_mla(
         power_stats=results["power_stats"],
     )
 
-    print(f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}: {latency:.4f} ms")
+    print(f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, kv={kv_cache_dtype}: {latency:.4f} ms")
 
     _cleanup(kv_cache_manager)
     return latency
@@ -499,6 +547,13 @@ def main():
     parser.add_argument("--num-heads", type=int, default=None, help="Filter by number of heads")
     parser.add_argument("--batch-size", type=int, default=None, help="Single batch size (for --quick)")
     parser.add_argument("--seq-len", type=int, default=None, help="Single seq len (for --quick)")
+    parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        choices=["bfloat16", "fp8"],
+        default=None,
+        help="KV cache dtype (default: run both bfloat16 and fp8 when GPU supports it)",
+    )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--quick", action="store_true", help="Quick single-point test")
     args = parser.parse_args()
@@ -507,12 +562,14 @@ def main():
         b = args.batch_size or 4
         s = args.seq_len or 2048
         h = args.num_heads or 128
+        kv_dtype = args.kv_cache_dtype or "bfloat16"
         fname = f"fused_{'dsa' if args.is_v32 else 'mla'}_{args.mode}_perf.txt"
         run_fused_mla(
             seq_len=s,
             batch_size=b,
             num_heads=h,
             is_v32=args.is_v32,
+            kv_cache_dtype=kv_dtype,
             perf_filename=fname,
             model_path=args.model_path,
             device=args.device,
@@ -520,19 +577,19 @@ def main():
         return
 
     if args.mode == "context":
-        test_cases = get_context_test_cases()
+        test_cases = get_context_test_cases(is_v32=args.is_v32)
     else:
-        test_cases = get_generation_test_cases()
-
-    if args.is_v32:
-        test_cases = [[s, b, h, True, f.replace("mla", "dsa")] for s, b, h, _, f in test_cases]
+        test_cases = get_generation_test_cases(is_v32=args.is_v32)
 
     if args.num_heads is not None:
         test_cases = [tc for tc in test_cases if tc[2] == args.num_heads]
 
+    if args.kv_cache_dtype is not None:
+        test_cases = [tc for tc in test_cases if tc[4] == args.kv_cache_dtype]
+
     print(f"Running {len(test_cases)} {args.mode} fused {'DSA' if args.is_v32 else 'MLA'} test cases...")
 
-    for i, (s, b, h, v32, fname) in enumerate(test_cases):
+    for i, (s, b, h, v32, kv_dtype, fname) in enumerate(test_cases):
         print(f"[{i + 1}/{len(test_cases)}]", end="")
         try:
             run_fused_mla(
@@ -540,16 +597,17 @@ def main():
                 batch_size=b,
                 num_heads=h,
                 is_v32=v32,
+                kv_cache_dtype=kv_dtype,
                 perf_filename=fname,
                 model_path=args.model_path,
                 device=args.device,
             )
         except torch.cuda.OutOfMemoryError:
-            print(f"  OOM: b={b}, s={s}, heads={h}")
+            print(f"  OOM: b={b}, s={s}, heads={h}, kv={kv_dtype}")
             torch.cuda.empty_cache()
             gc.collect()
         except Exception as e:
-            print(f"  FAILED: b={b}, s={s}, heads={h}: {e}")
+            print(f"  FAILED: b={b}, s={s}, heads={h}, kv={kv_dtype}: {e}")
             traceback.print_exc()
             torch.cuda.empty_cache()
             gc.collect()
