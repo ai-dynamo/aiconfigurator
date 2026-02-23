@@ -10,6 +10,7 @@ the model/system/backend/version support matrix for AIConfigurator.
 """
 
 import csv
+import gc
 import logging
 import os
 import traceback
@@ -58,6 +59,14 @@ class SupportMatrix:
 
     def load_databases(self):
         return perf_database.get_all_databases()
+
+    def _clear_database_caches(self):
+        """Clear interpolation caches on all loaded databases to reclaim memory."""
+        for system_dbs in self.databases.values():
+            for backend_dbs in system_dbs.values():
+                for db in backend_dbs.values():
+                    if hasattr(db, "_extracted_metrics_cache"):
+                        db._extracted_metrics_cache.clear()
 
     def __get_hardware_and_backend_combinations(self) -> list[tuple[str, str, str]]:
         """
@@ -130,13 +139,9 @@ class SupportMatrix:
 
                 task_config = TaskConfig(**task_config_kwargs)
 
-                # Run the configuration
-                runner = TaskRunner()
+                runner = TaskRunner(deepcopy_database=False)
                 result = runner.run(task_config)
 
-                # Check if we got valid results
-                # Note that we do not use pareto_frontier_df here because for the pareto_df
-                # if is not None and not empty, it means the pareto_frontier_df is also not None and not empty.
                 pareto_df = result.get("pareto_df")
                 if pareto_df is not None and not pareto_df.empty:
                     results[mode] = True
@@ -201,13 +206,15 @@ class SupportMatrix:
         combinations = self.generate_combinations()
         results = []
 
-        # Use tqdm for progress tracking
-        for model, system, backend, version in tqdm(
-            combinations,
-            desc="Testing support matrix",
-            unit="config",
+        gc_interval = 50
+
+        for i, (model, system, backend, version) in enumerate(
+            tqdm(
+                combinations,
+                desc="Testing support matrix",
+                unit="config",
+            )
         ):
-            # model is already a HuggingFace ID (e.g., 'meta-llama/Llama-2-7b-hf')
             huggingface_id = model
             success_dict, error_dict = self.run_single_test(
                 model=huggingface_id,
@@ -216,14 +223,18 @@ class SupportMatrix:
                 version=version,
             )
 
-            # Get the architecture for this model
             architecture = self.get_architecture(huggingface_id)
 
-            # Add separate entries for agg and disagg modes
             for mode in success_dict:
                 results.append(
                     (huggingface_id, architecture, system, backend, version, mode, success_dict[mode], error_dict[mode])
                 )
+
+            del success_dict, error_dict
+
+            if (i + 1) % gc_interval == 0:
+                self._clear_database_caches()
+                gc.collect()
 
         # Sort results by (huggingface_id, architecture, system, backend, version, mode)
         results.sort(key=lambda x: (x[0], x[1], x[2], x[3], Version(x[4]), x[5]))
