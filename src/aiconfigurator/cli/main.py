@@ -840,6 +840,7 @@ def _execute_task_configs(
               extracted from the rank-1 config.
     """
     results: dict[str, dict[str, pd.DataFrame]] = {}
+    failure_messages: list[str] = []
     start_time = time.time()
     runner = TaskRunner()
 
@@ -860,13 +861,17 @@ def _execute_task_configs(
                     if db_mode == common.DatabaseMode.SILICON.name
                     else ""
                 )
-                logger.warning(
-                    "Experiment %s returned no results. The TTFT and TPOT constraints may need to be relaxed.%s",
-                    exp_name,
-                    hybrid_hint,
+                msg = (
+                    f"Experiment {exp_name} returned no results. Possible causes: "
+                    "(1) TTFT/TPOT constraints are too tight — try relaxing --ttft or --tpot; "
+                    "(2) the model does not fit on the available GPUs — try increasing --total-gpus; "
+                    f"(3) no perf data in the database for this configuration.{hybrid_hint}"
                 )
-        except Exception:
+                logger.warning(msg)
+                failure_messages.append(msg)
+        except Exception as exc:
             logger.exception("Error running experiment %s", exp_name)
+            failure_messages.append(f"Experiment {exp_name} failed: {exc}")
 
     if len(results) < 1:
         first_config = next(iter(task_configs.values()), None)
@@ -879,6 +884,8 @@ def _execute_task_configs(
             )
         else:
             logger.error("No successful experiment runs to compare.")
+        for msg in failure_messages:
+            logger.error("  -> %s", msg)
         raise SystemExit(1)
 
     best_configs: dict[str, pd.DataFrame] = {}

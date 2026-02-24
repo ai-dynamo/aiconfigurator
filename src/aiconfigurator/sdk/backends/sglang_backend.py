@@ -415,6 +415,7 @@ class SGLANGBackend(BaseBackend):
         results_df = pd.DataFrame(columns=common.ColumnsAgg)
         results_dict_list = []
         capped_b = []
+        all_oom = True
         for b in b_list:
             for ctx_tokens in ctx_tokens_list:
                 if b - np.ceil(ctx_tokens / isl) < 0:  # allow b==1
@@ -443,6 +444,7 @@ class SGLANGBackend(BaseBackend):
 
                 if summary.check_oom():
                     break  # larger ctx tokens will cause oom
+                all_oom = False
                 result_dict = summary.get_result_dict()
                 if result_dict and result_dict["tpot"] <= tpot and result_dict["ttft"] <= ttft:
                     results_dict_list.append(result_dict)
@@ -456,6 +458,8 @@ class SGLANGBackend(BaseBackend):
 
         summary = InferenceSummary(runtime_config)
         summary.set_summary_df(sorted_results_df)
+        if all_oom:
+            summary.set_oom(True)
         return summary
 
     def _get_memory_usage(
