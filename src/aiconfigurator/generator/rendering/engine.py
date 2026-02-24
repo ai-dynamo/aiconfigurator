@@ -106,6 +106,7 @@ def render_backend_templates(
     backend: str,
     templates_dir: Optional[str] = None,
     version: Optional[str] = None,
+    use_dynamo_generator: bool = False,
 ) -> dict[str, str]:
     """
     Render templates for a specific backend with version-specific template selection.
@@ -329,15 +330,24 @@ def render_backend_templates(
     context["agg_gpu"] = agg_gpu
 
     # Render auxiliary templates (k8s deploy, benchmark, and run script)
+
     # k8s deploy: single file
-    k8s_aux = template_path / "k8s_deploy.yaml.j2"
-    if k8s_aux.exists():
+    if use_dynamo_generator:
+        # use dynamo planner profiler's config generator to generate k8s config
         try:
-            tmpl = env.get_template("k8s_deploy.yaml.j2")
-            rendered = tmpl.render(**context)
-            rendered_templates["k8s_deploy.yaml"] = rendered
+            rendered_templates["k8s_deploy.yaml"] = _generate_k8s_via_dynamo(param_values, backend, context)
         except Exception as e:
-            logger.warning(f"Failed to render template k8s_deploy.yaml.j2: {e}")
+            logger.warning(f"Failed to generate k8s config via Dynamo: {e}")
+    else:
+        # use the j2 templates in AIC to generate k8s config
+        k8s_aux = template_path / "k8s_deploy.yaml.j2"
+        if k8s_aux.exists():
+            try:
+                tmpl = env.get_template("k8s_deploy.yaml.j2")
+                rendered = tmpl.render(**context)
+                rendered_templates["k8s_deploy.yaml"] = rendered
+            except Exception as e:
+                logger.warning(f"Failed to render template k8s_deploy.yaml.j2: {e}")
 
     # benchmark job: single file from shared benchmark template folder
     bench_dir = _TEMPLATE_ROOT / "benchmark"
