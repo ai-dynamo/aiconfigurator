@@ -551,7 +551,7 @@ class DisaggInferenceSession:
 
             prefill_candidates = prefill_candidates[prefill_candidates["ttft"] < ttft]
             if len(prefill_candidates) == 0:
-                logger.warning(f"No prefill worker candidates found for ttft {ttft}ms.")
+                logger.debug(f"No prefill worker candidates found for ttft {ttft}ms.")
                 return None
             prefill_candidates = (
                 prefill_candidates.sort_values(by=["seq/s/gpu", "global_bs"], ascending=[False, True])
@@ -564,7 +564,7 @@ class DisaggInferenceSession:
                 & (decode_summary_df["tpot"] > tpot * DECODE_FILTER_RATIO_MIN)
             ].copy()
             if len(decode_candidates) == 0:
-                logger.warning(f"No decode worker candidates found for tpot {tpot}ms.")
+                logger.debug(f"No decode worker candidates found for tpot {tpot}ms.")
                 return None
 
             all_category_results: list[dict] = []
