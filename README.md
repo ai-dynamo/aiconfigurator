@@ -91,6 +91,8 @@ Quantization defaults are inferred from the Hugging Face model config (`config.j
 For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.  
 Any quantization set via `profiles` or YAML `config` overrides the HF defaults.
 
+For a full end-to-end walkthrough (support check, sweep, deploy, benchmark), see the [CLI User Guide -- End-to-End Workflow](docs/cli_user_guide.md#end-to-end-workflow).
+
 Refer to [CLI User Guide](docs/cli_user_guide.md)
 
 ### Python API
@@ -250,6 +252,8 @@ results/QWEN3_32B_FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 │   ├── top1
 │   │   ├── agg
 │   │   │   ├── agg_config.yaml
+│   │   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
+│   │   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
 │   │   │   ├── k8s_deploy.yaml
 │   │   │   └── node_0_run.sh 
 │   │   └── generator_config.yaml
@@ -260,7 +264,9 @@ results/QWEN3_32B_FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 │   ├── pareto.csv
 │   ├── top1
 │   │   ├── disagg
+│   │   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
 │   │   │   ├── decode_config.yaml
+│   │   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
 │   │   │   ├── k8s_deploy.yaml
 │   │   │   ├── node_0_run.sh
 │   │   │   └── prefill_config.yaml
