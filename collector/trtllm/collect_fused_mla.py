@@ -431,7 +431,11 @@ def run_fused_mla(
     if is_context:
         num_tokens = seq_len * batch_size
         position_ids = (
-            torch.arange(seq_len, device=torch_device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1).reshape(-1)
+            torch.arange(seq_len, device=torch_device, dtype=torch.long)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+            .reshape(-1)
+            .contiguous()
         )
     else:
         num_tokens = batch_size

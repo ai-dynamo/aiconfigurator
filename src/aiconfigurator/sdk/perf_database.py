@@ -2483,9 +2483,26 @@ class PerfDatabase:
                 target_x_list = tp_list
                 target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]
                 target_z_list = [
-                    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024,
-                    2048, 4096, 8192, 16384, 32768, 65536, 131072,
-                    262144, 2097152 * 8,
+                    1,
+                    2,
+                    4,
+                    8,
+                    16,
+                    32,
+                    64,
+                    128,
+                    256,
+                    512,
+                    1024,
+                    2048,
+                    4096,
+                    8192,
+                    16384,
+                    32768,
+                    65536,
+                    131072,
+                    262144,
+                    2097152 * 8,
                 ]
 
                 self._extrapolate_data_grid(
@@ -4312,10 +4329,15 @@ class PerfDatabase:
                 num_heads = 128 // tp_size
                 mla_dict = attn_data[fmha_quant_mode][kvcache_quant_mode]
                 full_s = s + prefix
-                prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
                 result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
-                latency = result["latency"] * prefix_correction
-                energy = result.get("energy", 0.0) * prefix_correction
+                latency = result["latency"]
+                energy = result.get("energy", 0.0)
+                if prefix > 0:
+                    base_sol = get_sol(b, full_s, 0, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+                    target_sol = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
+                    correction = 1.0 if base_sol <= 0 else target_sol / base_sol
+                    latency *= correction
+                    energy *= correction
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
@@ -5555,7 +5577,6 @@ class PerfDatabase:
             else:
                 raise
 
-
     # ═══════════════════════════════════════════════════════════════════
     # DSA (DeepSeek Sparse Attention) Queries
     # ═══════════════════════════════════════════════════════════════════
@@ -5597,7 +5618,7 @@ class PerfDatabase:
             PerformanceResult or (sol_time, sol_math, sol_mem) for SOL_FULL
         """
         # DeepSeek-V3.2 DSA structural dims are fixed in TRT-LLM 1.2.0rc5.
-        H = 7168
+        hidden_size = 7168
         q_lora = 1536
         kv_lora = 512
         qk_nope = 128
@@ -5623,9 +5644,9 @@ class PerfDatabase:
             tokens = b * s
 
             # --- Compute (FLOPs) ---
-            # 1. kv_a_proj: [tokens, H] x [H, q_lora+kv_lora+qk_rope+index_head_dim]
+            # 1. kv_a_proj: [tokens, hidden_size] x [hidden_size, q_lora+kv_lora+qk_rope+index_head_dim]
             proj_out = q_lora + kv_lora + qk_rope + index_head_dim
-            gemm_kva_ops = 2 * tokens * H * proj_out
+            gemm_kva_ops = 2 * tokens * hidden_size * proj_out
 
             # 2. q_b_proj: [tokens, q_lora] x [q_lora, num_heads * qk_head_dim]
             gemm_qb_ops = 2 * tokens * q_lora * (num_heads * qk_head_dim)
@@ -5633,16 +5654,29 @@ class PerfDatabase:
             # 3. Indexer wq_b: [tokens, q_lora] x [q_lora, index_n_heads * index_head_dim]
             gemm_wqb_ops = 2 * tokens * q_lora * (index_n_heads * index_head_dim)
 
-            # 4. Indexer weights_proj: [tokens, H] x [H, index_n_heads]
-            gemm_wp_ops = 2 * tokens * H * index_n_heads
+            # 4. Indexer weights_proj: [tokens, hidden_size] x [hidden_size, index_n_heads]
+            gemm_wp_ops = 2 * tokens * hidden_size * index_n_heads
 
             # 5. Indexer FP8 MQA logits: Q[tokens, index_n_heads, head_dim] x K[full_s, head_dim]
             # Weighted sum over index_n_heads -> [tokens, full_s] logits.
             indexer_logits_ops = 2 * tokens * index_n_heads * index_head_dim * full_s
 
             # 6. Sparse MLA attention: only selected top-k over full KV cache.
+            #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512).
             effective_kv = min(full_s, index_topk)
-            sparse_attn_ops = 2 * tokens * num_heads * attn_head_dim * effective_kv
+            # Exact KV pair count: sum_{i=0..s-1} min(prefix+i+1, topk)
+            if full_s <= index_topk:
+                # All queries in causal ramp (no topk saturation)
+                total_kv_pairs = b * (full_s * (full_s + 1) - prefix * (prefix + 1)) // 2
+            elif prefix >= index_topk:
+                # All queries saturated at topk
+                total_kv_pairs = tokens * index_topk
+            else:
+                # Mixed: first (topk-prefix) queries ramp, rest saturated
+                ramp_pairs = b * (index_topk * (index_topk + 1) - prefix * (prefix + 1)) // 2
+                sat_pairs = b * (full_s - index_topk) * index_topk
+                total_kv_pairs = ramp_pairs + sat_pairs
+            sparse_attn_ops = 2 * num_heads * (attn_head_dim + kv_lora) * total_kv_pairs
 
             # 7. BMM pre (q_nope absorption): num_heads x [tokens, qk_nope] x [kv_lora, qk_nope]
             bmm_pre_ops = 2 * num_heads * tokens * qk_nope * kv_lora
@@ -5650,8 +5684,8 @@ class PerfDatabase:
             # 8. BMM post (V projection): num_heads x [tokens, kv_lora] x [v_dim, kv_lora]
             bmm_post_ops = 2 * num_heads * tokens * kv_lora * v_dim
 
-            # 9. o_proj: [tokens, num_heads*v_dim] x [num_heads*v_dim, H]
-            gemm_oproj_ops = 2 * tokens * (num_heads * v_dim) * H
+            # 9. o_proj: [tokens, num_heads*v_dim] x [num_heads*v_dim, hidden_size]
+            gemm_oproj_ops = 2 * tokens * (num_heads * v_dim) * hidden_size
 
             total_ops = (
                 gemm_kva_ops
@@ -5667,16 +5701,16 @@ class PerfDatabase:
 
             # --- Memory (bytes) ---
             # Dominant terms: KV cache reads for sparse attention + GEMM weight reads
-            dtype_bytes = 2  # bf16
+            dtype_bytes = fmha_quant_mode.value.memory
             kv_cache_bytes = b * num_heads * effective_kv * attn_head_dim * kvcache_quant_mode.value.memory
             indexer_cache_bytes = b * index_n_heads * full_s * index_head_dim
             q_io_bytes = tokens * num_heads * qk_head_dim * dtype_bytes * 2  # read + write
             weight_bytes = (
-                H * proj_out
+                hidden_size * proj_out
                 + q_lora * num_heads * qk_head_dim
                 + q_lora * index_n_heads * index_head_dim
-                + H * index_n_heads
-                + num_heads * v_dim * H
+                + hidden_size * index_n_heads
+                + num_heads * v_dim * hidden_size
             ) * dtype_bytes
             total_mem = kv_cache_bytes + indexer_cache_bytes + q_io_bytes + weight_bytes
 
@@ -5775,7 +5809,7 @@ class PerfDatabase:
             index_topk: Top-k selected by the indexer
         """
         # DeepSeek-V3.2 DSA structural dims are fixed in TRT-LLM 1.2.0rc5.
-        H = 7168
+        hidden_size = 7168
         q_lora = 1536
         kv_lora = 512
         qk_nope = 128
@@ -5804,40 +5838,38 @@ class PerfDatabase:
             # --- Compute ---
             # GEMMs: small M (=b), dominated by weight loading
             gemm_ops = (
-                2 * tokens * H * proj_out
+                2 * tokens * hidden_size * proj_out
                 + 2 * tokens * q_lora * num_heads * qk_head_dim
                 + 2 * tokens * q_lora * index_n_heads * index_head_dim
-                + 2 * tokens * H * index_n_heads
-                + 2 * tokens * num_heads * v_dim * H
+                + 2 * tokens * hidden_size * index_n_heads
+                + 2 * tokens * num_heads * v_dim * hidden_size
             )
 
             # Indexer: paged MQA logits over full KV cache
             indexer_ops = 2 * tokens * index_n_heads * index_head_dim * s
 
             # Sparse attention: only top-k tokens
-            sparse_ops = 2 * tokens * num_heads * attn_head_dim * effective_kv
+            #   QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512).
+            sparse_ops = 2 * tokens * num_heads * (attn_head_dim + kv_lora) * effective_kv
 
             # BMMs
-            bmm_ops = (
-                2 * num_heads * tokens * qk_nope * kv_lora
-                + 2 * num_heads * tokens * kv_lora * v_dim
-            )
+            bmm_ops = 2 * num_heads * tokens * qk_nope * kv_lora + 2 * num_heads * tokens * kv_lora * v_dim
 
             total_ops = gemm_ops + indexer_ops + sparse_ops + bmm_ops
 
             # --- Memory ---
-            dtype_bytes = 2
+            dtype_bytes = quant_mode_gen.value.memory
             # Indexer K cache read: full s (paged, FP8)
             indexer_cache_bytes = b * s * index_head_dim
             # MLA KV cache read: only top-k tokens
             kv_cache_bytes = b * effective_kv * attn_head_dim * kv_cache_dtype.value.memory
             # GEMM weights (read once)
             weight_bytes = (
-                H * proj_out
+                hidden_size * proj_out
                 + q_lora * num_heads * qk_head_dim
                 + q_lora * index_n_heads * index_head_dim
-                + H * index_n_heads
-                + num_heads * v_dim * H
+                + hidden_size * index_n_heads
+                + num_heads * v_dim * hidden_size
             ) * dtype_bytes
             total_mem = indexer_cache_bytes + kv_cache_bytes + weight_bytes
 
@@ -5846,9 +5878,7 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        def get_empirical(
-            b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode
-        ) -> float:
+        def get_empirical(b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode) -> float:
             latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
             scale_factor = 0.5
             return latency / scale_factor
