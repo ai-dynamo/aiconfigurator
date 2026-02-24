@@ -5658,15 +5658,19 @@ class PerfDatabase:
             gemm_wp_ops = 2 * tokens * hidden_size * index_n_heads
 
             # 5. Indexer FP8 MQA logits: Q[tokens, index_n_heads, head_dim] x K[full_s, head_dim]
-            # Weighted sum over index_n_heads -> [tokens, full_s] logits.
-            indexer_logits_ops = 2 * tokens * index_n_heads * index_head_dim * full_s
+            #    TRT-LLM skips logits+topk when kv_len <= topk (skip_indexer optimization).
+            #    wq_b and weights_proj GEMMs still run regardless.
+            if full_s <= index_topk:
+                indexer_logits_ops = 0
+            else:
+                indexer_logits_ops = 2 * tokens * index_n_heads * index_head_dim * full_s
 
             # 6. Sparse MLA attention: only selected top-k over full KV cache.
             #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512).
             effective_kv = min(full_s, index_topk)
             # Exact KV pair count: sum_{i=0..s-1} min(prefix+i+1, topk)
             if full_s <= index_topk:
-                # All queries in causal ramp (no topk saturation)
+                # All queries in causal ramp (indexer skipped, full causal attention)
                 total_kv_pairs = b * (full_s * (full_s + 1) - prefix * (prefix + 1)) // 2
             elif prefix >= index_topk:
                 # All queries saturated at topk
@@ -5703,7 +5707,8 @@ class PerfDatabase:
             # Dominant terms: KV cache reads for sparse attention + GEMM weight reads
             dtype_bytes = fmha_quant_mode.value.memory
             kv_cache_bytes = b * num_heads * effective_kv * attn_head_dim * kvcache_quant_mode.value.memory
-            indexer_cache_bytes = b * index_n_heads * full_s * index_head_dim
+            # Indexer K cache read is skipped when kv_len <= topk (skip_indexer)
+            indexer_cache_bytes = 0 if full_s <= index_topk else b * index_n_heads * full_s * index_head_dim
             q_io_bytes = tokens * num_heads * qk_head_dim * dtype_bytes * 2  # read + write
             weight_bytes = (
                 hidden_size * proj_out
