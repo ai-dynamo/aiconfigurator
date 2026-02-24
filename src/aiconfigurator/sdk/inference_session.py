@@ -370,9 +370,14 @@ class DisaggInferenceSession:
                 exceptions.append(e)
                 continue
         if summary_df.empty:
+            if exceptions:
+                raise RuntimeError(
+                    f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
+                ) from exceptions[-1]
             raise RuntimeError(
-                f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
-            ) from exceptions[-1]
+                "No results found for any parallel configuration. "
+                "All configurations resulted in OOM at the smallest batch size."
+            )
         return summary_df
 
     def _pick_autoscale(

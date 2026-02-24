@@ -483,6 +483,14 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])
+    elif ARCHITECTURE_TO_MODEL_FAMILY.get(architecture) == "DEEPSEEK" and "kv_lora_rank" in config:
+        extra_params = common.DeepSeekMLAConfig(
+            q_lora_rank=config.get("q_lora_rank", 1536),
+            kv_lora_rank=config["kv_lora_rank"],
+            qk_nope_head_dim=config.get("qk_nope_head_dim", 128),
+            qk_rope_head_dim=config.get("qk_rope_head_dim", 64),
+            v_head_dim=config.get("v_head_dim", 128),
+        )
 
     logger.info(
         f"Model architecture: architecture={architecture}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "

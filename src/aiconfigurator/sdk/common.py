@@ -60,6 +60,26 @@ class NemotronHConfig:
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
 
 
+@dataclass(frozen=True)
+class DeepSeekMLAConfig:
+    """
+    Multi-head Latent Attention (MLA) configuration for DeepSeek-family models.
+
+    Attributes:
+        q_lora_rank (int): Rank of the query low-rank projection
+        kv_lora_rank (int): Rank of the key/value low-rank projection (compressed KV cache dim)
+        qk_nope_head_dim (int): Per-head dimension for the non-RoPE portion of Q/K
+        qk_rope_head_dim (int): Per-head dimension for the RoPE portion of Q/K
+        v_head_dim (int): Per-head value dimension
+    """
+
+    q_lora_rank: int
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -233,6 +253,10 @@ DefaultHFModels = {
     # DeepSeek Models
     "deepseek-ai/DeepSeek-V3",
     "nvidia/DeepSeek-V3.1-NVFP4",
+    # GLM Models
+    "zai-org/GLM-4.7-Flash",
+    "zai-org/GLM-4.7-FP8",
+    "zai-org/GLM-5-FP8",
     # Qwen 2.5 Models
     "Qwen/Qwen2.5-1.5B",
     "Qwen/Qwen2.5-7B",
@@ -290,6 +314,9 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MixtralForCausalLM": "MOE",
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
+    "GlmMoeDsaForCausalLM": "DEEPSEEK",
+    "Glm4MoeLiteForCausalLM": "DEEPSEEK",
+    "Glm4MoeForCausalLM": "MOE",
 }
 
 """
