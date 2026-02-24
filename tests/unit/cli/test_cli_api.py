@@ -39,6 +39,7 @@ class TestCLIExpUnit:
             {"exp_agg_simplified": pd.DataFrame()},
             {"exp_agg_simplified": pd.DataFrame()},
             {"exp_agg_simplified": 100.0},
+            {"exp_agg_simplified": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}},
         )
 
         # Simplified version based on example.yaml exp_agg_simplified
