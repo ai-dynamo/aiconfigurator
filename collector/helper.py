@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import fcntl
+import csv
 import heapq
 import json
 import logging
@@ -627,36 +627,70 @@ def log_perf(
     op_name: str,
     kernel_source: str,
     perf_filename: str,
-    power_stats: dict | None = None,  # NEW PARAMETER
+    power_stats: dict | None = None,
 ):
-    """
-    Log performance data to a CSV file with file locking.
+    lock_file = perf_filename + ".lock"
 
-    WARNING: fcntl.flock() advisory locks do NOT work reliably on NFS/shared
-    filesystems. If your output file is on NFS, workers may deadlock.
-    Use local filesystem paths (e.g., /tmp/) for output files instead.
-    """
-    content_prefix = f"{framework},{version},{device_name},{op_name},{kernel_source}"
-    header_prefix = "framework,version,device,op_name,kernel_source"
-    for item in item_list:
-        for key, value in item.items():
-            content_prefix += f",{value}"
-            header_prefix += f",{key}"
+    # Try for 1 sec (10 * 0.1s)
+    got_lock = False
+    for _ in range(10):
+        try:
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            got_lock = True
+            break
+        except OSError:
+            time.sleep(0.1)
 
-    # Add power stats only if power measurement was enabled
-    if power_stats:
-        for key in ["power", "power_limit"]:
-            value = power_stats.get(key, "")
-            content_prefix += f",{value}"
-            header_prefix += f",{key}"
+    if not got_lock:
+        print(f"Skipping log: can not get lock for {perf_filename}")
+        return
 
-    with open(perf_filename, "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+    try:
+        with open(perf_filename, "a", newline="") as f:
+            # Add header only if file is empty
+            is_empty = os.fstat(f.fileno()).st_size == 0
 
-        if os.fstat(f.fileno()).st_size == 0:
-            f.write(header_prefix + "\n")
+            base_data = {
+                "framework": framework,
+                "version": version,
+                "device": device_name,
+                "op_name": op_name,
+                "kernel_source": kernel_source,
+            }
 
-        f.write(content_prefix + "\n")
+            # Get headers from first item if exists
+            fieldnames = list(base_data.keys())
+            if item_list:
+                fieldnames += list(item_list[0].keys())
+            # Add power_stats keys if present
+            if power_stats:
+                for key in ["power", "power_limit"]:
+                    if key not in fieldnames:
+                        fieldnames.append(key)
+
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+
+            if is_empty:
+                writer.writeheader()
+
+            for item in item_list:
+                row = base_data | item
+                # Add power_stats values if present
+                if power_stats:
+                    for key in ["power", "power_limit"]:
+                        row[key] = power_stats.get(key, "")
+                writer.writerow(row)
+
+            # Force disk write (for NFS)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        print(f"Error writing log: {e}")
+    finally:
+        # Delete the lock file, even if writing crashed
+        if got_lock and os.path.exists(lock_file):
+            os.unlink(lock_file)
 
 
 # Helper functions for MoE
