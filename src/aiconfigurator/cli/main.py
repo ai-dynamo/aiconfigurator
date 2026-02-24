@@ -478,10 +478,10 @@ def configure_parser(parser):
     # Support mode - support matrix check
     support_parser = subparsers.add_parser(
         "support",
-        parents=[common_cli_parser],
         help="Check if AIC supports the model/hardware combo for (agg, disagg).",
         description="Verify support for a specific model and system combination using the support matrix.",
     )
+    support_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     _add_support_mode_arguments(support_parser)
 
 
@@ -1189,6 +1189,11 @@ def main(args):
         format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
     )
 
+    # Handle support mode early — it doesn't need systems_paths or top_n
+    if args.mode == "support":
+        _run_support_mode(args)
+        return
+
     try:
         perf_database.set_systems_paths(args.systems_paths)
     except ValueError as exc:
@@ -1205,11 +1210,6 @@ def main(args):
     # Handle estimate mode separately (single-point estimation)
     if args.mode == "estimate":
         _run_estimate_mode(args)
-        return
-
-    # Handle support mode separately (no sweeping)
-    if args.mode == "support":
-        _run_support_mode(args)
         return
 
     if args.mode == "default":
