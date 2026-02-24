@@ -378,14 +378,16 @@ def _add_support_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
+        help="System name (GPU type) or 'all' for a matrix view across every system. "
+        "Example: h200_sxm, h100_sxm, b200_sxm, gb200, a100_sxm, l40s, gb300.",
     )
     parser.add_argument(
         "--backend",
-        choices=[backend.value for backend in common.BackendName],
+        choices=[backend.value for backend in common.BackendName] + ["all"],
         type=str,
-        default="trtllm",
-        help="Backend name to filter by. Defaults to 'trtllm'.",
+        default=None,
+        help="Backend name to filter by, or 'all' for all backends. "
+        "Defaults to 'all' when --system is 'all', otherwise 'trtllm'.",
     )
     parser.add_argument(
         "--backend-version",
@@ -480,7 +482,8 @@ def configure_parser(parser):
         "support",
         parents=[common_cli_parser],
         help="Check if AIC supports the model/hardware combo for (agg, disagg).",
-        description="Verify support for a specific model and system combination using the support matrix.",
+        description="Verify support for a specific model and system combination using the support matrix. "
+        "Use --system all for a consolidated matrix view across all systems and backends.",
     )
     _add_support_mode_arguments(support_parser)
 
@@ -986,8 +989,103 @@ def _run_generate_mode(args):
     print("=" * 60 + "\n")
 
 
+def _run_support_matrix_mode(args):
+    """Run support check across system/backend combinations and display a matrix."""
+    model = args.model_path
+    version_filter = args.backend_version
+
+    try:
+        architecture = get_model_config_from_model_path(model)["architecture"]
+    except Exception:
+        architecture = None
+
+    matrix = common.get_support_matrix()
+    systems = sorted(common.SupportedSystems) if args.system == "all" else [args.system]
+    backends = [b.value for b in common.BackendName] if args.backend == "all" else [args.backend]
+    existing_combos = {(row["System"], row["Backend"]) for row in matrix}
+
+    results: dict[tuple[str, str], common.SupportResult | None] = {}
+    has_inferred = False
+
+    for system in systems:
+        for be in backends:
+            if (system, be) not in existing_combos:
+                results[(system, be)] = None
+                continue
+
+            if version_filter:
+                version = version_filter
+            else:
+                versions = sorted(
+                    {r["Version"] for r in matrix if r["System"] == system and r["Backend"] == be},
+                    reverse=True,
+                )
+                if not versions:
+                    results[(system, be)] = None
+                    continue
+                version = versions[0]
+
+            result = common.check_support(
+                model=model, system=system, backend=be, version=version, architecture=architecture
+            )
+            if not result.exact_match and result.agg_total_count == 0 and result.disagg_total_count == 0:
+                result = None
+            elif not result.exact_match and result.architecture:
+                has_inferred = True
+            results[(system, be)] = result
+
+    # ── render matrix ────────────────────────────────────────────
+    col_w = 6  # sub-column width (fits "disagg", "YES*", etc.)
+    gap = "   "
+    sys_w = max(len("System"), *(len(s) for s in systems)) + 2
+    block_w = col_w * 2 + 1  # "agg" + space + "disagg"
+
+    def _cell(supported: bool, inferred: bool) -> str:
+        return f"{('YES' if supported else 'NO') + ('*' if inferred else ''):>{col_w}}"
+
+    sub_col = f"{'agg':>{col_w}} {'disagg':>{col_w}}"
+    header1 = " " * sys_w + gap.join(be.center(block_w) for be in backends)
+    header2 = f"{'System':<{sys_w}}" + gap.join(sub_col for _ in backends)
+    sep = "-" * sys_w + gap.join("-" * block_w for _ in backends)
+    total_w = max(60, len(sep) + 4)
+
+    lines = ["", "=" * total_w, "  AIC Support Matrix", "=" * total_w, f"  Model:  {model}"]
+    if architecture:
+        lines.append(f"  Arch:   {architecture}")
+    if version_filter:
+        lines.append(f"  Version filter: {version_filter}")
+    lines += ["-" * total_w, f"  {header1}", f"  {header2}", f"  {sep}"]
+
+    for system in systems:
+        cells = []
+        for be in backends:
+            r = results.get((system, be))
+            if r is None:
+                cells.append(f"{'-':>{col_w}} {'-':>{col_w}}")
+            else:
+                inf = not r.exact_match and r.architecture is not None
+                cells.append(f"{_cell(r.agg_supported, inf)} {_cell(r.disagg_supported, inf)}")
+        lines.append(f"  {system:<{sys_w}}" + gap.join(cells))
+
+    lines.append("=" * total_w)
+    lines.append("  YES = supported  NO = not supported  - = no data")
+    if has_inferred:
+        lines.append("  * = inferred from architecture majority vote")
+    if not version_filter:
+        lines.append("  Using latest available version per system/backend combination.")
+    lines += ["=" * total_w, ""]
+    print("\n".join(lines))
+
+
 def _run_support_mode(args):
     """Run the support mode to see if a model/hardware combo is supported."""
+    if args.backend is None:
+        args.backend = "all" if args.system == "all" else "trtllm"
+
+    if args.system == "all" or args.backend == "all":
+        _run_support_matrix_mode(args)
+        return
+
     model = args.model_path
     system = args.system
     backend = args.backend
@@ -998,7 +1096,6 @@ def _run_support_mode(args):
         matrix = common.get_support_matrix()
         versions_for_combo = [row["Version"] for row in matrix if row["System"] == system and row["Backend"] == backend]
         if versions_for_combo:
-            # Sort versions and take the latest (assumes semantic versioning or lexicographic order)
             version = sorted(set(versions_for_combo), reverse=True)[0]
 
     logger.info("Checking support for model=%s, system=%s, backend=%s, version=%s", model, system, backend, version)
