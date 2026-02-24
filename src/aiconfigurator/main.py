@@ -11,9 +11,7 @@ from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.eval.main import configure_parser as configure_eval_parser
 from aiconfigurator.eval.main import main as eval_main
 from aiconfigurator.generator.api import generator_cli_helper
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+from aiconfigurator.logging_utils import setup_logging
 
 
 def _is_gradio_importable() -> bool:
@@ -91,6 +89,8 @@ def main(argv: list[str] | None = None) -> None:
     version_parser.set_defaults(handler=_show_version)
 
     args, extras = parser.parse_known_args(argv)
+
+    setup_logging(level=logging.DEBUG if getattr(args, "debug", False) else logging.INFO)
 
     # extras contains the arguments for the selected sub-command
     handler = getattr(args, "handler", None)

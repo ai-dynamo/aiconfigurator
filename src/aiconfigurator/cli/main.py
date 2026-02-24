@@ -21,6 +21,7 @@ from aiconfigurator.generator.api import (
     generate_naive_config,
     generator_cli_helper,
 )
+from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
@@ -1292,10 +1293,7 @@ def _run_estimate_mode(args):
 
 
 def main(args):
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
-        format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
-    )
+    setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
 
     # Handle support mode early — it doesn't need systems_paths or top_n
     if args.mode == "support":
