@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from functools import cache
+from typing import Optional
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
@@ -92,8 +94,15 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
 
 
 def _apply_model_quant_defaults(
-    model_config: config.ModelConfig, raw_config: dict, architecture: str, backend_name: str
+    model_config: config.ModelConfig,
+    raw_config: dict,
+    architecture: str,
+    backend_name: str,
+    worker_name: Optional[str] = None,
 ) -> None:
+    # Clone original model_config to track if any modifications were made
+    original_config = dataclasses.replace(model_config)
+
     inferred = _infer_quant_modes_from_raw_config(raw_config)
     applied: list[str] = []
     for key, value in inferred.items():
@@ -124,14 +133,17 @@ def _apply_model_quant_defaults(
     if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
 
-    logger.info(
-        "Model config (final quant modes): gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
-        model_config.gemm_quant_mode,
-        model_config.moe_quant_mode,
-        model_config.kvcache_quant_mode,
-        model_config.fmha_quant_mode,
-        model_config.comm_quant_mode,
-    )
+    # Only log if model_config was modified
+    if original_config != model_config:
+        logger.info(
+            "Resolved quant modes for %s: gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
+            worker_name or architecture,
+            model_config.gemm_quant_mode,
+            model_config.moe_quant_mode,
+            model_config.kvcache_quant_mode,
+            model_config.fmha_quant_mode,
+            model_config.comm_quant_mode,
+        )
 
 
 def get_model(

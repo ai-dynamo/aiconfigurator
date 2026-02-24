@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
 
 import pandas as pd
+import yaml
 from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
@@ -699,28 +699,9 @@ class TaskConfig:
 
         if serving_mode == "agg":
             self._convert_worker_config_to_enum(self.config.worker_config)
-            logger.info("Task %s: Runtime config: %s", self.task_name, self.config.runtime_config)
-            logger.info("Task %s: Worker config: %s", self.task_name, self.config.worker_config)
         elif serving_mode == "disagg":
             self._convert_worker_config_to_enum(self.config.prefill_worker_config)
             self._convert_worker_config_to_enum(self.config.decode_worker_config)
-            logger.info("Task %s: Runtime config: %s", self.task_name, self.config.runtime_config)
-            logger.info(
-                "Task %s: Prefill worker config: %s",
-                self.task_name,
-                self.config.prefill_worker_config,
-            )
-            logger.info(
-                "Task %s: Decode worker config: %s",
-                self.task_name,
-                self.config.decode_worker_config,
-            )
-            logger.info("Task %s: Replica config: %s", self.task_name, self.config.replica_config)
-            logger.info(
-                "Task %s: Advanced tuning config: %s",
-                self.task_name,
-                self.config.advanced_tuning_config,
-            )
         else:
             raise ValueError(f"Invalid serving mode: {serving_mode}")
 
@@ -795,9 +776,7 @@ class TaskConfig:
         model_raw_config = model_info.get("raw_config")
         model_architecture = model_info.get("architecture")
 
-        def _resolve_model_quant_modes(worker_cfg: object) -> dict[str, str | None]:
-            if model_raw_config is None:
-                return {}
+        def _resolve_model_quant_modes(worker_cfg: object, worker_name: str) -> None:
             model_config = config.ModelConfig(
                 gemm_quant_mode=_get_cfg_value(worker_cfg, "gemm_quant_mode"),
                 moe_quant_mode=_get_cfg_value(worker_cfg, "moe_quant_mode"),
@@ -805,22 +784,25 @@ class TaskConfig:
                 fmha_quant_mode=_get_cfg_value(worker_cfg, "fmha_quant_mode"),
                 comm_quant_mode=_get_cfg_value(worker_cfg, "comm_quant_mode"),
             )
-            try:
-                _apply_model_quant_defaults(
-                    model_config,
-                    model_raw_config,
-                    model_architecture,
-                    self.backend_name,
-                )
-            except Exception:
-                return {}
-            return {
-                "gemm_quant_mode": _to_name(model_config.gemm_quant_mode),
-                "moe_quant_mode": _to_name(model_config.moe_quant_mode),
-                "kvcache_quant_mode": _to_name(model_config.kvcache_quant_mode),
-                "fmha_quant_mode": _to_name(model_config.fmha_quant_mode),
-                "comm_quant_mode": _to_name(model_config.comm_quant_mode),
+            # TODO: _apply_model_quant_defaults is only called here. Maybe these two functions should be merged.
+            _apply_model_quant_defaults(
+                model_config,
+                model_raw_config or {},
+                model_architecture,
+                self.backend_name,
+                worker_name,
+            )
+
+            # Apply inferred quant modes to worker config.
+            quant_modes = {
+                "gemm_quant_mode": model_config.gemm_quant_mode,
+                "moe_quant_mode": model_config.moe_quant_mode,
+                "kvcache_quant_mode": model_config.kvcache_quant_mode,
+                "fmha_quant_mode": model_config.fmha_quant_mode,
+                "comm_quant_mode": model_config.comm_quant_mode,
             }
+            for k, v in quant_modes.items():
+                worker_cfg[k] = v
 
         is_deepseek = get_model_family(self.model_path) == "DEEPSEEK"
         enable_wideep = bool(getattr(self.config, "enable_wideep", self.enable_wideep))
@@ -838,12 +820,14 @@ class TaskConfig:
             context_attn_key = "context_attention"
             generation_attn_key = "generation_attention"
 
-        def _validate_worker_config(wc: object, *, validate_context: bool, validate_generation: bool) -> None:
-            model_modes = _resolve_model_quant_modes(wc)
-            gemm_mode = model_modes.get("gemm_quant_mode") or _to_name(_get_cfg_value(wc, "gemm_quant_mode"))
+        def _validate_worker_config(
+            wc: object, *, validate_context: bool, validate_generation: bool, worker_name: str
+        ) -> None:
+            _resolve_model_quant_modes(wc, worker_name)
+            gemm_mode = _to_name(_get_cfg_value(wc, "gemm_quant_mode"))
             _supported_or_raise("gemm", gemm_mode)
 
-            moe_mode = model_modes.get("moe_quant_mode") or _to_name(_get_cfg_value(wc, "moe_quant_mode"))
+            moe_mode = _to_name(_get_cfg_value(wc, "moe_quant_mode"))
             if self.backend_name == "sglang" and enable_wideep and moe_backend == "deepep_moe":
                 if validate_context:
                     _supported_or_raise("wideep_context_moe", moe_mode)
@@ -853,21 +837,31 @@ class TaskConfig:
                 _supported_or_raise("moe", moe_mode)
 
             if validate_context:
-                fmha_mode = model_modes.get("fmha_quant_mode") or _to_name(_get_cfg_value(wc, "fmha_quant_mode"))
+                fmha_mode = _to_name(_get_cfg_value(wc, "fmha_quant_mode"))
                 _supported_or_raise(context_attn_key, fmha_mode)
 
             if validate_generation:
-                kvcache_mode = model_modes.get("kvcache_quant_mode") or _to_name(
-                    _get_cfg_value(wc, "kvcache_quant_mode")
-                )
+                kvcache_mode = _to_name(_get_cfg_value(wc, "kvcache_quant_mode"))
                 _supported_or_raise(generation_attn_key, kvcache_mode)
 
         # agg/disagg worker configs use the same field names
         if self.config.serving_mode == "agg":
-            _validate_worker_config(self.config.worker_config, validate_context=True, validate_generation=True)
+            _validate_worker_config(
+                self.config.worker_config, validate_context=True, validate_generation=True, worker_name="Agg worker"
+            )
         elif self.config.serving_mode == "disagg":
-            _validate_worker_config(self.config.prefill_worker_config, validate_context=True, validate_generation=False)
-            _validate_worker_config(self.config.decode_worker_config, validate_context=False, validate_generation=True)
+            _validate_worker_config(
+                self.config.prefill_worker_config,
+                validate_context=True,
+                validate_generation=False,
+                worker_name="Prefill worker",
+            )
+            _validate_worker_config(
+                self.config.decode_worker_config,
+                validate_context=False,
+                validate_generation=True,
+                worker_name="Decode worker",
+            )
 
     def pretty(self) -> str:
         def _convert(obj: Any) -> Any:
@@ -947,7 +941,29 @@ class TaskConfig:
 
         final_dict = {self.task_name: printable}
 
-        return json.dumps(final_dict, indent=2)
+        class ListFlowDumper(yaml.SafeDumper):
+            """
+            Dumper that will print dict items on new lines, but lists on one line.
+            Example:
+                decode_worker_config:
+                    backend_name: trtllm
+                    backend_version: 1.2.0rc5
+                    dp_list: [1]
+                    num_gpu_per_worker: [1, 2, 4, 8]
+            """
+
+            pass
+
+        def represent_list_flow(dumper, data):
+            return dumper.represent_sequence(
+                "tag:yaml.org,2002:seq",
+                data,
+                flow_style=True,  # force inline style
+            )
+
+        ListFlowDumper.add_representer(list, represent_list_flow)
+
+        return yaml.dump(final_dict, Dumper=ListFlowDumper)
 
     def _convert_worker_config_to_enum(self, worker_config: dict | DefaultMunch) -> None:
         """Convert string quant mode values to enums, skip if already converted."""
@@ -1003,7 +1019,7 @@ class TaskRunner:
         return db
 
     def run_agg(self, task_config: DefaultMunch) -> dict[str, pd.DataFrame | None]:
-        logger.info("Task %s: Setting up runtime config", task_config.task_name)
+        logger.debug("Task %s: Setting up runtime config", task_config.task_name)
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
             osl=task_config.runtime_config.osl,
@@ -1012,7 +1028,7 @@ class TaskRunner:
             tpot=list(range(1, 20, 1)) + list(range(20, 300, 5)),
             request_latency=getattr(task_config.runtime_config, "request_latency", None),
         )
-        logger.info("Task %s: Setting up database", task_config.task_name)
+        logger.debug("Task %s: Setting up database", task_config.task_name)
         try:
             database_mode = getattr(task_config, "database_mode", None)
             database = self._get_database(
@@ -1031,7 +1047,7 @@ class TaskRunner:
                 task_config.worker_config.backend_version,
             )
             return None
-        logger.info("Task %s: Setting up model config", task_config.task_name)
+        logger.debug("Task %s: Setting up model config", task_config.task_name)
         model_config = config.ModelConfig(
             gemm_quant_mode=task_config.worker_config.gemm_quant_mode,
             kvcache_quant_mode=task_config.worker_config.kvcache_quant_mode,
@@ -1044,7 +1060,6 @@ class TaskRunner:
             attention_backend=task_config.attention_backend,  # sglang wideep only
             enable_wideep=task_config.enable_wideep,
         )
-        logger.info("Task %s: Enumerating parallel config", task_config.task_name)
         try:
             from aiconfigurator.sdk import pareto_analysis as pa
 
@@ -1067,6 +1082,12 @@ class TaskRunner:
                 task_config.worker_config.backend_version,
             )
             return None
+
+        logger.info("Task %s: Listing parallelism configs to evaluate: ", task_config.task_name)
+        for i, parallel_config in enumerate(parallel_config_list):
+            tp, pp, dp, moe_tp, moe_ep = parallel_config
+            logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
+
         logger.info("Task %s: Running agg pareto", task_config.task_name)
         result_df = pa.agg_pareto(
             model_path=task_config.model_path,
@@ -1081,7 +1102,7 @@ class TaskRunner:
         }
 
     def run_disagg(self, task_config: DefaultMunch, autoscale: bool = False) -> dict[str, pd.DataFrame | None]:
-        logger.info("Task %s: Setting up runtime config", task_config.task_name)
+        logger.debug("Task %s: Setting up runtime config", task_config.task_name)
         runtime_config = config.RuntimeConfig(
             isl=task_config.runtime_config.isl,
             osl=task_config.runtime_config.osl,
@@ -1094,7 +1115,7 @@ class TaskRunner:
         # Get database mode from config
         database_mode = getattr(task_config, "database_mode", None)
 
-        logger.info("Task %s: Setting up prefill database", task_config.task_name)
+        logger.debug("Task %s: Setting up prefill database", task_config.task_name)
         try:
             prefill_database = self._get_database(
                 system=task_config.prefill_worker_config.system_name,
@@ -1112,7 +1133,7 @@ class TaskRunner:
                 task_config.prefill_worker_config.backend_version,
             )
             return None
-        logger.info("Task %s: Setting up prefill model config", task_config.task_name)
+        logger.debug("Task %s: Setting up prefill model config", task_config.task_name)
         prefill_model_config = config.ModelConfig(
             gemm_quant_mode=task_config.prefill_worker_config.gemm_quant_mode,
             kvcache_quant_mode=task_config.prefill_worker_config.kvcache_quant_mode,
@@ -1126,7 +1147,6 @@ class TaskRunner:
             enable_wideep=task_config.enable_wideep,
         )
 
-        logger.info("Task %s: Enumerating prefill parallel config", task_config.task_name)
         try:
             from aiconfigurator.sdk import pareto_analysis as pa
 
@@ -1150,7 +1170,12 @@ class TaskRunner:
             )
             return None
 
-        logger.info("Task %s: Setting up decode database", task_config.task_name)
+        logger.info("Task %s: Listing prefill parallelism configs to evaluate: ", task_config.task_name)
+        for i, parallel_config in enumerate(prefill_parallel_config_list):
+            tp, pp, dp, moe_tp, moe_ep = parallel_config
+            logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
+
+        logger.debug("Task %s: Setting up decode database", task_config.task_name)
         try:
             decode_database = self._get_database(
                 system=task_config.decode_worker_config.system_name,
@@ -1168,7 +1193,7 @@ class TaskRunner:
                 task_config.decode_worker_config.backend_version,
             )
             return None
-        logger.info("Task %s: Setting up decode model config", task_config.task_name)
+        logger.debug("Task %s: Setting up decode model config", task_config.task_name)
         decode_model_config = config.ModelConfig(
             gemm_quant_mode=task_config.decode_worker_config.gemm_quant_mode,
             kvcache_quant_mode=task_config.decode_worker_config.kvcache_quant_mode,
@@ -1182,7 +1207,6 @@ class TaskRunner:
             enable_wideep=task_config.enable_wideep,
         )
 
-        logger.info("Task %s: Enumerating decode parallel config", task_config.task_name)
         try:
             from aiconfigurator.sdk import pareto_analysis as pa
 
@@ -1205,6 +1229,11 @@ class TaskRunner:
                 task_config.decode_worker_config.backend_version,
             )
             return None
+
+        logger.info("Task %s: Listing decode parallelism configs to evaluate: ", task_config.task_name)
+        for i, parallel_config in enumerate(decode_parallel_config_list):
+            tp, pp, dp, moe_tp, moe_ep = parallel_config
+            logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
 
         # For SGLang non-wideep disaggregated serving
         # See: https://github.com/ai-dynamo/dynamo/issues/5870
