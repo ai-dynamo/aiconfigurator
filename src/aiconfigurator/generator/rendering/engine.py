@@ -84,11 +84,18 @@ def _generate_k8s_via_dynamo(
         )
 
     # PVC support
-    model_cache = (k8s_cfg.get("k8s_model_cache") or "").strip()
-    if model_cache:
-        kwargs["pvc_name"] = model_cache
-        kwargs["pvc_mount_path"] = "/workspace/model_cache"
-        kwargs["model_path"] = k8s_cfg.get("k8s_hf_home") or "/workspace/model_cache"
+    pvc_name = (k8s_cfg.get("k8s_pvc_name") or k8s_cfg.get("k8s_model_cache") or "").strip()
+    if pvc_name:
+        pvc_mount = (k8s_cfg.get("k8s_pvc_mount_path") or "/workspace/model_cache").strip()
+        model_in_pvc = (
+            k8s_cfg.get("k8s_model_path_in_pvc")
+            or k8s_cfg.get("k8s_pvc_model_path")
+            or k8s_cfg.get("k8s_hf_home")
+            or ""
+        ).strip(" /")
+        kwargs["pvc_name"] = pvc_name
+        kwargs["pvc_mount_path"] = pvc_mount
+        kwargs["model_path"] = f"{pvc_mount}/{model_in_pvc}".rstrip("/") if model_in_pvc else pvc_mount
 
     config_dict = modifier.build_dgd_config(**kwargs)
     return yaml.dump(config_dict, sort_keys=False)
@@ -539,8 +546,19 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
     context["k8s_image_pull_secret"] = k8s_config.get("k8s_image_pull_secret")
     context["working_dir"] = k8s_config.get("working_dir")
     context["k8s_engine_mode"] = k8s_config.get("k8s_engine_mode")
-    context["k8s_model_cache"] = k8s_config.get("k8s_model_cache")
-    context["k8s_hf_home"] = k8s_config.get("k8s_hf_home")
+    # PVC config: new unified names with backward compat fallbacks
+    context["k8s_pvc_name"] = k8s_config.get("k8s_pvc_name") or k8s_config.get("k8s_model_cache")
+    context["k8s_pvc_mount_path"] = k8s_config.get("k8s_pvc_mount_path") or "/workspace/model_cache"
+    context["k8s_model_path_in_pvc"] = (
+        k8s_config.get("k8s_model_path_in_pvc") or k8s_config.get("k8s_pvc_model_path") or k8s_config.get("k8s_hf_home")
+    )
+    # Backward compat aliases for Jinja2 templates
+    context["k8s_model_cache"] = context["k8s_pvc_name"]
+    context["k8s_hf_home"] = (
+        f"{context['k8s_pvc_mount_path']}/{context['k8s_model_path_in_pvc']}".rstrip("/")
+        if context["k8s_model_path_in_pvc"]
+        else ""
+    )
 
     # Extract DynConfig for mode/router decisions
     dyn_config = param_values.get("DynConfig", {})
