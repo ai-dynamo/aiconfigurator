@@ -1026,9 +1026,12 @@ def _run_support_mode(args):
     print(f"  Disaggregated Support: {'YES' if result.disagg_supported else 'NO'}")
 
     # Show explanation if support was inferred from architecture majority vote
-    if not result.exact_match and result.architecture:
+    if not result.exact_match and result.architecture and (result.agg_total_count > 0 or result.disagg_total_count > 0):
         print("-" * 60)
-        print(f"  Note: Model '{model}' not found in support matrix.")
+        print(
+            f"  Note: Model '{model}' not found in support matrix cache,\n\
+    but the model matches architecture '{result.architecture}'."
+        )
         print(f"  Support inferred from architecture '{result.architecture}' majority vote:")
         if result.agg_total_count:
             p, t = result.agg_pass_count, result.agg_total_count
