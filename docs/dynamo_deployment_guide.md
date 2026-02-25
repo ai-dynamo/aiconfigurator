@@ -91,7 +91,9 @@ results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 │   ├── pareto.csv
 │   ├── top1
 │   │   ├── agg_config.yaml
+│   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
 │   │   ├── generator_config.yaml
+│   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
 │   │   ├── k8s_deploy.yaml
 │   │   └── run_0.sh
 │   ...
@@ -100,8 +102,10 @@ results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 │   ├── exp_config.yaml
 │   ├── pareto.csv
 │   ├── top1
+│   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
 │   │   ├── decode_config.yaml
 │   │   ├── generator_config.yaml
+│   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
 │   │   ├── k8s_deploy.yaml
 │   │   ├── prefill_config.yaml
 │   │   ├── run_0.sh
@@ -110,7 +114,7 @@ results/Qwen_Qwen3-32B_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 └── pareto_frontier.png
 ```
 
-Here, `agg_config.yaml`, `prefill_config.yaml`, and `decode_config.yaml` are TRTLLM engine configuration files, and `run_x.sh` are the executable scripts. `k8s_deploy.yaml` is for deployment in k8s. In this guide, we're not using k8s.
+Here, `agg_config.yaml`, `prefill_config.yaml`, and `decode_config.yaml` are TRTLLM engine configuration files, and `run_x.sh` are the executable scripts. `k8s_deploy.yaml` is for deployment in k8s. `bench_run.sh` and `k8s_bench.yaml` are benchmark helpers for running `aiperf` concurrency sweeps (see the [CLI User Guide](cli_user_guide.md#benchmark-artifacts) for details). In this guide, we're not using k8s.
 
 For multi-node setups, there will be multiple `run_x.sh` scripts (one per node), each invoking the same TRTLLM engine config file. By default, `run_0.sh` starts **both the frontend service and the workers, assuming ETCD and NATS are already running on node0, while other nodes only start the workers**. Therefore, in multi-node deployments, set the head node IP via **`--generator-set ServiceConfig.head_node_ip=<IP>`** (there is no standalone `--head_node_ip` CLI flag).
 
@@ -265,7 +269,9 @@ ${save_dir}/
 ├── agg/
 │   ├── top1/
 │   │   ├── agg_config.yaml
+│   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
 │   │   ├── generator_config.yaml
+│   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
 │   │   ├── k8s_deploy.yaml
 │   │   └── run_0.sh
 │   ├── best_config_topn.csv
@@ -273,8 +279,10 @@ ${save_dir}/
 │   └── pareto.csv
 ├── disagg/
 │   ├── top1/
+│   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
 │   │   ├── decode_config.yaml
 │   │   ├── generator_config.yaml
+│   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
 │   │   ├── k8s_deploy.yaml
 │   │   ├── prefill_config.yaml
 │   │   ├── run_0.sh

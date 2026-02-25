@@ -290,8 +290,9 @@ def configure_parser(parser):
     support_parser = subparsers.add_parser(
         "support",
         parents=[common_cli_parser],
-        help="Check if AIC supports the model/hardware combo for (agg, disagg).",
-        description="Verify support for a specific model and system combination using the support matrix. "
+        help="(Optional) Check if AIC supports the model/hardware combo for (agg, disagg).",
+        description="Optional pre-flight check to verify support for a specific model and system "
+        "combination using the support matrix. "
         "Use --system all for a consolidated matrix view across all systems and backends.",
     )
     _add_support_mode_arguments(support_parser)
@@ -913,6 +914,11 @@ def main(args):
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
     )
+
+    # Handle support mode early — it doesn't need systems_paths or top_n
+    if args.mode == "support":
+        _run_support_mode(args)
+        return
 
     try:
         perf_database.set_systems_paths(args.systems_paths)
