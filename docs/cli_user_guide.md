@@ -1,6 +1,6 @@
 # CLI User Guide
 ## Basic Command
-As mentioned in root Readme, CLI supports three modes: `default`, `exp`, and `generate`. We'll go through these modes one by one.
+As mentioned in root Readme, CLI supports five modes: `default`, `exp`, `generate`, `estimate`, and `support`. We'll go through these modes one by one.
 
 Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
 For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.
@@ -56,8 +56,8 @@ print(result["parallelism"])  # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8
 
 > **Note:** This is a naive configuration without memory validation or performance optimization. For production deployments, use `aiconfigurator cli default` to run the full parameter sweep with SLA optimization.
 
-### Support mode
-This mode allows you to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
+### Support mode (optional)
+This is an optional pre-flight check to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. You can skip this and run `cli default` directly. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
 
 ```bash
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
@@ -264,6 +264,8 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_90449
 │   ├── top1
 │   │   ├── agg
 │   │   │   ├── agg_config.yaml
+│   │   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
+│   │   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
 │   │   │   ├── k8s_deploy.yaml
 │   │   │   └── node_0_run.sh 
 │   │   └── generator_config.yaml
@@ -274,7 +276,9 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_90449
 │   ├── pareto.csv
 │   ├── top1
 │   │   ├── disagg
+│   │   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
 │   │   │   ├── decode_config.yaml
+│   │   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
 │   │   │   ├── k8s_deploy.yaml
 │   │   │   ├── node_0_run.sh
 │   │   │   └── prefill_config.yaml
@@ -282,7 +286,7 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_90449
 │   ...
 └── pareto_frontier.png
 ```
-By default, we output top 5 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. `agg_config.yaml` and `node_0_run.sh` are the files you need to deploy with Dynamo. If you want to deploy using k8s, you can leverage `k8s_deploy.yaml`. Refer to [deployment guide](dynamo_deployment_guide.md) for info about deployment.
+By default, we output top 5 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. `agg_config.yaml` and `node_0_run.sh` are the files you need to deploy with Dynamo. If you want to deploy using k8s, you can leverage `k8s_deploy.yaml`. For benchmarking, see the [Benchmark Artifacts](#benchmark-artifacts) section below. Refer to [deployment guide](dynamo_deployment_guide.md) for info about deployment.
 
 `--save-dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated-config-version 1.0.0rc6` can give you the right result.
 
@@ -467,6 +471,25 @@ result = cli_exp(config=config)
 ```
 
 See `src/aiconfigurator/cli/exps/database_mode_comparison.yaml` for an example comparing different database modes.
+
+### Benchmark Artifacts
+
+When `--save-dir` is used, each `topN` directory includes two benchmark helpers alongside the deployment artifacts:
+
+- **`bench_run.sh`** -- A shell script for bare-metal benchmarking. It loops over a concurrency array and calls [`aiperf profile`](https://github.com/ai-dynamo/aiperf) for each level. Before running it, make sure the deployed service is reachable at the endpoint printed in the script, and that `aiperf` is installed (`pip install aiperf`). Usage:
+  ```bash
+  cd results/.../disagg/top1/disagg/
+  bash bench_run.sh
+  ```
+
+- **`k8s_bench.yaml`** -- A Kubernetes Job manifest that runs the same `aiperf` concurrency sweep inside the cluster. Apply it after the service is up:
+  ```bash
+  kubectl apply -f results/.../disagg/top1/disagg/k8s_bench.yaml
+  ```
+
+**Concurrency sweep.** Both artifacts iterate over a base concurrency list `[1, 2, 8, 16, 32, 64, 128]`. When an estimated concurrency is available from the AIConfigurator run, three additional points are added: the estimate itself and its +/-5% neighbors. This targets the operating point AIConfigurator found optimal.
+
+**Templated values.** The scripts are pre-filled with the model name, tokenizer, ISL/OSL, endpoint URL, and streaming mode from the run that generated them -- no manual editing is needed for the common case.
 
 ### Exp mode
 If you want to customize your experiment apart from simple command which only compares disagg and agg of a same model, you can use `exp` mode. The command is,
@@ -656,3 +679,86 @@ In this example, we use a pre-defined profile to overwrite quantization of Qwen/
 You can refer to [src/aiconfigurator/cli/exps](../src/aiconfigurator/cli/exps) to find more reference yaml files.
 
 Use `exp` mode for flexible experiments, `default` mode for convenient agg vs disagg comparison with SLA optimization, and `generate` mode for quick config generation without sweeping. All modes support generating configs for frameworks automatically by `--save-dir DIR`.
+
+---
+
+
+## End-to-End Workflow
+
+This section walks through the typical workflow from checking hardware/model support all the way to benchmarking a deployed service. Each step feeds into the next.
+
+**Scenario:** Deploy Qwen3-32B-FP8 on 8x H200 GPUs with SLA targets of TTFT <= 600 ms and TPOT <= 50 ms.
+
+### Step 1: Check support (optional)
+
+You can optionally verify that your model/system combination is supported before running a sweep. This step is not required — you can skip it and run `cli default` directly.
+
+```bash
+aiconfigurator cli support --model Qwen/Qwen3-32B-FP8 --system h200_sxm
+```
+
+If the output shows `Aggregated Support: YES` and/or `Disaggregated Support: YES`, proceed. Otherwise, try a different backend (`--backend vllm` or `--backend sglang`) or system.
+
+### Step 2: Find the optimal configuration
+
+Run the parameter sweep to compare aggregated vs. disaggregated serving and find the best config under your SLA:
+
+```bash
+aiconfigurator cli default \
+  --model Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
+  --system h200_sxm \
+  --ttft 600 --tpot 50 \
+  --isl 4000 --osl 500 \
+  --save-dir results \
+  --generator-set ServiceConfig.head_node_ip=0.0.0.0 \
+  --generator-set ServiceConfig.model_path=/workspace/models/Qwen3-32B-FP8
+```
+
+`--save-dir` generates deployment-ready artifacts (engine configs, run scripts, K8s manifests, and benchmark helpers) under `results/`.
+
+### Step 3: Quick fallback (optional)
+
+If `cli support` shows your model/system combo is unsupported, or `cli default` fails to find a valid configuration, `generate` gives you the smallest TP that fits the model in memory. Otherwise, you can use the `cli default` results directly and skip this step.
+
+```bash
+aiconfigurator cli generate \
+  --model Qwen/Qwen3-32B-FP8 \
+  --total-gpus 8 \
+  --system h200_sxm \
+  --save-dir results_naive
+```
+
+### Step 4: Deploy
+
+Use the generated artifacts to launch the service. For bare-metal (single-node):
+
+```bash
+mkdir -p /workspace/engine_configs
+cp results/.../disagg/top1/*_config.yaml /workspace/engine_configs/
+cd results/.../disagg/top1/
+bash run_0.sh
+```
+
+For Kubernetes:
+
+```bash
+kubectl apply -f results/.../disagg/top1/k8s_deploy.yaml
+```
+
+See the [Deployment Guide](dynamo_deployment_guide.md) for multi-node and K8s details.
+
+### Step 5: Benchmark
+
+After the service is healthy, run the generated benchmark sweep to validate performance at the predicted concurrency:
+
+```bash
+# Bare-metal
+bash results/.../disagg/top1/bench_run.sh
+
+# Or Kubernetes
+kubectl apply -f results/.../disagg/top1/k8s_bench.yaml
+```
+
+Compare the measured TTFT, TPOT, and tokens/s/gpu against the AIConfigurator estimates printed in Step 2. See [Benchmark Artifacts](#benchmark-artifacts) for details on the generated scripts.
+

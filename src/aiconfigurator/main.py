@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import importlib.util
 import logging
 import sys
 
@@ -17,22 +16,33 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
-def is_package_installed(package_name):
-    spec = importlib.util.find_spec(package_name)
-    return spec is not None
+def _is_gradio_importable() -> bool:
+    """Check that gradio is installed and actually importable (not just leftover files)."""
+    try:
+        import gradio
+
+        return hasattr(gradio, "__version__")
+    except Exception:
+        return False
 
 
-if is_package_installed("gradio"):
+_GRADIO_AVAILABLE = _is_gradio_importable()
+
+
+def _run_webapp(extra_args: list[str]) -> None:
+    if not _GRADIO_AVAILABLE:
+        print(
+            "Error: The 'webapp' subcommand requires a working Gradio installation.\n"
+            "Install it with:  pip install aiconfigurator[webapp]"
+        )
+        sys.exit(1)
     from aiconfigurator.webapp.main import configure_parser as configure_webapp_parser
     from aiconfigurator.webapp.main import main as webapp_main
 
-    def _run_webapp(extra_args: list[str]) -> None:
-        webapp_parser = argparse.ArgumentParser(description="Dynamo AIConfigurator web interface")
-        configure_webapp_parser(webapp_parser)
-        webapp_args = webapp_parser.parse_args(extra_args)
-        webapp_main(webapp_args)
-else:
-    logger.warning("Gradio not installed, you can install it with pip3 install .[webapp]")
+    webapp_parser = argparse.ArgumentParser(description="Dynamo AIConfigurator web interface")
+    configure_webapp_parser(webapp_parser)
+    webapp_args = webapp_parser.parse_args(extra_args)
+    webapp_main(webapp_args)
 
 
 def _run_cli(extra_args: list[str]) -> None:
@@ -63,10 +73,12 @@ def main(argv: list[str] | None = None) -> None:
     cli_parser = subparsers.add_parser("cli", help="Run CLI interface", add_help=False)
     cli_parser.set_defaults(handler=_run_cli)
 
-    if is_package_installed("gradio"):
-        # Webapp subcommand
-        webapp_parser = subparsers.add_parser("webapp", help="Run Web interface", add_help=False)
-        webapp_parser.set_defaults(handler=_run_webapp)
+    # Webapp subcommand (always visible; prints install hint when Gradio is missing)
+    webapp_help = (
+        "Run Web interface" if _GRADIO_AVAILABLE else "Run Web interface (requires: pip install aiconfigurator[webapp])"
+    )
+    webapp_parser = subparsers.add_parser("webapp", help=webapp_help, add_help=False)
+    webapp_parser.set_defaults(handler=_run_webapp)
 
     # Eval subcommand
     eval_parser = subparsers.add_parser(
