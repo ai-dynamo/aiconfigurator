@@ -56,8 +56,8 @@ print(result["parallelism"])  # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8
 
 > **Note:** This is a naive configuration without memory validation or performance optimization. For production deployments, use `aiconfigurator cli default` to run the full parameter sweep with SLA optimization.
 
-### Support mode
-This mode allows you to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
+### Support mode (optional)
+This is an optional pre-flight check to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. You can skip this and run `cli default` directly. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
 
 ```bash
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
@@ -689,9 +689,9 @@ This section walks through the typical workflow from checking hardware/model sup
 
 **Scenario:** Deploy Qwen3-32B-FP8 on 8x H200 GPUs with SLA targets of TTFT <= 600 ms and TPOT <= 50 ms.
 
-### Step 1: Check support
+### Step 1: Check support (optional)
 
-Verify that your model/system combination is supported before investing time in a sweep:
+You can optionally verify that your model/system combination is supported before running a sweep. This step is not required — you can skip it and run `cli default` directly.
 
 ```bash
 aiconfigurator cli support --model Qwen/Qwen3-32B-FP8 --system h200_sxm
@@ -719,7 +719,7 @@ aiconfigurator cli default \
 
 ### Step 3: Quick fallback (optional)
 
-If you need a working config immediately without SLA optimization, `generate` gives you the smallest TP that fits the model in memory:
+If `cli support` shows your model/system combo is unsupported, or `cli default` fails to find a valid configuration, `generate` gives you the smallest TP that fits the model in memory. Otherwise, you can use the `cli default` results directly and skip this step.
 
 ```bash
 aiconfigurator cli generate \
