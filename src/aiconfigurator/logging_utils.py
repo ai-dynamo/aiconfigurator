@@ -44,12 +44,7 @@ class ColoredFormatter(logging.Formatter):
         if not self.use_colors:
             return log_message
 
-        # Handle different log formats
-        # Format 1: "HH:MM:SS [aiconfigurator] [L] [filename:line] message"
-        # Format 2: "LEVELNAME YYYY-MM-DD HH:MM:SS,mmm filename:line] message"
-        # Format 3: "LEVELNAME HH:MM:SS filename:line] message"
-
-        # Check if format contains [aiconfigurator] (format 1)
+        # Check if format contains [aiconfigurator]
         if "[aiconfigurator]" in log_message:
             parts = log_message.split(" ", 3)
             if len(parts) >= 4:
