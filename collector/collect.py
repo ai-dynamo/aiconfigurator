@@ -329,26 +329,18 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
 def collect_ops(
     num_processes: int,
     collections: list[dict],
-    ops: list[str] | None = None,
-    framework_version: str | None = None,
 ) -> list[dict]:
+    """Run collection for a list of resolved collection entries.
+
+    Each entry must have: name, type, module, get_func, run_func.
+    Version resolution and op filtering are handled upstream by
+    version_resolver.build_collections().
+    """
     all_errors = []
 
     for collection in collections:
-        if ops and (collection["type"] not in ops):
-            continue
         try:
-            # Handle version-specific modules
-            if "version_handler" in collection:
-                module_name = collection["version_handler"](framework_version)
-                if not module_name:
-                    logger.warning(
-                        f"Skipping {collection['name']}.{collection['type']} - unsupported version {framework_version}",
-                    )
-                    continue
-            else:
-                module_name = collection["module"]
-
+            module_name = collection["module"]
             get_module = __import__(module_name, fromlist=[collection["get_func"]])
             run_module = __import__(module_name, fromlist=[collection["run_func"]])
 
@@ -373,217 +365,67 @@ def collect_ops(
 
 def collect_sglang(num_processes: int, ops: list[str] | None = None):
     """Collect performance data for SGLang with enhanced error tracking"""
+    from collector.sglang.registry import REGISTRY
+    from collector.version_resolver import build_collections
+
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
 
     try:
-        # Try to get version from package metadata
         try:
             from importlib.metadata import version as get_version
 
             version = get_version("sglang")
-        except:
+        except Exception:
             try:
                 import pkg_resources
 
                 version = pkg_resources.get_distribution("sglang").version
-            except:
+            except Exception:
                 version = "unknown"
 
         logger.info(f"SGLang version: {version}")
-    except:
+    except Exception:
         logger.exception("SGLang is not installed")
         return
 
-    # Define collection modules - each test type as separate entry
-    # Non-wideep collections (support multi-process parallel)
-    collections = [
-        # GEMM collection
-        {
-            "name": "sglang",
-            "type": "gemm",
-            "module": "collector.sglang.collect_gemm",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
-        # MLA collections - context and generation
-        {
-            "name": "sglang",
-            "type": "mla_context",
-            "module": "collector.sglang.collect_mla",
-            "get_func": "get_context_mla_test_cases",
-            "run_func": "run_mla",
-        },
-        {
-            "name": "sglang",
-            "type": "mla_generation",
-            "module": "collector.sglang.collect_mla",
-            "get_func": "get_generation_mla_test_cases",
-            "run_func": "run_mla",
-        },
-        # MLA BMM collections - gen_pre and gen_post
-        {
-            "name": "sglang",
-            "type": "mla_bmm_gen_pre",
-            "module": "collector.sglang.collect_mla_bmm",
-            "get_func": "get_mla_gen_pre_test_cases",
-            "run_func": "run_mla_gen_pre",
-        },
-        {
-            "name": "sglang",
-            "type": "mla_bmm_gen_post",
-            "module": "collector.sglang.collect_mla_bmm",
-            "get_func": "get_mla_gen_post_test_cases",
-            "run_func": "run_mla_gen_post",
-        },
-        # MOE collection
-        {
-            "name": "sglang",
-            "type": "moe",
-            "module": "collector.sglang.collect_moe",
-            "get_func": "get_moe_test_cases",
-            "run_func": "run_moe_torch",
-        },
-        # Normal Attention collections - context and generation
-        {
-            "name": "sglang",
-            "type": "attention_context",
-            "module": "collector.sglang.collect_attn",
-            "get_func": "get_context_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "sglang",
-            "type": "attention_generation",
-            "module": "collector.sglang.collect_attn",
-            "get_func": "get_generation_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-    ]
+    collections = build_collections(REGISTRY, "sglang", version, ops, wideep_filter=False, logger=logger)
+    all_errors = collect_ops(num_processes, collections)
 
-    # Wideep collections - require single process due to NCCL/distributed init conflicts
-    wideep_collections = [
-        {
-            "name": "sglang",
-            "type": "wideep_mla_context",
-            "module": "collector.sglang.collect_wideep_attn",
-            "get_func": "get_wideep_mla_context_test_cases",
-            "run_func": "run_wideep_mla_context",
-        },
-        {
-            "name": "sglang",
-            "type": "wideep_mla_generation",
-            "module": "collector.sglang.collect_wideep_attn",
-            "get_func": "get_wideep_mla_generation_test_cases",
-            "run_func": "run_wideep_mla_generation",
-        },
-        {
-            "name": "sglang",
-            "type": "wideep_mlp_context",
-            "module": "collector.sglang.collect_wideep_mlp",
-            "get_func": "get_wideep_mlp_context_test_cases",
-            "run_func": "run_wideep_mlp_context",
-        },
-        {
-            "name": "sglang",
-            "type": "wideep_mlp_generation",
-            "module": "collector.sglang.collect_wideep_mlp",
-            "get_func": "get_wideep_mlp_generation_test_cases",
-            "run_func": "run_wideep_mlp_generation",
-        },
-        {
-            "name": "sglang",
-            "type": "wideep_moe",
-            "module": "collector.sglang.collect_wideep_deepep_moe",
-            "get_func": "get_wideep_moe_test_cases",
-            "run_func": "run_wideep_moe",
-        },
-    ]
-
-    # Run non-wideep collections with multi-process
-    all_errors = collect_ops(num_processes, collections, ops, version)
-
-    # Run wideep collections - now supports multi-process with proper port isolation
-    if ops is None or any(c["type"] in ops for c in wideep_collections):
+    wideep_collections = build_collections(REGISTRY, "sglang", version, ops, wideep_filter=True, logger=logger)
+    if wideep_collections:
         logger.info(f"Running wideep collections with {num_processes} processes")
-        wideep_errors = collect_ops(num_processes, wideep_collections, ops, version)
+        wideep_errors = collect_ops(num_processes, wideep_collections)
         all_errors.extend(wideep_errors)
 
     generate_collection_summary(all_errors, "sglang", version)
 
 
 def collect_vllm(num_processes: int, ops: list[str] | None = None):
-    """
-    Collect performance data for VLLM
-    """
+    """Collect performance data for vLLM"""
+    from collector.version_resolver import build_collections
+    from collector.vllm.registry import REGISTRY
 
     try:
         from vllm.version import __version__ as vllm_version
 
         version = vllm_version
-
-    except:
-        logger.exception("VLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
+    except Exception:
+        logger.exception("vLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
         return
 
-    collections = [
-        # GEMM collections
-        # vllm GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
-        {
-            "name": "vllm",
-            "type": "gemm",
-            "module": "collector.vllm.collect_gemm",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
-        # Attention collections - separate entries for context and generation
-        {
-            "name": "vllm",
-            "type": "attention_context",
-            "module": "collector.vllm.collect_attn",
-            "get_func": "get_context_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "attention_generation",
-            "module": "collector.vllm.collect_attn",
-            "get_func": "get_generation_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "moe",
-            "module": "collector.vllm.collect_moe",
-            "get_func": "get_moe_test_cases",
-            "run_func": "run_moe_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "mla_context",
-            "module": "collector.vllm.collect_mla",
-            "get_func": "get_context_mla_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "mla_generation",
-            "module": "collector.vllm.collect_mla",
-            "get_func": "get_generation_mla_test_cases",
-            "run_func": "run_attention_torch",
-        },
-    ]
-
-    all_errors = collect_ops(num_processes, collections, ops, version)
+    collections = build_collections(REGISTRY, "vllm", version, ops, logger=logger)
+    all_errors = collect_ops(num_processes, collections)
 
     generate_collection_summary(all_errors, "vllm", version)
 
 
 def collect_trtllm(num_processes: int, ops: list[str] | None = None):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
+    from collector.trtllm.registry import REGISTRY
+    from collector.version_resolver import build_collections
 
     os.environ["TLLM_LOG_LEVEL"] = "ERROR"
     os.environ["TRTLLM_DG_ENABLED"] = "1"
-    # Suppress flashinfer logging
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
 
     try:
@@ -595,127 +437,13 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             import tensorrt_llm
         version = tensorrt_llm.__version__
         logger.info(f"TensorRT LLM version: {version}")
-    except:
+    except Exception:
         logger.exception("TensorRT LLM is not installed")
         return
 
-    # Define collection modules - each test type as separate entry
-    collections = [
-        # GEMM collections
-        {
-            "name": "trtllm",
-            "type": "gemm",
-            "module": "collector.trtllm.collect_gemm",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
-        # Computescale collections
-        {
-            "name": "trtllm",
-            "type": "compute_scale",
-            "module": "collector.trtllm.collect_computescale",
-            "get_func": "get_computescale_test_cases",
-            "run_func": "run_computescale",
-        },
-        # MLA collections
-        {
-            "name": "trtllm",
-            "type": "mla_context",
-            "module": "collector.trtllm.collect_mla",
-            "get_func": "get_context_mla_test_cases",
-            "run_func": "run_mla",
-            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2"
-            if v.startswith(("1.1.0", "1.2.0"))
-            else "trtllm.collect_mla",
-        },
-        {
-            "name": "trtllm",
-            "type": "mla_generation",
-            "module": "collector.trtllm.collect_mla",
-            "get_func": "get_generation_mla_test_cases",
-            "run_func": "run_mla",
-            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2"
-            if v.startswith(("1.1.0", "1.2.0"))
-            else "trtllm.collect_mla",
-        },
-        # Attention collections - separate entries for context and generation
-        {
-            "name": "trtllm",
-            "type": "attention_context",
-            "module": "collector.trtllm.collect_attn",
-            "get_func": "get_context_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "trtllm",
-            "type": "attention_generation",
-            "module": "collector.trtllm.collect_attn",
-            "get_func": "get_generation_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        # MLA BMM collections
-        {
-            "name": "trtllm",
-            "type": "mla_bmm_gen_pre",
-            "module": "collector.trtllm.collect_mla_bmm",
-            "get_func": "get_mla_gen_pre_test_cases",
-            "run_func": "run_mla_gen_pre",
-        },
-        {
-            "name": "trtllm",
-            "type": "mla_bmm_gen_post",
-            "module": "collector.trtllm.collect_mla_bmm",
-            "get_func": "get_mla_gen_post_test_cases",
-            "run_func": "run_mla_gen_post",
-        },
-        # MOE collection (with version handling)
-        {
-            "name": "trtllm",
-            "type": "moe",
-            "module": None,  # Will be determined based on version
-            "get_func": "get_moe_test_cases",
-            "run_func": "run_moe_torch",
-            "version_handler": lambda v: "collector.trtllm.collect_moe_pre_0_20"
-            if v.startswith("0.20.0")
-            else "collector.trtllm.collect_moe_pre_1_0"
-            if v.startswith(("0.21.0", "1.0.0"))
-            else "collector.trtllm.collect_moe"
-            if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
-            else None,
-        },
-        # MOE with EPLB (Expert Parallel Load Balancer) collection
-        {
-            "name": "trtllm",
-            "type": "moe_eplb",
-            "module": None,  # Will be determined based on version
-            "get_func": "get_moe_eplb_test_cases",
-            "run_func": "run_moe_torch",
-            "version_handler": lambda v: "collector.trtllm.collect_moe"
-            if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
-            else None,
-        },
-        # WideEP MOE Compute collection (computation only, excludes AlltoAll)
-        # Includes 3 EPLB modes: OFF, ON (baseline), ON (288 slots)
-        {
-            "name": "trtllm",
-            "type": "trtllm_moe_wideep",
-            "module": "collector.trtllm.collect_wideep_moe_compute",
-            "get_func": "get_wideep_moe_compute_all_test_cases",
-            "run_func": "run_wideep_moe_compute",
-        },
-        # Mamba2 collection
-        {
-            "name": "trtllm",
-            "type": "mamba2",
-            "module": "collector.trtllm.collect_mamba2",
-            "get_func": "get_mamba2_test_cases",
-            "run_func": "run_mamba2_torch",
-        },
-    ]
+    collections = build_collections(REGISTRY, "trtllm", version, ops, logger=logger)
+    all_errors = collect_ops(num_processes, collections)
 
-    all_errors = collect_ops(num_processes, collections, ops, version)
-
-    # Generate summary report
     generate_collection_summary(all_errors, "trtllm", version)
 
 
@@ -763,6 +491,22 @@ def generate_collection_summary(all_errors, backend, version):
     logger.info(f"\nDetailed error report saved to: {summary_file}")
 
 
+def _all_op_names() -> list[str]:
+    """Collect all unique op names across all backend registries."""
+    from collector.sglang.registry import REGISTRY as SGLANG_REG
+    from collector.trtllm.registry import REGISTRY as TRTLLM_REG
+    from collector.vllm.registry import REGISTRY as VLLM_REG
+
+    seen = set()
+    ops = []
+    for reg in (TRTLLM_REG, VLLM_REG, SGLANG_REG):
+        for entry in reg:
+            if entry["op"] not in seen:
+                seen.add(entry["op"])
+                ops.append(entry["op"])
+    return ops
+
+
 def main():
     global logger
     parser = argparse.ArgumentParser(description="Collect performance data for backends")
@@ -772,27 +516,9 @@ def main():
         "--ops",
         nargs="*",
         type=str,
-        choices=[
-            "gemm",
-            "compute_scale",
-            "mla_context",
-            "mla_generation",
-            "attention_context",
-            "attention_generation",
-            "mla_bmm_gen_pre",
-            "mla_bmm_gen_post",
-            "moe",
-            "moe_eplb",  # MoE with EPLB (Expert Parallel Load Balancer)
-            "trtllm_moe_wideep",  # WideEP MoE compute (includes all 3 EPLB modes)
-            "wideep_moe",  # TensorRT-LLM WideEP MoE computation (single GPU) - from aic
-            "mamba2",
-            "wideep_mla_context",
-            "wideep_mla_generation",
-            "wideep_mlp_context",
-            "wideep_mlp_generation",
-        ],
+        choices=_all_op_names(),
         help="Run only specified collection items. Leave empty to run all. "
-        "Available ops vary by backend - see backend-specific collectors for details.",
+        "Available ops vary by backend — see backend-specific registry.py for details.",
         default=None,
     )
     parser.add_argument(

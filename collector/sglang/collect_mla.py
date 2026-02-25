@@ -1,5 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+__compat__ = "sglang>=0.5.5"
+
 import math
 import os
 import random
@@ -35,8 +38,6 @@ import sglang.srt.layers.attention.trtllm_mla_backend
 
 sglang.srt.layers.attention.flashinfer_mla_backend.get_attention_tp_size = lambda: 1
 sglang.srt.layers.attention.trtllm_mla_backend.get_attention_tp_size = lambda: 1
-
-compatible_version = ["0.5.5.post3", "0.5.6.post2", "0.5.8"]
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
