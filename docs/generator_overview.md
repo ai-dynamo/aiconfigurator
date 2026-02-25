@@ -189,19 +189,19 @@ The generator validator checks that generated engine configs or CLI args are acc
 **Usage (run inside the matching runtime image):**
 - TRT-LLM runtime image (e.g. `tensorrtllm-runtime`):
   ```
-  python -m aiconfigurator/tools/generator_validator/validator.py \
+  python tools/generator_validator/validator.py \
     --backend trtllm \
     --path /path/to/results
   ```
 - vLLM runtime image:
   ```
-  python -m aiconfigurator/tools/generator_validator/validator.py \
+  python tools/generator_validator/validator.py \
     --backend vllm \
     --path /path/to/results
   ```
 - SGLang runtime image:
   ```
-  python -m aiconfigurator/tools/generator_validator/validator.py \
+  python tools/generator_validator/validator.py \
     --backend sglang \
     --path /path/to/results
   ```

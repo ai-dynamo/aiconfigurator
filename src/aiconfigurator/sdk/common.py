@@ -137,7 +137,9 @@ def check_support(
     exact_matches = [
         row
         for row in matrix
-        if row["HuggingFaceID"] == model and row["System"] == system and _matches_filters(row, backend, version)
+        if row["HuggingFaceID"].lower() == model.lower()
+        and row["System"].lower() == system.lower()
+        and _matches_filters(row, backend, version)
     ]
 
     # Resolve architecture from matrix if model is found anywhere
