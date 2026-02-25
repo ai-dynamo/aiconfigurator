@@ -1,6 +1,6 @@
 # CLI User Guide
 ## Basic Command
-As mentioned in root Readme, CLI supports five modes: `default`, `exp`, `generate`, `estimate`, and `support`. We'll go through these modes one by one.
+As mentioned in root Readme, CLI supports five modes: `default`, `exp`, `generate`, and `support`. We'll go through these modes one by one.
 
 Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
 For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.
