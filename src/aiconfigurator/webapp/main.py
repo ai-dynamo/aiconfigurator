@@ -5,18 +5,23 @@ import argparse
 import logging
 from collections import defaultdict
 
-import gradio as gr
-
 import aiconfigurator
-from aiconfigurator.webapp.components.agg_pareto_tab import create_agg_pareto_tab
-from aiconfigurator.webapp.components.agg_tab import create_agg_tab
-from aiconfigurator.webapp.components.disagg_pareto_tab import create_disagg_pareto_tab
-from aiconfigurator.webapp.components.disagg_pd_ratio_tab import create_disagg_pd_ratio_tab
-from aiconfigurator.webapp.components.pareto_comparison_tab import create_pareto_comparison_tab
-from aiconfigurator.webapp.components.profiling.create_profiling_tab import create_profiling_tab
-from aiconfigurator.webapp.components.readme_tab import create_readme_tab
-from aiconfigurator.webapp.components.static_tab import create_static_tab
-from aiconfigurator.webapp.events.event_handler import EventHandler
+from aiconfigurator.sdk import perf_database
+
+
+def is_editable_install() -> bool:
+    """
+    Detect if aiconfigurator was installed in editable mode (pip install -e .)
+    vs from PyPI.
+    """
+    try:
+        import importlib.metadata
+        import json
+
+        direct_url = json.loads(importlib.metadata.distribution("aiconfigurator").read_text("direct_url.json"))
+        return direct_url["dir_info"]["editable"]
+    except Exception:
+        return False
 
 
 def configure_parser(parser):
@@ -45,7 +50,31 @@ def main(args):
     """
     Main function for the WebApp.
     """
-    from aiconfigurator.sdk import perf_database
+    try:
+        import gradio as gr
+    except ModuleNotFoundError as e:
+        if is_editable_install():
+            install_cmd = "pip3 install -e '.[webapp]'"
+        else:
+            install_cmd = "pip3 install aiconfigurator[webapp]"
+        raise ModuleNotFoundError(
+            f"AIConfigurator webapp requires gradio, which is not installed. Please install it with '{install_cmd}'"
+        ) from e
+
+    # All aiconfigurator.webapp will import gradio, so we need to import them here.
+
+    # Apply global Gradio monkey patches
+    # This must be imported before any Gradio components are created
+    from aiconfigurator.webapp import gradio_patches  # noqa: F401
+    from aiconfigurator.webapp.components.agg_pareto_tab import create_agg_pareto_tab
+    from aiconfigurator.webapp.components.agg_tab import create_agg_tab
+    from aiconfigurator.webapp.components.disagg_pareto_tab import create_disagg_pareto_tab
+    from aiconfigurator.webapp.components.disagg_pd_ratio_tab import create_disagg_pd_ratio_tab
+    from aiconfigurator.webapp.components.pareto_comparison_tab import create_pareto_comparison_tab
+    from aiconfigurator.webapp.components.profiling.create_profiling_tab import create_profiling_tab
+    from aiconfigurator.webapp.components.readme_tab import create_readme_tab
+    from aiconfigurator.webapp.components.static_tab import create_static_tab
+    from aiconfigurator.webapp.events.event_handler import EventHandler
 
     app_config = {
         "enable_agg": args.enable_agg,
