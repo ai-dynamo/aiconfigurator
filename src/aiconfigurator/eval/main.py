@@ -42,7 +42,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--no-generate",
         action="store_true",
-        help="Skip running `aiconfigurator cli`; use an existing save_dir run.",
+        help="Skip running `aiconfigurator cli`; use an existing save-dir run.",
     )
     g.add_argument("--run-name", type=str, default="", help="Optional run label (folder name suffix).")
     g.add_argument("--runs", type=int, default=1, help="Number of pipeline cycles to execute (same service).")
@@ -74,7 +74,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "--artifact-root",
         type=str,
         default="",
-        help="Optional base folder for eval outputs (default under save_dir).",
+        help="Optional base folder for eval outputs (default under save-dir).",
     )
     g.add_argument("--venv-dir", type=str, default="/workspace/aic", help="uv venv path for aiperf")
 
@@ -90,13 +90,8 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def main(args) -> int:
-    logging.basicConfig(
-        level=logging.DEBUG if getattr(args, "debug", False) else logging.INFO,
-        format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
-    )
-
     if not getattr(args, "save_dir", None):
-        LOG.error("--save_dir is required for eval")
+        LOG.error("--save-dir is required for eval")
         return 2
 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
