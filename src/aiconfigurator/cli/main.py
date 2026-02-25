@@ -480,8 +480,8 @@ def configure_parser(parser):
     # Support mode - support matrix check
     support_parser = subparsers.add_parser(
         "support",
-        help="(Optional) Check if AIC supports the model/hardware combo for (agg, disagg).",
-        description="Optional pre-flight check to verify support for a specific model and system "
+        help="Check if AIC supports the model/hardware combo for (agg, disagg).",
+        description="Pre-flight check to verify support for a specific model and system "
         "combination using the support matrix. You can skip this and run 'cli default' directly. "
         "Use --system all for a consolidated matrix view across all systems and backends.",
     )
