@@ -57,7 +57,8 @@ Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps
 
 ```
 registry.py          — declares which module handles which version range
-version_resolver.py  — routes runtime version → module, validates __compat__
+version_resolver.py  — routes runtime version → module (packaging.version)
+collect.py/collect_ops — validates __compat__ and fails incompatible ops
 __compat__           — per-file metadata declaring supported framework versions
 ```
 
@@ -137,7 +138,7 @@ When upstream framework `X.Y.Z` changes an API that a collector depends on:
 At collection time:
 1. `collect.py` reads the backend registry
 2. `build_collections()` resolves each op to the correct module for the detected framework version
-3. If the resolved module declares `__compat__`, it is validated against the runtime version — mismatches produce a warning
+3. If the resolved module declares `__compat__`, it is validated against the runtime version — mismatches fail that op explicitly and are recorded in the error summary
 4. Unsupported versions (no matching entry) are skipped with a warning
 
 ## Tests

@@ -49,7 +49,7 @@ The database contains the function **query_moe** which defines how we estimate t
 
 ### 3. Collect Data for the Operation
 
-Taking MoE for TensorRT-LLM as an example, it's defined in `collector/trtllm/collect_moe_v*.py` (version-specific files, e.g. `collect_moe_v1_1.py` for trtllm >= 1.1.0).
+Taking MoE for TensorRT-LLM as an example, it's defined in `collector/trtllm/collect_moe_v*.py` (version-specific files, e.g. `collect_moe_v3.py` for trtllm >= 1.1.0).
 
 #### 3.1 Adding New Test Cases
 

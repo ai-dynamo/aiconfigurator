@@ -329,13 +329,23 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
 def collect_ops(
     num_processes: int,
     collections: list[dict],
+    runtime_version: str | None = None,
 ) -> list[dict]:
     """Run collection for a list of resolved collection entries.
 
     Each entry must have: name, type, module, get_func, run_func.
     Version resolution and op filtering are handled upstream by
-    version_resolver.build_collections().
+    version_resolver.build_collections(). If runtime_version is provided,
+    per-module __compat__ is validated and incompatible ops fail explicitly.
     """
+
+    class CompatibilityError(RuntimeError):
+        """Raised when a resolved collector module is incompatible."""
+
+    check_compat = None
+    if runtime_version:
+        from collector.version_resolver import _check_compat as check_compat
+
     all_errors = []
 
     for collection in collections:
@@ -343,6 +353,18 @@ def collect_ops(
             module_name = collection["module"]
             get_module = __import__(module_name, fromlist=[collection["get_func"]])
             run_module = __import__(module_name, fromlist=[collection["run_func"]])
+
+            # Fail this op explicitly if declared compatibility doesn't match runtime.
+            if check_compat:
+                declared = getattr(get_module, "__compat__", None)
+                if declared:
+                    try:
+                        if not check_compat(declared, runtime_version):
+                            raise CompatibilityError(
+                                f"module {module_name} declares __compat__={declared!r}, runtime is v{runtime_version}"
+                            )
+                    except ValueError as e:
+                        raise CompatibilityError(f"invalid __compat__ {declared!r}: {e}") from e
 
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
@@ -354,7 +376,7 @@ def collect_ops(
             all_errors.append(
                 {
                     "module": f"{collection['name']}.{collection['type']}",
-                    "error_type": "ImportError",
+                    "error_type": "CompatibilityError" if isinstance(e, CompatibilityError) else type(e).__name__,
                     "error_message": str(e),
                     "traceback": traceback.format_exc(),
                 }
@@ -389,7 +411,7 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
         return
 
     collections = build_collections(REGISTRY, "sglang", version, ops, logger=logger)
-    all_errors = collect_ops(num_processes, collections)
+    all_errors = collect_ops(num_processes, collections, version)
 
     generate_collection_summary(all_errors, "sglang", version)
 
@@ -408,7 +430,7 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         return
 
     collections = build_collections(REGISTRY, "vllm", version, ops, logger=logger)
-    all_errors = collect_ops(num_processes, collections)
+    all_errors = collect_ops(num_processes, collections, version)
 
     generate_collection_summary(all_errors, "vllm", version)
 
@@ -436,7 +458,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         return
 
     collections = build_collections(REGISTRY, "trtllm", version, ops, logger=logger)
-    all_errors = collect_ops(num_processes, collections)
+    all_errors = collect_ops(num_processes, collections, version)
 
     generate_collection_summary(all_errors, "trtllm", version)
 

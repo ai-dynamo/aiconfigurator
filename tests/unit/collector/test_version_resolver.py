@@ -6,6 +6,7 @@
 from typing import ClassVar
 
 import pytest
+from packaging.version import Version
 
 from collector.version_resolver import (
     _check_compat,
@@ -20,14 +21,14 @@ from collector.version_resolver import (
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
 class TestNormalizeVersion:
-    """Verify PEP 440-aware version tuple generation."""
+    """Verify PEP 440-aware version normalization."""
 
     @pytest.mark.parametrize(
         "version_str,expected",
         [
-            ("1.2.0", (1, 2, 0, 0, 0)),
-            ("0.20.0", (0, 20, 0, 0, 0)),
-            ("0.5.5", (0, 5, 5, 0, 0)),
+            ("1.2.0", Version("1.2.0")),
+            ("0.20.0", Version("0.20.0")),
+            ("0.5.5", Version("0.5.5")),
         ],
     )
     def test_final_release(self, version_str, expected):
@@ -36,10 +37,10 @@ class TestNormalizeVersion:
     @pytest.mark.parametrize(
         "version_str,expected",
         [
-            ("1.2.0dev1", (1, 2, 0, -4, 1)),
-            ("1.2.0a2", (1, 2, 0, -3, 2)),
-            ("1.2.0b1", (1, 2, 0, -2, 1)),
-            ("1.2.0rc2", (1, 2, 0, -1, 2)),
+            ("1.2.0dev1", Version("1.2.0dev1")),
+            ("1.2.0a2", Version("1.2.0a2")),
+            ("1.2.0b1", Version("1.2.0b1")),
+            ("1.2.0rc2", Version("1.2.0rc2")),
         ],
     )
     def test_pre_release(self, version_str, expected):
@@ -48,8 +49,8 @@ class TestNormalizeVersion:
     @pytest.mark.parametrize(
         "version_str,expected",
         [
-            ("0.5.5.post2", (0, 5, 5, 1, 2)),
-            ("1.1.0.post1", (1, 1, 0, 1, 1)),
+            ("0.5.5.post2", Version("0.5.5.post2")),
+            ("1.1.0.post1", Version("1.1.0.post1")),
         ],
     )
     def test_post_release(self, version_str, expected):
@@ -60,14 +61,17 @@ class TestNormalizeVersion:
 
     def test_ordering_dev_to_post(self):
         ordered = ["1.2.0dev1", "1.2.0a2", "1.2.0b1", "1.2.0rc2", "1.2.0", "1.2.0.post2"]
-        tuples = [_normalize_version(v) for v in ordered]
-        assert tuples == sorted(tuples)
+        versions = [_normalize_version(v) for v in ordered]
+        assert versions == sorted(versions)
 
     def test_rc_less_than_release(self):
         assert _normalize_version("1.1.0rc5") < _normalize_version("1.1.0")
 
     def test_post_greater_than_release(self):
         assert _normalize_version("0.5.5.post2") > _normalize_version("0.5.5")
+
+    def test_short_release_equals_patch_zero(self):
+        assert _normalize_version("1.1") == _normalize_version("1.1.0")
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +111,18 @@ class TestCheckCompat:
     )
     def test_compat_constraints(self, compat, runtime, expected):
         assert _check_compat(compat, runtime) == expected
+
+    @pytest.mark.parametrize(
+        "compat",
+        [
+            "trtllm",
+            "trtllm>=",
+            "trtllm>=1.1.0,<<2.0.0",
+        ],
+    )
+    def test_invalid_compat_raises(self, compat):
+        with pytest.raises(ValueError, match="Invalid __compat__"):
+            _check_compat(compat, "1.1.0")
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +176,10 @@ class TestResolveModule:
     def test_post_routes_to_current(self):
         """0.21.0.post1 >= 0.21.0, so it should match v2."""
         assert resolve_module(self.VERSIONED_ENTRY, "0.21.0.post1") == "collector.trtllm.collect_moe_v2"
+
+    def test_short_version_routes_to_current(self):
+        """1.1 should be treated as 1.1.0."""
+        assert resolve_module(self.VERSIONED_ENTRY, "1.1") == "collector.trtllm.collect_moe_v3"
 
 
 # ---------------------------------------------------------------------------
