@@ -15,7 +15,7 @@ agg_prefill_decode tokens_per_block = (tokens_per_block if tokens_per_block else
 prefill max_num_tokens = (((SlaConfig.isl + 1500) + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
 decode max_num_tokens = ((max_batch_size + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
 agg max_num_tokens = ((max_batch_size + SlaConfig.isl + 1500 + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
-prefill_decode cache_transceiver_max_tokens_in_buffer = SlaConfig.isl + SlaConfig.osl + 1500
+prefill_decode cache_transceiver_max_tokens_in_buffer = (((SlaConfig.isl + SlaConfig.osl + 1500) + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
 
 # Enforce TensorRT-LLM MoE parallelism: moe_tp × moe_ep = tp
 when ModelConfig.is_moe and (moe_tensor_parallel_size and moe_expert_parallel_size):
