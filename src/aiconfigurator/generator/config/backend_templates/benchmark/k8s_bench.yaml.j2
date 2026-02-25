@@ -25,7 +25,14 @@ spec:
               {% set eff = BenchConfig.estimated_concurrency | int %}
               {% set eff_low = (BenchConfig.estimated_concurrency * 0.95) | int %}
               {% set eff_high = (BenchConfig.estimated_concurrency * 1.05) | int %}
-              concurrency_array=({{ (base_concurrency + [eff_low, eff, eff_high]) | join(' ') }})
+              {% set combined = base_concurrency + [eff_low, eff, eff_high] %}
+              {% set ns = namespace(seen=[]) %}
+              {% for c in combined %}
+              {% if c not in ns.seen %}
+              {% set ns.seen = ns.seen + [c] %}
+              {% endif %}
+              {% endfor %}
+              concurrency_array=({{ ns.seen | sort | join(' ') }})
               {% else %}
               concurrency_array=({{ base_concurrency | join(' ') }})
               {% endif %}
