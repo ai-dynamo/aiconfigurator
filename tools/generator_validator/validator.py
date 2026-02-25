@@ -73,9 +73,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate engine configs for TRT-LLM, vLLM, or SGLang.")
     parser.add_argument(
         "--backend",
-        default="trtllm",
+        required=True,
         choices=["trtllm", "vllm", "sglang"],
-        help="Which engine backend to validate (default: trtllm).",
+        help="Which engine backend to validate.",
     )
     parser.add_argument(
         "--path",
