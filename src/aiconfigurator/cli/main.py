@@ -294,7 +294,6 @@ def configure_parser(parser):
         description="Verify support for a specific model and system combination using the support matrix. "
         "Use --system all for a consolidated matrix view across all systems and backends.",
     )
-    support_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     _add_support_mode_arguments(support_parser)
 
 
