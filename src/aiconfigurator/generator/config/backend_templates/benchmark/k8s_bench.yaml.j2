@@ -29,7 +29,7 @@ spec:
               {% else %}
               concurrency_array=({{ base_concurrency | join(' ') }})
               {% endif %}
-              ARTIFACT_DIR="${BENCH_ARTIFACT_DIR:-${PWD}/artifacts}"
+              ARTIFACT_DIR="${BENCH_ARTIFACT_DIR:-/tmp/bench_artifacts}"
               for concurrency in "${concurrency_array[@]}"; do
                 echo "Run concurrency: $concurrency"
                 aiperf profile \
