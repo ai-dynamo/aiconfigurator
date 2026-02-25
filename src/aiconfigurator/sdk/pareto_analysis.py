@@ -50,6 +50,7 @@ def agg_pareto(
     # agg is agg server, the loop over parallel is outside here.
     results_df = pd.DataFrame(columns=ColumnsAgg)
     exceptions = []
+    all_configs_oom = True
     for parallel_config in parallel_config_list:
         tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
         logger.debug(
@@ -109,6 +110,8 @@ def agg_pareto(
                     max_batch_size=512,
                     ctx_stride=512,
                 )
+                if not summary.check_oom():
+                    all_configs_oom = False
                 result_df = summary.get_summary_df()
                 if len(result_df) == 0:
                     logger.debug(
@@ -143,6 +146,12 @@ def agg_pareto(
             raise RuntimeError(
                 f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
             ) from exceptions[-1]
+        if all_configs_oom:
+            raise RuntimeError(
+                "No results found: the model does not fit in GPU memory for any parallel "
+                "configuration. Try increasing --total-gpus, using a quantized model, or "
+                "using a system with more VRAM per GPU."
+            )
         raise RuntimeError(
             "No results found for any parallel configuration. No configuration satisfied the "
             "TTFT/TPOT or request-latency constraints. Try relaxing --ttft, --tpot, or "

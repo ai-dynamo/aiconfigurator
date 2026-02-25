@@ -625,6 +625,7 @@ def _execute_task_configs(
               extracted from the rank-1 config.
     """
     results: dict[str, dict[str, pd.DataFrame]] = {}
+    failure_messages: list[str] = []
     start_time = time.time()
     runner = TaskRunner()
 
@@ -639,14 +640,37 @@ def _execute_task_configs(
                 results[exp_name] = task_result
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_df))
             else:
-                logger.warning(
-                    "Experiment %s returned no results. The TTFT and TPOT constraints may need to be relaxed.", exp_name
+                db_mode = getattr(task_config, "database_mode", None)
+                hybrid_hint = (
+                    " For frontier/new models without silicon data, try --database-mode HYBRID."
+                    if db_mode == common.DatabaseMode.SILICON.name
+                    else ""
                 )
-        except Exception:
+                msg = (
+                    f"Experiment {exp_name} returned no results. Possible causes: "
+                    "(1) TTFT/TPOT constraints are too tight — try relaxing --ttft or --tpot; "
+                    "(2) the model does not fit on the available GPUs — try increasing --total-gpus; "
+                    f"(3) no perf data in the database for this configuration.{hybrid_hint}"
+                )
+                logger.warning(msg)
+                failure_messages.append(msg)
+        except Exception as exc:
             logger.exception("Error running experiment %s", exp_name)
+            failure_messages.append(f"Experiment {exp_name} failed: {exc}")
 
     if len(results) < 1:
-        logger.error("No successful experiment runs to compare.")
+        first_config = next(iter(task_configs.values()), None)
+        db_mode = getattr(first_config, "database_mode", None) if first_config else None
+        if db_mode == common.DatabaseMode.SILICON.name:
+            logger.error(
+                "No successful experiment runs to compare. "
+                "If this is a frontier or newly-released model, retry with --database-mode HYBRID "
+                "to extend coverage beyond the silicon database."
+            )
+        else:
+            logger.error("No successful experiment runs to compare.")
+        for msg in failure_messages:
+            logger.error("  -> %s", msg)
         raise SystemExit(1)
 
     best_configs: dict[str, pd.DataFrame] = {}
