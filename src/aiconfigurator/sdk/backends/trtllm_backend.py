@@ -459,8 +459,7 @@ class TRTLLMBackend(BaseBackend):
 
         summary = InferenceSummary(runtime_config)
         summary.set_summary_df(sorted_results_df)
-        if all_oom:
-            summary.set_oom(True)
+        summary.set_oom(all_oom)
         return summary
 
     def _get_memory_usage(
