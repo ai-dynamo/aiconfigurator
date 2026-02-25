@@ -128,7 +128,6 @@ def build_collections(
     runtime_version: str,
     ops: list[str] | None = None,
     *,
-    wideep_filter: bool | None = None,
     logger=None,
 ) -> list[dict]:
     """Build the collections list from a registry.
@@ -138,8 +137,6 @@ def build_collections(
         backend_name: e.g. "trtllm", "vllm", "sglang".
         runtime_version: Framework version string.
         ops: Optional filter — only include these op types.
-        wideep_filter: If None, include all. If True, only wideep.
-                       If False, only non-wideep.
         logger: Optional logger for warnings.
 
     Returns:
@@ -148,10 +145,6 @@ def build_collections(
     collections = []
     for entry in registry:
         if ops and entry["op"] not in ops:
-            continue
-
-        is_wideep = entry.get("wideep", False)
-        if wideep_filter is not None and is_wideep != wideep_filter:
             continue
 
         module = resolve_module(entry, runtime_version)

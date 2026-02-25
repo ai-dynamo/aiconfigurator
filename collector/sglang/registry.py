@@ -4,9 +4,6 @@
 """
 Declarative registry mapping ops to collector modules for SGLang.
 
-Entries with `"wideep": True` are collected in a separate pass
-(they require special distributed init handling).
-
 No version forks exist yet. When SGLang API changes require a fork,
 add a `versions` list following the trtllm registry pattern.
 """
@@ -60,40 +57,34 @@ REGISTRY = [
         "get_func": "get_generation_attention_test_cases",
         "run_func": "run_attention_torch",
     },
-    # --- Wideep collections (separate pass, special distributed handling) ---
     {
         "op": "wideep_mla_context",
         "module": "collector.sglang.collect_wideep_attn",
         "get_func": "get_wideep_mla_context_test_cases",
         "run_func": "run_wideep_mla_context",
-        "wideep": True,
     },
     {
         "op": "wideep_mla_generation",
         "module": "collector.sglang.collect_wideep_attn",
         "get_func": "get_wideep_mla_generation_test_cases",
         "run_func": "run_wideep_mla_generation",
-        "wideep": True,
     },
     {
         "op": "wideep_mlp_context",
         "module": "collector.sglang.collect_wideep_mlp",
         "get_func": "get_wideep_mlp_context_test_cases",
         "run_func": "run_wideep_mlp_context",
-        "wideep": True,
     },
     {
         "op": "wideep_mlp_generation",
         "module": "collector.sglang.collect_wideep_mlp",
         "get_func": "get_wideep_mlp_generation_test_cases",
         "run_func": "run_wideep_mlp_generation",
-        "wideep": True,
     },
     {
         "op": "wideep_moe",
         "module": "collector.sglang.collect_wideep_deepep_moe",
         "get_func": "get_wideep_moe_test_cases",
         "run_func": "run_wideep_moe",
-        "wideep": True,
     },
 ]

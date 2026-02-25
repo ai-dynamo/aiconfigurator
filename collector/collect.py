@@ -388,14 +388,8 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
         logger.exception("SGLang is not installed")
         return
 
-    collections = build_collections(REGISTRY, "sglang", version, ops, wideep_filter=False, logger=logger)
+    collections = build_collections(REGISTRY, "sglang", version, ops, logger=logger)
     all_errors = collect_ops(num_processes, collections)
-
-    wideep_collections = build_collections(REGISTRY, "sglang", version, ops, wideep_filter=True, logger=logger)
-    if wideep_collections:
-        logger.info(f"Running wideep collections with {num_processes} processes")
-        wideep_errors = collect_ops(num_processes, wideep_collections)
-        all_errors.extend(wideep_errors)
 
     generate_collection_summary(all_errors, "sglang", version)
 
