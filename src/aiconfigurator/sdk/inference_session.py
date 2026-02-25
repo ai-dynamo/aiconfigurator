@@ -370,9 +370,17 @@ class DisaggInferenceSession:
                 exceptions.append(e)
                 continue
         if summary_df.empty:
-            raise RuntimeError(
-                f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
-            ) from exceptions[-1]
+            if exceptions:
+                raise RuntimeError(
+                    f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
+                ) from exceptions[-1]
+            else:
+                n_configs = len(parallel_config_list)
+                raise RuntimeError(
+                    f"No results found for any of the {n_configs} parallel configuration(s). "
+                    "All configurations resulted in out-of-memory. "
+                    "Consider using more GPUs per worker, enabling quantization, or checking model size."
+                )
         return summary_df
 
     def _pick_autoscale(

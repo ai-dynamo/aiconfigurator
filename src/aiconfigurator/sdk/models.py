@@ -309,6 +309,26 @@ def get_model(
         )
         # extra_params is NemotronHConfig with hybrid layer configuration
         model.set_hybrid_config(extra_params)
+    elif model_family == "QWEN35MOE":
+        model = Qwen35MoEModel(
+            topk,
+            num_experts,
+            moe_inter_size,
+            model_path,
+            model_family,
+            architecture,
+            layers,
+            n,
+            n_kv,
+            d,
+            hidden,
+            inter,
+            vocab,
+            context,
+            model_config,
+        )
+        # extra_params is Qwen35MoEConfig with hybrid layer configuration
+        model.set_qwen35_config(extra_params)
 
     return model
 
@@ -330,7 +350,7 @@ def check_is_moe(model_path: str) -> bool:
     E.g., Nemotron_H is not an MoE model, but Nemotron_3 is an MoE model.
     """
     family = get_model_family(model_path)
-    if family in ("MOE", "DEEPSEEK"):
+    if family in ("MOE", "DEEPSEEK", "QWEN35MOE"):
         return True
     if family == "NEMOTRONH":
         model_info = _get_model_info(model_path)
@@ -2988,6 +3008,320 @@ class NemotronHModel(BaseModel):
                 h,
                 common.GEMMQuantMode.float16,
             )
+        )
+
+
+class Qwen35MoEModel(BaseModel):
+    """
+    Qwen3.5-MoE hybrid model (linear attention + full attention + MoE FFN).
+
+    Every 4th layer is full (standard GQA) attention; the rest are linear attention layers
+    (recurrent, no KV-cache growth). All layers use a gated MoE FFN with a shared expert.
+    Config is nested in text_config in the HuggingFace config.json.
+    """
+
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+        super().__init__(*args)
+        assert self._nextn == 0, "Qwen35MoE does not support mtp"
+
+        assert (
+            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+        ), (
+            f"tp_size ({self.config.tp_size}) * attention_dp_size "
+            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
+            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        )
+        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
+
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_inter_size = moe_inter_size
+        self._qwen35_config: common.Qwen35MoEConfig | None = None
+        self._power_law_alpha = 1.2
+
+    def set_qwen35_config(self, qwen35_config: common.Qwen35MoEConfig) -> None:
+        """Set the hybrid layer configuration and build operation pipelines."""
+        self._qwen35_config = qwen35_config
+        self._build_context_ops()
+        self._build_generation_ops()
+
+    def _count_layer_types(self) -> dict[str, int]:
+        """Count occurrences of each attention layer type."""
+        layer_types = self._qwen35_config.layer_types
+        return {
+            "linear_attention": layer_types.count("linear_attention"),
+            "full_attention": layer_types.count("full_attention"),
+        }
+
+    def _build_moe_ffn_ops(self, prefix: str, count: int) -> list:
+        """Build MoE FFN ops (shared expert + router + dispatch) for count layers."""
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        moe_tp_size = self.config.moe_tp_size
+        moe_ep_size = self.config.moe_ep_size
+        attention_dp_size = self.config.attention_dp_size
+        gemm_quant_mode = self.config.gemm_quant_mode
+        moe_quant_mode = self.config.moe_quant_mode
+        cfg = self._qwen35_config
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
+
+        moe_ops = [
+            ops.ElementWise(f"{prefix}_ffn_norm", count, 2 * h, 2 * h, 0.8),
+            # Shared expert: gated MLP (gate + up → SiLU → down)
+            ops.GEMM(
+                f"{prefix}_shared_gate_up_gemm",
+                count,
+                2 * cfg.shared_expert_inter_size // tp_size,
+                h,
+                gemm_quant_mode,
+            ),
+            ops.ElementWise(
+                f"{prefix}_shared_act_gate",
+                count,
+                2 * cfg.shared_expert_inter_size // tp_size,
+                cfg.shared_expert_inter_size // tp_size,
+                0.8,
+            ),
+            ops.GEMM(
+                f"{prefix}_shared_down_gemm",
+                count,
+                h,
+                cfg.shared_expert_inter_size // tp_size,
+                gemm_quant_mode,
+                low_precision_input=True,
+            ),
+            # Router (512 experts → always include)
+            ops.GEMM(
+                f"{prefix}_router_gemm",
+                count,
+                self._num_experts,
+                h,
+                common.GEMMQuantMode.float16,
+            ),
+            ops.MoEDispatch(
+                f"{prefix}_moe_pre_dispatch",
+                count,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                True,
+            ),
+            ops.MoE(
+                f"{prefix}_moe",
+                count,
+                h,
+                self._moe_inter_size,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                moe_quant_mode,
+                workload_distribution,
+                attention_dp_size,
+            ),
+            ops.MoEDispatch(
+                f"{prefix}_moe_post_dispatch",
+                count,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                False,
+            ),
+            ops.CustomAllReduce(f"{prefix}_moe_ar", count, h, tp_size),
+        ]
+        return moe_ops
+
+    def _build_context_ops(self) -> None:
+        """Build context (prefill) operations."""
+        if not self._qwen35_config:
+            return
+
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        pp_size = self.config.pp_size
+        gemm_quant_mode = self.config.gemm_quant_mode
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        fmha_quant_mode = self.config.fmha_quant_mode
+        cfg = self._qwen35_config
+
+        layer_counts = self._count_layer_types()
+        num_kv_heads_per_gpu = (self._num_kv_heads + tp_size - 1) // tp_size
+
+        self.context_ops = []
+        self.context_ops.append(ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3))
+
+        # Linear attention layers: QKV GEMMs + recurrent compute (no FMHA) + out GEMM
+        if layer_counts["linear_attention"] > 0:
+            count = layer_counts["linear_attention"]
+            # Q dim = linear_num_value_heads * linear_value_head_dim (matches output for recurrence)
+            lin_q_dim = cfg.linear_num_value_heads * cfg.linear_value_head_dim
+            lin_k_dim = cfg.linear_num_kv_heads * cfg.linear_key_head_dim
+            lin_v_dim = cfg.linear_num_value_heads * cfg.linear_value_head_dim
+            lin_qkv_per_gpu = (lin_q_dim + lin_k_dim + lin_v_dim) // tp_size
+            self.context_ops.extend(
+                [
+                    ops.ElementWise("context_linear_attn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_linear_qkv_gemm", count, lin_qkv_per_gpu, h, gemm_quant_mode),
+                    # Linear attention recurrence: O(L) scan, modeled as cheap ElementWise
+                    ops.ElementWise(
+                        "context_linear_attn_recurrence",
+                        count,
+                        lin_v_dim // tp_size,
+                        lin_v_dim // tp_size,
+                        0.8,
+                    ),
+                    ops.GEMM(
+                        "context_linear_out_gemm",
+                        count,
+                        h,
+                        lin_v_dim // tp_size,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                    ops.CustomAllReduce("context_linear_attn_ar", count, h, tp_size),
+                ]
+            )
+            self.context_ops.extend(self._build_moe_ffn_ops("context_linear", count))
+
+        # Full attention layers: standard GQA
+        if layer_counts["full_attention"] > 0:
+            count = layer_counts["full_attention"]
+            self.context_ops.extend(
+                [
+                    ops.ElementWise("context_full_attn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM(
+                        "context_full_qkv_gemm",
+                        count,
+                        self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
+                        h,
+                        gemm_quant_mode,
+                    ),
+                    ops.ContextAttention(
+                        "context_attention",
+                        count,
+                        self._num_heads // tp_size,
+                        num_kv_heads_per_gpu,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                        head_size=self._head_size,
+                    ),
+                    ops.GEMM(
+                        "context_full_out_gemm",
+                        count,
+                        h,
+                        self._num_heads * self._head_size // tp_size,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                    ops.CustomAllReduce("context_full_attn_ar", count, h, tp_size),
+                ]
+            )
+            self.context_ops.extend(self._build_moe_ffn_ops("context_full", count))
+
+        pp_scale_factor = pp_size - 1
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+        self.context_ops.append(
+            ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp_size, h, common.GEMMQuantMode.float16)
+        )
+
+    def _build_generation_ops(self) -> None:
+        """Build generation (decode) operations."""
+        if not self._qwen35_config:
+            return
+
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        pp_size = self.config.pp_size
+        gemm_quant_mode = self.config.gemm_quant_mode
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        cfg = self._qwen35_config
+
+        layer_counts = self._count_layer_types()
+        num_kv_heads_per_gpu = (self._num_kv_heads + tp_size - 1) // tp_size
+
+        self.generation_ops = []
+        self.generation_ops.append(ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3))
+
+        # Linear attention layers: QKV GEMMs + O(1) state update + out GEMM (no KV cache)
+        if layer_counts["linear_attention"] > 0:
+            count = layer_counts["linear_attention"]
+            lin_q_dim = cfg.linear_num_value_heads * cfg.linear_value_head_dim
+            lin_k_dim = cfg.linear_num_kv_heads * cfg.linear_key_head_dim
+            lin_v_dim = cfg.linear_num_value_heads * cfg.linear_value_head_dim
+            lin_qkv_per_gpu = (lin_q_dim + lin_k_dim + lin_v_dim) // tp_size
+            self.generation_ops.extend(
+                [
+                    ops.ElementWise("generation_linear_attn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_linear_qkv_gemm", count, lin_qkv_per_gpu, h, gemm_quant_mode),
+                    # Linear attention: O(1) state update per step (no KV cache, no FMHA)
+                    ops.ElementWise(
+                        "generation_linear_attn_state_update",
+                        count,
+                        lin_v_dim // tp_size,
+                        lin_v_dim // tp_size,
+                        0.8,
+                    ),
+                    ops.GEMM(
+                        "generation_linear_out_gemm",
+                        count,
+                        h,
+                        lin_v_dim // tp_size,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                    ops.CustomAllReduce("generation_linear_attn_ar", count, h, tp_size),
+                ]
+            )
+            self.generation_ops.extend(self._build_moe_ffn_ops("generation_linear", count))
+
+        # Full attention layers: standard GQA with KV cache
+        if layer_counts["full_attention"] > 0:
+            count = layer_counts["full_attention"]
+            self.generation_ops.extend(
+                [
+                    ops.ElementWise("generation_full_attn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM(
+                        "generation_full_qkv_gemm",
+                        count,
+                        self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
+                        h,
+                        gemm_quant_mode,
+                    ),
+                    ops.GenerationAttention(
+                        "generation_attention",
+                        count,
+                        self._num_heads // tp_size,
+                        num_kv_heads_per_gpu,
+                        kvcache_quant_mode,
+                        head_size=self._head_size,
+                    ),
+                    ops.GEMM(
+                        "generation_full_out_gemm",
+                        count,
+                        h,
+                        self._num_heads * self._head_size // tp_size,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                    ops.CustomAllReduce("generation_full_attn_ar", count, h, tp_size),
+                ]
+            )
+            self.generation_ops.extend(self._build_moe_ffn_ops("generation_full", count))
+
+        pp_scale_factor = pp_size - 1
+        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor, h, pp_size))
+        self.generation_ops.append(
+            ops.GEMM("generation_logits_gemm", 1, self._vocab_size // tp_size, h, common.GEMMQuantMode.float16)
         )
 
 
