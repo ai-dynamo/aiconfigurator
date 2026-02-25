@@ -6,6 +6,7 @@ import logging
 from collections import defaultdict
 
 import aiconfigurator
+from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import perf_database
 
 
@@ -84,18 +85,7 @@ def main(args):
         "debug": args.debug,
     }
 
-    if app_config["debug"]:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
-            datefmt="%m-%d %H:%M:%S",
-        )
-    else:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(levelname)s %(asctime)s] %(message)s",
-            datefmt="%m-%d %H:%M:%S",
-        )
+    setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
 
     try:
         perf_database.set_systems_paths(args.systems_paths)
