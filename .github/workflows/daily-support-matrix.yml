@@ -9,7 +9,7 @@ on:
 jobs:
   update-support-matrix:
     name: Update Support Matrix
-    runs-on: cpu-arm-r8g-4xlarge
+    runs-on: self-hosted
     timeout-minutes: 480 # 8 hours
     permissions:
       contents: write
@@ -39,6 +39,7 @@ jobs:
       - name: Generate new support matrix
         run: |
           docker run --rm \
+            --memory=32g --memory-swap=32g \
             -v ${{ github.workspace }}/src/aiconfigurator/systems:/app/src/aiconfigurator/systems \
             aiconfigurator:matrix \
             python3 tools/support_matrix/generate_support_matrix.py \
