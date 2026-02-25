@@ -1,3 +1,5 @@
+backend: pytorch
+
 {% if is_moe is defined %}  # is_moe from sdk
 moe_expert_parallel_size: {{ moe_expert_parallel_size }}
 moe_tensor_parallel_size: {{ moe_tensor_parallel_size }}
