@@ -302,6 +302,7 @@ class DisaggInferenceSession:
         """
         summary_df = pd.DataFrame(columns=common.ColumnsStatic)
         exceptions: list[Exception] = []
+        all_configs_oom = True
 
         for parallel_config in parallel_config_list:
             tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size = parallel_config
@@ -348,6 +349,7 @@ class DisaggInferenceSession:
                         latency_correction_scale=latency_correction_scale,
                     )
                     if not summary.check_oom():
+                        all_configs_oom = False
                         summary_df = pd.concat(
                             [summary_df, summary.get_summary_df()],
                             axis=0,
@@ -370,9 +372,21 @@ class DisaggInferenceSession:
                 exceptions.append(e)
                 continue
         if summary_df.empty:
+            if exceptions:
+                raise RuntimeError(
+                    f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
+                ) from exceptions[-1]
+            if all_configs_oom:
+                raise RuntimeError(
+                    "No results found: the model does not fit in GPU memory for any parallel "
+                    "configuration. Try increasing --total-gpus, using a quantized model, or "
+                    "using a system with more VRAM per GPU."
+                )
             raise RuntimeError(
-                f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
-            ) from exceptions[-1]
+                "No results found for any parallel configuration. No configuration satisfied the "
+                "TTFT/TPOT or request-latency constraints. Try relaxing --ttft, --tpot, or "
+                "--request_latency (e.g., higher ttft/tpot or higher request_latency)."
+            )
         return summary_df
 
     def _pick_autoscale(
