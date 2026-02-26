@@ -73,9 +73,9 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
     torch.set_default_dtype(dtype)
     if torch.cuda.is_available():
         torch.cuda.set_device(device)
+        torch.set_default_device(device)
     elif torch.xpu.is_available():
         torch.xpu.set_device(device)
-    torch.set_default_device(device)
 
     x = torch.randn((m, k), dtype=dtype, device=torch.device(device))
 
