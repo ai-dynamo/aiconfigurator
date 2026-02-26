@@ -516,7 +516,7 @@ class TRTLLMBackend(BaseBackend):
                 / 128
                 * 4
             )  # still an improvement opportunity in trtllm to achieve this.
-            # nextn correction for ds only, MTP
+            # MTP correction: additional activation memory for draft tokens
             if model.config.nextn > 0:
                 activations = activations * (model.config.nextn + 1)
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
