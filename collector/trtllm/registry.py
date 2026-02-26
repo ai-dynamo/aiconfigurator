@@ -81,14 +81,6 @@ REGISTRY = [
         ],
     },
     {
-        "op": "moe_eplb",
-        "get_func": "get_moe_eplb_test_cases",
-        "run_func": "run_moe_torch",
-        "versions": [
-            ("1.1.0", "collector.trtllm.collect_moe_v3"),
-        ],
-    },
-    {
         "op": "trtllm_moe_wideep",
         "module": "collector.trtllm.collect_wideep_moe_compute",
         "get_func": "get_wideep_moe_compute_all_test_cases",

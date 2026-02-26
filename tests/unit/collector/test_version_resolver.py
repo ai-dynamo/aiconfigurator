@@ -3,6 +3,9 @@
 
 """Unit tests for collector version resolver and registry infrastructure."""
 
+import ast
+import re
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -278,3 +281,107 @@ class TestRegistryIntegrity:
         reg, backend = registry
         ops = [e["op"] for e in reg]
         assert len(ops) == len(set(ops)), f"{backend}: duplicate op names found"
+
+    # -----------------------------------------------------------------------
+    # Module / function existence
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _module_top_level_names(module_dotpath: str) -> set[str]:
+        """Parse a collector module source via AST and return top-level def/class names.
+
+        Uses AST so that heavy runtime dependencies (torch, tensorrt_llm, …)
+        do NOT need to be installed.
+        """
+        parts = module_dotpath.split(".")
+        source_file = Path(*parts).with_suffix(".py")
+        if not source_file.exists():
+            return set()
+        tree = ast.parse(source_file.read_text(), filename=str(source_file))
+        return {
+            node.name
+            for node in ast.iter_child_nodes(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        }
+
+    def test_module_exports_declared_functions(self, registry):
+        """Every module referenced in the registry must define the declared
+        get_func and run_func at the module's top level.
+
+        Uses AST parsing so the test works without GPU/framework dependencies.
+        """
+        reg, backend = registry
+        # Deduplicate (module, get_func, run_func) to avoid redundant checks
+        seen: set[tuple[str, str, str]] = set()
+        for entry in reg:
+            if "versions" in entry:
+                modules = [mod for _, mod in entry["versions"]]
+            else:
+                modules = [entry["module"]]
+            for mod_path in modules:
+                key = (mod_path, entry["get_func"], entry["run_func"])
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                names = self._module_top_level_names(mod_path)
+                assert names, f"{backend}/{entry['op']}: source file for module {mod_path!r} not found or empty"
+                for attr_label, func_name in [("get_func", entry["get_func"]), ("run_func", entry["run_func"])]:
+                    assert func_name in names, (
+                        f"{backend}/{entry['op']}: module {mod_path!r} "
+                        f"does not define {func_name!r} (declared as {attr_label})"
+                    )
+
+    # -----------------------------------------------------------------------
+    # File naming convention enforcement
+    # -----------------------------------------------------------------------
+    _VN_SUFFIX_RE = re.compile(r"_v(\d+)$")
+
+    def test_versioned_modules_use_vn_suffix(self, registry):
+        """All module paths inside a 'versions' list must end with _vN."""
+        reg, backend = registry
+        for entry in reg:
+            if "versions" not in entry:
+                continue
+            for min_ver, module in entry["versions"]:
+                assert self._VN_SUFFIX_RE.search(module), (
+                    f"{backend}/{entry['op']}: versioned module {module!r} "
+                    f"(min_version={min_ver}) is missing a _vN suffix"
+                )
+
+    def test_unversioned_modules_no_vn_suffix(self, registry):
+        """Unversioned entries (single 'module') must NOT have a _vN suffix."""
+        reg, backend = registry
+        for entry in reg:
+            if "versions" in entry:
+                continue
+            module = entry["module"]
+            assert not self._VN_SUFFIX_RE.search(module), (
+                f"{backend}/{entry['op']}: unversioned module {module!r} should not have a _vN suffix"
+            )
+
+    def test_version_numbers_sequential_from_one(self, registry):
+        """For each module base name, _vN suffixes must be v1, v2, ..., vN with no gaps.
+
+        Checked across the entire registry because different ops may share
+        the same versioned module (e.g. moe and moe_eplb both use collect_moe_v3).
+        """
+        reg, backend = registry
+        # Collect all version numbers grouped by module base name
+        base_versions: dict[str, set[int]] = {}
+        for entry in reg:
+            if "versions" not in entry:
+                continue
+            for _, mod in entry["versions"]:
+                m = self._VN_SUFFIX_RE.search(mod)
+                if not m:
+                    continue
+                base = self._VN_SUFFIX_RE.sub("", mod)
+                base_versions.setdefault(base, set()).add(int(m.group(1)))
+
+        for base, nums in base_versions.items():
+            sorted_nums = sorted(nums)
+            expected = list(range(1, max(sorted_nums) + 1))
+            assert sorted_nums == expected, (
+                f"{backend}: module base {base!r} has version suffixes {sorted_nums}, expected sequential {expected}"
+            )

@@ -119,18 +119,18 @@ The resolver picks the first entry where `min_version <= runtime_version`.
 
 When upstream framework `X.Y.Z` changes an API that a collector depends on:
 
-1. Create `collect_{op}_v{N+1}.py` with the new API calls
-2. Add `__compat__ = "<backend>>=X.Y.Z"` to the new file
-3. Add `__compat__` upper bound to the old file if it doesn't have one (e.g. change `">=1.1.0"` to `">=1.1.0,<X.Y.Z"`)
-4. Convert the registry entry from unversioned to versioned (or prepend a new tuple):
+1. Rename the original file to `collect_{op}_v1.py` (if not already versioned)
+2. Create `collect_{op}_v2.py` with the new API calls
+3. Add `__compat__ = "<backend>>=X.Y.Z"` to the new file
+4. Add `__compat__` upper bound to the old file if it doesn't have one (e.g. change `">=1.1.0"` to `">=1.1.0,<X.Y.Z"`)
+5. Convert the registry entry from unversioned to versioned (or prepend a new tuple):
    ```python
    # Before (unversioned):
    {"op": "gemm", "module": "collector.trtllm.collect_gemm", ...}
 
-   # After (versioned):
-   {"op": "gemm", "versions": [("X.Y.Z", "collector.trtllm.collect_gemm_v2"), ("0.0.0", "collector.trtllm.collect_gemm")], ...}
+   # After (versioned — all forks carry explicit _vN suffix):
+   {"op": "gemm", "versions": [("X.Y.Z", "collector.trtllm.collect_gemm_v2"), ("0.0.0", "collector.trtllm.collect_gemm_v1")], ...}
    ```
-5. The original file stays untouched (no rename needed)
 6. Run tests to validate
 
 ## Runtime Behavior
