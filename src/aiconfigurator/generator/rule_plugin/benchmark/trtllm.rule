@@ -6,10 +6,12 @@ prefill disable_overlap_scheduler = true
 decode disable_overlap_scheduler = false
 agg disable_overlap_scheduler = false
 
-prefill max_num_tokens = SlaConfig.isl + 1500
-decode max_num_tokens = max_batch_size
-agg max_num_tokens = max_batch_size + SlaConfig.isl + 1500
-prefill_decode cache_transceiver_max_tokens_in_buffer = SlaConfig.isl + SlaConfig.osl + 1500
+# Ensure maxNumTokens.value() % tokensPerBlock == 0
+agg_prefill_decode tokens_per_block = (tokens_per_block if tokens_per_block else 32)
+prefill max_num_tokens = (((SlaConfig.isl + 1500) + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
+decode max_num_tokens = ((max_batch_size + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
+agg max_num_tokens = ((max_batch_size + SlaConfig.isl + 1500 + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
+prefill_decode cache_transceiver_max_tokens_in_buffer = (((SlaConfig.isl + SlaConfig.osl + 1500) + tokens_per_block - 1) // tokens_per_block) * tokens_per_block
 
 agg_prefill_decode cuda_graph_batch_sizes = ((range(1, max_batch_size + 1) | list) if max_batch_size else [])
 
