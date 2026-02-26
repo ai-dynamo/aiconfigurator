@@ -157,7 +157,10 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 import gc
 
                 gc.collect()
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                elif torch.xpu.is_available():
+                    torch.xpu.empty_cache()
 
 
 def parallel_run(tasks, func, num_processes, module_name="unknown"):
