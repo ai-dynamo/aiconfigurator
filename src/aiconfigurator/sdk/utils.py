@@ -483,6 +483,26 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])
+    elif architecture == "MiMoV2FlashForCausalLM":
+        moe_layer_freq_raw = config.get("moe_layer_freq", [])
+        if isinstance(moe_layer_freq_raw, list):
+            moe_layer_freq = tuple(moe_layer_freq_raw)
+        else:
+            moe_layer_freq = tuple([moe_layer_freq_raw] * layers)
+        extra_params = common.MiMoConfig(
+            hybrid_layer_pattern=tuple(config.get("hybrid_layer_pattern", [])),
+            moe_layer_freq=moe_layer_freq,
+            swa_num_kv_heads=config.get("swa_num_key_value_heads", 0),
+            swa_head_dim=config.get("swa_head_dim", 0),
+            swa_v_head_dim=config.get("swa_v_head_dim", 0),
+            global_v_head_dim=config.get("v_head_dim", 0),
+            sliding_window_size=config.get("sliding_window_size", 0),
+        )
+        logger.info(
+            f"MiMo hybrid config: global_attn_layers={sum(extra_params.hybrid_layer_pattern)}, "
+            f"swa_layers={len(extra_params.hybrid_layer_pattern) - sum(extra_params.hybrid_layer_pattern)}, "
+            f"moe_layers={sum(extra_params.moe_layer_freq)}, dense_layers={extra_params.moe_layer_freq.count(0)}"
+        )
 
     logger.info(
         f"Model architecture: architecture={architecture}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "

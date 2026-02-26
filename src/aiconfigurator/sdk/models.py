@@ -309,6 +309,26 @@ def get_model(
         )
         # extra_params is NemotronHConfig with hybrid layer configuration
         model.set_hybrid_config(extra_params)
+    elif model_family == "HYBRIDMOE":
+        model = HybridMoEModel(
+            topk,
+            num_experts,
+            moe_inter_size,
+            model_path,
+            model_family,
+            architecture,
+            layers,
+            n,
+            n_kv,
+            d,
+            hidden,
+            inter,
+            vocab,
+            context,
+            model_config,
+        )
+        # extra_params is MiMoConfig with hybrid layer configuration
+        model.set_mimo_config(extra_params)
 
     return model
 
@@ -330,7 +350,7 @@ def check_is_moe(model_path: str) -> bool:
     E.g., Nemotron_H is not an MoE model, but Nemotron_3 is an MoE model.
     """
     family = get_model_family(model_path)
-    if family in ("MOE", "DEEPSEEK"):
+    if family in ("MOE", "DEEPSEEK", "HYBRIDMOE"):
         return True
     if family == "NEMOTRONH":
         model_info = _get_model_info(model_path)
@@ -2988,6 +3008,471 @@ class NemotronHModel(BaseModel):
                 h,
                 common.GEMMQuantMode.float16,
             )
+        )
+
+
+class HybridMoEModel(BaseModel):
+    """
+    Hybrid MoE model (SWA + Global Attention + MoE), e.g. MiMo-V2-Flash.
+
+    Supports three layer types determined by hybrid_layer_pattern and moe_layer_freq:
+    - 'global_moe': Global full attention + MoE FFN
+    - 'swa_moe':    Sliding-window attention + MoE FFN
+    - 'dense':      Sliding-window attention + dense gated SwiGLU FFN
+    """
+
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+        super().__init__(*args)
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_inter_size = moe_inter_size
+        self._mimo_config: common.MiMoConfig | None = None
+        self._power_law_alpha = 1.01  # follow DeepSeek MoE
+
+    def set_mimo_config(self, mimo_config: common.MiMoConfig) -> None:
+        self._mimo_config = mimo_config
+        self._build_context_ops()
+        self._build_generation_ops()
+
+    def _count_layer_types(self) -> dict[str, int]:
+        cfg = self._mimo_config
+        global_moe = sum(1 for a, f in zip(cfg.hybrid_layer_pattern, cfg.moe_layer_freq) if a == 1 and f == 1)
+        swa_moe = sum(1 for a, f in zip(cfg.hybrid_layer_pattern, cfg.moe_layer_freq) if a == 0 and f == 1)
+        dense = sum(1 for f in cfg.moe_layer_freq if f == 0)
+        return {"global_moe": global_moe, "swa_moe": swa_moe, "dense": dense}
+
+    def _build_context_ops(self) -> None:
+        if not self._mimo_config:
+            return
+
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        pp_size = self.config.pp_size
+        moe_tp_size = self.config.moe_tp_size
+        moe_ep_size = self.config.moe_ep_size
+        attention_dp_size = self.config.attention_dp_size
+        gemm_quant_mode = self.config.gemm_quant_mode
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        fmha_quant_mode = self.config.fmha_quant_mode
+        moe_quant_mode = self.config.moe_quant_mode
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
+        cfg = self._mimo_config
+        layer_counts = self._count_layer_types()
+
+        # Per-TP KV head counts
+        global_n_kv_per_gpu = (self._num_kv_heads + tp_size - 1) // tp_size
+        swa_n_kv_per_gpu = (cfg.swa_num_kv_heads + tp_size - 1) // tp_size
+
+        # QKV GEMM output per TP: q(n*head_dim) + k(n_kv*head_dim) + v(n_kv*v_head_dim)
+        # head_dim == swa_head_dim (same q/k dimension for both attention types)
+        global_qkv_out = self._num_heads * self._head_size // tp_size + global_n_kv_per_gpu * (
+            self._head_size + cfg.global_v_head_dim
+        )
+        swa_qkv_out = self._num_heads * cfg.swa_head_dim // tp_size + swa_n_kv_per_gpu * (
+            cfg.swa_head_dim + cfg.swa_v_head_dim
+        )
+
+        # Proj GEMM input per TP: n * v_head_dim / tp
+        global_proj_in = self._num_heads * cfg.global_v_head_dim // tp_size
+        swa_proj_in = self._num_heads * cfg.swa_v_head_dim // tp_size
+
+        self.context_ops = []
+        self.context_ops.append(ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3))
+
+        # Global attention + MoE layers
+        if layer_counts["global_moe"] > 0:
+            count = layer_counts["global_moe"]
+            self.context_ops.extend(
+                [
+                    ops.ElementWise("context_global_attn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_global_qkv_gemm", count, global_qkv_out, h, gemm_quant_mode),
+                    ops.ContextAttention(
+                        "context_global_attention",
+                        count,
+                        self._num_heads // tp_size,
+                        global_n_kv_per_gpu,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                        window_size=0,
+                        head_size=cfg.global_v_head_dim,
+                    ),
+                    ops.GEMM(
+                        "context_global_proj_gemm", count, h, global_proj_in, gemm_quant_mode, low_precision_input=True
+                    ),
+                    ops.CustomAllReduce("context_global_attn_ar", count, h, tp_size),
+                    ops.ElementWise("context_global_moe_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_global_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.float16),
+                    ops.MoEDispatch(
+                        "context_global_moe_pre_dispatch",
+                        count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        True,
+                    ),
+                    ops.MoE(
+                        "context_global_moe",
+                        count,
+                        h,
+                        self._moe_inter_size,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        moe_quant_mode,
+                        workload_distribution,
+                        attention_dp_size,
+                        is_gated=True,
+                    ),
+                    ops.MoEDispatch(
+                        "context_global_moe_post_dispatch",
+                        count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        False,
+                    ),
+                    ops.CustomAllReduce("context_global_moe_ar", count, h, tp_size),
+                ]
+            )
+
+        # SWA attention + MoE layers
+        if layer_counts["swa_moe"] > 0:
+            count = layer_counts["swa_moe"]
+            self.context_ops.extend(
+                [
+                    ops.ElementWise("context_swa_moe_attn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_swa_moe_qkv_gemm", count, swa_qkv_out, h, gemm_quant_mode),
+                    ops.ContextAttention(
+                        "context_swa_moe_attention",
+                        count,
+                        self._num_heads // tp_size,
+                        swa_n_kv_per_gpu,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                        window_size=cfg.sliding_window_size,
+                        head_size=cfg.swa_v_head_dim,
+                    ),
+                    ops.GEMM(
+                        "context_swa_moe_proj_gemm", count, h, swa_proj_in, gemm_quant_mode, low_precision_input=True
+                    ),
+                    ops.CustomAllReduce("context_swa_moe_attn_ar", count, h, tp_size),
+                    ops.ElementWise("context_swa_moe_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_swa_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.float16),
+                    ops.MoEDispatch(
+                        "context_swa_moe_pre_dispatch",
+                        count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        True,
+                    ),
+                    ops.MoE(
+                        "context_swa_moe",
+                        count,
+                        h,
+                        self._moe_inter_size,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        moe_quant_mode,
+                        workload_distribution,
+                        attention_dp_size,
+                        is_gated=True,
+                    ),
+                    ops.MoEDispatch(
+                        "context_swa_moe_post_dispatch",
+                        count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        False,
+                    ),
+                    ops.CustomAllReduce("context_swa_moe_ar", count, h, tp_size),
+                ]
+            )
+
+        # SWA attention + Dense FFN layers (e.g. layer 0)
+        if layer_counts["dense"] > 0:
+            count = layer_counts["dense"]
+            self.context_ops.extend(
+                [
+                    ops.ElementWise("context_dense_attn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_dense_qkv_gemm", count, swa_qkv_out, h, gemm_quant_mode),
+                    ops.ContextAttention(
+                        "context_dense_attention",
+                        count,
+                        self._num_heads // tp_size,
+                        swa_n_kv_per_gpu,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                        window_size=cfg.sliding_window_size,
+                        head_size=cfg.swa_v_head_dim,
+                    ),
+                    ops.GEMM(
+                        "context_dense_proj_gemm", count, h, swa_proj_in, gemm_quant_mode, low_precision_input=True
+                    ),
+                    ops.CustomAllReduce("context_dense_attn_ar", count, h, tp_size),
+                    # Gated SwiGLU FFN
+                    ops.ElementWise("context_dense_ffn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_dense_gate_gemm", count, self._inter_size // tp_size, h, gemm_quant_mode),
+                    ops.GEMM("context_dense_up_gemm", count, self._inter_size // tp_size, h, gemm_quant_mode),
+                    ops.ElementWise(
+                        "context_dense_act", count, self._inter_size // tp_size, self._inter_size // tp_size, 0.8
+                    ),
+                    ops.GEMM(
+                        "context_dense_down_gemm",
+                        count,
+                        h,
+                        self._inter_size // tp_size,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                    ops.CustomAllReduce("context_dense_ffn_ar", count, h, tp_size),
+                ]
+            )
+
+        self.context_ops.append(ops.P2P("context_p2p", pp_size - 1, h, pp_size))
+        self.context_ops.append(
+            ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp_size, h, common.GEMMQuantMode.float16)
+        )
+
+    def _build_generation_ops(self) -> None:
+        if not self._mimo_config:
+            return
+
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        pp_size = self.config.pp_size
+        moe_tp_size = self.config.moe_tp_size
+        moe_ep_size = self.config.moe_ep_size
+        attention_dp_size = self.config.attention_dp_size
+        gemm_quant_mode = self.config.gemm_quant_mode
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        moe_quant_mode = self.config.moe_quant_mode
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
+        cfg = self._mimo_config
+        layer_counts = self._count_layer_types()
+
+        global_n_kv_per_gpu = (self._num_kv_heads + tp_size - 1) // tp_size
+        swa_n_kv_per_gpu = (cfg.swa_num_kv_heads + tp_size - 1) // tp_size
+
+        global_qkv_out = self._num_heads * self._head_size // tp_size + global_n_kv_per_gpu * (
+            self._head_size + cfg.global_v_head_dim
+        )
+        swa_qkv_out = self._num_heads * cfg.swa_head_dim // tp_size + swa_n_kv_per_gpu * (
+            cfg.swa_head_dim + cfg.swa_v_head_dim
+        )
+        global_proj_in = self._num_heads * cfg.global_v_head_dim // tp_size
+        swa_proj_in = self._num_heads * cfg.swa_v_head_dim // tp_size
+
+        self.generation_ops = []
+        self.generation_ops.append(ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3))
+
+        # Global attention + MoE layers
+        if layer_counts["global_moe"] > 0:
+            count = layer_counts["global_moe"]
+            self.generation_ops.extend(
+                [
+                    ops.ElementWise("generation_global_attn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_global_qkv_gemm", count, global_qkv_out, h, gemm_quant_mode),
+                    ops.GenerationAttention(
+                        "generation_global_attention",
+                        count,
+                        self._num_heads // tp_size,
+                        global_n_kv_per_gpu,
+                        kvcache_quant_mode,
+                        window_size=0,
+                        head_size=cfg.global_v_head_dim,
+                    ),
+                    ops.GEMM(
+                        "generation_global_proj_gemm",
+                        count,
+                        h,
+                        global_proj_in,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                    ops.CustomAllReduce("generation_global_attn_ar", count, h, tp_size),
+                    ops.ElementWise("generation_global_moe_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM(
+                        "generation_global_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.float16
+                    ),
+                    ops.MoEDispatch(
+                        "generation_global_moe_pre_dispatch",
+                        count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        True,
+                    ),
+                    ops.MoE(
+                        "generation_global_moe",
+                        count,
+                        h,
+                        self._moe_inter_size,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        moe_quant_mode,
+                        workload_distribution,
+                        attention_dp_size,
+                        is_gated=True,
+                    ),
+                    ops.MoEDispatch(
+                        "generation_global_moe_post_dispatch",
+                        count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        False,
+                    ),
+                    ops.CustomAllReduce("generation_global_moe_ar", count, h, tp_size),
+                ]
+            )
+
+        # SWA attention + MoE layers
+        if layer_counts["swa_moe"] > 0:
+            count = layer_counts["swa_moe"]
+            self.generation_ops.extend(
+                [
+                    ops.ElementWise("generation_swa_moe_attn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_swa_moe_qkv_gemm", count, swa_qkv_out, h, gemm_quant_mode),
+                    ops.GenerationAttention(
+                        "generation_swa_moe_attention",
+                        count,
+                        self._num_heads // tp_size,
+                        swa_n_kv_per_gpu,
+                        kvcache_quant_mode,
+                        window_size=cfg.sliding_window_size,
+                        head_size=cfg.swa_v_head_dim,
+                    ),
+                    ops.GEMM(
+                        "generation_swa_moe_proj_gemm",
+                        count,
+                        h,
+                        swa_proj_in,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                    ops.CustomAllReduce("generation_swa_moe_attn_ar", count, h, tp_size),
+                    ops.ElementWise("generation_swa_moe_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_swa_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.float16),
+                    ops.MoEDispatch(
+                        "generation_swa_moe_pre_dispatch",
+                        count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        True,
+                    ),
+                    ops.MoE(
+                        "generation_swa_moe",
+                        count,
+                        h,
+                        self._moe_inter_size,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        moe_quant_mode,
+                        workload_distribution,
+                        attention_dp_size,
+                        is_gated=True,
+                    ),
+                    ops.MoEDispatch(
+                        "generation_swa_moe_post_dispatch",
+                        count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        False,
+                    ),
+                    ops.CustomAllReduce("generation_swa_moe_ar", count, h, tp_size),
+                ]
+            )
+
+        # SWA attention + Dense FFN layers
+        if layer_counts["dense"] > 0:
+            count = layer_counts["dense"]
+            self.generation_ops.extend(
+                [
+                    ops.ElementWise("generation_dense_attn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_dense_qkv_gemm", count, swa_qkv_out, h, gemm_quant_mode),
+                    ops.GenerationAttention(
+                        "generation_dense_attention",
+                        count,
+                        self._num_heads // tp_size,
+                        swa_n_kv_per_gpu,
+                        kvcache_quant_mode,
+                        window_size=cfg.sliding_window_size,
+                        head_size=cfg.swa_v_head_dim,
+                    ),
+                    ops.GEMM(
+                        "generation_dense_proj_gemm",
+                        count,
+                        h,
+                        swa_proj_in,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                    ops.CustomAllReduce("generation_dense_attn_ar", count, h, tp_size),
+                    # Gated SwiGLU FFN
+                    ops.ElementWise("generation_dense_ffn_norm", count, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_dense_gate_gemm", count, self._inter_size // tp_size, h, gemm_quant_mode),
+                    ops.GEMM("generation_dense_up_gemm", count, self._inter_size // tp_size, h, gemm_quant_mode),
+                    ops.ElementWise(
+                        "generation_dense_act", count, self._inter_size // tp_size, self._inter_size // tp_size, 0.8
+                    ),
+                    ops.GEMM(
+                        "generation_dense_down_gemm",
+                        count,
+                        h,
+                        self._inter_size // tp_size,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                    ops.CustomAllReduce("generation_dense_ffn_ar", count, h, tp_size),
+                ]
+            )
+
+        self.generation_ops.append(ops.P2P("generation_p2p", pp_size - 1, h, pp_size))
+        self.generation_ops.append(
+            ops.GEMM("generation_logits_gemm", 1, self._vocab_size // tp_size, h, common.GEMMQuantMode.float16)
         )
 
 
