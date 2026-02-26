@@ -37,10 +37,3 @@ jobs:
         if: always()
         run: |
             docker cp aic:/workspace/test_report.md ./test_report.md
-      - name: Render the report to the PR when tests fail
-        uses: marocchino/sticky-pull-request-comment@v2
-        if: failure()
-        with:
-          header: test-report
-          recreate: true
-          path: test_report.md
