@@ -197,35 +197,83 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
     """
     Generate PR description markdown with tables of changes.
 
+    Sections are ordered by importance for readability when GitHub truncates
+    long output: regressions first, then fixed, removed, and added.
+
     Args:
         added_rows: List of added row tuples
         removed_rows: List of removed row tuples
-        changed_rows: List of changed row tuples
+        changed_rows: List of changed row tuples (each has old_status, new_status)
 
     Returns:
         Markdown formatted PR description
     """
+    regressions = [r for r in changed_rows if r[6] == "PASS" and r[7] == "FAIL"]
+    fixed = [r for r in changed_rows if r[6] == "FAIL" and r[7] == "PASS"]
+
     lines = [
         "This PR updates aiconfigurator/systems/support_matrix.csv with the following changes:",
         "",
+        "### Summary",
+        "",
+        "| Category | Count |",
+        "|----------|-------|",
+        f"| Regressions (PASS -> FAIL) | {len(regressions)} |",
+        f"| Fixed (FAIL -> PASS) | {len(fixed)} |",
+        f"| Removed rows | {len(removed_rows)} |",
+        f"| Added rows | {len(added_rows)} |",
+        "",
     ]
 
-    # Added rows
-    lines.append(f"### 1. Added the following {len(added_rows)} rows")
-    if added_rows:
+    section = 1
+
+    # Regressions (PASS -> FAIL)
+    lines.append(f"### {section}. Regressions (PASS -> FAIL): {len(regressions)} rows")
+    section += 1
+    if regressions:
         lines.append("")
-        lines.append("| HuggingFaceID | Architecture | System | Backend | Version | Mode | Status |")
-        lines.append("|---------------|--------------|--------|---------|---------|------|--------|")
-        for huggingface_id, architecture, system, backend, version, mode, status in added_rows:
-            row = f"| {huggingface_id} | {architecture} | {system} | {backend} | {version} | {mode} | {status} |"
+        lines.append(
+            "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
+        )
+        lines.append(
+            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
+        )
+        for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in regressions:
+            row = (
+                f"| {huggingface_id} | {architecture} | {system} | {backend} "
+                f"| {version} | {mode} | {old_status} | {new_status} |"
+            )
             lines.append(row)
     else:
         lines.append("")
-        lines.append("*No rows added*")
+        lines.append("*No regressions*")
+    lines.append("")
+
+    # Fixed (FAIL -> PASS)
+    lines.append(f"### {section}. Fixed (FAIL -> PASS): {len(fixed)} rows")
+    section += 1
+    if fixed:
+        lines.append("")
+        lines.append(
+            "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
+        )
+        lines.append(
+            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
+        )
+        for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in fixed:
+            row = (
+                f"| {huggingface_id} | {architecture} | {system} | {backend} "
+                f"| {version} | {mode} | {old_status} | {new_status} |"
+            )
+            lines.append(row)
+    else:
+        lines.append("")
+        lines.append("*No fixes*")
     lines.append("")
 
     # Removed rows
-    lines.append(f"### 2. Removed the following {len(removed_rows)} rows")
+    lines.append(f"### {section}. Removed rows: {len(removed_rows)}")
+    section += 1
     if removed_rows:
         lines.append("")
         lines.append("| HuggingFaceID | Architecture | System | Backend | Version | Mode | Status |")
@@ -238,25 +286,18 @@ def generate_pr_description(added_rows: list[tuple], removed_rows: list[tuple], 
         lines.append("*No rows removed*")
     lines.append("")
 
-    # Changed rows
-    lines.append(f"### 3. Changed the following {len(changed_rows)} rows")
-    if changed_rows:
+    # Added rows
+    lines.append(f"### {section}. Added rows: {len(added_rows)}")
+    if added_rows:
         lines.append("")
-        lines.append(
-            "| HuggingFaceID | Architecture | System | Backend | Version | Mode | Previous Status | New Status |"
-        )
-        lines.append(
-            "|---------------|--------------|--------|---------|---------|------|-----------------|------------|"
-        )
-        for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:
-            row = (
-                f"| {huggingface_id} | {architecture} | {system} | {backend} "
-                f"| {version} | {mode} | {old_status} | {new_status} |"
-            )
+        lines.append("| HuggingFaceID | Architecture | System | Backend | Version | Mode | Status |")
+        lines.append("|---------------|--------------|--------|---------|---------|------|--------|")
+        for huggingface_id, architecture, system, backend, version, mode, status in added_rows:
+            row = f"| {huggingface_id} | {architecture} | {system} | {backend} | {version} | {mode} | {status} |"
             lines.append(row)
     else:
         lines.append("")
-        lines.append("*No rows changed*")
+        lines.append("*No rows added*")
 
     return "\n".join(lines)
 
@@ -344,8 +385,13 @@ def main():
     print(f"Added rows: {len(added_rows)}")
     print(f"Removed rows: {len(removed_rows)}")
     print(f"Changed rows: {len(changed_rows)}")
+    print(f"  - Regressions (PASS -> FAIL): {len([r for r in changed_rows if r[6] == 'PASS' and r[7] == 'FAIL'])}")
+    print(f"  - Fixed (FAIL -> PASS): {len([r for r in changed_rows if r[6] == 'FAIL' and r[7] == 'PASS'])}")
 
     has_changes = len(added_rows) > 0 or len(removed_rows) > 0 or len(changed_rows) > 0
+
+    regressions = [r for r in changed_rows if r[6] == "PASS" and r[7] == "FAIL"]
+    fixed = [r for r in changed_rows if r[6] == "FAIL" and r[7] == "PASS"]
 
     # Generate output
     if args.output_diff:
@@ -355,6 +401,8 @@ def main():
             "added_count": len(added_rows),
             "removed_count": len(removed_rows),
             "changed_count": len(changed_rows),
+            "regression_count": len(regressions),
+            "fixed_count": len(fixed),
             "added_rows": added_rows,
             "removed_rows": removed_rows,
             "changed_rows": changed_rows,
