@@ -3936,13 +3936,9 @@ class PerfDatabase:
             v_head_dim = 128
             num_head = 128 // tp_size
 
-            # qkv_a projection (decode mode)
-            qkv_a_flop = 2 * hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) * b
-            qkv_a_mem = (
-                b * hidden_size
-                + hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim)
-                + 2 * b * (q_lora_rank + kv_lora_rank + qk_rope_head_dim)
-            )
+            # NOTE: qkv_a projection is now modeled as a standalone GEMM op
+            # (generation_qkv_a_proj_gemm) outside of the MLA attention forward path,
+            # matching sglang >=0.5.6 where qkv_a_proj was moved out of attention.
 
             # q_b projection
             q_b_flop = 2 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b
@@ -3977,10 +3973,8 @@ class PerfDatabase:
             attn_out_flop = 2 * num_head * v_head_dim * hidden_size * b
             attn_out_mem = b * num_head * v_head_dim + num_head * v_head_dim * hidden_size + 2 * b * hidden_size
 
-            ops = qkv_a_flop + q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop
-            mem_bytes = (
-                qkv_a_mem + q_b_mem + q_w_kc_mem + attn_mem * 2 + s_w_vc_mem + attn_out_mem
-            ) * fmha_quant_mode.value.memory
+            ops = q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop
+            mem_bytes = (q_b_mem + q_w_kc_mem + attn_mem * 2 + s_w_vc_mem + attn_out_mem) * fmha_quant_mode.value.memory
             sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
             sol_math += attn_flop / (self.system_spec["gpu"]["float16_tc_flops"]) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
@@ -4077,13 +4071,8 @@ class PerfDatabase:
             v_head_dim = 128
             num_head = 128 // tp_size
 
-            # qkv_a projection (prefill mode)
-            qkv_a_flop = 2 * hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) * b * s
-            qkv_a_mem = (
-                b * hidden_size * s
-                + hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim)
-                + 2 * b * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) * s
-            )
+            # NOTE: qkv_a projection is now modeled as a standalone GEMM op in the pipeline
+            # (context_qkv_a_proj_gemm), so it is excluded from this SOL calculation.
 
             # q_b projection
             q_b_flop = 2 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b * s
@@ -4117,8 +4106,8 @@ class PerfDatabase:
             attn_out_flop = 2 * num_head * v_head_dim * hidden_size * b * s
             attn_out_mem = b * num_head * v_head_dim * s + num_head * v_head_dim * hidden_size + 2 * b * hidden_size * s
 
-            ops = qkv_a_flop + q_b_flop + kv_b_flop + attn_out_flop
-            mem_bytes = (qkv_a_mem + q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha_quant_mode.value.memory
+            ops = q_b_flop + kv_b_flop + attn_out_flop
+            mem_bytes = (q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha_quant_mode.value.memory
             sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
             sol_math += attn_flop / (self.system_spec["gpu"]["float16_tc_flops"]) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000

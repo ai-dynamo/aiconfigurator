@@ -1933,6 +1933,23 @@ class WideEPDeepSeekModel(BaseModel):
 
         sms = self.config.sms
 
+        # qkv_a projection (fused q_a + kv_a + rope): hidden_size -> q_lora_rank + kv_lora_rank + qk_rope_head_dim
+        # This is replicated on every GPU (not TP-sharded), matching narrow EP's context_downscale_gemm.
+        # In sglang >=0.5.6, qkv_a_proj is computed outside the MLA attention forward via communicator,
+        # so it must be modeled as a separate GEMM op rather than included in WideEPContextMLA.
+        self.context_ops.extend(
+            [
+                ops.GEMM(
+                    "context_qkv_a_proj_gemm",
+                    self._num_layers,
+                    1536 + 512 + 64,  # q_lora_rank + kv_lora_rank + qk_rope_head_dim = 2112
+                    h,
+                    gemm_quant_mode,
+                    scale_num_tokens=tp_size,
+                ),
+            ]
+        )
+
         # context mla attention
         self.context_ops.extend(
             [
@@ -2046,6 +2063,19 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_backend=moe_backend,
                     enable_eplb=self.config.enable_eplb,
                 )
+            ]
+        )
+
+        # qkv_a projection for generation (same as context but per-token, not per-seq)
+        self.generation_ops.extend(
+            [
+                ops.GEMM(
+                    "generation_qkv_a_proj_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    1536 + 512 + 64,  # q_lora_rank + kv_lora_rank + qk_rope_head_dim = 2112
+                    h,
+                    gemm_quant_mode,
+                ),
             ]
         )
 
