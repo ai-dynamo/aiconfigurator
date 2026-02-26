@@ -84,7 +84,7 @@ def test_taskconfig_agg_default():
     cfg = task.config
 
     assert cfg.worker_config.system_name == "h200_sxm"
-    assert _enum_name(cfg.worker_config.gemm_quant_mode) is None
+    assert _enum_name(cfg.worker_config.gemm_quant_mode) == "float16"
     assert cfg.worker_config.num_gpu_per_worker == [1, 2, 4, 8]
     assert cfg.applied_layers == ["base-common", "agg-defaults"]
 
