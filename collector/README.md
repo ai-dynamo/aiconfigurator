@@ -151,6 +151,18 @@ Covers: version parsing (PEP 440 with rc/post), `__compat__` constraint evaluati
 
 # Collect gemm/attention/moe data/etc.
 
+## Smoke Test
+
+Use `--smoke` to quickly verify the collector runs end-to-end. It randomly samples 4 test cases per op instead of running the full suite.
+
+```bash
+# Smoke test for sglang
+python3 collect.py --backend sglang --smoke
+
+# Smoke a specific op
+python3 collect.py --backend trtllm --ops moe --smoke
+```
+
 ## Power Monitoring (Optional)
 
 The collector supports GPU power monitoring during kernel execution using NVML. This feature is optional and disabled by default.

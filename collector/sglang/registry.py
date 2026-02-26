@@ -70,18 +70,6 @@ REGISTRY = [
         "run_func": "run_wideep_mla_generation",
     },
     {
-        "op": "wideep_mlp_context",
-        "module": "collector.sglang.collect_wideep_mlp",
-        "get_func": "get_wideep_mlp_context_test_cases",
-        "run_func": "run_wideep_mlp_context",
-    },
-    {
-        "op": "wideep_mlp_generation",
-        "module": "collector.sglang.collect_wideep_mlp",
-        "get_func": "get_wideep_mlp_generation_test_cases",
-        "run_func": "run_wideep_mlp_generation",
-    },
-    {
         "op": "wideep_moe",
         "module": "collector.sglang.collect_wideep_deepep_moe",
         "get_func": "get_wideep_moe_test_cases",

@@ -66,7 +66,7 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
 
         # Smoke test: randomly sample a small subset to verify the collector works
         if smoke:
-            sample_size = min(10, len(test_cases))
+            sample_size = min(4, len(test_cases))
             test_cases = random.sample(test_cases, sample_size)
             logger.info(f"Smoke mode: sampled {sample_size} test cases for {full_name}")
 
@@ -347,7 +347,7 @@ def collect_ops(
     Version resolution and op filtering are handled upstream by
     version_resolver.build_collections(). If runtime_version is provided,
     per-module __compat__ is validated and incompatible ops fail explicitly.
-    If smoke is True, each op randomly samples 10 test cases for a quick
+    If smoke is True, each op randomly samples 4 test cases for a quick
     sanity check.
     """
 
@@ -554,7 +554,7 @@ def main():
     parser.add_argument(
         "--smoke",
         action="store_true",
-        help="Smoke test: randomly sample 10 test cases per op to verify the collector runs end-to-end",
+        help="Smoke test: randomly sample 4 test cases per op to verify the collector runs end-to-end",
     )
     parser.add_argument(
         "--measure_power",
@@ -595,7 +595,7 @@ def main():
     mp.set_start_method("spawn")
 
     if args.smoke:
-        logger.info("Smoke test mode enabled — sampling 10 random test cases per op")
+        logger.info("Smoke test mode enabled — sampling 4 random test cases per op")
 
     if args.backend == "trtllm":
         collect_trtllm(num_processes, ops, smoke=args.smoke)
