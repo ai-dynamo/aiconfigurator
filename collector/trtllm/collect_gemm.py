@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-import os
 
 import tensorrt_llm
 import torch
@@ -46,10 +45,6 @@ def get_gemm_test_cases():
     if sm_version >= 100:
         gemm_list += ["nvfp4"]
 
-    only_fp8_block = os.getenv("AIC_ONLY_FP8_BLOCK", "0") == "1"
-    if only_fp8_block:
-        gemm_list = [x for x in gemm_list if x == "fp8_block"]
-
     test_cases = []
     for gemm_common_testcase in get_gemm_common_test_cases():
         x = gemm_common_testcase.x
@@ -59,10 +54,6 @@ def get_gemm_test_cases():
             if (gemm_type == "nvfp4" or gemm_type == "fp8_block") and (n < 128 or k < 128):
                 continue
             test_cases.append([gemm_type, x, n, k, "gemm_perf.txt"])
-
-    max_cases = int(os.getenv("AIC_DEBUG_MAX_CASES", "0"))
-    if max_cases > 0:
-        test_cases = test_cases[:max_cases]
 
     return test_cases
 

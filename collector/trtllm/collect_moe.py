@@ -23,6 +23,7 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
 # Models that use non-gated MoE (Relu2 activation instead of SwiGLU)
 # These are substring patterns that will be matched against the full model name
+# It's supported in trtllm 1.3.0rc1, please expect failures for these models if using trtllm < 1.3.0rc1
 NON_GATED_MOE_MODELS = ["Nemotron-3"]
 
 from collector.common_test_cases import get_common_moe_test_cases
@@ -106,10 +107,6 @@ def get_moe_test_cases():
     if sm_version >= 100:
         moe_list += ["nvfp4"]
 
-    only_fp8_block = os.getenv("AIC_ONLY_FP8_BLOCK", "0") == "1"
-    if only_fp8_block:
-        moe_list = [x for x in moe_list if x == "fp8_block"]
-
     test_cases = []
 
     for common_moe_testcase in get_common_moe_test_cases():
@@ -124,11 +121,6 @@ def get_moe_test_cases():
             else:
                 if moe_type == "w4a16_mxfp4":
                     continue
-
-            # TRTLLM 1.2.0rc5 may fail fp8_block on non-gated MoE configs (e.g. Nemotron-3).
-            # Skip these in collection to avoid aborting the whole run.
-            if moe_type == "fp8_block" and any(pattern in model_name for pattern in NON_GATED_MOE_MODELS):
-                continue
 
             # w4afp8 requires k shape to be multiple of 128
             if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
@@ -190,10 +182,6 @@ def get_moe_test_cases():
     # This makes sure the same cache keys are far apart from each other.
     random.seed(42)
     random.shuffle(test_cases)
-
-    max_cases = int(os.getenv("AIC_DEBUG_MAX_CASES", "0"))
-    if max_cases > 0:
-        test_cases = test_cases[:max_cases]
 
     return test_cases
 
@@ -516,8 +504,6 @@ def run_moe_torch(
             source = "moe_torch_flow_min_latency"  # trtllm gen
         elif not is_gated:
             source = "moe_torch_flow_nongated"  # non-gated MoE (relu2)
-        elif model_config.moe_backend == "deepgemm":
-            source = "moe_torch_flow_deepgemm"  # SM100 DeepGEMM (MXFP8 style scale)
         elif model_config.moe_backend == "cutlass":
             source = "moe_torch_flow_cutlass"  # SM90 CUTLASS (FP32 scale)
         else:
