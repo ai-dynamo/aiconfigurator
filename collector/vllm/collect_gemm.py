@@ -17,7 +17,7 @@ from collector.common_test_cases import get_gemm_common_test_cases
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import setup_distributed, with_exit_stack
 
-compatible_versions = ["0.11.0", "0.12.0", "0.14.0"]
+compatible_versions = ["0.11.0", "0.12.0", "0.14.0", "0.16.0"]
 
 FP8_BLOCK_SHAPE = (128, 128)
 
@@ -124,6 +124,12 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
                     if not hasattr(gemm, "weight_scale"):
                         gemm.weight_scale = gemm.weight_scale_inv
 
+                # vLLM 0.16+ dynamic block quant no longer registers input_scale,
+                # but Fp8LinearMethod.apply still reads the attribute.
+                # Set it to None so the downstream W8A8BlockFp8LinearOp receives None.
+                if not hasattr(gemm, "input_scale"):
+                    gemm.input_scale = None
+
                 # Support both old (layer-only) and new (layer, cutlass_supported)
                 # signatures for maybe_post_process_fp8_weight_block.
                 try:
@@ -152,6 +158,9 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
         num_warmups=3,
         num_runs=6,
         repeat_n=1,
+        # vLLM 0.16+ fp8_block uses torch.compile-decorated kernels that are
+        # incompatible with CUDA graph capture; fall back to eager execution.
+        allow_graph_fail=(gemm_type == "fp8_block"),
     ) as results:
         pass
 

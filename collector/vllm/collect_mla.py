@@ -66,9 +66,41 @@ def run_attention_torch(
         # set a reasonable minimum
         8192,
     )
+
+    if is_context_phase:
+        batch_spec = BatchSpec(
+            seq_lens=[input_len] * batch_size,
+            query_lens=[input_len] * batch_size,
+        )
+    else:
+        batch_spec = BatchSpec(
+            seq_lens=[input_len] * batch_size,
+            query_lens=[1] * batch_size,
+        )
+
+    try:
+        vllm.utils.torch_utils.set_random_seed(42)
+    except AttributeError:
+        current_platform.seed_everything(42)
+
+    # vLLM 0.16+ requires vllm_config to be set BEFORE calling get_attn_backend_cls
+    vllm_config = create_vllm_config(
+        model_name=model,
+        max_model_len=max(batch_spec.seq_lens),
+        block_size=block_size,
+        num_gpu_blocks=num_kv_cache_blocks,
+        max_num_seqs=batch_size,
+        use_fp8_kv_cache=use_fp8_kv_cache,
+    )
+    assert convert_dtype_to_torch(vllm_config.model_config.dtype) == torch.bfloat16
+
+    # Enter vllm_config context for the rest of the function (needed for get_attn_backend_cls in 0.16+)
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
+
+    # Get the MLA backend
     try:
         # Let vllm choose the backend.
-        # defautl for vllm 0.11.0
+        # default for vllm 0.11.0
         backend = current_platform.get_attn_backend_cls(
             None,
             head_dim,
@@ -94,7 +126,7 @@ def run_attention_torch(
                 use_sparse=False,
             )
         except TypeError:
-            # vllm 0.14.0
+            # vllm 0.14.0 / 0.16.0
             from vllm.v1.attention.selector import AttentionSelectorConfig
 
             attn_selector_config = AttentionSelectorConfig(
@@ -118,32 +150,6 @@ def run_attention_torch(
         print(f"VLLM chose MLA backend: {backend_name}")
         builder_cls = backend_cls.get_builder_cls()
         impl_cls = backend_cls.get_impl_cls()
-
-    if is_context_phase:
-        batch_spec = BatchSpec(
-            seq_lens=[input_len] * batch_size,
-            query_lens=[input_len] * batch_size,
-        )
-    else:
-        batch_spec = BatchSpec(
-            seq_lens=[input_len] * batch_size,
-            query_lens=[1] * batch_size,
-        )
-
-    try:
-        vllm.utils.torch_utils.set_random_seed(42)
-    except AttributeError:
-        current_platform.seed_everything(42)
-
-    vllm_config = create_vllm_config(
-        model_name=model,
-        max_model_len=max(batch_spec.seq_lens),
-        block_size=block_size,
-        num_gpu_blocks=num_kv_cache_blocks,
-        max_num_seqs=batch_size,
-        use_fp8_kv_cache=use_fp8_kv_cache,
-    )
-    assert convert_dtype_to_torch(vllm_config.model_config.dtype) == torch.bfloat16
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache)
 
@@ -198,13 +204,36 @@ def run_attention_torch(
 
     # Build metadata
     layer_names = ["placeholder"]
-    exit_stack.enter_context(set_current_vllm_config(vllm_config))
+    # vllm_config already set in context earlier for 0.16+ compatibility
 
-    builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-    attn_metadata = builder.build(
-        common_prefix_len=0,
-        common_attn_metadata=common_attn_metadata,
-    )
+    # vLLM 0.16+ MLA backends call get_per_layer_parameters which requires
+    # actual registered attention layers. Mock it for testing.
+    import unittest.mock
+
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    def mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
+        return {
+            layer_name: PerLayerParameters(
+                window_left=-1,
+                logits_soft_cap=0.0,
+                sm_scale=1.0 / (head_dim**0.5),
+            )
+            for layer_name in layer_names
+        }
+
+    # Patch both the utils module and the mla_attention module where it's used
+    with (
+        unittest.mock.patch("vllm.v1.attention.backends.utils.get_per_layer_parameters", mock_get_per_layer_parameters),
+        unittest.mock.patch(
+            "vllm.model_executor.layers.attention.mla_attention.get_per_layer_parameters", mock_get_per_layer_parameters
+        ),
+    ):
+        builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
+        attn_metadata = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
 
     # Create mock kv_b_proj using the same weights as reference implementation
     from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -249,21 +278,73 @@ def run_attention_torch(
         device=query_vllm.device,
     )
 
-    # Run forward pass
+    # Initialize dcp_world_size (normally set on first forward call)
+    impl.dcp_world_size = 1
 
+    # Run forward pass
     test_ite = 6
     warm_up = 3
 
-    def run():
-        impl.forward(
-            mock_layer,
-            query_vllm,
-            kv_c_vllm,
-            k_pe_vllm,
-            kv_cache,
-            attn_metadata,
-            output=output,
-        )
+    if hasattr(impl, "forward"):
+        # vLLM <= 0.14.x: single forward() method
+        def run():
+            impl.forward(
+                mock_layer,
+                query_vllm,
+                kv_c_vllm,
+                k_pe_vllm,
+                kv_cache,
+                attn_metadata,
+                output=output,
+            )
+    elif is_context_phase:
+        # vLLM 0.16+: use forward_mha for context/prefill
+        k_scale = mock_layer._k_scale
+
+        def run():
+            impl.forward_mha(
+                query_vllm,
+                kv_c_vllm,
+                k_pe_vllm,
+                kv_cache,
+                attn_metadata,
+                k_scale,
+                output=output,
+            )
+    else:
+        # vLLM 0.16+: use forward_mqa for generation/decode
+        # Compute W_UK_T from kv_b_proj weights (same as MLAAttention.process_weights_after_loading)
+        kv_b_proj_weight = mock_kv_b_proj.weight.data.T  # (kv_lora_rank, num_heads * (qk_nope + v))
+        kv_b_proj_weight = kv_b_proj_weight.view(kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim)
+        W_UK, W_UV = kv_b_proj_weight.split([qk_nope_head_dim, v_head_dim], dim=-1)  # noqa: N806
+        W_UK_T = W_UK.permute(1, 2, 0)  # (N, qk_nope, kv_lora) # noqa: N806
+
+        # Replicate the W_UK_T projection that the calling layer normally does
+        # query_vllm shape: [num_tokens, num_heads, qk_nope_head_dim + qk_rope_head_dim]
+        mqa_q_nope = query_vllm[..., :qk_nope_head_dim]  # [B, N, qk_nope]
+        mqa_q_pe = query_vllm[..., qk_nope_head_dim:]  # [B, N, qk_rope]
+
+        # W_UK_T projection: (N, B, qk_nope) x (N, qk_nope, kv_lora) -> (N, B, kv_lora) -> (B, N, kv_lora)
+        mqa_q_nope_t = mqa_q_nope.transpose(0, 1)  # [N, B, qk_nope]
+        mqa_ql_nope = torch.bmm(mqa_q_nope_t, W_UK_T).transpose(0, 1)  # [B, N, kv_lora]
+
+        if use_fp8_kv_cache:
+            # When using FP8 KV cache, the real serving code quantizes Q to FP8
+            # (concat ql_nope + q_pe, then per-tensor quant to fp8_e4m3fn)
+            mqa_q_cat = torch.cat((mqa_ql_nope, mqa_q_pe), dim=-1)  # [B, N, kv_lora + qk_rope]
+            mqa_q_flat = mqa_q_cat.reshape(mqa_q_cat.shape[0], -1)
+            mqa_q_fp8 = mqa_q_flat.to(current_platform.fp8_dtype())
+            mqa_q = mqa_q_fp8.view(mqa_q_cat.shape)
+        else:
+            mqa_q = (mqa_ql_nope, mqa_q_pe)
+
+        def run():
+            impl.forward_mqa(
+                mqa_q,
+                kv_cache,
+                attn_metadata,
+                mock_layer,
+            )
 
     # Warmup
     for i in range(warm_up):

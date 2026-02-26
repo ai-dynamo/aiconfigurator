@@ -10,6 +10,15 @@ from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_confi
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
+# vLLM 0.16+ may disable inplace operations on certain platforms (e.g., Blackwell).
+try:
+    from vllm.model_executor.layers.fused_moe.fused_moe import disable_inplace
+except ImportError:
+
+    def disable_inplace():
+        return False
+
+
 # Compatibility: block FP8 helpers may differ by version.
 # Priority: vllm.utils.deep_gemm -> deep_gemm extension -> None.
 try:
@@ -27,7 +36,7 @@ from collector.helper import balanced_logits, benchmark_with_power, get_sm_versi
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
-compatible_version = ["0.11.0", "0.12.0", "0.14.0"]
+compatible_version = ["0.11.0", "0.12.0", "0.14.0", "0.16.0"]
 
 
 def get_moe_test_cases():
@@ -228,7 +237,7 @@ def run_moe_torch(
                         w2,
                         tw,
                         ti,
-                        inplace=True,
+                        inplace=not disable_inplace(),
                         quant_config=quant_config,
                         global_num_experts=num_experts,
                         expert_map=expert_map,
@@ -240,7 +249,7 @@ def run_moe_torch(
                     w2,
                     topk_weights,
                     topk_ids,
-                    inplace=True,
+                    inplace=not disable_inplace(),
                     quant_config=quant_config,
                     global_num_experts=num_experts,
                     expert_map=expert_map,
