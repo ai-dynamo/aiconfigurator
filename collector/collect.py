@@ -35,6 +35,8 @@ def setup_warning_filters():
     )
 
 
+import random
+
 import torch
 from tqdm import tqdm
 
@@ -52,7 +54,7 @@ from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, se
 logger = None
 
 
-def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes):
+def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes, smoke=False):
     """Safely collect module with comprehensive error handling"""
     full_name = f"{module_name}.{test_type}"
     logger.info(f"Starting collection: {full_name}")
@@ -61,6 +63,13 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         # Get test cases
         test_cases = get_test_cases_func()
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
+
+        # Smoke test: randomly sample a small subset to verify the collector works
+        if smoke:
+            sample_size = min(10, len(test_cases))
+            test_cases = random.sample(test_cases, sample_size)
+            logger.info(f"Smoke mode: sampled {sample_size} test cases for {full_name}")
+
         # Run collection
         errors = parallel_run(test_cases, run_func, num_processes, full_name)
 
@@ -330,6 +339,7 @@ def collect_ops(
     num_processes: int,
     collections: list[dict],
     runtime_version: str | None = None,
+    smoke: bool = False,
 ) -> list[dict]:
     """Run collection for a list of resolved collection entries.
 
@@ -337,6 +347,8 @@ def collect_ops(
     Version resolution and op filtering are handled upstream by
     version_resolver.build_collections(). If runtime_version is provided,
     per-module __compat__ is validated and incompatible ops fail explicitly.
+    If smoke is True, each op randomly samples 10 test cases for a quick
+    sanity check.
     """
 
     class CompatibilityError(RuntimeError):
@@ -368,7 +380,9 @@ def collect_ops(
 
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
-            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
+            errors = collect_module_safe(
+                collection["name"], collection["type"], get_func, run_func, num_processes, smoke=smoke
+            )
             all_errors.extend(errors)
 
         except Exception as e:
@@ -385,7 +399,7 @@ def collect_ops(
     return all_errors
 
 
-def collect_sglang(num_processes: int, ops: list[str] | None = None):
+def collect_sglang(num_processes: int, ops: list[str] | None = None, smoke: bool = False):
     """Collect performance data for SGLang with enhanced error tracking"""
     from collector.sglang.registry import REGISTRY
     from collector.version_resolver import build_collections
@@ -411,12 +425,12 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
         return
 
     collections = build_collections(REGISTRY, "sglang", version, ops, logger=logger)
-    all_errors = collect_ops(num_processes, collections, version)
+    all_errors = collect_ops(num_processes, collections, version, smoke=smoke)
 
     generate_collection_summary(all_errors, "sglang", version)
 
 
-def collect_vllm(num_processes: int, ops: list[str] | None = None):
+def collect_vllm(num_processes: int, ops: list[str] | None = None, smoke: bool = False):
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
     from collector.vllm.registry import REGISTRY
@@ -430,12 +444,12 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         return
 
     collections = build_collections(REGISTRY, "vllm", version, ops, logger=logger)
-    all_errors = collect_ops(num_processes, collections, version)
+    all_errors = collect_ops(num_processes, collections, version, smoke=smoke)
 
     generate_collection_summary(all_errors, "vllm", version)
 
 
-def collect_trtllm(num_processes: int, ops: list[str] | None = None):
+def collect_trtllm(num_processes: int, ops: list[str] | None = None, smoke: bool = False):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
     from collector.trtllm.registry import REGISTRY
     from collector.version_resolver import build_collections
@@ -458,7 +472,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         return
 
     collections = build_collections(REGISTRY, "trtllm", version, ops, logger=logger)
-    all_errors = collect_ops(num_processes, collections, version)
+    all_errors = collect_ops(num_processes, collections, version, smoke=smoke)
 
     generate_collection_summary(all_errors, "trtllm", version)
 
@@ -538,6 +552,11 @@ def main():
         default=None,
     )
     parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Smoke test: randomly sample 10 test cases per op to verify the collector runs end-to-end",
+    )
+    parser.add_argument(
         "--measure_power",
         action="store_true",
         help="Enable power monitoring during kernel execution (samples at 100ms intervals)",
@@ -575,12 +594,15 @@ def main():
 
     mp.set_start_method("spawn")
 
+    if args.smoke:
+        logger.info("Smoke test mode enabled — sampling 10 random test cases per op")
+
     if args.backend == "trtllm":
-        collect_trtllm(num_processes, ops)
+        collect_trtllm(num_processes, ops, smoke=args.smoke)
     elif args.backend == "sglang":
-        collect_sglang(num_processes, ops)
+        collect_sglang(num_processes, ops, smoke=args.smoke)
     elif args.backend == "vllm":
-        collect_vllm(num_processes, ops)
+        collect_vllm(num_processes, ops, smoke=args.smoke)
 
 
 if __name__ == "__main__":
