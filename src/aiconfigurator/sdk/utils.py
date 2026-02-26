@@ -170,10 +170,6 @@ def enumerate_parallel_config(
             allow_moe_pure_tp=allow_moe_pure_tp,
         )
 
-    for parallel_config in parallel_config_list:
-        tp, pp, dp, moe_tp, moe_ep = parallel_config
-        logger.info(f"Enumerated parallel config: tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
-
     return parallel_config_list
 
 
@@ -483,13 +479,6 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])
-
-    logger.info(
-        f"Model architecture: architecture={architecture}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "
-        f"hidden_size={hidden_size}, inter_size={inter_size}, vocab={vocab}, context={context}, "
-        f"topk={topk}, num_experts={num_experts}, moe_inter_size={moe_inter_size}, "
-        f"extra_params={'present' if extra_params else 'None'}"
-    )
     return {
         "architecture": architecture,
         "layers": layers,
@@ -736,6 +725,7 @@ def _load_model_config_from_model_path(model_path: str) -> dict:
     return _attach_inferred_quant_fields(_attach_hf_quant_config(config, hf_quant_config))
 
 
+@cache
 def get_model_config_from_model_path(model_path: str) -> dict:
     """
     Get model configuration from model path and parse it into model configuration parameters.
@@ -748,5 +738,10 @@ def get_model_config_from_model_path(model_path: str) -> dict:
     """
     raw_config = _load_model_config_from_model_path(model_path)
     parsed = _parse_hf_config_json(raw_config)
+    logger.info(
+        "Loaded model config for %s: %s",
+        model_path,
+        ", ".join(f"{k}={v}" for k, v in parsed.items()),
+    )
     parsed["raw_config"] = raw_config
     return parsed
