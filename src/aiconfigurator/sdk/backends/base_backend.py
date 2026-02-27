@@ -77,13 +77,19 @@ class BaseBackend(ABC):
 
             for op in model.context_ops:
                 # query latency and store the latency
-                x = batch_size * isl if "logits_gemm" not in op._name else batch_size
+                if "logits_gemm" in op._name:
+                    x = batch_size
+                elif hasattr(op, "_vision_num_tokens"):
+                    x = batch_size * op._vision_num_tokens
+                else:
+                    x = batch_size * isl
+                s_val = op._vision_num_tokens if hasattr(op, "_vision_num_tokens") else isl
                 result = op.query(
                     database,
                     x=x,
                     batch_size=batch_size,
                     beam_width=1,
-                    s=isl,
+                    s=s_val,
                     prefix=prefix,
                     model_name=getattr(model, "model_name", ""),
                 )

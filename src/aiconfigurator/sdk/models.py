@@ -322,6 +322,11 @@ def get_model(
         # extra_params is NemotronHConfig with hybrid layer configuration
         model.set_hybrid_config(extra_params)
 
+    # Add vision encoder ops if model has vision config
+    vision_config = raw_config.get("vision_config")
+    if vision_config is not None and hasattr(model, "_add_vision_encoder_ops"):
+        model._add_vision_encoder_ops(vision_config)
+
     return model
 
 
@@ -1464,6 +1469,56 @@ class DeepSeekModel(BaseModel):
 
         # TODO
         # a lot of quantization ops
+
+    def _add_vision_encoder_ops(self, vision_config: dict) -> None:
+        """Add vision encoder (ViT + patch merger + projector) ops to context_ops.
+
+        Vision ops are prepended so the vision encoder cost is accounted for
+        before the text decoder ops.  Each vision op carries a
+        ``_vision_num_tokens`` attribute so the backend can use the correct
+        token count instead of ``isl``.
+        """
+        vt_layers = vision_config["vt_num_hidden_layers"]  # 27
+        vt_heads = vision_config["vt_num_attention_heads"]  # 16
+        vt_hidden = vision_config["vt_hidden_size"]  # 1152
+        vt_inter = vision_config["vt_intermediate_size"]  # 4304
+
+        init_h = vision_config["init_pos_emb_height"]  # 64
+        init_w = vision_config["init_pos_emb_width"]  # 64
+        num_patches = init_h * init_w  # 4096
+
+        merge_kernel = vision_config["merge_kernel_size"]  # [2, 2]
+        merge_h, merge_w = merge_kernel[0], merge_kernel[1]
+        num_merged_patches = num_patches // (merge_h * merge_w)  # 1024
+
+        mm_hidden = vision_config["mm_hidden_size"]  # 1152
+        text_hidden = vision_config["text_hidden_size"]  # 7168
+
+        fp16 = common.GEMMQuantMode.float16
+
+        # --- ViT transformer layers (pre-merge, num_patches tokens) ---
+        pre_merge_ops = [
+            ops.ElementWise("vision_norm_1", vt_layers, vt_hidden, vt_hidden, 0.8),
+            ops.GEMM("vision_qkv_gemm", vt_layers, 3 * vt_hidden, vt_hidden, fp16),
+            ops.GEMM("vision_attn_proj_gemm", vt_layers, vt_hidden, vt_hidden, fp16),
+            ops.ElementWise("vision_norm_2", vt_layers, vt_hidden, vt_hidden, 0.8),
+            ops.GEMM("vision_ffn1_gemm", vt_layers, vt_inter, vt_hidden, fp16),
+            ops.ElementWise("vision_act", vt_layers, vt_inter, vt_inter, 0.8),
+            ops.GEMM("vision_ffn2_gemm", vt_layers, vt_hidden, vt_inter, fp16),
+        ]
+        for op in pre_merge_ops:
+            op._vision_num_tokens = num_patches
+
+        # --- Patch merger + projector (post-merge, num_merged_patches tokens) ---
+        post_merge_ops = [
+            ops.GEMM("vision_merge_gemm", 1, mm_hidden, merge_h * merge_w * mm_hidden, fp16),
+            ops.GEMM("vision_projector_gemm", 1, text_hidden, mm_hidden, fp16),
+        ]
+        for op in post_merge_ops:
+            op._vision_num_tokens = num_merged_patches
+
+        # Prepend vision ops before text decoder ops
+        self.context_ops = pre_merge_ops + post_merge_ops + self.context_ops
 
 
 class TrtllmWideEPDeepSeekModel(BaseModel):
