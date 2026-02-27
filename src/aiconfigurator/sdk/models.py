@@ -715,8 +715,12 @@ class LLAMAModel(BaseModel):
         # when tp_message_size=0, the comm part will be 0
         self.context_ops.append(ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp_size))
         self.context_ops.append(ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp_size))
-        self.generation_ops.append(ops.CustomAllReduce("generation_ar_1", self._num_layers * self._mtp_scale_factor, h, tp_size))
-        self.generation_ops.append(ops.CustomAllReduce("generation_ar_2", self._num_layers * self._mtp_scale_factor, h, tp_size))
+        self.generation_ops.append(
+            ops.CustomAllReduce("generation_ar_1", self._num_layers * self._mtp_scale_factor, h, tp_size)
+        )
+        self.generation_ops.append(
+            ops.CustomAllReduce("generation_ar_2", self._num_layers * self._mtp_scale_factor, h, tp_size)
+        )
 
         # pp
         pp_scale_factor = pp_size - 1
