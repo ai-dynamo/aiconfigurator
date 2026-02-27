@@ -223,7 +223,6 @@ def worker(
             worker_logger.debug(f"Starting task {task_id}")
             func(*task, device)
             worker_logger.debug(f"Completed task {task_id}")
-            emit_done(task_id)
         except Exception as e:
             # Build comprehensive error info
             error_info = {
@@ -240,7 +239,6 @@ def worker(
             # Report error to queue BEFORE any exit
             if error_queue:
                 error_queue.put(error_info)
-            emit_done(task_id)
 
             worker_logger.exception(f"Task {task_id} failed")
 
@@ -262,6 +260,10 @@ def worker(
                 # which we don't want (error already reported above).
                 exit(0)
         finally:
+            # emit_done lives in finally so it runs for ALL exit paths:
+            # normal return, Exception, SystemExit (sys.exit), KeyboardInterrupt.
+            emit_done(task_id)
+
             # CRITICAL: Increment progress regardless of success or failure
             # This marks the task as "attempted" and tracks overall progress
             with lock:
@@ -406,7 +408,12 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 stall_count = 0
                 last_progress = progress_value.value
 
-            # Check process health
+            # Check process health — only restart if there is still work
+            # remaining.  Workers that consumed a None sentinel or finished
+            # via sys.exit(EXIT_CODE_RESTART) should not be restarted once
+            # all tasks are dispatched, otherwise the new worker blocks
+            # forever on queue.get().
+            remaining = len(task_infos) - progress_value.value
             for i, p in enumerate(processes):
                 if not p.is_alive():
                     exit_code = p.exitcode
@@ -434,7 +441,11 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                         logger.error(f"Process {i} exceeded restart limit, not restarting")
                         continue
 
-                    processes[i] = start_process(i)
+                    if remaining > 0:
+                        processes[i] = start_process(i)
+                        queue.put(None)  # ensure the new worker can terminate
+                    else:
+                        processes[i] = p  # keep dead process ref, skip restart
 
             current = progress_value.value
             if current > pbar.n:
