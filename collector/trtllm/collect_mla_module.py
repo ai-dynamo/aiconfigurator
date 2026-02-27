@@ -147,6 +147,37 @@ def get_generation_test_cases(attn_type: str):
     return cases
 
 
+def _build_module_test_cases(attn_type: str, mode: str):
+    """Build module-level test cases for a specific attention type and phase.
+
+    Output test case format is positional args for run_mla_module_worker:
+    [seq_len, batch_size, num_heads, kv_cache_dtype, perf_filename, model_path, attn_type]
+    """
+    base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
+    model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
+    cases = []
+    for model_path in model_paths:
+        for s, b, h, kv_dtype, fname in base_cases:
+            cases.append([s, b, h, kv_dtype, fname, model_path, attn_type])
+    return cases
+
+
+def get_context_module_test_cases():
+    """collect.py entrypoint for context module collection across all models."""
+    cases = []
+    for _, attn_type in SUPPORTED_MODELS.items():
+        cases.extend(_build_module_test_cases(attn_type=attn_type, mode="context"))
+    return cases
+
+
+def get_generation_module_test_cases():
+    """collect.py entrypoint for generation module collection across all models."""
+    cases = []
+    for _, attn_type in SUPPORTED_MODELS.items():
+        cases.extend(_build_module_test_cases(attn_type=attn_type, mode="generation"))
+    return cases
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Layer Construction
 # ═══════════════════════════════════════════════════════════════════════
@@ -505,6 +536,29 @@ def run_mla_module(
 
     _cleanup(kv_cache_manager)
     return latency
+
+
+def run_mla_module_worker(
+    seq_len: int,
+    batch_size: int,
+    num_heads: int,
+    kv_cache_dtype: str,
+    perf_filename: str,
+    model_path: str,
+    attn_type: str,
+    device: str = "cuda:0",
+):
+    """Worker-compatible positional wrapper used by collector/collect.py."""
+    return run_mla_module(
+        seq_len=seq_len,
+        batch_size=batch_size,
+        num_heads=num_heads,
+        kv_cache_dtype=kv_cache_dtype,
+        perf_filename=perf_filename,
+        model_path=model_path,
+        attn_type=attn_type,
+        device=device,
+    )
 
 
 def _cleanup(kv_cache_manager):
