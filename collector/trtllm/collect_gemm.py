@@ -92,7 +92,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
             w = torch.randn((n, k), dtype=torch.float16, device=torch.device(device))
             w_sf_global = (448 * 6) / w.abs().max().float()
             w_fp4, w_sf_block = torch.ops.trtllm.fp4_quantize(w, w_sf_global, 16, False)
-            if tensorrt_llm.__version__.startswith(("1.1.0", "1.2.0")):
+            if tensorrt_llm.__version__.startswith(("1.1.0", "1.2.0", "1.3.0")):
                 w_sf_block_unswizzled = torch.ops.trtllm.block_scale_interleave_reverse(
                     w_sf_block.cpu().view(pad_up(n, 128), -1)
                 )

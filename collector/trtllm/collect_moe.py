@@ -388,7 +388,11 @@ def run_moe_torch(
         if existing_files:
             json_path = existing_files[0]
             try:
-                AutoTuner.get().profiling_cache.load_cache(json_path)
+                # TRT-LLM 1.3.0+ requires rank argument
+                try:
+                    AutoTuner.get().profiling_cache.load_cache(json_path, rank=0)
+                except TypeError:
+                    AutoTuner.get().profiling_cache.load_cache(json_path)
                 cache_loaded = True
                 print(f"Loaded profiling cache from {json_path}")
             except (OSError, json.JSONDecodeError):

@@ -3,7 +3,7 @@
 
 import tensorrt_llm
 import torch
-from tensorrt_llm._torch.attention_backend import AttentionInputType, TrtllmAttentionMetadata
+from tensorrt_llm._torch.attention_backend import TrtllmAttentionMetadata
 from tensorrt_llm._torch.attention_backend.interface import (
     AttentionRuntimeFeatures,
     PositionalEmbeddingParams,
@@ -283,17 +283,48 @@ def run_mla(
 
     # self.qk_nope_head_dim + self.qk_rope_head_dim
     if is_context_phase:
-        fused_q = torch.randn(
-            [
-                num_tokens,
-                num_heads
-                * (
-                    qk_nope_head_dim + qk_rope_head_dim + qk_nope_head_dim + qk_rope_head_dim + v_head_dim
-                ),  # 128 128 64
-            ],
-            device=device,
-            dtype=torch.bfloat16,
-        )
+        qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        try:
+            # TRT-LLM 1.3.0+: context MLA expects separate Q, K, V (is_fused_qkv=False)
+            from tensorrt_llm._torch.attention_backend.trtllm import AttentionInputType
+
+            _context_needs_separate_qkv = True
+        except ImportError:
+            _context_needs_separate_qkv = False
+
+        if _context_needs_separate_qkv:
+            # Q: [num_tokens, num_heads * qk_head_dim]
+            fused_q = torch.randn(
+                [num_tokens, num_heads * qk_head_dim],
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            # K: [num_tokens, num_heads * qk_head_dim]
+            context_k = torch.randn(
+                [num_tokens, num_heads * qk_head_dim],
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            # V: [num_tokens, num_heads * v_head_dim]
+            context_v = torch.randn(
+                [num_tokens, num_heads * v_head_dim],
+                device=device,
+                dtype=torch.bfloat16,
+            )
+        else:
+            fused_q = torch.randn(
+                [
+                    num_tokens,
+                    num_heads
+                    * (
+                        qk_nope_head_dim + qk_rope_head_dim + qk_nope_head_dim + qk_rope_head_dim + v_head_dim
+                    ),  # 128 128 64
+                ],
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            context_k = None
+            context_v = None
         q_pe = None
     else:
         fused_q = torch.randn(
@@ -302,13 +333,17 @@ def run_mla(
             dtype=torch.bfloat16,
         )
         q_pe = torch.randn([num_tokens, num_heads, qk_rope_head_dim], dtype=torch.bfloat16, device=device)
+        # TRT-LLM 1.3.0+ MLA generation requires cu_q/kv_seqlens and fmha_scheduler_counter
+        cu_q_seqlens = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
+        cu_kv_seqlens = torch.empty(batch_size + 1, dtype=torch.int32, device=device)
+        fmha_scheduler_counter = torch.empty(1, dtype=torch.uint32, device=device)
 
     # dry run
     if is_context_phase:
         attn.forward(
             fused_q,
-            None,
-            None,
+            context_k,
+            context_v,
             attn_metadata,
             out_scale=torch.tensor([]).float().to(torch.device(device)),
             attention_input_type=AttentionInputType.context_only,
@@ -324,6 +359,9 @@ def run_mla(
             attention_input_type=AttentionInputType.generation_only,
             latent_cache=latent_cache,
             q_pe=q_pe,
+            cu_q_seqlens=cu_q_seqlens,
+            cu_kv_seqlens=cu_kv_seqlens,
+            fmha_scheduler_counter=fmha_scheduler_counter,
         )
 
     # Use benchmark_with_power context manager
@@ -331,8 +369,8 @@ def run_mla(
         if is_context_phase:
             attn.forward(
                 fused_q,
-                None,
-                None,
+                context_k,
+                context_v,
                 attn_metadata,
                 out_scale=torch.tensor([]).float().to(torch.device(device)),
                 attention_input_type=AttentionInputType.context_only,
@@ -348,6 +386,9 @@ def run_mla(
                 attention_input_type=AttentionInputType.generation_only,
                 latent_cache=latent_cache,
                 q_pe=q_pe,
+                cu_q_seqlens=cu_q_seqlens,
+                cu_kv_seqlens=cu_kv_seqlens,
+                fmha_scheduler_counter=fmha_scheduler_counter,
             )
 
     with benchmark_with_power(
