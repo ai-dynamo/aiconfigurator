@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+import hashlib
 import heapq
 import json
 import logging
@@ -613,10 +614,14 @@ def get_sm_version():
 
 
 def create_test_case_id(test_case, test_type, module_name):
-    """Create unique identifier for test cases"""
-    # Convert test case to string for hashing
-    test_str = str(test_case)
-    return f"{module_name}_{test_type}_{abs(hash(test_str)) % 100000}_{test_str}"
+    """Create a stable, cross-session identifier for a test case.
+
+    Uses SHA-256 instead of Python's built-in hash() so that IDs are
+    deterministic across interpreter sessions (PYTHONHASHSEED) and machines.
+    """
+    raw = f"{module_name}:{test_type}:{test_case}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f"{module_name}_{test_type}_{digest}"
 
 
 def log_perf(

@@ -46,13 +46,99 @@ import signal
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
 
 logger = None
+RESUME_SCHEMA_VERSION = "collector-resume-v1"
 
 
-def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes):
+class ResumeCheckpoint:
+    """Tracks which tasks are done so a collection run can be resumed.
+
+    Always writes checkpoint files.  When ``--resume`` is passed the existing
+    checkpoint is loaded and done tasks are skipped; otherwise the checkpoint
+    is overwritten from scratch (so a future ``--resume`` can pick up).
+    """
+
+    FLUSH_INTERVAL_SEC = 2.0
+
+    def __init__(self, backend: str, module_name: str, run_func_name: str, resume_dir: str):
+        self.module_name = module_name
+        self._dirty = False
+        self._last_flush = 0.0
+        self._metadata = {
+            "schema": RESUME_SCHEMA_VERSION,
+            "backend": backend,
+            "module": module_name,
+            "run_func": run_func_name,
+        }
+        self._done: set[str] = set()
+
+        safe_name = module_name.replace("/", "_").replace(":", "_")
+        self._path = Path(resume_dir).expanduser().resolve() / backend / f"{safe_name}.json"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def load_existing(self):
+        """Load an existing checkpoint for resume.  Raises on mismatch."""
+        if not self._path.exists():
+            logger.info(f"{self.module_name}: no checkpoint found, starting fresh")
+            return
+
+        try:
+            with open(self._path) as f:
+                data = json.load(f)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load checkpoint {self._path}: {e}. Run without --resume to start fresh."
+            ) from e
+
+        for key in ("schema", "backend", "module", "run_func"):
+            if data.get(key) != self._metadata[key]:
+                raise RuntimeError(
+                    f"{self.module_name}: checkpoint mismatch "
+                    f"({key}: {data.get(key)} != {self._metadata[key]}). "
+                    "Run without --resume to start fresh."
+                )
+
+        self._done = set(data.get("done", []))
+        logger.info(f"{self.module_name}: loaded {len(self._done)} completed tasks from checkpoint")
+
+    # -- public API -------------------------------------------------------
+
+    def filter_done(self, task_infos: list[dict]) -> list[dict]:
+        """Return only tasks that are not yet done."""
+        runnable = [t for t in task_infos if t["id"] not in self._done]
+        skipped = len(task_infos) - len(runnable)
+        if skipped:
+            logger.info(f"{self.module_name}: skipping {skipped} done tasks, running {len(runnable)}")
+        return runnable
+
+    def mark_done(self, task_id: str):
+        self._done.add(task_id)
+        self._dirty = True
+        self.flush()
+
+    def flush(self, force: bool = False):
+        if not self._dirty:
+            return
+        now = time.time()
+        if not force and (now - self._last_flush) < self.FLUSH_INTERVAL_SEC:
+            return
+
+        data = {**self._metadata, "updated_at": datetime.now().isoformat(), "done": sorted(self._done)}
+        tmp_path = self._path.with_suffix(".json.tmp")
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, self._path)
+        self._dirty = False
+        self._last_flush = now
+
+
+def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes, resume_options=None):
     """Safely collect module with comprehensive error handling"""
     full_name = f"{module_name}.{test_type}"
     logger.info(f"Starting collection: {full_name}")
@@ -62,7 +148,13 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         test_cases = get_test_cases_func()
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
         # Run collection
-        errors = parallel_run(test_cases, run_func, num_processes, full_name)
+        errors = parallel_run(
+            test_cases,
+            run_func,
+            num_processes,
+            full_name,
+            resume_options=resume_options,
+        )
 
         return errors
 
@@ -78,7 +170,16 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         ]
 
 
-def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, module_name="unknown"):
+def worker(
+    queue,
+    device_id: int,
+    func,
+    progress_value,
+    lock,
+    error_queue=None,
+    result_queue=None,
+    module_name="unknown",
+):
     """worker with automatic logging setup"""
 
     setup_warning_filters()  # Must run in each spawned process
@@ -93,6 +194,15 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     device = torch.device(f"cuda:{device_id}")
     torch.cuda.set_device(device_id)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
+
+    def emit_done(task_id: str):
+        """Notify the main process that a task was attempted (success or failure)."""
+        if not result_queue:
+            return
+        try:
+            result_queue.put(task_id)
+        except Exception:
+            pass
 
     # Process tasks
     while True:
@@ -113,6 +223,7 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             worker_logger.debug(f"Starting task {task_id}")
             func(*task, device)
             worker_logger.debug(f"Completed task {task_id}")
+            emit_done(task_id)
         except Exception as e:
             # Build comprehensive error info
             error_info = {
@@ -129,6 +240,7 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
             # Report error to queue BEFORE any exit
             if error_queue:
                 error_queue.put(error_info)
+            emit_done(task_id)
 
             worker_logger.exception(f"Task {task_id} failed")
 
@@ -164,10 +276,39 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 torch.cuda.empty_cache()
 
 
-def parallel_run(tasks, func, num_processes, module_name="unknown"):
+def parallel_run(tasks, func, num_processes, module_name="unknown", resume_options=None):
     """parallel runner with error collection"""
+    raw_task_infos = []
+    for i, task in enumerate(tasks):
+        if isinstance(task, dict) and "id" in task and "params" in task:
+            task_id = task["id"]
+            task_params = task["params"]
+        else:
+            task_id = create_test_case_id(task, func.__name__, module_name)
+            task_params = task
+        raw_task_infos.append({"id": task_id, "params": task_params, "index": i})
+
+    resume_dir = resume_options.get("resume_dir", ".collector_resume") if resume_options else ".collector_resume"
+    resume_tracker = ResumeCheckpoint(
+        backend=resume_options.get("backend", "unknown") if resume_options else "unknown",
+        module_name=module_name,
+        run_func_name=func.__name__,
+        resume_dir=resume_dir,
+    )
+
+    if resume_options and resume_options.get("resume"):
+        resume_tracker.load_existing()
+        task_infos = resume_tracker.filter_done(raw_task_infos)
+    else:
+        task_infos = raw_task_infos
+
+    if not task_infos:
+        logger.info(f"{module_name}: no tasks to run")
+        return []
+
     queue = mp.Queue()
     error_queue = mp.Queue()
+    result_queue = mp.Queue()
     processes = []
     manager = mp.Manager()
     progress_value = manager.Value("i", 0)
@@ -179,7 +320,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     def start_process(device_id):
         p = mp.Process(
             target=worker,
-            args=(queue, device_id, func, progress_value, lock, error_queue, module_name),
+            args=(queue, device_id, func, progress_value, lock, error_queue, result_queue, module_name),
         )
         p.start()
         logger.info(f"Started worker process {p.pid} on device {device_id}")
@@ -215,20 +356,20 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             "timestamp": datetime.now().isoformat(),
         }
 
+    def drain_done_events():
+        while not result_queue.empty():
+            try:
+                task_id = result_queue.get_nowait()
+            except Exception:
+                break
+            resume_tracker.mark_done(task_id)
+
     # Start processes
     for device_id in range(num_processes):
         processes.append(start_process(device_id))
 
     # Queue tasks with IDs
-    for i, task in enumerate(tasks):
-        if not isinstance(task, dict):
-            task_info = {
-                "id": create_test_case_id(task, func.__name__, module_name),
-                "params": task,
-                "index": i,
-            }
-        else:
-            task_info = task
+    for task_info in task_infos:
         queue.put(task_info)
 
     # Add termination signals
@@ -237,17 +378,19 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
 
     # Monitor progress with error collection
     errors = []
-    with tqdm(total=len(tasks), desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
+
+    with tqdm(total=len(task_infos), desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
         last_progress = 0
         stall_count = 0
         last_error_count = 0
 
-        while progress_value.value < len(tasks):
+        while progress_value.value < len(task_infos):
             # Drain errors
             while not error_queue.empty():
                 error = error_queue.get()
                 errors.append(error)
                 process_stats[error["device_id"]]["errors"].append(error["task_id"])
+            drain_done_events()
 
             # Update postfix only if count changed
             if len(errors) != last_error_count:
@@ -258,7 +401,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             if progress_value.value == last_progress:
                 stall_count += 1
                 if stall_count > 30:
-                    logger.warning(f"Progress stalled at {progress_value.value}/{len(tasks)}")
+                    logger.warning(f"Progress stalled at {progress_value.value}/{len(task_infos)}")
             else:
                 stall_count = 0
                 last_progress = progress_value.value
@@ -297,11 +440,15 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             if current > pbar.n:
                 pbar.update(current - pbar.n)
 
+            resume_tracker.flush()
             time.sleep(2)
+        drain_done_events()
 
     # Collect remaining errors
     while not error_queue.empty():
         errors.append(error_queue.get())
+    drain_done_events()
+    resume_tracker.flush(force=True)
 
     # Wait for processes
     for p in processes:
@@ -331,6 +478,8 @@ def collect_ops(
     collections: list[dict],
     ops: list[str] | None = None,
     framework_version: str | None = None,
+    backend: str = "unknown",
+    resume_options: dict | None = None,
 ) -> list[dict]:
     all_errors = []
 
@@ -354,7 +503,15 @@ def collect_ops(
 
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
-            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
+            merged_resume = {**(resume_options or {}), "backend": backend}
+            errors = collect_module_safe(
+                collection["name"],
+                collection["type"],
+                get_func,
+                run_func,
+                num_processes,
+                resume_options=merged_resume,
+            )
             all_errors.extend(errors)
 
         except Exception as e:
@@ -371,7 +528,7 @@ def collect_ops(
     return all_errors
 
 
-def collect_sglang(num_processes: int, ops: list[str] | None = None):
+def collect_sglang(num_processes: int, ops: list[str] | None = None, resume_options: dict | None = None):
     """Collect performance data for SGLang with enhanced error tracking"""
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
 
@@ -500,18 +657,32 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
     ]
 
     # Run non-wideep collections with multi-process
-    all_errors = collect_ops(num_processes, collections, ops, version)
+    all_errors = collect_ops(
+        num_processes,
+        collections,
+        ops,
+        version,
+        backend="sglang",
+        resume_options=resume_options,
+    )
 
     # Run wideep collections - now supports multi-process with proper port isolation
     if ops is None or any(c["type"] in ops for c in wideep_collections):
         logger.info(f"Running wideep collections with {num_processes} processes")
-        wideep_errors = collect_ops(num_processes, wideep_collections, ops, version)
+        wideep_errors = collect_ops(
+            num_processes,
+            wideep_collections,
+            ops,
+            version,
+            backend="sglang",
+            resume_options=resume_options,
+        )
         all_errors.extend(wideep_errors)
 
     generate_collection_summary(all_errors, "sglang", version)
 
 
-def collect_vllm(num_processes: int, ops: list[str] | None = None):
+def collect_vllm(num_processes: int, ops: list[str] | None = None, resume_options: dict | None = None):
     """
     Collect performance data for VLLM
     """
@@ -573,12 +744,19 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         },
     ]
 
-    all_errors = collect_ops(num_processes, collections, ops, version)
+    all_errors = collect_ops(
+        num_processes,
+        collections,
+        ops,
+        version,
+        backend="vllm",
+        resume_options=resume_options,
+    )
 
     generate_collection_summary(all_errors, "vllm", version)
 
 
-def collect_trtllm(num_processes: int, ops: list[str] | None = None):
+def collect_trtllm(num_processes: int, ops: list[str] | None = None, resume_options: dict | None = None):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
 
     os.environ["TLLM_LOG_LEVEL"] = "ERROR"
@@ -713,7 +891,14 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
         },
     ]
 
-    all_errors = collect_ops(num_processes, collections, ops, version)
+    all_errors = collect_ops(
+        num_processes,
+        collections,
+        ops,
+        version,
+        backend="trtllm",
+        resume_options=resume_options,
+    )
 
     # Generate summary report
     generate_collection_summary(all_errors, "trtllm", version)
@@ -806,6 +991,17 @@ def main():
         default=1.0,
         help="Minimum duration for kernel runs when power measurement is enabled (default: 1.0s)",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume collection from checkpoint, skipping already-attempted tasks",
+    )
+    parser.add_argument(
+        "--resume-dir",
+        type=str,
+        default=".collector_resume",
+        help="Directory for per-module resume checkpoints (default: .collector_resume)",
+    )
     args = parser.parse_args()
     ops = args.ops
 
@@ -818,6 +1014,12 @@ def main():
 
     num_processes = torch.cuda.device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
+    resume_options = {
+        "resume": args.resume,
+        "resume_dir": args.resume_dir,
+    }
+    if args.resume:
+        logger.info(f"Resume enabled: dir={Path(args.resume_dir).expanduser()}")
 
     # Set environment variables for worker processes
     if args.measure_power:
@@ -834,11 +1036,11 @@ def main():
     mp.set_start_method("spawn")
 
     if args.backend == "trtllm":
-        collect_trtllm(num_processes, ops)
+        collect_trtllm(num_processes, ops, resume_options=resume_options)
     elif args.backend == "sglang":
-        collect_sglang(num_processes, ops)
+        collect_sglang(num_processes, ops, resume_options=resume_options)
     elif args.backend == "vllm":
-        collect_vllm(num_processes, ops)
+        collect_vllm(num_processes, ops, resume_options=resume_options)
 
 
 if __name__ == "__main__":
