@@ -51,3 +51,7 @@ class RuntimeConfig:
     ttft: float = None
     tpot: Union[float, list] = None
     request_latency: float = None  # it works together with ttft. 1. <= req_lat 2. <= req_lat and <= ttft
+    # VLM parameters
+    num_images: int = 0
+    image_height: int = 384
+    image_width: int = 384

@@ -419,7 +419,7 @@ def enumerate_profiling_configs(
             model_info = get_model_config_from_model_path(model_path)
             architecture = model_info.get("architecture", "")
             # GQA+MoE architectures that support pure TP sweeping
-            _gqa_moe_architectures = {"Qwen3MoeForCausalLM"}
+            _gqa_moe_architectures = {"Qwen3MoeForCausalLM", "Qwen3VLMoeForConditionalGeneration"}
             allow_moe_pure_tp = architecture in _gqa_moe_architectures
         except Exception:
             allow_moe_pure_tp = False
