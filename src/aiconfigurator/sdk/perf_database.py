@@ -2473,7 +2473,6 @@ class PerfDatabase:
                         target_x_list=target_x_list,
                         target_y_list=target_y_list,
                         target_z_list=target_z_list,
-                        sqrt_y_value=True,
                     )
 
         if getattr(self, "_generation_dsa_module_data", None) is not None:
