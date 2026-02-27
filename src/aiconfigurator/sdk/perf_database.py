@@ -1100,7 +1100,7 @@ def load_mla_bmm_data(mla_bmm_file):
     return mla_bmm_data
 
 
-def load_context_dsa_data(dsa_file: str):
+def load_context_dsa_module_data(dsa_file: str):
     """
     Load context DSA data. Produces the SAME dict structure as load_context_mla_data
     so that the same interpolation and query infrastructure can be reused.
@@ -1143,7 +1143,7 @@ def load_context_dsa_data(dsa_file: str):
     return dsa_data
 
 
-def load_generation_dsa_data(dsa_file: str):
+def load_generation_dsa_module_data(dsa_file: str):
     """
     Load generation DSA data. Produces the SAME dict structure as load_generation_mla_data
     so that the same interpolation and query infrastructure can be reused.
@@ -2020,13 +2020,13 @@ class PerfDatabase:
             self._nccl_data = load_nccl_data(nccl_data_dir)
             self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
             self._mamba2_data = load_mamba2_data(os.path.join(data_dir, common.PerfDataFilename.mamba2.value))
-            # DSA (DeepSeek Sparse Attention) for V3.2
+            # DSA module-level attention data (DeepSeek Sparse Attention)
             # Uses same dict structure as MLA so interpolation/query can be reused
-            self._context_dsa_data = load_context_dsa_data(
-                os.path.join(data_dir, common.PerfDataFilename.dsa_context.value)
+            self._context_dsa_module_data = load_context_dsa_module_data(
+                os.path.join(data_dir, common.PerfDataFilename.dsa_context_module.value)
             )
-            self._generation_dsa_data = load_generation_dsa_data(
-                os.path.join(data_dir, common.PerfDataFilename.dsa_generation.value)
+            self._generation_dsa_module_data = load_generation_dsa_module_data(
+                os.path.join(data_dir, common.PerfDataFilename.dsa_generation_module.value)
             )
             self._compute_scale_data = load_compute_scale_data(
                 os.path.join(data_dir, common.PerfDataFilename.compute_scale.value)
@@ -2453,11 +2453,11 @@ class PerfDatabase:
 
         # DSA (DeepSeek Sparse Attention) data interpolation
         # Uses EXACT same pattern as MLA since dict structure is identical
-        if getattr(self, "_context_dsa_data", None) is not None:
-            for quant_mode in self._context_dsa_data:
-                for kv_cache_dtype in self._context_dsa_data[quant_mode]:
-                    num_heads_list = list(self._context_dsa_data[quant_mode][kv_cache_dtype].keys())
-                    data_dict = self._context_dsa_data[quant_mode][kv_cache_dtype]
+        if getattr(self, "_context_dsa_module_data", None) is not None:
+            for quant_mode in self._context_dsa_module_data:
+                for kv_cache_dtype in self._context_dsa_module_data[quant_mode]:
+                    num_heads_list = list(self._context_dsa_module_data[quant_mode][kv_cache_dtype].keys())
+                    data_dict = self._context_dsa_module_data[quant_mode][kv_cache_dtype]
                     target_x_list = num_heads_list
                     target_y_list = (
                         [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
@@ -2476,10 +2476,10 @@ class PerfDatabase:
                         sqrt_y_value=True,
                     )
 
-        if getattr(self, "_generation_dsa_data", None) is not None:
-            for kv_cache_dtype in self._generation_dsa_data:
-                tp_list = list(self._generation_dsa_data[kv_cache_dtype].keys())
-                data_dict = self._generation_dsa_data[kv_cache_dtype]
+        if getattr(self, "_generation_dsa_module_data", None) is not None:
+            for kv_cache_dtype in self._generation_dsa_module_data:
+                tp_list = list(self._generation_dsa_module_data[kv_cache_dtype].keys())
+                data_dict = self._generation_dsa_module_data[kv_cache_dtype]
                 target_x_list = tp_list
                 target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]
                 target_z_list = [
@@ -5582,7 +5582,7 @@ class PerfDatabase:
     # ═══════════════════════════════════════════════════════════════════
 
     @functools.lru_cache(maxsize=32768)
-    def query_context_dsa(
+    def query_context_dsa_module(
         self,
         b: int,
         s: int,
@@ -5597,9 +5597,9 @@ class PerfDatabase:
         index_topk: int = 2048,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
-        Query context DSA (DeepSeek Sparse Attention) latency and energy.
+        Query context DSA module-level latency and energy.
 
-        DSA block includes: kv_a_proj + norms + q_b_proj + indexer (wq_b + weights_proj +
+        DSA module includes: kv_a_proj + norms + q_b_proj + indexer (wq_b + weights_proj +
         FP8 MQA logits + TopK) + sparse MLA (BMM pre + sparse attention + BMM post) + o_proj.
 
         Args:
@@ -5617,7 +5617,8 @@ class PerfDatabase:
         Returns:
             PerformanceResult or (sol_time, sol_math, sol_mem) for SOL_FULL
         """
-        # DeepSeek-V3.2 DSA structural dims are fixed in TRT-LLM 1.2.0rc5.
+        # DeepSeek-V3.2 DSA structural dims.
+        # FIXME: should use model config to get the structural dims.
         hidden_size = 7168
         q_lora = 1536
         kv_lora = 512
@@ -5626,7 +5627,6 @@ class PerfDatabase:
         v_dim = 128
         qk_head_dim = qk_nope + qk_rope
         attn_head_dim = kv_lora + qk_rope
-        default_profile = index_n_heads == 64 and index_head_dim == 128 and index_topk == 2048
 
         def get_sol(
             b: int,
@@ -5733,7 +5733,7 @@ class PerfDatabase:
             fmha_quant_mode: common.FMHAQuantMode,
         ) -> float:
             latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
-            scale_factor = 0.5  # DSA has more kernel launch overhead than MLA
+            scale_factor = 0.5
             return latency / scale_factor
 
         if database_mode is None:
@@ -5748,18 +5748,13 @@ class PerfDatabase:
             return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
-                dsa_data = getattr(self, "_context_dsa_data", None)
-                if dsa_data is None:
+                dsa_module_data = getattr(self, "_context_dsa_module_data", None)
+                if dsa_module_data is None:
                     raise PerfDataNotAvailableError(
-                        f"Context DSA perf data not loaded for system='{self.system}', "
+                        f"Context DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                if not default_profile:
-                    raise PerfDataNotAvailableError(
-                        "Context DSA perf data only supports DeepSeek-V3.2 default DSA dimensions; "
-                        "falling back to empirical estimation for custom parameterization."
-                    )
-                dsa_dict = dsa_data[fmha_quant_mode][kvcache_quant_mode]
+                dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode]
                 full_s = s + prefix
                 result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                 latency = result["latency"]
@@ -5774,21 +5769,21 @@ class PerfDatabase:
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
-                        f"Failed to query context DSA for {b=}, {s=}, {prefix=}, {num_heads=}, "
+                        f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
                         f"{index_n_heads=}, {index_head_dim=}, {index_topk=}; using empirical"
                     )
                     latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
                     return PerformanceResult(latency, energy=0.0)
                 else:
                     logger.exception(
-                        f"Failed to query context DSA for {b=}, {s=}, {prefix=}, {num_heads=}, "
+                        f"Failed to query context DSA module for {b=}, {s=}, {prefix=}, {num_heads=}, "
                         f"{index_n_heads=}, {index_head_dim=}, {index_topk=}, "
                         f"{kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}."
                     )
                     raise
 
     @functools.lru_cache(maxsize=32768)
-    def query_generation_dsa(
+    def query_generation_dsa_module(
         self,
         b: int,
         s: int,
@@ -5801,7 +5796,7 @@ class PerfDatabase:
         index_topk: int = 2048,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
-        Query generation DSA latency and energy.
+        Query generation DSA module-level latency and energy.
 
         Args:
             b: Batch size (each generating 1 token)
@@ -5813,7 +5808,7 @@ class PerfDatabase:
             index_head_dim: Head dim in the indexer
             index_topk: Top-k selected by the indexer
         """
-        # DeepSeek-V3.2 DSA structural dims are fixed in TRT-LLM 1.2.0rc5.
+        # FIXME: should use model config to get the structural dims.
         hidden_size = 7168
         q_lora = 1536
         kv_lora = 512
@@ -5822,15 +5817,11 @@ class PerfDatabase:
         v_dim = 128
         qk_head_dim = qk_nope + qk_rope
         attn_head_dim = kv_lora + qk_rope
-        default_profile = index_n_heads == 64 and index_head_dim == 128 and index_topk == 2048
 
         def get_sol(
             b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode
         ) -> tuple[float, float, float]:
-            """
-            SOL estimate for generation DSA block (1 token per request).
-            Generation is memory-bound: dominant cost is reading KV cache for indexer + sparse attn.
-            """
+            """SOL estimate for generation DSA module (1 token per request)."""
             if kv_cache_dtype == common.KVCacheQuantMode.fp8:
                 quant_mode_gen = common.FMHAQuantMode.fp8
             else:
@@ -5840,8 +5831,13 @@ class PerfDatabase:
             proj_out = q_lora + kv_lora + qk_rope + index_head_dim
             effective_kv = min(s, index_topk)
 
-            # --- Compute ---
+            # --- Compute (FLOPs) ---
             # GEMMs: small M (=b), dominated by weight loading
+            # 1. kv_a_proj: [tokens, hidden_size] x [hidden_size, q_lora+kv_lora+qk_rope+index_head_dim]
+            # 2. q_b_proj:  [tokens, q_lora] x [q_lora, num_heads * qk_head_dim]
+            # 3. Indexer wq_b: [tokens, q_lora] x [q_lora, index_n_heads * index_head_dim]
+            # 4. Indexer weights_proj: [tokens, hidden_size] x [hidden_size, index_n_heads]
+            # 5. o_proj: [tokens, num_heads*v_dim] x [num_heads*v_dim, hidden_size]
             gemm_ops = (
                 2 * tokens * hidden_size * proj_out
                 + 2 * tokens * q_lora * num_heads * qk_head_dim
@@ -5849,20 +5845,16 @@ class PerfDatabase:
                 + 2 * tokens * hidden_size * index_n_heads
                 + 2 * tokens * num_heads * v_dim * hidden_size
             )
-
-            # Indexer: paged MQA logits over full KV cache
+            # 6. Indexer: paged MQA logits over full KV cache
             indexer_ops = 2 * tokens * index_n_heads * index_head_dim * s
-
-            # Sparse attention: only top-k tokens
-            #   QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512).
+            # 7. Sparse attention: only top-k tokens
+            #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512)
             sparse_ops = 2 * tokens * num_heads * (attn_head_dim + kv_lora) * effective_kv
-
-            # BMMs
+            # 8. BMM pre (q_nope absorption) + BMM post (V projection)
             bmm_ops = 2 * num_heads * tokens * qk_nope * kv_lora + 2 * num_heads * tokens * kv_lora * v_dim
-
             total_ops = gemm_ops + indexer_ops + sparse_ops + bmm_ops
 
-            # --- Memory ---
+            # --- Memory (bytes) ---
             dtype_bytes = quant_mode_gen.value.memory
             # Indexer K cache read: full s (paged, FP8)
             indexer_cache_bytes = b * s * index_head_dim
@@ -5900,18 +5892,13 @@ class PerfDatabase:
             return PerformanceResult(emp_latency, energy=0.0)
         else:
             try:
-                dsa_data = getattr(self, "_generation_dsa_data", None)
-                if dsa_data is None:
+                dsa_module_data = getattr(self, "_generation_dsa_module_data", None)
+                if dsa_module_data is None:
                     raise PerfDataNotAvailableError(
-                        f"Generation DSA perf data not loaded for system='{self.system}', "
+                        f"Generation DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                if not default_profile:
-                    raise PerfDataNotAvailableError(
-                        "Generation DSA perf data only supports DeepSeek-V3.2 default DSA dimensions; "
-                        "falling back to empirical estimation for custom parameterization."
-                    )
-                dsa_dict = dsa_data[kv_cache_dtype]
+                dsa_dict = dsa_module_data[kv_cache_dtype]
                 result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
@@ -5919,14 +5906,14 @@ class PerfDatabase:
             except Exception:
                 if database_mode == common.DatabaseMode.HYBRID:
                     logger.debug(
-                        f"Failed to query generation DSA for {b=}, {s=}, {num_heads=}, "
+                        f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
                         f"{index_n_heads=}, {index_head_dim=}, {index_topk=}; using empirical"
                     )
                     latency = get_empirical(b, s, num_heads, kv_cache_dtype)
                     return PerformanceResult(latency, energy=0.0)
                 else:
                     logger.exception(
-                        f"Failed to query generation DSA for {b=}, {s=}, {num_heads=}, "
+                        f"Failed to query generation DSA module for {b=}, {s=}, {num_heads=}, "
                         f"{index_n_heads=}, {index_head_dim=}, {index_topk=}, "
                         f"{kv_cache_dtype=}, {database_mode=}."
                     )

@@ -1385,13 +1385,13 @@ class Mamba2(Operation):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# DSA (DeepSeek Sparse Attention) Operations for DeepSeek-V3.2
+# DSA (DeepSeek Sparse Attention) Operations
 # ═══════════════════════════════════════════════════════════════════════
 
 
-class ContextDSA(Operation):
+class ContextDSAModule(Operation):
     """
-    Context phase DSA (DeepSeek Sparse Attention) operation for V3.2.
+    Context phase DSA (DeepSeek Sparse Attention) module-level operation.
 
     Models the full DSA attention block including:
     - kv_a_proj_with_mqa GEMM (includes indexer K projection)
@@ -1428,7 +1428,7 @@ class ContextDSA(Operation):
         isl = kwargs.get("s")
         prefix = kwargs.get("prefix", 0)
 
-        result = database.query_context_dsa(
+        result = database.query_context_dsa_module(
             b=batch_size,
             s=isl,
             prefix=prefix,
@@ -1448,12 +1448,12 @@ class ContextDSA(Operation):
         return self._weights * self._scale_factor
 
 
-class GenerationDSA(Operation):
+class GenerationDSAModule(Operation):
     """
-    Generation phase DSA (DeepSeek Sparse Attention) operation for V3.2.
+    Generation phase DSA (DeepSeek Sparse Attention) module-level operation.
 
     Models the full DSA attention block during decode:
-    - Same components as ContextDSA
+    - Same components as ContextDSAModule
     - Uses paged MQA logits for indexer
     - Sparse MLA with KV cache lookup
     """
@@ -1483,7 +1483,7 @@ class GenerationDSA(Operation):
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
 
-        result = database.query_generation_dsa(
+        result = database.query_generation_dsa_module(
             b=batch_size,
             s=s,
             num_heads=self._num_heads,

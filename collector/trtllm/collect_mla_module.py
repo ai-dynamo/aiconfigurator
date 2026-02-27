@@ -1,34 +1,35 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = ">=1.2.0rc5"
+
 """
-Fused MLA Collector for TRT-LLM — unified MLA (V3) and DSA (V3.2) benchmarking.
+MLA Module Collector for TRT-LLM — unified MLA and DSA benchmarking.
 
-Uses TRT-LLM's own modeling code to construct a single-layer mock model with
-dummy weights, then extracts the attention module for benchmarking.  This avoids
-hand-wiring configs and metadata, making the collector easier to maintain and
-automatically aligned with upstream TRT-LLM changes.
+Profiles the complete attention module forward pass (projections + attention +
+output), not just the bare attention kernel.  Uses TRT-LLM's own modeling code
+to construct a single-layer mock model with dummy weights, then extracts the
+attention module for benchmarking.
 
-The approach mirrors the SGLang fused MLA collector:
-  1. Load pretrained config via ModelConfig.from_pretrained()
-  2. Override num_attention_heads / num_hidden_layers to simulate TP on a single GPU
-  3. Build one DeepseekV3DecoderLayer, fill with dummy weights
-  4. Extract self_attn (DeepseekV3Attention or DeepseekV32Attention)
-  5. Create KV cache + attention metadata using framework utilities
-  6. Benchmark the attention forward
+Supported models and their attention types are defined in SUPPORTED_MODELS.
+Model dimensions are loaded from the HF config.json via from_pretrained().
 
 Usage:
-    # MLA (V3) context phase
-    python collect_fused_mla.py --mode context --model-path deepseek-ai/DeepSeek-V3
+    # MLA context phase (DeepSeek-V3)
+    python collect_mla_module.py --mode context --model deepseek-ai/DeepSeek-V3
 
-    # DSA (V3.2) generation phase
-    python collect_fused_mla.py --mode generation --model-path deepseek-ai/DeepSeek-V3 --is-v32
+    # DSA generation phase (DeepSeek-V3.2)
+    python collect_mla_module.py --mode generation --model deepseek-ai/DeepSeek-V3.2
+
+    # All models, context phase
+    python collect_mla_module.py --mode context
+
+    # Quick single-point test
+    python collect_mla_module.py --mode context --model deepseek-ai/DeepSeek-V3
+    --quick --batch-size 4 --seq-len 2048 --num-heads 64
 
     # FP8 KV cache only
-    python collect_fused_mla.py --mode context --kv-cache-dtype fp8
-
-    # Quick single-point test with FP8 KV cache
-    python collect_fused_mla.py --mode context --quick --batch-size 4 --seq-len 2048 --num-heads 64 --kv-cache-dtype fp8
+    python collect_mla_module.py --mode context --model deepseek-ai/DeepSeek-V3 --kv-cache-dtype fp8
 """
 
 import argparse
@@ -65,27 +66,39 @@ from tensorrt_llm.quantization.mode import QuantAlgo
 from helper import benchmark_with_power, get_sm_version, log_perf
 
 # ═══════════════════════════════════════════════════════════════════════
+# Supported Models — model_path → attention type
+# ═══════════════════════════════════════════════════════════════════════
+
+SUPPORTED_MODELS: dict[str, str] = {
+    "deepseek-ai/DeepSeek-V3": "mla",
+    "deepseek-ai/DeepSeek-V3.2": "dsa",
+    # "zai-org/GLM-5": "dsa", is not supported yet
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Test Cases
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _get_kv_cache_dtypes(is_v32: bool = False):
+def _get_kv_cache_dtypes(is_dsa: bool = False):
     """Return the list of KV cache dtypes to benchmark based on GPU capability.
 
     FP8 KV cache support depends on both the architecture (MLA vs DSA) and GPU:
 
-      MLA (V3):  Hopper (86 < SM < 100) only — the old FMHA kernel includes
-                 FP8 MLA generation variants.  Blackwell (SM100+) trtllm-gen
-                 kernels lack the ``sparseMla=0`` FP8 MLA variant.
+      MLA:  Hopper (86 < SM < 100) only — the old FMHA kernel includes
+            FP8 MLA generation variants.  Blackwell (SM100+) trtllm-gen
+            kernels lack the ``sparseMla=0`` FP8 MLA variant.
 
-      DSA (V3.2): Blackwell (SM >= 100) only — uses ``forward_absorption_*``
-                  with trtllm-gen ``sparseMla=1`` kernels that support FP8.
-                  Hopper falls back to ``forward_sparse_mla_kvcache_bf16``
-                  which is BF16-only.
+      DSA:  Blackwell (SM >= 100) only — uses ``forward_absorption_*``
+            with trtllm-gen ``sparseMla=1`` kernels that support FP8.
+            Hopper falls back to ``forward_sparse_mla_kvcache_bf16``
+            which is BF16-only.
     """
     dtypes = ["bfloat16"]
+    # FIXME: FP8 KV cache and Platform combinations are incomplete.
     sm = get_sm_version()
-    if is_v32:
+    if is_dsa:
         if sm >= 100:
             dtypes.append("fp8")
     else:
@@ -94,39 +107,43 @@ def _get_kv_cache_dtypes(is_v32: bool = False):
     return dtypes
 
 
-def get_context_test_cases(is_v32: bool = False):
+def get_context_test_cases(attn_type: str):
     """Context-phase test cases.
-    Returns list of (seq_len, batch_size, num_heads, is_v32, kv_cache_dtype, perf_filename).
+
+    Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype, perf_filename].
     """
+    is_dsa = attn_type == "dsa"
     cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
-    base_fname = "fused_dsa_context_perf.txt" if is_v32 else "fused_mla_context_perf.txt"
-    for kv_dtype in _get_kv_cache_dtypes(is_v32=is_v32):
+    base_fname = f"{attn_type}_context_module_perf.txt"
+    for kv_dtype in _get_kv_cache_dtypes(is_dsa=is_dsa):
         for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
             for b in b_list:
                 for s in s_list:
                     if b * s > 131072:
                         continue
-                    cases.append([s, b, num_heads, is_v32, kv_dtype, base_fname])
+                    cases.append([s, b, num_heads, kv_dtype, base_fname])
     return cases
 
 
-def get_generation_test_cases(is_v32: bool = False):
+def get_generation_test_cases(attn_type: str):
     """Generation-phase test cases.
-    Returns list of (kv_cache_len, batch_size, num_heads, is_v32, kv_cache_dtype, perf_filename).
+
+    Returns list of [kv_cache_len, batch_size, num_heads, kv_cache_dtype, perf_filename].
     """
+    is_dsa = attn_type == "dsa"
     cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
-    base_fname = "fused_dsa_generation_perf.txt" if is_v32 else "fused_mla_generation_perf.txt"
-    for kv_dtype in _get_kv_cache_dtypes(is_v32=is_v32):
+    base_fname = f"{attn_type}_generation_module_perf.txt"
+    for kv_dtype in _get_kv_cache_dtypes(is_dsa=is_dsa):
         for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
             for b in b_list:
                 for s in s_list:
                     if b * s > 1024 * 4096 * 2 * 2 * 2:
                         continue
-                    cases.append([s, b, num_heads, is_v32, kv_dtype, base_fname])
+                    cases.append([s, b, num_heads, kv_dtype, base_fname])
     return cases
 
 
@@ -146,20 +163,15 @@ def _round_up(a, b):
 def create_attention_layer(
     model_path: str,
     num_heads: int = 128,
-    is_v32: bool = False,
     use_fp8_kv_cache: bool = False,
     device: str = "cuda:0",
 ):
     """
     Create a single attention layer from TRT-LLM's own modeling code.
 
-    Uses the official config.json from the HF model repo (including its
-    quantization_config) so the layer matches real inference behavior.
-
-    For V3.2 (``--is-v32``), prefer ``--model-path deepseek-ai/DeepSeek-V3.2``
-    so that ``from_pretrained`` auto-detects the DSA sparse attention config.
-    When using ``deepseek-ai/DeepSeek-V3`` with ``--is-v32``, the script will
-    patch ``model_type`` and inject the DSA config manually.
+    Uses the official config.json from the HF model repo via from_pretrained()
+    so the layer matches real inference behavior.  MLA vs DSA is determined by
+    the model's config.json automatically (model_type, sparse_attention_config).
     """
     mapping = Mapping(world_size=1, rank=0, tp_size=1, pp_size=1)
 
@@ -197,29 +209,6 @@ def create_attention_layer(
             model_config.quant_config,
             kv_cache_quant_algo=QuantAlgo.FP8,
         )
-
-    if is_v32:
-        # If loaded from V3 repo, patch model_type so DecoderLayer picks
-        # DeepseekV32Attention instead of DeepseekV3Attention.
-        if getattr(pretrained_config, "model_type", None) != "deepseek_v32":
-            pretrained_config.model_type = "deepseek_v32"
-
-        if not hasattr(pretrained_config, "index_n_heads"):
-            pretrained_config.index_n_heads = 64
-            pretrained_config.index_head_dim = 128
-            pretrained_config.index_topk = 2048
-
-        # Ensure sparse_attention_config is set (from_pretrained only auto-
-        # injects it for DeepseekV32ForCausalLM architecture).
-        if model_config.sparse_attention_config is None:
-            from tensorrt_llm.llmapi.llm_args import DeepSeekSparseAttentionConfig
-
-            sparse_cfg = DeepSeekSparseAttentionConfig(
-                index_n_heads=pretrained_config.index_n_heads,
-                index_head_dim=pretrained_config.index_head_dim,
-                index_topk=pretrained_config.index_topk,
-            )
-            object.__setattr__(model_config, "sparse_attention_config", sparse_cfg)
 
     aux_stream = torch.cuda.Stream(device=device)
     aux_stream_dict = {
@@ -333,12 +322,7 @@ def create_kv_cache_and_metadata(
         model_config.sparse_attention_config,
     )
 
-    # model_config.enable_flash_mla only returns True on SM90 (Hopper).
-    # Flash MLA's block-paged KV cache access also works on Blackwell (SM100+).
-    # Without it, block_ids_per_seq=None forces a slower indirection path.
     sm_major = torch.cuda.get_device_capability()[0]
-    kv_lora_rank = getattr(config, "kv_lora_rank", 0)
-    qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
     _enable_flash_mla = (
         model_config.attn_backend == "TRTLLM" and (kv_lora_rank + qk_rope_head_dim) == 576 and sm_major >= 9
     )
@@ -358,7 +342,7 @@ def create_kv_cache_and_metadata(
         ),
         cross=None,
         request_ids=request_ids,
-        prompt_lens=[seq_len_q if is_context else (kv_cache_len)] * batch_size,
+        prompt_lens=[seq_len_q if is_context else kv_cache_len] * batch_size,
         runtime_features=AttentionRuntimeFeatures(
             chunked_prefill=False,
             cache_reuse=False,
@@ -382,20 +366,20 @@ def create_kv_cache_and_metadata(
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def run_fused_mla(
+def run_mla_module(
     seq_len: int,
     batch_size: int,
     num_heads: int,
-    is_v32: bool,
     kv_cache_dtype: str,
     perf_filename: str,
     *,
-    model_path: str = "deepseek-ai/DeepSeek-V3",
+    model_path: str,
+    attn_type: str,
     device: str = "cuda:0",
     warming_up: int = 10,
     test_ite: int = 6,
 ):
-    """Run a single fused MLA / DSA benchmark point."""
+    """Run a single MLA / DSA module-level benchmark point."""
     torch.cuda.set_device(device)
     torch_device = torch.device(device)
 
@@ -403,14 +387,13 @@ def run_fused_mla(
 
     is_context = "context" in perf_filename
     phase = "context" if is_context else "generation"
-    variant = "DSA" if is_v32 else "MLA"
-    print(f"\n[Fused {variant}] {phase} b={batch_size}, s={seq_len}, heads={num_heads}, kv={kv_cache_dtype}")
+    variant = attn_type.upper()
+    print(f"\n[{variant} module] {phase} b={batch_size}, s={seq_len}, heads={num_heads}, kv={kv_cache_dtype}")
 
-    # 1. Create attention layer
+    # 1. Create attention layer (from_pretrained reads config.json)
     attn_module, model_config = create_attention_layer(
         model_path=model_path,
         num_heads=num_heads,
-        is_v32=is_v32,
         use_fp8_kv_cache=use_fp8_kv_cache,
         device=device,
     )
@@ -480,7 +463,7 @@ def run_fused_mla(
         num_warmups=warming_up,
         num_runs=test_ite,
         repeat_n=1,
-        allow_graph_fail=True,
+        allow_graph_fail=False,
     ) as results:
         pass
 
@@ -494,7 +477,7 @@ def run_fused_mla(
         isl = 1
         step = seq_len
 
-    op_name = f"fused_{'dsa' if is_v32 else 'mla'}_{phase}"
+    op_name = f"{attn_type}_{phase}_module"
 
     log_perf(
         item_list=[
@@ -537,17 +520,19 @@ def _cleanup(kv_cache_manager):
 
 
 def main():
+    model_names = list(SUPPORTED_MODELS.keys())
+
     parser = argparse.ArgumentParser(
-        description="Fused MLA/DSA collector for TRT-LLM (mock-model approach)",
+        description="MLA/DSA module-level collector for TRT-LLM",
     )
     parser.add_argument("--mode", choices=["context", "generation"], required=True)
     parser.add_argument(
-        "--model-path",
+        "--model",
         type=str,
-        default="deepseek-ai/DeepSeek-V3",
-        help="HF model ID or local checkpoint dir (only config.json is needed)",
+        default=None,
+        choices=model_names,
+        help=f"Model to benchmark. If not specified, runs all: {model_names}",
     )
-    parser.add_argument("--is-v32", action="store_true", help="Use V3.2 architecture (DSA)")
     parser.add_argument("--num-heads", type=int, default=None, help="Filter by number of heads")
     parser.add_argument("--batch-size", type=int, default=None, help="Single batch size (for --quick)")
     parser.add_argument("--seq-len", type=int, default=None, help="Single seq len (for --quick)")
@@ -562,59 +547,70 @@ def main():
     parser.add_argument("--quick", action="store_true", help="Quick single-point test")
     args = parser.parse_args()
 
-    if args.quick:
-        b = args.batch_size or 4
-        s = args.seq_len or 2048
-        h = args.num_heads or 128
-        kv_dtype = args.kv_cache_dtype or "bfloat16"
-        fname = f"fused_{'dsa' if args.is_v32 else 'mla'}_{args.mode}_perf.txt"
-        run_fused_mla(
-            seq_len=s,
-            batch_size=b,
-            num_heads=h,
-            is_v32=args.is_v32,
-            kv_cache_dtype=kv_dtype,
-            perf_filename=fname,
-            model_path=args.model_path,
-            device=args.device,
-        )
-        return
-
-    if args.mode == "context":
-        test_cases = get_context_test_cases(is_v32=args.is_v32)
+    # Select models to run
+    if args.model:
+        models_to_run = {args.model: SUPPORTED_MODELS[args.model]}
     else:
-        test_cases = get_generation_test_cases(is_v32=args.is_v32)
+        models_to_run = SUPPORTED_MODELS
 
-    if args.num_heads is not None:
-        test_cases = [tc for tc in test_cases if tc[2] == args.num_heads]
+    for model_path, attn_type in models_to_run.items():
+        print(f"\n{'=' * 60}")
+        print(f"Model: {model_path}  |  Attention: {attn_type.upper()}")
+        print(f"{'=' * 60}")
 
-    if args.kv_cache_dtype is not None:
-        test_cases = [tc for tc in test_cases if tc[4] == args.kv_cache_dtype]
-
-    print(f"Running {len(test_cases)} {args.mode} fused {'DSA' if args.is_v32 else 'MLA'} test cases...")
-
-    for i, (s, b, h, v32, kv_dtype, fname) in enumerate(test_cases):
-        print(f"[{i + 1}/{len(test_cases)}]", end="")
-        try:
-            run_fused_mla(
+        if args.quick:
+            b = args.batch_size or 4
+            s = args.seq_len or 2048
+            h = args.num_heads or 128
+            kv_dtype = args.kv_cache_dtype or "bfloat16"
+            fname = f"{attn_type}_{args.mode}_module_perf.txt"
+            run_mla_module(
                 seq_len=s,
                 batch_size=b,
                 num_heads=h,
-                is_v32=v32,
                 kv_cache_dtype=kv_dtype,
                 perf_filename=fname,
-                model_path=args.model_path,
+                model_path=model_path,
+                attn_type=attn_type,
                 device=args.device,
             )
-        except torch.cuda.OutOfMemoryError:
-            print(f"  OOM: b={b}, s={s}, heads={h}, kv={kv_dtype}")
-            torch.cuda.empty_cache()
-            gc.collect()
-        except Exception as e:
-            print(f"  FAILED: b={b}, s={s}, heads={h}, kv={kv_dtype}: {e}")
-            traceback.print_exc()
-            torch.cuda.empty_cache()
-            gc.collect()
+            continue
+
+        if args.mode == "context":
+            test_cases = get_context_test_cases(attn_type=attn_type)
+        else:
+            test_cases = get_generation_test_cases(attn_type=attn_type)
+
+        if args.num_heads is not None:
+            test_cases = [tc for tc in test_cases if tc[2] == args.num_heads]
+
+        if args.kv_cache_dtype is not None:
+            test_cases = [tc for tc in test_cases if tc[3] == args.kv_cache_dtype]
+
+        print(f"Running {len(test_cases)} {args.mode} {attn_type.upper()} module test cases...")
+
+        for i, (s, b, h, kv_dtype, fname) in enumerate(test_cases):
+            print(f"[{i + 1}/{len(test_cases)}]", end="")
+            try:
+                run_mla_module(
+                    seq_len=s,
+                    batch_size=b,
+                    num_heads=h,
+                    kv_cache_dtype=kv_dtype,
+                    perf_filename=fname,
+                    model_path=model_path,
+                    attn_type=attn_type,
+                    device=args.device,
+                )
+            except torch.cuda.OutOfMemoryError:
+                print(f"  OOM: b={b}, s={s}, heads={h}, kv={kv_dtype}")
+                torch.cuda.empty_cache()
+                gc.collect()
+            except Exception as e:
+                print(f"  FAILED: b={b}, s={s}, heads={h}, kv={kv_dtype}: {e}")
+                traceback.print_exc()
+                torch.cuda.empty_cache()
+                gc.collect()
 
 
 if __name__ == "__main__":
