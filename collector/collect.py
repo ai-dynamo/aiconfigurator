@@ -531,9 +531,9 @@ def _all_op_names() -> list[str]:
     ops = []
     for reg in (TRTLLM_REG, VLLM_REG, SGLANG_REG):
         for entry in reg:
-            if entry["op"] not in seen:
-                seen.add(entry["op"])
-                ops.append(entry["op"])
+            if entry.op not in seen:
+                seen.add(entry.op)
+                ops.append(entry.op)
     return ops
 
 

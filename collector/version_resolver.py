@@ -17,6 +17,8 @@ import re
 from packaging.specifiers import InvalidSpecifier, Specifier
 from packaging.version import InvalidVersion, Version
 
+from collector.registry_types import OpEntry
+
 _FRAMEWORK_PREFIX_RE = re.compile(r"^[a-zA-Z_]+")
 
 
@@ -99,30 +101,30 @@ def _check_compat(compat_str: str, runtime_version: str) -> bool:
     return True
 
 
-def resolve_module(entry: dict, runtime_version: str) -> str | None:
+def resolve_module(entry: OpEntry, runtime_version: str) -> str | None:
     """Return the collector module path for a registry entry.
 
     Args:
-        entry: A registry dict. Must have either "module" (unversioned)
-               or "versions" (list of (min_version, module) tuples,
-               sorted descending by min_version).
+        entry: An :class:`OpEntry`. Uses ``module`` directly for unversioned
+               entries, or walks ``versions`` (descending by min_version) for
+               versioned entries.
         runtime_version: The framework version string detected at runtime.
 
     Returns:
         Module path string, or None if no version matches.
     """
-    if "versions" not in entry:
-        return entry["module"]
+    if not entry.versions:
+        return entry.module
 
     rv = _normalize_version(runtime_version)
-    for min_ver_str, module in entry["versions"]:
-        if rv >= _normalize_version(min_ver_str):
-            return module
+    for route in entry.versions:
+        if rv >= _normalize_version(route.min_version):
+            return route.module
     return None
 
 
 def build_collections(
-    registry: list[dict],
+    registry: list[OpEntry],
     backend_name: str,
     runtime_version: str,
     ops: list[str] | None = None,
@@ -132,7 +134,7 @@ def build_collections(
     """Build the collections list from a registry.
 
     Args:
-        registry: The backend's REGISTRY list.
+        registry: The backend's REGISTRY list of :class:`OpEntry`.
         backend_name: e.g. "trtllm", "vllm", "sglang".
         runtime_version: Framework version string.
         ops: Optional filter — only include these op types.
@@ -143,22 +145,22 @@ def build_collections(
     """
     collections = []
     for entry in registry:
-        if ops and entry["op"] not in ops:
+        if ops and entry.op not in ops:
             continue
 
         module = resolve_module(entry, runtime_version)
         if module is None:
             if logger:
-                logger.warning(f"Skipping {backend_name}.{entry['op']} — no collector for v{runtime_version}")
+                logger.warning(f"Skipping {backend_name}.{entry.op} — no collector for v{runtime_version}")
             continue
 
         collections.append(
             {
                 "name": backend_name,
-                "type": entry["op"],
+                "type": entry.op,
                 "module": module,
-                "get_func": entry["get_func"],
-                "run_func": entry["run_func"],
+                "get_func": entry.get_func,
+                "run_func": entry.run_func,
             }
         )
 

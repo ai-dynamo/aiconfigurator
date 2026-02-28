@@ -11,6 +11,7 @@ from typing import ClassVar
 import pytest
 from packaging.version import Version
 
+from collector.registry_types import OpEntry, VersionRoute
 from collector.version_resolver import (
     _check_compat,
     _normalize_version,
@@ -135,23 +136,23 @@ class TestCheckCompat:
 class TestResolveModule:
     """Verify version-based module resolution from registry entries."""
 
-    VERSIONED_ENTRY: ClassVar[dict] = {
-        "op": "moe",
-        "get_func": "get_moe_test_cases",
-        "run_func": "run_moe_torch",
-        "versions": [
-            ("1.1.0", "collector.trtllm.collect_moe_v3"),
-            ("0.21.0", "collector.trtllm.collect_moe_v2"),
-            ("0.20.0", "collector.trtllm.collect_moe_v1"),
-        ],
-    }
+    VERSIONED_ENTRY: ClassVar[OpEntry] = OpEntry(
+        op="moe",
+        get_func="get_moe_test_cases",
+        run_func="run_moe_torch",
+        versions=(
+            VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
+            VersionRoute("0.21.0", "collector.trtllm.collect_moe_v2"),
+            VersionRoute("0.20.0", "collector.trtllm.collect_moe_v1"),
+        ),
+    )
 
-    UNVERSIONED_ENTRY: ClassVar[dict] = {
-        "op": "gemm",
-        "module": "collector.trtllm.collect_gemm",
-        "get_func": "get_gemm_test_cases",
-        "run_func": "run_gemm",
-    }
+    UNVERSIONED_ENTRY: ClassVar[OpEntry] = OpEntry(
+        op="gemm",
+        module="collector.trtllm.collect_gemm",
+        get_func="get_gemm_test_cases",
+        run_func="run_gemm",
+    )
 
     def test_unversioned_returns_module_directly(self):
         assert resolve_module(self.UNVERSIONED_ENTRY, "999.0.0") == "collector.trtllm.collect_gemm"
@@ -192,22 +193,22 @@ class TestResolveModule:
 class TestBuildCollections:
     """Verify collection list building from registry."""
 
-    SAMPLE_REGISTRY: ClassVar[list] = [
-        {
-            "op": "gemm",
-            "module": "collector.trtllm.collect_gemm",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
-        {
-            "op": "moe",
-            "get_func": "get_moe_test_cases",
-            "run_func": "run_moe_torch",
-            "versions": [
-                ("1.1.0", "collector.trtllm.collect_moe_v3"),
-                ("0.20.0", "collector.trtllm.collect_moe_v1"),
-            ],
-        },
+    SAMPLE_REGISTRY: ClassVar[list[OpEntry]] = [
+        OpEntry(
+            op="gemm",
+            module="collector.trtllm.collect_gemm",
+            get_func="get_gemm_test_cases",
+            run_func="run_gemm",
+        ),
+        OpEntry(
+            op="moe",
+            get_func="get_moe_test_cases",
+            run_func="run_moe_torch",
+            versions=(
+                VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
+                VersionRoute("0.20.0", "collector.trtllm.collect_moe_v1"),
+            ),
+        ),
     ]
 
     def test_all_ops_included(self):
@@ -243,6 +244,44 @@ class TestBuildCollections:
 
 
 # ---------------------------------------------------------------------------
+# OpEntry validation
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestOpEntryValidation:
+    """Verify OpEntry construction-time invariants."""
+
+    def test_rejects_missing_module_and_versions(self):
+        with pytest.raises(ValueError, match="must specify 'module' or 'versions'"):
+            OpEntry(op="bad", get_func="f", run_func="r")
+
+    def test_rejects_both_module_and_versions(self):
+        with pytest.raises(ValueError, match="cannot specify both"):
+            OpEntry(
+                op="bad",
+                get_func="f",
+                run_func="r",
+                module="some.module",
+                versions=(VersionRoute("1.0.0", "other.module"),),
+            )
+
+    def test_accepts_module_only(self):
+        entry = OpEntry(op="ok", get_func="f", run_func="r", module="some.module")
+        assert entry.module == "some.module"
+        assert entry.versions == ()
+
+    def test_accepts_versions_only(self):
+        routes = (VersionRoute("1.0.0", "some.module"),)
+        entry = OpEntry(op="ok", get_func="f", run_func="r", versions=routes)
+        assert entry.module is None
+        assert entry.versions == routes
+
+    def test_frozen(self):
+        entry = OpEntry(op="ok", get_func="f", run_func="r", module="m")
+        with pytest.raises(AttributeError):
+            entry.op = "changed"
+
+
+# ---------------------------------------------------------------------------
 # Registry integrity
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
@@ -256,30 +295,23 @@ class TestRegistryIntegrity:
         mod = __import__(f"collector.{request.param}.registry", fromlist=["REGISTRY"])
         return mod.REGISTRY, request.param
 
-    def test_every_entry_has_required_keys(self, registry):
+    def test_every_entry_is_opentry(self, registry):
         reg, backend = registry
         for entry in reg:
-            assert "op" in entry, f"{backend}: entry missing 'op'"
-            assert "get_func" in entry, f"{backend}/{entry.get('op')}: missing 'get_func'"
-            assert "run_func" in entry, f"{backend}/{entry.get('op')}: missing 'run_func'"
-            assert "module" in entry or "versions" in entry, (
-                f"{backend}/{entry['op']}: must have 'module' or 'versions'"
-            )
+            assert isinstance(entry, OpEntry), f"{backend}: entry {entry!r} is not an OpEntry"
 
     def test_versions_descending(self, registry):
         """version tuples must be in descending min_version order."""
         reg, backend = registry
         for entry in reg:
-            if "versions" not in entry:
+            if not entry.versions:
                 continue
-            min_vers = [_normalize_version(v) for v, _ in entry["versions"]]
-            assert min_vers == sorted(min_vers, reverse=True), (
-                f"{backend}/{entry['op']}: versions not in descending order"
-            )
+            min_vers = [_normalize_version(r.min_version) for r in entry.versions]
+            assert min_vers == sorted(min_vers, reverse=True), f"{backend}/{entry.op}: versions not in descending order"
 
     def test_no_duplicate_ops(self, registry):
         reg, backend = registry
-        ops = [e["op"] for e in reg]
+        ops = [e.op for e in reg]
         assert len(ops) == len(set(ops)), f"{backend}: duplicate op names found"
 
     # -----------------------------------------------------------------------
@@ -314,21 +346,21 @@ class TestRegistryIntegrity:
         # Deduplicate (module, get_func, run_func) to avoid redundant checks
         seen: set[tuple[str, str, str]] = set()
         for entry in reg:
-            if "versions" in entry:
-                modules = [mod for _, mod in entry["versions"]]
+            if entry.versions:
+                modules = [r.module for r in entry.versions]
             else:
-                modules = [entry["module"]]
+                modules = [entry.module]
             for mod_path in modules:
-                key = (mod_path, entry["get_func"], entry["run_func"])
+                key = (mod_path, entry.get_func, entry.run_func)
                 if key in seen:
                     continue
                 seen.add(key)
 
                 names = self._module_top_level_names(mod_path)
-                assert names, f"{backend}/{entry['op']}: source file for module {mod_path!r} not found or empty"
-                for attr_label, func_name in [("get_func", entry["get_func"]), ("run_func", entry["run_func"])]:
+                assert names, f"{backend}/{entry.op}: source file for module {mod_path!r} not found or empty"
+                for attr_label, func_name in [("get_func", entry.get_func), ("run_func", entry.run_func)]:
                     assert func_name in names, (
-                        f"{backend}/{entry['op']}: module {mod_path!r} "
+                        f"{backend}/{entry.op}: module {mod_path!r} "
                         f"does not define {func_name!r} (declared as {attr_label})"
                     )
 
@@ -338,26 +370,25 @@ class TestRegistryIntegrity:
     _VN_SUFFIX_RE = re.compile(r"_v(\d+)$")
 
     def test_versioned_modules_use_vn_suffix(self, registry):
-        """All module paths inside a 'versions' list must end with _vN."""
+        """All module paths inside a 'versions' tuple must end with _vN."""
         reg, backend = registry
         for entry in reg:
-            if "versions" not in entry:
+            if not entry.versions:
                 continue
-            for min_ver, module in entry["versions"]:
-                assert self._VN_SUFFIX_RE.search(module), (
-                    f"{backend}/{entry['op']}: versioned module {module!r} "
-                    f"(min_version={min_ver}) is missing a _vN suffix"
+            for route in entry.versions:
+                assert self._VN_SUFFIX_RE.search(route.module), (
+                    f"{backend}/{entry.op}: versioned module {route.module!r} "
+                    f"(min_version={route.min_version}) is missing a _vN suffix"
                 )
 
     def test_unversioned_modules_no_vn_suffix(self, registry):
         """Unversioned entries (single 'module') must NOT have a _vN suffix."""
         reg, backend = registry
         for entry in reg:
-            if "versions" in entry:
+            if entry.versions:
                 continue
-            module = entry["module"]
-            assert not self._VN_SUFFIX_RE.search(module), (
-                f"{backend}/{entry['op']}: unversioned module {module!r} should not have a _vN suffix"
+            assert not self._VN_SUFFIX_RE.search(entry.module), (
+                f"{backend}/{entry.op}: unversioned module {entry.module!r} should not have a _vN suffix"
             )
 
     def test_version_numbers_sequential_from_one(self, registry):
@@ -370,13 +401,13 @@ class TestRegistryIntegrity:
         # Collect all version numbers grouped by module base name
         base_versions: dict[str, set[int]] = {}
         for entry in reg:
-            if "versions" not in entry:
+            if not entry.versions:
                 continue
-            for _, mod in entry["versions"]:
-                m = self._VN_SUFFIX_RE.search(mod)
+            for route in entry.versions:
+                m = self._VN_SUFFIX_RE.search(route.module)
                 if not m:
                     continue
-                base = self._VN_SUFFIX_RE.sub("", mod)
+                base = self._VN_SUFFIX_RE.sub("", route.module)
                 base_versions.setdefault(base, set()).add(int(m.group(1)))
 
         for base, nums in base_versions.items():
