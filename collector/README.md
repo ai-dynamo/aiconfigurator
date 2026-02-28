@@ -88,21 +88,25 @@ Pre-release ordering is respected: `1.1.0rc2 < 1.1.0 < 1.1.0.post1`.
 
 ## Registry Format
 
-Each entry in `registry.py` has:
+Each entry in `registry.py` is an `OpEntry` dataclass (defined in `collector/registry_types.py`).
+Exactly one of `module` (unversioned) or `versions` (versioned) must be provided — this is
+validated at construction time.
 
 ```python
-# Unversioned (no fork):
-{"op": "gemm", "module": "collector.trtllm.collect_gemm", "get_func": "...", "run_func": "..."}
+from collector.registry_types import OpEntry, VersionRoute
 
-# Versioned (has forks) — descending by min_version:
-{"op": "moe", "get_func": "...", "run_func": "...", "versions": [
-    ("1.1.0", "collector.trtllm.collect_moe_v3"),
-    ("0.21.0", "collector.trtllm.collect_moe_v2"),
-    ("0.20.0", "collector.trtllm.collect_moe_v1"),
-]}
+# Unversioned (no fork):
+OpEntry(op="gemm", module="collector.trtllm.collect_gemm", get_func="...", run_func="...")
+
+# Versioned (has forks) — VersionRoutes in descending min_version order:
+OpEntry(op="moe", get_func="...", run_func="...", versions=(
+    VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
+    VersionRoute("0.21.0", "collector.trtllm.collect_moe_v2"),
+    VersionRoute("0.20.0", "collector.trtllm.collect_moe_v1"),
+))
 ```
 
-The resolver picks the first entry where `min_version <= runtime_version`.
+The resolver picks the first `VersionRoute` where `min_version <= runtime_version`.
 
 ## Adding a New Op
 
@@ -111,7 +115,7 @@ The resolver picks the first entry where `min_version <= runtime_version`.
 3. Export `get_myop_test_cases()` and `run_myop()` (or `run_myop_torch()`)
 4. Add an entry to `collector/<backend>/registry.py`:
    ```python
-   {"op": "myop", "module": "collector.<backend>.collect_myop", "get_func": "get_myop_test_cases", "run_func": "run_myop"}
+   OpEntry(op="myop", module="collector.<backend>.collect_myop", get_func="get_myop_test_cases", run_func="run_myop")
    ```
 5. Run `pytest tests/unit/collector/ -m unit` to verify registry integrity
 
@@ -123,13 +127,16 @@ When upstream framework `X.Y.Z` changes an API that a collector depends on:
 2. Create `collect_{op}_v2.py` with the new API calls
 3. Add `__compat__ = "<backend>>=X.Y.Z"` to the new file
 4. Add `__compat__` upper bound to the old file if it doesn't have one (e.g. change `">=1.1.0"` to `">=1.1.0,<X.Y.Z"`)
-5. Convert the registry entry from unversioned to versioned (or prepend a new tuple):
+5. Convert the registry entry from unversioned to versioned (or prepend a new `VersionRoute`):
    ```python
    # Before (unversioned):
-   {"op": "gemm", "module": "collector.trtllm.collect_gemm", ...}
+   OpEntry(op="gemm", module="collector.trtllm.collect_gemm", ...)
 
    # After (versioned — all forks carry explicit _vN suffix):
-   {"op": "gemm", "versions": [("X.Y.Z", "collector.trtllm.collect_gemm_v2"), ("0.0.0", "collector.trtllm.collect_gemm_v1")], ...}
+   OpEntry(op="gemm", versions=(
+       VersionRoute("X.Y.Z", "collector.trtllm.collect_gemm_v2"),
+       VersionRoute("0.0.0", "collector.trtllm.collect_gemm_v1"),
+   ), ...)
    ```
 6. Run tests to validate
 
