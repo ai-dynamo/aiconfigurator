@@ -1,3 +1,6 @@
+{%- set pvc_name = (K8sConfig.k8s_pvc_name or K8sConfig.k8s_model_cache or '') | trim -%}
+{%- set use_pvc = (pvc_name != '') -%}
+{%- set pvc_mount_path = K8sConfig.k8s_pvc_mount_path | default('/workspace/model_cache') -%}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -10,12 +13,27 @@ spec:
       name: {{ BenchConfig.name }}
     spec:
       restartPolicy: Never
+      {% if use_pvc %}
+      volumes:
+        - name: pvc
+          persistentVolumeClaim:
+            claimName: {{ pvc_name }}
+      {% endif %}
       containers:
         - name: aiperf
           image: {{ BenchConfig.image }}
           env:
             - name: AIPERF_SERVICE_PROFILE_START_TIMEOUT
               value: "{{ BenchConfig.profile_start_timeout }}"
+            {% if use_pvc %}
+            - name: BENCH_ARTIFACT_DIR
+              value: "{{ pvc_mount_path }}/bench_artifacts"
+            {% endif %}
+          {% if use_pvc %}
+          volumeMounts:
+            - name: pvc
+              mountPath: {{ pvc_mount_path }}
+          {% endif %}
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -40,7 +58,7 @@ spec:
               for concurrency in "${concurrency_array[@]}"; do
                 echo "Run concurrency: $concurrency"
                 aiperf profile \
-                  --artifact-dir "${ARTIFACT_DIR}" \
+                  --artifact-dir "${ARTIFACT_DIR}/concurrency_${concurrency}" \
                   -m {{ BenchConfig.model }} \
                   --endpoint-type {{ BenchConfig.endpoint_type }} \
                   -u {{ BenchConfig.endpoint_url }} \

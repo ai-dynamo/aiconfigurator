@@ -228,9 +228,8 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --total-gpus 8 --system h200_sxm \\
     --ttft 600 --tpot 50 --isl 4000 --osl 500 \\
     --generator-dynamo-version 0.7.1 \\
-    --generator-set K8sConfig.k8s_pvc_name=model-cache \\
-    --generator-set K8sConfig.k8s_model_path_in_pvc=Qwen/Qwen3-32B \\
-    --generator-set K8sConfig.k8s_namespace=ets-dynamo \\
+    --generator-set K8sConfig.k8s_pvc_name=$YOUR_PVC_NAME \\
+    --generator-set K8sConfig.k8s_namespace=$YOUR_NAMESPACE \\
     --save-dir results
 
 # Sweep for trtllm 1.2.0rc5 but generate config matching trtllm 1.2.0rc6
