@@ -37,6 +37,7 @@ import traceback
 
 import torch
 from vllm.config import set_current_vllm_config
+from vllm.forward_context import set_forward_context
 from vllm.platforms import current_platform
 from vllm.version import __version__ as vllm_version
 
@@ -252,7 +253,12 @@ def _create_attention_module(
     # Build the attention module inside set_current_vllm_config() context.
     # FP8 quantized Linear layers (QuantFP8 / CustomOp) call
     # get_current_vllm_config() during __init__, so the config must be set.
-    with set_current_vllm_config(vllm_config):
+    # set_default_torch_dtype is required because MLAAttention.__init__
+    # calls torch.get_default_dtype() to select the attention backend
+    # (MLA backends only support bfloat16, not float32).
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    with set_current_vllm_config(vllm_config), set_default_torch_dtype(vllm_config.model_config.dtype):
         attn_module = DeepseekV2MLAAttention(
             vllm_config=vllm_config,
             config=hf_config,
@@ -274,12 +280,40 @@ def _create_attention_module(
     attn_module.eval()
     attn_module.requires_grad_(False)
 
-    # Initialize with random weights
+    # Initialize with random weights (skip FP8 parameters which don't
+    # support in-place normal_; they will be populated by
+    # process_weights_after_loading later).
     with torch.no_grad():
         for param in attn_module.parameters():
+            if param.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                continue
             param.normal_(mean=0.0, std=0.02)
 
     return attn_module, vllm_config
+
+
+def _process_module_weights(attn_module, vllm_config, device):
+    """Process weights after loading, mimicking vLLM's model loader.
+
+    This must be called after module construction to:
+      1. Run FP8 quantization on linear layer weights.
+      2. Create W_UK_T and W_UV matrices in MLAAttention that are
+         required for the forward pass.
+    """
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+
+    with set_current_vllm_config(vllm_config):
+        # 1. Process quantized linear layers (FP8 weight conversion).
+        for _, module in attn_module.named_modules():
+            quant_method = getattr(module, "quant_method", None)
+            if isinstance(quant_method, QuantizeMethodBase):
+                quant_method.process_weights_after_loading(module)
+
+        # 2. Process MLAAttention layers (creates W_UK_T, W_UV).
+        for _, module in attn_module.named_modules():
+            if isinstance(module, MLAAttention) and hasattr(module, "process_weights_after_loading"):
+                module.process_weights_after_loading(vllm_config.model_config.dtype)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -377,14 +411,48 @@ def _create_kv_cache_and_metadata(
         cache_dtype_str=kv_cache_dtype_str,
     )
 
-    layer_names = ["model.layers.0.self_attn.attn"]
+    attn_layer_name = "model.layers.0.self_attn.attn"
+    layer_names = [attn_layer_name]
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, torch.device(device))
     attn_metadata = builder.build(
         common_prefix_len=0,
         common_attn_metadata=common_attn_metadata,
     )
 
-    return kv_cache, attn_metadata, common_attn_metadata
+    # For DSA, the Indexer has its own KV cache and metadata builder.
+    indexer_kv_cache = None
+    indexer_metadata = None
+    if is_dsa:
+        from vllm.v1.attention.backends.mla.indexer import (
+            DeepseekV32IndexerBackend,
+        )
+
+        index_head_dim = hf_config.index_head_dim
+        quant_block_size = 128
+        indexer_head_dim = index_head_dim + index_head_dim // quant_block_size * 4
+
+        indexer_layer_name = "model.layers.0.self_attn.indexer.k_cache"
+        indexer_spec = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=indexer_head_dim,
+            dtype=torch.uint8,
+        )
+        indexer_kv_cache = torch.zeros(
+            num_kv_cache_blocks,
+            block_size,
+            indexer_head_dim,
+            dtype=torch.uint8,
+            device=device,
+        )
+        indexer_builder_cls = DeepseekV32IndexerBackend.get_builder_cls()
+        indexer_builder = indexer_builder_cls(indexer_spec, [indexer_layer_name], vllm_config, torch.device(device))
+        indexer_metadata = indexer_builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
+
+    return kv_cache, attn_metadata, common_attn_metadata, indexer_kv_cache, indexer_metadata
 
 
 def _get_attention_backend(vllm_config, head_dim, use_fp8_kv_cache, is_dsa):
@@ -405,45 +473,19 @@ def _get_attention_backend(vllm_config, head_dim, use_fp8_kv_cache, is_dsa):
     else:
         kv_cache_dtype_val = None
 
-    try:
-        backend = current_platform.get_attn_backend_cls(
-            None,
-            head_dim,
-            dtype,
-            kv_cache_dtype=kv_cache_dtype_val,
-            block_size=vllm_config.cache_config.block_size,
-            use_mla=True,
-            has_sink=False,
-            use_sparse=is_dsa,
-        )
-    except TypeError:
-        try:
-            from vllm.v1.attention.selector import AttentionSelectorConfig
-
-            attn_selector_config = AttentionSelectorConfig(
-                head_size=head_dim,
-                dtype=dtype,
-                kv_cache_dtype=kv_cache_dtype_val,
-                block_size=vllm_config.cache_config.block_size,
-                use_mla=True,
-                has_sink=False,
-                use_sparse=is_dsa,
-            )
-            backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
-        except TypeError:
-            backend = current_platform.get_attn_backend_cls(
-                None,
-                head_dim,
-                dtype,
-                kv_cache_dtype=kv_cache_dtype_val,
-                block_size=vllm_config.cache_config.block_size,
-                use_v1=True,
-                use_mla=True,
-                has_sink=False,
-                use_sparse=is_dsa,
-            )
-
     from vllm.utils.import_utils import resolve_obj_by_qualname
+    from vllm.v1.attention.selector import AttentionSelectorConfig
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=head_dim,
+        dtype=dtype,
+        kv_cache_dtype=kv_cache_dtype_val,
+        block_size=vllm_config.cache_config.block_size,
+        use_mla=True,
+        has_sink=False,
+        use_sparse=is_dsa,
+    )
+    backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
 
     return resolve_obj_by_qualname(backend)
 
@@ -472,6 +514,14 @@ def run_mla_module(
     setup_distributed(device)
     torch.cuda.set_device(device)
 
+    # DSA's sparse_attn_indexer requires a WorkspaceManager.
+    try:
+        from vllm.v1.worker.workspace import init_workspace_manager
+
+        init_workspace_manager(torch.device(device))
+    except (ImportError, RuntimeWarning):
+        pass
+
     use_fp8_kv_cache = kv_cache_dtype == "fp8"
     use_prefill_fp8 = compute_dtype == "fp8"
     is_context = "context" in perf_filename
@@ -493,9 +543,12 @@ def run_mla_module(
         device=device,
     )
 
+    # 1b. Process weights (FP8 quantization + create W_UK_T / W_UV for MLA)
+    _process_module_weights(attn_module, vllm_config, device)
+
     # 2. Create KV cache + metadata
     with set_current_vllm_config(vllm_config):
-        kv_cache, attn_metadata, _ = _create_kv_cache_and_metadata(
+        kv_cache, attn_metadata, _, indexer_kv_cache, indexer_metadata = _create_kv_cache_and_metadata(
             vllm_config=vllm_config,
             attn_type=attn_type,
             batch_size=batch_size,
@@ -505,6 +558,18 @@ def run_mla_module(
             use_fp8_kv_cache=use_fp8_kv_cache,
             device=device,
         )
+
+    # 2b. Bind KV cache to the attention layer so forward() can access it.
+    #     MLAAttention registers itself in static_forward_context during
+    #     __init__, and reads self.kv_cache[virtual_engine] during forward.
+    attn_layer_name = "model.layers.0.self_attn.attn"
+    forward_ctx = vllm_config.compilation_config.static_forward_context
+    forward_ctx[attn_layer_name].kv_cache = [kv_cache]
+
+    # For DSA, also bind the indexer's KV cache.
+    indexer_layer_name = "model.layers.0.self_attn.indexer.k_cache"
+    if indexer_kv_cache is not None and indexer_layer_name in forward_ctx:
+        forward_ctx[indexer_layer_name].kv_cache = [indexer_kv_cache]
 
     # 3. Input tensors
     hidden_size = vllm_config.model_config.hf_config.hidden_size
@@ -534,7 +599,14 @@ def run_mla_module(
     )
 
     # 4. Dry run
+    #    set_current_vllm_config — needed by quantised layers and RoPE.
+    #    set_forward_context — provides attn_metadata + kv_cache to the
+    #    MLAAttention.forward() path (it calls get_forward_context()).
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
+    attn_metadata_dict = {attn_layer_name: attn_metadata}
+    if indexer_metadata is not None:
+        attn_metadata_dict[indexer_layer_name] = indexer_metadata
+    exit_stack.enter_context(set_forward_context(attn_metadata_dict, vllm_config))
     try:
         with torch.inference_mode():
             attn_module.forward(positions, hidden_states, None)
