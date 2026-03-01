@@ -571,6 +571,21 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
             "get_func": "get_generation_mla_test_cases",
             "run_func": "run_attention_torch",
         },
+        # Module-level attention collection (MLA/DSA auto-separated by collector)
+        {
+            "name": "vllm",
+            "type": "mla_context_module",
+            "module": "collector.vllm.collect_mla_module",
+            "get_func": "get_context_module_test_cases",
+            "run_func": "run_mla_module_worker",
+        },
+        {
+            "name": "vllm",
+            "type": "mla_generation_module",
+            "module": "collector.vllm.collect_mla_module",
+            "get_func": "get_generation_module_test_cases",
+            "run_func": "run_mla_module_worker",
+        },
     ]
 
     all_errors = collect_ops(num_processes, collections, ops, version)
