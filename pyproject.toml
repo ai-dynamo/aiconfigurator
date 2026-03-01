@@ -72,7 +72,7 @@ dev = [
     "import-ipynb==0.2",
 ]
 webapp = [
-    "gradio==5.47.1"
+    "gradio==6.8.0"
 ]
 service = [
     "fastapi>=0.115.12",
