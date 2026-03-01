@@ -249,23 +249,26 @@ def _create_attention_module(
             device=device,
         )
 
-    # Build the attention module
-    attn_module = DeepseekV2MLAAttention(
-        vllm_config=vllm_config,
-        config=hf_config,
-        hidden_size=hf_config.hidden_size,
-        num_heads=num_heads,
-        qk_nope_head_dim=hf_config.qk_nope_head_dim,
-        qk_rope_head_dim=hf_config.qk_rope_head_dim,
-        v_head_dim=hf_config.v_head_dim,
-        q_lora_rank=hf_config.q_lora_rank if hasattr(hf_config, "q_lora_rank") else None,
-        kv_lora_rank=hf_config.kv_lora_rank,
-        max_position_embeddings=hf_config.max_position_embeddings,
-        cache_config=vllm_config.cache_config,
-        quant_config=vllm_config.quant_config,
-        prefix="model.layers.0.self_attn",
-        topk_indices_buffer=topk_indices_buffer,
-    )
+    # Build the attention module inside set_current_vllm_config() context.
+    # FP8 quantized Linear layers (QuantFP8 / CustomOp) call
+    # get_current_vllm_config() during __init__, so the config must be set.
+    with set_current_vllm_config(vllm_config):
+        attn_module = DeepseekV2MLAAttention(
+            vllm_config=vllm_config,
+            config=hf_config,
+            hidden_size=hf_config.hidden_size,
+            num_heads=num_heads,
+            qk_nope_head_dim=hf_config.qk_nope_head_dim,
+            qk_rope_head_dim=hf_config.qk_rope_head_dim,
+            v_head_dim=hf_config.v_head_dim,
+            q_lora_rank=hf_config.q_lora_rank if hasattr(hf_config, "q_lora_rank") else None,
+            kv_lora_rank=hf_config.kv_lora_rank,
+            max_position_embeddings=hf_config.max_position_embeddings,
+            cache_config=vllm_config.cache_config,
+            quant_config=vllm_config.quant_config,
+            prefix="model.layers.0.self_attn",
+            topk_indices_buffer=topk_indices_buffer,
+        )
 
     attn_module = attn_module.to(device)
     attn_module.eval()
@@ -295,7 +298,7 @@ def _create_kv_cache_and_metadata(
     device: str = "cuda:0",
 ):
     """Create KV cache and attention metadata for benchmarking."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     hf_config = vllm_config.model_config.hf_config
     kv_lora_rank = hf_config.kv_lora_rank
@@ -365,13 +368,13 @@ def _create_kv_cache_and_metadata(
     backend_cls = _get_attention_backend(vllm_config, head_dim, use_fp8_kv_cache, is_dsa)
     builder_cls = backend_cls.get_builder_cls()
 
-    kv_cache_spec = FullAttentionSpec(
+    kv_cache_spec = MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,  # MLA uses 1 KV head
         head_size=head_dim,
         dtype=cache_dtype,
         sliding_window=None,
-        use_mla=True,
+        cache_dtype_str=kv_cache_dtype_str,
     )
 
     layer_names = ["model.layers.0.self_attn.attn"]
