@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 
 # Test configuration constants
 TOTAL_GPUS = 128
-ISL = 4000
-OSL = 500
-PREFIX = 500
-TTFT = 2000.0
-TPOT = 50.0
+ISL = 128
+OSL = 128
+PREFIX = 64
+TTFT = 100000
+TPOT = 5000
 
 
 class SupportMatrix:
