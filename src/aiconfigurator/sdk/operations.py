@@ -1382,3 +1382,63 @@ class Mamba2(Operation):
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
+
+
+class OverlapOp(Operation):
+    """
+    Two groups of operations that execute in parallel (overlap).
+
+    This models the TRT-LLM `maybe_execute_in_parallel` behavior where two
+    operation groups run concurrently on different CUDA streams during
+    generation phase (CUDA Graph enabled).
+
+    Latency = max(sum(group_a latencies), sum(group_b latencies))
+    Energy  = sum(all ops in both groups)  # both groups consume power
+    Weights = sum(all ops in both groups)
+    """
+
+    def __init__(self, name: str, group_a: list, group_b: list) -> None:
+        """
+        Args:
+            name: Operation name for latency breakdown reporting.
+            group_a: List of Operation objects for the first parallel group
+                     (e.g., routed expert path on main stream).
+            group_b: List of Operation objects for the second parallel group
+                     (e.g., shared expert path on aux stream).
+        """
+        super().__init__(name, 1.0)  # scale_factor handled by inner ops
+        self._group_a = group_a
+        self._group_b = group_b
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """
+        Query overlap operation latency.
+
+        Returns:
+            PerformanceResult with latency = max(group_a, group_b)
+            and energy = sum of all ops.
+        """
+        latency_a = 0.0
+        energy_a = 0.0
+        for op in self._group_a:
+            result = op.query(database, **kwargs)
+            latency_a += float(result)
+            energy_a += getattr(result, "energy", 0.0)
+
+        latency_b = 0.0
+        energy_b = 0.0
+        for op in self._group_b:
+            result = op.query(database, **kwargs)
+            latency_b += float(result)
+            energy_b += getattr(result, "energy", 0.0)
+
+        return PerformanceResult(
+            latency=max(latency_a, latency_b),
+            energy=energy_a + energy_b,
+        )
+
+    def get_weights(self, **kwargs):
+        weights = 0.0
+        for op in self._group_a + self._group_b:
+            weights += op.get_weights(**kwargs)
+        return weights
