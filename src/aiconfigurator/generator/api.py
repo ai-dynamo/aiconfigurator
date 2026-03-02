@@ -622,8 +622,7 @@ def generate_naive_config(
         backend_version = get_latest_database_version(system=system, backend=backend)
     if backend_version is None:
         logger.warning(
-            "No perf-database version found for system=%s, backend=%s; "
-            "falling back to default templates.",
+            "No perf-database version found for system=%s, backend=%s; falling back to default templates.",
             system,
             backend,
         )
