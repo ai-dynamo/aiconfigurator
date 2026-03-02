@@ -90,8 +90,8 @@ spec:
 
     {% if DynConfig.mode | default('disagg') == 'agg' %}
 {{ render_worker(
-    "VllmDecodeWorker",
-    "decode",
+    "VllmWorker",
+    None,
     agg_workers,
     agg_gpu,
     agg_cli_args_list | default([])
