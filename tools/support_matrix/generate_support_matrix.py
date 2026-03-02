@@ -41,12 +41,6 @@ def main():
         default=default_output,
         help=f"Output file to save results (CSV format) (default: {default_output})",
     )
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=None,
-        help="Maximum number of threads for parallel execution (default: auto)",
-    )
 
     args = parser.parse_args()
 
@@ -59,7 +53,7 @@ def main():
     )
 
     support_matrix = SupportMatrix()
-    results = support_matrix.test_support_matrix(max_workers=args.max_workers)
+    results = support_matrix.test_support_matrix()
 
     # Always save results (now has a default output location)
     support_matrix.save_results_to_csv(results, args.output)
