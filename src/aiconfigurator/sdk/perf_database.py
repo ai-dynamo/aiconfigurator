@@ -1922,7 +1922,7 @@ class PerfDatabase:
 
             # load_moe_data returns tuple of two Optional[dict]
             if isinstance(data_dict, tuple):
-                return (_wrap_data_dict(item) for item in data_dict)
+                return tuple(_wrap_data_dict(item) for item in data_dict)
 
             # Other ops just return Optional[dict]
             return _wrap_data_dict(data_dict)
@@ -1963,7 +1963,7 @@ class PerfDatabase:
         self._correct_data()
 
         # regular context attention
-        if self._context_attention_data is not None:
+        if self._context_attention_data:
             for quant_mode in self._context_attention_data:
                 for kv_cache_dtype in self._context_attention_data[quant_mode]:
                     for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype]:
@@ -2042,7 +2042,7 @@ class PerfDatabase:
                                 )
 
         # regular generation attention
-        if self._generation_attention_data is not None:
+        if self._generation_attention_data:
             for kv_cache_dtype in self._generation_attention_data:
                 for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
                     for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
@@ -2128,7 +2128,7 @@ class PerfDatabase:
                             )
 
         # regular gemm
-        if self._gemm_data is not None:
+        if self._gemm_data:
             for quant_mode, data_dict in self._gemm_data.items():
                 target_x_list = [
                     1,
@@ -2207,7 +2207,7 @@ class PerfDatabase:
 
         # mla
         # wideep context mla
-        if getattr(self, "_wideep_context_mla_data", None) is not None:
+        if getattr(self, "_wideep_context_mla_data", None):
             for kernel_source in self._wideep_context_mla_data:
                 for quant_mode in self._wideep_context_mla_data[kernel_source]:
                     for kv_cache_dtype in self._wideep_context_mla_data[kernel_source][quant_mode]:
@@ -2252,7 +2252,7 @@ class PerfDatabase:
                         )
 
         # regular context mla
-        if self._context_mla_data is not None:
+        if self._context_mla_data:
             for quant_mode in self._context_mla_data:
                 for kv_cache_dtype in self._context_mla_data[quant_mode]:
                     num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
@@ -2278,7 +2278,7 @@ class PerfDatabase:
                         sqrt_y_value=True,
                     )
         # wideep generation mla
-        if getattr(self, "_wideep_generation_mla_data", None) is not None:
+        if getattr(self, "_wideep_generation_mla_data", None):
             for kernel_source in self._wideep_generation_mla_data:
                 for kv_cache_dtype in self._wideep_generation_mla_data[kernel_source]:
                     tp_list = list(self._wideep_generation_mla_data[kernel_source][kv_cache_dtype].keys())
@@ -2331,7 +2331,7 @@ class PerfDatabase:
                     )
 
         # regular generation mla
-        if self._generation_mla_data is not None:
+        if self._generation_mla_data:
             for kv_cache_dtype in self._generation_mla_data:
                 tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
                 data_dict = self._generation_mla_data[kv_cache_dtype]
@@ -2501,7 +2501,7 @@ class PerfDatabase:
             preferred = "NCCL"
 
         # Check if preferred kernel is available in data, otherwise fallback
-        if self._wideep_alltoall_data is not None:
+        if self._wideep_alltoall_data:
             available_kernels = list(self._wideep_alltoall_data.keys())
             if preferred in available_kernels:
                 return preferred
@@ -2546,7 +2546,7 @@ class PerfDatabase:
             preferred = "moe_torch_flow"
 
         # Check if preferred kernel is available in data, otherwise fallback
-        if self._wideep_moe_compute_data is not None:
+        if self._wideep_moe_compute_data:
             available_kernels = list(self._wideep_moe_compute_data.keys())
             if preferred in available_kernels:
                 return preferred
@@ -4837,7 +4837,7 @@ class PerfDatabase:
             PerformanceResult with latency (ms) and energy (W·ms).
             Uses SOL-based fallback when mamba2_perf data is not loaded.
         """
-        mamba2_data = getattr(self, "_mamba2_data", None)
+        mamba2_data: dict = getattr(self, "_mamba2_data", {})
 
         def _sol_fallback() -> PerformanceResult:
             # SOL estimate for this kernel only (conv1d or ssm)
@@ -4853,7 +4853,7 @@ class PerfDatabase:
                 ssm_write_bytes = x * d_inner * 2
                 return self.query_mem_op(ssm_read_bytes + ssm_write_bytes)
 
-        if mamba2_data is None:
+        if not mamba2_data:
             return _sol_fallback()
 
         model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
@@ -5053,7 +5053,7 @@ class PerfDatabase:
         Correct the data based on sol time reference.
         """
         # regular gemm
-        if self._gemm_data is not None:
+        if self._gemm_data:
             for quant_mode in self._gemm_data:
                 for m in self._gemm_data[quant_mode]:
                     for n in self._gemm_data[quant_mode][m]:
@@ -5074,7 +5074,7 @@ class PerfDatabase:
                                     self._gemm_data[quant_mode][m][n][k] = float(max(sol, current_latency))
 
         # regular generation attention
-        if self._generation_attention_data is not None:
+        if self._generation_attention_data:
             for quant_mode in self._generation_attention_data:
                 for n_kv in self._generation_attention_data[quant_mode]:
                     for head_size in self._generation_attention_data[quant_mode][n_kv]:
