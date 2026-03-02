@@ -5,6 +5,7 @@ import pytest
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk import operations as ops
+from aiconfigurator.sdk.perf_database import LoadedOpData
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 pytestmark = pytest.mark.unit
@@ -28,7 +29,7 @@ def test_query_gemm_fp8_static_reuses_fp8_table(comprehensive_perf_db):
 
 def test_query_compute_scale_fp8_static_reuses_fp8_table(comprehensive_perf_db):
     # Provide enough points for 2D interpolation (>=2 keys in each axis).
-    comprehensive_perf_db._compute_scale_data = {
+    compute_scale_data_dict = {
         common.GEMMQuantMode.fp8: {
             64: {
                 256: {"latency": 1.0, "energy": 10.0},
@@ -40,6 +41,9 @@ def test_query_compute_scale_fp8_static_reuses_fp8_table(comprehensive_perf_db):
             },
         }
     }
+    comprehensive_perf_db._compute_scale_data = LoadedOpData(
+        compute_scale_data_dict, common.PerfDataFilename.compute_scale, "dummy_path"
+    )
 
     # Query an interior point so we avoid any boundary corner cases.
     m, k = 96, 384
@@ -57,7 +61,7 @@ def test_query_compute_scale_fp8_static_reuses_fp8_table(comprehensive_perf_db):
 
 
 def test_query_scale_matrix_fp8_static_reuses_fp8_table(comprehensive_perf_db):
-    comprehensive_perf_db._scale_matrix_data = {
+    scale_matrix_data_dict = {
         common.GEMMQuantMode.fp8: {
             64: {
                 256: {"latency": 3.0, "energy": 30.0},
@@ -69,6 +73,9 @@ def test_query_scale_matrix_fp8_static_reuses_fp8_table(comprehensive_perf_db):
             },
         }
     }
+    comprehensive_perf_db._scale_matrix_data = LoadedOpData(
+        scale_matrix_data_dict, common.PerfDataFilename.scale_matrix, "dummy_path"
+    )
 
     m, k = 96, 384
     fp8_result = comprehensive_perf_db.query_scale_matrix(m, k, common.GEMMQuantMode.fp8)

@@ -240,10 +240,18 @@ class DisaggInferenceSession:
 
         prefill_runtime_config = copy.deepcopy(runtime_config)
         prefill_runtime_config.batch_size = prefill_batch_size
-        prefill_summary = prefill_sess.run_static(mode="static_ctx", runtime_config=prefill_runtime_config)
+        prefill_summary = prefill_sess.run_static(
+            mode="static_ctx",
+            runtime_config=prefill_runtime_config,
+            latency_correction_scale=self._prefill_latency_correction_scale,
+        )
         decode_runtime_config = copy.deepcopy(runtime_config)
         decode_runtime_config.batch_size = decode_batch_size
-        decode_summary = decode_sess.run_static(mode="static_gen", runtime_config=decode_runtime_config)
+        decode_summary = decode_sess.run_static(
+            mode="static_gen",
+            runtime_config=decode_runtime_config,
+            latency_correction_scale=self._decode_latency_correction_scale,
+        )
         disagg_summary_df = self._get_disagg_summary_df(
             prefill_summary.get_summary_df(),
             prefill_num_worker,
