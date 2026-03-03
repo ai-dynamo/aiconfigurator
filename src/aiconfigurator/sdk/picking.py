@@ -373,6 +373,7 @@ def pick_autoscale(
     target_ttft: float,
     target_tpot: float,
     top_n: int = 5,
+    max_concurrency: int | None = None,
 ) -> dict[str, Any]:
     """Pick prefill and decode engines independently for autoscaling.
 
@@ -462,6 +463,8 @@ def pick_autoscale(
                 decode_summary_dict=d_row.to_dict(),
                 decode_num_worker=1,
             )
+            if max_concurrency is not None and combo["concurrency"] > max_concurrency:
+                continue
             all_combos.append(combo)
 
     if not all_combos:

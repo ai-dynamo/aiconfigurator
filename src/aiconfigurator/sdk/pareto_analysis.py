@@ -51,6 +51,9 @@ def agg_pareto(
         results_df: dataframe of the results
     """
 
+    if max_concurrency is not None:
+        logger.info("agg_pareto: max_concurrency=%d is active; capping batch-size sweep per config", max_concurrency)
+
     # agg is agg server, the loop over parallel is outside here.
     results_df = pd.DataFrame(columns=ColumnsAgg)
     exceptions = []
@@ -284,6 +287,8 @@ def disagg_pareto(
     autoscale = kwargs.get("autoscale", False)
     target_tpot = kwargs.get("target_tpot")
     max_concurrency = kwargs.get("max_concurrency")
+    if max_concurrency is not None:
+        logger.info("disagg_pareto: max_concurrency=%d is active; filtering compositions", max_concurrency)
 
     summary = disagg_sess.find_best_disagg_result_under_constraints(
         model_path=model_path,

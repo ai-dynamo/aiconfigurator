@@ -638,6 +638,9 @@ class TaskConfig:
             effective_profiles = list(dict.fromkeys([*effective_profiles, *yaml_profiles]))
             yaml_patch = yaml_config.get("config", yaml_config)
 
+        if max_concurrency is not None and max_concurrency < 1:
+            raise ValueError(f"max_concurrency must be >= 1, got {max_concurrency}")
+
         ctx = TaskContext(
             serving_mode=serving_mode,
             model_path=model_path,
@@ -911,6 +914,8 @@ class TaskConfig:
         )
 
         printable["enable_wideep"] = self.enable_wideep
+        if self.max_concurrency is not None:
+            printable["max_concurrency"] = self.max_concurrency
         printable["moe_backend"] = self.config.moe_backend
         printable["attention_backend"] = self.config.attention_backend
 

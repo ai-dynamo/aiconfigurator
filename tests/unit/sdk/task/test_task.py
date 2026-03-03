@@ -832,3 +832,52 @@ def test_agg_max_concurrency_none_by_default(monkeypatch):
     TaskRunner().run(task)
 
     assert captured.get("max_concurrency") is None
+
+
+def test_taskconfig_max_concurrency_zero_rejected():
+    """max_concurrency=0 should raise ValueError."""
+    with pytest.raises(ValueError, match=r"max_concurrency must be >= 1"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            max_concurrency=0,
+        )
+
+
+def test_taskconfig_max_concurrency_negative_rejected():
+    """Negative max_concurrency should raise ValueError."""
+    with pytest.raises(ValueError, match=r"max_concurrency must be >= 1"):
+        TaskConfig(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            max_concurrency=-5,
+        )
+
+
+def test_taskconfig_to_yaml_includes_max_concurrency():
+    """to_yaml() must include max_concurrency when it is set."""
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        max_concurrency=256,
+    )
+    yaml_output = task.to_yaml()
+    parsed = yaml.safe_load(yaml_output)
+    task_name = task.task_name
+    assert parsed[task_name]["max_concurrency"] == 256
+
+
+def test_taskconfig_to_yaml_omits_max_concurrency_when_none():
+    """to_yaml() must not include max_concurrency when it is None."""
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+    )
+    yaml_output = task.to_yaml()
+    parsed = yaml.safe_load(yaml_output)
+    task_name = task.task_name
+    assert "max_concurrency" not in parsed[task_name]
