@@ -12,7 +12,12 @@ from functools import cache
 from pathlib import Path
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.common import ARCHITECTURE_TO_MODEL_FAMILY, MULTIMODAL_TEXT_CONFIG_KEY, BlockConfig, DefaultHFModels
+from aiconfigurator.sdk.common import (
+    ARCHITECTURE_TO_MODEL_FAMILY,
+    MULTIMODAL_TEXT_CONFIG_KEY,
+    BlockConfig,
+    DefaultHFModels,
+)
 
 logger = logging.getLogger(__name__)
 
