@@ -163,7 +163,7 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
     # Sweep M from 256 to 1024 to capture deep_gemm JIT discontinuities.
     # The auto-tuner picks different BLOCK_N at M=512 vs M=513 (ceil(M/128) changes),
     # so dense sampling across this range reveals the step function in real latency.
-    m_list = list(range(256, 1025))
+    m_list = list(range(0, 8192))
     nk_shapes = [
         (51200, 5120),  # TP=1 gate_ffn1
         (5120, 25600),  # TP=1 ffn2
