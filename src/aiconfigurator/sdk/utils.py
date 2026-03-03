@@ -454,8 +454,7 @@ def _parse_hf_config_json(config: dict) -> dict:
         text_cfg = config[text_key]
         if not isinstance(text_cfg, dict):
             raise ValueError(
-                f"Expected '{text_key}' to be a dict for architecture {architecture}, "
-                f"got {type(text_cfg).__name__}"
+                f"Expected '{text_key}' to be a dict for architecture {architecture}, got {type(text_cfg).__name__}"
             )
         logger.info(
             "Multimodal model detected (%s). Reading LLM parameters from '%s'.",
