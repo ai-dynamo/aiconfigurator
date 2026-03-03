@@ -863,7 +863,11 @@ class TaskConfig:
                 worker_name="Decode worker",
             )
 
-    def pretty(self) -> str:
+    def to_yaml(self) -> str:
+        """
+        Returns a YAML string representation of the task configuration.
+        """
+
         def _convert(obj: Any) -> Any:
             if isinstance(obj, DefaultMunch):
                 return {key: _convert(value) for key, value in obj.items()}
@@ -1325,7 +1329,7 @@ if __name__ == "__main__":
     )
     task_runner = TaskRunner()
     print("\n=== TaskConfig (agg) ===")
-    print(task_agg.pretty())
+    print(task_agg.to_yaml())
     agg_df = task_runner.run(task_agg)["pareto_df"]
     agg_df = get_pareto_front(agg_df, "tokens/s/user", "tokens/s/gpu").reset_index(drop=True).reset_index()
     agg_df.to_csv("agg_df.csv", index=False)
@@ -1354,7 +1358,7 @@ if __name__ == "__main__":
         },
     )
     print("\n=== TaskConfig (disagg) ===")
-    print(task_disagg.pretty())
+    print(task_disagg.to_yaml())
     disagg_df = task_runner.run(task_disagg)["pareto_df"]
     disagg_df = get_pareto_front(disagg_df, "tokens/s/user", "tokens/s/gpu").reset_index(drop=True).reset_index()
     disagg_df.to_csv("disagg_df.csv", index=False)
