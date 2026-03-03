@@ -24,6 +24,7 @@ exp_agg_full:
   ttft: 1000.0  # Target TTFT in ms, optional, default to 1000.0
   tpot: 40.0   # Target TPOT in ms, optional, default to 40.0
   enable_wideep: false # enable wide ep for prefill/decode, optional, default to false
+  max_concurrency: null # optional, max global concurrency (total concurrent requests across all DP ranks). Configs exceeding this are excluded.
   profiles: [] # some inherit presets for easier patch, optional
   config: # all optional, used to patch default values
     nextn: 1 # mtp 1

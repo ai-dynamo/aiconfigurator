@@ -451,6 +451,7 @@ class DisaggInferenceSession:
         require_same_tp: bool = False,
         autoscale: bool = False,
         target_tpot: float | None = None,
+        max_concurrency: int | None = None,
     ) -> InferenceSummary | None:
         """
         Run disagg with given constraints
@@ -630,6 +631,8 @@ class DisaggInferenceSession:
                             prefill_degradation_factor=rate_matching_prefill_degradation_factor,
                             decode_degradation_factor=rate_matching_decode_degradation_factor,
                         )
+                        if max_concurrency is not None and disagg_dict["concurrency"] > max_concurrency:
+                            continue
                         category_results.append(disagg_dict)
 
                 if category_results:

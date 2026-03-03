@@ -743,3 +743,92 @@ def test_vllm_disagg_does_not_require_same_tp(monkeypatch):
     assert captured.get("require_same_tp") is False, (
         f"Expected require_same_tp=False for vllm disagg, got {captured.get('require_same_tp')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# max_concurrency tests
+# ---------------------------------------------------------------------------
+
+
+def test_taskconfig_stores_max_concurrency():
+    """max_concurrency is stored in config and instance attribute."""
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        max_concurrency=256,
+    )
+    assert task.max_concurrency == 256
+    assert task.config.max_concurrency == 256
+
+
+def test_taskconfig_max_concurrency_default_none():
+    """max_concurrency defaults to None when not specified."""
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+    )
+    assert task.max_concurrency is None
+    assert task.config.max_concurrency is None
+
+
+def _make_capturing_agg_pareto(captured: dict):
+    """Helper: return a fake agg_pareto that records its kwargs."""
+
+    def _fn(**kwargs):
+        captured.update(kwargs)
+        return pd.DataFrame({"tokens/s/user": [1.0], "tokens/s/gpu": [0.5]})
+
+    return _fn
+
+
+def test_agg_max_concurrency_passed_to_pareto(monkeypatch):
+    """max_concurrency should be forwarded from TaskRunner to agg_pareto."""
+    captured = {}
+    pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+    monkeypatch.setattr(pa_stub, "agg_pareto", _make_capturing_agg_pareto(captured))
+
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        max_concurrency=512,
+    )
+    TaskRunner().run(task)
+
+    assert captured.get("max_concurrency") == 512
+
+
+def test_disagg_max_concurrency_passed_to_pareto(monkeypatch):
+    """max_concurrency should be forwarded from TaskRunner to disagg_pareto."""
+    captured = {}
+    pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+    monkeypatch.setattr(pa_stub, "disagg_pareto", _make_capturing_disagg_pareto(captured))
+
+    task = TaskConfig(
+        serving_mode="disagg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        total_gpus=8,
+        max_concurrency=128,
+    )
+    TaskRunner().run(task)
+
+    assert captured.get("max_concurrency") == 128
+
+
+def test_agg_max_concurrency_none_by_default(monkeypatch):
+    """When max_concurrency is not set, None is forwarded to agg_pareto."""
+    captured = {}
+    pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+    monkeypatch.setattr(pa_stub, "agg_pareto", _make_capturing_agg_pareto(captured))
+
+    task = TaskConfig(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+    )
+    TaskRunner().run(task)
+
+    assert captured.get("max_concurrency") is None
