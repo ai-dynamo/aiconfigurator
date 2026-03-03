@@ -724,7 +724,7 @@ class LLAMAModel(BaseModel):
 
         # pp
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
 
@@ -1014,7 +1014,7 @@ class MOEModel(BaseModel):
 
         # pp
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
     def _validate_fp8_block_quantized_moe_config(self) -> None:
@@ -1444,7 +1444,7 @@ class DeepSeekModel(BaseModel):
 
         # pp
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
         # TODO
@@ -1898,7 +1898,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
 
         # pp
         pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
 

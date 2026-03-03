@@ -1293,8 +1293,8 @@ class EventFn:
             )
         elif models.get_model_family(model_path) == "MOE":
             return (
-                gr.update(value=0, visible=False),
-                gr.update(visible=False),
+                gr.update(value=0, visible=True),
+                gr.update(visible=True),
                 gr.update(visible=True),
                 gr.update(visible=True),
                 gr.update(visible=True),
@@ -1303,8 +1303,8 @@ class EventFn:
             )
         else:
             return (
-                gr.update(value=0, visible=False),
-                gr.update(visible=False),
+                gr.update(value=0, visible=True),
+                gr.update(visible=True),
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),

@@ -303,7 +303,7 @@ class TaskConfigFactory:
 
     @staticmethod
     def _base_common_layer(ctx: TaskContext) -> dict:
-        nextn = 1 if ctx.model_family == "DEEPSEEK" else 0
+        nextn = 0  # Default MTP off for all models; user can enable via CLI or YAML config
         return {
             "serving_mode": ctx.serving_mode,
             "model_path": ctx.model_path,

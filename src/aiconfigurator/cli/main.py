@@ -145,6 +145,19 @@ def _add_default_mode_arguments(parser):
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
+    parser.add_argument(
+        "--nextn",
+        type=int,
+        default=0,
+        help="Number of draft tokens for MTP (Multi-Token Prediction) speculative decoding. Default is 0 (disabled).",
+    )
+    parser.add_argument(
+        "--nextn-accept-rates",
+        type=str,
+        default="0.85,0.3,0,0,0",
+        help="Acceptance rates for MTP draft tokens. Comma-separated list of 5 floats. "
+        "Default is '0.85,0.3,0,0,0' meaning 1st token has 85%% acceptance, 2nd has 30%%, rest are 0.",
+    )
 
 
 def _add_experiments_mode_arguments(parser):
@@ -577,6 +590,8 @@ def build_default_task_configs(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
+    nextn: int = 0,
+    nextn_accept_rates: list[float] | None = None,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
 
@@ -595,12 +610,15 @@ def build_default_task_configs(
         tpot: Time per output token target in ms.
         request_latency: Optional end-to-end request latency target (ms).
         prefix: Prefix cache length.
+        nextn: Number of draft tokens for MTP speculative decoding.
+        nextn_accept_rates: Acceptance rates for MTP draft tokens.
 
     Returns:
         Dict with TaskConfig objects. When backend='auto', returns 6 configs
         (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
         Otherwise returns 2 configs ('agg' and 'disagg').
     """
+    nextn_accept_rates = nextn_accept_rates or [0.85, 0.3, 0.0, 0.0, 0.0]
     decode_system = decode_system or system
     # Expand "auto" backend to all available backends
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
@@ -622,6 +640,8 @@ def build_default_task_configs(
         "request_latency": request_latency,
         "prefix": prefix,
         "database_mode": database_mode,
+        "nextn": nextn,
+        "nextn_accept_rates": nextn_accept_rates,
     }
 
     task_configs: dict[str, TaskConfig] = {}
@@ -1333,6 +1353,8 @@ def main(args):
             tpot=args.tpot,
             request_latency=args.request_latency,
             prefix=args.prefix,
+            nextn=args.nextn,
+            nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],
         )
     elif args.mode == "exp":
         try:
