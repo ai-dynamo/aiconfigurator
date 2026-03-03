@@ -91,3 +91,38 @@ class TestBackendAny:
             # Disagg configs should have decode_system set (defaults to system)
             if exp_name.startswith("disagg"):
                 assert task_config.decode_system_name == "h200_sxm"
+
+    def test_build_default_task_configs_with_nextn(self):
+        """Test that nextn and nextn_accept_rates are passed to TaskConfig when specified."""
+        task_configs = build_default_task_configs(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system="h200_sxm",
+            backend="trtllm",
+            nextn=3,
+            nextn_accept_rates=[0.9, 0.5, 0.2, 0.1, 0.0],
+        )
+
+        assert len(task_configs) == 2
+
+        # Verify nextn is set in config
+        for task_config in task_configs.values():
+            assert task_config.config.nextn == 3
+            assert task_config.config.nextn_accept_rates == [0.9, 0.5, 0.2, 0.1, 0.0]
+
+    def test_build_default_task_configs_nextn_default_zero(self):
+        """Test that nextn defaults to 0 (MTP disabled) when not specified."""
+        task_configs = build_default_task_configs(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system="h200_sxm",
+            backend="trtllm",
+        )
+
+        assert len(task_configs) == 2
+
+        # Verify nextn defaults to 0
+        for task_config in task_configs.values():
+            assert task_config.config.nextn == 0
+            # Default accept rates should still be present
+            assert task_config.config.nextn_accept_rates is not None
