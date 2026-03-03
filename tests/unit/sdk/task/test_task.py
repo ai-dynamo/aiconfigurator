@@ -259,7 +259,8 @@ def test_taskconfig_disagg_total_gpus_caps_replica():
     ],
 )
 def test_taskconfig_yaml_returns_valid_yaml(serving_mode, task_kwargs, expected_keys):
-    """Test that TaskConfig.pretty() returns valid YAML that can be parsed."""
+    """Test that TaskConfig.to_yaml() returns valid YAML that can be parsed."""
+    task = TaskConfig(serving_mode=serving_mode, **task_kwargs)
     task = TaskConfig(serving_mode=serving_mode, **task_kwargs)
 
     yaml_output = task.to_yaml()
