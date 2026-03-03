@@ -280,10 +280,14 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(
             [
                 "default",
-                "--model-path", "Qwen/Qwen3-32B",
-                "--total-gpus", "8",
-                "--system", "h200_sxm",
-                "--max-concurrency", "512",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--max-concurrency",
+                "512",
             ]
         )
         assert args.max_concurrency == 512

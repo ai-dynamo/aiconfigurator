@@ -120,7 +120,11 @@ def agg_pareto(
                     logger.debug(
                         "Skipping parallel config tp=%d pp=%d dp=%d: "
                         "max_concurrency=%d requires batch_size < 1 (scale_factor=%d)",
-                        tp_size, pp_size, dp_size, max_concurrency, scale_factor,
+                        tp_size,
+                        pp_size,
+                        dp_size,
+                        max_concurrency,
+                        scale_factor,
                     )
                     continue
             else:
