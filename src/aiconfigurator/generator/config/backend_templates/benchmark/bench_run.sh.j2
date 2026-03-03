@@ -23,7 +23,7 @@ ARTIFACT_DIR="${BENCH_ARTIFACT_DIR:-/tmp/bench_artifacts}"
 for concurrency in "${concurrency_array[@]}"; do
   echo "Run concurrency: $concurrency"
   aiperf profile \
-    --artifact-dir "${ARTIFACT_DIR}" \
+    --artifact-dir "${ARTIFACT_DIR}/concurrency_${concurrency}" \
     -m {{ BenchConfig.model }} \
     --endpoint-type {{ BenchConfig.endpoint_type }} \
     -u http://{{ ServiceConfig.head_node_ip }}:{{ ServiceConfig.port }} \
