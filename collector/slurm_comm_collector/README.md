@@ -44,3 +44,33 @@ python3 cvt_log_to_perf_txt.py
 sbatch -N 1 ./slurm_custom_ar_2gpu.sh
 sbatch -N 1 ./slurm_custom_ar_4gpu.sh
 ```
+
+# 3. TensorRT-LLM WideEP MNNVL AlltoAll collection
+
+## 3.1 Modify submit_mnnvl.sh parameters
+
+Edit the following parameters in `submit_mnnvl.sh`:
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `SCRIPT_DIR` | Directory of this script | `/path/to/slurm_comm_collector` |
+| `CONTAINER_IMAGE` | TensorRT-LLM container image (.sqsh) | `/path/to/tensorrt-llm.sqsh` |
+| `CONTAINER_MOUNTS` | Container mount paths (src:dst) | `/yourdata:/yourdata` |
+| `ACCOUNT` | Slurm account name | `your account` |
+| `PARTITION` | Slurm partition name | `your partition` |
+| `GPU_COUNTS` | Array of GPU counts to test | `(2 4 8 16 32 64 72)` |
+| `GPUS_PER_NODE` | Number of GPUs per node | `4` (for GB200 NVL72) |
+
+## 3.2 Run the collector
+```bash
+bash submit_mnnvl.sh
+```
+
+## 3.3 Check job status and results
+```bash
+# Check job status
+squeue -u $USER
+
+# Results will be saved to
+cat results/wideep_alltoall_perf.txt
+```

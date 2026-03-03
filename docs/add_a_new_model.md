@@ -76,7 +76,7 @@ In this case, you just need to ensure the architecture is supported in **ARCHITE
 "YourModelForCausalLM": "LLAMA",  # or "MOE", "DEEPSEEK", etc.
 ```
 
-AIConfigurator will automatically download the model's `config.json` from HuggingFace when you run with `--model_path your-org/Your-New-Model`. The model config is parsed to extract layer count, hidden size, attention heads, etc.
+AIConfigurator will automatically download the model's `config.json` from HuggingFace when you run with `--model-path your-org/Your-New-Model`. The model config is parsed to extract layer count, hidden size, attention heads, etc.
 
 **Note**: If the architecture already exists in `ARCHITECTURE_TO_MODEL_FAMILY` (e.g., `LlamaForCausalLM`, `Qwen3ForCausalLM`, `MixtralForCausalLM`), no changes are needed - just use the model directly.
 
@@ -124,7 +124,7 @@ Rebuild & reinstall aiconfigurator to add this model's support.
 flowchart TD
     A[Does the model belong to an existing model_family?]
     A --> |YES| B([Simple dense, moe variants like <i><b>Qwen/Qwen3-32B</b></i> can directly use the existing <i><b>LLAMA</b></i> or <i><b>MOE</b></i> model_family])
-    B --> C[Ensure architecture exists in <i><b>ARCHITECTURE_TO_MODEL_FAMILY</b></i>, then use directly with <i><b>--model_path</b></i>]
+    B --> C[Ensure architecture exists in <i><b>ARCHITECTURE_TO_MODEL_FAMILY</b></i>, then use directly with <i><b>--model-path</b></i>]
     A --> |NO| D([Each layer in <i><b>Nemotron</b></i> can have a different <i><b>inter_size</b></i>, so we defined a new class for this model])
     D --> E[Does the model need new operations?]
     E --> |YES| F([for instance, new model might have covolution, which isn't defined in sdk/operations.py])

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aiconfigurator.cli.main import configure_parser
+from aiconfigurator.cli.main import build_default_task_configs, configure_parser
 from aiconfigurator.cli.main import main as cli_main
 
 pytestmark = pytest.mark.unit
@@ -37,6 +37,7 @@ class TestCLIIntegration:
             mock_best_configs,
             {"agg": mock_results_df},
             mock_best_throughputs,
+            {"agg": {"ttft": 100.0, "tpot": 10.0, "request_latency": 1000.0}},
         )
 
         with patch("aiconfigurator.cli.main.save_results") as mock_save:
@@ -78,11 +79,12 @@ class TestCLIIntegration:
             mock_best_configs,
             {"my_exp": mock_results_df},
             mock_best_throughputs,
+            {"my_exp": {"ttft": 100.0, "tpot": 10.0, "request_latency": 1000.0}},
         )
 
         args = cli_args_factory(
             mode="exp",
-            extra_args=["--yaml_path", str(mock_exp_yaml_path)],
+            extra_args=["--yaml-path", str(mock_exp_yaml_path)],
             save_dir=str(mock_exp_yaml_path.parent),
         )
 
@@ -112,13 +114,13 @@ class TestCLIIntegration:
     @patch("aiconfigurator.cli.main._execute_task_configs")
     def test_cli_main_build_dispatch(self, mock_execute, mode, build_patch, cli_args_factory, mock_exp_yaml_path):
         """Main should dispatch to the correct builder based on CLI mode."""
-        mock_execute.return_value = ("agg", {}, {}, {})
+        mock_execute.return_value = ("agg", {}, {}, {}, {})
         mock_task_config = MagicMock(name="TaskConfig")
 
         with patch(build_patch) as mock_builder:
             mock_builder.return_value = {"agg": mock_task_config}
             if mode == "exp":
-                args = cli_args_factory(mode=mode, extra_args=["--yaml_path", str(mock_exp_yaml_path)])
+                args = cli_args_factory(mode=mode, extra_args=["--yaml-path", str(mock_exp_yaml_path)])
             else:
                 args = cli_args_factory(mode=mode)
             cli_main(args)
@@ -164,7 +166,7 @@ class TestCLIIntegration:
             else:
                 yaml_file = tmp_path / "exp.yaml"
                 yaml_file.write_text("exps: []")
-                args = cli_args_factory(mode="exp", extra_args=["--yaml_path", str(yaml_file)])
+                args = cli_args_factory(mode="exp", extra_args=["--yaml-path", str(yaml_file)])
 
             with pytest.raises(RuntimeError):
                 cli_main(args)
@@ -177,7 +179,7 @@ class TestCLIIntegration:
         """Test that database_mode is correctly parsed and passed through in default mode."""
         args = cli_args_factory(
             mode="default",
-            extra_args=["--database_mode", database_mode],
+            extra_args=["--database-mode", database_mode],
         )
         assert args.database_mode == database_mode
 
@@ -198,13 +200,51 @@ exp_with_db_mode:
 
         mock_task_config = MagicMock(name="TaskConfig")
         mock_build_exp.return_value = {"exp_with_db_mode": mock_task_config}
-        mock_execute.return_value = ("exp_with_db_mode", {}, {}, {})
+        mock_execute.return_value = ("exp_with_db_mode", {}, {}, {}, {})
 
         parser = argparse.ArgumentParser()
         configure_parser(parser)
-        args = parser.parse_args(["exp", "--yaml_path", str(yaml_file)])
+        args = parser.parse_args(["exp", "--yaml-path", str(yaml_file)])
 
         cli_main(args)
 
         mock_build_exp.assert_called_once()
         mock_execute.assert_called_once()
+
+
+class TestBuildDefaultTaskConfigs:
+    """Tests for build_default_task_configs function."""
+
+    @patch("aiconfigurator.cli.main.TaskConfig")
+    def test_skips_disagg_when_total_gpus_less_than_2(self, mock_task_config):
+        """Disagg config should be skipped when total_gpus < 2."""
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_task_configs(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=1,
+            system="h200_sxm",
+        )
+
+        # Should only have agg config, no disagg
+        assert "agg" in result
+        assert "disagg" not in result
+        # TaskConfig should only be called once (for agg)
+        assert mock_task_config.call_count == 1
+
+    @patch("aiconfigurator.cli.main.TaskConfig")
+    def test_includes_disagg_when_total_gpus_at_least_2(self, mock_task_config):
+        """Disagg config should be included when total_gpus >= 2."""
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_task_configs(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=2,
+            system="h200_sxm",
+        )
+
+        # Should have both agg and disagg configs
+        assert "agg" in result
+        assert "disagg" in result
+        # TaskConfig should be called twice (agg + disagg)
+        assert mock_task_config.call_count == 2

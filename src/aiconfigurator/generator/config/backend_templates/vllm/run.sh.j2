@@ -1,32 +1,87 @@
-{#
-  vLLM backend run.sh template
-  Uses shared macros for worker launching.
-#}
-{% from 'base_run.j2' import shell_header, env_setup, frontend %}
-{% import 'vllm.j2' as vllm %}
+#!/bin/bash
+set -e
+trap 'echo "Cleaning up..."; kill 0 2>/dev/null || true' EXIT INT TERM
 
-{{ shell_header() }}
-
-{{ env_setup(ServiceConfig, DynConfig) }}
-
-{{ frontend(ServiceConfig, DynConfig) }}
-
-{% set mode = DynConfig.mode | default('disagg') %}
 {% set enable_router = DynConfig.enable_router | default(false) %}
+{% if enable_router %}
+export PYTHONHASHSEED=0
+{% endif %}
+export MODEL_PATH=${MODEL_PATH:-"{{ ServiceConfig.model_path }}"}
+export HF_TOKEN=${HF_TOKEN:-"{{ ServiceConfig.hf_token }}"}
+python3 -m dynamo.frontend {% if enable_router %}--router-mode kv --router-reset-states {% endif %}--http-port "{{ ServiceConfig.port }}" 2>&1 | sed "s/^/[Frontend] /" &
 
-{% if mode == 'agg' %}
-{# ============ AGGREGATE MODE ============ #}
-{{ vllm.run_worker('agg', agg_gpu, agg_workers, agg_gpu_offset | default(0), agg_cli_args, enable_router) }}
+{% if DynConfig.mode | default('disagg') == 'agg' %}
+AGG_GPU={{ agg_gpu }}
+AGG_WORKERS={{ agg_workers }}
+AGG_GPU_OFFSET={{ agg_gpu_offset | default(0) }}
+AGG_SYSTEM_PORT_BASE=${AGG_SYSTEM_PORT_BASE:-${DYN_SYSTEM_PORT1:-8081}}
+AGG_EVENT_PORT_BASE=${AGG_EVENT_PORT_BASE:-${DYN_VLLM_KV_EVENT_PORT:-{{ ServiceConfig.dyn_vllm_kv_event_port }}}}
+AGG_SIDE_CHANNEL_PORT_BASE=${AGG_SIDE_CHANNEL_PORT_BASE:-${VLLM_NIXL_SIDE_CHANNEL_PORT:-{{ ServiceConfig.vllm_nixl_side_channel_port }}}}
+for ((w=0; w<AGG_WORKERS; w++)); do
+  BASE=$(( AGG_GPU_OFFSET + w * AGG_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+AGG_GPU-1)))
+  SYSTEM_PORT=$(( AGG_SYSTEM_PORT_BASE + w ))
+  if [[ $w -eq 1 && -n "${DYN_SYSTEM_PORT2:-}" ]]; then
+    SYSTEM_PORT=$DYN_SYSTEM_PORT2
+  fi
+  EVENT_PORT=$(( AGG_EVENT_PORT_BASE + w ))
+  SIDE_CHANNEL_PORT=$(( AGG_SIDE_CHANNEL_PORT_BASE + w ))
+  ( DYN_SYSTEM_PORT=$SYSTEM_PORT \
+    DYN_VLLM_KV_EVENT_PORT=$EVENT_PORT \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.vllm \
+    --model "$MODEL_PATH" \
+    {% if enable_router %}--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${EVENT_PORT}\",\"enable_kv_cache_events\":true}" {% endif %}\
+    {{ agg_cli_args }} 2>&1 | sed "s/^/[Worker $w] /" ) &
+done
 wait
-
 {% else %}
-{# ============ DISAGGREGATE MODE ============ #}
+PREFILL_WORKERS={{ prefill_workers }}
+DECODE_WORKERS={{ decode_workers }}
+DECODE_SYSTEM_PORT_BASE=${DECODE_SYSTEM_PORT_BASE:-${DYN_SYSTEM_PORT1:-8081}}
+PREFILL_SYSTEM_PORT_BASE=${PREFILL_SYSTEM_PORT_BASE:-${DYN_SYSTEM_PORT2:-$((DECODE_SYSTEM_PORT_BASE + DECODE_WORKERS))}}
+PREFILL_EVENT_PORT_BASE=${PREFILL_EVENT_PORT_BASE:-${DYN_VLLM_KV_EVENT_PORT:-{{ ServiceConfig.dyn_vllm_kv_event_port }}}}
+PREFILL_SIDE_CHANNEL_PORT_BASE=${PREFILL_SIDE_CHANNEL_PORT_BASE:-${VLLM_NIXL_SIDE_CHANNEL_PORT:-{{ ServiceConfig.vllm_nixl_side_channel_port }}}}
+DECODE_EVENT_PORT_BASE=${DECODE_EVENT_PORT_BASE:-$((PREFILL_EVENT_PORT_BASE + PREFILL_WORKERS))}
+DECODE_SIDE_CHANNEL_PORT_BASE=${DECODE_SIDE_CHANNEL_PORT_BASE:-$((PREFILL_SIDE_CHANNEL_PORT_BASE + PREFILL_WORKERS))}
+
 {% if prefill_workers|int > 0 %}
-{{ vllm.run_worker('prefill', prefill_gpu, prefill_workers, prefill_gpu_offset | default(0), prefill_cli_args, enable_router) }}
+PREFILL_GPU={{ prefill_gpu }}
+for ((w=0; w<PREFILL_WORKERS; w++)); do
+  BASE=$(( w * PREFILL_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+PREFILL_GPU-1)))
+  SYSTEM_PORT=$(( PREFILL_SYSTEM_PORT_BASE + w ))
+  EVENT_PORT=$(( PREFILL_EVENT_PORT_BASE + w ))
+  SIDE_CHANNEL_PORT=$(( PREFILL_SIDE_CHANNEL_PORT_BASE + w ))
+  ( DYN_SYSTEM_PORT=$SYSTEM_PORT \
+  DYN_VLLM_KV_EVENT_PORT=$EVENT_PORT \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+  CUDA_VISIBLE_DEVICES=$GPU_LIST \
+    python3 -m dynamo.vllm \
+      --model "$MODEL_PATH" \
+      {% if enable_router %}--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${EVENT_PORT}\",\"enable_kv_cache_events\":true}" {% endif %}\
+      {{ prefill_cli_args }} --is-prefill-worker 2>&1 | sed "s/^/[Prefill $w] /" ) &
+done
 {% endif %}
 
 {% if decode_workers|int > 0 %}
-{{ vllm.run_worker('decode', decode_gpu, decode_workers, decode_gpu_offset | default(0), decode_cli_args, enable_router) }}
+DECODE_GPU={{ decode_gpu }}
+DECODE_GPU_OFFSET={{ decode_gpu_offset | default(0) }}
+for ((w=0; w<DECODE_WORKERS; w++)); do
+  BASE=$(( DECODE_GPU_OFFSET + w * DECODE_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+DECODE_GPU-1)))
+  SYSTEM_PORT=$(( DECODE_SYSTEM_PORT_BASE + w ))
+  EVENT_PORT=$(( DECODE_EVENT_PORT_BASE + w ))
+  SIDE_CHANNEL_PORT=$(( DECODE_SIDE_CHANNEL_PORT_BASE + w ))
+  ( DYN_SYSTEM_PORT=$SYSTEM_PORT \
+  DYN_VLLM_KV_EVENT_PORT=$EVENT_PORT \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+  CUDA_VISIBLE_DEVICES=$GPU_LIST \
+    python3 -m dynamo.vllm \
+      --model "$MODEL_PATH" \
+      {% if enable_router %}--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${EVENT_PORT}\",\"enable_kv_cache_events\":true}" {% endif %}\
+      {{ decode_cli_args }} --is-decode-worker 2>&1 | sed "s/^/[Decode $w] /" ) &
+done
 {% endif %}
 wait
 {% endif %}

@@ -34,6 +34,61 @@ def _load_json_with_infinity(file_path) -> dict:
     return json.loads(content)
 
 
+def filter_real_silicon_configs(
+    parallel_config_list: list[list[int]],
+    *,
+    is_moe: bool = False,
+    min_num_gpus: int | None = None,
+    max_num_gpus: int | None = None,
+    allow_moe_pure_tp: bool = True,
+) -> list[list[int]]:
+    """Filter parallel configs for real-silicon sweep runs.
+
+    Applies GPU count bounds and, for MoE models, restricts configs to pure
+    TEP, pure DEP, and optionally pure TP patterns.
+
+    Args:
+        parallel_config_list: List of ``[tp, pp, dp, moe_tp, moe_ep]`` configs.
+        is_moe: Whether the model is MoE.
+        min_num_gpus: Minimum total GPUs per config (inclusive).
+        max_num_gpus: Maximum total GPUs per config (inclusive).
+        allow_moe_pure_tp: When ``True`` (default, GQA+MoE models), pure TP
+            configs are kept.  Set to ``False`` for MLA+MoE models (e.g.
+            DeepSeek) to only allow TEP/DEP.
+
+    Returns:
+        Filtered list of parallel configurations.
+    """
+    filtered = []
+    for cfg in parallel_config_list:
+        tp, pp, dp, _moe_tp, _moe_ep = cfg
+        total_gpus = tp * pp * dp
+
+        # GPU count bounds
+        if min_num_gpus is not None and total_gpus < min_num_gpus:
+            continue
+        if max_num_gpus is not None and total_gpus > max_num_gpus:
+            continue
+
+        # For MoE: only allow pure TEP, pure DEP, and optionally pure TP.
+        # - Pure TEP: tp > 1, dp == 1, moe_tp == 1, moe_ep > 1
+        # - Pure DEP: tp == 1, dp > 1, moe_tp == 1, moe_ep > 1
+        # - Pure TP:  tp > 1, dp == 1, moe_tp > 1, moe_ep == 1
+        #   (only for GQA+MoE; disabled for MLA+MoE via allow_moe_pure_tp=False)
+        # Reject any config that doesn't match one of these patterns.
+        if is_moe:
+            is_pure_tep = tp > 1 and dp == 1 and _moe_tp == 1 and _moe_ep > 1
+            is_pure_dep = tp == 1 and dp > 1 and _moe_tp == 1 and _moe_ep > 1
+            is_pure_tp = tp > 1 and dp == 1 and _moe_tp > 1 and _moe_ep == 1
+            if not allow_moe_pure_tp:
+                is_pure_tp = False
+            if not (is_pure_tep or is_pure_dep or is_pure_tp):
+                continue
+
+        filtered.append(cfg)
+    return filtered
+
+
 def enumerate_parallel_config(
     num_gpu_list: list[int],
     tp_list: list[int],
@@ -44,6 +99,10 @@ def enumerate_parallel_config(
     is_moe: bool = False,
     backend: common.BackendName = common.BackendName.trtllm,
     enable_wideep: bool = False,
+    real_silicon_sweep: bool = False,
+    min_num_gpus: int | None = None,
+    max_num_gpus: int | None = None,
+    allow_moe_pure_tp: bool = True,
 ) -> list[list[int]]:
     """
     Enumerate parallel configurations based on parallel list.
@@ -60,9 +119,20 @@ def enumerate_parallel_config(
         is_moe: whether to use moe
         backend: backend name enum. Important for moe parallel enumeration as different backends
             have different moe parallel support.
+        real_silicon_sweep: when True, exclude PP (force pp_list=[1]) and filter by
+            min_num_gpus/max_num_gpus bounds on total GPUs per config. For MoE models,
+            only allows pure TEP, pure DEP, and (optionally) pure TP.
+        min_num_gpus: minimum total GPUs per config (only applied when real_silicon_sweep=True).
+        max_num_gpus: maximum total GPUs per config (only applied when real_silicon_sweep=True).
+        allow_moe_pure_tp: when True (default, GQA+MoE models), pure TP configs are kept.
+            Set to False for MLA+MoE models (e.g. DeepSeek) to only allow TEP/DEP.
+            Only effective when real_silicon_sweep=True.
     Returns:
         parallel_config_list: list of parallel configurations
     """
+    if real_silicon_sweep:
+        pp_list = [1]
+
     parallel_config_list = []
     for tp in tp_list:
         for pp in pp_list:
@@ -90,9 +160,15 @@ def enumerate_parallel_config(
                 if tp * pp in num_gpu_list:
                     parallel_config_list.append([tp, pp, 1, 1, 1])
 
-    for parallel_config in parallel_config_list:
-        tp, pp, dp, moe_tp, moe_ep = parallel_config
-        logger.info(f"Enumerated parallel config: tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
+    # Apply real silicon sweep filters to reduce sweep time on real silicon
+    if real_silicon_sweep:
+        parallel_config_list = filter_real_silicon_configs(
+            parallel_config_list,
+            is_moe=is_moe,
+            min_num_gpus=min_num_gpus,
+            max_num_gpus=max_num_gpus,
+            allow_moe_pure_tp=allow_moe_pure_tp,
+        )
 
     return parallel_config_list
 
@@ -231,10 +307,42 @@ def safe_mkdir(target_path: str, exist_ok: bool = True) -> Path:
 
 class HuggingFaceDownloadError(Exception):
     """
-    Exception raised when a HuggingFace config.json file cannot be downloaded.
+    Exception raised when a HuggingFace JSON file cannot be downloaded.
     """
 
     pass
+
+
+def _get_hf_auth_headers() -> dict[str, str]:
+    # Load token from ~/.cache/huggingface/token, if available
+    token_path = Path.home() / ".cache" / "huggingface" / "token"
+    hf_token = None
+    if token_path.exists():
+        with open(token_path) as f:
+            hf_token = f.read().strip()
+    headers: dict[str, str] = {}
+    if hf_token:
+        headers["Authorization"] = f"Bearer {hf_token}"
+    return headers
+
+
+def _download_hf_json(hf_id: str, filename: str, *, raise_on_404: bool = True) -> dict | None:
+    url = f"https://huggingface.co/{hf_id}/raw/main/{filename}"
+    try:
+        req = urllib.request.Request(url, headers=_get_hf_auth_headers())
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as e:
+        if e.code == 404 and not raise_on_404:
+            return None
+        token_path = Path.home() / ".cache" / "huggingface" / "token"
+        raise HuggingFaceDownloadError(
+            f"Failed to download {hf_id}'s {filename} from HuggingFace: "
+            f"HuggingFace returned HTTP error {e.code}: {e.reason}. "
+            f"URL: {url}. Check your authentication token in {token_path} if using a gated model."
+        ) from e
+    except Exception as e:
+        raise HuggingFaceDownloadError(f"Failed to download {hf_id}'s {filename} from HuggingFace: {e}") from e
 
 
 def _download_hf_config(hf_id: str) -> dict:
@@ -250,31 +358,7 @@ def _download_hf_config(hf_id: str) -> dict:
     Raises:
         HuggingFaceDownloadError: If the HuggingFace API returns an error
     """
-    url = f"https://huggingface.co/{hf_id}/raw/main/config.json"
-
-    # Load token from ~/.cache/huggingface/token, if available
-    token_path = Path.home() / ".cache" / "huggingface" / "token"
-    hf_token = None
-    if token_path.exists():
-        with open(token_path) as f:
-            hf_token = f.read().strip()
-    headers = {}
-    if hf_token:
-        headers["Authorization"] = f"Bearer {hf_token}"
-
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=30) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as e:
-        # Provide detailed error for any HTTP error code
-        raise HuggingFaceDownloadError(
-            f"Failed to download {hf_id}'s config.json from HuggingFace: "
-            f"HuggingFace returned HTTP error {e.code}: {e.reason}. "
-            f"URL: {url}. Check your authentication token in {token_path} if using a gated model."
-        ) from e
-    except Exception as e:
-        raise HuggingFaceDownloadError(f"Failed to download {hf_id}'s config.json from HuggingFace: {e}") from e
+    return _download_hf_json(hf_id, "config.json", raise_on_404=True) or {}
 
 
 def _parse_nemotron_block_configs(block_configs: list[dict]) -> list[BlockConfig]:
@@ -338,17 +422,15 @@ def _parse_nemotron_block_configs(block_configs: list[dict]) -> list[BlockConfig
     return grouped_configs if grouped_configs else None
 
 
-def _parse_hf_config_json(config: dict) -> list:
+def _parse_hf_config_json(config: dict) -> dict:
     """
-    Convert a HuggingFace config.json dictionary into a list of model configuration parameters:
-    [architecture, l, n, n_kv, d, hidden_size, inter_size, vocab, context, topk,
-    num_experts, moe_inter_size, extra_params]
+    Convert a HuggingFace config.json dictionary into model configuration parameters.
 
     Args:
         config: HuggingFace config.json dictionary
 
     Returns:
-        list: Model configuration parameters
+        dict: Model configuration parameters
 
     Raises:
         ValueError: If a required field is missing from the config or the architecture is not supported
@@ -397,28 +479,21 @@ def _parse_hf_config_json(config: dict) -> list:
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])
-
-    logger.info(
-        f"Model architecture: architecture={architecture}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "
-        f"hidden_size={hidden_size}, inter_size={inter_size}, vocab={vocab}, context={context}, "
-        f"topk={topk}, num_experts={num_experts}, moe_inter_size={moe_inter_size}, "
-        f"extra_params={'present' if extra_params else 'None'}"
-    )
-    return [
-        architecture,
-        layers,
-        n,
-        n_kv,
-        d,
-        hidden_size,
-        inter_size,
-        vocab,
-        context,
-        topk,
-        num_experts,
-        moe_inter_size,
-        extra_params,
-    ]
+    return {
+        "architecture": architecture,
+        "layers": layers,
+        "n": n,
+        "n_kv": n_kv,
+        "d": d,
+        "hidden_size": hidden_size,
+        "inter_size": inter_size,
+        "vocab": vocab,
+        "context": context,
+        "topk": topk,
+        "num_experts": num_experts,
+        "moe_inter_size": moe_inter_size,
+        "extra_params": extra_params,
+    }
 
 
 def _get_model_config_path():
@@ -435,12 +510,179 @@ def _load_pre_downloaded_hf_config(hf_id: str) -> dict:
     return _load_json_with_infinity(config_path)
 
 
+def _load_pre_downloaded_hf_quant_config(hf_id: str) -> dict | None:
+    config_path = _get_model_config_path() / f"{hf_id.replace('/', '--')}_hf_quant_config.json"
+    if not config_path.exists():
+        return None
+    return _load_json_with_infinity(config_path)
+
+
 def _load_local_config(path: str) -> dict:
     """Load config.json from a local directory path."""
     config_path = Path(path) / "config.json"
     if not config_path.exists():
         raise ValueError(f"config.json not found at {config_path}")
     return _load_json_with_infinity(config_path)
+
+
+def _load_local_quant_config(path: str) -> dict | None:
+    """Load hf_quant_config.json from a local directory path if present."""
+    config_path = Path(path) / "hf_quant_config.json"
+    if not config_path.exists():
+        return None
+    return _load_json_with_infinity(config_path)
+
+
+def _normalize_hf_quant_config(hf_quant_config: dict) -> dict:
+    quant_section = hf_quant_config.get("quantization")
+    if not isinstance(quant_section, dict):
+        return {}
+    quant_algo = quant_section.get("quant_algo") or quant_section.get("quantization_algo")
+    kv_algo = quant_section.get("kv_cache_quant_algo")
+    normalized: dict[str, str] = {}
+    if quant_algo:
+        normalized["quant_method"] = str(quant_algo).lower()
+    if kv_algo:
+        normalized["kv_cache_quant_method"] = str(kv_algo).lower()
+    return normalized
+
+
+def _normalize_quant_algo(value: object) -> str | None:
+    if value is None:
+        return None
+    algo = str(value).strip().lower()
+    if not algo:
+        return None
+    aliases = {
+        "fp8": "fp8",
+        "fp8_block": "fp8_block",
+        "nvfp4": "nvfp4",
+        "mxfp4": "mxfp4",
+        "w4a16_mxfp4": "mxfp4",
+    }
+    return aliases.get(algo, algo)
+
+
+def _normalize_kv_cache_algo(value: object) -> str | None:
+    if value is None:
+        return None
+    algo = str(value).strip().lower()
+    if not algo:
+        return None
+    if algo in {"fp8", "e4m3", "e5m2"}:
+        return "fp8"
+    if algo in {"fp16", "float16", "bf16", "bfloat16"}:
+        return "float16"
+    return algo
+
+
+def _infer_quant_dynamic(quant_cfg: dict) -> bool | None:
+    """
+    Args:
+        quant_cfg: The quantization configuration of config.json
+
+    Returns:
+        bool | None: The quantization dynamic
+    """
+    activation_scheme = str(quant_cfg.get("activation_scheme", "")).lower()
+    if activation_scheme:
+        if activation_scheme == "dynamic":
+            return True
+        if activation_scheme == "static":
+            return False
+
+    config_groups = quant_cfg.get("config_groups")
+    if isinstance(config_groups, dict):
+        found_dynamic = []
+        for group in config_groups.values():
+            if not isinstance(group, dict):
+                continue
+            for key in ("input_activations", "weights"):
+                item = group.get(key)
+                if isinstance(item, dict) and "dynamic" in item:
+                    found_dynamic.append(bool(item.get("dynamic")))
+        if found_dynamic:
+            return any(found_dynamic)
+
+    return None
+
+
+def _infer_quantization_fields(raw_config: dict) -> dict[str, object]:
+    quant_cfg = raw_config.get("quantization_config")
+    quant_cfg = quant_cfg if isinstance(quant_cfg, dict) else {}
+
+    hf_quant = raw_config.get("hf_quant_config")
+    hf_quant = hf_quant if isinstance(hf_quant, dict) else {}
+    hf_quant_section = hf_quant.get("quantization")
+    hf_quant_section = hf_quant_section if isinstance(hf_quant_section, dict) else {}
+
+    quant_algo = _normalize_quant_algo(
+        hf_quant_section.get("quant_algo")
+        or quant_cfg.get("quant_algo")
+        or quant_cfg.get("quant_method")
+        or quant_cfg.get("quantization_method")
+    )
+
+    kv_cache_algo = _normalize_kv_cache_algo(
+        hf_quant_section.get("kv_cache_quant_algo")
+        or quant_cfg.get("kv_cache_quant_algo")
+        or quant_cfg.get("kv_cache_quant_method")
+        or quant_cfg.get("kv_cache_dtype")
+    )
+
+    if kv_cache_algo is None:
+        kv_cache_scheme = quant_cfg.get("kv_cache_scheme")
+        if isinstance(kv_cache_scheme, dict):
+            scheme_type = str(kv_cache_scheme.get("type", "")).lower()
+            num_bits = kv_cache_scheme.get("num_bits")
+            if "fp8" in scheme_type:
+                kv_cache_algo = "fp8"
+            elif scheme_type == "float" and isinstance(num_bits, int):
+                # TODO: 4bit kv cache support
+                if num_bits <= 8:
+                    kv_cache_algo = "fp8"
+                elif num_bits >= 16:
+                    kv_cache_algo = "float16"
+
+    weight_block_size = quant_cfg.get("weight_block_size") or []
+    if quant_algo == "fp8" and weight_block_size:
+        quant_algo = "fp8_block"
+
+    quant_dynamic = _infer_quant_dynamic(quant_cfg)
+
+    logger.info(
+        "Quant inference result: quant_algo=%s, kv_cache_quant_algo=%s, quant_dynamic=%s",
+        quant_algo,
+        kv_cache_algo,
+        quant_dynamic,
+    )
+
+    inferred: dict[str, object] = {}
+    if quant_algo:
+        inferred["quant_algo"] = quant_algo
+    if kv_cache_algo:
+        inferred["kv_cache_quant_algo"] = kv_cache_algo
+    if quant_dynamic is not None:
+        inferred["quant_dynamic"] = quant_dynamic
+    return inferred
+
+
+def _attach_inferred_quant_fields(raw_config: dict) -> dict:
+    inferred = _infer_quantization_fields(raw_config)
+    for key, value in inferred.items():
+        raw_config.setdefault(key, value)
+    return raw_config
+
+
+def _attach_hf_quant_config(raw_config: dict, hf_quant_config: dict | None) -> dict:
+    if not hf_quant_config:
+        return raw_config
+    raw_config["hf_quant_config"] = hf_quant_config
+    if "quantization_config" not in raw_config:
+        normalized = _normalize_hf_quant_config(hf_quant_config)
+        if normalized:
+            raw_config["quantization_config"] = normalized
+    return raw_config
 
 
 @cache
@@ -464,26 +706,42 @@ def _load_model_config_from_model_path(model_path: str) -> dict:
     """
     # Check if it's a local path
     if os.path.isdir(model_path):
-        return _load_local_config(model_path)
+        config = _load_local_config(model_path)
+        return _attach_inferred_quant_fields(_attach_hf_quant_config(config, _load_local_quant_config(model_path)))
 
     # Otherwise treat as HuggingFace path
     if model_path in DefaultHFModels:
         config = _load_pre_downloaded_hf_config(model_path)
-    else:
-        config = _download_hf_config(model_path)
-    return config
+        return _attach_inferred_quant_fields(
+            _attach_hf_quant_config(config, _load_pre_downloaded_hf_quant_config(model_path))
+        )
+
+    config = _download_hf_config(model_path)
+    try:
+        hf_quant_config = _download_hf_json(model_path, "hf_quant_config.json", raise_on_404=False)
+    except Exception as exc:  # best-effort for optional quant config
+        logger.debug("Failed to download hf_quant_config.json for %s: %s", model_path, exc)
+        hf_quant_config = None
+    return _attach_inferred_quant_fields(_attach_hf_quant_config(config, hf_quant_config))
 
 
-def get_model_config_from_model_path(model_path: str) -> list:
+@cache
+def get_model_config_from_model_path(model_path: str) -> dict:
     """
-    Get model configuration from model path and parse it into a list of model configuration parameters
+    Get model configuration from model path and parse it into model configuration parameters.
 
     Args:
         model_path: HuggingFace model path or local directory path
 
     Returns:
-        list: Model configuration parameters
-              [architecture, layers, n, n_kv, d, hidden_size, inter_size, vocab, context,
-               topk, num_experts, moe_inter_size, extra_params]
+        dict: Model configuration parameters and raw config under "raw_config".
     """
-    return _parse_hf_config_json(_load_model_config_from_model_path(model_path))
+    raw_config = _load_model_config_from_model_path(model_path)
+    parsed = _parse_hf_config_json(raw_config)
+    logger.info(
+        "Loaded model config for %s: %s",
+        model_path,
+        ", ".join(f"{k}={v}" for k, v in parsed.items()),
+    )
+    parsed["raw_config"] = raw_config
+    return parsed

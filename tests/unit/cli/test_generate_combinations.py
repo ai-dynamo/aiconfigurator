@@ -26,7 +26,7 @@ MODEL_TEST_CASES = [
 
 @pytest.mark.unit
 @pytest.mark.parametrize("backend", ["trtllm", "sglang", "vllm"])
-@pytest.mark.parametrize("system", ["h200_sxm", "gb200_sxm"])
+@pytest.mark.parametrize("system", ["h200_sxm", "gb200"])
 @pytest.mark.parametrize(
     "model_path,expected_min_tp,description",
     MODEL_TEST_CASES,
@@ -82,7 +82,7 @@ def test_cli_generate_combinations(
     assert tp & (tp - 1) == 0, f"TP should be a power of 2, got {tp}"
 
     # TP should not exceed gpus_per_node for the system
-    max_tp = 4 if system == "gb200_sxm" else 8
+    max_tp = 4 if system == "gb200" else 8
     assert tp <= max_tp, f"TP should be <= {max_tp} for {system}, got {tp}"
 
     # Check expected TP constraints based on model size
@@ -97,7 +97,7 @@ def test_cli_generate_combinations(
     assert config["backend"] == backend
 
     # Verify correct number of run scripts are generated (one per node)
-    gpus_per_node = 4 if system == "gb200_sxm" else 8
+    gpus_per_node = 4 if system == "gb200" else 8
     gpus_per_worker = tp * pp
     num_workers = 32 // gpus_per_worker  # total_gpus=32
     workers_per_node = gpus_per_node // gpus_per_worker

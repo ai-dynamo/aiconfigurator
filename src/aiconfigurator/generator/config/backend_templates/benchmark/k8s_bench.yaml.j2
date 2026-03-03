@@ -1,0 +1,76 @@
+{%- set pvc_name = (K8sConfig.k8s_pvc_name or K8sConfig.k8s_model_cache or '') | trim -%}
+{%- set use_pvc = (pvc_name != '') -%}
+{%- set pvc_mount_path = K8sConfig.k8s_pvc_mount_path | default('/workspace/model_cache') -%}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ BenchConfig.name }}
+  namespace: {{ K8sConfig.k8s_namespace | default("default") }}
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      name: {{ BenchConfig.name }}
+    spec:
+      restartPolicy: Never
+      {% if use_pvc %}
+      volumes:
+        - name: pvc
+          persistentVolumeClaim:
+            claimName: {{ pvc_name }}
+      {% endif %}
+      containers:
+        - name: aiperf
+          image: {{ BenchConfig.image }}
+          env:
+            - name: AIPERF_SERVICE_PROFILE_START_TIMEOUT
+              value: "{{ BenchConfig.profile_start_timeout }}"
+            {% if use_pvc %}
+            - name: BENCH_ARTIFACT_DIR
+              value: "{{ pvc_mount_path }}/bench_artifacts"
+            {% endif %}
+          {% if use_pvc %}
+          volumeMounts:
+            - name: pvc
+              mountPath: {{ pvc_mount_path }}
+          {% endif %}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              pip install aiperf
+              {% set base_concurrency = [1, 2, 8, 16, 32, 64, 128] %}
+              {% if BenchConfig.estimated_concurrency and BenchConfig.estimated_concurrency > 0 %}
+              {% set eff = BenchConfig.estimated_concurrency | int %}
+              {% set eff_low = (BenchConfig.estimated_concurrency * 0.95) | int %}
+              {% set eff_high = (BenchConfig.estimated_concurrency * 1.05) | int %}
+              {% set combined = base_concurrency + [eff_low, eff, eff_high] %}
+              {% set ns = namespace(seen=[]) %}
+              {% for c in combined %}
+              {% if c not in ns.seen %}
+              {% set ns.seen = ns.seen + [c] %}
+              {% endif %}
+              {% endfor %}
+              concurrency_array=({{ ns.seen | sort | join(' ') }})
+              {% else %}
+              concurrency_array=({{ base_concurrency | join(' ') }})
+              {% endif %}
+              ARTIFACT_DIR="${BENCH_ARTIFACT_DIR:-/tmp/bench_artifacts}"
+              for concurrency in "${concurrency_array[@]}"; do
+                echo "Run concurrency: $concurrency"
+                aiperf profile \
+                  --artifact-dir "${ARTIFACT_DIR}/concurrency_${concurrency}" \
+                  -m {{ BenchConfig.model }} \
+                  --endpoint-type {{ BenchConfig.endpoint_type }} \
+                  -u {{ BenchConfig.endpoint_url }} \
+                  --tokenizer {{ BenchConfig.tokenizer }} \
+                  --isl {{ BenchConfig.isl }} --isl-stddev {{ BenchConfig.isl_stddev }} \
+                  --osl {{ BenchConfig.osl }} --osl-stddev {{ BenchConfig.osl_stddev }} \
+                  --extra-inputs ignore_eos:true \
+                  --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+                  --concurrency ${concurrency} \
+                  --num-requests $(($concurrency*50)) \
+                  --warmup-request-count $(($concurrency*2)) \
+                  --random-seed 100 \
+                  --ui {{ BenchConfig.ui }} \
+                  --streaming
+              done

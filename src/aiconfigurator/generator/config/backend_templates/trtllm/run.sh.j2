@@ -1,32 +1,63 @@
-{#
-  TRT-LLM backend run.sh template
-  Uses shared macros for worker launching.
-#}
-{% from 'base_run.j2' import shell_header, env_setup, frontend %}
-{% import 'trtllm.j2' as trtllm %}
+#!/bin/bash
+set -e
+trap 'echo "Cleaning up..."; kill 0 2>/dev/null || true' EXIT INT TERM
 
-{{ shell_header() }}
+export MODEL_PATH=${MODEL_PATH:-"{{ ServiceConfig.model_path }}"}
+export HF_TOKEN=${HF_TOKEN:-"{{ ServiceConfig.hf_token }}"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"{{ ServiceConfig.served_model_name }}"}
+export HEAD_NODE_IP=${HEAD_NODE_IP:-"{{ ServiceConfig.head_node_ip }}"}
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
 
-{{ env_setup(ServiceConfig, DynConfig) }}
-
-{{ frontend(ServiceConfig, DynConfig) }}
-
-{% set mode = DynConfig.mode | default('disagg') %}
 {% set enable_router = DynConfig.enable_router | default(false) %}
 
-{% if mode == 'agg' %}
-{# ============ AGGREGATE MODE ============ #}
-{{ trtllm.run_worker('agg', agg_gpu, agg_workers, agg_gpu_offset | default(0), agg_engine_args, enable_router) }}
-wait
+{% if ServiceConfig.include_frontend %}
+python3 -m dynamo.frontend {% if enable_router %}--router-mode kv {% endif %}--http-port "{{ ServiceConfig.port }}" 2>&1 | sed "s/^/[Frontend] /" &
+{% endif %}
 
+{% if DynConfig.mode | default('disagg') == "agg" %}
+AGG_GPU={{ agg_gpu }}
+AGG_WORKERS={{ agg_workers }}
+AGG_GPU_OFFSET={{ agg_gpu_offset | default(0) }}
+for ((w=0; w<AGG_WORKERS; w++)); do
+  BASE=$(( AGG_GPU_OFFSET + w * AGG_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+AGG_GPU-1)))
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.trtllm \
+    --model-path "$MODEL_PATH" \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    --extra-engine-args "{{ agg_engine_args }}" \
+    {% if enable_router %}--publish-events-and-metrics {% endif %} 2>&1 | sed "s/^/[Worker $w] /" ) &
+done
+wait
 {% else %}
-{# ============ DISAGGREGATE MODE ============ #}
 {% if prefill_workers|int > 0 %}
-{{ trtllm.run_worker('prefill', prefill_gpu, prefill_workers, prefill_gpu_offset | default(0), prefill_engine_args, enable_router) }}
+PREFILL_GPU={{ prefill_gpu }}
+PREFILL_WORKERS={{ prefill_workers }}
+for ((w=0; w<PREFILL_WORKERS; w++)); do
+  BASE=$(( w * PREFILL_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+PREFILL_GPU-1)))
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.trtllm \
+    --model-path "$MODEL_PATH" \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    --extra-engine-args "{{ prefill_engine_args }}" \
+    --disaggregation-mode prefill \
+    {% if enable_router %}--publish-events-and-metrics{% endif %} 2>&1 | sed "s/^/[Prefill $w] /" ) &
+done
 {% endif %}
 
 {% if decode_workers|int > 0 %}
-{{ trtllm.run_worker('decode', decode_gpu, decode_workers, decode_gpu_offset | default(0), decode_engine_args, enable_router) }}
+DECODE_GPU={{ decode_gpu }}
+DECODE_WORKERS={{ decode_workers }}
+DECODE_GPU_OFFSET={{ decode_gpu_offset | default(0) }}
+for ((w=0; w<DECODE_WORKERS; w++)); do
+  BASE=$(( DECODE_GPU_OFFSET + w * DECODE_GPU ))
+  GPU_LIST=$(seq -s, $BASE $((BASE+DECODE_GPU-1)))
+  ( CUDA_VISIBLE_DEVICES=$GPU_LIST python3 -m dynamo.trtllm \
+    --model-path "$MODEL_PATH" \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    --extra-engine-args "{{ decode_engine_args }}" \
+    --disaggregation-mode decode 2>&1 | sed "s/^/[Decode $w] /" ) &
+done
 {% endif %}
 wait
 {% endif %}

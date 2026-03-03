@@ -15,6 +15,23 @@ from .rendering import apply_defaults
 
 
 def _deep_merge(target: dict, extra: dict | None) -> dict:
+    """
+    Recursively merge the contents of the 'extra' dictionary into 'target',
+    performing a deep merge for nested dictionaries.
+
+    Args:
+        target: The base dictionary to update.
+        extra: An optional dictionary whose values will be merged into 'target'.
+
+    Returns:
+        The modified 'target' dictionary with merged values from 'extra'.
+
+    Example:
+        >>> a = {'a': 1, 'b': {'c': 2}}
+        >>> b = {'b': {'d': 3}, 'e': 4}
+        >>> _deep_merge(a, b)
+        {'a': 1, 'b': {'c': 2, 'd': 3}, 'e': 4}
+    """
     if not extra:
         return target
     for key, value in extra.items():
@@ -62,8 +79,17 @@ def task_config_to_generator_config(
     task_config: TaskConfig,
     result_df: pd.Series,
     generator_overrides: dict | None = None,
+    num_gpus_per_node: int | None = None,
 ) -> dict:
-    """Convert a task config/result row into unified generator parameters."""
+    """Convert a task config/result row into unified generator parameters.
+
+    Args:
+        task_config: The TaskConfig that produced the result.
+        result_df: A single row (pd.Series) from the best_configs DataFrame.
+        generator_overrides: Optional overrides dict from CLI flags.
+        num_gpus_per_node: If set, overrides the NodeConfig.num_gpus_per_node
+            in the generated config.
+    """
 
     overrides = copy.deepcopy(generator_overrides or {})
 
@@ -109,18 +135,19 @@ def task_config_to_generator_config(
     prefix_tokens = _safe_int(_series_val(result_df, "prefix", runtime_cfg.prefix), runtime_cfg.prefix)
     config_obj = task_config.config
 
-    # Fetch num_gpus_per_node from system config
-    num_gpus_per_node = 8
-    try:
-        db = get_database(
-            system=task_config.system_name,
-            backend=task_config.backend_name,
-            version=task_config.backend_version,
-        )
-        if db and "node" in db.system_spec:
-            num_gpus_per_node = db.system_spec["node"].get("num_gpus_per_node", 8)
-    except Exception:
-        pass
+    # Fetch num_gpus_per_node from system config (unless caller provided an override)
+    if num_gpus_per_node is None:
+        num_gpus_per_node = 8
+        try:
+            db = get_database(
+                system=task_config.system_name,
+                backend=task_config.backend_name,
+                version=task_config.backend_version,
+            )
+            if db and "node" in db.system_spec:
+                num_gpus_per_node = db.system_spec["node"].get("num_gpus_per_node", 8)
+        except Exception:
+            pass
 
     service_cfg = {
         "model_path": task_config.model_path,
@@ -141,15 +168,21 @@ def task_config_to_generator_config(
     model_cfg = _deep_merge(model_cfg, overrides.get("ModelConfig"))
     model_cfg = apply_defaults("ModelConfig", model_cfg, backend=backend_name)
 
-    k8s_cfg = {}
-    k8s_cfg = _deep_merge(k8s_cfg, overrides.get("K8sConfig"))
-    k8s_cfg = apply_defaults("K8sConfig", k8s_cfg, backend=backend_name)
-
     dyn_cfg = {
         "mode": task_config.serving_mode,
     }
     dyn_cfg = _deep_merge(dyn_cfg, overrides.get("DynConfig"))
     dyn_cfg = apply_defaults("DynConfig", dyn_cfg, backend=backend_name)
+
+    generator_dynamo_version = overrides.get("generator_dynamo_version")
+    k8s_cfg = {}
+    k8s_cfg = _deep_merge(k8s_cfg, overrides.get("K8sConfig"))
+    k8s_cfg = apply_defaults(
+        "K8sConfig",
+        k8s_cfg,
+        backend=backend_name,
+        extra_context={"generator_dynamo_version": generator_dynamo_version},
+    )
 
     worker_overrides = overrides.get("Workers", {})
     worker_count_overrides = overrides.get("WorkerCounts") or overrides.get("WorkerConfig") or {}
@@ -203,6 +236,7 @@ def task_config_to_generator_config(
         "tpot": _safe_float(_series_val(result_df, "tpot", runtime_cfg.tpot), runtime_cfg.tpot),
     }
     sla_cfg = _deep_merge(sla_cfg, overrides.get("SlaConfig"))
+    bench_cfg = overrides.get("BenchConfig")
 
     params = collect_generator_params(
         service=service_cfg,
@@ -215,8 +249,10 @@ def task_config_to_generator_config(
         agg_workers=agg_workers if agg_params else 0,
         num_gpus_per_node=num_gpus_per_node,
         sla=sla_cfg,
+        bench=bench_cfg,
         dyn_config=dyn_cfg,
         backend=backend_name,
+        generator_dynamo_version=generator_dynamo_version,
     )
 
     params = _deep_merge(params, overrides.get("Params"))

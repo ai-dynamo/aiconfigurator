@@ -36,15 +36,30 @@ def collect_generator_params(
     num_gpus_per_node: int = 8,
     sla: Optional[dict[str, Any]] = None,
     dyn_config: Optional[dict[str, Any]] = None,
+    bench: Optional[dict[str, Any]] = None,
     backend: Optional[str] = None,
+    generator_dynamo_version: Optional[str] = None,
 ) -> dict[str, Any]:
     prefill_params = prefill_params or {}
     decode_params = decode_params or {}
     agg_params = agg_params or {}
     backend_key = normalize_backend(backend, DEFAULT_BACKEND)
-    service = apply_defaults("ServiceConfig", service, backend=backend_key)
-    k8s = apply_defaults("K8sConfig", k8s, backend=backend_key)
-    dyn_cfg = apply_defaults("DynConfig", dyn_config or {}, backend=backend_key)
+    base_ctx = {
+        "ServiceConfig": dict(service),
+        "K8sConfig": dict(k8s),
+        "DynConfig": dict(dyn_config or {}),
+        "SlaConfig": dict(sla or {}),
+        "BenchConfig": dict(bench or {}),
+    }
+    if generator_dynamo_version:
+        base_ctx["generator_dynamo_version"] = generator_dynamo_version
+    service = apply_defaults("ServiceConfig", service, backend=backend_key, extra_context=base_ctx)
+    base_ctx["ServiceConfig"] = dict(service)
+    k8s = apply_defaults("K8sConfig", k8s, backend=backend_key, extra_context=base_ctx)
+    base_ctx["K8sConfig"] = dict(k8s)
+    dyn_cfg = apply_defaults("DynConfig", dyn_config or {}, backend=backend_key, extra_context=base_ctx)
+    base_ctx["DynConfig"] = dict(dyn_cfg)
+    bench_cfg = apply_defaults("BenchConfig", bench or {}, backend=backend_key, extra_context=base_ctx)
 
     mode_value = dyn_cfg.get("mode") or "disagg"
     enable_router = coerce_bool(dyn_cfg.get("enable_router"))
@@ -52,17 +67,36 @@ def collect_generator_params(
     name_prefix = k8s.get("name_prefix") or "dynamo"
     name = f"{name_prefix}-{mode_tag}{('-router' if enable_router else '')}"
     use_engine_cm = k8s.get("k8s_engine_mode", "inline") == "configmap"
-    _mc_raw = k8s.get("k8s_model_cache")
-    k8s_model_cache = _mc_raw.strip() if isinstance(_mc_raw, str) else ""
+    # PVC config: new unified names with backward compat fallbacks
+    _pvc_name_raw = k8s.get("k8s_pvc_name") or k8s.get("k8s_model_cache")
+    k8s_pvc_name = _pvc_name_raw.strip() if isinstance(_pvc_name_raw, str) else ""
 
-    _hf_home_raw = k8s.get("k8s_hf_home")
-    k8s_hf_home = _hf_home_raw.strip() if isinstance(_hf_home_raw, str) else ""
+    _pvc_mount_raw = k8s.get("k8s_pvc_mount_path")
+    k8s_pvc_mount_path = (
+        _pvc_mount_raw.strip()
+        if isinstance(_pvc_mount_raw, str) and _pvc_mount_raw.strip()
+        else "/workspace/model_cache"
+    )
 
-    # If model cache PVC mount is configured but HF_HOME is not set,
-    # set it to /workspace/model_cache, which is where the PVC is mounted.
-    # Note: k8s_model_cache is the PVC name, not the mount path.
-    if k8s_model_cache and not k8s_hf_home:
-        k8s_hf_home = "/workspace/model_cache"
+    _model_in_pvc_raw = k8s.get("k8s_model_path_in_pvc") or k8s.get("k8s_pvc_model_path")
+    k8s_model_path_in_pvc = _model_in_pvc_raw.strip(" /") if isinstance(_model_in_pvc_raw, str) else ""
+
+    # Compute the full model path: {mount}/{path_in_pvc}
+    k8s_full_model_path = (
+        f"{k8s_pvc_mount_path}/{k8s_model_path_in_pvc}".rstrip("/")
+        if k8s_model_path_in_pvc
+        else k8s_pvc_mount_path
+        if k8s_pvc_name
+        else ""
+    )
+
+    # k8s_hf_home: explicit user value takes priority, otherwise use computed path
+    _explicit_hf_home = k8s.get("k8s_hf_home")
+    k8s_hf_home_value = (
+        _explicit_hf_home.strip()
+        if isinstance(_explicit_hf_home, str) and _explicit_hf_home.strip()
+        else k8s_full_model_path
+    )
 
     workers_dict = {
         "prefill_workers": int(prefill_workers),
@@ -92,8 +126,12 @@ def collect_generator_params(
             "k8s_image_pull_secret": k8s.get("k8s_image_pull_secret"),
             "k8s_engine_mode": k8s.get("k8s_engine_mode"),
             "use_engine_cm": use_engine_cm,
-            "k8s_model_cache": k8s_model_cache,
-            "k8s_hf_home": k8s_hf_home,
+            "k8s_pvc_name": k8s_pvc_name,
+            "k8s_pvc_mount_path": k8s_pvc_mount_path,
+            "k8s_model_path_in_pvc": k8s_model_path_in_pvc,
+            # Backward compat aliases for Jinja2 templates
+            "k8s_model_cache": k8s_pvc_name,
+            "k8s_hf_home": k8s_hf_home_value,
             "prefill_engine_args": "/workspace/engine_configs/prefill_config.yaml",
             "decode_engine_args": "/workspace/engine_configs/decode_config.yaml",
             "agg_engine_args": "/workspace/engine_configs/agg_config.yaml",
@@ -105,6 +143,7 @@ def collect_generator_params(
         "DynConfig": dict(dyn_cfg),
         "WorkerConfig": workers_dict,
         "SlaConfig": sla or {},
+        "BenchConfig": bench_cfg,
         "NodeConfig": {"num_gpus_per_node": int(num_gpus_per_node)},
         "params": {
             "prefill": prefill_params,
@@ -193,6 +232,8 @@ def generate_config_from_input_dict(
                 dest = ".".join(["WorkerConfig"] + rest)
             elif group == "SlaConfig":
                 dest = ".".join(["SlaConfig"] + rest)
+            elif group == "BenchConfig":
+                dest = ".".join(["BenchConfig"] + rest)
             elif group == "ModelConfig":
                 dest = ".".join(["ModelConfig"] + rest)
             elif group == "DynConfig":
@@ -203,11 +244,14 @@ def generate_config_from_input_dict(
                 dest = None
             if dest:
                 _set_by_path(target, dest, val)
+            elif group == "generator_dynamo_version":
+                target["generator_dynamo_version"] = val
     target.setdefault("ServiceConfig", {})
     target.setdefault("K8sConfig", {})
     target.setdefault("WorkerConfig", {})
     target.setdefault("params", {})
     target.setdefault("SlaConfig", {})
+    target.setdefault("BenchConfig", {})
     target.setdefault("DynConfig", {})
     target.setdefault("NodeConfig", {})
     try:
@@ -234,8 +278,10 @@ def generate_config_from_input_dict(
         agg_workers=int(target.get("WorkerConfig", {}).get("agg_workers", 1)),
         num_gpus_per_node=int(target.get("NodeConfig", {}).get("num_gpus_per_node", 8)),
         sla=target.get("SlaConfig", {}),
+        bench=target.get("BenchConfig", {}),
         dyn_config=target.get("DynConfig", {}),
         backend=backend_key,
+        generator_dynamo_version=target.get("generator_dynamo_version"),
     )
     if target.get("ModelConfig"):
         params["ModelConfig"] = target.get("ModelConfig", {})

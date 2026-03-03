@@ -73,9 +73,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate engine configs for TRT-LLM, vLLM, or SGLang.")
     parser.add_argument(
         "--backend",
-        default="trtllm",
+        required=True,
         choices=["trtllm", "vllm", "sglang"],
-        help="Which engine backend to validate (default: trtllm).",
+        help="Which engine backend to validate.",
     )
     parser.add_argument(
         "--path",
@@ -106,10 +106,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     user_path = Path(args.path).resolve()
     handler = BACKEND_HANDLERS[args.backend]
-    if user_path.is_dir():
-        engine_configs = handler["collect"](user_path)
-    else:
-        engine_configs = [("engine", user_path)]
+
+    try:
+        if user_path.is_dir():
+            engine_configs = handler["collect"](user_path)
+        else:
+            engine_configs = [("engine", user_path)]
+    except Exception as exc:
+        print("\n" + "=" * 72)
+        print(handler["title"])
+        print("=" * 72)
+        print(f"Error: {exc}")
+        print("=" * 72 + "\n")
+        return 1
 
     failures: list[tuple[str, str]] = []
     resolved_model = None

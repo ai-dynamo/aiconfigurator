@@ -68,6 +68,11 @@ parameters:
     key: kv_cache_config.enable_block_reuse
     value: "not disable_prefix_cache"
 
+- param_key: cache_transceiver_max_tokens_in_buffer
+  vllm: null
+  sglang: null
+  trtllm: cache_transceiver_config.max_tokens_in_buffer
+
 # Cuda Graph
 - param_key: disable_cuda_graph
   vllm: enforce-eager

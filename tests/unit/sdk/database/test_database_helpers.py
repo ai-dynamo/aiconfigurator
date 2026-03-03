@@ -118,6 +118,51 @@ def test_get_supported_databases_edge_cases(temp_systems_dir: Path, perf_databas
     assert "bad_path" not in result
 
 
+def test_get_supported_databases_multiple_paths(temp_systems_dir: Path, perf_database):
+    setup_mock_filesystem(temp_systems_dir, {"h100": {"trtllm": ["1.0.0"]}})
+    other_dir = temp_systems_dir / "other"
+    other_dir.mkdir()
+    setup_mock_filesystem(other_dir, {"h200": {"vllm": ["0.6.0"]}})
+
+    result = perf_database.get_supported_databases([str(temp_systems_dir), str(other_dir)])
+
+    assert result["h100"]["trtllm"] == ["1.0.0"]
+    assert result["h200"]["vllm"] == ["0.6.0"]
+
+
+def test_build_no_databases_message_with_missing_path(temp_systems_dir: Path, perf_database):
+    custom_systems_dir = temp_systems_dir / "custom_systems"
+    custom_systems_dir.mkdir()
+    previous_paths = perf_database.get_systems_paths()
+    try:
+        perf_database.set_systems_paths(str(custom_systems_dir))
+        message = perf_database.build_no_databases_message()
+        assert "No loadable performance databases found under --systems-paths" in message
+        assert "Configured systems paths:" in message
+        assert str(custom_systems_dir) in message
+        assert "adding `default`" in message
+    finally:
+        perf_database.set_systems_paths(previous_paths)
+
+
+def test_build_no_databases_message_with_existing_empty_path(temp_systems_dir: Path, perf_database):
+    previous_paths = perf_database.get_systems_paths()
+    try:
+        perf_database.set_systems_paths("default")
+        message = perf_database.build_no_databases_message()
+        assert "No loadable performance databases found under --systems-paths" in message
+        assert "Configured systems paths:" in message
+        assert "already included" in message
+    finally:
+        perf_database.set_systems_paths(previous_paths)
+
+
+def test_set_systems_paths_invalid_entry_raises(temp_systems_dir: Path, perf_database):
+    missing_path = temp_systems_dir / "missing_systems_path"
+    with pytest.raises(ValueError, match="Invalid --systems-paths"):
+        perf_database.set_systems_paths(str(missing_path))
+
+
 # ----------------------------- get_latest_database_version -----------------------------
 
 

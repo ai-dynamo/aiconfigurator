@@ -10,12 +10,16 @@ the smallest TP that fits the model in memory, with PP=1.
 
 import logging
 import os
-from importlib import resources as pkg_resources
+import re
 from typing import Any
 
 import yaml
 
+from aiconfigurator.sdk import perf_database
+
 logger = logging.getLogger(__name__)
+
+_RFC1123_MAX_LEN = 63
 
 # Default fallbacks
 _DEFAULT_GPUS_PER_NODE = 8
@@ -24,12 +28,28 @@ _MEMORY_MULTIPLIER = 1.5  # Require 1.5x model weight to fit in VRAM
 _BYTES_PER_PARAM = 2  # FP16/BF16
 
 
+def _sanitize_rfc1123(name: str) -> str:
+    """Sanitize a string to be a valid RFC 1123 subdomain label prefix.
+
+    Converts ``"Qwen/Qwen3-32B"`` → ``"qwen-qwen3-32b"``, etc.
+    Falls back to ``"dynamo"`` when the input is empty or None.
+    """
+    if not name:
+        return "dynamo"
+    sanitized = name.lower()
+    sanitized = re.sub(r"[^a-z0-9\-.]", "-", sanitized)
+    sanitized = re.sub(r"-{2,}", "-", sanitized)
+    sanitized = sanitized.strip("-.")
+    sanitized = sanitized[:_RFC1123_MAX_LEN].rstrip("-.")
+    return sanitized or "dynamo"
+
+
 def _get_system_config(system_name: str) -> dict[str, Any]:
     """
     Read system configuration from YAML config file.
 
     Args:
-        system_name: Name of the system (e.g., 'h200_sxm', 'gb200_sxm').
+        system_name: Name of the system (e.g., 'h200_sxm', 'gb200').
 
     Returns:
         Dictionary with 'gpus_per_node' and 'vram_per_gpu' keys.
@@ -40,14 +60,15 @@ def _get_system_config(system_name: str) -> dict[str, Any]:
     }
 
     try:
-        systems_dir = pkg_resources.files("aiconfigurator") / "systems"
-        system_yaml_path = os.path.join(str(systems_dir), f"{system_name}.yaml")
-
-        if os.path.isfile(system_yaml_path):
+        for systems_root in perf_database.get_systems_paths():
+            system_yaml_path = os.path.join(systems_root, f"{system_name}.yaml")
+            if not os.path.isfile(system_yaml_path):
+                continue
             with open(system_yaml_path) as f:
                 system_spec = yaml.safe_load(f)
             result["gpus_per_node"] = int(system_spec.get("node", {}).get("num_gpus_per_node", _DEFAULT_GPUS_PER_NODE))
             result["vram_per_gpu"] = int(system_spec.get("gpu", {}).get("mem_capacity", _DEFAULT_VRAM_BYTES))
+            break
     except Exception as e:
         logger.warning(f"Could not read system config for {system_name}: {e}")
 
@@ -76,23 +97,12 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
 
     try:
         config = get_model_config_from_model_path(model_path)
-        # config format: [architecture, layers, n_heads, n_kv, head_size, hidden_size,
-        #                 inter_size, vocab, context, topk, num_experts, moe_inter_size, extra]
-        (
-            _architecture,
-            num_layers,
-            _num_heads,
-            _num_kv_heads,
-            _head_size,
-            hidden_size,
-            inter_size,
-            vocab_size,
-            _context,
-            _topk,
-            num_experts,
-            moe_inter_size,
-            _extra,
-        ) = config
+        num_layers = config["layers"]
+        hidden_size = config["hidden_size"]
+        inter_size = config["inter_size"]
+        vocab_size = config["vocab"]
+        num_experts = config["num_experts"]
+        moe_inter_size = config["moe_inter_size"]
 
         # Embedding parameters
         embedding_params = vocab_size * hidden_size
@@ -209,7 +219,7 @@ def build_naive_generator_params(
     Args:
         model_name: Name or HuggingFace ID of the model.
         total_gpus: Total number of GPUs available.
-        system_name: Name of the system (e.g., 'h200_sxm', 'gb200_sxm').
+        system_name: Name of the system (e.g., 'h200_sxm', 'gb200').
         backend_name: Name of the backend (e.g., 'trtllm', 'sglang', 'vllm').
 
     Returns:
@@ -256,14 +266,18 @@ def build_naive_generator_params(
     gpus_per_worker = tensor_parallel_size * pipeline_parallel_size
     agg_workers = total_gpus // gpus_per_worker
 
+    name_prefix = _sanitize_rfc1123(model_name)
+
     params = {
-        "service": {
+        "ServiceConfig": {
             "model_name": model_name,
             "served_model_name": model_name,
             "model_path": model_name,
+            "include_frontend": True,
         },
-        "k8s": {
+        "K8sConfig": {
             "system_name": system_name,
+            "name_prefix": name_prefix,
         },
         "params": {
             "agg": {
@@ -283,7 +297,6 @@ def build_naive_generator_params(
         "NodeConfig": {
             "num_gpus_per_node": gpus_per_node,
         },
-        # WorkerConfig is used by the run script generator
         "WorkerConfig": {
             "agg_workers": agg_workers,
             "agg_gpus_per_worker": gpus_per_worker,

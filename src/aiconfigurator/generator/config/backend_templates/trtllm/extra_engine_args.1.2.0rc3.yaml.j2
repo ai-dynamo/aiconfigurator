@@ -1,3 +1,5 @@
+backend: pytorch
+
 {% if is_moe is defined %}  # is_moe from sdk
 moe_expert_parallel_size: {{ moe_expert_parallel_size }}
 moe_tensor_parallel_size: {{ moe_tensor_parallel_size }}
@@ -33,6 +35,9 @@ kv_cache_config:
 
 cache_transceiver_config:
   backend: {{ cache_transceiver_config.backend | default('DEFAULT') }} # The communication backend type to use for the cache transceiver ("DEFAULT","UCX","NIXL","MPI")
+  {% if cache_transceiver_config.max_tokens_in_buffer is defined %}
+  max_tokens_in_buffer: {{ cache_transceiver_config.max_tokens_in_buffer }}
+  {% endif %}
 
 cuda_graph_config:
   enable_padding: {{ cuda_graph_config.enable_padding | default(false) }} # Pad CUDA graph

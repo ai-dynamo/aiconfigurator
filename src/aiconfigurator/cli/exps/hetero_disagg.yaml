@@ -9,7 +9,7 @@ exps:
 exp_h200_h200:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
+  model_path: "Qwen/Qwen3-32B-FP8" # required, HuggingFace model ID
   total_gpus: 16 # required
   system_name: "h200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
@@ -23,7 +23,7 @@ exp_h200_h200:
 exp_b200_h200:
   mode: "patch"
   serving_mode: "disagg" # required
-  model_path: "Qwen/Qwen3-32B" # required, HuggingFace model ID
+  model_path: "Qwen/Qwen3-32B-FP8" # required, HuggingFace model ID
   total_gpus: 16 # required
   system_name: "b200_sxm" # required, for prefill
   decode_system_name: "h200_sxm" # optional, if not provided, it will use the same system name as the prefill system.
@@ -33,3 +33,8 @@ exp_b200_h200:
   osl: 500 # output sequence length
   ttft: 300.0  # Target TTFT in ms
   tpot: 50.0   # Target TPOT in ms
+  config:
+    # we currently use the same model for prefill and decode. we need to override prefill quant modes
+    prefill_worker_config:
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"

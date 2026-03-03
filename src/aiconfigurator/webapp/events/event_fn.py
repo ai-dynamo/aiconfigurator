@@ -178,6 +178,7 @@ class EventFn:
         nextn,
         nextn_accept_rates,
         enable_wideep,
+        enable_eplb,
         mode,
         record_df,
     ):
@@ -209,6 +210,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
@@ -277,6 +279,7 @@ class EventFn:
         nextn,
         nextn_accept_rates,
         enable_wideep,
+        enable_eplb,
     ):
         traceback_log = ""
         stdout_buffer = StringIO()
@@ -305,6 +308,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
@@ -388,6 +392,7 @@ class EventFn:
         nextn,
         nextn_accept_rates,
         enable_wideep,
+        enable_eplb,
     ):
         is_error = False
         traceback_log = ""
@@ -412,6 +417,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and backend_name == "sglang") else None,
                 )
@@ -521,6 +527,7 @@ class EventFn:
         nextn,
         nextn_accept_rates,
         enable_wideep,
+        enable_eplb,
         prefill_system_name,
         prefill_backend_name,
         prefill_version,
@@ -579,7 +586,7 @@ class EventFn:
                 assert prefill_database is not None
                 assert decode_database is not None
                 prefill_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
-                decode_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
+                decode_database.set_default_database_mode(common.DatabaseMode[decode_database_mode])
                 nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 prefill_model_config = config.ModelConfig(
                     tp_size=prefill_tp_size,
@@ -595,6 +602,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and prefill_backend_name == "sglang") else None,
                 )
@@ -612,6 +620,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and decode_backend_name == "sglang") else None,
                 )
@@ -684,6 +693,17 @@ class EventFn:
 
                 num_gpu_list = [int(x) for x in num_gpu_list.split(",")] if len(num_gpu_list) > 0 else None
                 # logger.info(f"target num_gpu_list in the disagg system: {num_gpu_list}")
+
+                # For SGLang non-wideep disaggregated serving
+                # See: https://github.com/ai-dynamo/dynamo/issues/5870
+                require_same_tp = prefill_backend_name == "sglang" and not enable_wideep
+                if require_same_tp:
+                    logger.warning(
+                        "SGLang non-wideep disaggregated serving requires the same TP size "
+                        "for prefill and decode workers. Configurations with different TP "
+                        "sizes will be filtered out. "
+                    )
+
                 results_df = pareto_analysis.disagg_pareto(
                     model_path=model_path,
                     runtime_config=runtime_config,
@@ -703,6 +723,7 @@ class EventFn:
                     max_num_gpu=max_num_gpu if max_num_gpu > 0 else None,
                     prefill_max_num_tokens=prefill_max_batch_size * isl,
                     decode_max_num_tokens=decode_max_batch_size,
+                    require_same_tp=require_same_tp,
                 )
 
                 # Use request_latency as x-axis if request_latency mode is active
@@ -769,6 +790,7 @@ class EventFn:
         nextn,
         nextn_accept_rates,
         enable_wideep,
+        enable_eplb,
         prefill_system_name,
         prefill_backend_name,
         prefill_version,
@@ -877,6 +899,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and prefill_backend_name == "sglang") else None,
                 )
@@ -894,6 +917,7 @@ class EventFn:
                     nextn=nextn,
                     nextn_accept_rates=nextn_accept_rates,
                     enable_wideep=enable_wideep,
+                    enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
                     attention_backend="flashinfer" if (enable_wideep and decode_backend_name == "sglang") else None,
                 )
@@ -1147,6 +1171,7 @@ class EventFn:
                 gr.update(choices=[], value=None, interactive=True),
                 gr.update(choices=[], value=None, interactive=True),
                 gr.update(choices=[], value=None, interactive=True),
+                gr.update(value=False, interactive=False),
             )
         database_dict = get_all_databases()
         supported_quant_mode = database_dict[system_name][backend_name][version].supported_quant_mode
@@ -1189,10 +1214,11 @@ class EventFn:
             moe_quant_mode_choices if len(moe_quant_mode_choices) > 0 else [common.MoEQuantMode.float16.name]
         )
 
+        default_gemm_quant_mode = gemm_quant_mode_choices[0]
         return (
             gr.update(
                 choices=gemm_quant_mode_choices,
-                value=gemm_quant_mode_choices[0],
+                value=default_gemm_quant_mode,
                 interactive=True,
             ),
             gr.update(
@@ -1225,10 +1251,32 @@ class EventFn:
         )
 
     @staticmethod
+    def update_backend_choices_with_quant_toggles(system_name):
+        backend_update, version_update = EventFn.update_backend_choices(system_name)
+        return backend_update, version_update
+
+    @staticmethod
     def update_version_choices(system_name, backend_name):
         database_dict = get_all_databases()
         version_choices = sorted(database_dict[system_name][backend_name].keys(), reverse=True)
         return gr.update(choices=version_choices, value=None, interactive=True)
+
+    @staticmethod
+    def update_eplb_mode(enable_wideep):
+        """Update enable_eplb interactivity based on enable_wideep state."""
+        if enable_wideep:
+            return gr.update(interactive=True)
+        else:
+            return gr.update(value=False, interactive=False)
+
+    @staticmethod
+    def update_version_choices_with_quant_toggles(system_name, backend_name):
+        if not backend_name:
+            # Backend not selected yet.
+            return gr.update(choices=None, value=None, interactive=True)
+
+        version_update = EventFn.update_version_choices(system_name, backend_name)
+        return version_update
 
     @staticmethod
     def update_model_related_components(model_path):

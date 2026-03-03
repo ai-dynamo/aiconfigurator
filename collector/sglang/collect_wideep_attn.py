@@ -23,13 +23,13 @@ from sglang.srt.utils import BumpAllocator, suppress_other_loggers
 from torch.profiler import ProfilerActivity, profile, record_function
 
 try:
-    from helper import _get_deepseek_model_path, benchmark_with_power, log_perf
+    from helper import _get_deepseek_model_path, benchmark_with_power, get_sm_version, log_perf
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import _get_deepseek_model_path, benchmark_with_power, log_perf
+    from helper import _get_deepseek_model_path, benchmark_with_power, get_sm_version, log_perf
 
 DEEPSEEK_MODEL_PATH = _get_deepseek_model_path()
 
@@ -58,7 +58,8 @@ def get_attention_prefill_test_cases():
     context_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     context_seq_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 
-    attention_backends = ["flashinfer", "fa3"]
+    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
+    attention_backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
     head_nums = [128, 64, 32, 16]
 
     for attention_backend in attention_backends:
@@ -87,7 +88,8 @@ def get_attention_decode_test_cases():
     generation_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     generation_seq_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 
-    attention_backends = ["flashinfer", "fa3"]
+    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
+    attention_backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
     head_nums = [128, 64, 32, 16]
 
     for attention_backend in attention_backends:
@@ -566,14 +568,16 @@ def run_attention_torch(
 
 def get_wideep_mla_context_test_cases():
     """Returns list of (attention_backend, head_num, perf_filename) tuples."""
-    backends = ["flashinfer", "fa3"]
+    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
+    backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
     head_nums = [128, 64, 32, 16]
     return [[backend, head_num, "wideep_context_mla_perf.txt"] for backend in backends for head_num in head_nums]
 
 
 def get_wideep_mla_generation_test_cases():
     """Returns list of (attention_backend, head_num, perf_filename) tuples."""
-    backends = ["flashinfer", "fa3"]
+    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
+    backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
     head_nums = [128, 64, 32, 16]
     return [[backend, head_num, "wideep_generation_mla_perf.txt"] for backend in backends for head_num in head_nums]
 

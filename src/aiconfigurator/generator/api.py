@@ -20,17 +20,19 @@ from prettytable import PrettyTable
 
 from .artifacts import ArtifactWriter
 from .rendering import _cast_literal, render_backend_parameters, render_backend_templates
-from .utils import DEFAULT_BACKEND, normalize_backend
+from .utils import (
+    DEFAULT_BACKEND,
+    _load_yaml_payload,
+    get_default_dynamo_version_mapping,
+    normalize_backend,
+    resolve_backend_version_for_dynamo,
+)
 
 GENERATOR_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
 DEFAULT_DEPLOYMENT_SCHEMA_PATH = os.path.join(GENERATOR_CONFIG_DIR, "deployment_config.yaml")
 DEFAULT_BACKEND_MAPPING_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_config_mapping.yaml")
+DEFAULT_BACKEND_VERSION_MATRIX_PATH = os.path.join(GENERATOR_CONFIG_DIR, "backend_version_matrix.yaml")
 _VALID_GENERATOR_HELP_SECTIONS = {"all", "deploy", "backend"}
-
-
-def _load_yaml_payload(path: str) -> Any:
-    with open(path, encoding="utf-8") as fh:
-        return yaml.safe_load(fh) or {}
 
 
 def _format_default_value(value: Any) -> str:
@@ -261,6 +263,7 @@ def generate_backend_artifacts(
     templates_dir: Optional[str] = None,
     output_dir: Optional[str] = None,
     backend_version: Optional[str] = None,
+    use_dynamo_generator: bool = False,
 ) -> dict[str, str]:
     """
     Generate complete backend artifacts including run scripts, configs, and k8s YAML.
@@ -271,12 +274,20 @@ def generate_backend_artifacts(
         templates_dir: Optional directory containing templates
         output_dir: Optional directory to save generated files
         backend_version: Optional version string for version-specific template selection
+        use_dynamo_generator: If True, use the Dynamo DPP config generator
+            for the k8s deploy YAML instead of Jinja2 templates.
 
     Returns:
         Dictionary mapping artifact names to their content
     """
     logger = logging.getLogger(__name__)
-    artifacts = render_backend_templates(params, backend, templates_dir, backend_version)
+    artifacts = render_backend_templates(
+        params,
+        backend,
+        templates_dir,
+        backend_version,
+        use_dynamo_generator=use_dynamo_generator,
+    )
 
     if output_dir:
         params_obj = params.get("params", {})
@@ -359,10 +370,17 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
         help="Print generator schema help (deploy, backend, or all) and exit.",
     )
     grp.add_argument(
-        "--generated_config_version",
+        "--generated-config-version",
         type=str,
         default=None,
         help="Backend template version for generated artifacts (e.g. 1.1.0rc5).",
+    )
+    grp.add_argument(
+        "--generator-dynamo-version",
+        dest="generator_dynamo_version",
+        type=str,
+        default=None,
+        help="Dynamo version used for backend template selection.",
     )
 
 
@@ -396,10 +414,14 @@ def load_generator_overrides_from_args(args: argparse.Namespace) -> dict[str, An
     """
     Convenience wrapper that pulls generator override fields from an argparse namespace.
     """
-    return load_generator_overrides(
+    overrides = load_generator_overrides(
         getattr(args, "generator_config", None),
         getattr(args, "generator_set", None),
     )
+    dynamo_version = getattr(args, "generator_dynamo_version", None)
+    if dynamo_version:
+        overrides = _deep_merge_dicts(overrides, {"generator_dynamo_version": dynamo_version})
+    return overrides
 
 
 def parse_backend_arg(argv: list[str]) -> Optional[str]:
@@ -555,7 +577,7 @@ def generate_naive_config(
         model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or
             local path to directory containing config.json.
         total_gpus: Total number of GPUs for deployment.
-        system: System name (GPU type), e.g., 'h200_sxm', 'gb200_sxm'.
+        system: System name (GPU type), e.g., 'h200_sxm', 'gb200'.
         backend: Backend name ('trtllm', 'vllm', 'sglang'). Defaults to 'trtllm'.
         output_dir: Directory to save generated artifacts. If None, artifacts
             are generated but not saved to disk.
@@ -598,6 +620,12 @@ def generate_naive_config(
     # Determine backend version
     if backend_version is None:
         backend_version = get_latest_database_version(system=system, backend=backend)
+    if backend_version is None:
+        logger.warning(
+            "No perf-database version found for system=%s, backend=%s; falling back to default templates.",
+            system,
+            backend,
+        )
     logger.info("Using backend version: %s", backend_version)
 
     # Prepare output directory if provided
@@ -671,6 +699,7 @@ __all__ = [
     "generate_config_from_yaml",
     "generate_naive_config",
     "generator_cli_helper",
+    "get_default_dynamo_version_mapping",
     "load_generator_overrides",
     "load_generator_overrides_from_args",
     "parse_backend_arg",
@@ -678,5 +707,6 @@ __all__ = [
     "parse_mapping_arg",
     "prepare_generator_params",
     "print_generator_help",
+    "resolve_backend_version_for_dynamo",
     "resolve_mapping_yaml",
 ]

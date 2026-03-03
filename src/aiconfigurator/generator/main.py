@@ -36,7 +36,6 @@ def main(argv: Optional[list[str]] = None):
     current_dir = os.path.dirname(__file__)
     default_mapping_path = os.path.join(current_dir, "config", "backend_config_mapping.yaml")
 
-    logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     parser = argparse.ArgumentParser(
         prog="aic-generator",

@@ -69,13 +69,30 @@ else
 fi
 echo "================================================"
 
-# NCCL benchmarks
 if [[ "$device" == "cuda" ]]; then
-    num_gpus_nccl=(2 4 8)
+    GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+elif [[ "$device" == "xpu" ]]; then
+    GPU_COUNT=$(sycl-ls | grep '\[level_zero:gpu\]' | wc -l)
+fi
+
+echo "Found $GPU_COUNT GPUs."
+if [ "$GPU_COUNT" -ge 8 ]; then
+    gpu_count_list=(2 4 8)
+elif [ "$GPU_COUNT" -ge 4 ]; then
+    gpu_count_list=(2 4)
+elif [ "$GPU_COUNT" -ge 2 ]; then
+    gpu_count_list=(2)
+else
+    echo "Error: single GPU detected."
+    exit 1
+fi
+
+# NCCL
+if [[ "$device" == "cuda" ]]; then
     nccl_ops=("all_gather" "alltoall" "reduce_scatter" "all_reduce")
     dtypes=("half" "int8")
 
-    for n in "${num_gpus_nccl[@]}"; do
+    for n in "${gpu_count_list[@]}"; do
         for op in "${nccl_ops[@]}"; do
             for dtype in "${dtypes[@]}"; do
                 if [[ "$measure_power" == "true" ]]; then
@@ -92,14 +109,10 @@ else
 fi
 
 echo "Running AllReduce Benchmarks with $all_reduce_backend backend..."
-num_gpus_allreduce=(2 4 8)
-if [[ "$device" == "xpu" ]]; then
-    num_gpus_allreduce=(2 4)
-fi
 
 if [[ "$all_reduce_backend" == "trtllm" ]]; then
     # TRTLLM allreduce (CUDA Graph based)
-    for n in "${num_gpus_allreduce[@]}"; do
+    for n in "${gpu_count_list[@]}"; do
         echo "Running TRTLLM AllReduce benchmark with $n GPUs using CUDA Graph method"
         if [[ "$measure_power" == "true" ]]; then
             mpirun -n "$n" --allow-run-as-root python3 collect_all_reduce.py \
@@ -112,7 +125,7 @@ if [[ "$all_reduce_backend" == "trtllm" ]]; then
     done
 elif [[ "$all_reduce_backend" == "vllm" ]]; then
     # VLLM allreduce implementation
-    for n in "${num_gpus_allreduce[@]}"; do
+    for n in "${gpu_count_list[@]}"; do
         echo "Running VLLM AllReduce benchmark with $n GPUs"
         if [[ "$measure_power" == "true" ]]; then
             torchrun --nproc_per_node=$n collect_all_reduce.py --backend vllm \

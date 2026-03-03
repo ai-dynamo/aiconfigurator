@@ -5,37 +5,78 @@ import argparse
 import logging
 from collections import defaultdict
 
-import gradio as gr
-
 import aiconfigurator
-from aiconfigurator.webapp.components.agg_pareto_tab import create_agg_pareto_tab
-from aiconfigurator.webapp.components.agg_tab import create_agg_tab
-from aiconfigurator.webapp.components.disagg_pareto_tab import create_disagg_pareto_tab
-from aiconfigurator.webapp.components.disagg_pd_ratio_tab import create_disagg_pd_ratio_tab
-from aiconfigurator.webapp.components.pareto_comparison_tab import create_pareto_comparison_tab
-from aiconfigurator.webapp.components.profiling.create_profiling_tab import create_profiling_tab
-from aiconfigurator.webapp.components.readme_tab import create_readme_tab
-from aiconfigurator.webapp.components.static_tab import create_static_tab
-from aiconfigurator.webapp.events.event_handler import EventHandler
+from aiconfigurator.logging_utils import setup_logging
+from aiconfigurator.sdk import perf_database
+
+
+def is_editable_install() -> bool:
+    """
+    Detect if aiconfigurator was installed in editable mode (pip install -e .)
+    vs from PyPI.
+    """
+    try:
+        import importlib.metadata
+        import json
+
+        direct_url = json.loads(importlib.metadata.distribution("aiconfigurator").read_text("direct_url.json"))
+        return direct_url["dir_info"]["editable"]
+    except Exception:
+        return False
 
 
 def configure_parser(parser):
     """
     Configures the argument parser for the WebApp.
     """
-    parser.add_argument("--server_name", type=str, default="0.0.0.0", help="Server name")
-    parser.add_argument("--server_port", type=int, default=7860, help="Server port")
-    parser.add_argument("--enable_agg", action="store_true", help="Enable Agg tab")
-    parser.add_argument("--enable_disagg_pd_ratio", action="store_true", help="Enable Disagg PD Ratio tab")
-    parser.add_argument("--enable_profiling", action="store_true", help="Enable Profiling tab")
+    parser.add_argument("--server-name", type=str, default="0.0.0.0", help="Server name")
+    parser.add_argument("--server-port", type=int, default=7860, help="Server port")
+    parser.add_argument("--enable-agg", action="store_true", help="Enable Agg tab")
+    parser.add_argument("--enable-disagg-pd-ratio", action="store_true", help="Enable Disagg PD Ratio tab")
+    parser.add_argument("--enable-profiling", action="store_true", help="Enable Profiling tab")
     parser.add_argument("--debug", help="Debug mode", action="store_true")
     parser.add_argument("--experimental", help="enable experimental features", action="store_true")
+    parser.add_argument(
+        "--systems-paths",
+        type=str,
+        default=None,
+        help=(
+            "Systems search paths (comma-separated). Use 'default' for the built-in systems path. "
+            "Example: default,/opt/aic/systems,/data/aic/systems."
+        ),
+    )
 
 
 def main(args):
     """
     Main function for the WebApp.
     """
+    try:
+        import gradio as gr
+    except ModuleNotFoundError as e:
+        if is_editable_install():
+            install_cmd = "pip3 install -e '.[webapp]'"
+        else:
+            install_cmd = "pip3 install aiconfigurator[webapp]"
+        raise ModuleNotFoundError(
+            f"AIConfigurator webapp requires gradio, which is not installed. Please install it with '{install_cmd}'"
+        ) from e
+
+    # All aiconfigurator.webapp will import gradio, so we need to import them here.
+
+    # Apply global Gradio monkey patches
+    # This must be imported before any Gradio components are created
+    from aiconfigurator.webapp import gradio_patches  # noqa: F401
+    from aiconfigurator.webapp.components.agg_pareto_tab import create_agg_pareto_tab
+    from aiconfigurator.webapp.components.agg_tab import create_agg_tab
+    from aiconfigurator.webapp.components.disagg_pareto_tab import create_disagg_pareto_tab
+    from aiconfigurator.webapp.components.disagg_pd_ratio_tab import create_disagg_pd_ratio_tab
+    from aiconfigurator.webapp.components.pareto_comparison_tab import create_pareto_comparison_tab
+    from aiconfigurator.webapp.components.profiling.create_profiling_tab import create_profiling_tab
+    from aiconfigurator.webapp.components.readme_tab import create_readme_tab
+    from aiconfigurator.webapp.components.static_tab import create_static_tab
+    from aiconfigurator.webapp.events.event_handler import EventHandler
+
     app_config = {
         "enable_agg": args.enable_agg,
         "enable_disagg_pd_ratio": args.enable_disagg_pd_ratio,
@@ -44,18 +85,15 @@ def main(args):
         "debug": args.debug,
     }
 
-    if app_config["debug"]:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s",
-            datefmt="%m-%d %H:%M:%S",
-        )
-    else:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(levelname)s %(asctime)s] %(message)s",
-            datefmt="%m-%d %H:%M:%S",
-        )
+    setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
+
+    try:
+        perf_database.set_systems_paths(args.systems_paths)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if not perf_database.get_all_databases():
+        raise SystemExit(perf_database.build_no_databases_message())
 
     with gr.Blocks(
         title="Dynamo aiconfigurator for Disaggregated Serving Deployment",

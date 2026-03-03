@@ -102,13 +102,13 @@ class TestCLIDefaultEquivalence:
             "aiconfigurator.main",
             "cli",
             "default",
-            "--model_path",
+            "--model-path",
             "Qwen/Qwen3-32B",
-            "--total_gpus",
+            "--total-gpus",
             "32",
             "--system",
             "h200_sxm",
-            "--save_dir",
+            "--save-dir",
             str(save_dir),
         ]
 
@@ -172,9 +172,9 @@ class TestCLIExpEquivalence:
             "aiconfigurator.main",
             "cli",
             "exp",
-            "--yaml_path",
+            "--yaml-path",
             self.EXAMPLE_YAML_PATH,
-            "--save_dir",
+            "--save-dir",
             str(save_dir),
         ]
 

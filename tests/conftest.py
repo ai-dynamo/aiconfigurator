@@ -50,7 +50,7 @@ def cli_args_factory():
             )
         elif mode == "exp":
             yaml_override = overrides.pop("yaml_path", None)
-            if yaml_override is None and (not extra_args or "--yaml_path" not in extra_args):
+            if yaml_override is None and (not extra_args or "--yaml-path" not in extra_args):
                 with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as tmp:
                     tmp.write("exps: []\n")
                     tmp.flush()
@@ -66,7 +66,7 @@ def cli_args_factory():
         arg_list: list[str] = [mode]
 
         for key, value in base_args.items():
-            option = f"--{key}"
+            option = f"--{key.replace('_', '-')}"
             if isinstance(value, bool):
                 if value:
                     arg_list.append(option)

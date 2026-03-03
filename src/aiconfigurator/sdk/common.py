@@ -137,7 +137,9 @@ def check_support(
     exact_matches = [
         row
         for row in matrix
-        if row["HuggingFaceID"] == model and row["System"] == system and _matches_filters(row, backend, version)
+        if row["HuggingFaceID"].lower() == model.lower()
+        and row["System"].lower() == system.lower()
+        and _matches_filters(row, backend, version)
     ]
 
     # Resolve architecture from matrix if model is found anywhere
@@ -226,11 +228,13 @@ DefaultHFModels = {
     "meta-llama/Meta-Llama-3.1-8B",
     "meta-llama/Meta-Llama-3.1-70B",
     "meta-llama/Meta-Llama-3.1-405B",
+    "nvidia/Llama-3.1-70B-Instruct-FP8",
     # Mixtral Models
     "mistralai/Mixtral-8x7B-v0.1",
     "mistralai/Mixtral-8x22B-v0.1",
     # DeepSeek Models
     "deepseek-ai/DeepSeek-V3",
+    "nvidia/DeepSeek-V3.1-NVFP4",
     # Qwen 2.5 Models
     "Qwen/Qwen2.5-1.5B",
     "Qwen/Qwen2.5-7B",
@@ -241,9 +245,16 @@ DefaultHFModels = {
     "Qwen/Qwen3-1.7B",
     "Qwen/Qwen3-8B",
     "Qwen/Qwen3-32B",
+    "Qwen/Qwen3-32B-FP8",
     "Qwen/Qwen3-30B-A3B",
+    "Qwen/Qwen3-30B-A3B-FP8",
     "Qwen/Qwen3-235B-A22B",
+    "Qwen/Qwen3-235B-A22B-FP8",
     "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    "nvidia/Qwen3-235B-A22B-NVFP4",
+    "Qwen/Qwen3-32B-FP8-Static-PerTensor",
+    # MiniMax Models
+    "MiniMaxAI/MiniMax-M2.5",
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -255,56 +266,14 @@ DefaultHFModels = {
 }
 
 """
-Mapping from internal model names to HuggingFace model IDs.
-This allows the support matrix and other tools to use canonical HuggingFace paths.
-"""
-MODEL_NAME_TO_HF_ID = {
-    # Llama 2 Models
-    "LLAMA2_7B": "meta-llama/Llama-2-7b-hf",
-    "LLAMA2_13B": "meta-llama/Llama-2-13b-hf",
-    "LLAMA2_70B": "meta-llama/Llama-2-70b-hf",
-    # Llama 3.1 Models
-    "LLAMA3.1_8B": "meta-llama/Meta-Llama-3.1-8B",
-    "LLAMA3.1_70B": "meta-llama/Meta-Llama-3.1-70B",
-    "LLAMA3.1_405B": "meta-llama/Meta-Llama-3.1-405B",
-    # Mixtral Models
-    "MOE_Mixtral8x7B": "mistralai/Mixtral-8x7B-v0.1",
-    "MOE_Mixtral8x22B": "mistralai/Mixtral-8x22B-v0.1",
-    # DeepSeek Models
-    "DEEPSEEK_V3": "deepseek-ai/DeepSeek-V3",
-    # Qwen 2.5 Models
-    "QWEN2.5_1.5B": "Qwen/Qwen2.5-1.5B",
-    "QWEN2.5_7B": "Qwen/Qwen2.5-7B",
-    "QWEN2.5_32B": "Qwen/Qwen2.5-32B",
-    "QWEN2.5_72B": "Qwen/Qwen2.5-72B",
-    # Qwen 3 Models
-    "QWEN3_0.6B": "Qwen/Qwen3-0.6B",
-    "QWEN3_1.7B": "Qwen/Qwen3-1.7B",
-    "QWEN3_8B": "Qwen/Qwen3-8B",
-    "QWEN3_32B": "Qwen/Qwen3-32B",
-    "QWEN3_30B_A3B": "Qwen/Qwen3-30B-A3B",
-    "QWEN3_235B": "Qwen/Qwen3-235B-A22B",
-    "QWEN3_480B": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
-    # GPT-OSS Models
-    "GPT_OSS_120B": "openai/gpt-oss-120b",
-    "GPT_OSS_20B": "openai/gpt-oss-20b",
-    # NVIDIA Nemotron
-    "Nemotron_super_v1.1": "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
-    # Nemotron 3
-    "Nemotron_3_nano": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "Nemotron_3_super": "nvidia/NVIDIA-Nemotron-3-Super-120B-NVFP4-FP8KV",
-    # Nemotron H
-    "Nemotron_H_56B": "nvidia/Nemotron-H-56B-Base-8K",
-}
-
-"""
 Supported systems (GPU types)
 """
 SupportedSystems = {
     "h100_sxm",
     "h200_sxm",
     "b200_sxm",
-    "gb200_sxm",
+    "gb200",
+    "gb300",
     "a100_sxm",
     "l40s",
     "b60",
@@ -326,6 +295,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MixtralForCausalLM": "MOE",
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
+    "MiniMaxM2ForCausalLM": "MOE",
 }
 
 """
@@ -522,6 +492,12 @@ class PerfDataFilename(Enum):
     wideep_generation_moe = "wideep_generation_moe_perf.txt"
     wideep_deepep_normal = "wideep_deepep_normal_perf.txt"
     wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
+    # TensorRT-LLM WideEP specific
+    wideep_moe_compute = "wideep_moe_perf.txt"
+    wideep_alltoall = "wideep_alltoall_perf.txt"
+    compute_scale = "computescale_perf.txt"
+    scale_matrix = "scale_matrix_perf.txt"
+    mamba2 = "mamba2_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
@@ -536,12 +512,13 @@ class GEMMQuantMode(Enum):
     int8_wo = QuantMapping(1, 1, "int8_wo")  # w8a16
     int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
     fp8 = QuantMapping(1, 2, "fp8")  # w8fp8
+    fp8_static = QuantMapping(1, 2, "fp8_static")  # fp8 with static quantization (compute_scale/scale_matrix modeled)
     sq = QuantMapping(1, 2, "sq")  # w8int8
     fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for trtllm torch ds fp8
     fp8_ootb = QuantMapping(
         1, 2, "fp8_ootb"
     )  # in future, should deprecate this mode as it's specific for trtllm trt backend
-    nvfp4 = QuantMapping(0.5, 4, "nvfp4")  # nvfp4 on blackwell
+    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
 
 
 class MoEQuantMode(Enum):
@@ -554,7 +531,7 @@ class MoEQuantMode(Enum):
     int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
     fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for trtllm torch ds fp8
     w4afp8 = QuantMapping(0.5, 2, "w4afp8")  # specific for trtllm torch ds w4a8
-    nvfp4 = QuantMapping(0.5, 4, "nvfp4")  # nvfp4 on blackwell
+    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
     w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4")  # native data format for gpt oss
 
 

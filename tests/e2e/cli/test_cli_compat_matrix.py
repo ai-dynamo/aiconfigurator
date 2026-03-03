@@ -38,7 +38,7 @@ SYSTEMS_TO_TEST = [
     "h100_sxm",
     "h200_sxm",
     "b200_sxm",
-    "gb200_sxm",
+    "gb200",
     "l40s",
 ]
 
@@ -79,9 +79,9 @@ class TestModelSystemCombinations:
             "aiconfigurator",
             "cli",
             "default",
-            "--total_gpus",
+            "--total-gpus",
             "32",
-            "--model_path",
+            "--model-path",
             model,
             "--system",
             system,

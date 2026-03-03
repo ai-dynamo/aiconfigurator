@@ -70,6 +70,9 @@ class InferenceSummary:
         # cached result dict for efficient batch operations
         self._result_dict = None
 
+        # per-ops latency breakdown (populated by run_agg or run_disagg)
+        self._per_ops_data: dict | None = None
+
     def set_memory_and_check_oom(self, memory_dict: dict, mem_capacity: int) -> None:
         """
         Set memory and check oom.
@@ -270,6 +273,14 @@ class InferenceSummary:
         if self._summary_df is None:
             logger.warning("WARNING: summary df is not set")
         return self._summary_df
+
+    def set_per_ops_data(self, per_ops_data: dict) -> None:
+        """Set per-operation latency breakdown data from run_agg."""
+        self._per_ops_data = per_ops_data
+
+    def get_per_ops_data(self) -> dict | None:
+        """Get per-operation latency breakdown data (populated by run_agg)."""
+        return self._per_ops_data
 
     def set_result_dict(self, result_dict: dict) -> None:
         """
