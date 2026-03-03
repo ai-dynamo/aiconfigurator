@@ -640,9 +640,17 @@ def build_default_task_configs(
         "request_latency": request_latency,
         "prefix": prefix,
         "database_mode": database_mode,
-        "nextn": nextn,
-        "nextn_accept_rates": nextn_accept_rates,
     }
+
+    # Create yaml_config to pass nextn and nextn_accept_rates if specified
+    yaml_config = None
+    if nextn > 0:
+        yaml_config = {
+            "config": {
+                "nextn": nextn,
+                "nextn_accept_rates": nextn_accept_rates or [0.85, 0.3, 0.0, 0.0, 0.0],
+            }
+        }
 
     task_configs: dict[str, TaskConfig] = {}
 
@@ -650,6 +658,8 @@ def build_default_task_configs(
         # Create agg task for this backend
         agg_kwargs = dict(common_kwargs)
         agg_kwargs["backend_name"] = backend_name
+        if yaml_config:
+            agg_kwargs["yaml_config"] = yaml_config
         agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
         exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
         task_configs[exp_name] = agg_task
@@ -662,6 +672,8 @@ def build_default_task_configs(
         disagg_kwargs = dict(common_kwargs)
         disagg_kwargs["backend_name"] = backend_name
         disagg_kwargs["decode_system_name"] = decode_system
+        if yaml_config:
+            disagg_kwargs["yaml_config"] = yaml_config
         disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
         exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
         task_configs[exp_name] = disagg_task
