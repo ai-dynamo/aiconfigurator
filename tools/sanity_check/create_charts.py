@@ -91,7 +91,8 @@ def create_charts(
 
     if torch.xpu.is_available():
         op_to_chart_function["generation_attention"] = [
-            fn for fn in op_to_chart_function["generation_attention"]
+            fn
+            for fn in op_to_chart_function["generation_attention"]
             if fn != validate_database.visualize_generation_attention_b
         ]
 
