@@ -15,7 +15,7 @@ gpu:
 
 node:
   num_gpus_per_node: 8
-  inter_node_bw: 25000000000  # Byte/s per GPU, single direction, 1:1 CX7 per node
+  inter_node_bw: 50000000000  # Byte/s per GPU, single direction, 1:1 CX7 NDR 400Gb/s per node
   intra_node_bw: 32000000000  # Byte/s per gpu, single direction (pcie 4.0)
   pcie_bw: 32000000000  # Byte/s, single direction, pcie 4.0
   p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations

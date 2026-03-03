@@ -540,7 +540,7 @@ def prepare_template_context(param_values: dict[str, Any], backend: str) -> dict
 
     # Extract K8s configuration
     k8s_config = param_values.get("K8sConfig", {})
-    context["name_prefix"] = k8s_config.get("name_prefix")
+    context["name_prefix"] = k8s_config.get("name_prefix") or "dynamo"
     context["k8s_namespace"] = k8s_config.get("k8s_namespace")
     context["k8s_image"] = k8s_config.get("k8s_image")
     context["k8s_image_pull_secret"] = k8s_config.get("k8s_image_pull_secret")
