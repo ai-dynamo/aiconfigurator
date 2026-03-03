@@ -451,12 +451,17 @@ def _parse_hf_config_json(config: dict) -> dict:
     # correct sub-dictionary while keeping the top-level architecture name.
     text_key = MULTIMODAL_TEXT_CONFIG_KEY.get(architecture)
     if text_key and text_key in config:
+        text_cfg = config[text_key]
+        if not isinstance(text_cfg, dict):
+            raise ValueError(
+                f"Expected '{text_key}' to be a dict for architecture {architecture}, "
+                f"got {type(text_cfg).__name__}"
+            )
         logger.info(
             "Multimodal model detected (%s). Reading LLM parameters from '%s'.",
             architecture,
             text_key,
         )
-        text_cfg = config[text_key]
         # Merge quantization_config from text_config if not present at top level
         if "quantization_config" not in config and "quantization_config" in text_cfg:
             config["quantization_config"] = text_cfg["quantization_config"]
@@ -704,11 +709,12 @@ def _attach_inferred_quant_fields(raw_config: dict) -> dict:
     # For multimodal models the quantization_config may live under text_config.
     # Promote it to the top level so downstream inference picks it up.
     if "quantization_config" not in raw_config:
-        for key in MULTIMODAL_TEXT_CONFIG_KEY.values():
-            nested = raw_config.get(key, {})
+        architecture = (raw_config.get("architectures") or [None])[0]
+        text_key = MULTIMODAL_TEXT_CONFIG_KEY.get(architecture)
+        if text_key:
+            nested = raw_config.get(text_key, {})
             if isinstance(nested, dict) and "quantization_config" in nested:
                 raw_config["quantization_config"] = nested["quantization_config"]
-                break
     inferred = _infer_quantization_fields(raw_config)
     for key, value in inferred.items():
         raw_config.setdefault(key, value)
