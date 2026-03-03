@@ -3225,6 +3225,7 @@ class PerfDatabase:
         # Check if values are dicts (new format) or floats (legacy)
         if isinstance(y0, dict) and isinstance(y1, dict):
             # New format: interpolate latency and power separately
+            # FIXME: will this lose energy?
             lat0, lat1 = y0["latency"], y1["latency"]
             pow0, pow1 = y0["power"], y1["power"]
 
