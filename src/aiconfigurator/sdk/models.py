@@ -119,7 +119,7 @@ def _apply_model_quant_defaults(
     if (
         architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
         and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
-    ):        
+    ):
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
 
     # FIXME: temporary workaround for Qwen3 32B FP8, only float16+fp8kvcache is supported
