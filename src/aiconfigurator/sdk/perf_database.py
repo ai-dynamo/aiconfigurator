@@ -262,7 +262,7 @@ def get_database(
             database = databases_cache[cache_key][backend][version]
             return database
         except KeyError:
-            logger.info(f"loading {system=}, {backend=}, {version=}")
+            logger.info(f"Loading database for {system=}, {backend=}, {version=}")
             try:
                 with open(system_yaml_path) as f:
                     system_spec = yaml.load(f, Loader=yaml.SafeLoader)
