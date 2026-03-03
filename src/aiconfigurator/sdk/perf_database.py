@@ -1101,6 +1101,11 @@ def load_mla_bmm_data(mla_bmm_file):
     return mla_bmm_data
 
 
+def _normalize_dtype_key(raw: str) -> str:
+    """Map collector dtype strings to enum member names (bfloat16 → float16)."""
+    return "float16" if raw == "bfloat16" else raw
+
+
 def load_context_dsa_module_data(dsa_file: str):
     """
     Load context DSA data. Produces the SAME dict structure as load_context_mla_data
@@ -1113,7 +1118,6 @@ def load_context_dsa_module_data(dsa_file: str):
         logger.debug(f"DSA context data file {dsa_file} not found.")
         return None
 
-    # Same 5-level defaultdict as MLA — leaf is defaultdict() so try/except KeyError works
     dsa_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
 
     with open(dsa_file, encoding="utf-8") as f:
@@ -1132,10 +1136,8 @@ def load_context_dsa_module_data(dsa_file: str):
 
         entry = {"latency": latency, "power": power, "energy": energy}
 
-        # DSA only supports BF16 KV cache in TRT-LLM 1.2.0rc5.
-        # Register under float16 quant keys only.
-        quant_mode = common.FMHAQuantMode.float16
-        kv_dtype = common.KVCacheQuantMode.float16
+        quant_mode = common.FMHAQuantMode[_normalize_dtype_key(row["mla_dtype"])]
+        kv_dtype = common.KVCacheQuantMode[_normalize_dtype_key(row["kv_cache_dtype"])]
         try:
             dsa_data[quant_mode][kv_dtype][num_heads][s][b]
         except KeyError:
@@ -1179,7 +1181,7 @@ def load_generation_dsa_module_data(dsa_file: str):
 
         entry = {"latency": latency, "power": power, "energy": energy}
 
-        kv_dtype = common.KVCacheQuantMode.float16
+        kv_dtype = common.KVCacheQuantMode[_normalize_dtype_key(row["kv_cache_dtype"])]
         try:
             dsa_data[kv_dtype][num_heads][b][s]
         except KeyError:
@@ -5549,7 +5551,7 @@ class PerfDatabase:
             gemm_wp_ops = 2 * tokens * hidden_size * index_n_heads
 
             # 5. Indexer FP8 MQA logits: Q[tokens, index_n_heads, head_dim] x K[full_s, head_dim]
-            #    TRT-LLM skips logits+topk when kv_len <= topk (skip_indexer optimization).
+            #    One optimization is to skip logits+topk when kv_len <= topk (skip_indexer optimization).
             #    wq_b and weights_proj GEMMs still run regardless.
             if full_s <= index_topk:
                 indexer_logits_ops = 0
@@ -5736,7 +5738,9 @@ class PerfDatabase:
                 + 2 * tokens * hidden_size * index_n_heads
                 + 2 * tokens * num_heads * v_dim * hidden_size
             )
-            # 6. Indexer: paged MQA logits over full KV cache
+            # 6. Indexer: paged MQA logits over full KV cache.
+            #    Unlike context phase, generation uses paged MQA kernels that
+            #    dispatch uniformly across the batch, so the indexer always runs.
             indexer_ops = 2 * tokens * index_n_heads * index_head_dim * s
             # 7. Sparse attention: only top-k tokens
             #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512)
@@ -5747,7 +5751,7 @@ class PerfDatabase:
 
             # --- Memory (bytes) ---
             dtype_bytes = quant_mode_gen.value.memory
-            # Indexer K cache read: full s (paged, FP8)
+            # Indexer K cache read: always read full KV cache (paged, FP8)
             indexer_cache_bytes = b * s * index_head_dim
             # MLA KV cache read: only top-k tokens
             kv_cache_bytes = b * effective_kv * attn_head_dim * kv_cache_dtype.value.memory
