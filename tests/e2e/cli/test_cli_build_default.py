@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess as sp
+import tempfile
 
 import pytest
 
@@ -19,6 +20,7 @@ _DEFAULT_BUILD_CASES = [
             "prefix": 0,
             "ttft": 5000,
             "tpot": 10,
+            "save_dir": tempfile.gettempdir(),
         },
     ),
     pytest.param(
@@ -87,8 +89,9 @@ def _build_default_cmd(
     prefix: int,
     ttft: int,
     tpot: int,
+    save_dir: str | None = None,
 ):
-    return [
+    cmd = [
         "aiconfigurator",
         "cli",
         "default",
@@ -111,6 +114,9 @@ def _build_default_cmd(
         "--tpot",
         str(tpot),
     ]
+    if save_dir:
+        cmd.extend(["--save-dir", save_dir])
+    return cmd
 
 
 @pytest.mark.parametrize("case", _DEFAULT_BUILD_CASES)
@@ -133,3 +139,6 @@ def test_cli_default_build_subset(case: dict):
     assert "Dynamo aiconfigurator Final Results" in combined_output
     assert f"Model: {case['model_path']}" in combined_output
     assert f"Total GPUs: {case['total_gpus']}" in combined_output
+
+    # TODO: remove try/except around save_results
+    assert "Failed to save results" not in combined_output
