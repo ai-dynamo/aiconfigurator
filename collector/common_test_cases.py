@@ -149,7 +149,7 @@ class GemmCommonTestCase:
 def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
     x_list = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 128, 160, 192]
     # when x > 128, collect both x and x+1 due to the zig-zag pattern of the gemm.
-    for x in range(256, 4096 + 1, 256):
+    for x in range(256, 4096 + 257, 256):
         x_list.append(x)
         x_list.append(x + 1)
         # after 4096, the zig-zag pattern can be ignored
@@ -178,7 +178,7 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
         10240,
         12288,
     ]
-    nk_list_ext = [16384, 65536]  # for coverage and interp purpose
+    nk_list_ext = [16384, 51200, 65536]  # for coverage and interp purpose
 
     test_cases = []
     # x_list_orig+add+ext  <==> nk_list+ext
