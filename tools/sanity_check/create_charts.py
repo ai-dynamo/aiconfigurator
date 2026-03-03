@@ -14,6 +14,7 @@ import subprocess
 import sys
 import textwrap
 from collections import defaultdict
+
 import torch
 
 from aiconfigurator.sdk.perf_database import get_database
