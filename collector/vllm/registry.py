@@ -9,6 +9,7 @@ add a ``versions`` tuple following the trtllm registry pattern.
 """
 
 import torch
+
 from collector.registry_types import OpEntry
 
 REGISTRY: list[OpEntry] = [
