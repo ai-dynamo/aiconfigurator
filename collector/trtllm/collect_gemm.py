@@ -5,6 +5,7 @@ import math
 
 import tensorrt_llm
 import torch
+import torch.nn.functional as F
 from common_test_cases import get_gemm_common_test_cases
 from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
@@ -16,13 +17,32 @@ def pad_up(x: int, y: int) -> int:
     return ((x + y - 1) // y) * y
 
 
+def _compute_fp8_block_weight_scales(weight: torch.Tensor, group_size: int) -> torch.Tensor:
+    """Compute per-block scales from weight tensor (shape: [n, k])."""
+    n, k = weight.shape
+    n_blocks = math.ceil(n / group_size)
+    k_blocks = math.ceil(k / group_size)
+    pad_n = n_blocks * group_size - n
+    pad_k = k_blocks * group_size - k
+
+    weight_abs = weight.abs()
+    if pad_n or pad_k:
+        weight_abs = F.pad(weight_abs, (0, pad_k, 0, pad_n))
+
+    block_max = weight_abs.view(n_blocks, group_size, k_blocks, group_size).amax(dim=(1, 3))
+    return (block_max / 448.0).clamp_min(1e-6).to(dtype=torch.float32)
+
+
 def get_gemm_test_cases():
     gemm_list = ["float16"]
-    if get_sm_version() > 86:
+    sm_version = get_sm_version()
+    if sm_version > 86:
         gemm_list += ["fp8"]
-        if get_sm_version() < 100:
-            gemm_list += ["fp8_block"]
-    if get_sm_version() >= 100:
+        # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block.
+        # SM90 uses CUTLASS backend with FP32 scale.
+        # SM100 uses TRTLLM/DeepGEMM backend with UE8M0 scale (MXFP8 style).
+        gemm_list += ["fp8_block"]
+    if sm_version >= 100:
         gemm_list += ["nvfp4"]
 
     test_cases = []
@@ -42,6 +62,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
+    sm_version = get_sm_version()
 
     dtype = torch.bfloat16
     x = torch.randn((m, k), dtype=dtype).to(torch.device(device))
@@ -76,15 +97,10 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
                 "weight_scale": torch.randn(1, dtype=torch.float32, device=torch.device(device)),
             }
         elif gemm_type == "fp8_block":
+            fp_weight = torch.randn((n, k), dtype=torch.bfloat16, device=torch.device(device))
             weights = {
-                "weight": torch.randn((n, k), dtype=torch.bfloat16, device=torch.device(device)).to(
-                    dtype=torch.float8_e4m3fn
-                ),
-                "weight_scale": torch.randn(
-                    (math.ceil(n / group_size), math.ceil(k / group_size)),
-                    dtype=torch.float32,
-                    device=torch.device(device),
-                ),
+                "weight": fp_weight.to(dtype=torch.float8_e4m3fn),
+                "weight_scale": _compute_fp8_block_weight_scales(fp_weight, group_size),
             }
         elif gemm_type == "nvfp4":
             # From trtllm test case
@@ -126,6 +142,8 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
     ) as results:
         pass
 
+    kernel_source = "deepgemm" if gemm_type == "fp8_block" and sm_version >= 100 else "torch_flow"
+
     log_perf(
         item_list=[
             {"gemm_dtype": gemm_type, "m": m, "n": n, "k": k, "latency": results["latency_ms"] / outside_loop_count}
@@ -134,7 +152,12 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         version=tensorrt_llm.__version__,
         device_name=torch.cuda.get_device_name(device),
         op_name="gemm",
-        kernel_source="torch_flow",
+        kernel_source=kernel_source,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )
+
+
+if __name__ == "__main__":
+    for test_case in get_gemm_test_cases():
+        run_gemm(*test_case)

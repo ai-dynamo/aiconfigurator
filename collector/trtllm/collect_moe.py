@@ -23,6 +23,7 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
 # Models that use non-gated MoE (Relu2 activation instead of SwiGLU)
 # These are substring patterns that will be matched against the full model name
+# It's supported in trtllm 1.3.0rc1, please expect failures for these models if using trtllm < 1.3.0rc1
 NON_GATED_MOE_MODELS = ["Nemotron-3"]
 
 from collector.common_test_cases import get_common_moe_test_cases
@@ -91,18 +92,19 @@ def cleanup_empty_json_files(directory):
 
 def get_moe_test_cases():
     moe_list = ["float16"]
-    if get_sm_version() > 86:
+    sm_version = get_sm_version()
+    if sm_version > 86:
         moe_list += ["fp8"]
-        if get_sm_version() < 100:
-            # though trtllm gen kernel source supports fp8_block, it only provides min-latency
-            # data. not practical.
-            moe_list += [
-                # "w4afp8", FIXME: trtllm 1.2 has bugs for w4afp8
-                "fp8_block",
-                "w4a16_mxfp4",
-            ]
+        # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block.
+        # SM90 uses CUTLASS backend with FP32 scale.
+        # SM100 uses DEEPGEMM/TRTLLM backend with UE8M0 scale (MXFP8 style).
+        moe_list += ["fp8_block"]
 
-    if get_sm_version() >= 100:
+    # SM90 specific quant mode.
+    if 86 < sm_version < 100:
+        moe_list += ["w4a16_mxfp4"]
+
+    if sm_version >= 100:
         moe_list += ["nvfp4"]
 
     test_cases = []
@@ -128,6 +130,12 @@ def get_moe_test_cases():
             if moe_type == "fp8_block" and (
                 common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
             ):
+                continue
+
+            # Blackwell DeepGEMM fp8_block has an additional TP-shard alignment requirement.
+            # Skip shapes that are known to trigger layout assert:
+            #   Assertion error ... layout.hpp:78: sf.size(-2) == ceil_div(mn, gran_mn)
+            if moe_type == "fp8_block" and sm_version >= 100 and (common_moe_testcase.inter_size // moe_tp) % 128 != 0:
                 continue
 
             # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0
@@ -270,6 +278,8 @@ def run_moe_torch(
         activation_type = ActivationType.Swiglu
         is_gated = True
 
+    sm_version = get_sm_version()
+
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
         # use triton backend for best performance on Hopper
         model_config.moe_backend = "triton"
@@ -278,12 +288,23 @@ def run_moe_torch(
         )
         swiglu_beta = torch.tensor([1.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
         swiglu_limit = torch.tensor([7.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
-        if 86 < get_sm_version() < 100:
+        if 86 < sm_version < 100:
             model_config.moe_backend = "triton"
         else:
             model_config.moe_backend = "cutlass" if not min_latency_mode else "trtllm"
     else:
-        model_config.moe_backend = "cutlass" if not min_latency_mode else "trtllm"
+        # Select backend based on platform and quant mode.
+        if min_latency_mode:
+            model_config.moe_backend = "trtllm"
+        elif moe_type == "fp8_block":
+            if sm_version >= 100:
+                # Blackwell: DeepGEMM uses MXFP8 style (E4M3 + UE8M0 scale).
+                model_config.moe_backend = "deepgemm"
+            else:
+                # Hopper: CUTLASS uses FP32 scale.
+                model_config.moe_backend = "cutlass"
+        else:
+            model_config.moe_backend = "cutlass"
 
     router_logits_dtype = torch.bfloat16
     # current min_latency mode only support experts <= 256. Thus K2 will not have min_latency mode.
@@ -430,11 +451,15 @@ def run_moe_torch(
         num_iter = 5 if distributed == "power_law" else 1
         if distributed == "power_law":
             actual_logits_list = [
-                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype)
+                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(
+                    device=torch.device(device), dtype=router_logits_dtype
+                )
                 for _ in range(num_iter)
             ]
         elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype)
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(
+                device=torch.device(device), dtype=router_logits_dtype
+            )
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 
@@ -473,12 +498,16 @@ def run_moe_torch(
             if not results["used_cuda_graph"] and aic_debug == 1:
                 print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
 
-        if min_latency_mode:
+        if moe_type == "fp8_block" and sm_version >= 100:
+            source = "deepgemm"
+        elif min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
         elif not is_gated:
             source = "moe_torch_flow_nongated"  # non-gated MoE (relu2)
+        elif model_config.moe_backend == "cutlass":
+            source = "moe_torch_flow_cutlass"  # SM90 CUTLASS (FP32 scale)
         else:
-            source = "moe_torch_flow"  # cutlass (gated SwiGLU)
+            source = "moe_torch_flow"  # default
 
         log_perf(
             item_list=[
