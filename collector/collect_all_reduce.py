@@ -460,20 +460,32 @@ def benchmark_vllm_allreduce(
                 # Adaptive num_runs calculation for power measurement
                 actual_num_runs = num_runs
                 if measure_power:
-                    # Estimate single iteration time
-                    start_warmup = torch.cuda.Event(enable_timing=True)
-                    end_warmup = torch.cuda.Event(enable_timing=True)
+                    # Estimate single iteration time (only on rank 0)
+                    if rank == 0:
+                        start_warmup = torch.cuda.Event(enable_timing=True)
+                        end_warmup = torch.cuda.Event(enable_timing=True)
 
-                    torch.cuda.synchronize()
-                    start_warmup.record()
-                    for i in range(num_warmups):
-                        graph.replay()
-                    end_warmup.record()
-                    torch.cuda.synchronize()
+                        torch.cuda.synchronize()
+                        start_warmup.record()
+                        for i in range(num_warmups):
+                            graph.replay()
+                        end_warmup.record()
+                        torch.cuda.synchronize()
 
-                    single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
-                    actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
-                    actual_num_runs = min(actual_num_runs, 1000)
+                        single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
+                        actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
+                        actual_num_runs = min(actual_num_runs, 1000)
+                    else:
+                        # Other ranks do warmup but don't calculate
+                        torch.cuda.synchronize()
+                        for i in range(num_warmups):
+                            graph.replay()
+                        torch.cuda.synchronize()
+
+                    # Broadcast actual_num_runs from rank 0 to all ranks
+                    actual_num_runs_tensor = torch.tensor([actual_num_runs], device="cuda")
+                    torch.distributed.broadcast(actual_num_runs_tensor, src=0)
+                    actual_num_runs = actual_num_runs_tensor.item()
                 else:
                     # Normal warmup
                     torch.cuda.synchronize()
@@ -510,21 +522,34 @@ def benchmark_vllm_allreduce(
                 # Adaptive num_runs calculation for power measurement
                 actual_num_runs = num_runs
                 if measure_power:
-                    # Estimate single iteration time
-                    start_warmup = torch.cuda.Event(enable_timing=True)
-                    end_warmup = torch.cuda.Event(enable_timing=True)
+                    # Estimate single iteration time (only on rank 0)
+                    if rank == 0:
+                        start_warmup = torch.cuda.Event(enable_timing=True)
+                        end_warmup = torch.cuda.Event(enable_timing=True)
 
-                    torch.cuda.synchronize()
-                    start_warmup.record()
-                    for _ in range(num_warmups):
-                        for _ in range(repeat_n):
-                            _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
-                    end_warmup.record()
-                    torch.cuda.synchronize()
+                        torch.cuda.synchronize()
+                        start_warmup.record()
+                        for _ in range(num_warmups):
+                            for _ in range(repeat_n):
+                                _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
+                        end_warmup.record()
+                        torch.cuda.synchronize()
 
-                    single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
-                    actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
-                    actual_num_runs = min(actual_num_runs, 1000)
+                        single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
+                        actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
+                        actual_num_runs = min(actual_num_runs, 1000)
+                    else:
+                        # Other ranks do warmup but don't calculate
+                        torch.cuda.synchronize()
+                        for _ in range(num_warmups):
+                            for _ in range(repeat_n):
+                                _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
+                        torch.cuda.synchronize()
+
+                    # Broadcast actual_num_runs from rank 0 to all ranks
+                    actual_num_runs_tensor = torch.tensor([actual_num_runs], device="cuda")
+                    torch.distributed.broadcast(actual_num_runs_tensor, src=0)
+                    actual_num_runs = actual_num_runs_tensor.item()
                 else:
                     # Normal warmup
                     torch.cuda.synchronize()
@@ -612,9 +637,7 @@ def benchmark_sglang_allreduce(
     power_min_duration: float = 1.0,
 ):
     """Benchmark SGLang custom AllReduce implementation"""
-    sglang_mods, local_rank = setup_sglang_distributed(
-        world_size, rank, use_slurm
-    )
+    sglang_mods, local_rank = setup_sglang_distributed(world_size, rank, use_slurm)
 
     # Parse test range
     min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
@@ -662,20 +685,32 @@ def benchmark_sglang_allreduce(
                 # Adaptive num_runs calculation for power measurement
                 actual_num_runs = num_runs
                 if measure_power:
-                    # Estimate single iteration time
-                    start_warmup = torch.cuda.Event(enable_timing=True)
-                    end_warmup = torch.cuda.Event(enable_timing=True)
+                    # Estimate single iteration time (only on rank 0)
+                    if rank == 0:
+                        start_warmup = torch.cuda.Event(enable_timing=True)
+                        end_warmup = torch.cuda.Event(enable_timing=True)
 
-                    torch.cuda.synchronize()
-                    start_warmup.record()
-                    for i in range(num_warmups):
-                        graph.replay()
-                    end_warmup.record()
-                    torch.cuda.synchronize()
+                        torch.cuda.synchronize()
+                        start_warmup.record()
+                        for i in range(num_warmups):
+                            graph.replay()
+                        end_warmup.record()
+                        torch.cuda.synchronize()
 
-                    single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
-                    actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
-                    actual_num_runs = min(actual_num_runs, 1000)
+                        single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
+                        actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
+                        actual_num_runs = min(actual_num_runs, 1000)
+                    else:
+                        # Other ranks do warmup but don't calculate
+                        torch.cuda.synchronize()
+                        for i in range(num_warmups):
+                            graph.replay()
+                        torch.cuda.synchronize()
+
+                    # Broadcast actual_num_runs from rank 0 to all ranks
+                    actual_num_runs_tensor = torch.tensor([actual_num_runs], device="cuda")
+                    torch.distributed.broadcast(actual_num_runs_tensor, src=0)
+                    actual_num_runs = actual_num_runs_tensor.item()
                 else:
                     # Normal warmup
                     torch.cuda.synchronize()
@@ -712,21 +747,34 @@ def benchmark_sglang_allreduce(
                 # Adaptive num_runs calculation for power measurement
                 actual_num_runs = num_runs
                 if measure_power:
-                    # Estimate single iteration time
-                    start_warmup = torch.cuda.Event(enable_timing=True)
-                    end_warmup = torch.cuda.Event(enable_timing=True)
+                    # Estimate single iteration time (only on rank 0)
+                    if rank == 0:
+                        start_warmup = torch.cuda.Event(enable_timing=True)
+                        end_warmup = torch.cuda.Event(enable_timing=True)
 
-                    torch.cuda.synchronize()
-                    start_warmup.record()
-                    for _ in range(num_warmups):
-                        for _ in range(repeat_n):
-                            _ = sglang_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
-                    end_warmup.record()
-                    torch.cuda.synchronize()
+                        torch.cuda.synchronize()
+                        start_warmup.record()
+                        for _ in range(num_warmups):
+                            for _ in range(repeat_n):
+                                _ = sglang_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
+                        end_warmup.record()
+                        torch.cuda.synchronize()
 
-                    single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
-                    actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
-                    actual_num_runs = min(actual_num_runs, 1000)
+                        single_iter_time = start_warmup.elapsed_time(end_warmup) / num_warmups / 1000.0  # seconds
+                        actual_num_runs = max(num_runs, int(power_min_duration / (single_iter_time * repeat_n)) + 1)
+                        actual_num_runs = min(actual_num_runs, 1000)
+                    else:
+                        # Other ranks do warmup but don't calculate
+                        torch.cuda.synchronize()
+                        for _ in range(num_warmups):
+                            for _ in range(repeat_n):
+                                _ = sglang_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
+                        torch.cuda.synchronize()
+
+                    # Broadcast actual_num_runs from rank 0 to all ranks
+                    actual_num_runs_tensor = torch.tensor([actual_num_runs], device="cuda")
+                    torch.distributed.broadcast(actual_num_runs_tensor, src=0)
+                    actual_num_runs = actual_num_runs_tensor.item()
                 else:
                     # Normal warmup
                     torch.cuda.synchronize()
@@ -767,8 +815,9 @@ def benchmark_sglang_allreduce(
 
                 # Get SGLang version
                 try:
-                    import sglang
-                    sglang_version = sglang.__version__ if hasattr(sglang, "__version__") else "unknown"
+                    import importlib.metadata
+
+                    sglang_version = importlib.metadata.version("sglang")
                 except:
                     sglang_version = "unknown"
 

@@ -121,7 +121,7 @@ elif [[ "$all_reduce_backend" == "vllm" ]]; then
     done
 elif [[ "$all_reduce_backend" == "sglang" ]]; then
     # SGLang allreduce implementation
-    for n in "${num_gpus_allreduce[@]}"; do
+    for n in "${gpu_count_list[@]}"; do
         echo "Running SGLang AllReduce benchmark with $n GPUs"
         if [[ "$measure_power" == "true" ]]; then
             torchrun --nproc_per_node=$n collect_all_reduce.py --backend sglang \
