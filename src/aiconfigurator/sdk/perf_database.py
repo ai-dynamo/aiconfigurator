@@ -254,6 +254,10 @@ def get_database(
     elif isinstance(systems_paths, str):
         systems_paths = [systems_paths]
 
+    if version is None:
+        logger.error(f"No database version available for {system=}, {backend=}")
+        return None
+
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
         if not os.path.isfile(system_yaml_path):
