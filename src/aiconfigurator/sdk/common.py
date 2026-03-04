@@ -253,6 +253,8 @@ DefaultHFModels = {
     "Qwen/Qwen3-Coder-480B-A35B-Instruct",
     "nvidia/Qwen3-235B-A22B-NVFP4",
     "Qwen/Qwen3-32B-FP8-Static-PerTensor",
+    # MiniMax Models
+    "MiniMaxAI/MiniMax-M2.5",
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -286,12 +288,20 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Qwen3ForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
+    "KimiK25ForConditionalGeneration": "DEEPSEEK",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",
     "MixtralForCausalLM": "MOE",
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
+    "MiniMaxM2ForCausalLM": "MOE",
+}
+
+# Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
+# _parse_hf_config_json will flatten these before parsing.
+MULTIMODAL_TEXT_CONFIG_KEY = {
+    "KimiK25ForConditionalGeneration": "text_config",
 }
 
 """

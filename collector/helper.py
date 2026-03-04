@@ -1234,7 +1234,7 @@ def power_law_logits_v3(
 ):
     """Generate power law distributed router logits for MoE.
 
-    Used by: sglang/collect_moe.py, vllm/collect_moe.py, trtllm/collect_moe.py
+    Used by: sglang/collect_moe.py, vllm/collect_moe.py, trtllm/collect_moe_v*.py
 
     Args:
         num_tokens: Number of tokens

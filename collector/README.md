@@ -49,7 +49,126 @@ Today we only collect intra-node comm. This script will collect custom allreduce
 It will also collect nccl allreudce, all_gather, all2all, reduce_scatter using nccl.
 The generated file is comm_perf.txt and custom_all_reduce.txt.
 
+# Version Management
+
+## Overview
+
+Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps ops to collector modules, and a **version resolver** (`version_resolver.py`) that picks the right module at runtime. Individual collector files declare their compatibility via `__compat__`.
+
+```
+registry.py          — declares which module handles which version range
+version_resolver.py  — routes runtime version → module (packaging.version)
+collect.py/collect_ops — validates __compat__ and fails incompatible ops
+__compat__           — per-file metadata declaring supported framework versions
+```
+
+## File Naming Convention
+
+- **No version fork**: `collect_{op}.py` (no suffix)
+- **Version forks**: `collect_{op}_v1.py`, `collect_{op}_v2.py`, ... (sequential)
+- The number is just an ordering key; the actual version range lives in `__compat__`
+
+## `__compat__` Format
+
+Every collector file must declare `__compat__` after the license header:
+
+```python
+# SPDX-FileCopyrightText: ...
+# SPDX-License-Identifier: Apache-2.0
+
+__compat__ = "trtllm>=1.1.0"
+```
+
+The format is `<framework><constraints>` using PEP 440-style operators:
+- `"trtllm>=1.1.0"` — open-ended (latest version)
+- `"trtllm>=0.21.0,<1.1.0"` — bounded range
+- `"sglang>=0.5.5"` — sglang example
+
+Pre-release ordering is respected: `1.1.0rc2 < 1.1.0 < 1.1.0.post1`.
+
+## Registry Format
+
+Each entry in `registry.py` is an `OpEntry` dataclass (defined in `collector/registry_types.py`).
+Exactly one of `module` (unversioned) or `versions` (versioned) must be provided — this is
+validated at construction time.
+
+```python
+from collector.registry_types import OpEntry, VersionRoute
+
+# Unversioned (no fork):
+OpEntry(op="gemm", module="collector.trtllm.collect_gemm", get_func="...", run_func="...")
+
+# Versioned (has forks) — VersionRoutes in descending min_version order:
+OpEntry(op="moe", get_func="...", run_func="...", versions=(
+    VersionRoute("1.1.0", "collector.trtllm.collect_moe_v3"),
+    VersionRoute("0.21.0", "collector.trtllm.collect_moe_v2"),
+    VersionRoute("0.20.0", "collector.trtllm.collect_moe_v1"),
+))
+```
+
+The resolver picks the first `VersionRoute` where `min_version <= runtime_version`.
+
+## Adding a New Op
+
+1. Create `collector/<backend>/collect_myop.py`
+2. Add `__compat__ = "<backend>>=X.Y.Z"` after the license header
+3. Export `get_myop_test_cases()` and `run_myop()` (or `run_myop_torch()`)
+4. Add an entry to `collector/<backend>/registry.py`:
+   ```python
+   OpEntry(op="myop", module="collector.<backend>.collect_myop", get_func="get_myop_test_cases", run_func="run_myop")
+   ```
+5. Run `pytest tests/unit/collector/ -m unit` to verify registry integrity
+
+## Handling a Framework API Change
+
+When upstream framework `X.Y.Z` changes an API that a collector depends on:
+
+1. Rename the original file to `collect_{op}_v1.py` (if not already versioned)
+2. Create `collect_{op}_v2.py` with the new API calls
+3. Add `__compat__ = "<backend>>=X.Y.Z"` to the new file
+4. Add `__compat__` upper bound to the old file if it doesn't have one (e.g. change `">=1.1.0"` to `">=1.1.0,<X.Y.Z"`)
+5. Convert the registry entry from unversioned to versioned (or prepend a new `VersionRoute`):
+   ```python
+   # Before (unversioned):
+   OpEntry(op="gemm", module="collector.trtllm.collect_gemm", ...)
+
+   # After (versioned — all forks carry explicit _vN suffix):
+   OpEntry(op="gemm", versions=(
+       VersionRoute("X.Y.Z", "collector.trtllm.collect_gemm_v2"),
+       VersionRoute("0.0.0", "collector.trtllm.collect_gemm_v1"),
+   ), ...)
+   ```
+6. Run tests to validate
+
+## Runtime Behavior
+
+At collection time:
+1. `collect.py` reads the backend registry
+2. `build_collections()` resolves each op to the correct module for the detected framework version
+3. If the resolved module declares `__compat__`, it is validated against the runtime version — mismatches fail that op explicitly and are recorded in the error summary
+4. Unsupported versions (no matching entry) are skipped with a warning
+
+## Tests
+
+```bash
+pytest tests/unit/collector/ -m unit
+```
+
+Covers: version parsing (PEP 440 with rc/post), `__compat__` constraint evaluation, module routing, and structural validation of all three registries.
+
 # Collect gemm/attention/moe data/etc.
+
+## Smoke Test
+
+Use `--smoke` to quickly verify the collector runs end-to-end. It randomly samples 4 test cases per op instead of running the full suite.
+
+```bash
+# Smoke test for sglang
+python3 collect.py --backend sglang --smoke
+
+# Smoke a specific op
+python3 collect.py --backend trtllm --ops moe --smoke
+```
 
 ## Power Monitoring (Optional)
 
@@ -149,50 +268,24 @@ how many files are needed accordingly.
 
 ## For SGLang
 
-SGLang requires a **hybrid collection approach**:
-
-### 1. Run unified collectors (GEMM, MLA, MoE, Normal Attention)
 Suggest to start from lmsysorg docker image. Say, for 0.5.6.post2, we can use lmsysorg/sglang:v0.5.6.post2-cu126
 ```bash
 python3 collect.py --backend sglang
 ```
-This collects data for:
+This collects all SGLang ops in a single pass, including:
 - GEMM operations (FP8, FP16, INT8, INT4)
 - MLA (Multi-head Latent Attention) for context and generation
 - MLA BMM (Batch Matrix Multiplication) operations
 - MoE (Mixture of Experts) operations
 - Normal attention operations
+- WideEP / DeepSeek-specific collectors (MLA, MLP, DeepEP MoE)
 
-### 2. Run DeepSeek-specific collectors independently
-Some SGLang collectors are **DeepSeek model-specific** and must be run separately:
-```bash
-cd sglang/
-# Set model and output paths
-export MODEL_PATH=/path/to/deepseek-v3
-export OUTPUT_PATH=/path/to/output
-
-# Run DeepSeek-specific attention collector
-SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 \
-  python collect_wideep_attn.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH
-
-# Run DeepSeek MLP collector
-python collect_wideep_mlp.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH
-
-# Run DeepSeek DeepEP MoE collector (requires 2+ GPUs)
-python collect_wideep_deepep_moe.py --model_path $MODEL_PATH --output_path $OUTPUT_PATH \
-  --tp_size 2 --ep_size 2 --num_experts 256
-```
-See `sglang/README.md` for detailed documentation on these collectors.
-
-### 3. Run DeepEP collector for distributed MoE data
-For **DeepSeek V3** models with DeepEP MoE, collect distributed performance data:
+### DeepEP multi-node collector
+For **DeepSeek V3** models with DeepEP MoE, inter-node communication data requires a separate multi-node setup:
 ```bash
 # Follow instructions in deep_collector/README.md
-# This requires multi-node setup for inter-node communication profiling
 ```
 See `deep_collector/README.md` for complete multi-node setup instructions.
-
-**Note**: SGLang collection requires more manual steps than TensorRT-LLM due to DeepSeek-specific operators and distributed MoE configurations.
 
 # Test
 Rebuild and install the new aiconfigurator. Please make sure you have your new system definition file prepared. It's src/aiconfigurator/systems/xxx.yaml

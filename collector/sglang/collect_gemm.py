@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = "sglang>=0.5.5"
+
 import os
 import random
 
@@ -29,9 +31,6 @@ from sglang.srt.layers.deep_gemm_wrapper import (
 from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
 
 from helper import benchmark_with_power, get_sm_version, log_perf
-
-compatible_versions = ["0.5.5.post2", "0.5.6.post2", "0.5.8"]
-
 
 # Disable DeepGEMM JIT precompilation (compiles ALL M values per unique N,K pair).
 # The collector only needs the specific M being tested.

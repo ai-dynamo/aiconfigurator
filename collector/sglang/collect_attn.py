@@ -1,5 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+__compat__ = "sglang>=0.5.5"
+
 import math
 import os
 from typing import NamedTuple
@@ -35,8 +38,6 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMo
 from helper import benchmark_with_power, get_sm_version, log_perf
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
-
-compatible_version = ["0.5.5.post3", "0.5.6.post2", "0.5.8"]
 
 
 class Timing(NamedTuple):
