@@ -583,6 +583,8 @@ class LLAMAModel(BaseModel):
             / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
             * (self._nextn + self._num_layers)
             / self._num_layers
+            if self._nextn > 0
+            else 1.0
         )
 
         h = self._hidden_size
@@ -748,6 +750,8 @@ class MOEModel(BaseModel):
             / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
             * (self._nextn + self._num_layers)
             / self._num_layers
+            if self._nextn > 0
+            else 1.0
         )
 
         # make sure the paralel width is same

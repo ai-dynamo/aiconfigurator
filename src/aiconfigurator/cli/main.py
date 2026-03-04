@@ -648,7 +648,7 @@ def build_default_task_configs(
         yaml_config = {
             "config": {
                 "nextn": nextn,
-                "nextn_accept_rates": nextn_accept_rates or [0.85, 0.3, 0.0, 0.0, 0.0],
+                "nextn_accept_rates": nextn_accept_rates,
             }
         }
 
