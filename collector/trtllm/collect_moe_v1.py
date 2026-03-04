@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = "trtllm>=0.20.0,<0.21.0"
 
-import os
 
 import tensorrt_llm
 import torch
@@ -12,28 +12,13 @@ from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 from torch.nn.parameter import Parameter
 
-try:
-    from common_test_cases import get_common_moe_test_cases
-
-    from helper import (
-        balanced_logits,
-        benchmark_with_power,
-        get_sm_version,
-        log_perf,
-    )
-except ModuleNotFoundError:
-    import os
-    import sys
-
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from common_test_cases import get_common_moe_test_cases
-
-    from helper import (
-        balanced_logits,
-        benchmark_with_power,
-        get_sm_version,
-        log_perf,
-    )
+from collector.common_test_cases import get_common_moe_test_cases
+from collector.helper import (
+    balanced_logits,
+    benchmark_with_power,
+    get_sm_version,
+    log_perf,
+)
 
 
 def get_moe_test_cases():

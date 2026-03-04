@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = "trtllm>=1.1.0,<1.3.0rc3"
+
 import gc
 import glob
 import inspect
@@ -23,6 +25,7 @@ from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
 # Models that use non-gated MoE (Relu2 activation instead of SwiGLU)
 # These are substring patterns that will be matched against the full model name
+# supported in trtllm 1.3.0rc1, please expect failures for these models if using trtllm < 1.3.0rc1
 NON_GATED_MOE_MODELS = ["Nemotron-3"]
 
 from collector.common_test_cases import get_common_moe_test_cases

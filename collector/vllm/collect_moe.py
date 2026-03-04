@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = "vllm>=0.11.0"
+
 import os
 
 import torch
@@ -37,8 +39,6 @@ if torch.xpu.is_available():
 
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
-
-compatible_version = ["0.11.0", "0.12.0", "0.14.0"]
 
 
 def get_moe_test_cases():

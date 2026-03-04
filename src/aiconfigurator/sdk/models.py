@@ -125,7 +125,10 @@ def _apply_model_quant_defaults(
         logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
 
     # FIXME: temporary workaround for Deepseek V3 fp8 fmha quant mode, only float16+fp8kvcache is supported
-    if architecture == "DeepseekV3ForCausalLM" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+    if (
+        architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
+        and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
+    ):
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
 
     # FIXME: temporary workaround for Qwen3 32B FP8, only float16+fp8kvcache is supported

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = "trtllm<1.1.0"
+
 import tensorrt_llm
 import torch
 from tensorrt_llm._torch.attention_backend import AttentionInputType, TrtllmAttentionMetadata
@@ -17,7 +19,7 @@ from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantConfig
 
-from helper import benchmark_with_power, log_perf
+from collector.helper import benchmark_with_power, log_perf
 
 
 # TODO: refactor to use common_test_cases.py
