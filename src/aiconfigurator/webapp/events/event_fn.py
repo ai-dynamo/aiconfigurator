@@ -1282,17 +1282,7 @@ class EventFn:
     def update_model_related_components(model_path):
         # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
         model_family = models.get_model_family(model_path)
-        if model_family == "DEEPSEEK":
-            return (
-                gr.update(value=0, visible=True),
-                gr.update(visible=True),
-                gr.update(visible=True),
-                gr.update(visible=True),
-                gr.update(visible=True),
-                gr.update(visible=True),
-                gr.update(visible=True),
-            )
-        elif model_family == "MOE":
+        if model_family in ("DEEPSEEK", "MOE"):
             return (
                 gr.update(value=0, visible=True),
                 gr.update(visible=True),
