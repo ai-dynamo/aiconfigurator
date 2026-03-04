@@ -381,9 +381,10 @@ class DisaggInferenceSession:
                 continue
         if summary_df.empty:
             if exceptions:
+                last = exceptions[-1]
                 raise RuntimeError(
-                    f"No results found for any parallel configuration. Showing last exception: {exceptions[-1]}"
-                ) from exceptions[-1]
+                    f"No results found for any parallel configuration. Showing last exception: {last}"
+                ) from last
             if all_configs_oom:
                 raise RuntimeError(
                     "No results found: the model does not fit in GPU memory for any parallel "
