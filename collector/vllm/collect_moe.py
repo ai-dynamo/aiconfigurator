@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+from vllm.model_executor.layers.fused_moe.utils import disable_inplace
 from vllm.version import __version__ as vllm_version
 
 # Compatibility: block FP8 helpers may differ by version.
@@ -22,8 +23,22 @@ except Exception:
     except Exception:
         per_block_cast_to_fp8 = None  # type: ignore[assignment]
 
+# nvfp4 MoE helpers (Blackwell SM 100+).
+# Note: fused_experts does not support nvfp4; use flashinfer_cutlass_fused_moe directly.
+try:
+    from flashinfer.fused_moe.core import ActivationType as _ActivationType
+    from vllm._custom_ops import scaled_fp4_quant as _scaled_fp4_quant
+    from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+        swizzle_blockscale as _swizzle_blockscale,
+    )
+    from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe as _flashinfer_cutlass_fused_moe
+
+    _nvfp4_moe_available = True
+except Exception:
+    _nvfp4_moe_available = False
+
 from collector.common_test_cases import get_common_moe_test_cases
-from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
+from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_topk
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
@@ -39,6 +54,8 @@ def get_moe_test_cases():
         moe_list += ["fp8"]
     if get_sm_version() >= 90 and per_block_cast_to_fp8 is not None:
         moe_list += ["fp8_block"]
+    if get_sm_version() >= 100 and _nvfp4_moe_available:
+        moe_list += ["nvfp4"]
 
     test_cases = []
 
@@ -54,10 +71,17 @@ def get_moe_test_cases():
         if common_moe_testcase.tp > 1 and common_moe_testcase.ep > 1:
             continue
 
+        local_inter_size = common_moe_testcase.inter_size // common_moe_testcase.tp
+
         for moe_type in moe_list:
-            # fp8_block requires hidden_size divisible by block group_size (128)
-            if moe_type == "fp8_block" and (
-                common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
+            # fp8_block requires hidden_size and local_inter_size divisible by 128.
+            if moe_type == "fp8_block" and (common_moe_testcase.hidden_size % 128 != 0 or local_inter_size % 128 != 0):
+                continue
+
+            # nvfp4 requires hidden_size and local_inter_size divisible by 16 (group_size).
+            # flashinfer_cutlass_fused_moe (the nvfp4 kernel) does not support EP > 1.
+            if moe_type == "nvfp4" and (
+                common_moe_testcase.hidden_size % 16 != 0 or local_inter_size % 16 != 0 or common_moe_testcase.ep > 1
             ):
                 continue
 
@@ -174,11 +198,55 @@ def run_moe_torch(
         w1 = w1.to(dtype)
         w2 = w2.to(dtype)
 
+    use_inplace = not disable_inplace()
+
+    # nvfp4 MoE: quantize weights to fp4 and precompute quant scales.
+    # fused_experts does not support nvfp4; use flashinfer_cutlass_fused_moe directly.
+    nvfp4_w1_fp4 = nvfp4_w2_fp4 = None
+    nvfp4_quant_scales: list | None = None
+    if moe_type == "nvfp4":
+        dtype = torch.bfloat16  # nvfp4 uses bfloat16 activations
+
+        def _quant_expert_weights_nvfp4(w_bf16: torch.Tensor):
+            E = w_bf16.shape[0]  # noqa: N806
+            gscales = w_bf16.view(E, -1).abs().max(dim=1).values.float() / 6.0
+            fp4_list, sf_list = [], []
+            for i in range(E):
+                gscale_inv = torch.tensor(1.0 / gscales[i].item(), dtype=torch.float32, device=w_bf16.device)
+                w_fp4, w_sf = _scaled_fp4_quant(
+                    w_bf16[i].contiguous(), gscale_inv, is_sf_swizzled_layout=False, backend="cutlass"
+                )
+                fp4_list.append(w_fp4)
+                sf_list.append(w_sf)
+            fp4 = torch.stack(fp4_list)
+            scale = _swizzle_blockscale(torch.stack(sf_list))
+            return fp4, scale, gscales
+
+        nvfp4_w1_fp4, nvfp4_w1_scale, w1_gscales = _quant_expert_weights_nvfp4(w1.to(torch.bfloat16))
+        nvfp4_w2_fp4, nvfp4_w2_scale, w2_gscales = _quant_expert_weights_nvfp4(w2.to(torch.bfloat16))
+
+        # Input activation global scale (CT convention: store 1/actual_scale).
+        x_actual_scale = 1.0 / 6.0
+        a1_gscale = torch.full((local_num_experts,), 1.0 / x_actual_scale, dtype=torch.float32, device=device)
+        a2_gscale = a1_gscale.clone()
+        # Combined dequantization alpha: w_scale * x_scale.
+        g1_alphas = (w1_gscales * x_actual_scale).to(torch.float32)
+        g2_alphas = (w2_gscales * x_actual_scale).to(torch.float32)
+        nvfp4_quant_scales = [
+            a1_gscale,
+            nvfp4_w1_scale.view(torch.int32),
+            g1_alphas,
+            a2_gscale,
+            nvfp4_w2_scale.view(torch.int32),
+            g2_alphas,
+        ]
+
     # Performance testing for each token count
     for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
         print("num_tokens", num_tokens)
         print("topk", topk)
-        hidden_states = torch.randn([num_tokens, hidden_size]).half().to(device)
+        act_dtype = torch.bfloat16 if moe_type == "nvfp4" else torch.float16
+        hidden_states = torch.randn([num_tokens, hidden_size], dtype=act_dtype, device=device)
 
         # Generate topk_weights and topk_ids
         num_iter = 10 if distributed == "power_law" else 1
@@ -186,23 +254,22 @@ def run_moe_torch(
             topk_weights_list = []
             topk_ids_list = []
 
+            # Use power_law_topk instead of power_law_logits_v3 + topk to avoid the
+            # expensive F.one_hot([num_tokens, topk, num_experts]) intermediate tensor
+            # (e.g. 268 MB for num_tokens=65536, topk=8, num_experts=256 in bfloat16).
+            weight_dtype = torch.float32 if moe_type == "nvfp4" else torch.float16
             for _ in range(num_iter):
-                logits = (
-                    power_law_logits_v3(
-                        num_tokens,
-                        num_experts,
-                        topk,
-                        moe_ep_size,
-                        power_law_alpha,
-                    )
-                    .half()
-                    .to(device)
+                tw, ids = power_law_topk(
+                    num_tokens,
+                    num_experts,
+                    topk,
+                    moe_ep_size,
+                    power_law_alpha,
+                    device,
+                    dtype=weight_dtype,
                 )
-                weights, ids = torch.topk(logits, topk, dim=-1)
-                topk_weights_list.append(F.softmax(weights, dim=-1))
+                topk_weights_list.append(tw)
                 topk_ids_list.append(ids)
-
-            print("actual num_tokens: ", [topk_ids.shape[0] for topk_ids in topk_ids_list])
 
         elif distributed == "balanced":
             actual_logits = balanced_logits(num_tokens, num_experts, topk).half().to(device)
@@ -215,38 +282,84 @@ def run_moe_torch(
         num_warmups = 3
         num_runs = 6
         if distributed == "power_law":
-            num_warmups = 1
+            # num_warmups=0: the CUDA graph capture is itself an execution that warms the GPU.
+            # Triton JIT compilation (cuModuleLoad) is not recorded in the graph, so this is safe.
+            # Saves 2 of 4 execution phases (pre-capture + post-capture warmup), ~50% speedup.
+            num_warmups = 0
             num_runs = 1
 
-        def run_single_iteration():
-            if distributed == "power_law":
-                for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
-                    local_num_tokens = tw.shape[0]
+        if moe_type == "nvfp4":
+
+            def run_single_iteration():
+                if distributed == "power_law":
+                    for tw, ti in zip(topk_weights_list, topk_ids_list):
+                        local_num_tokens = tw.shape[0]
+                        out = torch.empty(local_num_tokens, hidden_size, dtype=torch.bfloat16, device=device)
+                        _ = _flashinfer_cutlass_fused_moe(
+                            input=hidden_states[:local_num_tokens],
+                            token_selected_experts=ti.to(torch.int),
+                            token_final_scales=tw,
+                            fc1_expert_weights=nvfp4_w1_fp4.view(torch.long),
+                            fc2_expert_weights=nvfp4_w2_fp4.view(torch.long),
+                            output_dtype=torch.bfloat16,
+                            quant_scales=nvfp4_quant_scales,
+                            input_sf=None,
+                            tp_size=1,
+                            tp_rank=0,
+                            ep_size=1,
+                            ep_rank=0,
+                            output=out,
+                            activation_type=_ActivationType.Swiglu,
+                        )
+                else:
+                    out = torch.empty(hidden_states.shape[0], hidden_size, dtype=torch.bfloat16, device=device)
+                    _ = _flashinfer_cutlass_fused_moe(
+                        input=hidden_states,
+                        token_selected_experts=topk_ids.to(torch.int),
+                        token_final_scales=topk_weights.float(),
+                        fc1_expert_weights=nvfp4_w1_fp4.view(torch.long),
+                        fc2_expert_weights=nvfp4_w2_fp4.view(torch.long),
+                        output_dtype=torch.bfloat16,
+                        quant_scales=nvfp4_quant_scales,
+                        input_sf=None,
+                        tp_size=1,
+                        tp_rank=0,
+                        ep_size=1,
+                        ep_rank=0,
+                        output=out,
+                        activation_type=_ActivationType.Swiglu,
+                    )
+        else:
+
+            def run_single_iteration():
+                if distributed == "power_law":
+                    for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
+                        local_num_tokens = tw.shape[0]
+                        _ = fused_experts(
+                            hidden_states[:local_num_tokens],
+                            w1,
+                            w2,
+                            tw,
+                            ti,
+                            inplace=use_inplace,
+                            quant_config=quant_config,
+                            global_num_experts=num_experts,
+                            expert_map=expert_map,
+                        )
+                else:
                     _ = fused_experts(
-                        hidden_states[:local_num_tokens],
+                        hidden_states,
                         w1,
                         w2,
-                        tw,
-                        ti,
-                        inplace=True,
+                        topk_weights,
+                        topk_ids,
+                        inplace=use_inplace,
                         quant_config=quant_config,
                         global_num_experts=num_experts,
                         expert_map=expert_map,
                     )
-            else:
-                _ = fused_experts(
-                    hidden_states,
-                    w1,
-                    w2,
-                    topk_weights,
-                    topk_ids,
-                    inplace=True,
-                    quant_config=quant_config,
-                    global_num_experts=num_experts,
-                    expert_map=expert_map,
-                )
 
-        def run_iterations(use_cuda_graph=False):
+        def run_iterations():
             # Use benchmark_with_power context manager
             with benchmark_with_power(
                 device=device,
@@ -260,7 +373,7 @@ def run_moe_torch(
             return results["latency_ms"] / num_iter, results["power_stats"]
 
         try:
-            latency, power_stats = run_iterations(use_cuda_graph=False)
+            latency, power_stats = run_iterations()
         except torch.OutOfMemoryError:
             # If OOM, check if we had at least one successful run.
             if num_tokens_idx > 0:
@@ -269,7 +382,7 @@ def run_moe_torch(
 
         print(f"moe latency: {latency}")
 
-        source = "vllm_fused_moe"
+        source = "flashinfer_cutlass_fused_moe" if moe_type == "nvfp4" else "vllm_fused_moe"
 
         log_perf(
             item_list=[

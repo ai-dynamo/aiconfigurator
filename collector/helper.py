@@ -172,6 +172,7 @@ def benchmark_with_power(
     measure_power: bool | None = None,  # Auto-detect from environment if None
     power_min_duration: float | None = None,  # Auto-detect from environment if None
     allow_graph_fail: bool = False,  # NEW: Enable graceful fallback on graph capture failure
+    use_cuda_graph: bool = True,  # Set False to skip graph capture entirely (eager only)
 ):
     """
     Context manager that handles warmup, graph capture, timing, and power monitoring.
@@ -241,22 +242,23 @@ def benchmark_with_power(
     # ═══════════════════════════════════════════════════════════════════
     # CUDA Graph Capture with Optional Fallback
     # ═══════════════════════════════════════════════════════════════════
-    use_graph = True
-    g = torch.cuda.CUDAGraph()
+    use_graph = use_cuda_graph
+    g = torch.cuda.CUDAGraph() if use_graph else None
 
-    try:
-        with torch.cuda.graph(g):
-            for _ in range(repeat_n):
-                kernel_func()
-        torch.cuda.synchronize()
-    except Exception as e:
-        if allow_graph_fail:
-            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
-            torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
-            use_graph = False
-        else:
-            # Standard behavior: re-raise exception
-            raise
+    if use_graph:
+        try:
+            with torch.cuda.graph(g):
+                for _ in range(repeat_n):
+                    kernel_func()
+            torch.cuda.synchronize()
+        except Exception as e:
+            if allow_graph_fail:
+                logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
+                torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
+                use_graph = False
+            else:
+                # Standard behavior: re-raise exception
+                raise
 
     # ═══════════════════════════════════════════════════════════════════
     # Warmup the ACTUAL execution path (after graph capture)
@@ -1324,6 +1326,43 @@ def power_law_logits_v3(
             }
             return router_logits, rank0_info
         return router_logits
+
+
+def power_law_topk(num_tokens, num_experts, topk, ep, alpha, device, dtype=None):
+    """Efficient version of power_law_logits_v3 that returns (topk_weights, topk_ids) directly.
+
+    Bypasses the expensive F.one_hot([num_tokens, topk, num_experts]) → softmax → topk roundtrip
+    used by power_law_logits_v3, which allocates a ~[num_tokens*topk*num_experts] intermediate
+    tensor (e.g. 268 MB for num_tokens=65536, topk=8, num_experts=256 in bfloat16).
+
+    Returns identical expert routing (same topk_ids from the same underlying distribution),
+    with approximately uniform topk_weights (1/topk each). The weight values do not affect
+    MoE kernel performance since the routing pattern is entirely determined by topk_ids.
+
+    Speedup vs power_law_logits_v3: ~10-50x for large num_tokens.
+
+    Args:
+        num_tokens: Number of tokens
+        num_experts: Total number of experts
+        topk: Number of experts per token
+        ep: Expert parallelism size
+        alpha: Power law exponent
+        device: Target CUDA device for the returned tensors
+        dtype: dtype for topk_weights (default float16; use float32 for nvfp4)
+
+    Returns:
+        Tuple of (topk_weights, topk_ids):
+            - topk_weights: [num_tokens, topk] uniform weights (1/topk), dtype=dtype, on device
+            - topk_ids: [num_tokens, topk] expert indices (int64), on device
+    """
+    import torch
+
+    if dtype is None:
+        dtype = torch.float16
+    _, h_selected_experts = _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha)
+    topk_ids = h_selected_experts.to(device)  # [num_tokens, topk], int64
+    topk_weights = torch.full((num_tokens, topk), 1.0 / topk, dtype=dtype, device=device)
+    return topk_weights, topk_ids
 
 
 def power_law_deepep_prefill(num_tokens, num_experts, topk, ep, alpha):

@@ -331,6 +331,9 @@ def collect_ops(
     collections: list[dict],
     ops: list[str] | None = None,
     framework_version: str | None = None,
+    limit: int | None = None,
+    shuffle: bool = False,
+    shuffle_seed: int = 42,
 ) -> list[dict]:
     all_errors = []
 
@@ -354,7 +357,21 @@ def collect_ops(
 
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
-            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
+
+            def get_func_with_limit(get_func=get_func):
+                import random
+
+                cases = get_func()
+                if shuffle:
+                    rng = random.Random(shuffle_seed)
+                    rng.shuffle(cases)
+                if limit is not None:
+                    cases = cases[:limit]
+                return cases
+
+            errors = collect_module_safe(
+                collection["name"], collection["type"], get_func_with_limit, run_func, num_processes
+            )
             all_errors.extend(errors)
 
         except Exception as e:
@@ -511,7 +528,7 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None):
     generate_collection_summary(all_errors, "sglang", version)
 
 
-def collect_vllm(num_processes: int, ops: list[str] | None = None):
+def collect_vllm(num_processes: int, ops: list[str] | None = None, limit: int | None = None, shuffle: bool = False):
     """
     Collect performance data for VLLM
     """
@@ -573,7 +590,7 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None):
         },
     ]
 
-    all_errors = collect_ops(num_processes, collections, ops, version)
+    all_errors = collect_ops(num_processes, collections, ops, version, limit=limit, shuffle=shuffle)
 
     generate_collection_summary(all_errors, "vllm", version)
 
@@ -806,6 +823,17 @@ def main():
         default=1.0,
         help="Minimum duration for kernel runs when power measurement is enabled (default: 1.0s)",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit the number of test cases per collection (useful for debugging)",
+    )
+    parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Shuffle test cases before applying --limit (uses seed 42 for reproducibility)",
+    )
     args = parser.parse_args()
     ops = args.ops
 
@@ -838,7 +866,7 @@ def main():
     elif args.backend == "sglang":
         collect_sglang(num_processes, ops)
     elif args.backend == "vllm":
-        collect_vllm(num_processes, ops)
+        collect_vllm(num_processes, ops, limit=args.limit, shuffle=args.shuffle)
 
 
 if __name__ == "__main__":

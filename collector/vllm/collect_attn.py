@@ -310,9 +310,18 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
-    if use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
-        query_vllm = query_vllm.to(current_platform.fp8_dtype())
-        output = output.to(torch.bfloat16)
+    if use_fp8_kv_cache:
+        # In vLLM 0.16+, the backend declares its expected query dtype via
+        # attn_metadata.q_data_type (set during build). Only cast to fp8 if
+        # that's what the backend actually expects; otherwise keep float16.
+        # Fall back to the old cast for older vLLM without q_data_type.
+        expected_q_dtype = getattr(attn_metadata, "q_data_type", None)
+        if expected_q_dtype == current_platform.fp8_dtype():
+            query_vllm = query_vllm.to(expected_q_dtype)
+            output = output.to(torch.bfloat16)
+        elif expected_q_dtype is None and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
+            query_vllm = query_vllm.to(current_platform.fp8_dtype())
+            output = output.to(torch.bfloat16)
 
     def run():
         impl.forward(
