@@ -1775,6 +1775,72 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
     return wideep_alltoall_data
 
 
+def load_cutlass_moe_alltoall_data(cutlass_moe_alltoall_file):
+    """
+    Load CutlassFusedMoE NVLink OneSided AlltoAll perf data.
+    Data format is identical to wideep_alltoall_perf.txt.
+
+    Structure: [kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts]
+               [moe_ep_size][num_tokens] -> {latency, power, energy}
+    op_name: alltoall_prepare, alltoall_dispatch, alltoall_combine, alltoall_combine_low_precision
+    """
+    if not os.path.exists(cutlass_moe_alltoall_file):
+        logger.debug(f"CutlassFusedMoE AlltoAll data file {cutlass_moe_alltoall_file} not found.")
+        return None
+
+    cutlass_alltoall_data = defaultdict(
+        lambda: defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(
+                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                    )
+                )
+            )
+        )
+    )
+
+    logger.debug(f"Loading CutlassFusedMoE AlltoAll data from: {cutlass_moe_alltoall_file}")
+    with open(cutlass_moe_alltoall_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+        has_power = len(rows) > 0 and "power" in rows[0]
+        has_num_nodes = len(rows) > 0 and "num_nodes" in rows[0]
+        has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
+
+        for row in rows:
+            op_name = row["op_name"]
+            quant_mode = row["moe_dtype"]
+            num_tokens = int(row["num_tokens"])
+            hidden_size = int(row["hidden_size"])
+            topk = int(row["topk"])
+            num_experts = int(row["num_experts"])
+            moe_ep_size = int(row["moe_ep_size"])
+            latency = float(row["latency"])
+            quant_mode = common.MoEQuantMode[quant_mode]
+
+            kernel_source = row.get("kernel_source", "MnnvlMoe")
+
+            if has_num_nodes:
+                num_nodes = int(row["num_nodes"])
+            else:
+                num_nodes = max(1, moe_ep_size // 4)
+
+            power = float(row.get("power", 0.0))
+            energy = power * latency
+
+            cutlass_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
+                moe_ep_size
+            ][num_tokens] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
+
+    return cutlass_alltoall_data
+
+
 class LoadedOpData(UserDict):
     """
     A dictionary-like object which also keeps track of which file the data was loaded from.
@@ -1909,6 +1975,7 @@ class PerfDatabase:
                 PerfDataFilename.wideep_deepep_ll: load_wideep_deepep_ll_data,
                 PerfDataFilename.wideep_moe_compute: load_wideep_moe_compute_data,
                 PerfDataFilename.wideep_alltoall: load_wideep_alltoall_data,
+                PerfDataFilename.cutlass_moe_alltoall: load_cutlass_moe_alltoall_data,
             }
             perf_data_dir = data_dir
             if op_filename_enum == PerfDataFilename.nccl:
@@ -1958,6 +2025,7 @@ class PerfDatabase:
         if backend == "trtllm":
             self._wideep_moe_compute_data = _load_op_data(PerfDataFilename.wideep_moe_compute)
             self._wideep_alltoall_data = _load_op_data(PerfDataFilename.wideep_alltoall)
+            self._cutlass_moe_alltoall_data = _load_op_data(PerfDataFilename.cutlass_moe_alltoall)
 
         # pre-correction
         self._correct_data()
@@ -5312,6 +5380,103 @@ class PerfDatabase:
             database_mode=database_mode,
             error_msg=(
                 f"Failed to query wideep alltoall data for {op_name} (kernel={kernel_source}), "
+                f"node_num={node_num}, {num_tokens=}, {hidden_size=}, {topk=}, {num_experts=}, "
+                f"{moe_ep_size=}, {quant_mode=}"
+            ),
+        )
+
+    def query_cutlass_moe_alltoall(
+        self,
+        op_name: str,
+        num_tokens: int,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        node_num: int | None = None,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """
+        Query CutlassFusedMoE NVLink OneSided AlltoAll communication latency.
+
+        Used for non-WideEP DeepSeek MoE on GB200 where CutlassFusedMoE uses
+        NVLink OneSided AlltoAll (MoeAlltoAll.dispatch with AlltoAllMethodType.NVL_ONE_SIDED).
+
+        Data format is identical to wideep_alltoall. Kernel selection uses the same
+        _select_alltoall_kernel logic.
+
+        Args:
+            op_name: Operation name, one of:
+                - "alltoall_prepare": Prepare phase (permute, quantize, metadata packing)
+                - "alltoall_dispatch": Token dispatch phase (NVLink one-sided write)
+                - "alltoall_combine": Result combine phase (NVLink one-sided read + unpermute)
+                - "alltoall_combine_low_precision": Low precision combine
+            num_tokens: Number of tokens
+            hidden_size: Hidden dimension size
+            topk: Number of experts activated per token
+            num_experts: Total number of experts
+            moe_ep_size: MoE expert parallelism size
+            quant_mode: MoE quantization mode
+            node_num: Number of nodes. If None, computed as moe_ep_size // 4
+            database_mode: Database mode
+
+        Returns:
+            PerformanceResult: Latency in ms, energy accessible via .energy attribute.
+        """
+        if database_mode is None:
+            database_mode = self._default_database_mode
+
+        if node_num is None:
+            if moe_ep_size < 4:
+                node_num = 1
+            else:
+                node_num = moe_ep_size // 4
+            logger.debug(
+                f"query_cutlass_moe_alltoall: node_num not specified, using {node_num} (moe_ep_size={moe_ep_size})"
+            )
+
+        valid_op_names = ["alltoall_prepare", "alltoall_dispatch", "alltoall_combine", "alltoall_combine_low_precision"]
+        if op_name not in valid_op_names:
+            raise ValueError(f"Invalid op_name '{op_name}'. Must be one of {valid_op_names}")
+
+        kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk)
+        logger.debug(f"query_cutlass_moe_alltoall: auto-selected kernel_source='{kernel_source}'")
+
+        def get_silicon():
+            self._cutlass_moe_alltoall_data.raise_if_not_loaded()
+            kernel_data = self._cutlass_moe_alltoall_data[kernel_source]
+            alltoall_dict = kernel_data[op_name][quant_mode][node_num][hidden_size][topk][num_experts][moe_ep_size]
+
+            num_left, num_right = self._nearest_1d_point_helper(
+                num_tokens,
+                list(alltoall_dict.keys()),
+                inner_only=False,
+            )
+            result = self._interp_1d(
+                [num_left, num_right],
+                [alltoall_dict[num_left], alltoall_dict[num_right]],
+                num_tokens,
+            )
+
+            if isinstance(result, dict):
+                lat = result["latency"]
+                energy = result.get("energy", 0.0)
+            else:
+                lat = result
+                energy = 0.0
+
+            return PerformanceResult(lat, energy=energy)
+
+        def get_empirical() -> float:
+            return 0.1
+
+        return self._query_silicon_or_hybrid(
+            get_silicon=get_silicon,
+            get_empirical=get_empirical,
+            database_mode=database_mode,
+            error_msg=(
+                f"Failed to query cutlass moe alltoall data for {op_name} (kernel={kernel_source}), "
                 f"node_num={node_num}, {num_tokens=}, {hidden_size=}, {topk=}, {num_experts=}, "
                 f"{moe_ep_size=}, {quant_mode=}"
             ),

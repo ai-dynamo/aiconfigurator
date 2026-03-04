@@ -501,6 +501,8 @@ class PerfDataFilename(Enum):
     # TensorRT-LLM WideEP specific
     wideep_moe_compute = "wideep_moe_perf.txt"
     wideep_alltoall = "wideep_alltoall_perf.txt"
+    # TensorRT-LLM CutlassFusedMoE NVLink OneSided AlltoAll
+    cutlass_moe_alltoall = "cutlass_moe_alltoall_perf.txt"
     compute_scale = "computescale_perf.txt"
     scale_matrix = "scale_matrix_perf.txt"
     mamba2 = "mamba2_perf.txt"

@@ -1165,20 +1165,13 @@ class DeepSeekModel(BaseModel):
             ]
         )
 
-        # shared moe
+        # Context shared moe: gate+up fused into one GEMM (matches TRT-LLM GatedMLP)
         self.context_ops.extend(
             [
                 ops.GEMM(
-                    "context_shared_gate_gemm",
+                    "context_shared_gate_up_gemm",
                     self._num_layers,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GEMM(
-                    "context_shared_ffn1_gemm",
-                    self._num_layers,
-                    self._moe_inter_size // tp_size,
+                    2 * self._moe_inter_size // tp_size,
                     h,
                     gemm_quant_mode,
                 ),
@@ -1225,6 +1218,8 @@ class DeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     True,
+                    quant_mode=moe_quant_mode,
+                    reduce_results=False,
                 )
             ]
         )
@@ -1261,9 +1256,17 @@ class DeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     False,
+                    quant_mode=moe_quant_mode,
+                    reduce_results=False,
                 )
             ]
         )
+
+        # TP AllReduce after MoE (context): only in pure TP mode
+        if attention_dp_size == 1 and tp_size > 1:
+            self.context_ops.append(
+                ops.CustomAllReduce("context_moe_ar", self._num_layers, h, tp_size)
+            )
 
         self.context_ops.extend(
             [
@@ -1338,105 +1341,98 @@ class DeepSeekModel(BaseModel):
             ]
         )
 
-        # shared moe
-        self.generation_ops.extend(
-            [
-                ops.GEMM(
-                    "generation_shared_gate_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GEMM(
-                    "generation_shared_ffn1_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.ElementWise(
-                    "generation_shared_act_gate",
-                    self._num_layers * self._mtp_scale_factor,
-                    2 * self._moe_inter_size // tp_size,
-                    self._moe_inter_size // tp_size,
-                    0.8,
-                ),
-                ops.GEMM(
-                    "generation_shared_ffn2_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._moe_inter_size // tp_size,
-                    gemm_quant_mode,
-                ),
-            ]
+        # Generation MoE: shared experts and routed experts run in parallel
+        # on different CUDA streams (via maybe_execute_in_parallel) when CUDA
+        # Graph is enabled. Model with OverlapOp: latency = max(shared, routed).
+
+        # group_b: shared expert path (aux CUDA stream)
+        gen_shared_ops = [
+            ops.GEMM(
+                "generation_shared_gate_up_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                2 * self._moe_inter_size // tp_size,
+                h,
+                gemm_quant_mode,
+            ),
+            ops.ElementWise(
+                "generation_shared_act_gate",
+                self._num_layers * self._mtp_scale_factor,
+                2 * self._moe_inter_size // tp_size,
+                self._moe_inter_size // tp_size,
+                0.8,
+            ),
+            ops.GEMM(
+                "generation_shared_ffn2_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._moe_inter_size // tp_size,
+                gemm_quant_mode,
+            ),
+        ]
+
+        # group_a: routed expert path (main CUDA stream)
+        gen_routed_ops = [
+            ops.GEMM(
+                "generation_router_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                self._num_experts,
+                h,
+                common.GEMMQuantMode.float16,
+            ),
+            ops.MoEDispatch(
+                "generation_moe_pre_dispatch",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                True,
+                quant_mode=moe_quant_mode,
+                reduce_results=False,
+            ),
+            ops.MoE(
+                "generation_moe",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._moe_inter_size,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                moe_quant_mode,
+                workload_distribution,
+                attention_dp_size,
+            ),
+            ops.MoEDispatch(
+                "generation_moe_post_dispatch",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                False,
+                quant_mode=moe_quant_mode,
+                reduce_results=False,
+            ),
+        ]
+
+        self.generation_ops.append(
+            ops.OverlapOp("generation_moe_overlap", group_a=gen_routed_ops, group_b=gen_shared_ops)
         )
 
-        # router gemm, num_experts is large enough, cannot be ignored anymore.
-        self.generation_ops.extend(
-            [
-                ops.GEMM(
-                    "generation_router_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._num_experts,
-                    h,
-                    common.GEMMQuantMode.float16,
+        # TP AllReduce after MoE: reduces shared + routed output across TP ranks.
+        # Only needed in pure TP mode (no attention DP). When attention DP is used,
+        # the AlltoAll combine or ReduceScatter already handles the reduction.
+        if attention_dp_size == 1 and tp_size > 1:
+            self.generation_ops.append(
+                ops.CustomAllReduce(
+                    "generation_moe_ar", self._num_layers * self._mtp_scale_factor, h, tp_size
                 )
-            ]
-        )
-
-        # dispatch tokens to experts, pre-dispatch
-        self.generation_ops.extend(
-            [
-                ops.MoEDispatch(
-                    "generation_moe_pre_dispatch",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    True,
-                )
-            ]
-        )
-
-        # moe part
-        self.generation_ops.extend(
-            [
-                ops.MoE(
-                    "generation_moe",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._moe_inter_size,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    moe_quant_mode,
-                    workload_distribution,
-                    attention_dp_size,
-                ),
-            ]
-        )
-
-        # dispatch tokens to experts, post-dispatch
-        self.generation_ops.extend(
-            [
-                ops.MoEDispatch(
-                    "generation_moe_post_dispatch",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    False,
-                )
-            ]
-        )
+            )
 
         self.generation_ops.extend(
             [
@@ -1449,16 +1445,6 @@ class DeepSeekModel(BaseModel):
                 )
             ]
         )
-
-        # when tp_size=0, the comm part will be 0
-        # self.context_ops.append(ops.CustomAllReduce('context_ar_1', self._num_layers, h, tp_size))
-        # self.context_ops.append(ops.CustomAllReduce('context_ar_2', self._num_layers, h, tp_size))
-        # self.generation_ops.append(
-        #     ops.CustomAllReduce('generation_ar_1', self._num_layers*self._mtp_scale_factor, h, tp_size)
-        # )
-        # self.generation_ops.append(
-        #     ops.CustomAllReduce('generation_ar_2', self._num_layers*self._mtp_scale_factor, h, tp_size)
-        # )
 
         # pp
         pp_scale_factor = pp_size - 1
