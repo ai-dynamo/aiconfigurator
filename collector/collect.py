@@ -179,6 +179,7 @@ def worker(
     error_queue=None,
     result_queue=None,
     module_name="unknown",
+    consumed_sentinel=None,
 ):
     """worker with automatic logging setup"""
 
@@ -208,6 +209,8 @@ def worker(
     while True:
         task_info = queue.get()
         if task_info is None:
+            if consumed_sentinel is not None:
+                consumed_sentinel[device_id] = True
             worker_logger.debug("Received termination signal")
             break
 
@@ -319,10 +322,24 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # Track process health
     process_stats = {i: {"restarts": 0, "errors": []} for i in range(num_processes)}
 
+    # Per-worker flag: True once a worker has consumed its None sentinel.
+    # Used to decide whether a replacement sentinel is needed on restart.
+    consumed_sentinel = manager.dict(dict.fromkeys(range(num_processes), False))
+
     def start_process(device_id):
         p = mp.Process(
             target=worker,
-            args=(queue, device_id, func, progress_value, lock, error_queue, result_queue, module_name),
+            args=(
+                queue,
+                device_id,
+                func,
+                progress_value,
+                lock,
+                error_queue,
+                result_queue,
+                module_name,
+                consumed_sentinel,
+            ),
         )
         p.start()
         logger.info(f"Started worker process {p.pid} on device {device_id}")
@@ -442,8 +459,11 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                         continue
 
                     if remaining > 0:
+                        need_sentinel = consumed_sentinel.get(i, False)
+                        consumed_sentinel[i] = False
                         processes[i] = start_process(i)
-                        queue.put(None)  # ensure the new worker can terminate
+                        if need_sentinel:
+                            queue.put(None)
                     else:
                         processes[i] = p  # keep dead process ref, skip restart
 
