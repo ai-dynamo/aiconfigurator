@@ -42,8 +42,11 @@ from tqdm import tqdm
 
 setup_warning_filters()
 import argparse
+import cProfile
+import io
 import json
 import multiprocessing as mp
+import pstats
 import signal
 import time
 import traceback
@@ -140,8 +143,142 @@ class ResumeCheckpoint:
         self._last_flush = now
 
 
+class ProfilerContext:
+    """Context manager for profiling collector execution"""
+
+    def __init__(self, backend: str, enabled: bool = False):
+        self.enabled = enabled
+        self.backend = backend
+        self.profiler = None
+        self.start_time = None
+        self.log_dir = None
+
+    def __enter__(self):
+        if self.enabled:
+            self.profiler = cProfile.Profile()
+            self.profiler.enable()
+            self.start_time = time.perf_counter()
+            self.log_dir = os.environ.get("COLLECTOR_LOG_DIR", "")
+            if not self.log_dir:
+                self.log_dir = "."
+            logger.info("Profiling enabled - running sequentially in main process (no parallel workers)")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not self.enabled or self.profiler is None:
+            return
+
+        self.profiler.disable()
+        profile_file = os.path.join(self.log_dir, f"collector_profile_{self.backend}.prof")
+        self.profiler.dump_stats(profile_file)
+
+        # Calculate elapsed time
+        end_time = time.perf_counter()
+        elapsed_time = end_time - self.start_time if self.start_time else 0
+
+        logger.info("=" * 80)
+        logger.info("PROFILING SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"Total elapsed time: {elapsed_time:.2f} seconds ({elapsed_time / 60:.2f} minutes)")
+        logger.info(f"Profile file: {profile_file}")
+        logger.info("=" * 80)
+
+        # Print slow operations ranked by tottime and cumtime
+        stats = pstats.Stats(self.profiler)
+        stats.strip_dirs()
+
+        # Get top functions by tottime (time spent in the function itself, excluding subcalls)
+        logger.info("Top 20 functions by tottime (time in function excluding subcalls):")
+        logger.info("=" * 80)
+        stream = io.StringIO()
+        import sys
+
+        old_stdout = sys.stdout
+        sys.stdout = stream
+        try:
+            stats.sort_stats("tottime")
+            stats.print_stats(20)
+        finally:
+            sys.stdout = old_stdout
+        for line in stream.getvalue().split("\n"):
+            if line.strip():
+                logger.info(line)
+
+        # Get top functions by cumtime (cumulative time including subcalls)
+        logger.info("=" * 80)
+        logger.info("Top 20 functions by cumtime (cumulative time including subcalls):")
+        logger.info("=" * 80)
+        stream = io.StringIO()
+        sys.stdout = stream
+        try:
+            stats.sort_stats("cumtime")
+            stats.print_stats(20)
+        finally:
+            sys.stdout = old_stdout
+        for line in stream.getvalue().split("\n"):
+            if line.strip():
+                logger.info(line)
+
+        logger.info("=" * 80)
+        logger.info(f"Full profile saved to: {profile_file}")
+
+
+def sequential_run(tasks, func, module_name="unknown"):
+    """Sequential runner for profiling mode - runs all tasks in main process"""
+    errors = []
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(0)
+
+    with tqdm(total=len(tasks), desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
+        for i, task in enumerate(tasks):
+            # Handle both old format (tuple) and new format (dict)
+            if isinstance(task, dict):
+                task_id = task.get("id", "unknown")
+                task_params = task.get("params", task)
+            else:
+                task_params = task
+                task_id = create_test_case_id(task, func.__name__, module_name)
+
+            try:
+                func(*task_params, device)
+            except Exception as e:
+                error_info = {
+                    "module": module_name,
+                    "device_id": 0,
+                    "task_id": task_id,
+                    "task_params": str(task_params),
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc(),
+                    "timestamp": datetime.now().isoformat(),
+                }
+                errors.append(error_info)
+                logger.exception(f"Task {task_id} failed")
+
+            pbar.update(1)
+            if len(errors) > 0:
+                pbar.set_postfix({"errors": len(errors)})
+
+    # Log summary
+    if errors:
+        log_dir = os.environ.get("COLLECTOR_LOG_DIR", "")
+        logger.error(f"{module_name}: Completed with {len(errors)} errors")
+        error_file = f"{log_dir}/errors_{module_name}.json"
+        save_error_report(errors, error_file)
+        logger.error(f"Error details saved to {error_file}")
+    else:
+        logger.info(f"{module_name}: Completed successfully with no errors")
+
+    return errors
+
+
 def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes, resume_options=None):
-    """Safely collect module with comprehensive error handling"""
+    """
+    Safely collect module with comprehensive error handling
+
+    Args:
+        num_processes: Number of parallel processes to use. If 0, runs sequentially in main process.
+    """
     full_name = f"{module_name}.{test_type}"
     logger.info(f"Starting collection: {full_name}")
 
@@ -151,13 +288,20 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
 
         # Run collection
-        errors = parallel_run(
-            test_cases,
-            run_func,
-            num_processes,
-            full_name,
-            resume_options=resume_options,
-        )
+        if num_processes == 0:
+            errors = sequential_run(
+                test_cases,
+                run_func,
+                full_name
+            )
+        else:
+            errors = parallel_run(
+                test_cases,
+                run_func,
+                num_processes,
+                full_name,
+                resume_options=resume_options,
+            )
 
         return errors
 
@@ -810,6 +954,11 @@ def main():
         action="store_true",
         help="Shuffle test cases before applying --limit (uses seed 42 for reproducibility)",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Profile the collector run and save output ",
+    )
     args = parser.parse_args()
     ops = args.ops
 
@@ -829,6 +978,14 @@ def main():
     if args.resume:
         logger.info(f"Resume enabled: dir={Path(args.checkpoint_dir).expanduser()}")
 
+    # Determine number of processes (0 = sequential mode for profiling)
+    if args.profile:
+        num_processes = 0
+        logger.info("Starting collection in sequential mode (profiling enabled)")
+    else:
+        num_processes = torch.cuda.device_count()
+        logger.info(f"Starting collection with {num_processes} GPU processes")
+
     # Set environment variables for worker processes
     if args.measure_power:
         os.environ["COLLECTOR_MEASURE_POWER"] = "true"
@@ -841,8 +998,6 @@ def main():
     # (env var takes effect at interpreter startup, before any module imports)
     os.environ["PYTHONWARNINGS"] = "ignore::UserWarning:torch.library"
 
-    mp.set_start_method("spawn")
-
     shuffle = args.shuffle
     limit = args.limit
     if args.smoke:
@@ -850,12 +1005,26 @@ def main():
         limit = 4
         logger.info("Smoke test mode enabled — sampling 4 random test cases per op")
 
-    if args.backend == "trtllm":
-        collect_trtllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
-    elif args.backend == "sglang":
-        collect_sglang(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
-    elif args.backend == "vllm":
-        collect_vllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
+    # Warn if profiling without limit (profiling can be very slow)
+    if args.profile and limit is None:
+        logger.warning(
+            "Profiling is enabled but --limit is not set. "
+            "Profiling all test cases can be very slow. "
+            "Consider using --limit to restrict the number of test cases."
+        )
+
+    # Only set multiprocessing start method if not profiling (profiling uses sequential mode via num_processes=0)
+    if not args.profile:
+        mp.set_start_method("spawn")
+
+    # Use profiling context manager
+    with ProfilerContext(args.backend, enabled=args.profile):
+        if args.backend == "trtllm":
+            collect_trtllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
+        elif args.backend == "sglang":
+            collect_sglang(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
+        elif args.backend == "vllm":
+            collect_vllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
 
 
 if __name__ == "__main__":
