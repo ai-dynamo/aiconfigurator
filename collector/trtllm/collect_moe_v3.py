@@ -478,8 +478,6 @@ def run_moe_torch(
             if not results["used_cuda_graph"] and aic_debug == 1:
                 print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
 
-        print(f"moe latency: for {num_tokens} tokens: {latency}")
-
         if min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
         elif not is_gated:
