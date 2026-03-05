@@ -101,7 +101,11 @@ def _merge_into_top_n(
     """Merge the best configs and pareto fronts into top N."""
     best_configs_dfs = []
     pareto_dfs = []
+    retained_exps: list[str] = []
     for exp_name in exps:
+        if exp_name not in best_configs:
+            continue
+        retained_exps.append(exp_name)
         backend_name = task_configs[exp_name].backend_name
         df = best_configs[exp_name].copy()
         if not df.empty:
@@ -126,7 +130,8 @@ def _merge_into_top_n(
     # Merge pareto fronts for plotting and recompute Pareto frontier
     if pareto_dfs:
         df_combined_pareto = pd.concat(pareto_dfs, ignore_index=True)
-        x_col = pareto_x_axis.get(exps[0], "tokens/s/user")
+        ref_exp = next((name for name in retained_exps if name in pareto_x_axis), None)
+        x_col = pareto_x_axis.get(ref_exp, "tokens/s/user")
         df_merged_pareto_front = get_pareto_front(
             df_combined_pareto,
             x_col,
