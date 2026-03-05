@@ -14,7 +14,7 @@ ACCOUNT="${ACCOUNT:-coreai_tritoninference_triton3}"
 PARTITION="${PARTITION:-gb200}"
 
 COLLECTOR_SCRIPT="${SCRIPT_DIR}/collect_trtllm_alltoall.py"
-OUTPUT_FILE="${SCRIPT_DIR}/results/wideep_alltoall_perf.txt"
+OUTPUT_FILE="${SCRIPT_DIR}/results/trtllm_alltoall_perf.txt"
 
 mkdir -p "${SCRIPT_DIR}/logs" "${SCRIPT_DIR}/errors" "${SCRIPT_DIR}/results"
 

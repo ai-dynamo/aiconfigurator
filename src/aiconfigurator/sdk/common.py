@@ -500,9 +500,8 @@ class PerfDataFilename(Enum):
     wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
     # TensorRT-LLM WideEP specific
     wideep_moe_compute = "wideep_moe_perf.txt"
-    wideep_alltoall = "wideep_alltoall_perf.txt"
-    # TensorRT-LLM CutlassFusedMoE NVLink OneSided AlltoAll
-    cutlass_moe_alltoall = "cutlass_moe_alltoall_perf.txt"
+    # TensorRT-LLM AlltoAll (covers WideEP NVLinkTwoSided + CutlassFusedMoE NVLinkOneSided)
+    trtllm_alltoall = "trtllm_alltoall_perf.txt"
     compute_scale = "computescale_perf.txt"
     scale_matrix = "scale_matrix_perf.txt"
     mamba2 = "mamba2_perf.txt"

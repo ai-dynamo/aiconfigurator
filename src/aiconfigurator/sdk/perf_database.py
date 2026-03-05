@@ -1671,10 +1671,10 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
     return wideep_moe_compute_data
 
 
-def load_wideep_alltoall_data(wideep_alltoall_file):
+def load_trtllm_alltoall_data(trtllm_alltoall_file):
     """
-    Load the TensorRT-LLM wideep All2All data from wideep_alltoall_perf.txt.
-    This data represents All2All communication time (prepare, dispatch, combine).
+    Load TensorRT-LLM AlltoAll communication perf data from trtllm_alltoall_perf.txt.
+    Covers both WideEP (NVLinkTwoSided) and CutlassFusedMoE (NVLinkOneSided) paths.
 
     Returns:
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
@@ -1685,6 +1685,7 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
     Note:
         kernel_source identifies the All2All communication method:
         - "MnnvlMoe": NVLink Two-Sided via MNNVL (GB200, SM >= 100)
+        - "NVLinkOneSided": NVLink One-Sided (CutlassFusedMoE on GB200)
         - "DeepEP": DeepEP normal mode (H100/H200, cross-node)
         - "DeepEPLowLatency": DeepEP low-latency mode (H100/H200, intra-node)
         - "NCCL": Standard NCCL communication (fallback)
@@ -1693,11 +1694,11 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
         If data file does not have 'num_nodes' column, it will be computed as moe_ep_size // 4.
         This assumes 4 GPUs per node (e.g., GB200 NVL4).
     """
-    if not os.path.exists(wideep_alltoall_file):
-        logger.debug(f"TensorRT-LLM wideep All2All data file {wideep_alltoall_file} not found.")
+    if not os.path.exists(trtllm_alltoall_file):
+        logger.debug(f"TensorRT-LLM AlltoAll data file {trtllm_alltoall_file} not found.")
         return None
 
-    wideep_alltoall_data = defaultdict(
+    trtllm_alltoall_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(
@@ -1709,105 +1710,24 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
         )
     )
 
-    logger.debug(f"Loading TensorRT-LLM wideep All2All data from: {wideep_alltoall_file}")
-    with open(wideep_alltoall_file, encoding="utf-8") as f:
+    logger.debug(f"Loading TensorRT-LLM AlltoAll data from: {trtllm_alltoall_file}")
+    with open(trtllm_alltoall_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 
-        # Check if power columns exist (backward compatibility)
         has_power = len(rows) > 0 and "power" in rows[0]
         if not has_power:
-            logger.debug(f"Legacy database format detected in {wideep_alltoall_file} - power will default to 0.0")
+            logger.debug(f"Legacy database format detected in {trtllm_alltoall_file} - power will default to 0.0")
 
-        # Check if num_nodes column exists
         has_num_nodes = len(rows) > 0 and "num_nodes" in rows[0]
         if not has_num_nodes:
-            logger.debug(f"num_nodes column not found in {wideep_alltoall_file} - will be computed as moe_ep_size // 4")
+            logger.debug(
+                f"num_nodes column not found in {trtllm_alltoall_file} - will be computed as moe_ep_size // 4"
+            )
 
-        # Check if kernel_source column exists
         has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
         if not has_kernel_source:
-            logger.debug(f"kernel_source column not found in {wideep_alltoall_file} - will default to 'MnnvlMoe'")
-
-        for row in rows:
-            op_name = row["op_name"]  # alltoall_prepare, alltoall_dispatch, alltoall_combine, etc.
-            quant_mode = row["moe_dtype"]
-            num_tokens = int(row["num_tokens"])
-            hidden_size = int(row["hidden_size"])
-            topk = int(row["topk"])
-            num_experts = int(row["num_experts"])
-            moe_ep_size = int(row["moe_ep_size"])
-            latency = float(row["latency"])
-            quant_mode = common.MoEQuantMode[quant_mode]
-
-            # Get kernel_source from data or use default
-            kernel_source = row.get("kernel_source", "MnnvlMoe")
-
-            # Get num_nodes from data or compute from moe_ep_size
-            if has_num_nodes:
-                num_nodes = int(row["num_nodes"])
-            else:
-                # Default: assume 4 GPUs per node
-                if moe_ep_size % 4 != 0:
-                    logger.warning(
-                        f"moe_ep_size={moe_ep_size} is not divisible by 4, using moe_ep_size // 4 = {moe_ep_size // 4}"
-                    )
-                num_nodes = max(1, moe_ep_size // 4)
-
-            # Read power with backward compatibility
-            power = float(row.get("power", 0.0))
-            energy = power * latency  # watt-milliseconds
-
-            # Store all three values with kernel_source and num_nodes dimensions
-            wideep_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
-                moe_ep_size
-            ][num_tokens] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,
-            }
-            # logger.debug(
-            #     f"Loaded TensorRT-LLM wideep All2All data: kernel={kernel_source}, {op_name}, {quant_mode}, "
-            #     f"num_nodes={num_nodes}, {hidden_size}, {topk}, {num_experts}, {moe_ep_size}, "
-            #     f"{num_tokens} -> {latency}"
-            # )
-
-    return wideep_alltoall_data
-
-
-def load_cutlass_moe_alltoall_data(cutlass_moe_alltoall_file):
-    """
-    Load CutlassFusedMoE NVLink OneSided AlltoAll perf data.
-    Data format is identical to wideep_alltoall_perf.txt.
-
-    Structure: [kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts]
-               [moe_ep_size][num_tokens] -> {latency, power, energy}
-    op_name: alltoall_prepare, alltoall_dispatch, alltoall_combine, alltoall_combine_low_precision
-    """
-    if not os.path.exists(cutlass_moe_alltoall_file):
-        logger.debug(f"CutlassFusedMoE AlltoAll data file {cutlass_moe_alltoall_file} not found.")
-        return None
-
-    cutlass_alltoall_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
-
-    logger.debug(f"Loading CutlassFusedMoE AlltoAll data from: {cutlass_moe_alltoall_file}")
-    with open(cutlass_moe_alltoall_file, encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
-        has_power = len(rows) > 0 and "power" in rows[0]
-        has_num_nodes = len(rows) > 0 and "num_nodes" in rows[0]
-        has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
+            logger.debug(f"kernel_source column not found in {trtllm_alltoall_file} - will default to 'MnnvlMoe'")
 
         for row in rows:
             op_name = row["op_name"]
@@ -1825,12 +1745,16 @@ def load_cutlass_moe_alltoall_data(cutlass_moe_alltoall_file):
             if has_num_nodes:
                 num_nodes = int(row["num_nodes"])
             else:
+                if moe_ep_size % 4 != 0:
+                    logger.warning(
+                        f"moe_ep_size={moe_ep_size} is not divisible by 4, using moe_ep_size // 4 = {moe_ep_size // 4}"
+                    )
                 num_nodes = max(1, moe_ep_size // 4)
 
             power = float(row.get("power", 0.0))
             energy = power * latency
 
-            cutlass_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
+            trtllm_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
                 moe_ep_size
             ][num_tokens] = {
                 "latency": latency,
@@ -1838,7 +1762,7 @@ def load_cutlass_moe_alltoall_data(cutlass_moe_alltoall_file):
                 "energy": energy,
             }
 
-    return cutlass_alltoall_data
+    return trtllm_alltoall_data
 
 
 class LoadedOpData(UserDict):
@@ -1914,7 +1838,7 @@ class PerfDatabase:
         _wideep_deepep_ll_data (dict): the wideep deepep ll data
         TensorRT-LLM wideep:
         _wideep_moe_compute_data (dict): the wideep moe compute data (pure computation, no all2all)
-        _wideep_alltoall_data (dict): the wideep all2all data (prepare, dispatch, combine)
+        _trtllm_alltoall_data (dict): the trtllm all2all data (prepare, dispatch, combine)
 
     Methods:
         query_gemm: query the gemm data
@@ -1974,8 +1898,7 @@ class PerfDatabase:
                 PerfDataFilename.wideep_deepep_normal: load_wideep_deepep_normal_data,
                 PerfDataFilename.wideep_deepep_ll: load_wideep_deepep_ll_data,
                 PerfDataFilename.wideep_moe_compute: load_wideep_moe_compute_data,
-                PerfDataFilename.wideep_alltoall: load_wideep_alltoall_data,
-                PerfDataFilename.cutlass_moe_alltoall: load_cutlass_moe_alltoall_data,
+                PerfDataFilename.trtllm_alltoall: load_trtllm_alltoall_data,
             }
             perf_data_dir = data_dir
             if op_filename_enum == PerfDataFilename.nccl:
@@ -2024,8 +1947,7 @@ class PerfDatabase:
         # TensorRT-LLM wideep path
         if backend == "trtllm":
             self._wideep_moe_compute_data = _load_op_data(PerfDataFilename.wideep_moe_compute)
-            self._wideep_alltoall_data = _load_op_data(PerfDataFilename.wideep_alltoall)
-            self._cutlass_moe_alltoall_data = _load_op_data(PerfDataFilename.cutlass_moe_alltoall)
+            self._trtllm_alltoall_data = _load_op_data(PerfDataFilename.trtllm_alltoall)
 
         # pre-correction
         self._correct_data()
@@ -2525,56 +2447,84 @@ class PerfDatabase:
         quant_mode: common.MoEQuantMode,
         moe_ep_size: int,
         topk: int,
+        moe_backend: Optional[str] = None,
     ) -> str:
         """
-        Automatically select All2All communication method based on GPU architecture and configuration.
+        Automatically select All2All communication method based on GPU architecture,
+        MoE backend type, and configuration.
 
-        Selection logic (based on TensorRT-LLM's select_alltoall_method_type):
-        1. SM >= 100 (GB200 with MNNVL support) -> MnnvlMoe (NVLink Two-Sided)
-        2. SM >= 90 (H100/H200) with cross-node -> DeepEP
-        3. SM >= 90 (H100/H200) within single node -> DeepEPLowLatency
-        4. SM < 90 -> NCCL (fallback)
+        Aligned with TensorRT-LLM's per-backend select_alltoall_method_type:
+
+        CutlassFusedMoE / TRTLLMGenFusedMoE (fused_moe_cutlass.py / fused_moe_trtllm_gen.py):
+          - Requires supports_mnnvl() (approximated as SM >= 100)
+          - Returns NVLinkOneSided
+          - Does NOT support DeepEP / DeepEPLowLatency
+
+        WideEPMoE (fused_moe_wide_ep.py):
+          - If supports_mnnvl() -> NVLinkTwoSided (MnnvlMoe)
+          - Else if DeepEP feasible -> DeepEP (inter-node) or DeepEPLowLatency (intra-node)
+          - Does NOT support NVLinkOneSided
+
+        DeepGemmFusedMoE / CuteDslFusedMoE:
+          - Always NotEnabled
 
         Args:
             quant_mode: MoE quantization mode
             moe_ep_size: MoE expert parallelism size
             topk: Number of experts activated per token
+            moe_backend: MoE backend identifier. "wideep" for WideEP path,
+                        "CUTLASS"/"TRTLLM"/None for CutlassFusedMoE/TRTLLMGen,
+                        "DEEPGEMM"/"CUTE_DSL" for backends without AlltoAll.
 
         Returns:
-            str: The selected kernel_source name
+            str: The selected kernel_source name, or "NotEnabled" if AlltoAll is not used.
         """
+        # DeepGemm / CuteDsl never use AlltoAll
+        if moe_backend is not None and moe_backend.upper() in {"DEEPGEMM", "CUTE_DSL"}:
+            return "NotEnabled"
+
         sm_version = self.system_spec["gpu"]["sm_version"]
         num_gpus_per_node = self.system_spec["node"]["num_gpus_per_node"]
         is_inter_node = moe_ep_size > num_gpus_per_node
+        is_wideep = moe_backend is not None and moe_backend.upper() == "WIDEEP"
 
-        # Preferred kernel based on hardware
-        if sm_version >= 100:
-            # GB200 supports MNNVL (Multi-Node NVLink)
-            preferred = "MnnvlMoe"
-        elif sm_version >= 90:
-            # H100/H200: Check DeepEP feasibility
-            # DeepEP requires: tp_size == 1, ep_size > 1, top_k in supported range
-            deepep_feasible = moe_ep_size > 1 and topk <= 8
+        # We approximate supports_mnnvl() as sm_version >= 100 (GB200 NVLink fabric).
+        supports_mnnvl = sm_version >= 100
 
-            if deepep_feasible and is_inter_node:
-                # Cross-node: use DeepEP normal mode
-                preferred = "DeepEP"
-            elif deepep_feasible:
-                # Intra-node: use DeepEP low-latency mode
-                preferred = "DeepEPLowLatency"
-            else:
+        if is_wideep:
+            # WideEPMoE path (fused_moe_wide_ep.py):
+            #   supports_mnnvl -> NVLinkTwoSided (MnnvlMoe)
+            #   else -> try DeepEP (requires env var TRTLLM_CAN_USE_DEEP_EP=1 in real TRT-LLM)
+            #   else -> NotEnabled
+            if supports_mnnvl:
                 preferred = "MnnvlMoe"
+            else:
+                # DeepEP feasibility: ep_size > 1 and topk in supported range
+                deepep_feasible = moe_ep_size > 1 and topk <= 8
+                if deepep_feasible and is_inter_node:
+                    preferred = "DeepEP"
+                elif deepep_feasible:
+                    preferred = "DeepEPLowLatency"
+                else:
+                    preferred = "NotEnabled"
         else:
-            # SM89 and below: use NCCL standard communication
-            preferred = "NCCL"
+            # CutlassFusedMoE / TRTLLMGenFusedMoE path (fused_moe_cutlass.py):
+            #   supports_mnnvl -> NVLinkOneSided
+            #   else -> NotEnabled (no DeepEP support for these backends)
+            if supports_mnnvl:
+                preferred = "NVLinkOneSided"
+            else:
+                preferred = "NotEnabled"
+
+        if preferred == "NotEnabled":
+            return preferred
 
         # Check if preferred kernel is available in data, otherwise fallback
-        if self._wideep_alltoall_data:
-            available_kernels = list(self._wideep_alltoall_data.keys())
+        if self._trtllm_alltoall_data:
+            available_kernels = list(self._trtllm_alltoall_data.keys())
             if preferred in available_kernels:
                 return preferred
             elif available_kernels:
-                # Fallback to any available kernel
                 fallback = available_kernels[0]
                 logger.debug(f"Preferred All2All kernel '{preferred}' not available, falling back to '{fallback}'")
                 return fallback
@@ -5283,7 +5233,7 @@ class PerfDatabase:
             ),
         )
 
-    def query_wideep_alltoall(
+    def query_trtllm_alltoall(
         self,
         op_name: str,
         num_tokens: int,
@@ -5292,17 +5242,16 @@ class PerfDatabase:
         num_experts: int,
         moe_ep_size: int,
         quant_mode: common.MoEQuantMode,
+        moe_backend: Optional[str] = None,
         node_num: int | None = None,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult:
         """
-        Query WideEP All2All communication latency.
+        Query TensorRT-LLM AlltoAll communication latency.
 
-        The All2All communication method is automatically selected based on GPU architecture:
-        - SM >= 100 (GB200 with MNNVL) -> MnnvlMoe (NVLink Two-Sided)
-        - SM >= 90 (H100/H200) cross-node -> DeepEP
-        - SM >= 90 (H100/H200) intra-node -> DeepEPLowLatency
-        - SM < 90 -> NCCL (fallback)
+        Unified entry for both WideEP (NVLinkTwoSided) and CutlassFusedMoE (NVLinkOneSided)
+        AlltoAll communication paths. The kernel is auto-selected based on moe_backend and
+        GPU architecture via _select_alltoall_kernel.
 
         Args:
             op_name: Operation name, one of:
@@ -5314,110 +5263,12 @@ class PerfDatabase:
             hidden_size: Hidden dimension size
             topk: Number of experts activated per token
             num_experts: Total number of experts
-            moe_ep_size: MoE expert parallelism size (must be divisible by 4 if node_num is None)
-            quant_mode: MoE quantization mode
-            node_num: Number of nodes. If None, computed as moe_ep_size // 4 (assuming 4 GPUs per node)
-            database_mode: Database mode
-
-        Returns:
-            PerformanceResult: Latency in ms, energy accessible via .energy attribute.
-
-        Raises:
-            ValueError: If moe_ep_size is not divisible by 4 when node_num is None
-        """
-        if database_mode is None:
-            database_mode = self._default_database_mode
-
-        # Compute node_num if not provided
-        if node_num is None:
-            if moe_ep_size < 4:
-                node_num = 1
-            else:
-                node_num = moe_ep_size // 4
-            logger.debug(f"query_wideep_alltoall: node_num not specified, using {node_num} (moe_ep_size={moe_ep_size})")
-
-        valid_op_names = ["alltoall_prepare", "alltoall_dispatch", "alltoall_combine", "alltoall_combine_low_precision"]
-        if op_name not in valid_op_names:
-            raise ValueError(f"Invalid op_name '{op_name}'. Must be one of {valid_op_names}")
-
-        # Automatically select All2All kernel based on GPU architecture
-        kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk)
-        logger.debug(f"query_wideep_alltoall: auto-selected kernel_source='{kernel_source}'")
-
-        # SILICON or HYBRID mode - use database
-        def get_silicon():
-            self._wideep_alltoall_data.raise_if_not_loaded()
-            kernel_data = self._wideep_alltoall_data[kernel_source]
-            alltoall_dict = kernel_data[op_name][quant_mode][node_num][hidden_size][topk][num_experts][moe_ep_size]
-
-            num_left, num_right = self._nearest_1d_point_helper(
-                num_tokens,
-                list(alltoall_dict.keys()),
-                inner_only=False,
-            )
-            result = self._interp_1d(
-                [num_left, num_right],
-                [alltoall_dict[num_left], alltoall_dict[num_right]],
-                num_tokens,
-            )
-
-            if isinstance(result, dict):
-                lat = result["latency"]
-                energy = result.get("energy", 0.0)
-            else:
-                lat = result
-                energy = 0.0
-
-            return PerformanceResult(lat, energy=energy)
-
-        def get_empirical() -> float:
-            # Simple empirical fallback: ~0.1ms per operation as baseline
-            return 0.1
-
-        return self._query_silicon_or_hybrid(
-            get_silicon=get_silicon,
-            get_empirical=get_empirical,
-            database_mode=database_mode,
-            error_msg=(
-                f"Failed to query wideep alltoall data for {op_name} (kernel={kernel_source}), "
-                f"node_num={node_num}, {num_tokens=}, {hidden_size=}, {topk=}, {num_experts=}, "
-                f"{moe_ep_size=}, {quant_mode=}"
-            ),
-        )
-
-    def query_cutlass_moe_alltoall(
-        self,
-        op_name: str,
-        num_tokens: int,
-        hidden_size: int,
-        topk: int,
-        num_experts: int,
-        moe_ep_size: int,
-        quant_mode: common.MoEQuantMode,
-        node_num: int | None = None,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
-        """
-        Query CutlassFusedMoE NVLink OneSided AlltoAll communication latency.
-
-        Used for non-WideEP DeepSeek MoE on GB200 where CutlassFusedMoE uses
-        NVLink OneSided AlltoAll (MoeAlltoAll.dispatch with AlltoAllMethodType.NVL_ONE_SIDED).
-
-        Data format is identical to wideep_alltoall. Kernel selection uses the same
-        _select_alltoall_kernel logic.
-
-        Args:
-            op_name: Operation name, one of:
-                - "alltoall_prepare": Prepare phase (permute, quantize, metadata packing)
-                - "alltoall_dispatch": Token dispatch phase (NVLink one-sided write)
-                - "alltoall_combine": Result combine phase (NVLink one-sided read + unpermute)
-                - "alltoall_combine_low_precision": Low precision combine
-            num_tokens: Number of tokens
-            hidden_size: Hidden dimension size
-            topk: Number of experts activated per token
-            num_experts: Total number of experts
             moe_ep_size: MoE expert parallelism size
             quant_mode: MoE quantization mode
+            moe_backend: MoE backend identifier for kernel selection.
+                "wideep" -> NVLinkTwoSided (MnnvlMoe);
+                "CUTLASS"/"TRTLLM"/None -> NVLinkOneSided;
+                "DEEPGEMM"/"CUTE_DSL" -> NotEnabled.
             node_num: Number of nodes. If None, computed as moe_ep_size // 4
             database_mode: Database mode
 
@@ -5433,19 +5284,19 @@ class PerfDatabase:
             else:
                 node_num = moe_ep_size // 4
             logger.debug(
-                f"query_cutlass_moe_alltoall: node_num not specified, using {node_num} (moe_ep_size={moe_ep_size})"
+                f"query_trtllm_alltoall: node_num not specified, using {node_num} (moe_ep_size={moe_ep_size})"
             )
 
         valid_op_names = ["alltoall_prepare", "alltoall_dispatch", "alltoall_combine", "alltoall_combine_low_precision"]
         if op_name not in valid_op_names:
             raise ValueError(f"Invalid op_name '{op_name}'. Must be one of {valid_op_names}")
 
-        kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk)
-        logger.debug(f"query_cutlass_moe_alltoall: auto-selected kernel_source='{kernel_source}'")
+        kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
+        logger.debug(f"query_trtllm_alltoall: auto-selected kernel_source='{kernel_source}' (moe_backend={moe_backend})")
 
         def get_silicon():
-            self._cutlass_moe_alltoall_data.raise_if_not_loaded()
-            kernel_data = self._cutlass_moe_alltoall_data[kernel_source]
+            self._trtllm_alltoall_data.raise_if_not_loaded()
+            kernel_data = self._trtllm_alltoall_data[kernel_source]
             alltoall_dict = kernel_data[op_name][quant_mode][node_num][hidden_size][topk][num_experts][moe_ep_size]
 
             num_left, num_right = self._nearest_1d_point_helper(
@@ -5476,9 +5327,9 @@ class PerfDatabase:
             get_empirical=get_empirical,
             database_mode=database_mode,
             error_msg=(
-                f"Failed to query cutlass moe alltoall data for {op_name} (kernel={kernel_source}), "
-                f"node_num={node_num}, {num_tokens=}, {hidden_size=}, {topk=}, {num_experts=}, "
-                f"{moe_ep_size=}, {quant_mode=}"
+                f"Failed to query trtllm alltoall data for {op_name} (kernel={kernel_source}), "
+                f"moe_backend={moe_backend}, node_num={node_num}, {num_tokens=}, {hidden_size=}, "
+                f"{topk=}, {num_experts=}, {moe_ep_size=}, {quant_mode=}"
             ),
         )
 

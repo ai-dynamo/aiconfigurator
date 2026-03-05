@@ -1461,7 +1461,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
 
     This model enables WideEP (Wide Expert Parallelism) for TensorRT-LLM backend:
     - MoE computation uses WideEP path (query_wideep_moe_compute) with configurable EPLB modes
-    - All2All communication uses WideEP path (query_wideep_alltoall with auto kernel selection)
+    - All2All communication uses unified TRT-LLM path (query_trtllm_alltoall with auto kernel selection)
 
     Token handling (handled in MoE/MoEDispatch query methods):
     - MoE compute: total tokens (x * attention_dp_size)

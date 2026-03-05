@@ -406,7 +406,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
 
         if self._pre_dispatch:
             # Pre-dispatch phase: prepare + dispatch
-            prepare_result = database.query_wideep_alltoall(
+            prepare_result = database.query_trtllm_alltoall(
                 op_name="alltoall_prepare",
                 num_tokens=num_tokens,
                 hidden_size=self._hidden_size,
@@ -414,9 +414,10 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 num_experts=self._num_experts,
                 moe_ep_size=self._moe_ep_size,
                 quant_mode=self._quant_mode,
+                moe_backend="wideep",
                 node_num=self._node_num,
             )
-            dispatch_result = database.query_wideep_alltoall(
+            dispatch_result = database.query_trtllm_alltoall(
                 op_name="alltoall_dispatch",
                 num_tokens=num_tokens,
                 hidden_size=self._hidden_size,
@@ -424,13 +425,14 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 num_experts=self._num_experts,
                 moe_ep_size=self._moe_ep_size,
                 quant_mode=self._quant_mode,
+                moe_backend="wideep",
                 node_num=self._node_num,
             )
             comm_latency = float(prepare_result) + float(dispatch_result)
         else:
             # Post-dispatch phase: combine or combine_low_precision
             combine_op = "alltoall_combine_low_precision" if self._use_low_precision_combine else "alltoall_combine"
-            combine_result = database.query_wideep_alltoall(
+            combine_result = database.query_trtllm_alltoall(
                 op_name=combine_op,
                 num_tokens=num_tokens,
                 hidden_size=self._hidden_size,
@@ -438,6 +440,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 num_experts=self._num_experts,
                 moe_ep_size=self._moe_ep_size,
                 quant_mode=self._quant_mode,
+                moe_backend="wideep",
                 node_num=self._node_num,
             )
             comm_latency = float(combine_result)
@@ -611,7 +614,7 @@ class MoEDispatch(Operation):
 
                 if self._pre_dispatch:
                     if enable_alltoall:
-                        prepare_result = database.query_cutlass_moe_alltoall(
+                        prepare_result = database.query_trtllm_alltoall(
                             op_name="alltoall_prepare",
                             num_tokens=num_tokens,
                             hidden_size=self._hidden_size,
@@ -619,8 +622,9 @@ class MoEDispatch(Operation):
                             num_experts=self._num_experts,
                             moe_ep_size=self._moe_ep_size,
                             quant_mode=quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block,
+                            moe_backend=self._moe_backend,
                         )
-                        dispatch_result = database.query_cutlass_moe_alltoall(
+                        dispatch_result = database.query_trtllm_alltoall(
                             op_name="alltoall_dispatch",
                             num_tokens=num_tokens,
                             hidden_size=self._hidden_size,
@@ -628,6 +632,7 @@ class MoEDispatch(Operation):
                             num_experts=self._num_experts,
                             moe_ep_size=self._moe_ep_size,
                             quant_mode=quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block,
+                            moe_backend=self._moe_backend,
                         )
                         comm_latency = float(prepare_result) + float(dispatch_result)
                     elif self._attention_dp_size > 1:
@@ -646,7 +651,7 @@ class MoEDispatch(Operation):
                         comm_latency = 0
                 else:
                     if enable_alltoall:
-                        combine_result = database.query_cutlass_moe_alltoall(
+                        combine_result = database.query_trtllm_alltoall(
                             op_name="alltoall_combine",
                             num_tokens=num_tokens,
                             hidden_size=self._hidden_size,
@@ -654,6 +659,7 @@ class MoEDispatch(Operation):
                             num_experts=self._num_experts,
                             moe_ep_size=self._moe_ep_size,
                             quant_mode=quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block,
+                            moe_backend=self._moe_backend,
                         )
                         comm_latency = float(combine_result)
                     elif self._attention_dp_size > 1:
