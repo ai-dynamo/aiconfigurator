@@ -2,15 +2,28 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-TensorRT-LLM WideEP NVLinkTwoSided All-to-All Communication Benchmark
+TensorRT-LLM MoE NVLink All-to-All Communication Benchmark (NVFP4 Only)
 
-This script collects All-to-All communication performance data for WideEP MoE
-using NVLinkTwoSided communication strategy.
+Unified benchmark for two NVLink-based All-to-All communication strategies:
 
-Supports only balanced token distribution workloads.
+  --kernel-source NVLinkTwoSided
+      WideEPMoE backend.
+      Phases: prepare + dispatch + combine [+ combine_low_precision].
+      Supports multi-node.
+
+  --kernel-source NVLinkOneSided
+      CutlassMoE backend.
+      Phases: dispatch + combine (no prepare).
+      Single-node only.
+
+Output: trtllm_alltoall_perf.txt
 
 Usage (Slurm):
-    srun --ntasks 8 --ntasks-per-node 4 --mpi=pmix python collect_trtllm_alltoall.py
+    srun --ntasks 4 --ntasks-per-node 4 --mpi=pmix \\
+        python collect_trtllm_alltoall.py --kernel-source NVLinkOneSided
+
+    srun --ntasks 8 --ntasks-per-node 4 --mpi=pmix \\
+        python collect_trtllm_alltoall.py --kernel-source NVLinkTwoSided
 """
 
 import os
@@ -26,6 +39,10 @@ import torch.distributed as dist
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from helper import benchmark_with_power, log_perf
+
+KERNEL_SOURCE_TWO_SIDED = "NVLinkTwoSided"
+KERNEL_SOURCE_ONE_SIDED = "NVLinkOneSided"
+VALID_KERNEL_SOURCES = [KERNEL_SOURCE_TWO_SIDED, KERNEL_SOURCE_ONE_SIDED]
 
 
 class TokenDistribution(Enum):
@@ -49,8 +66,6 @@ DEFAULT_DISTRIBUTIONS = [
 
 # Supported MoE data types
 DEFAULT_MOE_DTYPES = [
-    MoEDtype.FLOAT16,
-    MoEDtype.FP8,
     MoEDtype.NVFP4,
 ]
 
@@ -451,15 +466,23 @@ def prepare_test_data(
 
 @dataclass
 class AlltoallBenchmarkResult:
-    """Benchmark results for each operation."""
+    """
+    Benchmark results for each All-to-All operation.
 
-    prepare_latency_ms: float
+    NVLinkTwoSided populates all four fields.
+    NVLinkOneSided only populates dispatch and combine (prepare and combine_lp stay 0).
+    """
+
     dispatch_latency_ms: float
     combine_latency_ms: float
-    combine_low_precision_latency_ms: float
+    prepare_latency_ms: float = 0.0
+    combine_low_precision_latency_ms: float = 0.0
 
 
-def benchmark_nvlink_two_sided_alltoall(
+# ============================================================================
+# NVLinkTwoSided benchmark  (WideEPMoE backend)
+# ============================================================================
+def benchmark_nvlink_two_sided(
     test_case: AlltoallTestCase,
     mapping,
     device: torch.device,
@@ -468,6 +491,7 @@ def benchmark_nvlink_two_sided_alltoall(
 ) -> AlltoallBenchmarkResult:
     """
     Benchmark NVLinkTwoSided All-to-All communication.
+    Benchmarks four phases: prepare, dispatch, combine, combine_low_precision.
 
     Args:
         test_case: Test case configuration
@@ -621,6 +645,143 @@ def benchmark_nvlink_two_sided_alltoall(
     )
 
 
+# ============================================================================
+# NVLinkOneSided benchmark  (CutlassMoE backend)
+# ============================================================================
+def benchmark_nvlink_one_sided(
+    test_case: AlltoallTestCase,
+    mapping,
+    device: torch.device,
+    num_warmup: int = 3,
+    num_iterations: int = 10,
+) -> AlltoallBenchmarkResult:
+    """
+    Benchmark NVLinkOneSided All-to-All communication.
+
+    Uses torch.ops.trtllm.moe_a2a_dispatch / moe_a2a_combine C++ ops directly
+    (bypassing the Python MoeAlltoAll state machine) so that both dispatch and
+    combine can be captured into CUDA Graphs.
+
+    Args:
+        test_case: Test case configuration
+        mapping: TensorRT-LLM Mapping
+        device: CUDA device
+        num_warmup: Number of warmup iterations
+        num_iterations: Number of benchmark iterations
+
+    Returns:
+        AlltoallBenchmarkResult containing dispatch and combine latencies
+    """
+    from tensorrt_llm._torch.distributed.moe_alltoall import MoeAlltoAll
+
+    ep_rank = mapping.moe_ep_rank
+    num_slots = test_case.num_experts
+    act_dtype = torch.bfloat16
+
+    # Calculate workspace size and create MoeAlltoAll (for workspace initialization)
+    workspace_size = MoeAlltoAll.calculate_required_workspace_size(
+        test_case.ep_size, test_case.top_k, test_case.num_tokens,
+        test_case.hidden_size, act_dtype,
+    )
+    moe_a2a = MoeAlltoAll(
+        mapping=mapping,
+        max_num_tokens=test_case.num_tokens,
+        top_k=test_case.top_k,
+        num_experts=num_slots,
+        workspace_size_per_rank=workspace_size,
+    )
+
+    # Extract workspace and metainfo for direct C++ op calls
+    workspace = moe_a2a.workspace
+    metainfo = moe_a2a.metainfo
+
+    # Prepare test data
+    hidden_states, hidden_states_sf, token_selected_slots, token_final_scales = prepare_test_data(test_case, device)
+
+    runtime_max_tokens_per_rank = test_case.num_tokens  # balanced: all ranks have same count
+
+    # Build payloads list matching CutlassFusedMoE.forward_chunk() convention:
+    #   payloads = [hidden_states, (hidden_states_sf if NVFP4), token_selected_slots, token_final_scales]
+    payloads = [hidden_states]
+    if hidden_states_sf is not None:
+        payloads.append(hidden_states_sf)
+    payloads.append(token_selected_slots)
+    payloads.append(token_final_scales)
+
+    # ------------------------------------------------------------------
+    # One bootstrap dispatch
+    # ------------------------------------------------------------------
+    _, combine_payload_offset = torch.ops.trtllm.moe_a2a_dispatch(
+        token_selected_slots, payloads, workspace, metainfo,
+        runtime_max_tokens_per_rank, ep_rank, test_case.ep_size,
+        test_case.top_k, num_slots,
+    )
+    combine_payload_offset = int(combine_payload_offset)
+    torch.cuda.synchronize()
+
+    # Pre-fill the combine payload region with mock MoE output (bfloat16).
+    combine_payload = torch.ops.trtllm.moe_a2a_get_combine_payload_tensor(
+        workspace, ep_rank, test_case.ep_size, runtime_max_tokens_per_rank,
+        combine_payload_offset, torch.bfloat16, test_case.hidden_size,
+    )
+    combine_payload.copy_(torch.randn_like(combine_payload))
+    torch.cuda.synchronize()
+
+    # ========================================================================
+    # Helper: benchmark using shared CUDA Graph infrastructure from helper.py.
+    # ========================================================================
+    def _benchmark_op(func, label):
+        """Benchmark a single operation using shared benchmark_with_power."""
+        with benchmark_with_power(
+            device=device,
+            kernel_func=func,
+            num_warmups=num_warmup,
+            num_runs=num_iterations,
+            allow_graph_fail=True,
+        ) as results:
+            latency = results["latency_ms"]
+            if ep_rank == 0:
+                mode = "CUDA Graph" if results["used_cuda_graph"] else "Eager"
+                print(f"    [{label}] {mode} timing: {latency:.3f} ms")
+        return latency
+
+    # ========================================================================
+    # Benchmark: dispatch
+    # ========================================================================
+    def dispatch_op():
+        torch.ops.trtllm.moe_a2a_dispatch(
+            token_selected_slots, payloads, workspace, metainfo,
+            runtime_max_tokens_per_rank, ep_rank, test_case.ep_size,
+            test_case.top_k, num_slots,
+        )
+
+    dispatch_latency = _benchmark_op(dispatch_op, "dispatch")
+
+    # ========================================================================
+    # Benchmark: combine
+    # ========================================================================
+    moe_output = combine_payload.view(
+        test_case.ep_size, runtime_max_tokens_per_rank, test_case.hidden_size,
+    )
+
+    def combine_op():
+        torch.ops.trtllm.moe_a2a_combine(
+            moe_output, test_case.num_tokens, workspace, metainfo,
+            runtime_max_tokens_per_rank, ep_rank, test_case.ep_size,
+            test_case.top_k, combine_payload_offset, True,
+        )
+
+    combine_latency = _benchmark_op(combine_op, "combine")
+
+    return AlltoallBenchmarkResult(
+        dispatch_latency_ms=dispatch_latency,
+        combine_latency_ms=combine_latency,
+    )
+
+
+# ============================================================================
+# Performance logging
+# ============================================================================
 def log_alltoall_perf(
     test_case: AlltoallTestCase,
     op_name: str,
@@ -628,18 +789,21 @@ def log_alltoall_perf(
     framework: str,
     version: str,
     device_name: str,
+    kernel_source: str,
     perf_filename: str,
 ):
     """
-    Log All-to-All performance data in moe_perf.txt compatible format.
+    Log All-to-All performance data in perf.txt compatible format.
 
     Args:
         test_case: Test case configuration
-        op_name: Operation name (alltoall_prepare, alltoall_dispatch, alltoall_combine, alltoall_combine_low_precision)
+        op_name: Operation name (alltoall_prepare, alltoall_dispatch, alltoall_combine,
+                 alltoall_combine_low_precision)
         latency_ms: Latency in milliseconds
         framework: Framework name (e.g., "TRTLLM")
         version: Framework version
         device_name: GPU device name
+        kernel_source: Communication strategy (NVLinkTwoSided or NVLinkOneSided)
         perf_filename: Output file path
     """
     distribution_str = test_case.distribution.value
@@ -661,7 +825,7 @@ def log_alltoall_perf(
         version=version,
         device_name=device_name,
         op_name=op_name,
-        kernel_source="MnnvlMoe",
+        kernel_source=kernel_source,
         perf_filename=perf_filename,
     )
 
@@ -670,7 +834,8 @@ def run_benchmark(
     rank: int,
     world_size: int,
     device: torch.device,
-    output_file: str = "wideep_alltoall_perf.txt",
+    kernel_source: str,
+    output_file: str = "trtllm_alltoall_perf.txt",
     num_warmup: int = 3,
     num_iterations: int = 10,
 ):
@@ -681,6 +846,7 @@ def run_benchmark(
         rank: Current rank
         world_size: Total number of ranks
         device: CUDA device
+        kernel_source: Communication strategy (NVLinkTwoSided or NVLinkOneSided)
         output_file: Output file path
         num_warmup: Number of warmup iterations
         num_iterations: Number of benchmark iterations
@@ -691,7 +857,7 @@ def run_benchmark(
     if not check_mnnvl_support():
         if rank == 0:
             print("ERROR: MNNVL (NVLink) not supported on this hardware.")
-            print("NVLinkTwoSided requires full NVLink connectivity between GPUs.")
+            print("Both NVLinkTwoSided and NVLinkOneSided require NVLink connectivity.")
         return
 
     # Create mapping
@@ -706,14 +872,21 @@ def run_benchmark(
 
     if rank == 0:
         print(f"\n{'=' * 70}")
-        print("TensorRT-LLM WideEP NVLinkTwoSided All-to-All Benchmark")
+        print(f"TensorRT-LLM MoE All-to-All Benchmark  [{kernel_source}]")
         print(f"{'=' * 70}")
         print(f"EP size: {world_size}")
         print(f"Device: {device_name}")
         print(f"TensorRT-LLM version: {version}")
         print(f"Number of test cases: {len(test_cases)}")
         print(f"MoE dtypes: {[d.value for d in DEFAULT_MOE_DTYPES]}")
+        print(f"Output: {output_file}")
         print(f"{'=' * 70}\n")
+
+    # Select benchmark function based on kernel source
+    bench_fn = (
+        benchmark_nvlink_two_sided if kernel_source == KERNEL_SOURCE_TWO_SIDED
+        else benchmark_nvlink_one_sided
+    )
 
     # Run benchmarks
     for idx, test_case in enumerate(test_cases):
@@ -725,12 +898,9 @@ def run_benchmark(
             dist.barrier()
 
         try:
-            result = benchmark_nvlink_two_sided_alltoall(
-                test_case,
-                mapping,
-                device,
-                num_warmup=num_warmup,
-                num_iterations=num_iterations,
+            result = bench_fn(
+                test_case, mapping, device,
+                num_warmup=num_warmup, num_iterations=num_iterations,
             )
 
             # Log results (only rank 0)
@@ -743,61 +913,52 @@ def run_benchmark(
                     test_case.num_tokens, test_case.hidden_size, test_case.top_k
                 )
 
-                dispatch_bw = calculate_bandwidth_gbps(dispatch_data_size, result.dispatch_latency_ms)
-                combine_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_latency_ms)
-                combine_lp_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_low_precision_latency_ms)
+                if result.prepare_latency_ms > 0:
+                    print(f"  Prepare:  {result.prepare_latency_ms:.3f} ms")
 
-                print(f"  Prepare: {result.prepare_latency_ms:.3f} ms")
+                dispatch_bw = calculate_bandwidth_gbps(dispatch_data_size, result.dispatch_latency_ms)
                 dispatch_kb = dispatch_data_size / 1024
-                print(f"  Dispatch: {result.dispatch_latency_ms:.3f} ms ({dispatch_bw:.2f} GB/s, {dispatch_kb:.1f} KB)")
+                print(f"  Dispatch: {result.dispatch_latency_ms:.3f} ms "
+                      f"({dispatch_bw:.2f} GB/s, {dispatch_kb:.1f} KB)")
+
+                combine_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_latency_ms)
                 combine_kb = combine_data_size / 1024
-                print(f"  Combine: {result.combine_latency_ms:.3f} ms ({combine_bw:.2f} GB/s, {combine_kb:.1f} KB)")
+                print(f"  Combine:  {result.combine_latency_ms:.3f} ms "
+                      f"({combine_bw:.2f} GB/s, {combine_kb:.1f} KB)")
+
                 if result.combine_low_precision_latency_ms > 0:
-                    lp_ms = result.combine_low_precision_latency_ms
-                    print(f"  Combine (low precision): {lp_ms:.3f} ms ({combine_lp_bw:.2f} GB/s)")
+                    combine_lp_bw = calculate_bandwidth_gbps(
+                        combine_data_size, result.combine_low_precision_latency_ms,
+                    )
+                    print(f"  Combine (low precision): {result.combine_low_precision_latency_ms:.3f} ms "
+                          f"({combine_lp_bw:.2f} GB/s)")
 
                 # Log each operation separately
+                if result.prepare_latency_ms > 0:
+                    log_alltoall_perf(
+                        test_case, "alltoall_prepare", result.prepare_latency_ms,
+                        framework, version, device_name, kernel_source, output_file,
+                    )
                 log_alltoall_perf(
-                    test_case,
-                    "alltoall_prepare",
-                    result.prepare_latency_ms,
-                    framework,
-                    version,
-                    device_name,
-                    output_file,
+                    test_case, "alltoall_dispatch", result.dispatch_latency_ms,
+                    framework, version, device_name, kernel_source, output_file,
                 )
                 log_alltoall_perf(
-                    test_case,
-                    "alltoall_dispatch",
-                    result.dispatch_latency_ms,
-                    framework,
-                    version,
-                    device_name,
-                    output_file,
-                )
-                log_alltoall_perf(
-                    test_case,
-                    "alltoall_combine",
-                    result.combine_latency_ms,
-                    framework,
-                    version,
-                    device_name,
-                    output_file,
+                    test_case, "alltoall_combine", result.combine_latency_ms,
+                    framework, version, device_name, kernel_source, output_file,
                 )
                 if result.combine_low_precision_latency_ms > 0:
                     log_alltoall_perf(
-                        test_case,
-                        "alltoall_combine_low_precision",
+                        test_case, "alltoall_combine_low_precision",
                         result.combine_low_precision_latency_ms,
-                        framework,
-                        version,
-                        device_name,
-                        output_file,
+                        framework, version, device_name, kernel_source, output_file,
                     )
 
         except Exception as e:
             if rank == 0:
+                import traceback
                 print(f"  ERROR: {e}")
+                traceback.print_exc()
 
     if rank == 0:
         print(f"\n{'=' * 70}")
@@ -810,15 +971,21 @@ def parse_args():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="WideEP NVLinkTwoSided All-to-All Communication Benchmark",
+        description="TensorRT-LLM MoE NVLink All-to-All Communication Benchmark",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--output",
-        "-o",
+        "--kernel-source",
         type=str,
-        default="wideep_alltoall_perf.txt",
-        help="Output file path for performance results (default: wideep_alltoall_perf.txt)",
+        default=KERNEL_SOURCE_TWO_SIDED,
+        choices=VALID_KERNEL_SOURCES,
+        help=f"Communication strategy (default: {KERNEL_SOURCE_TWO_SIDED})",
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=str,
+        default="trtllm_alltoall_perf.txt",
+        help="Output file path for performance results (default: trtllm_alltoall_perf.txt)",
     )
     parser.add_argument(
         "--warmup",
@@ -842,17 +1009,18 @@ def main():
 
     if world_size < 2:
         print("ERROR: This benchmark requires at least 2 GPUs.")
-        print("Usage: srun --ntasks N --mpi=pmix python collect_trtllm_alltoall.py")
+        print("Usage: srun --ntasks N --mpi=pmix python collect_trtllm_alltoall.py --kernel-source ...")
         return
 
     if rank == 0:
-        print(f"Running with {world_size} GPUs")
+        print(f"Running {args.kernel_source} with {world_size} GPUs")
 
     try:
         run_benchmark(
             rank,
             world_size,
             device,
+            kernel_source=args.kernel_source,
             output_file=args.output,
             num_warmup=args.warmup,
             num_iterations=args.iterations,
