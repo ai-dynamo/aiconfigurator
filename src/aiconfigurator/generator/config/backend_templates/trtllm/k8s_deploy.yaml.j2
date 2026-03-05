@@ -110,7 +110,7 @@ readinessProbe:
               {% if cli_args_list %}
               args=(
                 {%- for arg in cli_args_list %}
-                "{{ arg }}"
+                {{ arg | tojson }}
                 {%- endfor %}
                 --extra-engine-args "{{ engine_path }}"
               )

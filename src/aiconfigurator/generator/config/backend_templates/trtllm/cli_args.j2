@@ -20,8 +20,8 @@
   {%- set _ = args.append('--pipeline-parallel-size ' + pipeline_parallel_size|string) -%}
 {%- endif -%}
 
-{%- if expert_parallel_size is defined and expert_parallel_size > 0 -%}
-  {%- set _ = args.append('--expert-parallel-size ' + expert_parallel_size|string) -%}
+{%- if moe_expert_parallel_size is defined and moe_expert_parallel_size is not none and moe_expert_parallel_size > 0 -%}
+  {%- set _ = args.append('--expert-parallel-size ' + moe_expert_parallel_size|string) -%}
 {%- endif -%}
 
 {%- if enable_attention_dp is defined and enable_attention_dp -%}
