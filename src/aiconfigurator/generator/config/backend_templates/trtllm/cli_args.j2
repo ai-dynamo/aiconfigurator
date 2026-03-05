@@ -1,0 +1,92 @@
+{%- set args = [] -%}
+{%- set override_dict = {} -%}
+
+{#- Model configuration -#}
+{%- if ServiceConfig.model_path -%}
+  {%- set _ = args.append('--model-path "' + ServiceConfig.model_path + '"') -%}
+{%- endif -%}
+
+{%- if ServiceConfig.served_model_name -%}
+  {%- set _ = args.append('--served-model-name "' + ServiceConfig.served_model_name + '"') -%}
+{%- endif -%}
+
+{#- Parallelism configuration - only include if defined and > 0 -#}
+{%- if tensor_parallel_size is defined and tensor_parallel_size > 0 -%}
+  {%- set _ = args.append('--tensor-parallel-size ' + tensor_parallel_size|string) -%}
+{%- endif -%}
+
+{%- if pipeline_parallel_size is defined and pipeline_parallel_size > 0 -%}
+  {%- set _ = args.append('--pipeline-parallel-size ' + pipeline_parallel_size|string) -%}
+{%- endif -%}
+
+{%- if expert_parallel_size is defined and expert_parallel_size > 0 -%}
+  {%- set _ = args.append('--expert-parallel-size ' + expert_parallel_size|string) -%}
+{%- endif -%}
+
+{%- if enable_attention_dp is defined and enable_attention_dp -%}
+  {%- set _ = args.append('--enable-attention-dp') -%}
+{%- endif -%}
+
+{#- Resource configuration - max_batch_size and max_num_tokens go to build_config -#}
+{%- if max_batch_size is defined or max_num_tokens is defined or max_seq_len is defined -%}
+  {%- set _ = override_dict.update({'build_config': {}}) -%}
+  {%- if max_batch_size is defined -%}
+    {%- set _ = override_dict['build_config'].update({'max_batch_size': max_batch_size}) -%}
+  {%- endif -%}
+  {%- if max_num_tokens is defined -%}
+    {%- set _ = override_dict['build_config'].update({'max_num_tokens': max_num_tokens}) -%}
+  {%- endif -%}
+  {%- if max_seq_len is defined -%}
+    {%- set _ = override_dict['build_config'].update({'max_seq_len': max_seq_len}) -%}
+  {%- endif -%}
+{%- endif -%}
+
+{#- KV Cache configuration -#}
+{%- if tokens_per_block is defined or (disable_prefix_cache is defined) or kv_cache_dtype is defined -%}
+  {%- set _ = override_dict.update({'kv_cache_config': {}}) -%}
+  {%- if tokens_per_block is defined -%}
+    {%- set _ = override_dict['kv_cache_config'].update({'tokens_per_block': tokens_per_block}) -%}
+  {%- endif -%}
+  {%- if disable_prefix_cache is defined -%}
+    {#- disable_prefix_cache maps to enable_block_reuse (inverted) -#}
+    {%- set _ = override_dict['kv_cache_config'].update({'enable_block_reuse': not disable_prefix_cache}) -%}
+  {%- endif -%}
+  {%- if kv_cache_dtype is defined -%}
+    {%- set _ = override_dict['kv_cache_config'].update({'dtype': kv_cache_dtype}) -%}
+  {%- endif -%}
+{%- endif -%}
+
+{#- Cache transceiver configuration -#}
+{%- if cache_transceiver_max_tokens_in_buffer is defined -%}
+  {%- set _ = override_dict.update({'cache_transceiver_config': {'max_tokens_in_buffer': cache_transceiver_max_tokens_in_buffer}}) -%}
+{%- endif -%}
+
+{#- Direct CLI args -#}
+{%- if kv_cache_free_gpu_memory_fraction is defined -%}
+  {%- set _ = args.append('--free-gpu-memory-fraction ' + kv_cache_free_gpu_memory_fraction|string) -%}
+{%- endif -%}
+
+{%- if disable_overlap_scheduler is defined and disable_overlap_scheduler -%}
+  {%- set _ = args.append('--disable-overlap-scheduler') -%}
+{%- endif -%}
+
+{%- if skip_tokenizer_init is defined and skip_tokenizer_init -%}
+  {%- set _ = args.append('--skip-tokenizer-init') -%}
+{%- endif -%}
+
+{%- if trust_remote_code is defined and trust_remote_code -%}
+  {%- set _ = args.append('--trust-remote-code') -%}
+{%- endif -%}
+
+{%- if enable_chunked_prefill is defined and enable_chunked_prefill -%}
+  {%- set _ = args.append('--enable-chunked-prefill') -%}
+{%- endif -%}
+
+{#- Add override-engine-args if we have any overrides -#}
+{%- if override_dict -%}
+  {%- set json_str = override_dict|tojson|replace('"', '\\"') -%}
+  {%- set _ = args.append('--override-engine-args "' + json_str + '"') -%}
+{%- endif -%}
+
+{#- Output the args -#}
+{{ args | join(' ') }}
