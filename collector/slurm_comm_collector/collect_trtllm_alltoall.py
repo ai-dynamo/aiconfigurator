@@ -652,6 +652,7 @@ def benchmark_nvlink_one_sided(
     test_case: AlltoallTestCase,
     mapping,
     device: torch.device,
+    max_num_tokens: int,
     num_warmup: int = 3,
     num_iterations: int = 10,
 ) -> AlltoallBenchmarkResult:
@@ -666,6 +667,8 @@ def benchmark_nvlink_one_sided(
         test_case: Test case configuration
         mapping: TensorRT-LLM Mapping
         device: CUDA device
+        max_num_tokens: Maximum number of tokens across all test cases.
+            MoeAlltoAll workspace is a process-level singleton sized by this value.
         num_warmup: Number of warmup iterations
         num_iterations: Number of benchmark iterations
 
@@ -680,12 +683,12 @@ def benchmark_nvlink_one_sided(
 
     # Calculate workspace size and create MoeAlltoAll (for workspace initialization)
     workspace_size = MoeAlltoAll.calculate_required_workspace_size(
-        test_case.ep_size, test_case.top_k, test_case.num_tokens,
+        test_case.ep_size, test_case.top_k, max_num_tokens,
         test_case.hidden_size, act_dtype,
     )
     moe_a2a = MoeAlltoAll(
         mapping=mapping,
-        max_num_tokens=test_case.num_tokens,
+        max_num_tokens=max_num_tokens,
         top_k=test_case.top_k,
         num_experts=num_slots,
         workspace_size_per_rank=workspace_size,
@@ -882,11 +885,8 @@ def run_benchmark(
         print(f"Output: {output_file}")
         print(f"{'=' * 70}\n")
 
-    # Select benchmark function based on kernel source
-    bench_fn = (
-        benchmark_nvlink_two_sided if kernel_source == KERNEL_SOURCE_TWO_SIDED
-        else benchmark_nvlink_one_sided
-    )
+    # For NVLinkOneSided, workspace is a process-level singleton sized by max_num_tokens
+    max_num_tokens = max(tc.num_tokens for tc in test_cases) if test_cases else 0
 
     # Run benchmarks
     for idx, test_case in enumerate(test_cases):
@@ -898,10 +898,16 @@ def run_benchmark(
             dist.barrier()
 
         try:
-            result = bench_fn(
-                test_case, mapping, device,
-                num_warmup=num_warmup, num_iterations=num_iterations,
-            )
+            if kernel_source == KERNEL_SOURCE_TWO_SIDED:
+                result = benchmark_nvlink_two_sided(
+                    test_case, mapping, device,
+                    num_warmup=num_warmup, num_iterations=num_iterations,
+                )
+            else:
+                result = benchmark_nvlink_one_sided(
+                    test_case, mapping, device, max_num_tokens,
+                    num_warmup=num_warmup, num_iterations=num_iterations,
+                )
 
             # Log results (only rank 0)
             if rank == 0:
