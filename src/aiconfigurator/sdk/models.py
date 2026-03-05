@@ -1219,7 +1219,6 @@ class DeepSeekModel(BaseModel):
                     attention_dp_size,
                     True,
                     quant_mode=moe_quant_mode,
-                    reduce_results=False,
                 )
             ]
         )
@@ -1257,16 +1256,9 @@ class DeepSeekModel(BaseModel):
                     attention_dp_size,
                     False,
                     quant_mode=moe_quant_mode,
-                    reduce_results=False,
                 )
             ]
         )
-
-        # TP AllReduce after MoE (context): only in pure TP mode
-        if attention_dp_size == 1 and tp_size > 1:
-            self.context_ops.append(
-                ops.CustomAllReduce("context_moe_ar", self._num_layers, h, tp_size)
-            )
 
         self.context_ops.extend(
             [
@@ -1390,7 +1382,6 @@ class DeepSeekModel(BaseModel):
                 attention_dp_size,
                 True,
                 quant_mode=moe_quant_mode,
-                reduce_results=False,
             ),
             ops.MoE(
                 "generation_moe",
@@ -1416,23 +1407,12 @@ class DeepSeekModel(BaseModel):
                 attention_dp_size,
                 False,
                 quant_mode=moe_quant_mode,
-                reduce_results=False,
             ),
         ]
 
         self.generation_ops.append(
             ops.OverlapOp("generation_moe_overlap", group_a=gen_routed_ops, group_b=gen_shared_ops)
         )
-
-        # TP AllReduce after MoE: reduces shared + routed output across TP ranks.
-        # Only needed in pure TP mode (no attention DP). When attention DP is used,
-        # the AlltoAll combine or ReduceScatter already handles the reduction.
-        if attention_dp_size == 1 and tp_size > 1:
-            self.generation_ops.append(
-                ops.CustomAllReduce(
-                    "generation_moe_ar", self._num_layers * self._mtp_scale_factor, h, tp_size
-                )
-            )
 
         self.generation_ops.extend(
             [

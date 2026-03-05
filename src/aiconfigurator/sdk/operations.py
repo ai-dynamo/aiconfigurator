@@ -405,7 +405,6 @@ class TrtLLMWideEPMoEDispatch(Operation):
         comm_latency = 0.0
 
         if self._pre_dispatch:
-            # Pre-dispatch phase: prepare + dispatch
             prepare_result = database.query_trtllm_alltoall(
                 op_name="alltoall_prepare",
                 num_tokens=num_tokens,
@@ -430,7 +429,6 @@ class TrtLLMWideEPMoEDispatch(Operation):
             )
             comm_latency = float(prepare_result) + float(dispatch_result)
         else:
-            # Post-dispatch phase: combine or combine_low_precision
             combine_op = "alltoall_combine_low_precision" if self._use_low_precision_combine else "alltoall_combine"
             combine_result = database.query_trtllm_alltoall(
                 op_name=combine_op,
@@ -583,9 +581,6 @@ class MoEDispatch(Operation):
             if _sm_version == 100:
                 logger.debug("MoEDispatch: In trtllm SM100 execution path")
 
-                # AlltoAll selection (aligned with TRT-LLM select_alltoall_method_type):
-                #   CutlassFusedMoE / TRTLLMGenFusedMoE: NVLinkOneSided when dp>1, moe_tp==1, supports_mnnvl
-                #   DeepGemmFusedMoE / CuteDslFusedMoE: AlltoAll not supported (NotEnabled)
                 _alltoall_backends = {None, "CUTLASS", "TRTLLM"}
                 backend_supports_alltoall = (
                     self._moe_backend is None or self._moe_backend.upper() in _alltoall_backends
@@ -614,10 +609,7 @@ class MoEDispatch(Operation):
 
                 if self._pre_dispatch:
                     if enable_alltoall:
-                        # NVLinkOneSided (CutlassFusedMoE/TRTLLMGen) has no prepare phase.
-                        # In TRT-LLM, prepare_dispatch is only called for NVLinkTwoSided
-                        # (configurable_moe.py: "Only NVLINK two-sided needs prepare_dispatch").
-                        # WideEP uses TrtLLMWideEPMoEDispatch, not this class.
+                        _effective_qm = quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block
                         dispatch_result = database.query_trtllm_alltoall(
                             op_name="alltoall_dispatch",
                             num_tokens=num_tokens,
@@ -625,7 +617,7 @@ class MoEDispatch(Operation):
                             topk=self._topk,
                             num_experts=self._num_experts,
                             moe_ep_size=self._moe_ep_size,
-                            quant_mode=quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block,
+                            quant_mode=_effective_qm,
                             moe_backend=self._moe_backend,
                         )
                         comm_latency = float(dispatch_result)
@@ -636,15 +628,21 @@ class MoEDispatch(Operation):
                         )
                     elif self._attention_tp_size > 1:
                         if self._reduce_results:
-                            comm_latency = database.query_custom_allreduce(
-                                common.CommQuantMode.half, self.num_gpus, volume
-                            )
+                            if _num_gpus_per_node == 72 and self.num_gpus > 4:
+                                comm_latency = database.query_nccl(
+                                    common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
+                                )
+                            else:
+                                comm_latency = database.query_custom_allreduce(
+                                    common.CommQuantMode.half, self.num_gpus, volume
+                                )
                         else:
                             comm_latency = 0
                     else:
                         comm_latency = 0
                 else:
                     if enable_alltoall:
+                        _effective_qm = quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block
                         combine_result = database.query_trtllm_alltoall(
                             op_name="alltoall_combine",
                             num_tokens=num_tokens,
@@ -652,7 +650,7 @@ class MoEDispatch(Operation):
                             topk=self._topk,
                             num_experts=self._num_experts,
                             moe_ep_size=self._moe_ep_size,
-                            quant_mode=quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block,
+                            quant_mode=_effective_qm,
                             moe_backend=self._moe_backend,
                         )
                         comm_latency = float(combine_result)
@@ -665,9 +663,14 @@ class MoEDispatch(Operation):
                         )
                     elif self._attention_tp_size > 1:
                         if self._reduce_results:
-                            comm_latency = database.query_custom_allreduce(
-                                common.CommQuantMode.half, self.num_gpus, volume
-                            )
+                            if _num_gpus_per_node == 72 and self.num_gpus > 4:
+                                comm_latency = database.query_nccl(
+                                    common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
+                                )
+                            else:
+                                comm_latency = database.query_custom_allreduce(
+                                    common.CommQuantMode.half, self.num_gpus, volume
+                                )
                         else:
                             comm_latency = 0
                     else:

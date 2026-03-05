@@ -2488,18 +2488,12 @@ class PerfDatabase:
         is_inter_node = moe_ep_size > num_gpus_per_node
         is_wideep = moe_backend is not None and moe_backend.upper() == "WIDEEP"
 
-        # We approximate supports_mnnvl() as sm_version >= 100 (GB200 NVLink fabric).
         supports_mnnvl = sm_version >= 100
 
         if is_wideep:
-            # WideEPMoE path (fused_moe_wide_ep.py):
-            #   supports_mnnvl -> NVLinkTwoSided (MnnvlMoe)
-            #   else -> try DeepEP (requires env var TRTLLM_CAN_USE_DEEP_EP=1 in real TRT-LLM)
-            #   else -> NotEnabled
             if supports_mnnvl:
                 preferred = "MnnvlMoe"
             else:
-                # DeepEP feasibility: ep_size > 1 and topk in supported range
                 deepep_feasible = moe_ep_size > 1 and topk <= 8
                 if deepep_feasible and is_inter_node:
                     preferred = "DeepEP"
@@ -2508,9 +2502,6 @@ class PerfDatabase:
                 else:
                     preferred = "NotEnabled"
         else:
-            # CutlassFusedMoE / TRTLLMGenFusedMoE path (fused_moe_cutlass.py):
-            #   supports_mnnvl -> NVLinkOneSided
-            #   else -> NotEnabled (no DeepEP support for these backends)
             if supports_mnnvl:
                 preferred = "NVLinkOneSided"
             else:
@@ -2519,7 +2510,6 @@ class PerfDatabase:
         if preferred == "NotEnabled":
             return preferred
 
-        # Check if preferred kernel is available in data, otherwise fallback
         if self._trtllm_alltoall_data:
             available_kernels = list(self._trtllm_alltoall_data.keys())
             if preferred in available_kernels:
