@@ -8,8 +8,6 @@ No version forks exist yet. When vLLM API changes require a fork,
 add a ``versions`` tuple following the trtllm registry pattern.
 """
 
-import torch
-
 from collector.registry_types import OpEntry
 
 REGISTRY: list[OpEntry] = [
@@ -50,6 +48,3 @@ REGISTRY: list[OpEntry] = [
         run_func="run_attention_torch",
     ),
 ]
-
-if torch.xpu.is_available():
-    REGISTRY = [entry for entry in REGISTRY if "mla" not in entry.op.lower()]

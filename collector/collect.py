@@ -442,7 +442,14 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None, smoke: bool =
         logger.exception("vLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
         return
 
-    collections = build_collections(REGISTRY, "vllm", version, ops, logger=logger)
+    if torch.xpu.is_available():
+        op_registry = [entry for entry in REGISTRY if "mla" not in entry.op.lower()]
+    elif torch.cuda.is_available():
+        op_registry = REGISTRY
+    else:
+        raise RuntimeError("No supported hardware detected. Neither CUDA nor XPU is available.")
+
+    collections = build_collections(op_registry, "vllm", version, ops, logger=logger)
     all_errors = collect_ops(num_processes, collections, version, smoke=smoke)
 
     generate_collection_summary(all_errors, "vllm", version)
