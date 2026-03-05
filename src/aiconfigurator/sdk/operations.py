@@ -614,16 +614,10 @@ class MoEDispatch(Operation):
 
                 if self._pre_dispatch:
                     if enable_alltoall:
-                        prepare_result = database.query_trtllm_alltoall(
-                            op_name="alltoall_prepare",
-                            num_tokens=num_tokens,
-                            hidden_size=self._hidden_size,
-                            topk=self._topk,
-                            num_experts=self._num_experts,
-                            moe_ep_size=self._moe_ep_size,
-                            quant_mode=quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block,
-                            moe_backend=self._moe_backend,
-                        )
+                        # NVLinkOneSided (CutlassFusedMoE/TRTLLMGen) has no prepare phase.
+                        # In TRT-LLM, prepare_dispatch is only called for NVLinkTwoSided
+                        # (configurable_moe.py: "Only NVLINK two-sided needs prepare_dispatch").
+                        # WideEP uses TrtLLMWideEPMoEDispatch, not this class.
                         dispatch_result = database.query_trtllm_alltoall(
                             op_name="alltoall_dispatch",
                             num_tokens=num_tokens,
@@ -634,7 +628,7 @@ class MoEDispatch(Operation):
                             quant_mode=quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block,
                             moe_backend=self._moe_backend,
                         )
-                        comm_latency = float(prepare_result) + float(dispatch_result)
+                        comm_latency = float(dispatch_result)
                     elif self._attention_dp_size > 1:
                         all_gather_volume = (dispatch_x_volume + dispatch_sf_volume) * self._attention_dp_size
                         comm_latency = database.query_nccl(
