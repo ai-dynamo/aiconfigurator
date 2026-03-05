@@ -620,13 +620,17 @@ def build_default_task_configs(
                 if backend_version not in sys_backends.get(backend_name, []):
                     logger.warning(
                         "Skipping backend %s: version %s not available for system %s.",
-                        backend_name, backend_version, system,
+                        backend_name,
+                        backend_version,
+                        system,
                     )
                     continue
                 if decode_system != system and backend_version not in decode_backends.get(backend_name, []):
                     logger.warning(
                         "Skipping backend %s: version %s not available for decode system %s.",
-                        backend_name, backend_version, decode_system,
+                        backend_name,
+                        backend_version,
+                        decode_system,
                     )
                     continue
             available.append(backend_name)
