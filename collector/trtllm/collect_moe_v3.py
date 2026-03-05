@@ -129,7 +129,7 @@ def get_moe_test_cases():
 
             # fp8_block requires hidden_size divisible by block group_size (128)
             if moe_type == "fp8_block" and (
-                common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
+                common_moe_testcase.hidden_size % 128 != 0 or (inter_s // moe_tp) % 128 != 0
             ):
                 continue
 
@@ -477,6 +477,8 @@ def run_moe_torch(
             # Log if CUDA graph capture failed (for debugging)
             if not results["used_cuda_graph"] and aic_debug == 1:
                 print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
+
+        print(f"moe latency: for {num_tokens} tokens: {latency}")
 
         if min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen

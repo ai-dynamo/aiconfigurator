@@ -57,7 +57,8 @@ def get_moe_test_cases():
         for moe_type in moe_list:
             # fp8_block requires hidden_size divisible by block group_size (128)
             if moe_type == "fp8_block" and (
-                common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
+                common_moe_testcase.hidden_size % 128 != 0
+                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
             ):
                 continue
 
@@ -181,7 +182,7 @@ def run_moe_torch(
         hidden_states = torch.randn([num_tokens, hidden_size]).half().to(device)
 
         # Generate topk_weights and topk_ids
-        num_iter = 10 if distributed == "power_law" else 1
+        num_iter = 5 if distributed == "power_law" else 1
         if distributed == "power_law":
             topk_weights_list = []
             topk_ids_list = []
@@ -246,7 +247,7 @@ def run_moe_torch(
                     expert_map=expert_map,
                 )
 
-        def run_iterations(use_cuda_graph=False):
+        def run_iterations():
             # Use benchmark_with_power context manager
             with benchmark_with_power(
                 device=device,
@@ -254,13 +255,14 @@ def run_moe_torch(
                 num_warmups=num_warmups,
                 num_runs=num_runs,
                 repeat_n=1,
+                allow_graph_fail=True,
             ) as results:
                 pass
 
             return results["latency_ms"] / num_iter, results["power_stats"]
 
         try:
-            latency, power_stats = run_iterations(use_cuda_graph=False)
+            latency, power_stats = run_iterations()
         except torch.OutOfMemoryError:
             # If OOM, check if we had at least one successful run.
             if num_tokens_idx > 0:
