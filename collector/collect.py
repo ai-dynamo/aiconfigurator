@@ -54,7 +54,7 @@ from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, se
 logger = None
 
 
-def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes, smoke=False):
+def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes):
     """Safely collect module with comprehensive error handling"""
     full_name = f"{module_name}.{test_type}"
     logger.info(f"Starting collection: {full_name}")
@@ -63,12 +63,6 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         # Get test cases
         test_cases = get_test_cases_func()
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
-
-        # Smoke test: randomly sample a small subset to verify the collector works
-        if smoke:
-            sample_size = min(4, len(test_cases))
-            test_cases = random.sample(test_cases, sample_size)
-            logger.info(f"Smoke mode: sampled {sample_size} test cases for {full_name}")
 
         # Run collection
         errors = parallel_run(test_cases, run_func, num_processes, full_name)
@@ -339,7 +333,9 @@ def collect_ops(
     num_processes: int,
     collections: list[dict],
     runtime_version: str | None = None,
-    smoke: bool = False,
+    limit: int | None = None,
+    shuffle: bool = False,
+    shuffle_seed: int = 42,
 ) -> list[dict]:
     """Run collection for a list of resolved collection entries.
 
@@ -347,8 +343,8 @@ def collect_ops(
     Version resolution and op filtering are handled upstream by
     version_resolver.build_collections(). If runtime_version is provided,
     per-module __compat__ is validated and incompatible ops fail explicitly.
-    If smoke is True, each op randomly samples 4 test cases for a quick
-    sanity check.
+    If limit is provided, the number of test cases is limited to the limit.
+    If shuffle is True, the test cases are shuffled with the given seed.
     """
 
     class CompatibilityError(RuntimeError):
@@ -380,8 +376,18 @@ def collect_ops(
 
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
+
+            def get_func_with_limit(get_func=get_func):
+                cases = get_func()
+                if shuffle:
+                    rng = random.Random(shuffle_seed)
+                    rng.shuffle(cases)
+                if limit is not None:
+                    cases = cases[:limit]
+                return cases
+
             errors = collect_module_safe(
-                collection["name"], collection["type"], get_func, run_func, num_processes, smoke=smoke
+                collection["name"], collection["type"], get_func_with_limit, run_func, num_processes
             )
             all_errors.extend(errors)
 
@@ -399,7 +405,7 @@ def collect_ops(
     return all_errors
 
 
-def collect_sglang(num_processes: int, ops: list[str] | None = None, smoke: bool = False):
+def collect_sglang(num_processes: int, ops: list[str] | None = None, limit: int | None = None, shuffle: bool = False):
     """Collect performance data for SGLang with enhanced error tracking"""
     from collector.sglang.registry import REGISTRY
     from collector.version_resolver import build_collections
@@ -416,12 +422,12 @@ def collect_sglang(num_processes: int, ops: list[str] | None = None, smoke: bool
         return
 
     collections = build_collections(REGISTRY, "sglang", version, ops, logger=logger)
-    all_errors = collect_ops(num_processes, collections, version, smoke=smoke)
+    all_errors = collect_ops(num_processes, collections, version, limit=limit, shuffle=shuffle)
 
     generate_collection_summary(all_errors, "sglang", version)
 
 
-def collect_vllm(num_processes: int, ops: list[str] | None = None, smoke: bool = False):
+def collect_vllm(num_processes: int, ops: list[str] | None = None, limit: int | None = None, shuffle: bool = False):
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
     from collector.vllm.registry import REGISTRY
@@ -435,12 +441,12 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None, smoke: bool =
         return
 
     collections = build_collections(REGISTRY, "vllm", version, ops, logger=logger)
-    all_errors = collect_ops(num_processes, collections, version, smoke=smoke)
+    all_errors = collect_ops(num_processes, collections, version, limit=limit, shuffle=shuffle)
 
     generate_collection_summary(all_errors, "vllm", version)
 
 
-def collect_trtllm(num_processes: int, ops: list[str] | None = None, smoke: bool = False):
+def collect_trtllm(num_processes: int, ops: list[str] | None = None, limit: int | None = None, shuffle: bool = False):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
     from collector.trtllm.registry import REGISTRY
     from collector.version_resolver import build_collections
@@ -463,7 +469,7 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None, smoke: bool
         return
 
     collections = build_collections(REGISTRY, "trtllm", version, ops, logger=logger)
-    all_errors = collect_ops(num_processes, collections, version, smoke=smoke)
+    all_errors = collect_ops(num_processes, collections, version, limit=limit, shuffle=shuffle)
 
     generate_collection_summary(all_errors, "trtllm", version)
 
@@ -558,6 +564,17 @@ def main():
         default=1.0,
         help="Minimum duration for kernel runs when power measurement is enabled (default: 1.0s)",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit the number of test cases per collection (useful for debugging)",
+    )
+    parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Shuffle test cases before applying --limit (uses seed 42 for reproducibility)",
+    )
     args = parser.parse_args()
     ops = args.ops
 
@@ -585,15 +602,19 @@ def main():
 
     mp.set_start_method("spawn")
 
+    shuffle = args.shuffle
+    limit = args.limit
     if args.smoke:
+        shuffle = True
+        limit = 4
         logger.info("Smoke test mode enabled — sampling 4 random test cases per op")
 
     if args.backend == "trtllm":
-        collect_trtllm(num_processes, ops, smoke=args.smoke)
+        collect_trtllm(num_processes, ops, limit=limit, shuffle=shuffle)
     elif args.backend == "sglang":
-        collect_sglang(num_processes, ops, smoke=args.smoke)
+        collect_sglang(num_processes, ops, limit=limit, shuffle=shuffle)
     elif args.backend == "vllm":
-        collect_vllm(num_processes, ops, smoke=args.smoke)
+        collect_vllm(num_processes, ops, limit=limit, shuffle=shuffle)
 
 
 if __name__ == "__main__":
