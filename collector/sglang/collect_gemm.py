@@ -40,17 +40,22 @@ os.environ.setdefault("SGLANG_JIT_DEEPGEMM_PRECOMPILE", "0")
 def get_gemm_test_cases():
     test_cases = []
 
-    # fp8_block (DeepGEMM) requires SM90+ for TMA support
     sm_version = get_sm_version()
-    if sm_version < 90:
+    if sm_version < 89:
+        gemm_list = ["float16"]
+    elif sm_version < 90:
         # SM89 (L40S) and earlier don't have TMA - skip fp8_block
         gemm_list = ["float16", "fp8"]
     elif sm_version < 100:
         # Hopper supports fp8_block
+        # fp8_block (DeepGEMM) requires SM90+ for TMA support
         gemm_list = ["fp8_block", "float16", "fp8"]
-    else:
-        # Blackwell supports nvfp4
+    elif sm_version < 110:
+        # SM100/SM103 (B100/B200 datacenter Blackwell): fp8_block + nvfp4
         gemm_list = ["fp8_block", "float16", "fp8", "nvfp4"]
+    else:
+        # SM120+ (RTX PRO 6000 Blackwell workstation): no DeepGEMM recipe for fp8_block
+        gemm_list = ["float16", "fp8", "nvfp4"]
 
     for gemm_common_testcase in get_gemm_common_test_cases():
         x = gemm_common_testcase.x

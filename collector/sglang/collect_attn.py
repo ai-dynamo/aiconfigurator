@@ -79,6 +79,7 @@ class MockServerArgs:
         self.kv_cache_dtype = "auto"
         self.speculative_eagle_topk = 0
         self.speculative_num_draft_tokens = 0
+        self.speculative_num_steps = None
         self.page_size = page_size
         self.multi_item_scoring_delimiter = None
         self.dllm_algorithm = None
@@ -86,6 +87,11 @@ class MockServerArgs:
         self.enable_piecewise_cuda_graph = False
         self.model_path = None
         self.revision = None
+        # Required by TritonAttnBackend
+        self.triton_attention_num_kv_splits = 8
+        self.triton_attention_split_tile_size = None
+        self.disable_cuda_graph = False
+        self.chunked_prefill_size = -1
 
 
 class MockModelRunner:
@@ -118,6 +124,10 @@ class MockModelRunner:
         self.is_hybrid_swa = self.model_config.is_hybrid_swa
         self.server_args.kv_cache_dtype = kv_cache_dtype
         self.server_args.page_size = page_size
+        # Required by TritonAttnBackend
+        self.gpu_id = 0
+        self.hybrid_gdn_config = None
+        self.kimi_linear_config = None
 
 
 def create_req_to_token_pool(batch_size, total_len, page_size, torch_device, device_str):
@@ -319,17 +329,27 @@ def run_attention_torch(
     model_runner.token_to_kv_pool = kv_pool
 
     sm_version = get_sm_version()
-    if sm_version >= 100:
+    if sm_version >= 110:
+        # SM120+ (workstation Blackwell): TRTLLM prefill (TllmGenFmhaRunner) is unsupported;
+        # FA3 is not compiled for SM120. Use Triton JIT-compiled backend instead.
+        from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
+
+        attn_backend = TritonAttnBackend(model_runner)
+        attn_backend_name = "triton"
+    elif sm_version >= 100:
         try:
             from sglang.srt.layers.attention.trtllm_mha_backend import (
                 TRTLLMHAAttnBackend,
             )
 
             attn_backend = TRTLLMHAAttnBackend(model_runner)
+            attn_backend_name = "trtllm_mha"
         except ImportError:
             attn_backend = FlashAttentionBackend(model_runner)
+            attn_backend_name = "flash_attention"
     else:
         attn_backend = FlashAttentionBackend(model_runner)
+        attn_backend_name = "flash_attention"
 
     model_runner.attn_backend = attn_backend
 
@@ -504,7 +524,7 @@ def run_attention_torch(
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name=op_name,
-        kernel_source="trtllm_mha" if get_sm_version() >= 100 else "flash_attention",
+        kernel_source=attn_backend_name,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )
