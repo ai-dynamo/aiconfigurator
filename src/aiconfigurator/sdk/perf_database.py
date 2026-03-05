@@ -5127,6 +5127,7 @@ class PerfDatabase:
                                                     window_size
                                                 ][n][b][s] = float(sol)
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_moe_compute(
         self,
         num_tokens: int,
@@ -5140,7 +5141,8 @@ class PerfDatabase:
         quant_mode: common.MoEQuantMode,
         workload_distribution: str,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+        is_gated: bool = True,
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query WideEP MoE compute latency (pure computation, excluding All2All communication).
 
@@ -5165,13 +5167,124 @@ class PerfDatabase:
             quant_mode: MoE quantization mode
             workload_distribution: Workload distribution pattern (e.g., "power_law_1.01" or "power_law_1.01_eplb")
             database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+            is_gated: Whether MoE uses gated activation (SwiGLU=True, Relu2=False).
+                      Affects the number of GEMMs in SOL computation (3 for gated, 2 for non-gated).
 
         Returns:
             PerformanceResult: Latency in ms, energy accessible via .energy attribute.
+            For SOL_FULL mode: tuple of (sol_time, sol_math, sol_mem).
         """
+
+        num_gemms = 3 if is_gated else 2
+
+        def get_sol(
+            num_tokens: int,
+            hidden_size: int,
+            inter_size: int,
+            topk: int,
+            num_experts: int,
+            num_slots: int,
+            moe_tp_size: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            workload_distribution: str,
+        ) -> tuple[float, float, float]:
+            """
+            Get the SOL (Speed of Light) time using Roofline model.
+
+            Uses num_slots instead of num_experts for weight memory calculation,
+            since WideEP EPLB redundant mode may replicate experts across slots.
+            """
+            total_tokens = num_tokens * topk
+            ops = total_tokens * hidden_size * inter_size * num_gemms * 2 // moe_ep_size // moe_tp_size
+            mem_bytes = quant_mode.value.memory * (
+                total_tokens // moe_ep_size * hidden_size * 2  # input+output
+                + total_tokens // moe_ep_size * inter_size * num_gemms // moe_tp_size  # intermediate activations
+                + hidden_size
+                * inter_size
+                * num_gemms
+                // moe_tp_size
+                * min(num_slots // moe_ep_size, total_tokens // moe_ep_size)  # weights (use num_slots)
+            )
+            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+
+        def get_empirical(
+            num_tokens: int,
+            hidden_size: int,
+            inter_size: int,
+            topk: int,
+            num_experts: int,
+            num_slots: int,
+            moe_tp_size: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            workload_distribution: str,
+        ) -> float:
+            """
+            Get the empirical estimation: SOL / scale_factor.
+            """
+            latency = get_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )[0]
+            scale_factor = 0.4
+            return latency / scale_factor
+
         if database_mode is None:
             database_mode = self._default_database_mode
 
+        if database_mode == common.DatabaseMode.SOL:
+            sol_latency = get_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )[0]
+            return PerformanceResult(sol_latency, energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            emp_latency = get_empirical(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )
+            return PerformanceResult(emp_latency, energy=0.0)
         # Automatically select MoE kernel based on GPU architecture and quant mode
         kernel_source = self._select_moe_kernel(quant_mode)
         logger.debug(f"query_wideep_moe_compute: auto-selected kernel_source='{kernel_source}'")
@@ -5185,7 +5298,6 @@ class PerfDatabase:
             if workload_distribution in available_distributions:
                 used_distribution = workload_distribution
             else:
-                # Fallback: try to find a similar distribution or use the first available
                 used_distribution = available_distributions[0] if available_distributions else None
                 if used_distribution is None:
                     raise KeyError(f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}")
@@ -5233,6 +5345,7 @@ class PerfDatabase:
             ),
         )
 
+    @functools.lru_cache(maxsize=32768)
     def query_trtllm_alltoall(
         self,
         op_name: str,
@@ -5245,7 +5358,7 @@ class PerfDatabase:
         moe_backend: Optional[str] = None,
         node_num: int | None = None,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query TensorRT-LLM AlltoAll communication latency.
 
@@ -5269,12 +5382,87 @@ class PerfDatabase:
                 "wideep" -> NVLinkTwoSided (MnnvlMoe);
                 "CUTLASS"/"TRTLLM"/None -> NVLinkOneSided;
                 "DEEPGEMM"/"CUTE_DSL" -> NotEnabled.
-            node_num: Number of nodes. If None, computed as moe_ep_size // 4
-            database_mode: Database mode
+            node_num: Number of nodes. If None, computed as moe_ep_size // 4 (assuming 4 GPUs per node)
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
 
         Returns:
             PerformanceResult: Latency in ms, energy accessible via .energy attribute.
+            For SOL_FULL mode: tuple of (sol_time, sol_comm, sol_overhead).
+
+        Raises:
+            ValueError: If op_name is not valid
         """
+
+        def get_sol(
+            num_tokens: int,
+            hidden_size: int,
+            topk: int,
+            num_experts: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            node_num: int,
+        ) -> tuple[float, float, float]:
+            """
+            Get the SOL time for All2All communication.
+
+            All2All transfers token data between GPUs:
+            - dispatch: each GPU sends (num_tokens * topk / ep_size) tokens to other GPUs
+            - combine: reverse direction
+            - prepare: lightweight metadata exchange
+
+            The total data transferred per GPU is proportional to
+            num_tokens * topk * hidden_size * (1 - 1/ep_size), since each GPU keeps 1/ep_size locally.
+            """
+            is_inter_node = node_num > 1
+
+            if is_inter_node:
+                bw = self.system_spec["node"]["inter_node_bw"]
+            else:
+                bw = self.system_spec["node"]["intra_node_bw"]
+
+            if op_name == "alltoall_prepare":
+                # Prepare is lightweight metadata exchange, data volume is small
+                data_bytes = num_tokens * topk * 4  # token routing indices, ~4 bytes per entry
+            else:
+                # dispatch/combine: transfer token activations
+                data_bytes = (
+                    num_tokens
+                    * topk
+                    * hidden_size
+                    * quant_mode.value.memory
+                    * (1.0 - 1.0 / moe_ep_size)  # fraction sent to remote GPUs
+                )
+
+            sol_comm = data_bytes / bw * 1000  # ms
+            p2p_latency_ms = self.system_spec["node"]["p2p_latency"] * 1000
+            sol_overhead = p2p_latency_ms
+            sol_time = sol_comm + sol_overhead
+            return sol_time, sol_comm, sol_overhead
+
+        def get_empirical(
+            num_tokens: int,
+            hidden_size: int,
+            topk: int,
+            num_experts: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            node_num: int,
+        ) -> float:
+            """
+            Get the empirical estimation: SOL / scale_factor.
+            """
+            latency = get_sol(
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
+            )[0]
+            scale_factor = 0.5
+            return latency / scale_factor
+
         if database_mode is None:
             database_mode = self._default_database_mode
 
@@ -5290,6 +5478,39 @@ class PerfDatabase:
         valid_op_names = ["alltoall_prepare", "alltoall_dispatch", "alltoall_combine", "alltoall_combine_low_precision"]
         if op_name not in valid_op_names:
             raise ValueError(f"Invalid op_name '{op_name}'. Must be one of {valid_op_names}")
+
+        if database_mode == common.DatabaseMode.SOL:
+            sol_latency = get_sol(
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
+            )[0]
+            return PerformanceResult(sol_latency, energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
+            )
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            emp_latency = get_empirical(
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
+            )
+            return PerformanceResult(emp_latency, energy=0.0)
 
         kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
         logger.debug(f"query_trtllm_alltoall: auto-selected kernel_source='{kernel_source}' (moe_backend={moe_backend})")
