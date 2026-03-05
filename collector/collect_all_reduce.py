@@ -636,6 +636,14 @@ def benchmark_sglang_allreduce(
     measure_power: bool = False,
     power_min_duration: float = 1.0,
 ):
+    class MockServerArgs:
+        def __init__(self):
+            self.enable_symm_mem = False
+
+    from sglang.srt.server_args import set_global_server_args_for_scheduler
+
+    set_global_server_args_for_scheduler(MockServerArgs())
+
     """Benchmark SGLang custom AllReduce implementation"""
     sglang_mods, local_rank = setup_sglang_distributed(world_size, rank, use_slurm)
 
