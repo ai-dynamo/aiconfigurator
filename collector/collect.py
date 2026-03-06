@@ -223,55 +223,6 @@ class ProfilerContext:
         logger.info(f"Full profile saved to: {profile_file}")
 
 
-def sequential_run(tasks, func, module_name="unknown"):
-    """Sequential runner for profiling mode - runs all tasks in main process"""
-    errors = []
-    device = torch.device("cuda:0")
-    torch.cuda.set_device(0)
-
-    with tqdm(total=len(tasks), desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
-        for i, task in enumerate(tasks):
-            # Handle both old format (tuple) and new format (dict)
-            if isinstance(task, dict):
-                task_id = task.get("id", "unknown")
-                task_params = task.get("params", task)
-            else:
-                task_params = task
-                task_id = create_test_case_id(task, func.__name__, module_name)
-
-            try:
-                func(*task_params, device)
-            except Exception as e:
-                error_info = {
-                    "module": module_name,
-                    "device_id": 0,
-                    "task_id": task_id,
-                    "task_params": str(task_params),
-                    "error_type": type(e).__name__,
-                    "error_message": str(e),
-                    "traceback": traceback.format_exc(),
-                    "timestamp": datetime.now().isoformat(),
-                }
-                errors.append(error_info)
-                logger.exception(f"Task {task_id} failed")
-
-            pbar.update(1)
-            if len(errors) > 0:
-                pbar.set_postfix({"errors": len(errors)})
-
-    # Log summary
-    if errors:
-        log_dir = os.environ.get("COLLECTOR_LOG_DIR", "")
-        logger.error(f"{module_name}: Completed with {len(errors)} errors")
-        error_file = f"{log_dir}/errors_{module_name}.json"
-        save_error_report(errors, error_file)
-        logger.error(f"Error details saved to {error_file}")
-    else:
-        logger.info(f"{module_name}: Completed successfully with no errors")
-
-    return errors
-
-
 def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes, resume_options=None):
     """
     Safely collect module with comprehensive error handling
@@ -288,20 +239,13 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
 
         # Run collection
-        if num_processes == 0:
-            errors = sequential_run(
-                test_cases,
-                run_func,
-                full_name
-            )
-        else:
-            errors = parallel_run(
-                test_cases,
-                run_func,
-                num_processes,
-                full_name,
-                resume_options=resume_options,
-            )
+        errors = parallel_run(
+            test_cases,
+            run_func,
+            num_processes,
+            full_name,
+            resume_options=resume_options,
+        )
 
         return errors
 
@@ -429,7 +373,11 @@ def worker(
 
 
 def parallel_run(tasks, func, num_processes, module_name="unknown", resume_options=None):
-    """parallel runner with error collection"""
+    """parallel runner with error collection
+
+    Args:
+        num_processes: Number of parallel processes. If 0, runs sequentially in main process.
+    """
     raw_task_infos = []
     for i, task in enumerate(tasks):
         if isinstance(task, dict) and "id" in task and "params" in task:
@@ -551,6 +499,40 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         last_progress = 0
         stall_count = 0
         last_error_count = 0
+
+        if num_processes == 0:
+            # Special handling for --profile
+            # Run tasks sequentially in main process
+            device = torch.device("cuda:0")
+            torch.cuda.set_device(0)
+
+            for task_info in task_infos:
+                task_id = task_info["id"]
+                task_params = task_info["params"]
+
+                try:
+                    func(*task_params, device)
+                    resume_tracker.mark_done(task_id)
+                except Exception as e:
+                    error_info = {
+                        "module": module_name,
+                        "device_id": 0,
+                        "task_id": task_id,
+                        "task_params": str(task_params),
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "traceback": traceback.format_exc(),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    errors.append(error_info)
+                    logger.exception(f"Task {task_id} failed")
+
+                pbar.update(1)
+                progress_value.value += 1
+                if len(errors) > 0:
+                    pbar.set_postfix({"errors": len(errors)})
+                resume_tracker.flush()
+            resume_tracker.flush(force=True)
 
         while progress_value.value < len(task_infos):
             # Drain errors
