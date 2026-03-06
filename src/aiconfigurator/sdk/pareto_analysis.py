@@ -28,6 +28,7 @@ def agg_pareto(
     backend_name: str,
     model_config: config.ModelConfig,
     parallel_config_list: list[list[int]],
+    max_concurrency: int | None = None,
 ) -> pd.DataFrame:
     """
     Find Pareto front for agg.
@@ -42,10 +43,16 @@ def agg_pareto(
         backend_name: name of the backend
         model_config: model config
         parallel_config_list: list of parallel configurations
+        max_concurrency: optional maximum global concurrency. When set, the
+            per-engine batch size sweep is capped so that
+            ``batch_size * pp_size * attention_dp_size <= max_concurrency``.
 
     Returns:
         results_df: dataframe of the results
     """
+
+    if max_concurrency is not None:
+        logger.info("agg_pareto: max_concurrency=%d is active; capping batch-size sweep per config", max_concurrency)
 
     # agg is agg server, the loop over parallel is outside here.
     results_df = pd.DataFrame(columns=ColumnsAgg)
@@ -103,11 +110,31 @@ def agg_pareto(
             if not runtime_configs_to_evaluate:
                 continue
 
+            # Cap per-engine batch size so global concurrency stays within budget.
+            # Global concurrency = batch_size * pp_size * attention_dp_size.
+            default_max_batch_size = 512
+            scale_factor = pp_size * dp_size
+            if max_concurrency is not None and scale_factor > 0:
+                effective_max_batch_size = min(default_max_batch_size, max_concurrency // scale_factor)
+                if effective_max_batch_size < 1:
+                    logger.debug(
+                        "Skipping parallel config tp=%d pp=%d dp=%d: "
+                        "max_concurrency=%d requires batch_size < 1 (scale_factor=%d)",
+                        tp_size,
+                        pp_size,
+                        dp_size,
+                        max_concurrency,
+                        scale_factor,
+                    )
+                    continue
+            else:
+                effective_max_batch_size = default_max_batch_size
+
             for overwritten_runtime_config in runtime_configs_to_evaluate:
                 summary = sess.find_best_agg_result_under_constraints(
                     runtime_config=overwritten_runtime_config,
                     top_k=10,
-                    max_batch_size=512,
+                    max_batch_size=effective_max_batch_size,
                     ctx_stride=512,
                 )
                 if not summary.check_oom():
@@ -263,6 +290,9 @@ def disagg_pareto(
     require_same_tp = kwargs.get("require_same_tp", False)
     autoscale = kwargs.get("autoscale", False)
     target_tpot = kwargs.get("target_tpot")
+    max_concurrency = kwargs.get("max_concurrency")
+    if max_concurrency is not None:
+        logger.info("disagg_pareto: max_concurrency=%d is active; filtering compositions", max_concurrency)
 
     summary = disagg_sess.find_best_disagg_result_under_constraints(
         model_path=model_path,
@@ -279,6 +309,7 @@ def disagg_pareto(
         require_same_tp=require_same_tp,
         autoscale=autoscale,
         target_tpot=target_tpot,
+        max_concurrency=max_concurrency,
     )
 
     return summary.get_summary_df()

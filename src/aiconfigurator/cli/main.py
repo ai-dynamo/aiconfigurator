@@ -145,6 +145,15 @@ def _add_default_mode_arguments(parser):
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="Maximum global concurrency (total concurrent requests across all DP ranks / workers). "
+        "Configurations whose concurrency exceeds this value are excluded from the search. "
+        "For agg mode, global concurrency = batch_size * pp_size * attention_dp_size. "
+        "For disagg mode, global concurrency = per_worker_concurrency * num_decode_workers.",
+    )
 
 
 def _add_experiments_mode_arguments(parser):
@@ -576,6 +585,7 @@ def build_default_task_configs(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
+    max_concurrency: int | None = None,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
 
@@ -594,6 +604,8 @@ def build_default_task_configs(
         tpot: Time per output token target in ms.
         request_latency: Optional end-to-end request latency target (ms).
         prefix: Prefix cache length.
+        max_concurrency: Maximum global concurrency. Configurations whose
+            concurrency exceeds this value are excluded from the search.
 
     Returns:
         Dict with TaskConfig objects. When backend='auto', returns 6 configs
@@ -652,6 +664,7 @@ def build_default_task_configs(
         "system_name": system,
         "backend_version": backend_version,
         "total_gpus": total_gpus,
+        "max_concurrency": max_concurrency,
         "isl": isl,
         "osl": osl,
         "ttft": ttft,
@@ -702,6 +715,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "request_latency",
     "enable_wideep",
     "total_gpus",
+    "max_concurrency",
     "database_mode",
 }
 
@@ -834,6 +848,8 @@ def build_experiment_task_configs(
 
         if "enable_wideep" in exp_config:
             task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
+        if "max_concurrency" in exp_config:
+            task_kwargs["max_concurrency"] = exp_config["max_concurrency"]
         if "database_mode" in exp_config:
             task_kwargs["database_mode"] = exp_config["database_mode"]
 
@@ -1372,6 +1388,7 @@ def main(args):
             tpot=args.tpot,
             request_latency=args.request_latency,
             prefix=args.prefix,
+            max_concurrency=args.max_concurrency,
         )
     elif args.mode == "exp":
         try:

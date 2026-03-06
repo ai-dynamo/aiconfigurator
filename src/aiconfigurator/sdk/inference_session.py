@@ -411,6 +411,7 @@ class DisaggInferenceSession:
         target_ttft: float | None = None,
         target_tpot: float | None = None,
         top_n: int = 5,
+        max_concurrency: int | None = None,
     ) -> InferenceSummary:
         """Pick best prefill and decode engines independently for autoscaling.
 
@@ -432,6 +433,7 @@ class DisaggInferenceSession:
             target_ttft=target_ttft,
             target_tpot=target_tpot,
             top_n=top_n,
+            max_concurrency=max_concurrency,
         )
 
         disagg_summary_df = result["best_config_df"]
@@ -456,6 +458,7 @@ class DisaggInferenceSession:
         require_same_tp: bool = False,
         autoscale: bool = False,
         target_tpot: float | None = None,
+        max_concurrency: int | None = None,
     ) -> InferenceSummary | None:
         """
         Run disagg with given constraints
@@ -482,6 +485,13 @@ class DisaggInferenceSession:
             decode_max_num_tokens (int): the decode max num tokens
             decode_num_worker_list (List[int]): the decode num worker list
             num_gpu_list (Optional[List[int]]): the num gpu list
+            require_same_tp (bool): require same TP for prefill and decode
+            autoscale (bool): use autoscale picking (P and D chosen independently)
+            target_tpot (Optional[float]): TPOT target for autoscale mode
+            max_concurrency (Optional[int]): maximum global concurrency.
+                Compositions whose ``concurrency`` exceeds this value are
+                excluded from the search in both rate-matching and autoscale
+                paths.
 
         Returns:
             Optional[InferenceSummary]: the summary of the inference result, contains all the
@@ -635,6 +645,8 @@ class DisaggInferenceSession:
                             prefill_degradation_factor=rate_matching_prefill_degradation_factor,
                             decode_degradation_factor=rate_matching_decode_degradation_factor,
                         )
+                        if max_concurrency is not None and disagg_dict["concurrency"] > max_concurrency:
+                            continue
                         category_results.append(disagg_dict)
 
                 if category_results:
@@ -712,6 +724,7 @@ class DisaggInferenceSession:
                 runtime_config=runtime_config,
                 disagg_summary=disagg_summary,
                 target_tpot=target_tpot,
+                max_concurrency=max_concurrency,
             )
 
         # find best result under constraints

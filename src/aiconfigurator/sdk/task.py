@@ -59,6 +59,7 @@ class TaskContext:
     request_latency: float | None
     enable_wideep: bool
     total_gpus: int | None
+    max_concurrency: int | None
     profiles: list[str] = field(default_factory=list)
     yaml_patch: dict = field(default_factory=dict)
     yaml_mode: Literal["patch", "replace"] = "patch"
@@ -576,6 +577,7 @@ class TaskConfig:
         request_latency: float | None = None,
         enable_wideep: bool = False,
         total_gpus: int | None = None,
+        max_concurrency: int | None = None,
         profiles: list[str] | None = None,
         yaml_config: dict | None = None,
         database_mode: str | None = None,
@@ -605,6 +607,9 @@ class TaskConfig:
             request_latency: The target end-to-end request latency.
             enable_wideep: Whether to enable wideep.
             total_gpus: The total number of GPUs.
+            max_concurrency: Maximum global concurrency (total concurrent
+                requests across all DP ranks / workers). Configurations whose
+                concurrency exceeds this value are excluded from the search.
             profiles: The profiles to use.
             yaml_config: The YAML configuration.
         """
@@ -633,6 +638,9 @@ class TaskConfig:
             effective_profiles = list(dict.fromkeys([*effective_profiles, *yaml_profiles]))
             yaml_patch = yaml_config.get("config", yaml_config)
 
+        if max_concurrency is not None and max_concurrency < 1:
+            raise ValueError(f"max_concurrency must be >= 1, got {max_concurrency}")
+
         ctx = TaskContext(
             serving_mode=serving_mode,
             model_path=model_path,
@@ -649,6 +657,7 @@ class TaskConfig:
             request_latency=request_latency,
             enable_wideep=enable_wideep,
             total_gpus=total_gpus,
+            max_concurrency=max_concurrency,
             profiles=effective_profiles,
             yaml_patch=yaml_patch,
             yaml_mode=yaml_mode,
@@ -657,6 +666,7 @@ class TaskConfig:
         self.config, applied_layers = TaskConfigFactory.create(ctx)
         self.config.applied_layers = applied_layers
         self.config.database_mode = database_mode  # Store in config for TaskRunner access
+        self.config.max_concurrency = max_concurrency  # Store in config for TaskRunner access
 
         self.serving_mode = serving_mode
         self.model_path = model_path
@@ -665,6 +675,7 @@ class TaskConfig:
         self.backend_name = backend_name
         self.enable_wideep = enable_wideep
         self.total_gpus = total_gpus
+        self.max_concurrency = max_concurrency
         self.yaml_mode = yaml_mode
         self.yaml_patch = yaml_patch
         self.profiles = list(effective_profiles)
@@ -903,6 +914,8 @@ class TaskConfig:
         )
 
         printable["enable_wideep"] = self.enable_wideep
+        if self.max_concurrency is not None:
+            printable["max_concurrency"] = self.max_concurrency
         printable["moe_backend"] = self.config.moe_backend
         printable["attention_backend"] = self.config.attention_backend
 
@@ -1093,6 +1106,7 @@ class TaskRunner:
             logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
 
         logger.info("Task %s: Running agg pareto", task_config.task_name)
+        max_concurrency = getattr(task_config, "max_concurrency", None)
         result_df = pa.agg_pareto(
             model_path=task_config.model_path,
             runtime_config=runtime_config,
@@ -1100,6 +1114,7 @@ class TaskRunner:
             backend_name=task_config.worker_config.backend_name,
             model_config=model_config,
             parallel_config_list=parallel_config_list,
+            max_concurrency=max_concurrency,
         )
         return {
             "pareto_df": result_df,
@@ -1253,6 +1268,7 @@ class TaskRunner:
             )
 
         logger.info("Task %s: Running disagg pareto", task_config.task_name)
+        max_concurrency = getattr(task_config, "max_concurrency", None)
         result_df = pa.disagg_pareto(
             model_path=task_config.model_path,
             runtime_config=runtime_config,
@@ -1276,6 +1292,7 @@ class TaskRunner:
             require_same_tp=require_same_tp,
             autoscale=autoscale,
             target_tpot=task_config.runtime_config.tpot if autoscale else None,
+            max_concurrency=max_concurrency,
         )
         return {"pareto_df": result_df}
 
