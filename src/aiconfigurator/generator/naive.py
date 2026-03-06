@@ -92,6 +92,10 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
 
     Returns:
         Estimated model weight size in bytes.
+
+    Raises:
+        RuntimeError: If the model config cannot be fetched (e.g. model not found
+            on HuggingFace). Callers must not proceed with guessed parameters.
     """
     from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
@@ -142,9 +146,8 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
         return weight_bytes
 
     except Exception as e:
-        logger.warning(f"Could not estimate model size for {model_path}: {e}")
-        # Return a large fallback to be safe (assume 70B model @ FP16 = ~140GB)
-        return 140 * 1024 * 1024 * 1024
+        logger.exception("Could not estimate model size for %s.", model_path)
+        raise RuntimeError(f"Model {model_path!r} not found or config unavailable") from e
 
 
 def _calculate_min_tp(
