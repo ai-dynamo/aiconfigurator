@@ -105,11 +105,9 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
         if gemm_type == "fp8" and hasattr(gemm, "weight"):
             new_weight = gemm.weight.data.t()
-            # print("new_weight stride:", new_weight.stride())
             # mnk = 1,128,128 weight stride = (128,1)
             # transpose to (1,128) for fp8 cutlass limit
             gemm.weight = torch.nn.Parameter(new_weight)
-            # print("after fix, weight stride:", gemm.weight.data.stride())
         elif gemm_type == "fp8_block":
             block_n, block_k = FP8_BLOCK_SHAPE
             with torch.no_grad():
@@ -131,6 +129,11 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
                 except TypeError:
                     maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
 
+                # vLLM 0.16+ block_quant apply() reads layer.input_scale (None
+                # for dynamic activation); set it if create_weights didn't.
+                if not hasattr(gemm, "input_scale"):
+                    gemm.input_scale = None
+
         gemm.forward(x)  # dry run to init
 
         return gemm
@@ -146,12 +149,16 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
         for op in op_list:
             op.forward(x)
 
+    # fp8_block uses dynamic input quantization (torch.as_tensor cpu ops inside
+    # forward) which is not CUDA-graph-capturable; run in eager mode to avoid
+    # corrupting the CUDA allocator state for subsequent test cases.
     with benchmark_with_power(
         device=device,
         kernel_func=kernel_func,
         num_warmups=3,
         num_runs=6,
         repeat_n=1,
+        use_cuda_graph=(gemm_type != "fp8_block"),
     ) as results:
         pass
 
