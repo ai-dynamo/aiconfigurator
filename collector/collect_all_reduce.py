@@ -38,6 +38,7 @@ from helper import PowerMonitor, log_perf
 
 def sync_device():
     import torch
+
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     elif hasattr(torch, "xpu") and torch.xpu.is_available():
@@ -433,7 +434,9 @@ def benchmark_vllm_allreduce(
 
             else:
                 # Eager mode
-                input_tensor = torch.ones(input_shape, dtype=torch_dtype, device="xpu" if torch.xpu.is_available() else "cuda")
+                input_tensor = torch.ones(
+                    input_shape, dtype=torch_dtype, device="xpu" if torch.xpu.is_available() else "cuda"
+                )
 
                 # Adaptive num_runs calculation for power measurement
                 actual_num_runs = num_runs
