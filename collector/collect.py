@@ -64,7 +64,7 @@ class ResumeCheckpoint:
 
     FLUSH_INTERVAL_SEC = 2.0
 
-    def __init__(self, backend: str, module_name: str, run_func_name: str, resume_dir: str):
+    def __init__(self, backend: str, module_name: str, run_func_name: str, checkpoint_dir: str):
         self.module_name = module_name
         self._dirty = False
         self._last_flush = 0.0
@@ -77,7 +77,7 @@ class ResumeCheckpoint:
         self._done: set[str] = set()
 
         safe_name = module_name.replace("/", "_").replace(":", "_")
-        self._path = Path(resume_dir).expanduser().resolve() / backend / f"{safe_name}.json"
+        self._path = Path(checkpoint_dir).expanduser().resolve() / backend / f"{safe_name}.json"
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def load_existing(self):
@@ -293,12 +293,14 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             task_params = task
         raw_task_infos.append({"id": task_id, "params": task_params, "index": i})
 
-    resume_dir = resume_options.get("resume_dir", ".collector_resume") if resume_options else ".collector_resume"
+    checkpoint_dir = (
+        resume_options.get("checkpoint_dir", ".collector_resume") if resume_options else ".collector_resume"
+    )
     resume_tracker = ResumeCheckpoint(
         backend=resume_options.get("backend", "unknown") if resume_options else "unknown",
         module_name=module_name,
         run_func_name=func.__name__,
-        resume_dir=resume_dir,
+        checkpoint_dir=checkpoint_dir,
     )
 
     if resume_options and resume_options.get("resume"):
@@ -1028,7 +1030,7 @@ def main():
         help="Resume collection from checkpoint, skipping already-attempted tasks",
     )
     parser.add_argument(
-        "--resume-dir",
+        "--checkpoint-dir",
         type=str,
         default=".collector_resume",
         help="Directory for per-module resume checkpoints (default: .collector_resume)",
@@ -1047,10 +1049,10 @@ def main():
     logger.info(f"Starting collection with {num_processes} GPU processes")
     resume_options = {
         "resume": args.resume,
-        "resume_dir": args.resume_dir,
+        "checkpoint_dir": args.checkpoint_dir,
     }
     if args.resume:
-        logger.info(f"Resume enabled: dir={Path(args.resume_dir).expanduser()}")
+        logger.info(f"Resume enabled: dir={Path(args.checkpoint_dir).expanduser()}")
 
     # Set environment variables for worker processes
     if args.measure_power:

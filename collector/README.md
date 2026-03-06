@@ -159,7 +159,7 @@ python3 collect.py --backend trtllm
 python3 collect.py --backend trtllm --resume
 
 # Custom checkpoint directory
-python3 collect.py --backend trtllm --resume --resume-dir /path/to/checkpoints
+python3 collect.py --backend trtllm --resume --checkpoint-dir /path/to/checkpoints
 ```
 
 A task is marked **done** once it is attempted (success or failure).

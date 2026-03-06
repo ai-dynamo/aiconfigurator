@@ -106,7 +106,7 @@ def _run(tasks, num_processes, tmp_path, module_name="test"):
         _task_fn,
         num_processes=num_processes,
         module_name=module_name,
-        resume_options={"resume_dir": str(tmp_path / ".resume")},
+        resume_options={"checkpoint_dir": str(tmp_path / ".resume")},
     )
 
 
