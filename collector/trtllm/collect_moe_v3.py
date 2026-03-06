@@ -433,7 +433,9 @@ def run_moe_torch(
         num_iter = 5 if distributed == "power_law" else 1
         if distributed == "power_law":
             actual_logits_list = [
-                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype)
+                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha)
+                .to(router_logits_dtype)
+                .to(device)
                 for _ in range(num_iter)
             ]
         elif distributed == "balanced":

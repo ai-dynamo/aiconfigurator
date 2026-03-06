@@ -604,10 +604,48 @@ def build_default_task_configs(
     # Expand "auto" backend to all available backends
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
 
-    for backend_name in backends_to_sweep:
-        _ensure_backend_version_available(system, backend_name, backend_version)
+    if backend == "auto":
+        supported = perf_database.get_supported_databases()
+        available = []
+        for backend_name in backends_to_sweep:
+            sys_backends = supported.get(system, {})
+            decode_backends = supported.get(decode_system, {}) if decode_system != system else sys_backends
+            if backend_name not in sys_backends:
+                logger.warning("Skipping backend %s: not supported for system %s.", backend_name, system)
+                continue
+            if decode_system != system and backend_name not in decode_backends:
+                logger.warning("Skipping backend %s: not supported for decode system %s.", backend_name, decode_system)
+                continue
+            if backend_version is not None:
+                if backend_version not in sys_backends.get(backend_name, []):
+                    logger.warning(
+                        "Skipping backend %s: version %s not available for system %s.",
+                        backend_name,
+                        backend_version,
+                        system,
+                    )
+                    continue
+                if decode_system != system and backend_version not in decode_backends.get(backend_name, []):
+                    logger.warning(
+                        "Skipping backend %s: version %s not available for decode system %s.",
+                        backend_name,
+                        backend_version,
+                        decode_system,
+                    )
+                    continue
+            available.append(backend_name)
+        if not available:
+            logger.error(
+                "No backends available for system %s. Supported backends: %s",
+                system,
+                ", ".join(sorted(supported.get(system, {}).keys())),
+            )
+            raise SystemExit(1)
+        backends_to_sweep = available
+    else:
+        _ensure_backend_version_available(system, backend, backend_version)
         if decode_system != system:
-            _ensure_backend_version_available(decode_system, backend_name, backend_version)
+            _ensure_backend_version_available(decode_system, backend, backend_version)
 
     common_kwargs: dict[str, Any] = {
         "model_path": model_path,
@@ -854,6 +892,8 @@ def _execute_task_configs(
             logger.info("Starting experiment: %s", exp_name)
             logger.debug("Task config: \n%s", task_config.to_yaml())
             task_result = runner.run(task_config)
+            if task_result is None:
+                raise RuntimeError(f"Task runner returned no result for {exp_name}")
             pareto_df = task_result["pareto_df"]
             if pareto_df is not None and not pareto_df.empty:
                 results[exp_name] = task_result
