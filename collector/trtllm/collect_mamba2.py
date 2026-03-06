@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = "trtllm>=1.2.0rc5"
+
 """
 Mamba2 SSM Collector for AIConfigurator.
 

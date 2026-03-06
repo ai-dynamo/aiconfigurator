@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = "vllm>=0.11.0"
+
 import os
 
 import torch
@@ -16,8 +18,6 @@ from vllm.version import __version__ as vllm_version
 from collector.common_test_cases import get_gemm_common_test_cases
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.vllm.utils import setup_distributed, with_exit_stack
-
-compatible_versions = ["0.11.0", "0.12.0", "0.14.0"]
 
 FP8_BLOCK_SHAPE = (128, 128)
 

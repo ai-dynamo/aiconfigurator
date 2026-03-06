@@ -35,6 +35,8 @@ def setup_warning_filters():
     )
 
 
+import random
+
 import torch
 from tqdm import tqdm
 
@@ -46,13 +48,99 @@ import signal
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
 
 logger = None
+RESUME_SCHEMA_VERSION = "collector-resume-v1"
 
 
-def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes):
+class ResumeCheckpoint:
+    """Tracks which tasks are done so a collection run can be resumed.
+
+    Always writes checkpoint files.  When ``--resume`` is passed the existing
+    checkpoint is loaded and done tasks are skipped; otherwise the checkpoint
+    is overwritten from scratch (so a future ``--resume`` can pick up).
+    """
+
+    FLUSH_INTERVAL_SEC = 2.0
+
+    def __init__(self, backend: str, module_name: str, run_func_name: str, checkpoint_dir: str):
+        self.module_name = module_name
+        self._dirty = False
+        self._last_flush = 0.0
+        self._metadata = {
+            "schema": RESUME_SCHEMA_VERSION,
+            "backend": backend,
+            "module": module_name,
+            "run_func": run_func_name,
+        }
+        self._done: set[str] = set()
+
+        safe_name = module_name.replace("/", "_").replace(":", "_")
+        self._path = Path(checkpoint_dir).expanduser().resolve() / backend / f"{safe_name}.json"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def load_existing(self):
+        """Load an existing checkpoint for resume.  Raises on mismatch."""
+        if not self._path.exists():
+            logger.info(f"{self.module_name}: no checkpoint found, starting fresh")
+            return
+
+        try:
+            with open(self._path) as f:
+                data = json.load(f)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load checkpoint {self._path}: {e}. Run without --resume to start fresh."
+            ) from e
+
+        for key in ("schema", "backend", "module", "run_func"):
+            if data.get(key) != self._metadata[key]:
+                raise RuntimeError(
+                    f"{self.module_name}: checkpoint mismatch "
+                    f"({key}: {data.get(key)} != {self._metadata[key]}). "
+                    "Run without --resume to start fresh."
+                )
+
+        self._done = set(data.get("done", []))
+        logger.info(f"{self.module_name}: loaded {len(self._done)} completed tasks from checkpoint")
+
+    # -- public API -------------------------------------------------------
+
+    def filter_done(self, task_infos: list[dict]) -> list[dict]:
+        """Return only tasks that are not yet done."""
+        runnable = [t for t in task_infos if t["id"] not in self._done]
+        skipped = len(task_infos) - len(runnable)
+        if skipped:
+            logger.info(f"{self.module_name}: skipping {skipped} done tasks, running {len(runnable)}")
+        return runnable
+
+    def mark_done(self, task_id: str):
+        self._done.add(task_id)
+        self._dirty = True
+        self.flush()
+
+    def flush(self, force: bool = False):
+        if not self._dirty:
+            return
+        now = time.time()
+        if not force and (now - self._last_flush) < self.FLUSH_INTERVAL_SEC:
+            return
+
+        data = {**self._metadata, "updated_at": datetime.now().isoformat(), "done": sorted(self._done)}
+        tmp_path = self._path.with_suffix(".json.tmp")
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, self._path)
+        self._dirty = False
+        self._last_flush = now
+
+
+def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, num_processes, resume_options=None):
     """Safely collect module with comprehensive error handling"""
     full_name = f"{module_name}.{test_type}"
     logger.info(f"Starting collection: {full_name}")
@@ -61,8 +149,15 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         # Get test cases
         test_cases = get_test_cases_func()
         logger.info(f"Generated {len(test_cases)} test cases for {full_name}")
+
         # Run collection
-        errors = parallel_run(test_cases, run_func, num_processes, full_name)
+        errors = parallel_run(
+            test_cases,
+            run_func,
+            num_processes,
+            full_name,
+            resume_options=resume_options,
+        )
 
         return errors
 
@@ -78,7 +173,17 @@ def collect_module_safe(module_name, test_type, get_test_cases_func, run_func, n
         ]
 
 
-def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, module_name="unknown"):
+def worker(
+    queue,
+    device_id: int,
+    func,
+    progress_value,
+    lock,
+    error_queue=None,
+    result_queue=None,
+    module_name="unknown",
+    consumed_sentinel=None,
+):
     """worker with automatic logging setup"""
 
     setup_warning_filters()  # Must run in each spawned process
@@ -94,10 +199,21 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     torch.cuda.set_device(device_id)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
+    def emit_done(task_id: str):
+        """Notify the main process that a task was attempted (success or failure)."""
+        if not result_queue:
+            return
+        try:
+            result_queue.put(task_id)
+        except Exception:
+            pass
+
     # Process tasks
     while True:
         task_info = queue.get()
         if task_info is None:
+            if consumed_sentinel is not None:
+                consumed_sentinel[device_id] = True
             worker_logger.debug("Received termination signal")
             break
 
@@ -150,6 +266,10 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 # which we don't want (error already reported above).
                 exit(0)
         finally:
+            # emit_done lives in finally so it runs for ALL exit paths:
+            # normal return, Exception, SystemExit (sys.exit), KeyboardInterrupt.
+            emit_done(task_id)
+
             # CRITICAL: Increment progress regardless of success or failure
             # This marks the task as "attempted" and tracks overall progress
             with lock:
@@ -164,10 +284,41 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 torch.cuda.empty_cache()
 
 
-def parallel_run(tasks, func, num_processes, module_name="unknown"):
+def parallel_run(tasks, func, num_processes, module_name="unknown", resume_options=None):
     """parallel runner with error collection"""
+    raw_task_infos = []
+    for i, task in enumerate(tasks):
+        if isinstance(task, dict) and "id" in task and "params" in task:
+            task_id = task["id"]
+            task_params = task["params"]
+        else:
+            task_id = create_test_case_id(task, func.__name__, module_name)
+            task_params = task
+        raw_task_infos.append({"id": task_id, "params": task_params, "index": i})
+
+    checkpoint_dir = (
+        resume_options.get("checkpoint_dir", ".collector_checkpoint") if resume_options else ".collector_checkpoint"
+    )
+    resume_tracker = ResumeCheckpoint(
+        backend=resume_options.get("backend", "unknown") if resume_options else "unknown",
+        module_name=module_name,
+        run_func_name=func.__name__,
+        checkpoint_dir=checkpoint_dir,
+    )
+
+    if resume_options and resume_options.get("resume"):
+        resume_tracker.load_existing()
+        task_infos = resume_tracker.filter_done(raw_task_infos)
+    else:
+        task_infos = raw_task_infos
+
+    if not task_infos:
+        logger.info(f"{module_name}: no tasks to run")
+        return []
+
     queue = mp.Queue()
     error_queue = mp.Queue()
+    result_queue = mp.Queue()
     processes = []
     manager = mp.Manager()
     progress_value = manager.Value("i", 0)
@@ -176,10 +327,24 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
     # Track process health
     process_stats = {i: {"restarts": 0, "errors": []} for i in range(num_processes)}
 
+    # Per-worker flag: True once a worker has consumed its None sentinel.
+    # Used to decide whether a replacement sentinel is needed on restart.
+    consumed_sentinel = manager.dict(dict.fromkeys(range(num_processes), False))
+
     def start_process(device_id):
         p = mp.Process(
             target=worker,
-            args=(queue, device_id, func, progress_value, lock, error_queue, module_name),
+            args=(
+                queue,
+                device_id,
+                func,
+                progress_value,
+                lock,
+                error_queue,
+                result_queue,
+                module_name,
+                consumed_sentinel,
+            ),
         )
         p.start()
         logger.info(f"Started worker process {p.pid} on device {device_id}")
@@ -215,20 +380,20 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             "timestamp": datetime.now().isoformat(),
         }
 
+    def drain_done_events():
+        while not result_queue.empty():
+            try:
+                task_id = result_queue.get_nowait()
+            except Exception:
+                break
+            resume_tracker.mark_done(task_id)
+
     # Start processes
     for device_id in range(num_processes):
         processes.append(start_process(device_id))
 
     # Queue tasks with IDs
-    for i, task in enumerate(tasks):
-        if not isinstance(task, dict):
-            task_info = {
-                "id": create_test_case_id(task, func.__name__, module_name),
-                "params": task,
-                "index": i,
-            }
-        else:
-            task_info = task
+    for task_info in task_infos:
         queue.put(task_info)
 
     # Add termination signals
@@ -237,17 +402,19 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
 
     # Monitor progress with error collection
     errors = []
-    with tqdm(total=len(tasks), desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
+
+    with tqdm(total=len(task_infos), desc=f"{module_name}", dynamic_ncols=True, leave=True) as pbar:
         last_progress = 0
         stall_count = 0
         last_error_count = 0
 
-        while progress_value.value < len(tasks):
+        while progress_value.value < len(task_infos):
             # Drain errors
             while not error_queue.empty():
                 error = error_queue.get()
                 errors.append(error)
                 process_stats[error["device_id"]]["errors"].append(error["task_id"])
+            drain_done_events()
 
             # Update postfix only if count changed
             if len(errors) != last_error_count:
@@ -258,12 +425,17 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
             if progress_value.value == last_progress:
                 stall_count += 1
                 if stall_count > 30:
-                    logger.warning(f"Progress stalled at {progress_value.value}/{len(tasks)}")
+                    logger.warning(f"Progress stalled at {progress_value.value}/{len(task_infos)}")
             else:
                 stall_count = 0
                 last_progress = progress_value.value
 
-            # Check process health
+            # Check process health — only restart if there is still work
+            # remaining.  Workers that consumed a None sentinel or finished
+            # via sys.exit(EXIT_CODE_RESTART) should not be restarted once
+            # all tasks are dispatched, otherwise the new worker blocks
+            # forever on queue.get().
+            remaining = len(task_infos) - progress_value.value
             for i, p in enumerate(processes):
                 if not p.is_alive():
                     exit_code = p.exitcode
@@ -291,17 +463,28 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
                         logger.error(f"Process {i} exceeded restart limit, not restarting")
                         continue
 
-                    processes[i] = start_process(i)
+                    if remaining > 0:
+                        need_sentinel = consumed_sentinel.get(i, False)
+                        consumed_sentinel[i] = False
+                        processes[i] = start_process(i)
+                        if need_sentinel:
+                            queue.put(None)
+                    else:
+                        processes[i] = p  # keep dead process ref, skip restart
 
             current = progress_value.value
             if current > pbar.n:
                 pbar.update(current - pbar.n)
 
+            resume_tracker.flush()
             time.sleep(2)
+        drain_done_events()
 
     # Collect remaining errors
     while not error_queue.empty():
         errors.append(error_queue.get())
+    drain_done_events()
+    resume_tracker.flush(force=True)
 
     # Wait for processes
     for p in processes:
@@ -329,32 +512,71 @@ def parallel_run(tasks, func, num_processes, module_name="unknown"):
 def collect_ops(
     num_processes: int,
     collections: list[dict],
-    ops: list[str] | None = None,
-    framework_version: str | None = None,
+    runtime_version: str | None = None,
+    limit: int | None = None,
+    shuffle: bool = False,
+    shuffle_seed: int = 42,
+    backend: str = "unknown",
+    resume_options: dict | None = None,
 ) -> list[dict]:
+    """Run collection for a list of resolved collection entries.
+
+    Each entry must have: name, type, module, get_func, run_func.
+    Version resolution and op filtering are handled upstream by
+    version_resolver.build_collections(). If runtime_version is provided,
+    per-module __compat__ is validated and incompatible ops fail explicitly.
+    If limit is provided, the number of test cases is limited to the limit.
+    If shuffle is True, the test cases are shuffled with the given seed.
+    """
+
+    class CompatibilityError(RuntimeError):
+        """Raised when a resolved collector module is incompatible."""
+
+    check_compat = None
+    if runtime_version:
+        from collector.version_resolver import _check_compat as check_compat
+
     all_errors = []
 
     for collection in collections:
-        if ops and (collection["type"] not in ops):
-            continue
         try:
-            # Handle version-specific modules
-            if "version_handler" in collection:
-                module_name = collection["version_handler"](framework_version)
-                if not module_name:
-                    logger.warning(
-                        f"Skipping {collection['name']}.{collection['type']} - unsupported version {framework_version}",
-                    )
-                    continue
-            else:
-                module_name = collection["module"]
-
+            module_name = collection["module"]
             get_module = __import__(module_name, fromlist=[collection["get_func"]])
             run_module = __import__(module_name, fromlist=[collection["run_func"]])
 
+            # Fail this op explicitly if declared compatibility doesn't match runtime.
+            if check_compat:
+                declared = getattr(get_module, "__compat__", None)
+                if declared:
+                    try:
+                        if not check_compat(declared, runtime_version):
+                            raise CompatibilityError(
+                                f"module {module_name} declares __compat__={declared!r}, runtime is v{runtime_version}"
+                            )
+                    except ValueError as e:
+                        raise CompatibilityError(f"invalid __compat__ {declared!r}: {e}") from e
+
             get_func = getattr(get_module, collection["get_func"])
             run_func = getattr(run_module, collection["run_func"])
-            errors = collect_module_safe(collection["name"], collection["type"], get_func, run_func, num_processes)
+
+            def get_func_with_limit(get_func=get_func):
+                cases = get_func()
+                if shuffle:
+                    rng = random.Random(shuffle_seed)
+                    rng.shuffle(cases)
+                if limit is not None:
+                    cases = cases[:limit]
+                return cases
+
+            merged_resume = {**(resume_options or {}), "backend": backend}
+            errors = collect_module_safe(
+                collection["name"],
+                collection["type"],
+                get_func_with_limit,
+                run_func,
+                num_processes,
+                resume_options=merged_resume,
+            )
             all_errors.extend(errors)
 
         except Exception as e:
@@ -362,7 +584,7 @@ def collect_ops(
             all_errors.append(
                 {
                     "module": f"{collection['name']}.{collection['type']}",
-                    "error_type": "ImportError",
+                    "error_type": "CompatibilityError" if isinstance(e, CompatibilityError) else type(e).__name__,
                     "error_message": str(e),
                     "traceback": traceback.format_exc(),
                 }
@@ -371,219 +593,82 @@ def collect_ops(
     return all_errors
 
 
-def collect_sglang(num_processes: int, ops: list[str] | None = None):
+def collect_sglang(
+    num_processes: int,
+    ops: list[str] | None = None,
+    limit: int | None = None,
+    shuffle: bool = False,
+    resume_options: dict | None = None,
+):
     """Collect performance data for SGLang with enhanced error tracking"""
+    from collector.sglang.registry import REGISTRY
+    from collector.version_resolver import build_collections
+
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
 
     try:
-        # Try to get version from package metadata
-        try:
-            from importlib.metadata import version as get_version
+        from importlib.metadata import version as get_version
 
-            version = get_version("sglang")
-        except:
-            try:
-                import pkg_resources
-
-                version = pkg_resources.get_distribution("sglang").version
-            except:
-                version = "unknown"
-
+        version = get_version("sglang")
         logger.info(f"SGLang version: {version}")
-    except:
+    except Exception:
         logger.exception("SGLang is not installed")
         return
 
-    # Define collection modules - each test type as separate entry
-    # Non-wideep collections (support multi-process parallel)
-    collections = [
-        # GEMM collection
-        {
-            "name": "sglang",
-            "type": "gemm",
-            "module": "collector.sglang.collect_gemm",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
-        # MLA collections - context and generation
-        {
-            "name": "sglang",
-            "type": "mla_context",
-            "module": "collector.sglang.collect_mla",
-            "get_func": "get_context_mla_test_cases",
-            "run_func": "run_mla",
-        },
-        {
-            "name": "sglang",
-            "type": "mla_generation",
-            "module": "collector.sglang.collect_mla",
-            "get_func": "get_generation_mla_test_cases",
-            "run_func": "run_mla",
-        },
-        # MLA BMM collections - gen_pre and gen_post
-        {
-            "name": "sglang",
-            "type": "mla_bmm_gen_pre",
-            "module": "collector.sglang.collect_mla_bmm",
-            "get_func": "get_mla_gen_pre_test_cases",
-            "run_func": "run_mla_gen_pre",
-        },
-        {
-            "name": "sglang",
-            "type": "mla_bmm_gen_post",
-            "module": "collector.sglang.collect_mla_bmm",
-            "get_func": "get_mla_gen_post_test_cases",
-            "run_func": "run_mla_gen_post",
-        },
-        # MOE collection
-        {
-            "name": "sglang",
-            "type": "moe",
-            "module": "collector.sglang.collect_moe",
-            "get_func": "get_moe_test_cases",
-            "run_func": "run_moe_torch",
-        },
-        # Normal Attention collections - context and generation
-        {
-            "name": "sglang",
-            "type": "attention_context",
-            "module": "collector.sglang.collect_attn",
-            "get_func": "get_context_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "sglang",
-            "type": "attention_generation",
-            "module": "collector.sglang.collect_attn",
-            "get_func": "get_generation_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-    ]
-
-    # Wideep collections - require single process due to NCCL/distributed init conflicts
-    wideep_collections = [
-        {
-            "name": "sglang",
-            "type": "wideep_mla_context",
-            "module": "collector.sglang.collect_wideep_attn",
-            "get_func": "get_wideep_mla_context_test_cases",
-            "run_func": "run_wideep_mla_context",
-        },
-        {
-            "name": "sglang",
-            "type": "wideep_mla_generation",
-            "module": "collector.sglang.collect_wideep_attn",
-            "get_func": "get_wideep_mla_generation_test_cases",
-            "run_func": "run_wideep_mla_generation",
-        },
-        {
-            "name": "sglang",
-            "type": "wideep_mlp_context",
-            "module": "collector.sglang.collect_wideep_mlp",
-            "get_func": "get_wideep_mlp_context_test_cases",
-            "run_func": "run_wideep_mlp_context",
-        },
-        {
-            "name": "sglang",
-            "type": "wideep_mlp_generation",
-            "module": "collector.sglang.collect_wideep_mlp",
-            "get_func": "get_wideep_mlp_generation_test_cases",
-            "run_func": "run_wideep_mlp_generation",
-        },
-        {
-            "name": "sglang",
-            "type": "wideep_moe",
-            "module": "collector.sglang.collect_wideep_deepep_moe",
-            "get_func": "get_wideep_moe_test_cases",
-            "run_func": "run_wideep_moe",
-        },
-    ]
-
-    # Run non-wideep collections with multi-process
-    all_errors = collect_ops(num_processes, collections, ops, version)
-
-    # Run wideep collections - now supports multi-process with proper port isolation
-    if ops is None or any(c["type"] in ops for c in wideep_collections):
-        logger.info(f"Running wideep collections with {num_processes} processes")
-        wideep_errors = collect_ops(num_processes, wideep_collections, ops, version)
-        all_errors.extend(wideep_errors)
+    collections = build_collections(REGISTRY, "sglang", version, ops, logger=logger)
+    all_errors = collect_ops(
+        num_processes,
+        collections,
+        version,
+        limit=limit,
+        shuffle=shuffle,
+        backend="sglang",
+        resume_options=resume_options,
+    )
 
     generate_collection_summary(all_errors, "sglang", version)
 
 
-def collect_vllm(num_processes: int, ops: list[str] | None = None):
-    """
-    Collect performance data for VLLM
-    """
+def collect_vllm(
+    num_processes: int,
+    ops: list[str] | None = None,
+    limit: int | None = None,
+    shuffle: bool = False,
+    resume_options: dict | None = None,
+):
+    """Collect performance data for vLLM"""
+    from collector.version_resolver import build_collections
+    from collector.vllm.registry import REGISTRY
 
     try:
         from vllm.version import __version__ as vllm_version
 
         version = vllm_version
-
-    except:
-        logger.exception("VLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
+    except Exception:
+        logger.exception("vLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
         return
 
-    collections = [
-        # GEMM collections
-        # vllm GEMM collection for fp16, fp8, fp8_block, nvfp4, awq, and gptq
-        {
-            "name": "vllm",
-            "type": "gemm",
-            "module": "collector.vllm.collect_gemm",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
-        # Attention collections - separate entries for context and generation
-        {
-            "name": "vllm",
-            "type": "attention_context",
-            "module": "collector.vllm.collect_attn",
-            "get_func": "get_context_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "attention_generation",
-            "module": "collector.vllm.collect_attn",
-            "get_func": "get_generation_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "moe",
-            "module": "collector.vllm.collect_moe",
-            "get_func": "get_moe_test_cases",
-            "run_func": "run_moe_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "mla_context",
-            "module": "collector.vllm.collect_mla",
-            "get_func": "get_context_mla_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "vllm",
-            "type": "mla_generation",
-            "module": "collector.vllm.collect_mla",
-            "get_func": "get_generation_mla_test_cases",
-            "run_func": "run_attention_torch",
-        },
-    ]
-
-    all_errors = collect_ops(num_processes, collections, ops, version)
+    collections = build_collections(REGISTRY, "vllm", version, ops, logger=logger)
+    all_errors = collect_ops(
+        num_processes, collections, version, limit=limit, shuffle=shuffle, backend="vllm", resume_options=resume_options
+    )
 
     generate_collection_summary(all_errors, "vllm", version)
 
 
-def collect_trtllm(num_processes: int, ops: list[str] | None = None):
+def collect_trtllm(
+    num_processes: int,
+    ops: list[str] | None = None,
+    limit: int | None = None,
+    shuffle: bool = False,
+    resume_options: dict | None = None,
+):
     """Collect performance data for TensorRT LLM with enhanced error tracking"""
+    from collector.trtllm.registry import REGISTRY
+    from collector.version_resolver import build_collections
 
     os.environ["TLLM_LOG_LEVEL"] = "ERROR"
     os.environ["TRTLLM_DG_ENABLED"] = "1"
-    # Suppress flashinfer logging
     os.environ["FLASHINFER_LOG_LEVEL"] = "ERROR"
 
     try:
@@ -595,142 +680,21 @@ def collect_trtllm(num_processes: int, ops: list[str] | None = None):
             import tensorrt_llm
         version = tensorrt_llm.__version__
         logger.info(f"TensorRT LLM version: {version}")
-    except:
+    except Exception:
         logger.exception("TensorRT LLM is not installed")
         return
 
-    # Define collection modules - each test type as separate entry
-    collections = [
-        # GEMM collections
-        {
-            "name": "trtllm",
-            "type": "gemm",
-            "module": "collector.trtllm.collect_gemm",
-            "get_func": "get_gemm_test_cases",
-            "run_func": "run_gemm",
-        },
-        # Computescale collections
-        {
-            "name": "trtllm",
-            "type": "compute_scale",
-            "module": "collector.trtllm.collect_computescale",
-            "get_func": "get_computescale_test_cases",
-            "run_func": "run_computescale",
-        },
-        # MLA collections
-        {
-            "name": "trtllm",
-            "type": "mla_context",
-            "module": "collector.trtllm.collect_mla",
-            "get_func": "get_context_mla_test_cases",
-            "run_func": "run_mla",
-            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2"
-            if v.startswith(("1.1.0", "1.2.0"))
-            else "trtllm.collect_mla",
-        },
-        {
-            "name": "trtllm",
-            "type": "mla_generation",
-            "module": "collector.trtllm.collect_mla",
-            "get_func": "get_generation_mla_test_cases",
-            "run_func": "run_mla",
-            "version_handler": lambda v: "trtllm.collect_mla_1_1rc2"
-            if v.startswith(("1.1.0", "1.2.0"))
-            else "trtllm.collect_mla",
-        },
-        # Attention collections - separate entries for context and generation
-        {
-            "name": "trtllm",
-            "type": "attention_context",
-            "module": "collector.trtllm.collect_attn",
-            "get_func": "get_context_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        {
-            "name": "trtllm",
-            "type": "attention_generation",
-            "module": "collector.trtllm.collect_attn",
-            "get_func": "get_generation_attention_test_cases",
-            "run_func": "run_attention_torch",
-        },
-        # MLA BMM collections
-        {
-            "name": "trtllm",
-            "type": "mla_bmm_gen_pre",
-            "module": "collector.trtllm.collect_mla_bmm",
-            "get_func": "get_mla_gen_pre_test_cases",
-            "run_func": "run_mla_gen_pre",
-        },
-        {
-            "name": "trtllm",
-            "type": "mla_bmm_gen_post",
-            "module": "collector.trtllm.collect_mla_bmm",
-            "get_func": "get_mla_gen_post_test_cases",
-            "run_func": "run_mla_gen_post",
-        },
-        # MOE collection (with version handling)
-        {
-            "name": "trtllm",
-            "type": "moe",
-            "module": None,  # Will be determined based on version
-            "get_func": "get_moe_test_cases",
-            "run_func": "run_moe_torch",
-            "version_handler": lambda v: "collector.trtllm.collect_moe_pre_0_20"
-            if v.startswith("0.20.0")
-            else "collector.trtllm.collect_moe_pre_1_0"
-            if v.startswith(("0.21.0", "1.0.0"))
-            else "collector.trtllm.collect_moe"
-            if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
-            else None,
-        },
-        # MOE with EPLB (Expert Parallel Load Balancer) collection
-        {
-            "name": "trtllm",
-            "type": "moe_eplb",
-            "module": None,  # Will be determined based on version
-            "get_func": "get_moe_eplb_test_cases",
-            "run_func": "run_moe_torch",
-            "version_handler": lambda v: "collector.trtllm.collect_moe"
-            if v.startswith(("1.1.0", "1.2.0", "1.3.0"))
-            else None,
-        },
-        # WideEP MOE Compute collection (computation only, excludes AlltoAll)
-        # Includes 3 EPLB modes: OFF, ON (baseline), ON (288 slots)
-        {
-            "name": "trtllm",
-            "type": "trtllm_moe_wideep",
-            "module": "collector.trtllm.collect_wideep_moe_compute",
-            "get_func": "get_wideep_moe_compute_all_test_cases",
-            "run_func": "run_wideep_moe_compute",
-        },
-        # Mamba2 collection
-        {
-            "name": "trtllm",
-            "type": "mamba2",
-            "module": "collector.trtllm.collect_mamba2",
-            "get_func": "get_mamba2_test_cases",
-            "run_func": "run_mamba2_torch",
-        },
-        # Module-level attention collection (MLA/DSA auto-separated by collector)
-        {
-            "name": "trtllm",
-            "type": "mla_context_module",
-            "module": "collector.trtllm.collect_mla_module",
-            "get_func": "get_context_module_test_cases",
-            "run_func": "run_mla_module_worker",
-        },
-        {
-            "name": "trtllm",
-            "type": "mla_generation_module",
-            "module": "collector.trtllm.collect_mla_module",
-            "get_func": "get_generation_module_test_cases",
-            "run_func": "run_mla_module_worker",
-        },
-    ]
+    collections = build_collections(REGISTRY, "trtllm", version, ops, logger=logger)
+    all_errors = collect_ops(
+        num_processes,
+        collections,
+        version,
+        limit=limit,
+        shuffle=shuffle,
+        backend="trtllm",
+        resume_options=resume_options,
+    )
 
-    all_errors = collect_ops(num_processes, collections, ops, version)
-
-    # Generate summary report
     generate_collection_summary(all_errors, "trtllm", version)
 
 
@@ -778,6 +742,22 @@ def generate_collection_summary(all_errors, backend, version):
     logger.info(f"\nDetailed error report saved to: {summary_file}")
 
 
+def _all_op_names() -> list[str]:
+    """Collect all unique op names across all backend registries."""
+    from collector.sglang.registry import REGISTRY as SGLANG_REG
+    from collector.trtllm.registry import REGISTRY as TRTLLM_REG
+    from collector.vllm.registry import REGISTRY as VLLM_REG
+
+    seen = set()
+    ops = []
+    for reg in (TRTLLM_REG, VLLM_REG, SGLANG_REG):
+        for entry in reg:
+            if entry.op not in seen:
+                seen.add(entry.op)
+                ops.append(entry.op)
+    return ops
+
+
 def main():
     global logger
     parser = argparse.ArgumentParser(description="Collect performance data for backends")
@@ -787,30 +767,15 @@ def main():
         "--ops",
         nargs="*",
         type=str,
-        choices=[
-            "gemm",
-            "compute_scale",
-            "mla_context",
-            "mla_generation",
-            "attention_context",
-            "attention_generation",
-            "mla_bmm_gen_pre",
-            "mla_bmm_gen_post",
-            "moe",
-            "moe_eplb",  # MoE with EPLB (Expert Parallel Load Balancer)
-            "trtllm_moe_wideep",  # WideEP MoE compute (includes all 3 EPLB modes)
-            "wideep_moe",  # TensorRT-LLM WideEP MoE computation (single GPU) - from aic
-            "mamba2",
-            "mla_context_module",
-            "mla_generation_module",
-            "wideep_mla_context",
-            "wideep_mla_generation",
-            "wideep_mlp_context",
-            "wideep_mlp_generation",
-        ],
+        choices=_all_op_names(),
         help="Run only specified collection items. Leave empty to run all. "
-        "Available ops vary by backend - see backend-specific collectors for details.",
+        "Available ops vary by backend — see backend-specific registry.py for details.",
         default=None,
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Smoke test: randomly sample 4 test cases per op to verify the collector runs end-to-end",
     )
     parser.add_argument(
         "--measure_power",
@@ -822,6 +787,28 @@ def main():
         type=float,
         default=1.0,
         help="Minimum duration for kernel runs when power measurement is enabled (default: 1.0s)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume collection from checkpoint, skipping already-attempted tasks",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default=".collector_checkpoint",
+        help="Directory for per-module resume checkpoints (default: .collector_checkpoint)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit the number of test cases per collection (useful for debugging)",
+    )
+    parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Shuffle test cases before applying --limit (uses seed 42 for reproducibility)",
     )
     args = parser.parse_args()
     ops = args.ops
@@ -835,6 +822,12 @@ def main():
 
     num_processes = torch.cuda.device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
+    resume_options = {
+        "resume": args.resume,
+        "checkpoint_dir": args.checkpoint_dir,
+    }
+    if args.resume:
+        logger.info(f"Resume enabled: dir={Path(args.checkpoint_dir).expanduser()}")
 
     # Set environment variables for worker processes
     if args.measure_power:
@@ -850,12 +843,19 @@ def main():
 
     mp.set_start_method("spawn")
 
+    shuffle = args.shuffle
+    limit = args.limit
+    if args.smoke:
+        shuffle = True
+        limit = 4
+        logger.info("Smoke test mode enabled — sampling 4 random test cases per op")
+
     if args.backend == "trtllm":
-        collect_trtllm(num_processes, ops)
+        collect_trtllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
     elif args.backend == "sglang":
-        collect_sglang(num_processes, ops)
+        collect_sglang(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
     elif args.backend == "vllm":
-        collect_vllm(num_processes, ops)
+        collect_vllm(num_processes, ops, limit=limit, shuffle=shuffle, resume_options=resume_options)
 
 
 if __name__ == "__main__":
