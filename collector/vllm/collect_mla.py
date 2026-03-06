@@ -119,11 +119,7 @@ def run_attention_torch(
                 has_sink=False,
                 use_sparse=False,
             )
-            try:
-                backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
-            except ValueError:
-                # No valid MLA backend for this config (e.g. fp8 KV cache on SM120).
-                return
+            backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
 
     if _Backend is not None:
         backend_name = _Backend[resolve_obj_by_qualname(backend).get_name()]

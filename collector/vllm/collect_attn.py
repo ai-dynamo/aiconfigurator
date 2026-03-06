@@ -331,7 +331,6 @@ def run_attention_torch(
             output=output,
         )
 
-    # Use benchmark_with_power context manager.
     # Context (prefill) attention uses FlashInfer which is not reliably
     # CUDA-graph-capturable; disable graph to prevent hangs/SIGSEGV.
     with benchmark_with_power(

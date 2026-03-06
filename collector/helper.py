@@ -1035,7 +1035,6 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
         assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
 
     # Find EP rank with max load and swap to rank 0
-    # Use reshape+sum instead of Conv1d to avoid cuDNN crashes on SM120 (Blackwell)
     ep_totals = num_tokens_per_expert.view(ep, num_experts // ep).sum(dim=1)
     max_ep_idx = torch.argmax(ep_totals).item()
 
