@@ -23,7 +23,12 @@ from aiconfigurator.cli.main import (
     build_experiment_task_configs,
 )
 from aiconfigurator.cli.report_and_save import save_results
-from aiconfigurator.sdk.task import TaskConfig
+from aiconfigurator.sdk.models import check_is_moe
+from aiconfigurator.sdk.task import (
+    DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
+    DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE,
+    TaskConfig,
+)
 
 
 def cli_support(
@@ -404,6 +409,68 @@ class EstimateResult:
     per_ops_data: dict | None = None
     """Per-operation latency breakdown (populated when available)."""
 
+    @property
+    def request_latency(self) -> float:
+        """End-to-end request latency (ms)."""
+        return self.raw.get("request_latency", 0.0)
+
+    @property
+    def tokens_per_second(self) -> float:
+        """Total output throughput (tokens/s)."""
+        return self.raw.get("tokens/s", 0.0)
+
+    @property
+    def tokens_per_second_per_gpu(self) -> float:
+        """Per-GPU output throughput (tokens/s/gpu)."""
+        return self.raw.get("tokens/s/gpu", 0.0)
+
+    @property
+    def tokens_per_second_per_user(self) -> float:
+        """Per-user output throughput (tokens/s/user)."""
+        return self.raw.get("tokens/s/user", 0.0)
+
+    @property
+    def concurrency(self) -> float:
+        """Effective concurrency (requests in flight)."""
+        return self.raw.get("concurrency", 0.0)
+
+    @property
+    def seq_per_second(self) -> float:
+        """Sequence throughput (seq/s)."""
+        return self.raw.get("seq/s", 0.0)
+
+    @property
+    def num_total_gpus(self) -> int:
+        """Total GPUs used by the parallelism config."""
+        return int(self.raw.get("num_total_gpus", 0))
+
+    @property
+    def memory(self) -> float:
+        """Estimated GPU memory usage (GB).
+
+        For disagg mode there is no single memory value; use
+        ``raw["(p)memory"]`` and ``raw["(d)memory"]`` instead.
+        """
+        if self.mode == "disagg":
+            return 0.0
+        return self.raw.get("memory", 0.0)
+
+    def get(self) -> dict:
+        """
+        Return all metrics as a dict matching the CSV column schema.
+
+        Includes ``tokens/s/gpu_cluster`` (equals ``tokens/s/gpu`` for
+        single-point estimates where only one replica group is evaluated).
+
+        Verified by ``tests/e2e/cli/test_cli_estimate_vs_default.py`` which
+        asserts that the returned keys and values match the
+        ``best_config_topn.csv`` output from ``cli_default``.
+        """
+        result = dict(self.raw)
+        if "tokens/s/gpu_cluster" not in result:
+            result["tokens/s/gpu_cluster"] = result.get("tokens/s/gpu", 0.0)
+        return result
+
     def __repr__(self) -> str:
         return (
             f"EstimateResult(mode={self.mode!r}, ttft={self.ttft:.3f}ms, tpot={self.tpot:.3f}ms, "
@@ -417,8 +484,13 @@ def _resolve_moe_parallelism(
     attention_dp_size: int,
     moe_tp_size: int | None,
     moe_ep_size: int | None,
+    model_path: str | None = None,
 ) -> tuple[int, int]:
-    """Resolve and validate MoE parallelism widths, returning (moe_tp_size, moe_ep_size)."""
+    """Resolve and validate MoE parallelism widths, returning (moe_tp_size, moe_ep_size).
+
+    For dense (non-MoE) models the width constraint is not enforced because
+    MoE parallelism has no effect on the computation.
+    """
     if moe_tp_size is None and moe_ep_size is None:
         moe_tp_size = tp_size
         moe_ep_size = attention_dp_size
@@ -429,7 +501,7 @@ def _resolve_moe_parallelism(
 
     attn_width = tp_size * attention_dp_size
     moe_width = moe_tp_size * moe_ep_size
-    if attn_width != moe_width:
+    if attn_width != moe_width and (model_path is None or check_is_moe(model_path)):
         raise ValueError(
             f"Parallelism width mismatch: tp_size({tp_size}) * attention_dp_size({attention_dp_size}) = {attn_width}, "
             f"but moe_tp_size({moe_tp_size}) * moe_ep_size({moe_ep_size}) = {moe_width}. "
@@ -716,7 +788,9 @@ def _run_agg_estimate(
     from aiconfigurator.sdk.config import RuntimeConfig
     from aiconfigurator.sdk.inference_session import InferenceSession
 
-    moe_tp_size, moe_ep_size = _resolve_moe_parallelism(tp_size, attention_dp_size, moe_tp_size, moe_ep_size)
+    moe_tp_size, moe_ep_size = _resolve_moe_parallelism(
+        tp_size, attention_dp_size, moe_tp_size, moe_ep_size, model_path=model_path
+    )
 
     model_config = _build_model_config(
         tp_size,
@@ -812,12 +886,14 @@ def _run_disagg_estimate(
         prefill_attention_dp_size,
         prefill_moe_tp_size,
         prefill_moe_ep_size,
+        model_path=model_path,
     )
     d_moe_tp, d_moe_ep = _resolve_moe_parallelism(
         decode_tp_size,
         decode_attention_dp_size,
         decode_moe_tp_size,
         decode_moe_ep_size,
+        model_path=model_path,
     )
 
     prefill_model_config = _build_model_config(
@@ -857,6 +933,10 @@ def _run_disagg_estimate(
         prefill_backend=prefill_backend,
         decode_database=decode_database,
         decode_backend=decode_backend,
+    )
+    session.set_latency_correction_scales(
+        DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE,
+        DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
     )
 
     summary = session.run_disagg(

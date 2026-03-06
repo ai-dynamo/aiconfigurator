@@ -192,6 +192,7 @@ class DisaggInferenceSession:
         Get the disagg summary df based on prefill and decode summary df
         """
         prefill_dict = prefill_summary_df.iloc[0].to_dict()
+        prefill_dict["ttft"] = prefill_dict["ttft"] * _AUTOSCALE_TTFT_CORRECTION_FACTOR
         decode_dict = decode_summary_df.iloc[0].to_dict()
 
         summary_dict = _build_disagg_summary_dict(
