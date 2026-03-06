@@ -37,8 +37,6 @@ from helper import PowerMonitor, log_perf
 
 
 def sync_device():
-    import torch
-
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     elif hasattr(torch, "xpu") and torch.xpu.is_available():
