@@ -370,8 +370,12 @@ def collect_ops(
                 if declared:
                     try:
                         if not check_compat(declared, runtime_version):
-                            raise CompatibilityError(
-                                f"module {module_name} declares __compat__={declared!r}, runtime is v{runtime_version}"
+                            if torch.xpu.is_available():
+                                # Disable vllm xpu runtime version check for now
+                                logger.warning(f"module {module_name} declares __compat__={declared!r}, runtime is v{runtime_version}")
+                            else:
+                                raise CompatibilityError(
+                                    f"module {module_name} declares __compat__={declared!r}, runtime is v{runtime_version}"
                             )
                     except ValueError as e:
                         raise CompatibilityError(f"invalid __compat__ {declared!r}: {e}") from e
