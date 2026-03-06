@@ -504,6 +504,11 @@ class PerfDataFilename(Enum):
     compute_scale = "computescale_perf.txt"
     scale_matrix = "scale_matrix_perf.txt"
     mamba2 = "mamba2_perf.txt"
+    # Module-level attention profiling (complete self_attn forward)
+    mla_context_module = "mla_context_module_perf.txt"
+    mla_generation_module = "mla_generation_module_perf.txt"
+    dsa_context_module = "dsa_context_module_perf.txt"
+    dsa_generation_module = "dsa_generation_module_perf.txt"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
