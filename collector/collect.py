@@ -297,7 +297,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         raw_task_infos.append({"id": task_id, "params": task_params, "index": i})
 
     checkpoint_dir = (
-        resume_options.get("checkpoint_dir", ".collector_resume") if resume_options else ".collector_resume"
+        resume_options.get("checkpoint_dir", ".collector_checkpoint") if resume_options else ".collector_checkpoint"
     )
     resume_tracker = ResumeCheckpoint(
         backend=resume_options.get("backend", "unknown") if resume_options else "unknown",
@@ -796,8 +796,8 @@ def main():
     parser.add_argument(
         "--checkpoint-dir",
         type=str,
-        default=".collector_resume",
-        help="Directory for per-module resume checkpoints (default: .collector_resume)",
+        default=".collector_checkpoint",
+        help="Directory for per-module resume checkpoints (default: .collector_checkpoint)",
     )
     parser.add_argument(
         "--limit",

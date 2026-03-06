@@ -13,7 +13,7 @@ build/
 dist/
 */automation/dynamo/
 aiconf_save/
-.collector_resume/
+.collector_checkpoint/
 
 venv/
 env/

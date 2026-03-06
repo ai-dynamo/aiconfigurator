@@ -271,7 +271,7 @@ how many files are needed accordingly.
 Checkpoint files are always written so an interrupted run can be resumed later:
 
 ```bash
-# Normal run (writes checkpoint to .collector_resume/)
+# Normal run (writes checkpoint to .collector_checkpoint/)
 python3 collect.py --backend trtllm
 
 # Resume an interrupted run (skips already-attempted tasks)

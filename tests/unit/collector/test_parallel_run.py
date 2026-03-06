@@ -106,13 +106,13 @@ def _run(tasks, num_processes, tmp_path, module_name="test"):
         _task_fn,
         num_processes=num_processes,
         module_name=module_name,
-        resume_options={"checkpoint_dir": str(tmp_path / ".resume")},
+        resume_options={"checkpoint_dir": str(tmp_path / ".checkpoint")},
     )
 
 
 def _checkpoint_path(tmp_path, module_name, backend="unknown"):
     safe_name = module_name.replace("/", "_").replace(":", "_")
-    return tmp_path / ".resume" / backend / f"{safe_name}.json"
+    return tmp_path / ".checkpoint" / backend / f"{safe_name}.json"
 
 
 def _load_done_ids(tmp_path, module_name, backend="unknown"):
