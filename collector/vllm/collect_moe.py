@@ -294,7 +294,7 @@ def run_moe_torch(
                         _ = _flashinfer_cutlass_fused_moe(
                             input=hidden_states[:local_num_tokens],
                             token_selected_experts=ti.to(torch.int),
-                            token_final_scales=tw,
+                            token_final_scales=tw.to(torch.float32),
                             fc1_expert_weights=nvfp4_w1_fp4.view(torch.long),
                             fc2_expert_weights=nvfp4_w2_fp4.view(torch.long),
                             output_dtype=torch.bfloat16,
@@ -312,7 +312,7 @@ def run_moe_torch(
                     _ = _flashinfer_cutlass_fused_moe(
                         input=hidden_states,
                         token_selected_experts=topk_ids.to(torch.int),
-                        token_final_scales=topk_weights.float(),
+                        token_final_scales=topk_weights.to(torch.float32),
                         fc1_expert_weights=nvfp4_w1_fp4.view(torch.long),
                         fc2_expert_weights=nvfp4_w2_fp4.view(torch.long),
                         output_dtype=torch.bfloat16,
