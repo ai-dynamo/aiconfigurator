@@ -4,6 +4,8 @@ import contextlib
 import os
 import warnings
 
+from helper import get_device_module, get_device_str
+
 
 def setup_warning_filters():
     """Configure warning filters to suppress known non-critical warnings"""
@@ -93,13 +95,8 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     setup_signal_handlers(device_id, error_queue)
 
     # Setup device
-
-    if torch.cuda.is_available():
-        device = torch.device(f"cuda:{device_id}")
-        torch.cuda.set_device(device)
-    elif torch.xpu.is_available():
-        device = torch.device(f"xpu:{device_id}")
-        torch.xpu.set_device(device)
+    device = torch.device(f"{get_device_str()}:{device_id}")
+    get_device_module().set_device(device)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
     # Process tasks
@@ -169,10 +166,7 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 import gc
 
                 gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                elif torch.xpu.is_available():
-                    torch.xpu.empty_cache()
+                get_device_module().empty_cache()
 
 
 def parallel_run(tasks, func, num_processes, module_name="unknown"):
@@ -600,10 +594,7 @@ def main():
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
 
-    num_processes = torch.cuda.device_count()
-    if num_processes == 0 and torch.xpu.is_available():
-        num_processes = torch.xpu.device_count()
-    logger.info(f"Starting collection with {num_processes} GPU processes")
+    num_processes = get_device_module().device_count()
 
     # Set environment variables for worker processes
     if args.measure_power:

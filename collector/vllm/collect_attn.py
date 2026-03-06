@@ -36,7 +36,7 @@ except ImportError:
 
 from vllm.config import set_current_vllm_config
 
-from collector.helper import benchmark_with_power, get_sm_version, log_perf
+from collector.helper import benchmark_with_power, get_device_module, get_sm_version, log_perf
 from collector.vllm.utils import (
     BatchSpec,
     create_and_prepopulate_kv_cache,
@@ -78,10 +78,8 @@ def run_attention_torch(
     perf_filename,
     device="cuda:0",
 ):
-    if torch.cuda.is_available():
-        torch.cuda.set_device(device)
-    elif torch.xpu.is_available():
-        torch.xpu.set_device(device)
+    get_device_module().set_device(device)
+
     dtype = torch.float16
     model = os.path.join(os.path.dirname(__file__), "fake_hf_model")
     block_size = 64
@@ -362,13 +360,7 @@ def run_attention_torch(
     dtype_str = "float16"
     kernel_source = f"vllm_{backend_name_str}".lower()
 
-    if torch.cuda.is_available():
-        device_name = torch.cuda.get_device_name(device)
-    elif torch.xpu.is_available():
-        device_name = torch.xpu.get_device_name(device)
-    else:
-        print("Unsupported device type, fallback to cuda!")
-        device_name = torch.cuda.get_device_name(device)
+    device_name = get_device_module().get_device_name(device)
 
     log_perf(
         item_list=[

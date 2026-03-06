@@ -29,7 +29,14 @@ except Exception:
         per_block_cast_to_fp8 = None  # type: ignore[assignment]
 
 from collector.common_test_cases import get_common_moe_test_cases
-from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
+from collector.helper import (
+    balanced_logits,
+    benchmark_with_power,
+    get_device_module,
+    get_sm_version,
+    log_perf,
+    power_law_logits_v3,
+)
 
 if torch.xpu.is_available():
     try:
@@ -108,10 +115,7 @@ def run_moe_torch(
     device="cuda:0",
 ):
     """Run vLLM MoE performance benchmarking"""
-    if torch.cuda.is_available():
-        torch.cuda.set_device(device)
-    elif torch.xpu.is_available():
-        torch.xpu.set_device(device)
+    get_device_module().set_device(device)
     torch.set_default_device(device)
 
     # Configure quantization parameters
@@ -319,9 +323,7 @@ def run_moe_torch(
             ],
             framework="VLLM",
             version=vllm_version,
-            device_name=torch.cuda.get_device_name(device)
-            if torch.cuda.is_available()
-            else torch.xpu.get_device_name(device),
+            device_name=get_device_module().get_device_name(),
             op_name="moe",
             kernel_source=source,
             perf_filename=perf_filename,

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+import functools
 import heapq
 import json
 import logging
@@ -233,16 +234,10 @@ def benchmark_with_power(
             )
     else:
         # Normal warmup
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            for _ in range(num_warmups):
-                kernel_func()
-            torch.cuda.synchronize()
-        elif torch.xpu.is_available():
-            torch.xpu.synchronize()
-            for _ in range(num_warmups):
-                kernel_func()
-            torch.xpu.synchronize()
+        get_device_module().synchronize()
+        for _ in range(num_warmups):
+            kernel_func()
+        get_device_module().synchronize()
 
     # ═══════════════════════════════════════════════════════════════════
     # CUDA Graph Capture with Optional Fallback
@@ -303,29 +298,19 @@ def benchmark_with_power(
     # ═══════════════════════════════════════════════════════════════════
     # Execute with Graph or Eager (both paths measured!)
     # ═══════════════════════════════════════════════════════════════════
-    if torch.cuda.is_available():
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-
-        start_event.record()
-        for _ in range(actual_num_runs):
-            if use_graph:
-                g.replay()
-            else:
-                # Fallback: Direct execution
-                # This matches SGLang/VLLM pattern where kernel_func handles internal loops
-                for _ in range(repeat_n):
-                    kernel_func()
-        end_event.record()
-        torch.cuda.synchronize()
-    elif torch.xpu.is_available():
-        start_event = torch.xpu.Event(enable_timing=True)
-        end_event = torch.xpu.Event(enable_timing=True)
-        start_event.record()
-        for i in range(actual_num_runs):
-            kernel_func()
-        end_event.record()
-        torch.xpu.synchronize()
+    start_event = get_device_module().Event(enable_timing=True)
+    end_event = get_device_module().Event(enable_timing=True)
+    start_event.record()
+    for _ in range(actual_num_runs):
+        if use_graph:
+            g.replay()
+        else:
+            # Fallback: Direct execution
+            # This matches SGLang/VLLM pattern where kernel_func handles internal loops
+            for _ in range(repeat_n):
+                kernel_func()
+    end_event.record()
+    get_device_module().synchronize()
 
     # Check for throttling
     throttled = False
@@ -1454,3 +1439,25 @@ def _get_deepseek_model_path():
 
     # Fallback to default path
     return "/deepseek-v3"
+
+
+@functools.lru_cache(maxsize=1)
+def get_device_module():
+    import torch
+
+    if torch.cuda.is_available():
+        return torch.cuda
+    elif torch.xpu.is_available():
+        return torch.xpu
+    raise RuntimeError("No supported device (need CUDA or XPU)")
+
+
+@functools.lru_cache(maxsize=1)
+def get_device_str():
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.xpu.is_available():
+        return "xpu"
+    raise RuntimeError("No supported device (need CUDA or XPU)")
