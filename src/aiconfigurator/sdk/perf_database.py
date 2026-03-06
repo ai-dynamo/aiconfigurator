@@ -360,7 +360,14 @@ def get_all_databases(
 # by default float16
 def load_custom_allreduce_data(custom_allreduce_file):
     """
-    Load the custom allreduce data for trtllm with power support (backward compatible).
+    Load the custom allreduce data with power support (backward compatible).
+
+    Supports multiple data formats:
+    - TRTLLM: kernel_source="TRTLLM", last column="implementation"
+    - vLLM/SGLang: kernel_source="*_graph" or "*_eager", last column="backend"
+
+    For vLLM/SGLang with both graph and eager modes, only graph mode data is kept
+    (better performance for decode phase).
 
     Returns:
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
@@ -380,6 +387,16 @@ def load_custom_allreduce_data(custom_allreduce_file):
         logger.debug(f"Legacy database format detected in {custom_allreduce_file} - power will default to 0.0")
 
     for row in rows:
+        # Check kernel_source to filter graph vs eager mode (for vLLM/SGLang)
+        kernel_source = row.get("kernel_source", "")
+        backend = row.get("backend", "")
+
+        # For vLLM/SGLang format: only keep graph mode data (skip eager mode)
+        # kernel_source patterns: "vLLM_custom_graph", "SGLang_CustomAllReduce_graph", etc.
+        # backend patterns: "vllm_graph", "sglang_graph", etc.
+        if kernel_source.endswith("_eager") or backend.endswith("_eager"):
+            continue  # Skip eager mode, use graph mode only
+
         dtype, tp_size, message_size, latency = (
             row["allreduce_dtype"],
             row["num_gpus"],
