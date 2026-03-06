@@ -892,7 +892,8 @@ class GenerationAttention(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query generation attention latency with energy data."""
         beam_width = kwargs.get("beam_width")
-        assert beam_width == 1, "only support beam_width=1"
+        if beam_width != 1:
+            raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
 
@@ -974,7 +975,8 @@ class GenerationMLA(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query generation MLA latency with energy data."""
         beam_width = kwargs.get("beam_width")
-        assert beam_width == 1, "only support beam_width=1"
+        if beam_width != 1:
+            raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
 
@@ -1008,7 +1010,8 @@ class MLABmm(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query MLA BMM latency with power data."""
         beam_width = kwargs.get("beam_width")
-        assert beam_width == 1, "only support beam_width=1"
+        if beam_width != 1:
+            raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
         batch_size = kwargs.get("batch_size")
 
         result = database.query_mla_bmm(batch_size, self._num_heads, self._quant_mode, self._if_pre)
@@ -1479,7 +1482,8 @@ class GenerationDSAModule(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query generation DSA latency with energy data."""
         beam_width = kwargs.get("beam_width")
-        assert beam_width == 1, "only support beam_width=1"
+        if beam_width != 1:
+            raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
 
