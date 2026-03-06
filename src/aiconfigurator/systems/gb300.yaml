@@ -19,7 +19,7 @@ gpu:
 node:
   num_gpus_per_node: 4  # 4 GPUs per physical node (2 Grace CPUs x 2 GPUs each)
   num_gpus_per_rack: 72  # 72 GPUs per rack (18 compute trays x 4 GPUs each)
-  inter_rack_bw: 25000000000  # Byte/s per GPU, single direction - InfiniBand between racks
+  inter_rack_bw: 100000000000  # Byte/s per GPU, single direction - CX8 XDR 800Gb/s InfiniBand between racks
   inter_node_bw: 900000000000  # Byte/s per GPU, single direction - NVLink via NVSwitch within rack
   intra_node_bw: 900000000000  # Byte/s per GPU, single direction - NVLink 5th gen within node
   pcie_bw: 64000000000  # Byte/s, single direction, pcie 5.0

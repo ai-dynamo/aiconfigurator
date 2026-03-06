@@ -9,15 +9,16 @@ import importlib.resources as pkg_resources
 import logging
 import math
 import os
-from collections import defaultdict
+from collections import UserDict, defaultdict
 from collections.abc import Iterable
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import yaml
 from scipy import interpolate
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.common import PerfDataFilename
 from aiconfigurator.sdk.performance_result import PerformanceResult
 
 databases_cache = defaultdict(lambda: defaultdict(lambda: defaultdict()))
@@ -253,6 +254,10 @@ def get_database(
     elif isinstance(systems_paths, str):
         systems_paths = [systems_paths]
 
+    if version is None:
+        logger.error(f"No database version available for {system=}, {backend=}")
+        return None
+
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
         if not os.path.isfile(system_yaml_path):
@@ -262,7 +267,7 @@ def get_database(
             database = databases_cache[cache_key][backend][version]
             return database
         except KeyError:
-            logger.info(f"loading {system=}, {backend=}, {version=}")
+            logger.info(f"Loading database for {system=}, {backend=}, {version=}")
             try:
                 with open(system_yaml_path) as f:
                     system_spec = yaml.load(f, Loader=yaml.SafeLoader)
@@ -361,7 +366,7 @@ def load_custom_allreduce_data(custom_allreduce_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(custom_allreduce_file):
-        logger.warning(f"Custom allreduce data file {custom_allreduce_file} not found.")
+        logger.debug(f"Custom allreduce data file {custom_allreduce_file} not found.")
         return None
     custom_allreduce_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
 
@@ -418,7 +423,7 @@ def load_nccl_data(nccl_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(nccl_file):
-        logger.warning(f"NCCL data file {nccl_file} not found.")
+        logger.debug(f"NCCL data file {nccl_file} not found.")
         return None
     nccl_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
 
@@ -475,7 +480,7 @@ def load_gemm_data(gemm_file):
               For old database formats without power, defaults to power=0.0 and energy=0.0.
     """
     if not os.path.exists(gemm_file):
-        logger.warning(f"GEMM data file {gemm_file} not found.")
+        logger.debug(f"GEMM data file {gemm_file} not found.")
         return None
     gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
 
@@ -538,7 +543,7 @@ def load_compute_scale_data(compute_scale_file):
               For old database formats without power, defaults to power=0.0 and energy=0.0.
     """
     if not os.path.exists(compute_scale_file):
-        logger.warning(f"Compute scale data file {compute_scale_file} not found.")
+        logger.debug(f"Compute scale data file {compute_scale_file} not found.")
         return None
     compute_scale_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 
@@ -594,7 +599,7 @@ def load_scale_matrix_data(scale_matrix_file):
               For old database formats without power, defaults to power=0.0 and energy=0.0.
     """
     if not os.path.exists(scale_matrix_file):
-        logger.warning(f"Scale matrix data file {scale_matrix_file} not found.")
+        logger.debug(f"Scale matrix data file {scale_matrix_file} not found.")
         return None
     scale_matrix_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
 
@@ -650,7 +655,7 @@ def load_moe_data(moe_file):
                with 'latency', 'power', and 'energy' keys. For old formats, power/energy default to 0.0.
     """
     if not os.path.exists(moe_file):
-        logger.warning(f"MOE data file {moe_file} not found.")
+        logger.debug(f"MOE data file {moe_file} not found.")
         return None, None
 
     moe_default_data = defaultdict(
@@ -760,7 +765,7 @@ def load_context_attention_data(context_attention_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(context_attention_file):
-        logger.warning(f"Context attention data file {context_attention_file} not found.")
+        logger.debug(f"Context attention data file {context_attention_file} not found.")
         return None
     context_attention_data = defaultdict(
         lambda: defaultdict(
@@ -842,7 +847,7 @@ def load_generation_attention_data(generation_attention_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(generation_attention_file):
-        logger.warning(f"Generation attention data file {generation_attention_file} not found.")
+        logger.debug(f"Generation attention data file {generation_attention_file} not found.")
         return None
     generation_attention_data = defaultdict(
         lambda: defaultdict(
@@ -922,7 +927,7 @@ def load_context_mla_data(context_mla_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(context_mla_file):
-        logger.warning(f"Context mla data file {context_mla_file} not found.")
+        logger.debug(f"Context mla data file {context_mla_file} not found.")
         return None
     context_mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
 
@@ -986,7 +991,7 @@ def load_generation_mla_data(generation_mla_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(generation_mla_file):
-        logger.warning(f"Generation mla data file {generation_mla_file} not found.")
+        logger.debug(f"Generation mla data file {generation_mla_file} not found.")
         return None
     generation_mla_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
     with open(generation_mla_file, encoding="utf-8") as f:
@@ -1052,7 +1057,7 @@ def load_mla_bmm_data(mla_bmm_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(mla_bmm_file):
-        logger.warning(f"MLA BMM data file {mla_bmm_file} not found.")
+        logger.debug(f"MLA BMM data file {mla_bmm_file} not found.")
         return None
     mla_bmm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
 
@@ -1118,7 +1123,7 @@ def load_mamba2_data(mamba2_file: str):
               Returns None if file does not exist.
     """
     if not os.path.exists(mamba2_file):
-        logger.warning(f"Mamba2 data file {mamba2_file} not found.")
+        logger.debug(f"Mamba2 data file {mamba2_file} not found.")
         return None
 
     # data[kernel_source][phase][model_key] -> nested batch_size [seq_len] -> {latency, power, energy}
@@ -1185,7 +1190,7 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_context_moe_file):
-        logger.warning(f"Context MoE data file {wideep_context_moe_file} not found.")
+        logger.debug(f"Context MoE data file {wideep_context_moe_file} not found.")
         return None
 
     wideep_context_moe_data = defaultdict(
@@ -1256,7 +1261,7 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_generation_moe_file):
-        logger.warning(f"Generation MoE data file {wideep_generation_moe_file} not found.")
+        logger.debug(f"Generation MoE data file {wideep_generation_moe_file} not found.")
         return None
 
     wideep_generation_moe_data = defaultdict(
@@ -1327,7 +1332,7 @@ def load_wideep_context_mla_data(wideep_context_mla_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_context_mla_file):
-        logger.warning(f"SGLang wideep context mla data file {wideep_context_mla_file} not found.")
+        logger.debug(f"SGLang wideep context mla data file {wideep_context_mla_file} not found.")
         return None
     wideep_context_mla_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
@@ -1398,7 +1403,7 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_generation_mla_file):
-        logger.warning(f"SGLang wideep generation mla data file {wideep_generation_mla_file} not found.")
+        logger.debug(f"SGLang wideep generation mla data file {wideep_generation_mla_file} not found.")
         return None
     wideep_generation_mla_data = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
@@ -1470,7 +1475,7 @@ def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_deepep_ll_file):
-        logger.warning(f"SGLang wideep deepep LL operation data file {wideep_deepep_ll_file} not found.")
+        logger.debug(f"SGLang wideep deepep LL operation data file {wideep_deepep_ll_file} not found.")
         return None
 
     wideep_deepep_ll_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
@@ -1527,7 +1532,7 @@ def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
     """
     if not os.path.exists(wideep_deepep_normal_file):
-        logger.warning(f"SGLang wideep deepep normal operation data file {wideep_deepep_normal_file} not found.")
+        logger.debug(f"SGLang wideep deepep normal operation data file {wideep_deepep_normal_file} not found.")
         return None
 
     wideep_deepep_normal_data = defaultdict(
@@ -1596,7 +1601,7 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
         If data file does not have 'kernel_source' column, it defaults to "moe_torch_flow".
     """
     if not os.path.exists(wideep_moe_compute_file):
-        logger.warning(f"TensorRT-LLM wideep MoE compute data file {wideep_moe_compute_file} not found.")
+        logger.debug(f"TensorRT-LLM wideep MoE compute data file {wideep_moe_compute_file} not found.")
         return None
 
     wideep_moe_compute_data = defaultdict(
@@ -1693,7 +1698,7 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
         This assumes 4 GPUs per node (e.g., GB200 NVL4).
     """
     if not os.path.exists(wideep_alltoall_file):
-        logger.warning(f"TensorRT-LLM wideep All2All data file {wideep_alltoall_file} not found.")
+        logger.debug(f"TensorRT-LLM wideep All2All data file {wideep_alltoall_file} not found.")
         return None
 
     wideep_alltoall_data = defaultdict(
@@ -1774,6 +1779,51 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
     return wideep_alltoall_data
 
 
+class LoadedOpData(UserDict):
+    """
+    A dictionary-like object which also keeps track of which file the data was loaded from.
+    """
+
+    def __init__(self, dict_data: Optional[dict], op_name_enum: PerfDataFilename, filepath: str):
+        self.op_name_enum = op_name_enum
+        self.filepath = filepath
+        self.loaded = dict_data is not None
+
+        super().__init__()
+        if dict_data:
+            super().update(dict_data)
+
+    def raise_if_not_loaded(self):
+        if self.loaded:
+            return
+
+        error_suffix = (
+            "This combination of model, system, backend, and backend version is not supported by AIC in SILICON mode."
+        )
+
+        if not os.path.exists(self.filepath):
+            raise PerfDataNotAvailableError(
+                f"Error loading silicon data for op {self.op_name_enum}: "
+                f"File does not exist at {self.filepath}. "
+                f"{error_suffix}"
+            )
+        raise PerfDataNotAvailableError(
+            f"Unknown error loading {self.op_name_enum} data from {self.filepath}. {error_suffix}"
+        )
+
+    def __getitem__(self, key):
+        self.raise_if_not_loaded()
+        return super().__getitem__(key)
+
+    def __setitem__(self, key, value):
+        self.raise_if_not_loaded()
+        return super().__setitem__(key, value)
+
+    def __contains__(self, key):
+        self.raise_if_not_loaded()
+        return super().__contains__(key)
+
+
 class PerfDatabase:
     """
     The perf database for a given system, backend and version
@@ -1839,120 +1889,85 @@ class PerfDatabase:
             self.system_spec["data_dir"],
             "nccl",
             self.system_spec["misc"]["nccl_version"],
-            common.PerfDataFilename.nccl.value,
         )
 
+        def _load_op_data(op_filename_enum: PerfDataFilename) -> LoadedOpData | tuple[LoadedOpData, ...]:
+            func_map = {
+                PerfDataFilename.gemm: load_gemm_data,
+                PerfDataFilename.context_attention: load_context_attention_data,
+                PerfDataFilename.generation_attention: load_generation_attention_data,
+                PerfDataFilename.moe: load_moe_data,
+                PerfDataFilename.custom_allreduce: load_custom_allreduce_data,
+                PerfDataFilename.nccl: load_nccl_data,
+                PerfDataFilename.context_mla: load_context_mla_data,
+                PerfDataFilename.generation_mla: load_generation_mla_data,
+                PerfDataFilename.mla_bmm: load_mla_bmm_data,
+                PerfDataFilename.mamba2: load_mamba2_data,
+                PerfDataFilename.compute_scale: load_compute_scale_data,
+                PerfDataFilename.scale_matrix: load_scale_matrix_data,
+                PerfDataFilename.wideep_context_moe: load_wideep_context_moe_data,
+                PerfDataFilename.wideep_generation_moe: load_wideep_generation_moe_data,
+                PerfDataFilename.wideep_context_mla: load_wideep_context_mla_data,
+                PerfDataFilename.wideep_generation_mla: load_wideep_generation_mla_data,
+                PerfDataFilename.wideep_deepep_normal: load_wideep_deepep_normal_data,
+                PerfDataFilename.wideep_deepep_ll: load_wideep_deepep_ll_data,
+                PerfDataFilename.wideep_moe_compute: load_wideep_moe_compute_data,
+                PerfDataFilename.wideep_alltoall: load_wideep_alltoall_data,
+            }
+            perf_data_dir = data_dir
+            if op_filename_enum == PerfDataFilename.nccl:
+                perf_data_dir = nccl_data_dir
+
+            data_filepath = os.path.join(perf_data_dir, op_filename_enum.value)
+            data_dict: Optional[dict] = func_map[op_filename_enum](data_filepath)
+
+            def _wrap_data_dict(data_dict: Optional[dict]):
+                return LoadedOpData(data_dict, op_filename_enum, data_filepath)
+
+            # load_moe_data returns tuple of two Optional[dict]
+            if isinstance(data_dict, tuple):
+                return tuple(_wrap_data_dict(item) for item in data_dict)
+
+            # Other ops just return Optional[dict]
+            return _wrap_data_dict(data_dict)
+
+        # Core ops
+        self._gemm_data = _load_op_data(PerfDataFilename.gemm)
+        self._context_attention_data = _load_op_data(PerfDataFilename.context_attention)
+        self._generation_attention_data = _load_op_data(PerfDataFilename.generation_attention)
+        self._moe_data, self._moe_low_latency_data = _load_op_data(PerfDataFilename.moe)
+
+        # Comm ops
+        self._custom_allreduce_data = _load_op_data(PerfDataFilename.custom_allreduce)
+        self._nccl_data = _load_op_data(PerfDataFilename.nccl)
+
+        # More model-specific ops
+        self._context_mla_data = _load_op_data(PerfDataFilename.context_mla)
+        self._generation_mla_data = _load_op_data(PerfDataFilename.generation_mla)
+        self._mla_bmm_data = _load_op_data(PerfDataFilename.mla_bmm)
+        self._mamba2_data = _load_op_data(PerfDataFilename.mamba2)
+        self._compute_scale_data = _load_op_data(PerfDataFilename.compute_scale)
+        self._scale_matrix_data = _load_op_data(PerfDataFilename.scale_matrix)
+
+        # sglang wideep path
         if backend == "sglang":
-            # For SGLang, only load MoE data and provide empty structures for other data
-            # regular path
-            self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
-            self._context_attention_data = load_context_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
-            )
-            self._generation_attention_data = load_generation_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
-            )
-            self._moe_data, self._moe_low_latency_data = load_moe_data(
-                os.path.join(data_dir, common.PerfDataFilename.moe.value)
-            )
-            self._context_mla_data = load_context_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
-            )
-            self._generation_mla_data = load_generation_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
-            )
-            self._custom_allreduce_data = load_custom_allreduce_data(
-                os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
-            )
-            self._nccl_data = load_nccl_data(nccl_data_dir)
-            self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
+            self._wideep_context_moe_data = _load_op_data(PerfDataFilename.wideep_context_moe)
+            self._wideep_generation_moe_data = _load_op_data(PerfDataFilename.wideep_generation_moe)
+            self._wideep_context_mla_data = _load_op_data(PerfDataFilename.wideep_context_mla)
+            self._wideep_generation_mla_data = _load_op_data(PerfDataFilename.wideep_generation_mla)
+            self._wideep_deepep_normal_data = _load_op_data(PerfDataFilename.wideep_deepep_normal)
+            self._wideep_deepep_ll_data = _load_op_data(PerfDataFilename.wideep_deepep_ll)
 
-            # wideep path
-            self._wideep_context_moe_data = load_wideep_context_moe_data(
-                os.path.join(data_dir, common.PerfDataFilename.wideep_context_moe.value)
-            )
-            self._wideep_generation_moe_data = load_wideep_generation_moe_data(
-                os.path.join(data_dir, common.PerfDataFilename.wideep_generation_moe.value)
-            )
-            self._wideep_context_mla_data = load_wideep_context_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.wideep_context_mla.value)
-            )
-            self._wideep_generation_mla_data = load_wideep_generation_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.wideep_generation_mla.value)
-            )
-            self._wideep_deepep_normal_data = load_wideep_deepep_normal_data(
-                os.path.join(data_dir, common.PerfDataFilename.wideep_deepep_normal.value)
-            )
-            self._wideep_deepep_ll_data = load_wideep_deepep_ll_data(
-                os.path.join(data_dir, common.PerfDataFilename.wideep_deepep_ll.value)
-            )
-            self._compute_scale_data = None
-            self._scale_matrix_data = None
-        elif backend == "vllm":
-            self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
-            self._context_attention_data = load_context_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
-            )
-            self._generation_attention_data = load_generation_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
-            )
-            self._custom_allreduce_data = load_custom_allreduce_data(
-                os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
-            )
-            self._nccl_data = load_nccl_data(nccl_data_dir)
-            self._moe_data, _ = load_moe_data(os.path.join(data_dir, common.PerfDataFilename.moe.value))
-            self._mla_bmm_data = None
-            self._context_mla_data = load_context_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
-            )
-            self._generation_mla_data = load_generation_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
-            )
-            self._compute_scale_data = None
-            self._scale_matrix_data = None
-        else:  # TRTLLM
-            self._gemm_data = load_gemm_data(os.path.join(data_dir, common.PerfDataFilename.gemm.value))
-            self._context_attention_data = load_context_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_attention.value)
-            )
-            self._generation_attention_data = load_generation_attention_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_attention.value)
-            )
-            self._custom_allreduce_data = load_custom_allreduce_data(
-                os.path.join(data_dir, common.PerfDataFilename.custom_allreduce.value)
-            )
-            self._moe_data, self._moe_low_latency_data = load_moe_data(
-                os.path.join(data_dir, common.PerfDataFilename.moe.value)
-            )
-            self._context_mla_data = load_context_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.context_mla.value)
-            )
-            self._generation_mla_data = load_generation_mla_data(
-                os.path.join(data_dir, common.PerfDataFilename.generation_mla.value)
-            )
-            self._nccl_data = load_nccl_data(nccl_data_dir)
-            self._mla_bmm_data = load_mla_bmm_data(os.path.join(data_dir, common.PerfDataFilename.mla_bmm.value))
-            self._mamba2_data = load_mamba2_data(os.path.join(data_dir, common.PerfDataFilename.mamba2.value))
-            self._compute_scale_data = load_compute_scale_data(
-                os.path.join(data_dir, common.PerfDataFilename.compute_scale.value)
-            )
-            self._scale_matrix_data = load_scale_matrix_data(
-                os.path.join(data_dir, common.PerfDataFilename.scale_matrix.value)
-            )
-
-            # TensorRT-LLM wideep path
-            self._wideep_moe_compute_data = load_wideep_moe_compute_data(
-                os.path.join(data_dir, common.PerfDataFilename.wideep_moe_compute.value)
-            )
-            self._wideep_alltoall_data = load_wideep_alltoall_data(
-                os.path.join(data_dir, common.PerfDataFilename.wideep_alltoall.value)
-            )
+        # TensorRT-LLM wideep path
+        if backend == "trtllm":
+            self._wideep_moe_compute_data = _load_op_data(PerfDataFilename.wideep_moe_compute)
+            self._wideep_alltoall_data = _load_op_data(PerfDataFilename.wideep_alltoall)
 
         # pre-correction
         self._correct_data()
 
         # regular context attention
-        if self._context_attention_data is not None:
+        if self._context_attention_data:
             for quant_mode in self._context_attention_data:
                 for kv_cache_dtype in self._context_attention_data[quant_mode]:
                     for num_kv_heads in self._context_attention_data[quant_mode][kv_cache_dtype]:
@@ -2031,7 +2046,7 @@ class PerfDatabase:
                                 )
 
         # regular generation attention
-        if self._generation_attention_data is not None:
+        if self._generation_attention_data:
             for kv_cache_dtype in self._generation_attention_data:
                 for num_kv_heads in self._generation_attention_data[kv_cache_dtype]:
                     for head_size in self._generation_attention_data[kv_cache_dtype][num_kv_heads]:
@@ -2117,7 +2132,7 @@ class PerfDatabase:
                             )
 
         # regular gemm
-        if self._gemm_data is not None:
+        if self._gemm_data:
             for quant_mode, data_dict in self._gemm_data.items():
                 target_x_list = [
                     1,
@@ -2196,7 +2211,7 @@ class PerfDatabase:
 
         # mla
         # wideep context mla
-        if getattr(self, "_wideep_context_mla_data", None) is not None:
+        if getattr(self, "_wideep_context_mla_data", None):
             for kernel_source in self._wideep_context_mla_data:
                 for quant_mode in self._wideep_context_mla_data[kernel_source]:
                     for kv_cache_dtype in self._wideep_context_mla_data[kernel_source][quant_mode]:
@@ -2241,7 +2256,7 @@ class PerfDatabase:
                         )
 
         # regular context mla
-        if self._context_mla_data is not None:
+        if self._context_mla_data:
             for quant_mode in self._context_mla_data:
                 for kv_cache_dtype in self._context_mla_data[quant_mode]:
                     num_heads_list = list(self._context_mla_data[quant_mode][kv_cache_dtype].keys())
@@ -2267,7 +2282,7 @@ class PerfDatabase:
                         sqrt_y_value=True,
                     )
         # wideep generation mla
-        if getattr(self, "_wideep_generation_mla_data", None) is not None:
+        if getattr(self, "_wideep_generation_mla_data", None):
             for kernel_source in self._wideep_generation_mla_data:
                 for kv_cache_dtype in self._wideep_generation_mla_data[kernel_source]:
                     tp_list = list(self._wideep_generation_mla_data[kernel_source][kv_cache_dtype].keys())
@@ -2320,7 +2335,7 @@ class PerfDatabase:
                     )
 
         # regular generation mla
-        if self._generation_mla_data is not None:
+        if self._generation_mla_data:
             for kv_cache_dtype in self._generation_mla_data:
                 tp_list = list(self._generation_mla_data[kv_cache_dtype].keys())
                 data_dict = self._generation_mla_data[kv_cache_dtype]
@@ -2490,7 +2505,7 @@ class PerfDatabase:
             preferred = "NCCL"
 
         # Check if preferred kernel is available in data, otherwise fallback
-        if self._wideep_alltoall_data is not None:
+        if self._wideep_alltoall_data:
             available_kernels = list(self._wideep_alltoall_data.keys())
             if preferred in available_kernels:
                 return preferred
@@ -2535,7 +2550,7 @@ class PerfDatabase:
             preferred = "moe_torch_flow"
 
         # Check if preferred kernel is available in data, otherwise fallback
-        if self._wideep_moe_compute_data is not None:
+        if self._wideep_moe_compute_data:
             available_kernels = list(self._wideep_moe_compute_data.keys())
             if preferred in available_kernels:
                 return preferred
@@ -3107,6 +3122,47 @@ class PerfDatabase:
         """
         return self._default_database_mode
 
+    def _query_silicon_or_hybrid(
+        self,
+        get_silicon: Callable[[], PerformanceResult],
+        get_empirical: Callable[[], float],
+        database_mode: common.DatabaseMode,
+        error_msg: str,
+    ) -> PerformanceResult:
+        """
+        Helper method to query database (SILICON mode) with optional fallback to empirical mode.
+
+        Args:
+            get_silicon: Callable that performs the database query and returns PerformanceResult
+            get_empirical: Callable that returns empirical latency (float) - should be a lambda or function
+                          that captures the necessary arguments
+            database_mode: Database mode (SILICON or HYBRID) - HYBRID mode will fall back to empirical on exception
+            error_msg: Error message for logging when query fails
+
+        Returns:
+            PerformanceResult from database query or empirical fallback (if database_mode is HYBRID)
+        """
+        if not error_msg.endswith("."):
+            error_msg += "."
+
+        try:
+            return get_silicon()
+
+        except Exception as e:
+            if database_mode == common.DatabaseMode.HYBRID:
+                debug_msg = error_msg + " Will try empirical mode."
+                logger.debug(debug_msg)
+                return PerformanceResult(get_empirical(), energy=0.0)
+
+            exception_msg = error_msg + " Consider using HYBRID mode."
+            logger.exception(exception_msg)
+            # Modify the original exception message
+            if e.args:
+                e.args = (str(e.args[0]) + " " + exception_msg,) + e.args[1:]
+            else:
+                e.args = (exception_msg,)
+            raise
+
     @staticmethod
     def _normalize_gemm_quant_mode_for_table(quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
         """
@@ -3178,15 +3234,12 @@ class PerfDatabase:
             return get_sol(m, n, k, quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0)
+
+        # TODO: remove "else" and unindent
         else:
             # SILICON or HYBRID mode - use database
-            try:
-                if self._gemm_data is None:
-                    msg = (
-                        "GEMM perf table is missing for "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
-                    )
-                    raise PerfDataNotAvailableError(msg)
+            def get_silicon():
+                self._gemm_data.raise_if_not_loaded()
                 if table_quant_mode not in self._gemm_data:
                     supported = sorted([k.name for k in self._gemm_data])
                     raise PerfDataNotAvailableError(
@@ -3198,15 +3251,13 @@ class PerfDatabase:
                 result = self._interp_3d(m, n, k, self._gemm_data[table_quant_mode], "cubic")
                 # Result is dict: {"latency": ..., "power": ..., "energy": ...}
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}, using empirical mode")
-                    return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0)
-                else:
-                    logger.exception(
-                        f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(m, n, k, quant_mode),
+                database_mode=database_mode,
+                error_msg=f"Failed to query gemm data for {m=}, {n=}, {k=}, {quant_mode=}",
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_compute_scale(
@@ -3259,13 +3310,8 @@ class PerfDatabase:
             return PerformanceResult(get_empirical(m, k), energy=0.0)
         else:
             # SILICON or HYBRID mode - use database
-            try:
-                if self._compute_scale_data is None:
-                    msg = (
-                        "Compute scale perf table is missing for "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
-                    )
-                    raise PerfDataNotAvailableError(msg)
+            def get_silicon():
+                self._compute_scale_data.raise_if_not_loaded()
                 if table_quant_mode not in self._compute_scale_data:
                     supported = sorted([k.name for k in self._compute_scale_data])
                     raise PerfDataNotAvailableError(
@@ -3296,19 +3342,13 @@ class PerfDatabase:
 
                 result = self._interp_2d_linear(m_i, k_i, table)
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query compute_scale data for {m=}, {k=}, {quant_mode=}, using empirical mode"
-                    )
-                    return PerformanceResult(get_empirical(m, k), energy=0.0)
-                else:
-                    logger.exception(
-                        "Failed to query compute_scale data for "
-                        f"{m=}, {k=}, {quant_mode=}. "
-                        "Please consider Hybrid mode."
-                    )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(m, k),
+                database_mode=database_mode,
+                error_msg=f"Failed to query compute_scale data for {m=}, {k=}, {quant_mode=}",
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_scale_matrix(
@@ -3361,13 +3401,8 @@ class PerfDatabase:
             return PerformanceResult(get_empirical(m, k), energy=0.0)
         else:
             # SILICON or HYBRID mode - use database
-            try:
-                if self._scale_matrix_data is None:
-                    msg = (
-                        "Scale matrix perf table is missing for "
-                        f"system='{self.system}', backend='{self.backend}', version='{self.version}'."
-                    )
-                    raise PerfDataNotAvailableError(msg)
+            def get_silicon():
+                self._scale_matrix_data.raise_if_not_loaded()
                 if table_quant_mode not in self._scale_matrix_data:
                     supported = sorted([k.name for k in self._scale_matrix_data])
                     raise PerfDataNotAvailableError(
@@ -3398,17 +3433,13 @@ class PerfDatabase:
 
                 result = self._interp_2d_linear(m_i, k_i, table)
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query scale_matrix data for {m=}, {k=}, {quant_mode=}, using empirical mode"
-                    )
-                    return PerformanceResult(get_empirical(m, k), energy=0.0)
-                else:
-                    logger.exception(
-                        f"Failed to query scale_matrix data for {m=}, {k=}, {quant_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(m, k),
+                database_mode=database_mode,
+                error_msg=f"Failed to query scale_matrix data for {m=}, {k=}, {quant_mode=}",
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_context_attention(
@@ -3524,57 +3555,40 @@ class PerfDatabase:
             )
             return PerformanceResult(emp_latency, energy=0.0)
         else:
-            try:
-                if self._context_attention_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"Context attention perf table is missing for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'. "
-                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                    )
+            # SILICON or HYBRID mode - use database
+            def get_silicon():
+                self._context_attention_data.raise_if_not_loaded()
                 full_s = s + prefix
                 prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
                 # In self._context_attention_data, we use n_kv = 0 to mean n_kv == n.
-                n_kv = 0 if n == n_kv else n_kv
-                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv][head_size][
-                    window_size
-                ]
+                n_kv_lookup = 0 if n == n_kv else n_kv
+                attention_dict = self._context_attention_data[fmha_quant_mode][kvcache_quant_mode][n_kv_lookup][
+                    head_size
+                ][window_size]
                 result = self._interp_3d(n, full_s, b, attention_dict, "cubic")
                 latency = result["latency"] * prefix_correction
                 energy = result.get("energy", 0.0) * prefix_correction
                 return PerformanceResult(latency, energy=energy)
-            except Exception as e:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, {n_kv=}, "
-                        f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
-                    )
-                    latency = get_empirical(
-                        b,
-                        s,
-                        prefix,
-                        n,
-                        n_kv,
-                        head_size,
-                        window_size,
-                        kvcache_quant_mode,
-                        fmha_quant_mode,
-                    )
-                    return PerformanceResult(latency, energy=0.0)
-                else:
-                    # Missing perf data is expected for some system/backend/mode combinations.
-                    # Avoid spamming full tracebacks during Pareto enumeration.
-                    if isinstance(e, PerfDataNotAvailableError):
-                        logger.debug(
-                            f"Missing context attention perf data for {b=}, {s=}, {prefix=}, {n=}, {n_kv=}, "
-                            f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}"
-                        )
-                    else:
-                        logger.exception(
-                            f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, "
-                            f"{n_kv=}, {head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}. "
-                            "Please consider Hybrid mode."
-                        )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(
+                    b,
+                    s,
+                    prefix,
+                    n,
+                    n_kv,
+                    head_size,
+                    window_size,
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                ),
+                database_mode=database_mode,
+                error_msg=(
+                    f"Failed to query context attention data for {b=}, {s=}, {prefix=}, {n=}, {n_kv=}, "
+                    f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {fmha_quant_mode=}"
+                ),
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_attention(
@@ -3671,37 +3685,29 @@ class PerfDatabase:
             emp_latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
         else:
-            try:
-                if self._generation_attention_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"Generation attention perf table is missing for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'. "
-                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                    )
+            # SILICON or HYBRID mode - use database
+            def get_silicon():
+                self._generation_attention_data.raise_if_not_loaded()
                 # In self._generation_attention_data, we use n_kv = 0 to mean n_kv == n.
-                if n_kv == n:
-                    n_kv = 0
+                n_kv_lookup = n_kv if n_kv != n else 0
 
-                attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv][head_size][window_size]
+                attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv_lookup][head_size][
+                    window_size
+                ]
                 result = self._interp_3d(n, b, s, attention_dict, "bilinear")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
                 return PerformanceResult(latency, energy=energy)
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, "
-                        f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, using empirical mode"
-                    )
-                    latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
-                    return PerformanceResult(latency, energy=0.0)
-                else:
-                    logger.exception(
-                        f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, "
-                        f"{head_size=}, {window_size=}, {kvcache_quant_mode=}, {database_mode=}. "
-                        "Please consider Hybrid mode."
-                    )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode),
+                database_mode=database_mode,
+                error_msg=(
+                    f"Failed to query generation attention data for {b=}, {s=}, {n=}, {n_kv=}, "
+                    f"{head_size=}, {window_size=}, {kvcache_quant_mode=}"
+                ),
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_context_mla(
@@ -3781,13 +3787,9 @@ class PerfDatabase:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
         else:
-            try:
-                if self._context_mla_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"Context MLA perf table is missing for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'. "
-                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                    )
+            # SILICON or HYBRID mode - use database
+            def get_silicon():
+                self._context_mla_data.raise_if_not_loaded()
                 full_s = s + prefix
                 prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
                 mla_dict = self._context_mla_data[fmha_quant_mode][kvcache_quant_mode]
@@ -3795,20 +3797,16 @@ class PerfDatabase:
                 latency = result["latency"] * prefix_correction
                 energy = result.get("energy", 0.0) * prefix_correction
                 return PerformanceResult(latency, energy=energy)
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query context mla data for {b=}, {s=}, {prefix=}, {num_heads=}, "
-                        f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
-                    )
-                    latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
-                    return PerformanceResult(latency, energy=0.0)
-                else:
-                    logger.exception(
-                        f"Failed to query context mla data for {b=}, {s=}, {prefix=}, {num_heads=}, \
-                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode),
+                database_mode=database_mode,
+                error_msg=(
+                    f"Failed to query context mla data for {b=}, {s=}, {prefix=}, {num_heads=}, "
+                    f"{kvcache_quant_mode=}, {fmha_quant_mode=}"
+                ),
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_generation_mla(
@@ -3879,32 +3877,21 @@ class PerfDatabase:
             emp_latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0)
         else:
-            try:
-                if self._generation_mla_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"Generation MLA perf table is missing for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'. "
-                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                    )
+            # SILICON or HYBRID mode - use database
+            def get_silicon():
+                self._generation_mla_data.raise_if_not_loaded()
                 mla_dict = self._generation_mla_data[kvcache_quant_mode]
                 result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
                 return PerformanceResult(latency, energy=energy)
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query generation mla data for {b=}, {s=}, {num_heads=}, "
-                        f"{kvcache_quant_mode=}, using empirical mode"
-                    )
-                    latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
-                    return PerformanceResult(latency, energy=0.0)
-                else:
-                    logger.exception(
-                        f"Failed to query generation mla data for {b=}, {s=}, {num_heads=}, \
-                        {kvcache_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(b, s, num_heads, kvcache_quant_mode),
+                database_mode=database_mode,
+                error_msg=f"Failed to query generation mla data for {b=}, {s=}, {num_heads=}, {kvcache_quant_mode=}",
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_generation_mla(
@@ -3936,13 +3923,9 @@ class PerfDatabase:
             v_head_dim = 128
             num_head = 128 // tp_size
 
-            # qkv_a projection (decode mode)
-            qkv_a_flop = 2 * hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) * b
-            qkv_a_mem = (
-                b * hidden_size
-                + hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim)
-                + 2 * b * (q_lora_rank + kv_lora_rank + qk_rope_head_dim)
-            )
+            # NOTE: qkv_a projection is now modeled as a standalone GEMM op
+            # (generation_qkv_a_proj_gemm) outside of the MLA attention forward path,
+            # matching sglang >=0.5.6 where qkv_a_proj was moved out of attention.
 
             # q_b projection
             q_b_flop = 2 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b
@@ -3977,10 +3960,8 @@ class PerfDatabase:
             attn_out_flop = 2 * num_head * v_head_dim * hidden_size * b
             attn_out_mem = b * num_head * v_head_dim + num_head * v_head_dim * hidden_size + 2 * b * hidden_size
 
-            ops = qkv_a_flop + q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop
-            mem_bytes = (
-                qkv_a_mem + q_b_mem + q_w_kc_mem + attn_mem * 2 + s_w_vc_mem + attn_out_mem
-            ) * fmha_quant_mode.value.memory
+            ops = q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop
+            mem_bytes = (q_b_mem + q_w_kc_mem + attn_mem * 2 + s_w_vc_mem + attn_out_mem) * fmha_quant_mode.value.memory
             sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
             sol_math += attn_flop / (self.system_spec["gpu"]["float16_tc_flops"]) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
@@ -4012,42 +3993,33 @@ class PerfDatabase:
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode), energy=0.0)
         else:
-            try:
-                if self._wideep_generation_mla_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"WiDeep generation MLA perf table is missing for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'. "
-                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                    )
-                if attention_backend is None:
-                    attention_backend = "flashinfer"
-                if attention_backend == "flashinfer":
+            # SILICON or HYBRID mode - use database
+            def get_silicon():
+                self._wideep_generation_mla_data.raise_if_not_loaded()
+                attn_backend = attention_backend or "flashinfer"
+                if attn_backend == "flashinfer":
                     attn_data = self._wideep_generation_mla_data["flashinfer"]
-                elif attention_backend == "fa3":
+                elif attn_backend == "fa3":
                     attn_data = self._wideep_generation_mla_data["fa3"]
                 else:
-                    raise ValueError(f"Unsupported attention backend: {attention_backend}")
+                    raise ValueError(f"Unsupported attention backend: {attn_backend}")
                 # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
                 num_heads = 128 // tp_size
                 mla_dict = attn_data[kvcache_quant_mode]
                 result = self._interp_3d(num_heads, b, s, mla_dict, "bilinear")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query wideep generation mla data for {b=}, {s=}, {tp_size=}, "
-                        f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
-                    )
-                    latency = get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
-                    energy = 0.0
-                else:
-                    logger.exception(
-                        f"Failed to query wideep generation mla data for {b=}, {s=}, {tp_size=}, \
-                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
-            return PerformanceResult(latency, energy=energy)
+                return PerformanceResult(latency, energy=energy)
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode),
+                database_mode=database_mode,
+                error_msg=(
+                    f"Failed to query wideep generation mla data for {b=}, {s=}, {tp_size=}, "
+                    f"{kvcache_quant_mode=}, {fmha_quant_mode=}"
+                ),
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_wideep_context_mla(
@@ -4077,13 +4049,8 @@ class PerfDatabase:
             v_head_dim = 128
             num_head = 128 // tp_size
 
-            # qkv_a projection (prefill mode)
-            qkv_a_flop = 2 * hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) * b * s
-            qkv_a_mem = (
-                b * hidden_size * s
-                + hidden_size * (q_lora_rank + kv_lora_rank + qk_rope_head_dim)
-                + 2 * b * (q_lora_rank + kv_lora_rank + qk_rope_head_dim) * s
-            )
+            # NOTE: qkv_a projection is now modeled as a standalone GEMM op in the pipeline
+            # (context_qkv_a_proj_gemm), so it is excluded from this SOL calculation.
 
             # q_b projection
             q_b_flop = 2 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b * s
@@ -4117,8 +4084,8 @@ class PerfDatabase:
             attn_out_flop = 2 * num_head * v_head_dim * hidden_size * b * s
             attn_out_mem = b * num_head * v_head_dim * s + num_head * v_head_dim * hidden_size + 2 * b * hidden_size * s
 
-            ops = qkv_a_flop + q_b_flop + kv_b_flop + attn_out_flop
-            mem_bytes = (qkv_a_mem + q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha_quant_mode.value.memory
+            ops = q_b_flop + kv_b_flop + attn_out_flop
+            mem_bytes = (q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha_quant_mode.value.memory
             sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
             sol_math += attn_flop / (self.system_spec["gpu"]["float16_tc_flops"]) * 1000
             sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
@@ -4153,21 +4120,16 @@ class PerfDatabase:
                 energy=0.0,
             )
         else:
-            try:
-                if self._wideep_context_mla_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"WiDeep context MLA perf table is missing for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'. "
-                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                    )
-                if attention_backend is None:
-                    attention_backend = "flashinfer"
-                if attention_backend == "flashinfer":
+            # SILICON or HYBRID mode - use database
+            def get_silicon():
+                self._wideep_context_mla_data.raise_if_not_loaded()
+                attn_backend = attention_backend or "flashinfer"
+                if attn_backend == "flashinfer":
                     attn_data = self._wideep_context_mla_data["flashinfer"]
-                elif attention_backend == "fa3":
+                elif attn_backend == "fa3":
                     attn_data = self._wideep_context_mla_data["fa3"]
                 else:
-                    raise ValueError(f"Unsupported attention backend: {attention_backend}")
+                    raise ValueError(f"Unsupported attention backend: {attn_backend}")
 
                 # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
                 num_heads = 128 // tp_size
@@ -4177,21 +4139,17 @@ class PerfDatabase:
                 result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
                 latency = result["latency"] * prefix_correction
                 energy = result.get("energy", 0.0) * prefix_correction
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query wideep context mla data for {b=}, {s=}, {prefix=}, {tp_size=}, "
-                        f"{kvcache_quant_mode=}, {fmha_quant_mode=}, using empirical mode"
-                    )
-                    latency = get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
-                    energy = 0.0
-                else:
-                    logger.exception(
-                        f"Failed to query wideep context mla data for {b=}, {s=}, {prefix=}, {tp_size=}, \
-                        {kvcache_quant_mode=}, {fmha_quant_mode=}, {database_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
-            return PerformanceResult(latency, energy=energy)
+                return PerformanceResult(latency, energy=energy)
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode),
+                database_mode=database_mode,
+                error_msg=(
+                    f"Failed to query wideep context mla data for {b=}, {s=}, {prefix=}, {tp_size=}, "
+                    f"{kvcache_quant_mode=}, {fmha_quant_mode=}"
+                ),
+            )
 
     # to simplify, we no longer support allreduce_strategy
     @functools.lru_cache(maxsize=32768)
@@ -4250,19 +4208,15 @@ class PerfDatabase:
             emp_latency = get_empirical(quant_mode, tp_size, size)
             return PerformanceResult(emp_latency, energy=0.0)
         else:
-            try:
+            # SILICON or HYBRID mode - use database
+            def get_silicon():
                 if tp_size == 1:
                     return PerformanceResult(0.0, energy=0.0)
                 if self.system_spec["node"]["num_gpus_per_node"] == 72 and tp_size > 4:
                     # on GB200, we only have custom all reduce for up to tp4.
                     return self.query_nccl(quant_mode, tp_size, "all_reduce", size)
 
-                if self._custom_allreduce_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"Custom allreduce perf table is missing for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'. "
-                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                    )
+                self._custom_allreduce_data.raise_if_not_loaded()
 
                 comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
                     "AUTO"
@@ -4293,20 +4247,13 @@ class PerfDatabase:
                     energy = energy * scale_factor
 
                 return PerformanceResult(lat, energy=energy)
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query custom allreduce data for {quant_mode=}, {tp_size=}, {size=}, \
-                        {database_mode=}, using empirical mode"
-                    )
-                    lat = get_empirical(quant_mode, tp_size, size)
-                    return PerformanceResult(lat, energy=0.0)
-                else:
-                    logger.exception(
-                        f"Failed to query custom allreduce data for {quant_mode=}, {tp_size=}, {size=}, \
-                        {database_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(quant_mode, tp_size, size),
+                database_mode=database_mode,
+                error_msg=f"Failed to query custom allreduce data for {quant_mode=}, {tp_size=}, {size=}",
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_nccl(
@@ -4372,16 +4319,12 @@ class PerfDatabase:
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(dtype, num_gpus, operation, message_size), energy=0.0)
         else:
-            try:
+            # SILICON or HYBRID mode - use database
+            def get_silicon():
                 if num_gpus == 1:
                     return PerformanceResult(0.0, energy=0.0)
 
-                if self._nccl_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"NCCL perf table is missing for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'. "
-                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                    )
+                self._nccl_data.raise_if_not_loaded()
 
                 max_num_gpus = max(self._nccl_data[dtype][operation].keys())
                 nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
@@ -4416,20 +4359,13 @@ class PerfDatabase:
                     energy = energy * scaling_formula
 
                 return PerformanceResult(lat, energy=energy)
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query nccl data for {dtype=}, {num_gpus=}, "
-                        f"{operation=}, {message_size=}, using empirical mode"
-                    )
-                    lat = get_empirical(dtype, num_gpus, operation, message_size)
-                    return PerformanceResult(lat, energy=0.0)
-                else:
-                    logger.exception(
-                        f"Failed to query nccl data for {dtype=}, {num_gpus=}, \
-                        {operation=}, {message_size=}, {database_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(dtype, num_gpus, operation, message_size),
+                database_mode=database_mode,
+                error_msg=f"Failed to query nccl data for {dtype=}, {num_gpus=}, {operation=}, {message_size=}",
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_moe(
@@ -4581,12 +4517,12 @@ class PerfDatabase:
             )
             return PerformanceResult(emp_latency, energy=0.0)
         else:
-            try:
+            # SILICON or HYBRID mode - use database
+            def get_silicon():
                 if self.backend == common.BackendName.sglang.value:
                     # deepep_moe is for sglang wideep only
                     # Apply num_tokens correction when eplb is enabled (only during prefill)
-                    if enable_eplb and is_context:
-                        num_tokens = int(num_tokens * 0.8)
+                    num_tokens_corrected = int(num_tokens * 0.8) if enable_eplb and is_context else num_tokens
                     if moe_backend == "deepep_moe":
                         if is_context:
                             moe_data = self._wideep_context_moe_data
@@ -4595,12 +4531,7 @@ class PerfDatabase:
                     else:
                         moe_data = self._moe_data
 
-                    if moe_data is None:
-                        raise PerfDataNotAvailableError(
-                            f"MoE perf table is missing for system='{self.system}', "
-                            f"backend='{self.backend}', version='{self.version}', moe_backend='{moe_backend}'. "
-                            "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                        )
+                    moe_data.raise_if_not_loaded()
 
                     used_workload_distribution = (
                         workload_distribution if workload_distribution in moe_data[quant_mode] else "uniform"
@@ -4609,14 +4540,14 @@ class PerfDatabase:
                         inter_size
                     ][moe_tp_size][moe_ep_size]
                     num_left, num_right = self._nearest_1d_point_helper(
-                        num_tokens,
+                        num_tokens_corrected,
                         list(moe_dict.keys()),
                         inner_only=False,
                     )
                     result = self._interp_1d(
                         [num_left, num_right],
                         [moe_dict[num_left], moe_dict[num_right]],
-                        num_tokens,
+                        num_tokens_corrected,
                     )
                     if isinstance(result, dict):
                         lat = result["latency"]
@@ -4689,12 +4620,7 @@ class PerfDatabase:
                         energy = 0.0
                     return PerformanceResult(lat, energy=energy)
                 elif self.backend == common.BackendName.vllm.value:
-                    if self._moe_data is None:
-                        raise PerfDataNotAvailableError(
-                            f"MoE perf table is missing for system='{self.system}', "
-                            f"backend='{self.backend}', version='{self.version}'. "
-                            "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                        )
+                    self._moe_data.raise_if_not_loaded()
                     used_workload_distribution = (
                         workload_distribution if workload_distribution in self._moe_data[quant_mode] else "uniform"
                     )
@@ -4716,33 +4642,26 @@ class PerfDatabase:
                     return PerformanceResult(latency, energy=energy)
                 else:
                     raise NotImplementedError(f"backend {self.backend} not supported for moe")
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        "Failed to query moe data for "
-                        f"{num_tokens=}, {hidden_size=}, {inter_size=}, {topk=}, {num_experts=}, "
-                        f"{moe_tp_size=}, {moe_ep_size=}, {quant_mode=}, {workload_distribution=}, using empirical mode"
-                    )
-                    latency = get_empirical(
-                        num_tokens,
-                        hidden_size,
-                        inter_size,
-                        topk,
-                        num_experts,
-                        moe_tp_size,
-                        moe_ep_size,
-                        quant_mode,
-                        workload_distribution,
-                    )
-                    return PerformanceResult(latency, energy=0.0)
-                else:
-                    logger.exception(
-                        "Failed to query moe data for "
-                        f"{num_tokens=}, {hidden_size=}, {inter_size=}, {topk=}, {num_experts=}, "
-                        f"{moe_tp_size=}, {moe_ep_size=}, {quant_mode=}, {workload_distribution=}, "
-                        f"{database_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(
+                    num_tokens,
+                    hidden_size,
+                    inter_size,
+                    topk,
+                    num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    quant_mode,
+                    workload_distribution,
+                ),
+                database_mode=database_mode,
+                error_msg=(
+                    f"Failed to query moe data for {num_tokens=}, {hidden_size=}, {inter_size=}, {topk=}, "
+                    f"{num_experts=}, {moe_tp_size=}, {moe_ep_size=}, {quant_mode=}, {workload_distribution=}"
+                ),
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_mla_bmm(
@@ -4805,16 +4724,13 @@ class PerfDatabase:
             emp_latency = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
             return PerformanceResult(emp_latency, energy=0.0)
         else:
-            try:
-                if self._mla_bmm_data is None:
-                    raise PerfDataNotAvailableError(
-                        f"MLA BMM perf table is missing for system='{self.system}', "
-                        f"backend='{self.backend}', version='{self.version}'. "
-                        "Please use HYBRID or EMPIRICAL database mode, or provide the data file."
-                    )
-                if quant_mode not in self._mla_bmm_data:
-                    quant_mode = common.GEMMQuantMode.float16
-                mla_bmm_dict = self._mla_bmm_data[quant_mode]["mla_gen_pre" if if_pre else "mla_gen_post"][num_heads]
+            # SILICON or HYBRID mode - use database
+            def get_silicon():
+                self._mla_bmm_data.raise_if_not_loaded()
+                quant_mode_lookup = quant_mode if quant_mode in self._mla_bmm_data else common.GEMMQuantMode.float16
+                mla_bmm_dict = self._mla_bmm_data[quant_mode_lookup]["mla_gen_pre" if if_pre else "mla_gen_post"][
+                    num_heads
+                ]
                 num_left, num_right = self._nearest_1d_point_helper(
                     num_tokens,
                     list(mla_bmm_dict.keys()),
@@ -4832,20 +4748,13 @@ class PerfDatabase:
                     lat = result
                     energy = 0.0
                 return PerformanceResult(lat, energy=energy)
-            except Exception:
-                if database_mode == common.DatabaseMode.HYBRID:
-                    logger.debug(
-                        f"Failed to query mla bmm data for {num_tokens=}, {num_heads=}, {quant_mode=}, "
-                        f"{if_pre=}, using empirical mode"
-                    )
-                    lat = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
-                    return PerformanceResult(lat, energy=0.0)
-                else:
-                    logger.exception(
-                        f"Failed to query mla bmm data for {num_tokens=}, {num_heads=}, {quant_mode=}, \
-                        {if_pre=}, {database_mode=}. Please consider Hybrid mode."
-                    )
-                    raise
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(num_tokens, num_heads, quant_mode, if_pre),
+                database_mode=database_mode,
+                error_msg=f"Failed to query mla bmm data for {num_tokens=}, {num_heads=}, {quant_mode=}, {if_pre=}",
+            )
 
     @functools.lru_cache(maxsize=32768)
     def query_mem_op(
@@ -4921,7 +4830,7 @@ class PerfDatabase:
             PerformanceResult with latency (ms) and energy (W·ms).
             Uses SOL-based fallback when mamba2_perf data is not loaded.
         """
-        mamba2_data = getattr(self, "_mamba2_data", None)
+        mamba2_data: dict = getattr(self, "_mamba2_data", {})
 
         def _sol_fallback() -> PerformanceResult:
             # SOL estimate for this kernel only (conv1d or ssm)
@@ -4937,7 +4846,7 @@ class PerfDatabase:
                 ssm_write_bytes = x * d_inner * 2
                 return self.query_mem_op(ssm_read_bytes + ssm_write_bytes)
 
-        if mamba2_data is None:
+        if not mamba2_data:
             return _sol_fallback()
 
         model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
@@ -5137,7 +5046,7 @@ class PerfDatabase:
         Correct the data based on sol time reference.
         """
         # regular gemm
-        if self._gemm_data is not None:
+        if self._gemm_data:
             for quant_mode in self._gemm_data:
                 for m in self._gemm_data[quant_mode]:
                     for n in self._gemm_data[quant_mode][m]:
@@ -5158,7 +5067,7 @@ class PerfDatabase:
                                     self._gemm_data[quant_mode][m][n][k] = float(max(sol, current_latency))
 
         # regular generation attention
-        if self._generation_attention_data is not None:
+        if self._generation_attention_data:
             for quant_mode in self._generation_attention_data:
                 for n_kv in self._generation_attention_data[quant_mode]:
                     for head_size in self._generation_attention_data[quant_mode][n_kv]:
@@ -5204,6 +5113,7 @@ class PerfDatabase:
                                                     window_size
                                                 ][n][b][s] = float(sol)
 
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_moe_compute(
         self,
         num_tokens: int,
@@ -5217,7 +5127,8 @@ class PerfDatabase:
         quant_mode: common.MoEQuantMode,
         workload_distribution: str,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+        is_gated: bool = True,
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query WideEP MoE compute latency (pure computation, excluding All2All communication).
 
@@ -5242,32 +5153,137 @@ class PerfDatabase:
             quant_mode: MoE quantization mode
             workload_distribution: Workload distribution pattern (e.g., "power_law_1.01" or "power_law_1.01_eplb")
             database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+            is_gated: Whether MoE uses gated activation (SwiGLU=True, Relu2=False).
+                      Affects the number of GEMMs in SOL computation (3 for gated, 2 for non-gated).
 
         Returns:
             PerformanceResult: Latency in ms, energy accessible via .energy attribute.
+            For SOL_FULL mode: tuple of (sol_time, sol_math, sol_mem).
         """
+
+        num_gemms = 3 if is_gated else 2
+
+        def get_sol(
+            num_tokens: int,
+            hidden_size: int,
+            inter_size: int,
+            topk: int,
+            num_experts: int,
+            num_slots: int,
+            moe_tp_size: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            workload_distribution: str,
+        ) -> tuple[float, float, float]:
+            """
+            Get the SOL (Speed of Light) time using Roofline model.
+
+            Uses num_slots instead of num_experts for weight memory calculation,
+            since WideEP EPLB redundant mode may replicate experts across slots.
+            """
+            total_tokens = num_tokens * topk
+            ops = total_tokens * hidden_size * inter_size * num_gemms * 2 // moe_ep_size // moe_tp_size
+            mem_bytes = quant_mode.value.memory * (
+                total_tokens // moe_ep_size * hidden_size * 2  # input+output
+                + total_tokens // moe_ep_size * inter_size * num_gemms // moe_tp_size  # intermediate activations
+                + hidden_size
+                * inter_size
+                * num_gemms
+                // moe_tp_size
+                * min(num_slots // moe_ep_size, total_tokens // moe_ep_size)  # weights (use num_slots)
+            )
+            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+
+        def get_empirical(
+            num_tokens: int,
+            hidden_size: int,
+            inter_size: int,
+            topk: int,
+            num_experts: int,
+            num_slots: int,
+            moe_tp_size: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            workload_distribution: str,
+        ) -> float:
+            """
+            Get the empirical estimation: SOL / scale_factor.
+            """
+            latency = get_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )[0]
+            scale_factor = 0.4
+            return latency / scale_factor
+
         if database_mode is None:
             database_mode = self._default_database_mode
 
-        if self._wideep_moe_compute_data is None:
-            raise PerfDataNotAvailableError(
-                f"WideEP MoE compute perf table is missing for system='{self.system}', "
-                f"backend='{self.backend}', version='{self.version}'. "
-                "Please provide the wideep_moe_compute_perf.txt data file."
+        if database_mode == common.DatabaseMode.SOL:
+            sol_latency = get_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )[0]
+            return PerformanceResult(sol_latency, energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
             )
-
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            emp_latency = get_empirical(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )
+            return PerformanceResult(emp_latency, energy=0.0)
         # Automatically select MoE kernel based on GPU architecture and quant mode
         kernel_source = self._select_moe_kernel(quant_mode)
         logger.debug(f"query_wideep_moe_compute: auto-selected kernel_source='{kernel_source}'")
 
-        try:
+        # SILICON or HYBRID mode - use database
+        def get_silicon():
+            self._wideep_moe_compute_data.raise_if_not_loaded()
             # Find the best matching distribution
             kernel_data = self._wideep_moe_compute_data[kernel_source]
             available_distributions = list(kernel_data[quant_mode].keys())
             if workload_distribution in available_distributions:
                 used_distribution = workload_distribution
             else:
-                # Fallback: try to find a similar distribution or use the first available
                 used_distribution = available_distributions[0] if available_distributions else None
                 if used_distribution is None:
                     raise KeyError(f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}")
@@ -5297,21 +5313,25 @@ class PerfDatabase:
 
             return PerformanceResult(lat, energy=energy)
 
-        except Exception as e:
-            if database_mode == common.DatabaseMode.HYBRID:
-                logger.debug(
-                    f"Failed to query wideep moe compute data (kernel={kernel_source}): {e}, "
-                    "falling back to empirical estimation"
-                )
-                # Simple empirical fallback based on SOL
-                total_tokens = num_tokens * topk
-                ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size
-                sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
-                lat = sol_math / 0.4  # Empirical scale factor
-                return PerformanceResult(lat, energy=0.0)
-            else:
-                raise
+        def get_empirical() -> float:
+            # Simple empirical fallback based on SOL
+            total_tokens = num_tokens * topk
+            ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size
+            sol_math = ops / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            return sol_math / 0.4  # Empirical scale factor
 
+        return self._query_silicon_or_hybrid(
+            get_silicon=get_silicon,
+            get_empirical=get_empirical,
+            database_mode=database_mode,
+            error_msg=(
+                f"Failed to query wideep moe compute data (kernel={kernel_source}) for "
+                f"{num_tokens=}, {hidden_size=}, {inter_size=}, {topk=}, {num_experts=}, "
+                f"{num_slots=}, {moe_tp_size=}, {moe_ep_size=}, {quant_mode=}, {workload_distribution=}"
+            ),
+        )
+
+    @functools.lru_cache(maxsize=32768)
     def query_wideep_alltoall(
         self,
         op_name: str,
@@ -5323,7 +5343,7 @@ class PerfDatabase:
         quant_mode: common.MoEQuantMode,
         node_num: int | None = None,
         database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
+    ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query WideEP All2All communication latency.
 
@@ -5346,14 +5366,86 @@ class PerfDatabase:
             moe_ep_size: MoE expert parallelism size (must be divisible by 4 if node_num is None)
             quant_mode: MoE quantization mode
             node_num: Number of nodes. If None, computed as moe_ep_size // 4 (assuming 4 GPUs per node)
-            database_mode: Database mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
 
         Returns:
             PerformanceResult: Latency in ms, energy accessible via .energy attribute.
+            For SOL_FULL mode: tuple of (sol_time, sol_comm, sol_overhead).
 
         Raises:
-            ValueError: If moe_ep_size is not divisible by 4 when node_num is None
+            ValueError: If op_name is not valid
         """
+
+        def get_sol(
+            num_tokens: int,
+            hidden_size: int,
+            topk: int,
+            num_experts: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            node_num: int,
+        ) -> tuple[float, float, float]:
+            """
+            Get the SOL time for All2All communication.
+
+            All2All transfers token data between GPUs:
+            - dispatch: each GPU sends (num_tokens * topk / ep_size) tokens to other GPUs
+            - combine: reverse direction
+            - prepare: lightweight metadata exchange
+
+            The total data transferred per GPU is proportional to
+            num_tokens * topk * hidden_size * (1 - 1/ep_size), since each GPU keeps 1/ep_size locally.
+            """
+            is_inter_node = node_num > 1
+
+            if is_inter_node:
+                bw = self.system_spec["node"]["inter_node_bw"]
+            else:
+                bw = self.system_spec["node"]["intra_node_bw"]
+
+            if op_name == "alltoall_prepare":
+                # Prepare is lightweight metadata exchange, data volume is small
+                data_bytes = num_tokens * topk * 4  # token routing indices, ~4 bytes per entry
+            else:
+                # dispatch/combine: transfer token activations
+                data_bytes = (
+                    num_tokens
+                    * topk
+                    * hidden_size
+                    * quant_mode.value.memory
+                    * (1.0 - 1.0 / moe_ep_size)  # fraction sent to remote GPUs
+                )
+
+            sol_comm = data_bytes / bw * 1000  # ms
+            p2p_latency_ms = self.system_spec["node"]["p2p_latency"] * 1000
+            sol_overhead = p2p_latency_ms
+            sol_time = sol_comm + sol_overhead
+            return sol_time, sol_comm, sol_overhead
+
+        def get_empirical(
+            num_tokens: int,
+            hidden_size: int,
+            topk: int,
+            num_experts: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            node_num: int,
+        ) -> float:
+            """
+            Get the empirical estimation: SOL / scale_factor.
+            """
+            latency = get_sol(
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
+            )[0]
+            scale_factor = 0.5
+            return latency / scale_factor
+
         if database_mode is None:
             database_mode = self._default_database_mode
 
@@ -5365,22 +5457,49 @@ class PerfDatabase:
                 node_num = moe_ep_size // 4
             logger.debug(f"query_wideep_alltoall: node_num not specified, using {node_num} (moe_ep_size={moe_ep_size})")
 
-        if self._wideep_alltoall_data is None:
-            raise PerfDataNotAvailableError(
-                f"WideEP All2All perf table is missing for system='{self.system}', "
-                f"backend='{self.backend}', version='{self.version}'. "
-                "Please provide the wideep_alltoall_perf.txt data file."
-            )
-
         valid_op_names = ["alltoall_prepare", "alltoall_dispatch", "alltoall_combine", "alltoall_combine_low_precision"]
         if op_name not in valid_op_names:
             raise ValueError(f"Invalid op_name '{op_name}'. Must be one of {valid_op_names}")
 
+        if database_mode == common.DatabaseMode.SOL:
+            sol_latency = get_sol(
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
+            )[0]
+            return PerformanceResult(sol_latency, energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
+            )
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            emp_latency = get_empirical(
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
+            )
+            return PerformanceResult(emp_latency, energy=0.0)
         # Automatically select All2All kernel based on GPU architecture
         kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk)
         logger.debug(f"query_wideep_alltoall: auto-selected kernel_source='{kernel_source}'")
 
-        try:
+        # SILICON or HYBRID mode - use database
+        def get_silicon():
+            self._wideep_alltoall_data.raise_if_not_loaded()
             kernel_data = self._wideep_alltoall_data[kernel_source]
             alltoall_dict = kernel_data[op_name][quant_mode][node_num][hidden_size][topk][num_experts][moe_ep_size]
 
@@ -5404,17 +5523,20 @@ class PerfDatabase:
 
             return PerformanceResult(lat, energy=energy)
 
-        except Exception as e:
-            if database_mode == common.DatabaseMode.HYBRID:
-                logger.debug(
-                    f"Failed to query wideep alltoall data for {op_name} (kernel={kernel_source}), "
-                    f"node_num={node_num}: {e}, using empirical estimation"
-                )
-                # Simple empirical fallback: ~0.1ms per operation as baseline
-                lat = 0.1
-                return PerformanceResult(lat, energy=0.0)
-            else:
-                raise
+        def get_empirical() -> float:
+            # Simple empirical fallback: ~0.1ms per operation as baseline
+            return 0.1
+
+        return self._query_silicon_or_hybrid(
+            get_silicon=get_silicon,
+            get_empirical=get_empirical,
+            database_mode=database_mode,
+            error_msg=(
+                f"Failed to query wideep alltoall data for {op_name} (kernel={kernel_source}), "
+                f"node_num={node_num}, {num_tokens=}, {hidden_size=}, {topk=}, {num_experts=}, "
+                f"{moe_ep_size=}, {quant_mode=}"
+            ),
+        )
 
 
 if __name__ == "__main__":

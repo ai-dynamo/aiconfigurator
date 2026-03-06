@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from functools import cache
+from typing import Optional
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
@@ -92,8 +94,15 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
 
 
 def _apply_model_quant_defaults(
-    model_config: config.ModelConfig, raw_config: dict, architecture: str, backend_name: str
+    model_config: config.ModelConfig,
+    raw_config: dict,
+    architecture: str,
+    backend_name: str,
+    worker_name: Optional[str] = None,
 ) -> None:
+    # Clone original model_config to track if any modifications were made
+    original_config = dataclasses.replace(model_config)
+
     inferred = _infer_quant_modes_from_raw_config(raw_config)
     applied: list[str] = []
     for key, value in inferred.items():
@@ -116,7 +125,10 @@ def _apply_model_quant_defaults(
         logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
 
     # FIXME: temporary workaround for Deepseek V3 fp8 fmha quant mode, only float16+fp8kvcache is supported
-    if architecture == "DeepseekV3ForCausalLM" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+    if (
+        architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
+        and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
+    ):
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
 
     # FIXME: temporary workaround for Qwen3 32B FP8, only float16+fp8kvcache is supported
@@ -124,14 +136,17 @@ def _apply_model_quant_defaults(
     if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
 
-    logger.info(
-        "Model config (final quant modes): gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
-        model_config.gemm_quant_mode,
-        model_config.moe_quant_mode,
-        model_config.kvcache_quant_mode,
-        model_config.fmha_quant_mode,
-        model_config.comm_quant_mode,
-    )
+    # Only log if model_config was modified
+    if original_config != model_config:
+        logger.info(
+            "Resolved quant modes for %s: gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
+            worker_name or architecture,
+            model_config.gemm_quant_mode,
+            model_config.moe_quant_mode,
+            model_config.kvcache_quant_mode,
+            model_config.fmha_quant_mode,
+            model_config.comm_quant_mode,
+        )
 
 
 def get_model(
@@ -720,17 +735,26 @@ class LLAMAModel(BaseModel):
 # mostly for mixtral models
 class MOEModel(BaseModel):
     """
-    Traditional MoE models uses this model impl: Mixtral, LLAMA4_MOE, etc.
+    Traditional MoE models uses this model impl: Mixtral, LLAMA4_MOE, MiniMax-M2, etc.
     Some rules to follow,
     Due to implementation, attn layer name needs to be context_attention or generation_attention,
     exact match is required. Same for logits_gemm.
-    Other than DS V3, all other models don't support mtp
+    Supports MTP (Multi-Token Prediction) when nextn > 0 (e.g. MiniMax-M2).
+    When nextn == 0, _mtp_scale_factor is 1.0 and behavior is unchanged.
     TODO: redesign shared moe part.
     """
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
-        assert self._nextn == 0, "Only DS V3 supports mtp"
+
+        self._mtp_scale_factor = (
+            1.0
+            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
+            * (self._nextn + self._num_layers)
+            / self._num_layers
+            if self._nextn > 0
+            else 1.0
+        )
 
         # make sure the paralel width is same
         assert (
@@ -792,7 +816,7 @@ class MOEModel(BaseModel):
             self.generation_ops.append(
                 ops.GenerationAttention(
                     "generation_attention",
-                    self._num_layers / attn_scale_factor,
+                    self._num_layers * self._mtp_scale_factor / attn_scale_factor,
                     self._num_heads // tp_size,
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
@@ -892,18 +916,24 @@ class MOEModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("generation_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
+                ops.ElementWise(
+                    "generation_add_norm_1",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * h,
+                    2 * h,
+                    0.8,
+                ),
                 ops.GEMM(
                     "generation_qkv_gemm",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
                 ),
                 ops.GenerationAttention(
                     "generation_attention",
-                    self._num_layers / attn_scale_factor,
+                    self._num_layers * self._mtp_scale_factor / attn_scale_factor,
                     self._num_heads // tp_size,
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
@@ -911,13 +941,19 @@ class MOEModel(BaseModel):
                 ),
                 ops.GEMM(
                     "generation_proj_gemm",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
                 ),
-                ops.ElementWise("generation_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise(
+                    "generation_add_norm_2",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * h,
+                    2 * h,
+                    0.8,
+                ),
             ]
         )
 
@@ -927,7 +963,7 @@ class MOEModel(BaseModel):
                 [
                     ops.GEMM(
                         "generation_router_gemm",
-                        self._num_layers,
+                        self._num_layers * self._mtp_scale_factor,
                         self._num_experts,
                         h,
                         common.GEMMQuantMode.float16,
@@ -940,7 +976,7 @@ class MOEModel(BaseModel):
             [
                 ops.MoEDispatch(
                     "generation_moe_pre_dispatch",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._topk,
                     self._num_experts,
@@ -951,7 +987,7 @@ class MOEModel(BaseModel):
                 ),
                 ops.MoE(
                     "generation_moe",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._moe_inter_size,
                     self._topk,
@@ -964,7 +1000,7 @@ class MOEModel(BaseModel):
                 ),
                 ops.MoEDispatch(
                     "generation_moe_post_dispatch",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._topk,
                     self._num_experts,
@@ -980,7 +1016,7 @@ class MOEModel(BaseModel):
             [
                 ops.GEMM(
                     "generation_logits_gemm",
-                    1,
+                    1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
                     common.GEMMQuantMode.float16,
@@ -997,7 +1033,7 @@ class MOEModel(BaseModel):
         # pp
         pp_scale_factor = pp_size - 1
         self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
-        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor, h, pp_size))
+        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
     def _validate_fp8_block_quantized_moe_config(self) -> None:
         """
@@ -1933,6 +1969,23 @@ class WideEPDeepSeekModel(BaseModel):
 
         sms = self.config.sms
 
+        # qkv_a projection (fused q_a + kv_a + rope): hidden_size -> q_lora_rank + kv_lora_rank + qk_rope_head_dim
+        # This is replicated on every GPU (not TP-sharded), matching narrow EP's context_downscale_gemm.
+        # In sglang >=0.5.6, qkv_a_proj is computed outside the MLA attention forward via communicator,
+        # so it must be modeled as a separate GEMM op rather than included in WideEPContextMLA.
+        self.context_ops.extend(
+            [
+                ops.GEMM(
+                    "context_qkv_a_proj_gemm",
+                    self._num_layers,
+                    1536 + 512 + 64,  # q_lora_rank + kv_lora_rank + qk_rope_head_dim = 2112
+                    h,
+                    gemm_quant_mode,
+                    scale_num_tokens=tp_size,
+                ),
+            ]
+        )
+
         # context mla attention
         self.context_ops.extend(
             [
@@ -2046,6 +2099,19 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_backend=moe_backend,
                     enable_eplb=self.config.enable_eplb,
                 )
+            ]
+        )
+
+        # qkv_a projection for generation (same as context but per-token, not per-seq)
+        self.generation_ops.extend(
+            [
+                ops.GEMM(
+                    "generation_qkv_a_proj_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    1536 + 512 + 64,  # q_lora_rank + kv_lora_rank + qk_rope_head_dim = 2112
+                    h,
+                    gemm_quant_mode,
+                ),
             ]
         )
 

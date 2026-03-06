@@ -738,9 +738,17 @@ def _run_agg_estimate(
     session = InferenceSession(model, database, backend)
     summary = session.run_agg(runtime_config, ctx_tokens=ctx_tokens)
 
+    if summary.check_oom():
+        raise RuntimeError(
+            f"OOM: the model '{model_path}' does not fit in GPU memory on system '{system_name}' "
+            f"with the given parallelism (tp={tp_size}, pp={pp_size}, dp={attention_dp_size}). "
+            "Try increasing tp_size/pp_size, using a quantized model, or "
+            "using a system with more VRAM per GPU."
+        )
+
     result_dict = summary.get_result_dict()
     if result_dict is None:
-        raise RuntimeError("Estimation produced no results. The configuration may be invalid or OOM.")
+        raise RuntimeError("Estimation produced no results. The configuration may be invalid.")
 
     return EstimateResult(
         ttft=result_dict["ttft"],
@@ -862,9 +870,22 @@ def _run_disagg_estimate(
         decode_num_worker=decode_num_workers,
     )
 
+    if summary.check_oom():
+        oom_details = []
+        if decode_system_name != system_name:
+            oom_details.append(f"prefill system '{system_name}' or decode system '{decode_system_name}'")
+        else:
+            oom_details.append(f"system '{system_name}'")
+        raise RuntimeError(
+            f"OOM: the model '{model_path}' does not fit in GPU memory on {oom_details[0]} "
+            f"with the given parallelism. "
+            "Try increasing tp_size/pp_size, using a quantized model, or "
+            "using a system with more VRAM per GPU."
+        )
+
     result_dict = summary.get_result_dict()
     if result_dict is None:
-        raise RuntimeError("Disagg estimation produced no results. The configuration may be invalid or OOM.")
+        raise RuntimeError("Disagg estimation produced no results. The configuration may be invalid.")
 
     return EstimateResult(
         ttft=result_dict["ttft"],

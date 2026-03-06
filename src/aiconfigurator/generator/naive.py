@@ -10,6 +10,7 @@ the smallest TP that fits the model in memory, with PP=1.
 
 import logging
 import os
+import re
 from typing import Any
 
 import yaml
@@ -18,11 +19,29 @@ from aiconfigurator.sdk import perf_database
 
 logger = logging.getLogger(__name__)
 
+_RFC1123_MAX_LEN = 63
+
 # Default fallbacks
 _DEFAULT_GPUS_PER_NODE = 8
 _DEFAULT_VRAM_BYTES = 141 * 1024 * 1024 * 1024  # 141 GiB (H200)
 _MEMORY_MULTIPLIER = 1.5  # Require 1.5x model weight to fit in VRAM
 _BYTES_PER_PARAM = 2  # FP16/BF16
+
+
+def _sanitize_rfc1123(name: str) -> str:
+    """Sanitize a string to be a valid RFC 1123 subdomain label prefix.
+
+    Converts ``"Qwen/Qwen3-32B"`` → ``"qwen-qwen3-32b"``, etc.
+    Falls back to ``"dynamo"`` when the input is empty or None.
+    """
+    if not name:
+        return "dynamo"
+    sanitized = name.lower()
+    sanitized = re.sub(r"[^a-z0-9\-.]", "-", sanitized)
+    sanitized = re.sub(r"-{2,}", "-", sanitized)
+    sanitized = sanitized.strip("-.")
+    sanitized = sanitized[:_RFC1123_MAX_LEN].rstrip("-.")
+    return sanitized or "dynamo"
 
 
 def _get_system_config(system_name: str) -> dict[str, Any]:
@@ -73,6 +92,10 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
 
     Returns:
         Estimated model weight size in bytes.
+
+    Raises:
+        RuntimeError: If the model config cannot be fetched (e.g. model not found
+            on HuggingFace). Callers must not proceed with guessed parameters.
     """
     from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
@@ -123,9 +146,8 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
         return weight_bytes
 
     except Exception as e:
-        logger.warning(f"Could not estimate model size for {model_path}: {e}")
-        # Return a large fallback to be safe (assume 70B model @ FP16 = ~140GB)
-        return 140 * 1024 * 1024 * 1024
+        logger.exception("Could not estimate model size for %s.", model_path)
+        raise RuntimeError(f"Model {model_path!r} not found or config unavailable") from e
 
 
 def _calculate_min_tp(
@@ -247,14 +269,18 @@ def build_naive_generator_params(
     gpus_per_worker = tensor_parallel_size * pipeline_parallel_size
     agg_workers = total_gpus // gpus_per_worker
 
+    name_prefix = _sanitize_rfc1123(model_name)
+
     params = {
-        "service": {
+        "ServiceConfig": {
             "model_name": model_name,
             "served_model_name": model_name,
             "model_path": model_name,
+            "include_frontend": True,
         },
-        "k8s": {
+        "K8sConfig": {
             "system_name": system_name,
+            "name_prefix": name_prefix,
         },
         "params": {
             "agg": {
@@ -274,7 +300,6 @@ def build_naive_generator_params(
         "NodeConfig": {
             "num_gpus_per_node": gpus_per_node,
         },
-        # WorkerConfig is used by the run script generator
         "WorkerConfig": {
             "agg_workers": agg_workers,
             "agg_gpus_per_worker": gpus_per_worker,

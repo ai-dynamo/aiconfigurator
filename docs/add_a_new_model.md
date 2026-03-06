@@ -49,17 +49,17 @@ The database contains the function **query_moe** which defines how we estimate t
 
 ### 3. Collect Data for the Operation
 
-Taking MoE for TensorRT-LLM as an example, it's defined in [`collector/trtllm/collect_moe.py`](../collector/trtllm/collect_moe.py).
+Taking MoE for TensorRT-LLM as an example, it's defined in `collector/trtllm/collect_moe_v*.py` (version-specific files, e.g. `collect_moe_v3.py` for trtllm >= 1.1.0).
 
 #### 3.1 Adding New Test Cases
 
-If the MoE operation you want is not covered by the current inherited [database](../src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt), you need to add the test case in `collect_moe.py` and collect your own data. 
+If the MoE operation you want is not covered by the current inherited [database](../src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt), you need to add the test case in the appropriate `collect_moe_v*.py` and collect your own data. 
 
-For example, if you want to cover a new model with `num_experts=1024, topk=16`, you need to extend the **model_config_list** defined in the **`get_moe_test_cases()`** function in `collect_moe.py`.
+For example, if you want to cover a new model with `num_experts=1024, topk=16`, you need to extend the **model_config_list** defined in the **`get_moe_test_cases()`** function in the version-matched `collect_moe_v*.py` file.
 
 #### 3.2 Update Database
 
-Use the newly generated data by collect_moe.py `moe_perf.txt` to replace the inherited database's `moe_perf.txt` file and rebuild & reinstall aiconfigurator.
+Use the newly generated `moe_perf.txt` to replace the inherited database's `moe_perf.txt` file and rebuild & reinstall aiconfigurator.
 
 
 ## Adding a New Model
@@ -89,7 +89,7 @@ This typically refers to a MoE model, as the MoE operation of a new model usuall
 
 You need to follow several steps:
 
-1. Define a new MoE operation test case in `collect_moe.py` and follow the collector [README](../collector/README.md) to collect the MoE data points for your model.
+1. Define a new MoE operation test case in the version-matched `collect_moe_v*.py` and follow the collector [README](../collector/README.md) to collect the MoE data points for your model.
 
 2. Update the inherited database such as `src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt` with the `moe_perf.txt` file you get in step 1.
 

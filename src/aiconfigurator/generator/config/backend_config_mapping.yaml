@@ -6,17 +6,17 @@ parameters:
 - param_key: tensor_parallel_size
   vllm: tensor-parallel-size
   sglang: tensor-parallel-size
-  trtllm: tensor_parallel_size
+  trtllm: tensor-parallel-size
 
 - param_key: pipeline_parallel_size
   vllm: pipeline-parallel-size
   sglang: pipeline-parallel-size
-  trtllm: pipeline_parallel_size
+  trtllm: pipeline-parallel-size
 
 - param_key: enable_attention_dp
   vllm: null
   sglang: enable-dp-attention
-  trtllm: enable_attention_dp
+  trtllm: enable-attention-dp
 
 - param_key: data_parallel_size
   vllm: data-parallel-size
@@ -31,47 +31,45 @@ parameters:
 - param_key: moe_expert_parallel_size
   vllm: null
   sglang: expert-parallel-size
-  trtllm: moe_expert_parallel_size
+  trtllm: expert-parallel-size
 
 - param_key: moe_tensor_parallel_size
   vllm: null
   # https://github.com/sgl-project/sglang/issues/8530
   # sglang moe_tensor_parallel_size only supports 1 or None for now
   sglang: null
-  trtllm: moe_tensor_parallel_size
+  trtllm: null
 
 # KV Cache
 - param_key: kv_cache_dtype
   vllm: kv-cache-dtype
   sglang: kv-cache-dtype
-  trtllm: kv_cache_config.dtype
+  trtllm: kv_cache_dtype
 
 - param_key: kv_cache_free_gpu_memory_fraction
   vllm: gpu-memory-utilization
   sglang: mem-fraction-static
-  trtllm: kv_cache_config.free_gpu_memory_fraction
+  trtllm: kv_cache_free_gpu_memory_fraction
 
 - param_key: kv_cache_max_tokens
   vllm: null
   sglang: max-total-tokens
-  trtllm: kv_cache_config.max_tokens
+  trtllm: kv_cache_max_tokens
 
 - param_key: tokens_per_block
   vllm: block-size
   sglang: page-size
-  trtllm: kv_cache_config.tokens_per_block
+  trtllm: tokens_per_block
 
 - param_key: disable_prefix_cache
   vllm: no-enable-prefix-caching
   sglang: disable-radix-cache
-  trtllm: 
-    key: kv_cache_config.enable_block_reuse
-    value: "not disable_prefix_cache"
+  trtllm: disable_prefix_cache
 
 - param_key: cache_transceiver_max_tokens_in_buffer
   vllm: null
   sglang: null
-  trtllm: cache_transceiver_config.max_tokens_in_buffer
+  trtllm: cache_transceiver_max_tokens_in_buffer
 
 # Cuda Graph
 - param_key: disable_cuda_graph
@@ -82,27 +80,25 @@ parameters:
 - param_key: cuda_graph_batch_sizes
   vllm: cudagraph-capture-sizes
   sglang: cuda-graph-bs
-  trtllm: cuda_graph_config.batch_sizes
+  trtllm: null
 
 - param_key: cuda_graph_enable_padding
   vllm: null
   sglang:
     key: disable-cuda-graph-padding
     value: "not cuda_graph_enable_padding"
-  trtllm:
-    key: cuda_graph_config.enable_padding
-    value: "cuda_graph_enable_padding"
+  trtllm: null
 
 - param_key: cuda_graph_max_batch_size
   vllm: null
   sglang: cuda-graph-max-bs
-  trtllm: cuda_graph_config.max_batch_size
+  trtllm: null
 
 # lengths
 - param_key: max_batch_size
   vllm: max-num-seqs
   sglang: max-running-requests
-  trtllm: build_config.max_batch_size
+  trtllm: max_batch_size
 
 - param_key: enable_chunked_prefill
   vllm: enable-chunked-prefill
@@ -124,18 +120,18 @@ parameters:
 - param_key: max_num_tokens
   vllm: max-num-batched-tokens
   sglang: null
-  trtllm: build_config.max_num_tokens
+  trtllm: max_num_tokens
 
 - param_key: max_seq_len
   vllm: max-model-len
   sglang: context-length
-  trtllm: build_config.max_seq_len
+  trtllm: max_seq_len
 
 # backend
 - param_key: moe_backend
   vllm: null
   sglang: moe-runner-backend
-  trtllm: moe_config.backend
+  trtllm: null
 
 - param_key: moe_all2all_backend
   vllm: all2all-backend
@@ -145,7 +141,7 @@ parameters:
 - param_key: kv_transfer_backend
   vllm: null
   sglang: disaggregation-transfer-backend
-  trtllm: cache_transceiver_config.backend
+  trtllm: null
 
 - param_key: disaggregation_bootstrap_port
   vllm: null
@@ -158,7 +154,7 @@ parameters:
 - param_key: attention_backend
   vllm: null
   sglang: attention-backend
-  trtllm: attn_backend
+  trtllm: null
 
 - param_key: elastic_ep_backend
   vllm: null
@@ -169,12 +165,12 @@ parameters:
 - param_key: speculative_decoding_type
   vllm: speculative_config.method
   sglang: speculative-algorithm
-  trtllm: speculative_config.decoding_type
+  trtllm: null
 
 - param_key: num_nextn_predict_layers
   vllm: speculative_config.num_speculative_tokens
   sglang: speculative-num-steps
-  trtllm: speculative_config.num_nextn_predict_layers
+  trtllm: null
 
 # Others
 - param_key: disable_overlap_scheduler
@@ -185,7 +181,7 @@ parameters:
 - param_key: moe_load_balancer
   vllm: null
   sglang: load-balance-method
-  trtllm: moe_config.load_balancer
+  trtllm: null
 
 - param_key: skip_tokenizer_init
   vllm: skip-tokenizer-init

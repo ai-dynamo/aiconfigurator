@@ -12,7 +12,12 @@ from functools import cache
 from pathlib import Path
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.common import ARCHITECTURE_TO_MODEL_FAMILY, BlockConfig, DefaultHFModels
+from aiconfigurator.sdk.common import (
+    ARCHITECTURE_TO_MODEL_FAMILY,
+    MULTIMODAL_TEXT_CONFIG_KEY,
+    BlockConfig,
+    DefaultHFModels,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,10 +174,6 @@ def enumerate_parallel_config(
             max_num_gpus=max_num_gpus,
             allow_moe_pure_tp=allow_moe_pure_tp,
         )
-
-    for parallel_config in parallel_config_list:
-        tp, pp, dp, moe_tp, moe_ep = parallel_config
-        logger.info(f"Enumerated parallel config: tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
 
     return parallel_config_list
 
@@ -440,6 +441,27 @@ def _parse_hf_config_json(config: dict) -> dict:
         ValueError: If a required field is missing from the config or the architecture is not supported
     """
     architecture = config["architectures"][0]
+
+    # For multimodal models, unwrap the nested text config so that all LLM
+    # parameters (layers, hidden_size, MoE fields, etc.) are read from the
+    # correct sub-dictionary while keeping the top-level architecture name.
+    text_key = MULTIMODAL_TEXT_CONFIG_KEY.get(architecture)
+    if text_key and text_key in config:
+        text_cfg = config[text_key]
+        if not isinstance(text_cfg, dict):
+            raise ValueError(
+                f"Expected '{text_key}' to be a dict for architecture {architecture}, got {type(text_cfg).__name__}"
+            )
+        logger.info(
+            "Multimodal model detected (%s). Reading LLM parameters from '%s'.",
+            architecture,
+            text_key,
+        )
+        # Merge quantization_config from text_config if not present at top level
+        if "quantization_config" not in config and "quantization_config" in text_cfg:
+            config["quantization_config"] = text_cfg["quantization_config"]
+        config = {**text_cfg, **{"architectures": [architecture]}}
+
     if architecture not in ARCHITECTURE_TO_MODEL_FAMILY:
         raise ValueError(
             f"The model's architecture {architecture} is not supported. "
@@ -483,13 +505,6 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])
-
-    logger.info(
-        f"Model architecture: architecture={architecture}, layers={layers}, n={n}, n_kv={n_kv}, d={d}, "
-        f"hidden_size={hidden_size}, inter_size={inter_size}, vocab={vocab}, context={context}, "
-        f"topk={topk}, num_experts={num_experts}, moe_inter_size={moe_inter_size}, "
-        f"extra_params={'present' if extra_params else 'None'}"
-    )
     return {
         "architecture": architecture,
         "layers": layers,
@@ -679,6 +694,15 @@ def _infer_quantization_fields(raw_config: dict) -> dict[str, object]:
 
 
 def _attach_inferred_quant_fields(raw_config: dict) -> dict:
+    # For multimodal models the quantization_config may live under text_config.
+    # Promote it to the top level so downstream inference picks it up.
+    if "quantization_config" not in raw_config:
+        architecture = (raw_config.get("architectures") or [None])[0]
+        text_key = MULTIMODAL_TEXT_CONFIG_KEY.get(architecture)
+        if text_key:
+            nested = raw_config.get(text_key, {})
+            if isinstance(nested, dict) and "quantization_config" in nested:
+                raw_config["quantization_config"] = nested["quantization_config"]
     inferred = _infer_quantization_fields(raw_config)
     for key, value in inferred.items():
         raw_config.setdefault(key, value)
@@ -736,6 +760,7 @@ def _load_model_config_from_model_path(model_path: str) -> dict:
     return _attach_inferred_quant_fields(_attach_hf_quant_config(config, hf_quant_config))
 
 
+@cache
 def get_model_config_from_model_path(model_path: str) -> dict:
     """
     Get model configuration from model path and parse it into model configuration parameters.
@@ -748,5 +773,10 @@ def get_model_config_from_model_path(model_path: str) -> dict:
     """
     raw_config = _load_model_config_from_model_path(model_path)
     parsed = _parse_hf_config_json(raw_config)
+    logger.info(
+        "Loaded model config for %s: %s",
+        model_path,
+        ", ".join(f"{k}={v}" for k, v in parsed.items()),
+    )
     parsed["raw_config"] = raw_config
     return parsed
