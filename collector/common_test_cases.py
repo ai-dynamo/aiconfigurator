@@ -4,6 +4,8 @@ import dataclasses
 import itertools
 from typing import Optional
 
+import torch
+
 
 @dataclasses.dataclass
 class MoeCommonTestCase:
@@ -52,6 +54,9 @@ def get_common_moe_test_cases():
         32768,
         65536,
     ]
+    if torch.xpu.is_available():
+        # narrow down the search space for xpu currently
+        num_tokens = [ntok for ntok in num_tokens if ntok < 128]
     tp_list = [1, 2, 4, 8, 16, 32]
     ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     num_gpu_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -89,6 +94,11 @@ def get_common_moe_test_cases():
             "nvidia/NVIDIA-Nemotron-3-Super-120B-NVFP4-FP8KV",
         ],  # nemotron-3 super (uses relu2, non-gated)
     ]
+    if torch.xpu.is_available():
+        # More configs will be validated/added soon for XPU
+        model_config_list = [
+            [2048, 1408, 4, 60, "QWEN1.5_MOE"],
+        ]
 
     test_cases: list[MoeCommonTestCase] = []
 
@@ -191,7 +201,10 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
         10240,
         12288,
     ]
-    nk_list_ext = [16384, 65536]  # for coverage and interp purpose
+    if torch.cuda.is_available():
+        nk_list_ext = [16384, 65536]  # for coverage and interp purpose
+    elif torch.xpu.is_available():  # narrow down the search space for xpu currently
+        nk_list_ext = []
 
     test_cases = []
     # x_list_orig+add+ext  <==> nk_list+ext

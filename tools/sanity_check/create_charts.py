@@ -15,6 +15,8 @@ import sys
 import textwrap
 from collections import defaultdict
 
+import torch
+
 from aiconfigurator.sdk.perf_database import get_database
 
 # Disable interactive backend
@@ -86,6 +88,13 @@ def create_charts(
             functools.partial(validate_database.visualize_nccl, operation="reduce_scatter"),
         ],
     }
+
+    if torch.xpu.is_available():
+        op_to_chart_function["generation_attention"] = [
+            fn
+            for fn in op_to_chart_function["generation_attention"]
+            if fn != validate_database.visualize_generation_attention_b
+        ]
 
     with open(output_md_file, "a") as f:
         f.write(

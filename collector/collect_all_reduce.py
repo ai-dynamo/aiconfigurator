@@ -31,8 +31,9 @@ from argparse import ArgumentParser
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 
-from helper import PowerMonitor, log_perf
+from helper import PowerMonitor, get_device_module, get_device_str, log_perf
 
 
 def get_input_shape_and_comm_size(size, token_dim=4096):
@@ -220,7 +221,7 @@ def benchmark_trtllm_allreduce(
                 ],
                 framework="TRTLLM",
                 version=trtllm_version,
-                device_name=torch.cuda.get_device_name(),
+                device_name=get_device_module().get_device_name(),
                 op_name="all_reduce",
                 kernel_source="TRTLLM",
                 perf_filename=perf_filename,
@@ -275,8 +276,8 @@ def setup_vllm_distributed(world_size, rank, use_slurm):
         # For non-SLURM, assume single node or use environment variables
         local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
 
-    # Set CUDA device
-    torch.cuda.set_device(local_rank)
+    # Set device
+    get_device_module().set_device(local_rank)
 
     # Initialize distributed environment
     if not torch.distributed.is_initialized():
@@ -294,12 +295,17 @@ def setup_vllm_distributed(world_size, rank, use_slurm):
         print(f"  Local rank: {local_rank}")
 
         try:
+            if torch.xpu.is_available():
+                dist.init_process_group(
+                    backend="xccl",
+                    init_method="env://",
+                )
             vllm_mods["init_distributed_environment"](
                 world_size=world_size,
                 rank=rank,
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank,
-                backend="nccl",
+                backend="xccl" if torch.xpu.is_available() else "nccl",
             )
         except Exception as e:
             print(f"\nERROR: Failed to initialize distributed environment: {e}")
@@ -337,16 +343,17 @@ def benchmark_vllm_allreduce(
     num_runs = 20
 
     # Warmup communication
-    warmup_tensor = torch.ones(1, dtype=torch_dtype, device="cuda")
+    warmup_tensor = torch.ones(1, dtype=torch_dtype, device=get_device_str())
     _ = vllm_mods["tensor_model_parallel_all_reduce"](warmup_tensor)
-    torch.cuda.synchronize()
+    get_device_module().synchronize()
 
     size = min_size
     while size < max_size:
         input_shape = get_input_shape_and_comm_size(size)
 
         # Test both graph capture and eager mode
-        for use_graph in [True, False]:
+        flag_lst = [False] if torch.xpu.is_available() else [True, False]
+        for use_graph in flag_lst:
             mode_str = "graph" if use_graph else "eager"
 
             if use_graph:
@@ -415,7 +422,7 @@ def benchmark_vllm_allreduce(
 
             else:
                 # Eager mode
-                input_tensor = torch.ones(input_shape, dtype=torch_dtype, device="cuda")
+                input_tensor = torch.ones(input_shape, dtype=torch_dtype, device=get_device_str())
 
                 # Adaptive num_runs calculation for power measurement
                 actual_num_runs = num_runs
@@ -437,11 +444,11 @@ def benchmark_vllm_allreduce(
                     actual_num_runs = min(actual_num_runs, 1000)
                 else:
                     # Normal warmup
-                    torch.cuda.synchronize()
+                    get_device_module().synchronize()
                     for _ in range(num_warmups):
                         for _ in range(repeat_n):
                             _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
-                    torch.cuda.synchronize()
+                    get_device_module().synchronize()
 
                 # Initialize power monitoring
                 power_monitor = None
@@ -452,15 +459,15 @@ def benchmark_vllm_allreduce(
                         power_monitor = None
 
                 # Timing
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
+                start_event = get_device_module().Event(enable_timing=True)
+                end_event = get_device_module().Event(enable_timing=True)
 
                 start_event.record()
                 for _ in range(actual_num_runs):
                     for _ in range(repeat_n):
                         _ = vllm_mods["tensor_model_parallel_all_reduce"](input_tensor.clone())
                 end_event.record()
-                torch.cuda.synchronize()
+                get_device_module().synchronize()
 
                 # Stop power monitoring
                 if power_monitor:
@@ -493,7 +500,7 @@ def benchmark_vllm_allreduce(
                     ],
                     framework="vLLM",
                     version=vllm_version,
-                    device_name=torch.cuda.get_device_name(),
+                    device_name=get_device_module().get_device_name(),
                     op_name="all_reduce",
                     kernel_source=f"vLLM_custom_{mode_str}",
                     perf_filename=perf_filename,
@@ -503,7 +510,7 @@ def benchmark_vllm_allreduce(
         size *= ratio
 
     # Synchronize all ranks before cleanup
-    torch.cuda.synchronize()
+    get_device_module().synchronize()
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
 

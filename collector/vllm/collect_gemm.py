@@ -9,14 +9,18 @@ import torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    maybe_post_process_fp8_weight_block,
-)
+
+try:
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        maybe_post_process_fp8_weight_block,
+    )
+except Exception:
+    print("No maybe_post_process_fp8_weight_block found, please check your vLLM version.")
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
 
 from collector.common_test_cases import get_gemm_common_test_cases
-from collector.helper import benchmark_with_power, get_sm_version, log_perf
+from collector.helper import benchmark_with_power, get_device_module, get_sm_version, log_perf
 from collector.vllm.utils import setup_distributed, with_exit_stack
 
 FP8_BLOCK_SHAPE = (128, 128)
@@ -67,8 +71,9 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
     dtype = torch.float16
     torch.set_default_dtype(dtype)
-    torch.cuda.set_device(device)
-    torch.set_default_device(device)
+    get_device_module().set_device(device)
+    if torch.cuda.is_available():
+        torch.set_default_device(device)
 
     x = torch.randn((m, k), dtype=dtype, device=torch.device(device))
 
@@ -167,11 +172,11 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
         ],
         framework="VLLM",
         version=vllm_version,
-        device_name=torch.cuda.get_device_name(device),
+        device_name=get_device_module().get_device_name(device),
         op_name="gemm",
         kernel_source="vllm_default",
         perf_filename=perf_filename,
-        power_stats=results["power_stats"],
+        power_stats=results["power_stats"] if torch.cuda.is_available() else None,
     )
 
 

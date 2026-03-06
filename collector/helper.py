@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+import functools
 import heapq
 import json
 import logging
@@ -233,43 +234,47 @@ def benchmark_with_power(
             )
     else:
         # Normal warmup
-        torch.cuda.synchronize()
+        get_device_module().synchronize()
         for _ in range(num_warmups):
             kernel_func()
-        torch.cuda.synchronize()
+        get_device_module().synchronize()
 
     # ═══════════════════════════════════════════════════════════════════
     # CUDA Graph Capture with Optional Fallback
     # ═══════════════════════════════════════════════════════════════════
-    use_graph = True
-    g = torch.cuda.CUDAGraph()
+    if torch.cuda.is_available():
+        use_graph = True
+        g = torch.cuda.CUDAGraph()
 
-    try:
-        with torch.cuda.graph(g):
-            for _ in range(repeat_n):
-                kernel_func()
-        torch.cuda.synchronize()
-    except Exception as e:
-        if allow_graph_fail:
-            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
-            torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
-            use_graph = False
-        else:
-            # Standard behavior: re-raise exception
-            raise
+        try:
+            with torch.cuda.graph(g):
+                for _ in range(repeat_n):
+                    kernel_func()
+            torch.cuda.synchronize()
+        except Exception as e:
+            if allow_graph_fail:
+                logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
+                torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
+                use_graph = False
+            else:
+                # Standard behavior: re-raise exception
+                raise
+    else:
+        use_graph = False
 
     # ═══════════════════════════════════════════════════════════════════
     # Warmup the ACTUAL execution path (after graph capture)
     # ═══════════════════════════════════════════════════════════════════
-    torch.cuda.synchronize()
-    for _ in range(num_warmups):
-        if use_graph:
-            g.replay()
-        else:
-            # Fallback: Direct execution matching actual execution path
-            for _ in range(repeat_n):
-                kernel_func()
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        for _ in range(num_warmups):
+            if use_graph:
+                g.replay()
+            else:
+                # Fallback: Direct execution matching actual execution path
+                for _ in range(repeat_n):
+                    kernel_func()
+        torch.cuda.synchronize()
 
     # Initialize power monitor if enabled
     power_monitor = None
@@ -293,9 +298,8 @@ def benchmark_with_power(
     # ═══════════════════════════════════════════════════════════════════
     # Execute with Graph or Eager (both paths measured!)
     # ═══════════════════════════════════════════════════════════════════
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
+    start_event = get_device_module().Event(enable_timing=True)
+    end_event = get_device_module().Event(enable_timing=True)
     start_event.record()
     for _ in range(actual_num_runs):
         if use_graph:
@@ -306,7 +310,7 @@ def benchmark_with_power(
             for _ in range(repeat_n):
                 kernel_func()
     end_event.record()
-    torch.cuda.synchronize()
+    get_device_module().synchronize()
 
     # Check for throttling
     throttled = False
@@ -582,6 +586,8 @@ def get_sm_version():
             device = torch.cuda.current_device()
             capability = torch.cuda.get_device_capability(device)
             return capability[0] * 10 + capability[1]
+        elif torch.xpu.is_available():
+            return -1
     except Exception:
         pass
 
@@ -1433,3 +1439,25 @@ def _get_deepseek_model_path():
 
     # Fallback to default path
     return "/deepseek-v3"
+
+
+@functools.lru_cache(maxsize=1)
+def get_device_module():
+    import torch
+
+    if torch.cuda.is_available():
+        return torch.cuda
+    elif torch.xpu.is_available():
+        return torch.xpu
+    raise RuntimeError("No supported device (need CUDA or XPU)")
+
+
+@functools.lru_cache(maxsize=1)
+def get_device_str():
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.xpu.is_available():
+        return "xpu"
+    raise RuntimeError("No supported device (need CUDA or XPU)")

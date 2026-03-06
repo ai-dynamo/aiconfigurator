@@ -4,6 +4,8 @@ import contextlib
 import os
 import warnings
 
+from helper import get_device_module, get_device_str
+
 
 def setup_warning_filters():
     """Configure warning filters to suppress known non-critical warnings"""
@@ -93,8 +95,8 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
     setup_signal_handlers(device_id, error_queue)
 
     # Setup device
-    device = torch.device(f"cuda:{device_id}")
-    torch.cuda.set_device(device_id)
+    device = torch.device(f"{get_device_str()}:{device_id}")
+    get_device_module().set_device(device)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
     # Process tasks
@@ -164,7 +166,7 @@ def worker(queue, device_id: int, func, progress_value, lock, error_queue=None, 
                 import gc
 
                 gc.collect()
-                torch.cuda.empty_cache()
+                get_device_module().empty_cache()
 
 
 def parallel_run(tasks, func, num_processes, module_name="unknown"):
@@ -368,9 +370,17 @@ def collect_ops(
                 if declared:
                     try:
                         if not check_compat(declared, runtime_version):
-                            raise CompatibilityError(
-                                f"module {module_name} declares __compat__={declared!r}, runtime is v{runtime_version}"
-                            )
+                            if torch.xpu.is_available():
+                                # Disable vllm xpu runtime version check for now
+                                logger.warning(
+                                    f"module {module_name} declares __compat__={declared!r}, \
+                                    runtime is v{runtime_version}"
+                                )
+                            else:
+                                raise CompatibilityError(
+                                    f"module {module_name} declares __compat__={declared!r}, \
+                                        runtime is v{runtime_version}"
+                                )
                     except ValueError as e:
                         raise CompatibilityError(f"invalid __compat__ {declared!r}: {e}") from e
 
@@ -440,7 +450,14 @@ def collect_vllm(num_processes: int, ops: list[str] | None = None, limit: int | 
         logger.exception("vLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
         return
 
-    collections = build_collections(REGISTRY, "vllm", version, ops, logger=logger)
+    if torch.xpu.is_available():
+        op_registry = [entry for entry in REGISTRY if "mla" not in entry.op.lower()]
+    elif torch.cuda.is_available():
+        op_registry = REGISTRY
+    else:
+        raise RuntimeError("No supported hardware detected. Neither CUDA nor XPU is available.")
+
+    collections = build_collections(op_registry, "vllm", version, ops, logger=logger)
     all_errors = collect_ops(num_processes, collections, version, limit=limit, shuffle=shuffle)
 
     generate_collection_summary(all_errors, "vllm", version)
@@ -585,8 +602,7 @@ def main():
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
 
-    num_processes = torch.cuda.device_count()
-    logger.info(f"Starting collection with {num_processes} GPU processes")
+    num_processes = get_device_module().device_count()
 
     # Set environment variables for worker processes
     if args.measure_power:

@@ -472,6 +472,8 @@ class TaskConfigFactory:
 
     @classmethod
     def _finalize_disagg(cls, config: DefaultMunch, ctx: TaskContext) -> None:
+        prefill_cfg = config.prefill_worker_config
+        decode_cfg = config.decode_worker_config
         replica_cfg = config.replica_config
 
         # if replica_cfg.max_gpu_per_replica is overwritten by patch, extend the num_gpu_per_replica
@@ -487,6 +489,11 @@ class TaskConfigFactory:
                 raise ValueError(f"total_gpus must be greater than 2 for disagg, got {ctx.total_gpus}")
             replica_cfg.max_gpu_per_replica = min(ctx.total_gpus, replica_cfg.get("max_gpu_per_replica"))
             logger.debug("Using max gpu per replica %s", replica_cfg.max_gpu_per_replica)
+            # Prefill/Decode num_gpu_per_worker should be strictly smaller than total_gpus
+            prefill_cfg.num_gpu_per_worker = [num for num in prefill_cfg.num_gpu_per_worker if num <= ctx.total_gpus]
+            logger.debug("Overwriting num gpu per prefill worker to %s", prefill_cfg.num_gpu_per_worker)
+            decode_cfg.num_gpu_per_worker = [num for num in decode_cfg.num_gpu_per_worker if num <= ctx.total_gpus]
+            logger.debug("Overwriting num gpu per decode worker to %s", decode_cfg.num_gpu_per_worker)
 
 
 _quants = {
