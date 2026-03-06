@@ -5,7 +5,7 @@ import gradio as gr
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import get_default_models
-from aiconfigurator.sdk.perf_database import get_all_databases
+from aiconfigurator.sdk.perf_database import get_database, get_supported_databases
 
 
 def create_model_path_config(app_config):
@@ -25,12 +25,13 @@ def create_model_path_config(app_config):
 
 def create_system_config(app_config, gpu_config=False):
     """create system config components"""
-    database_dict = get_all_databases()
-    system_choices = sorted(database_dict.keys())
+    # Use get_supported_databases() to avoid loading all databases at startup
+    supported_databases = get_supported_databases()
+    system_choices = sorted(supported_databases.keys())
     default_system = "h200_sxm" if "h200_sxm" in system_choices else system_choices[0]
-    backend_choices = sorted(database_dict[default_system].keys())
+    backend_choices = sorted(supported_databases[default_system].keys())
     default_backend = "trtllm" if "trtllm" in backend_choices else backend_choices[0]
-    version_choices = sorted(database_dict[default_system][default_backend].keys())
+    version_choices = sorted(supported_databases[default_system][default_backend])
     default_version = version_choices[-1]
 
     with gr.Accordion("System config"):
@@ -97,14 +98,18 @@ def create_system_config(app_config, gpu_config=False):
 
 def create_model_quant_config(app_config):
     """create model quantization config components"""
-    database_dict = get_all_databases()
-    system_choices = sorted(database_dict.keys())
+    # Use get_supported_databases() for structure, then load only the specific database needed
+    supported_databases = get_supported_databases()
+    system_choices = sorted(supported_databases.keys())
     default_system = "h200_sxm" if "h200_sxm" in system_choices else system_choices[0]
-    backend_choices = sorted(database_dict[default_system].keys())
+    backend_choices = sorted(supported_databases[default_system].keys())
     default_backend = "trtllm" if "trtllm" in backend_choices else backend_choices[0]
-    version_choices = sorted(database_dict[default_system][default_backend].keys())
+    version_choices = sorted(supported_databases[default_system][default_backend])
     default_version = version_choices[-1]
-    database = database_dict[default_system][default_backend][default_version]
+    # Load only the specific database we need
+    database = get_database(default_system, default_backend, default_version)
+    if database is None:
+        raise ValueError(f"Could not load database for {default_system}/{default_backend}/{default_version}")
     gemm_quant_mode_choices = database.supported_quant_mode["gemm"]
     kvcache_quant_mode_choices = database.supported_quant_mode["generation_mla"]  # DS V3 by default
     fmha_quant_mode_choices = database.supported_quant_mode["context_mla"]  # DS V3 by default

@@ -62,7 +62,10 @@ class NemotronHConfig:
 
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
-    return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
+    from pathlib import Path
+
+    return Path("new_support_matrix.csv")
+    # return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
 
 
 @cache

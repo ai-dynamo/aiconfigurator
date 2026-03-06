@@ -16,7 +16,7 @@ from aiconfigurator.sdk import common, config, models, pareto_analysis
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.inference_session import InferenceSession
 from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
-from aiconfigurator.sdk.perf_database import get_all_databases, get_database
+from aiconfigurator.sdk.perf_database import get_database, get_supported_databases
 from aiconfigurator.sdk.utils import enumerate_parallel_config
 
 
@@ -1173,8 +1173,17 @@ class EventFn:
                 gr.update(choices=[], value=None, interactive=True),
                 gr.update(value=False, interactive=False),
             )
-        database_dict = get_all_databases()
-        supported_quant_mode = database_dict[system_name][backend_name][version].supported_quant_mode
+        # Load only the specific database we need
+        database = get_database(system_name, backend_name, version)
+        if database is None:
+            return (
+                gr.update(choices=[], value=None, interactive=True),
+                gr.update(choices=[], value=None, interactive=True),
+                gr.update(choices=[], value=None, interactive=True),
+                gr.update(choices=[], value=None, interactive=True),
+                gr.update(value=False, interactive=False),
+            )
+        supported_quant_mode = database.supported_quant_mode
 
         if get_model_family(model_path) != "DEEPSEEK":
             gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
@@ -1244,8 +1253,9 @@ class EventFn:
 
     @staticmethod
     def update_backend_choices(system_name):
-        database_dict = get_all_databases()
-        backend_choices = sorted(database_dict[system_name].keys(), reverse=True)
+        # Use get_supported_databases() to avoid loading all databases
+        supported_databases = get_supported_databases()
+        backend_choices = sorted(supported_databases[system_name].keys(), reverse=True)
         return gr.update(choices=backend_choices, value=None, interactive=True), gr.update(
             choices=None, value=None, interactive=True
         )
@@ -1257,8 +1267,9 @@ class EventFn:
 
     @staticmethod
     def update_version_choices(system_name, backend_name):
-        database_dict = get_all_databases()
-        version_choices = sorted(database_dict[system_name][backend_name].keys(), reverse=True)
+        # Use get_supported_databases() to avoid loading all databases
+        supported_databases = get_supported_databases()
+        version_choices = sorted(supported_databases[system_name][backend_name], reverse=True)
         return gr.update(choices=version_choices, value=None, interactive=True)
 
     @staticmethod
