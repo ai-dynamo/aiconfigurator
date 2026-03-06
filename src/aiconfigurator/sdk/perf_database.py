@@ -4476,6 +4476,74 @@ class PerfDatabase:
             scale_factor = 0.4
             return latency / scale_factor
 
+        def _estimate_overflow_with_last_token_util(
+            query_tokens: int,
+            moe_dict: dict,
+            hidden_size: int,
+            inter_size: int,
+            topk: int,
+            num_experts: int,
+            moe_tp_size: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            workload_distribution: str,
+        ) -> PerformanceResult | None:
+            """Estimate overflow latency using utilization at the largest collected token."""
+            token_points = sorted(moe_dict.keys())
+            if query_tokens <= token_points[-1]:
+                return None
+
+            last_token = token_points[-1]
+            last_point = moe_dict[last_token]
+            if isinstance(last_point, dict):
+                last_latency = float(last_point["latency"])
+                last_power = float(last_point.get("power", 0.0))
+                last_energy = float(last_point.get("energy", 0.0))
+            else:
+                last_latency = float(last_point)
+                last_power = 0.0
+                last_energy = 0.0
+
+            if last_latency <= 0:
+                return None
+
+            sol_last = get_sol(
+                last_token,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )[0]
+            sol_query = get_sol(
+                query_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )[0]
+
+            if sol_last <= 0:
+                return None
+
+            util = max(sol_last / last_latency, 1e-8)
+            est_latency = sol_query / util
+
+            est_energy = 0.0
+            if last_power > 0:
+                est_energy = last_power * est_latency
+            elif last_energy > 0:
+                est_energy = last_energy * (est_latency / last_latency)
+
+            return PerformanceResult(est_latency, energy=est_energy)
+
         if database_mode is None:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
@@ -4539,6 +4607,20 @@ class PerfDatabase:
                     moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
+                    overflow_estimate = _estimate_overflow_with_last_token_util(
+                        num_tokens_corrected,
+                        moe_dict,
+                        hidden_size,
+                        inter_size,
+                        topk,
+                        num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        quant_mode,
+                        workload_distribution,
+                    )
+                    if overflow_estimate is not None:
+                        return overflow_estimate
                     num_left, num_right = self._nearest_1d_point_helper(
                         num_tokens_corrected,
                         list(moe_dict.keys()),
@@ -4601,6 +4683,20 @@ class PerfDatabase:
                         moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
                             hidden_size
                         ][inter_size][moe_tp_size][moe_ep_size]
+                    overflow_estimate = _estimate_overflow_with_last_token_util(
+                        num_tokens,
+                        moe_dict,
+                        hidden_size,
+                        inter_size,
+                        topk,
+                        num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        quant_mode,
+                        workload_distribution,
+                    )
+                    if overflow_estimate is not None:
+                        return overflow_estimate
 
                     num_left, num_right = self._nearest_1d_point_helper(
                         num_tokens,
@@ -4627,6 +4723,20 @@ class PerfDatabase:
                     moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
+                    overflow_estimate = _estimate_overflow_with_last_token_util(
+                        num_tokens,
+                        moe_dict,
+                        hidden_size,
+                        inter_size,
+                        topk,
+                        num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        quant_mode,
+                        workload_distribution,
+                    )
+                    if overflow_estimate is not None:
+                        return overflow_estimate
                     num_left, num_right = self._nearest_1d_point_helper(
                         num_tokens, list(moe_dict.keys()), inner_only=False
                     )
