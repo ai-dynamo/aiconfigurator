@@ -98,6 +98,48 @@ class BaseBackend(ABC):
 
             return context_latency_dict, context_energy_wms_dict
 
+        _NON_LAYER_OP_KEYWORDS = ("embedding", "logits_gemm", "p2p")
+
+        def _is_layer_op(op_name: str) -> bool:
+            """Check if an op is a per-layer op (not a per-step-only op like embedding/logits/p2p)."""
+            return not any(kw in op_name for kw in _NON_LAYER_OP_KEYWORDS)
+
+        # Default PDL discount factors per (sm_version, backend, model_family, wideep).
+        # Calibrated from nsys alignment: factor = nsys_layer_wall / aic_layer_prediction.
+        _PDL_DEFAULTS = {
+            # (sm_version_min, backend, model_family, wideep) -> factor
+            (100, "trtllm", "DEEPSEEK", True): 0.935,
+        }
+
+        def _get_pdl_discount_factor() -> float:
+            """Determine PDL discount factor from conditions or yaml override.
+
+            Auto-activates for known configurations (e.g. GB200 + trtllm + DeepSeek + WideEP).
+            If gpu.pdl_discount_factor is set in system yaml, it overrides the default.
+            """
+            sm_version = database.system_spec.get("gpu", {}).get("sm_version", 0)
+            is_wideep = getattr(model.config, "enable_wideep", False)
+            model_family = getattr(model, "model_family", "")
+
+            yaml_override = database.system_spec.get("gpu", {}).get("pdl_discount_factor", None)
+            if yaml_override is not None:
+                if yaml_override >= 1.0:
+                    return 1.0
+                if is_wideep and model_family == "DEEPSEEK":
+                    logger.debug(f"PDL discount (yaml override): factor={yaml_override}")
+                    return yaml_override
+                return 1.0
+
+            for (sm_min, be, mf, we), factor in _PDL_DEFAULTS.items():
+                if sm_version >= sm_min and database.backend == be and model_family == mf and is_wideep == we:
+                    logger.debug(
+                        f"PDL discount auto-activated: factor={factor} "
+                        f"(sm{sm_version}, {be}, {mf}, wideep={we})"
+                    )
+                    return factor
+
+            return 1.0
+
         def _run_generation(
             batch_size: int, beam_width: int, isl: int, osl: int, stride: int
         ) -> tuple[dict[str, float], dict[str, float]]:
@@ -113,6 +155,8 @@ class BaseBackend(ABC):
 
             generation_latency_dict = defaultdict(float)  # milliseconds
             generation_energy_wms_dict = defaultdict(float)  # W·ms
+
+            pdl_factor = _get_pdl_discount_factor()
 
             for i in range(0, osl - 1, stride):
                 latency_dict = defaultdict(float)
@@ -134,6 +178,13 @@ class BaseBackend(ABC):
 
                     latency_dict[op._name] += latency_ms
                     energy_wms_dict[op._name] += energy_wms
+
+                # Apply PDL discount to layer ops only
+                if pdl_factor < 1.0:
+                    for op_name in latency_dict:
+                        if _is_layer_op(op_name):
+                            latency_dict[op_name] *= pdl_factor
+                            energy_wms_dict[op_name] *= pdl_factor
 
                 # usually stride, but might be less at the end
                 repeat_count = min(stride, osl - 1 - i)
