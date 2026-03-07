@@ -766,7 +766,7 @@ def run_wideep_moe_compute(
     if existing_files:
         json_path = existing_files[0]
         try:
-            AutoTuner.get().profiling_cache.load_cache(json_path)
+            AutoTuner.get().profiling_cache.load_cache(json_path, rank=device.index)
             cache_loaded = True
             print(f"Loaded profiling cache from {json_path}")
         except (OSError, json.JSONDecodeError):

@@ -39,7 +39,6 @@ from collector.helper import (
 )
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
-AIC_RESTART_WORKER = int(os.getenv("AIC_RESTART_WORKER", "0"))
 
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
 
@@ -329,12 +328,9 @@ def run_moe_torch(
     moe.to(torch.device(device))
 
     if moe_type == "w4a16_mxfp4":
-        w1_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype).cuda()
-        w2_weight = torch.randn((num_experts, hidden_size, inter_size), dtype=dtype).cuda()
-        w3_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype).cuda()
-        w1_bias = torch.randn((num_experts, inter_size), dtype=dtype).cuda()
-        w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype).cuda()
-        w3_bias = torch.randn((num_experts, inter_size), dtype=dtype).cuda()
+        w1_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
+        w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype, device=device)
+        w3_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
 
         from triton_kernels.numerics_details.mxfp import downcast_to_mxfp_torch
 
@@ -345,9 +341,21 @@ def run_moe_torch(
             tensor_scales = tensor_scales.transpose(1, 2).contiguous()
             return tensor_fp4, tensor_scales
 
+        # Convert one weight tensor at a time to lower peak memory.
+        w1_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype, device=device)
         w1_weight_fp4, w1_weight_scale = fp32_to_mxfp4(w1_weight)
+        del w1_weight
+        torch.cuda.empty_cache()
+
+        w2_weight = torch.randn((num_experts, hidden_size, inter_size), dtype=dtype, device=device)
         w2_weight_fp4, w2_weight_scale = fp32_to_mxfp4(w2_weight)
+        del w2_weight
+        torch.cuda.empty_cache()
+
+        w3_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype, device=device)
         w3_weight_fp4, w3_weight_scale = fp32_to_mxfp4(w3_weight)
+        del w3_weight
+        torch.cuda.empty_cache()
 
         weights = {}
         for expert_id in range(num_experts):
@@ -391,7 +399,7 @@ def run_moe_torch(
         if existing_files:
             json_path = existing_files[0]
             try:
-                AutoTuner.get().profiling_cache.load_cache(json_path)
+                AutoTuner.get().profiling_cache.load_cache(json_path, rank=device.index)
                 cache_loaded = True
                 print(f"Loaded profiling cache from {json_path}")
             except (OSError, json.JSONDecodeError):
@@ -517,8 +525,7 @@ def run_moe_torch(
 
     # Exit the worker process after completing MOE task to ensure complete resource cleanup
     # This forces OS to reclaim all GPU memory, CUDA context, and other resources
-    if AIC_RESTART_WORKER:
-        sys.exit(EXIT_CODE_RESTART)
+    sys.exit(EXIT_CODE_RESTART)
 
 
 if __name__ == "__main__":
