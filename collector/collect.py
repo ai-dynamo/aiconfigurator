@@ -946,7 +946,7 @@ def main():
 
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
-        logger = setup_logging(scope=args.ops if ops else ["all"], debug=args.debug)
+        logger = setup_logging(scope=args.ops if args.ops else ["all"], debug=args.debug)
     elif args.debug:
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)

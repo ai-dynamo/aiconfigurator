@@ -162,20 +162,24 @@ def _build_module_test_cases(attn_type: str, mode: str):
     return cases
 
 
-def get_context_module_test_cases():
-    """collect.py entrypoint for context module collection across all models."""
-    cases = []
-    for _, attn_type in SUPPORTED_MODELS.items():
-        cases.extend(_build_module_test_cases(attn_type=attn_type, mode="context"))
-    return cases
+def get_mla_context_module_test_cases():
+    """collect.py entrypoint for MLA context module collection."""
+    return _build_module_test_cases(attn_type="mla", mode="context")
 
 
-def get_generation_module_test_cases():
-    """collect.py entrypoint for generation module collection across all models."""
-    cases = []
-    for _, attn_type in SUPPORTED_MODELS.items():
-        cases.extend(_build_module_test_cases(attn_type=attn_type, mode="generation"))
-    return cases
+def get_mla_generation_module_test_cases():
+    """collect.py entrypoint for MLA generation module collection."""
+    return _build_module_test_cases(attn_type="mla", mode="generation")
+
+
+def get_dsa_context_module_test_cases():
+    """collect.py entrypoint for DSA context module collection."""
+    return _build_module_test_cases(attn_type="dsa", mode="context")
+
+
+def get_dsa_generation_module_test_cases():
+    """collect.py entrypoint for DSA generation module collection."""
+    return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
 # ═══════════════════════════════════════════════════════════════════════
