@@ -45,11 +45,11 @@ sbatch -N 1 ./slurm_custom_ar_2gpu.sh
 sbatch -N 1 ./slurm_custom_ar_4gpu.sh
 ```
 
-# 3. TensorRT-LLM WideEP MNNVL AlltoAll collection
+# 3. TensorRT-LLM MoE AlltoAll collection (NVLink)
 
-## 3.1 Modify submit_mnnvl.sh parameters
+Benchmarks MoE alltoall **dispatch** and **combine** over NVLink. Supports two kernel sources: **NVLinkTwoSided** (WideEP/MNNVL) and **NVLinkOneSided** (CutlassFusedMoE). Results are written to `results/trtllm_alltoall_perf.txt`. Configure `SCRIPT_DIR`, `CONTAINER_IMAGE`, `CONTAINER_MOUNTS`, `ACCOUNT`, `PARTITION`, `GPU_COUNTS`, and `GPUS_PER_NODE` in `submit_trtllm_alltoall.sh` before running.
 
-Edit the following parameters in `submit_mnnvl.sh`:
+## 3.1 Parameters (edit in `submit_trtllm_alltoall.sh`)
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
@@ -58,19 +58,24 @@ Edit the following parameters in `submit_mnnvl.sh`:
 | `CONTAINER_MOUNTS` | Container mount paths (src:dst) | `/yourdata:/yourdata` |
 | `ACCOUNT` | Slurm account name | `your account` |
 | `PARTITION` | Slurm partition name | `your partition` |
-| `GPU_COUNTS` | Array of GPU counts to test | `(2 4 8 16 32 64 72)` |
-| `GPUS_PER_NODE` | Number of GPUs per node | `4` (for GB200 NVL72) |
+| `GPU_COUNTS` | Array of GPU counts to test | `(2 4 8 16 32 48 64 72)` |
+| `GPUS_PER_NODE` | Number of GPUs per node | `4` (e.g. GB200 NVL72) |
 
 ## 3.2 Run the collector
+
 ```bash
-bash submit_mnnvl.sh
+# Default: NVLinkTwoSided, GPU counts 2,4,8,16,32,48,64,72
+bash submit_trtllm_alltoall.sh
+
+# NVLinkOneSided, only 2 and 4 GPUs
+bash submit_trtllm_alltoall.sh --kernel-source NVLinkOneSided --gpu-list 2,4
+
+# NVLinkTwoSided, custom GPU counts
+bash submit_trtllm_alltoall.sh --gpu-list 4,8,16
 ```
 
-## 3.3 Check job status and results
+## 3.3 Check results
 ```bash
-# Check job status
 squeue -u $USER
-
-# Results will be saved to
-cat results/wideep_alltoall_perf.txt
+cat results/trtllm_alltoall_perf.txt
 ```
