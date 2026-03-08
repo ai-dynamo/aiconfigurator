@@ -5,8 +5,8 @@
 MLA Module Collector for vLLM — unified MLA and DSA benchmarking.
 
 Profiles the complete attention module forward pass (projections + attention +
-output), not just the bare attention kernel.  Uses vLLM's own modeling code
-to construct a mock `DeepseekV2MLAAttention` module with dummy weights, then
+output), not just the bare attention kernel. Uses vLLM's own modeling code to
+construct a single `DeepseekV2MLAAttention` module with dummy weights, then
 benchmarks its forward.
 
 MLA vs DSA is determined by the presence of `index_topk` in the HF config.
@@ -14,6 +14,8 @@ Op names and data schema are aligned with TRT-LLM's collect_mla_module.py
 so that queries can be reused across frameworks.
 
 Supported models and their attention types are defined in SUPPORTED_MODELS.
+The collector reads a real HF config, overrides the layer-local shape fields
+in-memory, and then instantiates just the attention module.
 
 Usage:
     # MLA context phase (DeepSeek-V3 style)
@@ -52,19 +54,17 @@ from collector.vllm.utils import (
 )
 
 # ═══════════════════════════════════════════════════════════════════════
-# Supported Models — attn_type → config directory
+# Supported Models — attn_type → real config source
 # ═══════════════════════════════════════════════════════════════════════
-
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 SUPPORTED_MODELS: dict[str, dict] = {
     "mla": {
         "attn_type": "mla",
-        "config_dir": os.path.join(_THIS_DIR, "fake_mla_hf_model"),
+        "model": os.environ.get("AICONFIGURATOR_VLLM_MLA_MODEL", "deepseek-ai/DeepSeek-V3"),
     },
     "dsa": {
         "attn_type": "dsa",
-        "config_dir": os.path.join(_THIS_DIR, "fake_dsa_hf_model"),
+        "model": os.environ.get("AICONFIGURATOR_VLLM_DSA_MODEL", "deepseek-ai/DeepSeek-V3.2"),
     },
 }
 
@@ -189,8 +189,10 @@ def _create_attention_module(
     """
     Create a DeepseekV2MLAAttention module from vLLM's own modeling code.
 
-    Uses the HF config (MLA or DSA) to construct the module with dummy
-    weights.  The module includes all projections + attention + output.
+    Loads a real HF config first, overrides the layer-local attention
+    dimensions we want to benchmark in-memory, and then constructs the module
+    with dummy weights. The module includes all projections + attention +
+    output.
 
     Args:
         use_prefill_fp8: When True and on SM100+, enable FP8 prefill
@@ -199,7 +201,7 @@ def _create_attention_module(
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 
     model_info = SUPPORTED_MODELS[attn_type]
-    config_dir = model_info["config_dir"]
+    model_name = model_info["model"]
 
     block_size = 64
     max_model_len = max(max_seq_len + 1, 4096)
@@ -215,13 +217,14 @@ def _create_attention_module(
     is_dsa = attn_type == "dsa"
 
     vllm_config = create_vllm_config(
-        model_name=config_dir,
+        model_name=model_name,
         max_model_len=max_model_len,
         block_size=block_size,
         num_gpu_blocks=num_kv_cache_blocks,
         max_num_seqs=max_batch_size,
         max_num_batched_tokens=max(max_batch_size * max_seq_len, 131072),
         use_fp8_kv_cache=use_fp8_kv_cache,
+        trust_remote_code=True,
     )
 
     # For DSA, mirror the DeepseekV32ForCausalLM.verify_and_update_config()
@@ -234,8 +237,9 @@ def _create_attention_module(
     if use_prefill_fp8:
         vllm_config.attention_config.use_prefill_query_quantization = True
 
-    # Override num_heads for benchmarking
+    # Override just the layer-local dimensions we sweep in the collector.
     hf_config = vllm_config.model_config.hf_config
+    hf_config.num_hidden_layers = 1
     hf_config.num_attention_heads = num_heads
     hf_config.num_key_value_heads = num_heads
 
@@ -316,6 +320,50 @@ def _process_module_weights(attn_module, vllm_config, device):
                 module.process_weights_after_loading(vllm_config.model_config.dtype)
 
 
+def _create_context_kv_inputs(batch_spec: BatchSpec, kv_lora_rank: int, qk_rope_head_dim: int, device: str):
+    """
+    Create cached KV tensors for the tokens that already exist in the paged KV
+    cache before the current forward() call.
+
+    Context phase: cache is empty because all tokens are processed in the same
+    prefill step.
+    Generation phase: cache holds seq_len - 1 historical tokens, and the
+    current forward processes exactly 1 new token per request.
+    """
+    kv_c_contexts = []
+    k_pe_contexts = []
+    for seq_len, query_len in zip(batch_spec.seq_lens, batch_spec.query_lens):
+        context_len = max(0, int(seq_len) - int(query_len))
+        kv_c_contexts.append(torch.randn(context_len, kv_lora_rank, dtype=torch.bfloat16, device=device))
+        k_pe_contexts.append(torch.randn(context_len, 1, qk_rope_head_dim, dtype=torch.bfloat16, device=device))
+    return kv_c_contexts, k_pe_contexts
+
+
+def _populate_indexer_kv_cache(
+    indexer_kv_cache: torch.Tensor,
+    common_attn_metadata,
+    context_lens: list[int],
+) -> None:
+    """
+    Populate the DSA indexer cache so generation benchmarks see a realistic
+    historical K cache instead of an all-zero buffer.
+    """
+    block_table = common_attn_metadata.block_table_tensor
+    block_size = indexer_kv_cache.shape[1]
+    entry_dim = indexer_kv_cache.shape[2]
+    device = indexer_kv_cache.device
+
+    for i, context_len in enumerate(context_lens):
+        if context_len <= 0:
+            continue
+        token_offsets = torch.arange(context_len, dtype=torch.long, device=device)
+        block_indices = token_offsets // block_size
+        intra_block_offsets = token_offsets % block_size
+        block_ids = block_table[i, block_indices]
+        random_cache = torch.randint(0, 256, (context_len, entry_dim), dtype=torch.uint8, device=device)
+        indexer_kv_cache[block_ids, intra_block_offsets, :] = random_cache
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # KV Cache + Metadata
 # ═══════════════════════════════════════════════════════════════════════
@@ -375,19 +423,17 @@ def _create_kv_cache_and_metadata(
         cache_dtype = torch.bfloat16
         kv_cache_dtype_str = None
 
-    # Populate KV cache with random data
-    all_kv_c = []
-    all_k_pe = []
-    for i in range(batch_size):
-        q_len = batch_spec.query_lens[i]
-        kv_c = torch.randn(q_len, kv_lora_rank, dtype=torch.bfloat16, device=device)
-        k_pe = torch.randn(q_len, 1, qk_rope_head_dim, dtype=torch.bfloat16, device=device)
-        all_kv_c.append(kv_c)
-        all_k_pe.append(k_pe)
+    # Populate KV cache with the tokens that exist before this forward.
+    kv_c_contexts, k_pe_contexts = _create_context_kv_inputs(
+        batch_spec=batch_spec,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        device=device,
+    )
 
     kv_cache = create_and_prepopulate_kv_cache_mla(
-        kv_c_contexts=all_kv_c,
-        k_pe_contexts=all_k_pe,
+        kv_c_contexts=kv_c_contexts,
+        k_pe_contexts=k_pe_contexts,
         block_size=block_size,
         head_size=head_dim,
         dtype=cache_dtype,
@@ -450,6 +496,11 @@ def _create_kv_cache_and_metadata(
         indexer_metadata = indexer_builder.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
+        )
+        _populate_indexer_kv_cache(
+            indexer_kv_cache=indexer_kv_cache,
+            common_attn_metadata=common_attn_metadata,
+            context_lens=[tensor.shape[0] for tensor in kv_c_contexts],
         )
 
     return kv_cache, attn_metadata, common_attn_metadata, indexer_kv_cache, indexer_metadata
@@ -750,7 +801,7 @@ def main():
     for model_key, model_info in models_to_run.items():
         attn_type = model_info["attn_type"]
         print(f"\n{'=' * 60}")
-        print(f"Model: {model_key}  |  Attention: {attn_type.upper()}")
+        print(f"Model: {model_key} ({model_info['model']})  |  Attention: {attn_type.upper()}")
         print(f"{'=' * 60}")
 
         if args.quick:

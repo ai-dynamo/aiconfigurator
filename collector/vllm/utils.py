@@ -224,13 +224,14 @@ def create_vllm_config(
     add_mock_model_methods: bool = True,
     hf_config_override: dict | None = None,
     use_fp8_kv_cache: bool = False,
+    trust_remote_code: bool = False,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
     model_config = ModelConfig(
         model=model_name,
         tokenizer=model_name,
-        trust_remote_code=False,
+        trust_remote_code=trust_remote_code,
         dtype=dtype,
         seed=0,
         max_model_len=max_model_len,
