@@ -1136,20 +1136,20 @@ class DeepSeekModel(BaseModel):
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),  # on every gpu, fused_a
+                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, common.GEMMQuantMode.float16),  # on every gpu, fused_a; NVFP4 ckpt excludes kv_a_proj_with_mqa
                 ops.GEMM(
                     "context_q_b_proj_gemm",
                     self._num_layers,
                     24576 // tp_size,
                     1536,
-                    gemm_quant_mode,
+                    common.GEMMQuantMode.float16,  # NVFP4 ckpt excludes q_b_proj
                 ),
                 ops.GEMM(
                     "context_kv_b_proj_gemm",
                     self._num_layers,
                     32768 // tp_size,
                     512,
-                    gemm_quant_mode,
+                    common.GEMMQuantMode.float16,  # NVFP4 ckpt excludes kv_b_proj
                 ),  # agg ctx attn part
                 ops.ContextMLA(
                     "context_attention",
@@ -1287,14 +1287,14 @@ class DeepSeekModel(BaseModel):
                     self._num_layers * self._mtp_scale_factor,
                     2112,
                     h,
-                    gemm_quant_mode,
+                    common.GEMMQuantMode.float16,  # NVFP4 ckpt excludes kv_a_proj_with_mqa
                 ),  # on every gpu
                 ops.GEMM(
                     "generation_q_b_proj_gemm",
                     self._num_layers * self._mtp_scale_factor,
                     24576 // tp_size,
                     1536,
-                    gemm_quant_mode,
+                    common.GEMMQuantMode.float16,  # NVFP4 ckpt excludes q_b_proj
                 ),
                 ops.MLABmm(
                     "generation_bmm_pre",
