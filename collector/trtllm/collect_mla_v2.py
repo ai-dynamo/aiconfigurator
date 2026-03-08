@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = "trtllm>=1.1.0"
+
 import math
 from dataclasses import dataclass
 
@@ -23,7 +25,7 @@ from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
 from tensorrt_llm.sampling_params import SamplingParams
 
-from helper import benchmark_with_power, log_perf
+from collector.helper import benchmark_with_power, log_perf
 
 
 def get_context_mla_test_cases():

@@ -1,5 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+__compat__ = "sglang>=0.5.5"
+
 import math
 import os
 import random
@@ -35,8 +38,6 @@ import sglang.srt.layers.attention.trtllm_mla_backend
 
 sglang.srt.layers.attention.flashinfer_mla_backend.get_attention_tp_size = lambda: 1
 sglang.srt.layers.attention.trtllm_mla_backend.get_attention_tp_size = lambda: 1
-
-compatible_version = ["0.5.5.post3", "0.5.6.post2", "0.5.8"]
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
@@ -217,7 +218,11 @@ def get_generation_mla_test_cases():
     if sm_version < 90:
         return []
 
-    dtype_list = [torch.bfloat16, torch.float8_e4m3fn]
+    if sm_version == 120:
+        # flashinfer 0.6.3+ (sglang 0.5.9+): XQA MLA only supports fp8 on SM120 GPUs
+        dtype_list = [torch.float8_e4m3fn]
+    else:
+        dtype_list = [torch.bfloat16, torch.float8_e4m3fn]
     test_cases = []
     n_list = [64, 128]
     for n in n_list:
@@ -243,6 +248,12 @@ def get_generation_mla_test_cases():
             ]:
                 for dtype in dtype_list:
                     for tp_size in [1, 2, 4, 8, 16, 32, 64]:
+                        if sm_version == 120 and n // tp_size != 128:
+                            # XQA MLA kernel has head_group_ratio=128 hardcoded; it always reads
+                            # 128 Q heads from the q tensor regardless of the runtime head count.
+                            # local_heads != 128 causes out-of-bounds GPU memory reads and crashes.
+                            # Only n=128, tp=1 (local_heads=128) is safe.
+                            continue
                         if b * s > 1024 * 4096 * 4:
                             continue
                         total_len = s
@@ -348,6 +359,12 @@ def run_mla(
     model_runner.model_config.scaling = MLA_SCALING
 
     if is_blackwell_dev:
+        # TRTLLMMLABackend inherits FlashInferMLAAttnBackend which creates
+        # FlashInferMLAIndicesUpdaterDecode(model_runner, self) — a cyclic reference.
+        # Without explicit GC, previous backends accumulate and corrupt shared workspace state.
+        import gc
+
+        gc.collect()
         attn_backend = TRTLLMMLABackend(model_runner)
         kernel_source = "trtllm_mla"
     else:

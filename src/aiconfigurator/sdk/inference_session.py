@@ -192,6 +192,7 @@ class DisaggInferenceSession:
         Get the disagg summary df based on prefill and decode summary df
         """
         prefill_dict = prefill_summary_df.iloc[0].to_dict()
+        prefill_dict["ttft"] = prefill_dict["ttft"] * _AUTOSCALE_TTFT_CORRECTION_FACTOR
         decode_dict = decode_summary_df.iloc[0].to_dict()
 
         summary_dict = _build_disagg_summary_dict(
@@ -261,6 +262,11 @@ class DisaggInferenceSession:
 
         disagg_summary = InferenceSummary(runtime_config=runtime_config)
         disagg_summary.set_summary_df(disagg_summary_df)
+
+        prefill_oom = prefill_summary.check_oom()
+        decode_oom = decode_summary.check_oom()
+        if prefill_oom or decode_oom:
+            disagg_summary.set_oom(True)
 
         # Carry per-op latency breakdowns from prefill/decode static runs
         per_ops_data = {}

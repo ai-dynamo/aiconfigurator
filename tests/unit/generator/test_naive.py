@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from aiconfigurator.generator.naive import (
+    _estimate_model_weight_bytes,
     _sanitize_rfc1123,
     build_naive_generator_params,
 )
@@ -148,6 +149,30 @@ class TestBuildNaiveGeneratorParams:
             backend_name="vllm",
         )
         assert result["ServiceConfig"]["include_frontend"] is True
+
+
+@pytest.mark.unit
+class TestEstimateModelWeightBytesFailsOnMissingModel:
+    @patch("aiconfigurator.sdk.utils.get_model_config_from_model_path")
+    def test_raises_when_config_download_fails(self, mock_get_config):
+        mock_get_config.side_effect = Exception(
+            "Failed to download nonexistent-org/fake-model-12345's config.json from HuggingFace: "
+            "HuggingFace returned HTTP error 401: Unauthorized."
+        )
+        with pytest.raises(RuntimeError, match=r"Model .* not found or config unavailable"):
+            _estimate_model_weight_bytes("nonexistent-org/fake-model-12345")
+
+    @patch("aiconfigurator.generator.naive._get_system_config")
+    @patch("aiconfigurator.generator.naive._estimate_model_weight_bytes")
+    def test_build_naive_generator_params_propagates_model_not_found(self, mock_est, _mock_sys):
+        mock_est.side_effect = RuntimeError("Model 'nonexistent-org/fake-model-12345' not found or config unavailable")
+        with pytest.raises(RuntimeError, match="not found or config unavailable"):
+            build_naive_generator_params(
+                model_name="nonexistent-org/fake-model-12345",
+                total_gpus=8,
+                system_name="h200_sxm",
+                backend_name="vllm",
+            )
 
 
 @pytest.mark.unit
