@@ -455,9 +455,11 @@ def pick_autoscale(
     # -- Combine: each prefill x each decode, workers=1, take top_n --
     all_combos: list[dict] = []
     for _, p_row in prefill_candidates.iterrows():
+        p_dict = p_row.to_dict()
+        p_dict["ttft"] = p_row["ttft_corrected"]
         for _, d_row in decode_candidates.iterrows():
             combo = _build_disagg_summary_dict(
-                prefill_summary_dict=p_row.to_dict(),
+                prefill_summary_dict=p_dict,
                 prefill_num_worker=1,
                 decode_summary_dict=d_row.to_dict(),
                 decode_num_worker=1,

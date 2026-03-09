@@ -267,6 +267,25 @@ Please note that the whole process will report a lot of missing datapoints with 
 Once everything is done, you might see mutliple xxx.txt files under the same folder. Refer to src/aiconfigurator/systems/ folder to prepare the database including
 how many files are needed accordingly.
 
+## Resume Collection (Checkpoint)
+
+Checkpoint files are always written so an interrupted run can be resumed later:
+
+```bash
+# Normal run (writes checkpoint to .collector_checkpoint/)
+python3 collect.py --backend trtllm
+
+# Resume an interrupted run (skips already-attempted tasks)
+python3 collect.py --backend trtllm --resume
+
+# Custom checkpoint directory
+python3 collect.py --backend trtllm --resume --checkpoint-dir /path/to/checkpoints
+```
+
+A task is marked **done** once it is attempted (success or failure).
+Only tasks that never finished are re-queued on `--resume`.
+Running without `--resume` always starts fresh (overwrites old checkpoint).
+
 ## For SGLang
 
 Suggest to start from lmsysorg docker image. Say, for 0.5.6.post2, we can use lmsysorg/sglang:v0.5.6.post2-cu126

@@ -21,6 +21,9 @@ from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE = 1.1
+DEFAULT_DECODE_LATENCY_CORRECTION_SCALE = 1.08
+
 
 @dataclass(frozen=True)
 class ConfigLayer:
@@ -444,8 +447,8 @@ class TaskConfigFactory:
             replica_config["max_gpu_per_replica"] = 512
 
         advanced_tuning_config = {
-            "prefill_latency_correction_scale": 1.1,
-            "decode_latency_correction_scale": 1.08,
+            "prefill_latency_correction_scale": DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE,
+            "decode_latency_correction_scale": DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
             "prefill_max_batch_size": 1,
             "decode_max_batch_size": 512,
         }

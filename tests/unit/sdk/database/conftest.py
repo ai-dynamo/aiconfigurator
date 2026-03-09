@@ -83,7 +83,7 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
     # load_moe_data needs to return 2 dicts
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_moe_data", lambda path: ({}, {}))
 
-    # Patch every other loader to return an empty dict
+    # Patch every other loader to return an empty dict (or None for optional loaders)
     for loader_name in [
         "load_context_attention_data",
         "load_generation_attention_data",
@@ -93,6 +93,11 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
         "load_nccl_data",
     ]:
         monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: {})
+    for loader_name in [
+        "load_context_dsa_module_data",
+        "load_generation_dsa_module_data",
+    ]:
+        monkeypatch.setattr(f"aiconfigurator.sdk.perf_database.{loader_name}", lambda path: None)
 
 
 @pytest.fixture
@@ -298,5 +303,9 @@ def comprehensive_perf_db(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_mla_bmm_data", lambda path: dummy_mla_bmm_data)
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_nccl_data", lambda path: dummy_nccl_data)
+
+    # DSA module-level attention data (same dict structure as MLA)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_context_dsa_module_data", lambda path: None)
+    monkeypatch.setattr("aiconfigurator.sdk.perf_database.load_generation_dsa_module_data", lambda path: None)
 
     return PerfDatabase("test_system", "trtllm", "v1", str(tmp_path))

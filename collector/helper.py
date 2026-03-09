@@ -619,10 +619,8 @@ def get_sm_version():
 
 
 def create_test_case_id(test_case, test_type, module_name):
-    """Create unique identifier for test cases"""
-    # Convert test case to string for hashing
-    test_str = str(test_case)
-    return f"{module_name}_{test_type}_{abs(hash(test_str)) % 100000}_{test_str}"
+    """Create a stable, cross-session identifier for a test case."""
+    return f"{module_name}:{test_type}:{test_case}"
 
 
 def log_perf(

@@ -1591,11 +1591,16 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             )
 
         # ===================== Context Phase =====================
+        # Note: Context phase does NOT use CUDA Graph, so maybe_execute_in_parallel
+        # falls back to sequential execution. All ops are modeled sequentially here.
         self.context_ops.extend(
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                # kv_a_proj_with_mqa: projects hidden_size -> compressed_dim (1536+512+64=2112)
                 ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
+                # q_a_layernorm: RMSNorm on q_compressed (dim=1536)
+                ops.ElementWise("context_q_a_layernorm", self._num_layers, 1536, 1536, 0.8),
                 ops.GEMM(
                     "context_q_b_proj_gemm",
                     self._num_layers,
@@ -1622,35 +1627,30 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             ]
         )
 
-        # shared moe
+        # shared moe (sequential in context phase - no CUDA Graph overlap)
+        # In WideEP ADP mode, shared_tp_size=1: each rank computes full shared expert.
+        # TRT-LLM uses fused gate_up_proj: one GEMM with output dim = 2 * inter_size.
         self.context_ops.extend(
             [
                 ops.GEMM(
-                    "context_shared_gate_gemm",
+                    "context_shared_gate_up_gemm",
                     self._num_layers,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GEMM(
-                    "context_shared_ffn1_gemm",
-                    self._num_layers,
-                    self._moe_inter_size // tp_size,
+                    2 * self._moe_inter_size,
                     h,
                     gemm_quant_mode,
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
                     self._num_layers,
-                    2 * self._moe_inter_size // tp_size,
-                    self._moe_inter_size // tp_size,
+                    2 * self._moe_inter_size,
+                    self._moe_inter_size,
                     0.8,
                 ),
                 ops.GEMM(
                     "context_shared_ffn2_gemm",
                     self._num_layers,
                     h,
-                    self._moe_inter_size // tp_size,
+                    self._moe_inter_size,
                     gemm_quant_mode,
                 ),
             ]
@@ -1725,6 +1725,17 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             ]
         )
 
+        # moe_reduce_add_shared_output: sum routed output over top_k + add shared output
+        self.context_ops.append(
+            ops.ElementWise(
+                "context_moe_reduce_add",
+                self._num_layers,
+                2 * h,
+                h,
+                0.8,
+            )
+        )
+
         self.context_ops.extend(
             [
                 ops.GEMM(
@@ -1748,12 +1759,23 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     2 * h,
                     0.8,
                 ),
+                # kv_a_proj_with_mqa: projects hidden_size -> compressed_dim (1536+512+64=2112)
                 ops.GEMM(
                     "generation_downscale_gemm",
                     self._num_layers * self._mtp_scale_factor,
                     2112,
                     h,
                     gemm_quant_mode,
+                ),
+                # q_a_layernorm: RMSNorm on q_compressed (dim=1536)
+                # In TRT-LLM, kv_a_layernorm (dim=512) runs in parallel but is much smaller,
+                # so we model only q_a_layernorm as the dominant one.
+                ops.ElementWise(
+                    "generation_q_a_layernorm",
+                    self._num_layers * self._mtp_scale_factor,
+                    1536,
+                    1536,
+                    0.8,
                 ),
                 ops.GEMM(
                     "generation_q_b_proj_gemm",
@@ -1762,12 +1784,31 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     1536,
                     gemm_quant_mode,
                 ),
-                ops.MLABmm(
-                    "generation_bmm_pre",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._num_heads // tp_size,
-                    mla_bmm_quant_mode,
-                    if_pre=True,
+                # BMM_pre (Absorption) || RoPE+KV cache prep (overlap on two streams)
+                # Main stream: q_nope * W_absorption -> absorbed_q
+                # Aux stream: RoPE(q_pe) + write compressed_kv to KV cache
+                # Effective latency = max(bmm_pre, rope_kvcache)
+                ops.OverlapOp(
+                    "generation_bmm_rope_overlap",
+                    group_a=[
+                        ops.MLABmm(
+                            "generation_bmm_pre",
+                            self._num_layers * self._mtp_scale_factor,
+                            self._num_heads // tp_size,
+                            mla_bmm_quant_mode,
+                            if_pre=True,
+                        ),
+                    ],
+                    group_b=[
+                        # mla_rope_generation: RoPE on q_pe (64d) + KV cache write (512+64=576d)
+                        ops.ElementWise(
+                            "generation_rope_kvcache",
+                            self._num_layers * self._mtp_scale_factor,
+                            576,  # kv_lora_rank(512) + qk_rope_head_dim(64)
+                            576,
+                            0.8,
+                        ),
+                    ],
                 ),
                 ops.GenerationMLA(
                     "generation_attention",
@@ -1799,107 +1840,107 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             ]
         )
 
-        # shared moe
-        self.generation_ops.extend(
-            [
-                ops.GEMM(
-                    "generation_shared_gate_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GEMM(
-                    "generation_shared_ffn1_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.ElementWise(
-                    "generation_shared_act_gate",
-                    self._num_layers * self._mtp_scale_factor,
-                    2 * self._moe_inter_size // tp_size,
-                    self._moe_inter_size // tp_size,
-                    0.8,
-                ),
-                ops.GEMM(
-                    "generation_shared_ffn2_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._moe_inter_size // tp_size,
-                    gemm_quant_mode,
-                ),
-            ]
+        # ---- MoE: Shared Expert || Routed Expert (OverlapOp) ----
+        # In TRT-LLM generation phase (CUDA Graph enabled), shared expert runs
+        # on aux stream in parallel with routed expert on main stream.
+        # Latency = max(routed_path, shared_path) instead of sum.
+
+        # Group B (Aux Stream): Shared Expert
+        # Note: In WideEP ADP mode, shared_tp_size=1 (no TP for shared expert),
+        # so we use full moe_inter_size without dividing by tp_size.
+        # TRT-LLM uses fused gate_up_proj: one GEMM with output dim = 2 * inter_size.
+        _shared_expert_ops = [
+            ops.GEMM(
+                "generation_shared_gate_up_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                2 * self._moe_inter_size,
+                h,
+                gemm_quant_mode,
+            ),
+            ops.ElementWise(
+                "generation_shared_act_gate",
+                self._num_layers * self._mtp_scale_factor,
+                2 * self._moe_inter_size,
+                self._moe_inter_size,
+                0.8,
+            ),
+            ops.GEMM(
+                "generation_shared_ffn2_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._moe_inter_size,
+                gemm_quant_mode,
+            ),
+        ]
+
+        # Group A (Main Stream): Router + AllToAll Dispatch + MoE Compute + AllToAll Combine
+        _routed_expert_ops = [
+            ops.GEMM(
+                "generation_router_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                self._num_experts,
+                h,
+                common.GEMMQuantMode.float16,
+            ),
+            ops.TrtLLMWideEPMoEDispatch(
+                "generation_moe_pre_dispatch",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                True,  # pre_dispatch
+                quant_mode=moe_quant_mode,
+            ),
+            ops.TrtLLMWideEPMoE(
+                "generation_moe",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._moe_inter_size,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                moe_quant_mode,
+                workload_distribution,
+                attention_dp_size,
+                num_slots=wideep_num_slots,
+            ),
+            ops.TrtLLMWideEPMoEDispatch(
+                "generation_moe_post_dispatch",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                False,  # post_dispatch (combine)
+                quant_mode=moe_quant_mode,
+                use_low_precision_combine=True,
+            ),
+        ]
+
+        self.generation_ops.append(
+            ops.OverlapOp(
+                "generation_moe_overlap",
+                group_a=_routed_expert_ops,
+                group_b=_shared_expert_ops,
+            )
         )
 
-        # router gemm
-        self.generation_ops.extend(
-            [
-                ops.GEMM(
-                    "generation_router_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._num_experts,
-                    h,
-                    common.GEMMQuantMode.float16,
-                )
-            ]
-        )
-
-        # WideEP: dispatch tokens to experts, pre-dispatch
-        self.generation_ops.extend(
-            [
-                ops.TrtLLMWideEPMoEDispatch(
-                    "generation_moe_pre_dispatch",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    True,  # pre_dispatch
-                    quant_mode=moe_quant_mode,
-                )
-            ]
-        )
-
-        # WideEP: MoE computation with EPLB support
-        self.generation_ops.extend(
-            [
-                ops.TrtLLMWideEPMoE(
-                    "generation_moe",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._moe_inter_size,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    moe_quant_mode,
-                    workload_distribution,
-                    attention_dp_size,
-                    num_slots=wideep_num_slots,
-                ),
-            ]
-        )
-
-        # WideEP: dispatch tokens to experts, post-dispatch (combine)
-        self.generation_ops.extend(
-            [
-                ops.TrtLLMWideEPMoEDispatch(
-                    "generation_moe_post_dispatch",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    False,  # post_dispatch (combine)
-                    quant_mode=moe_quant_mode,
-                )
-            ]
+        # moe_reduce_add_shared_output: sum routed output over top_k + add shared output
+        # This runs after both streams synchronize.
+        self.generation_ops.append(
+            ops.ElementWise(
+                "generation_moe_reduce_add",
+                self._num_layers * self._mtp_scale_factor,
+                2 * h,
+                h,
+                0.8,
+            )
         )
 
         self.generation_ops.extend(

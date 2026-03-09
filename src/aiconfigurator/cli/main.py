@@ -1322,7 +1322,20 @@ def _run_estimate_mode(args):
     print("-" * 60)
     print(f"  TTFT:             {result.ttft:.3f} ms")
     print(f"  TPOT:             {result.tpot:.3f} ms")
+    print(f"  Request Latency:  {result.request_latency:.3f} ms")
     print(f"  Power (per GPU):  {result.power_w:.1f} W")
+    print("-" * 60)
+    print(f"  tokens/s:         {result.tokens_per_second:,.2f}")
+    print(f"  tokens/s/gpu:     {result.tokens_per_second_per_gpu:,.2f}")
+    print(f"  tokens/s/user:    {result.tokens_per_second_per_user:,.2f}")
+    print(f"  seq/s:            {result.seq_per_second:,.3f}")
+    print(f"  Concurrency:      {result.concurrency:.0f}")
+    if result.mode == "agg":
+        print(f"  Memory (GPU):     {result.memory:.2f} GB")
+    else:
+        raw = result.raw
+        print(f"  (p) Memory:       {raw.get('(p)memory', 'N/A')} GB")
+        print(f"  (d) Memory:       {raw.get('(d)memory', 'N/A')} GB")
     print("=" * 60)
 
     if args.print_per_ops_latency and result.per_ops_data:

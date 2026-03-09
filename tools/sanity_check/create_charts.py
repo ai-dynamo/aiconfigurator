@@ -87,6 +87,8 @@ def create_charts(
             functools.partial(validate_database.visualize_nccl, operation="alltoall"),
             functools.partial(validate_database.visualize_nccl, operation="reduce_scatter"),
         ],
+        "dsa_context_module": [validate_database.visualize_dsa_module],
+        "dsa_generation_module": [validate_database.visualize_dsa_module],
     }
 
     if torch.xpu.is_available():
