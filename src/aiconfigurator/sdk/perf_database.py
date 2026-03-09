@@ -4524,7 +4524,8 @@ class PerfDatabase:
                 workload_distribution,
             )[0]
 
-            util = max(sol_last / last_latency, 1e-8)
+            util = min(1.0, sol_last / last_latency)  # clamp MFU ≤ 1.0
+            util = max(util, 1e-8)                    # guard against near-zero sol_last
             est_latency = sol_query / util
 
             est_energy = 0.0
