@@ -44,6 +44,7 @@ moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tu
 
 
 def gc_collect():
+    """Run GC and clear CUDA cache to reduce fragmentation between runs."""
     for _ in range(2):
         gc.collect()
         torch.cuda.empty_cache()
@@ -71,6 +72,7 @@ def _process_json_file(file_path):
 
 
 def cleanup_empty_json_files(directory):
+    """Remove empty or invalid JSON files under directory (e.g. autotuner cache)."""
     if not os.path.exists(directory):
         return
 
@@ -92,6 +94,7 @@ def cleanup_empty_json_files(directory):
 
 
 def get_moe_test_cases():
+    """Build list of MoE test case tuples for trtllm >= 1.1 (power_law, SM-dependent quant modes)."""
     moe_list = ["float16"]
     if get_sm_version() > 86:
         moe_list += ["fp8"]
@@ -196,6 +199,7 @@ def run_moe_torch(
     power_law_alpha=0.0,
     device="cuda:0",
 ):
+    """Run MoE forward passes and log latency/power to perf file (trtllm >= 1.1 collector)."""
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)

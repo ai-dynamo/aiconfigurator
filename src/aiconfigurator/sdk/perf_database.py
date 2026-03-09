@@ -4411,6 +4411,8 @@ class PerfDatabase:
                               Energy accessible via .energy attribute (W·ms).
         """
 
+        num_gemms = 3 if is_gated else 2  # gated (SwiGLU): 3 GEMMs; non-gated (Relu2): 2 GEMMs
+
         def get_sol(
             num_tokens: int,
             hidden_size: int,
@@ -4429,17 +4431,13 @@ class PerfDatabase:
             # tp already impacted inter_size.
             # only consider even workload.
             total_tokens = num_tokens * topk
-            ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size  # ffn1, ffn2, gate
+            ops = total_tokens * hidden_size * inter_size * num_gemms * 2 // moe_ep_size // moe_tp_size
             mem_bytes = quant_mode.value.memory * (
                 total_tokens // moe_ep_size * hidden_size * 2  # input+output
-                + total_tokens
-                // moe_ep_size
-                * inter_size
-                * 3
-                // moe_tp_size  # intermediate, assume ffn1/gate all need to write results.
+                + total_tokens // moe_ep_size * inter_size * num_gemms // moe_tp_size  # intermediate
                 + hidden_size
                 * inter_size
-                * 3
+                * num_gemms
                 // moe_tp_size
                 * min(num_experts // moe_ep_size, total_tokens // moe_ep_size)
             )

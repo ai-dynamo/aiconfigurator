@@ -73,6 +73,7 @@ moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wideep
 
 
 def cleanup_empty_json_files(directory):
+    """Remove empty or invalid JSON files under directory (autotuner cache)."""
     if not os.path.exists(directory):
         return
 
@@ -359,6 +360,7 @@ class WideEPMoEComputeSimulator(nn.Module):
 
     @property
     def moe_op(self) -> MoEOp:
+        """Lazy-selected MoE op (DeepGemm, Cutlass, or auto)."""
         if self._moe_op is None:
             if self.force_kernel == "deepgemm":
                 self._moe_op = DeepGemmMoEOp()
