@@ -14,8 +14,8 @@ gpu:
 
 node:
   num_gpus_per_node: 8 # check your # cards with sycl-ls
-  inter_node_bw: 25000000000 # Byte/s per GPU, single direction, 1:1 CX7 per node, 25GB/s
-  intra_node_bw: 32000000000    # NEED TO CHECK (==PCIe bw without NVLink)! Byte/s per GPU, single direction
+  inter_node_bw: 50000000000 # Byte/s per GPU, single direction, 1:1 CX7 per node, 50GB/s
+  intra_node_bw: 32000000000    # PCIe bw without NVLink, Byte/s per GPU, single direction
   pcie_bw: 32000000000  # Byte/s, single direction, pcie 5.0 (4GB/s) x8 (8 lane for b60)
   p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
 
