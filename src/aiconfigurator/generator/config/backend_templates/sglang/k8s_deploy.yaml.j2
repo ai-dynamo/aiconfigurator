@@ -8,10 +8,16 @@
 {%- macro render_worker(component_name, role, replicas, gpu, cli_args) -%}
 {{ "    " ~ component_name ~ ":" }}
       envFromSecret: hf-token-secret
-      {% if K8sConfig.k8s_hf_home %}
+      {% if K8sConfig.k8s_hf_home or K8sConfig.k8s_etcd_endpoints %}
       envs:
+        {% if K8sConfig.k8s_etcd_endpoints %}
+        - name: ETCD_ENDPOINTS
+          value: {{ K8sConfig.k8s_etcd_endpoints }}
+        {% endif %}
+        {% if K8sConfig.k8s_hf_home %}
         - name: HF_HOME
           value: {{ K8sConfig.k8s_hf_home }}
+        {% endif %}
       {% endif %}
       componentType: worker
       {% if role %}
@@ -80,8 +86,12 @@ spec:
         mainContainer:
           image: {{ K8sConfig.k8s_image }}
           imagePullPolicy: IfNotPresent
-      {% if enable_router or K8sConfig.k8s_hf_home %}
+      {% if enable_router or K8sConfig.k8s_hf_home or K8sConfig.k8s_etcd_endpoints %}
       envs:
+        {% if K8sConfig.k8s_etcd_endpoints %}
+        - name: ETCD_ENDPOINTS
+          value: {{ K8sConfig.k8s_etcd_endpoints }}
+        {% endif %}
         {% if enable_router %}
         - name: DYN_ROUTER_MODE
           value: kv

@@ -89,6 +89,9 @@ inputs:
   - key: K8sConfig.k8s_model_cache
     required: false
     default: ""
+  - key: K8sConfig.k8s_etcd_endpoints
+    required: false
+    default: ""
   - key: K8sConfig.k8s_hf_home
     required: false
     default: ""
