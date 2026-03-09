@@ -1884,15 +1884,12 @@ class PerfDatabase:
         self._extracted_metrics_cache = {}
 
         data_dir = os.path.join(systems_root, self.system_spec["data_dir"], backend, version)
-        if "misc" in self.system_spec:
-            nccl_data_dir = os.path.join(
-                systems_root,
-                self.system_spec["data_dir"],
-                "nccl",
-                self.system_spec["misc"]["nccl_version"],
-            )
-        else:
-            nccl_data_dir = ""
+        nccl_data_dir = os.path.join(
+            systems_root,
+            self.system_spec["data_dir"],
+            "nccl",
+            self.system_spec["misc"]["nccl_version"],
+        )
 
         def _load_op_data(op_filename_enum: PerfDataFilename) -> LoadedOpData | tuple[LoadedOpData, ...]:
             func_map = {
