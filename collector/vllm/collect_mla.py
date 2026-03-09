@@ -66,6 +66,19 @@ def run_attention_torch(
         # set a reasonable minimum
         8192,
     )
+
+    # vLLM 0.16+ calls get_current_vllm_config() inside supports_combination()
+    # during backend selection, so we must set it before get_attn_backend_cls().
+    vllm_config = create_vllm_config(
+        model_name=model,
+        max_model_len=input_len,
+        block_size=block_size,
+        num_gpu_blocks=num_kv_cache_blocks,
+        max_num_seqs=batch_size,
+        use_fp8_kv_cache=use_fp8_kv_cache,
+    )
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
+
     try:
         # Let vllm choose the backend.
         # defautl for vllm 0.11.0
@@ -94,7 +107,7 @@ def run_attention_torch(
                 use_sparse=False,
             )
         except TypeError:
-            # vllm 0.14.0
+            # vllm 0.14.0+
             from vllm.v1.attention.selector import AttentionSelectorConfig
 
             attn_selector_config = AttentionSelectorConfig(
@@ -135,14 +148,6 @@ def run_attention_torch(
     except AttributeError:
         current_platform.seed_everything(42)
 
-    vllm_config = create_vllm_config(
-        model_name=model,
-        max_model_len=max(batch_spec.seq_lens),
-        block_size=block_size,
-        num_gpu_blocks=num_kv_cache_blocks,
-        max_num_seqs=batch_size,
-        use_fp8_kv_cache=use_fp8_kv_cache,
-    )
     assert convert_dtype_to_torch(vllm_config.model_config.dtype) == torch.bfloat16
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache)
@@ -198,7 +203,6 @@ def run_attention_torch(
 
     # Build metadata
     layer_names = ["placeholder"]
-    exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
     attn_metadata = builder.build(
@@ -240,6 +244,12 @@ def run_attention_torch(
     # Process weights to create W_UK_T and W_UV attributes needed by MLA
     impl.process_weights_after_loading(dtype)
 
+    # dcp_world_size is initialised to -1 and would normally be set inside
+    # MLAAttention.forward_impl (via get_dcp_group().world_size).  Since we
+    # call impl.forward_mha / forward_mqa directly we must set it ourselves.
+    if hasattr(impl, "dcp_world_size") and impl.dcp_world_size == -1:
+        impl.dcp_world_size = 1
+
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device)
     output = torch.empty(
@@ -254,16 +264,56 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
-    def run():
-        impl.forward(
-            mock_layer,
-            query_vllm,
-            kv_c_vllm,
-            k_pe_vllm,
-            kv_cache,
-            attn_metadata,
-            output=output,
-        )
+    k_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    # Determine the actual routing from the built metadata rather than from
+    # is_context_phase.  Edge case: input_len=1 in a "context" test is treated
+    # as a decode request by the metadata builder (max_query_len=1 ≤ threshold).
+    use_prefill_path = hasattr(attn_metadata, "prefill") and attn_metadata.prefill is not None
+
+    if hasattr(impl, "forward"):
+        # Old API (vLLM < 0.16): single unified forward method.
+        def run():
+            impl.forward(
+                mock_layer,
+                query_vllm,
+                kv_c_vllm,
+                k_pe_vllm,
+                kv_cache,
+                attn_metadata,
+                output=output,
+            )
+    elif use_prefill_path:
+        # vLLM 0.16+ prefill path.
+        def run():
+            impl.forward_mha(
+                query_vllm,
+                kv_c_vllm,
+                k_pe_vllm,
+                kv_cache,
+                attn_metadata,
+                k_scale,
+                output=output,
+            )
+    else:
+        # vLLM 0.16+ decode path (also used when input_len=1 in context phase):
+        #   1. W_UK_T projects q_nope -> latent space  [N,B,P] x [N,P,L] -> [N,B,L]
+        #   2. forward_mqa runs decode attention        -> [B,N,L]
+        #   3. W_UV projects latent output -> v space   [N,B,L] x [N,L,V] -> [N,B,V]
+        W_UK_T = torch.randn(num_heads, qk_nope_head_dim, kv_lora_rank, dtype=dtype, device=device)  # noqa: N806
+        W_UV = torch.randn(num_heads, kv_lora_rank, v_head_dim, dtype=dtype, device=device)  # noqa: N806
+        num_mqa_tokens = query_vllm.shape[0]
+        decode_out_t = torch.empty(num_heads, num_mqa_tokens, v_head_dim, dtype=dtype, device=device)
+
+        def run():
+            q_nope = query_vllm[..., :qk_nope_head_dim]  # [B, N, P]
+            q_pe = query_vllm[..., qk_nope_head_dim:]  # [B, N, qk_rope_head_dim]
+            ql_nope = torch.bmm(
+                q_nope.transpose(0, 1),
+                W_UK_T,  # [N,B,P] x [N,P,L] -> [N,B,L]
+            ).transpose(0, 1)  # -> [B, N, L]
+            attn_out, _ = impl.forward_mqa((ql_nope, q_pe), kv_cache, attn_metadata, mock_layer)
+            torch.bmm(attn_out.transpose(0, 1), W_UV, out=decode_out_t)
 
     # Warmup
     for i in range(warm_up):

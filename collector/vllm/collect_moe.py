@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
+from vllm.model_executor.layers.fused_moe.utils import disable_inplace
 from vllm.version import __version__ as vllm_version
 
 # Compatibility: block FP8 helpers may differ by version.
@@ -54,11 +55,11 @@ def get_moe_test_cases():
         if common_moe_testcase.tp > 1 and common_moe_testcase.ep > 1:
             continue
 
+        local_inter_size = common_moe_testcase.inter_size // common_moe_testcase.tp
+
         for moe_type in moe_list:
-            # fp8_block requires hidden_size divisible by block group_size (128)
-            if moe_type == "fp8_block" and (
-                common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
-            ):
+            # fp8_block requires hidden_size and local_inter_size divisible by 128.
+            if moe_type == "fp8_block" and (common_moe_testcase.hidden_size % 128 != 0 or local_inter_size % 128 != 0):
                 continue
 
             test_cases.append(
@@ -174,6 +175,8 @@ def run_moe_torch(
         w1 = w1.to(dtype)
         w2 = w2.to(dtype)
 
+    use_inplace = not disable_inplace()
+
     # Performance testing for each token count
     for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
         print("num_tokens", num_tokens)
@@ -228,7 +231,7 @@ def run_moe_torch(
                         w2,
                         tw,
                         ti,
-                        inplace=True,
+                        inplace=use_inplace,
                         quant_config=quant_config,
                         global_num_experts=num_experts,
                         expert_map=expert_map,
@@ -240,13 +243,13 @@ def run_moe_torch(
                     w2,
                     topk_weights,
                     topk_ids,
-                    inplace=True,
+                    inplace=use_inplace,
                     quant_config=quant_config,
                     global_num_experts=num_experts,
                     expert_map=expert_map,
                 )
 
-        def run_iterations(use_cuda_graph=False):
+        def run_iterations():
             # Use benchmark_with_power context manager
             with benchmark_with_power(
                 device=device,
@@ -260,7 +263,7 @@ def run_moe_torch(
             return results["latency_ms"] / num_iter, results["power_stats"]
 
         try:
-            latency, power_stats = run_iterations(use_cuda_graph=False)
+            latency, power_stats = run_iterations()
         except torch.OutOfMemoryError:
             # If OOM, check if we had at least one successful run.
             if num_tokens_idx > 0:

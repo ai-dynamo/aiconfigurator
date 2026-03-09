@@ -172,6 +172,7 @@ def benchmark_with_power(
     measure_power: bool | None = None,  # Auto-detect from environment if None
     power_min_duration: float | None = None,  # Auto-detect from environment if None
     allow_graph_fail: bool = False,  # NEW: Enable graceful fallback on graph capture failure
+    use_cuda_graph: bool = True,  # Set False to skip graph capture entirely (eager only)
 ):
     """
     Context manager that handles warmup, graph capture, timing, and power monitoring.
@@ -241,22 +242,23 @@ def benchmark_with_power(
     # ═══════════════════════════════════════════════════════════════════
     # CUDA Graph Capture with Optional Fallback
     # ═══════════════════════════════════════════════════════════════════
-    use_graph = True
-    g = torch.cuda.CUDAGraph()
+    use_graph = use_cuda_graph
+    g = torch.cuda.CUDAGraph() if use_graph else None
 
-    try:
-        with torch.cuda.graph(g):
-            for _ in range(repeat_n):
-                kernel_func()
-        torch.cuda.synchronize()
-    except Exception as e:
-        if allow_graph_fail:
-            logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
-            torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
-            use_graph = False
-        else:
-            # Standard behavior: re-raise exception
-            raise
+    if use_graph:
+        try:
+            with torch.cuda.graph(g):
+                for _ in range(repeat_n):
+                    kernel_func()
+            torch.cuda.synchronize()
+        except Exception as e:
+            if allow_graph_fail:
+                logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
+                torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
+                use_graph = False
+            else:
+                # Standard behavior: re-raise exception
+                raise
 
     # ═══════════════════════════════════════════════════════════════════
     # Warmup the ACTUAL execution path (after graph capture)
@@ -1031,20 +1033,8 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
         assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
 
     # Find EP rank with max load and swap to rank 0
-    with torch.no_grad():
-        conv1d = torch.nn.Conv1d(
-            in_channels=1,
-            out_channels=1,
-            kernel_size=num_experts // ep,
-            stride=num_experts // ep,
-            padding=0,
-            bias=False,
-        )
-        conv1d_weights = torch.tensor([1 for _ in range(num_experts // ep)])
-        conv1d.weight.copy_(conv1d_weights)
-
-    res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
-    max_ep_idx = torch.argmax(res).item()
+    ep_totals = num_tokens_per_expert.view(ep, num_experts // ep).sum(dim=1)
+    max_ep_idx = torch.argmax(ep_totals).item()
 
     if max_ep_idx != 0:
         ep_group_size = num_experts // ep

@@ -307,9 +307,18 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
-    if use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
-        query_vllm = query_vllm.to(current_platform.fp8_dtype())
-        output = output.to(torch.bfloat16)
+    if use_fp8_kv_cache:
+        # In vLLM 0.16+, the backend declares its expected query dtype via
+        # attn_metadata.q_data_type (set during build). Only cast to fp8 if
+        # that's what the backend actually expects; otherwise keep float16.
+        # Fall back to the old cast for older vLLM without q_data_type.
+        expected_q_dtype = getattr(attn_metadata, "q_data_type", None)
+        if expected_q_dtype == current_platform.fp8_dtype():
+            query_vllm = query_vllm.to(expected_q_dtype)
+            output = output.to(torch.bfloat16)
+        elif expected_q_dtype is None and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
+            query_vllm = query_vllm.to(current_platform.fp8_dtype())
+            output = output.to(torch.bfloat16)
 
     def run():
         impl.forward(
@@ -322,13 +331,15 @@ def run_attention_torch(
             output=output,
         )
 
-    # Use benchmark_with_power context manager
+    # Context (prefill) attention uses FlashInfer which is not reliably
+    # CUDA-graph-capturable; disable graph to prevent hangs/SIGSEGV.
     with benchmark_with_power(
         device=device,
         kernel_func=run,
         num_warmups=warm_up,
         num_runs=test_ite,
         repeat_n=1,
+        use_cuda_graph=not is_context_phase,
     ) as results:
         pass
 
@@ -410,6 +421,10 @@ def get_context_attention_test_cases(if_unit_test=False):
     kv_cache_dtype_list = [False]
     if get_sm_version() > 86:
         kv_cache_dtype_list.append(True)
+    # Flash Attention 2 lacks SM100+ (Blackwell) kernels and crashes/hangs.
+    # On SM100+ only collect fp8 KV cache cases (routed to FlashInfer).
+    if get_sm_version() >= 100:
+        kv_cache_dtype_list = [v for v in kv_cache_dtype_list if v]
 
     # DEBUG
     # print(f"b_list: {b_list}, s_list: {s_list}, n_list: {n_list}, n_kv_list: {n_kv_list}")
@@ -480,6 +495,9 @@ def get_generation_attention_test_cases():
     kv_cache_dtype_list = [False]
     if get_sm_version() > 86:
         kv_cache_dtype_list.append(True)
+    # Flash Attention 2 lacks SM100+ (Blackwell) kernels; skip fp16 KV cache.
+    if get_sm_version() >= 100:
+        kv_cache_dtype_list = [v for v in kv_cache_dtype_list if v]
 
     max_bsn = 8192 * 1024
     for n in sorted(n_list, reverse=True):
