@@ -232,6 +232,7 @@ DefaultHFModels = {
     "nvidia/Qwen3-32B-NVFP4",
     # Qwen 3 MoE Models
     "Qwen/Qwen3-30B-A3B",
+    "nvidia/Qwen3-30B-A3B-NVFP4",
     "Qwen/Qwen3-235B-A22B",
     # MiniMax Models
     "MiniMaxAI/MiniMax-M2.5",
