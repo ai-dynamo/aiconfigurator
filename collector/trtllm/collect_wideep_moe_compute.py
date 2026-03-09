@@ -14,6 +14,7 @@ Reference: aic/collector/trtllm/collect_wideep_moe.py
 
 import gc
 import glob
+import inspect
 import json
 import os
 import sys
@@ -766,7 +767,11 @@ def run_wideep_moe_compute(
     if existing_files:
         json_path = existing_files[0]
         try:
-            AutoTuner.get().profiling_cache.load_cache(json_path, rank=device.index)
+            load_cache = AutoTuner.get().profiling_cache.load_cache
+            if "rank" in inspect.signature(load_cache).parameters:
+                load_cache(json_path, rank=device.index)
+            else:
+                load_cache(json_path)
             cache_loaded = True
             print(f"Loaded profiling cache from {json_path}")
         except (OSError, json.JSONDecodeError):
