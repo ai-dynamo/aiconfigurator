@@ -44,7 +44,7 @@ def _process_combination_worker(
     Run a single combination in a worker process. Uses the process-local SupportMatrix.
     Must be a module-level function for pickling by ProcessPoolExecutor.
     """
-    assert _worker_matrix is not None
+    assert _worker_matrix is not None  # this only works in linux, not in windows/macos
     model, system, backend, version = combo
     success_dict, error_dict = _worker_matrix.run_single_test(
         model=model,

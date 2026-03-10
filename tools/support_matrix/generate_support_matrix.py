@@ -45,7 +45,7 @@ def main():
         "--max-workers",
         type=int,
         default=None,
-        help="Maximum number of threads for parallel execution (default: auto)",
+        help="Maximum number of processes for parallel execution (default: auto)",
     )
 
     args = parser.parse_args()
