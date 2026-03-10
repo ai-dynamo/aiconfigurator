@@ -581,7 +581,7 @@ class MoEDispatch(Operation):
             if _sm_version == 100:
                 logger.debug("MoEDispatch: In trtllm SM100 execution path")
 
-                _alltoall_backends = {None, "CUTLASS", "TRTLLM"}
+                _alltoall_backends = {"CUTLASS", "TRTLLM"}
                 backend_supports_alltoall = (
                     self._moe_backend is None or self._moe_backend.upper() in _alltoall_backends
                 )
@@ -589,6 +589,7 @@ class MoEDispatch(Operation):
                     backend_supports_alltoall
                     and self._attention_dp_size > 1
                     and self._moe_tp_size == 1
+                    and self._quant_mode is not None
                 )
 
                 # Quantize-aware communication volume.
@@ -609,10 +610,6 @@ class MoEDispatch(Operation):
 
                 if self._pre_dispatch:
                     if enable_alltoall:
-                        # CutlassFusedMoE (NVLinkOneSided) skips alltoall_prepare —
-                        # only WideEP (TrtLLMWideEPMoEDispatch) needs prepare+dispatch.
-                        # Default to fp8_block when quant_mode unspecified (SM100 CutlassFusedMoE default).
-                        _effective_qm = quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block
                         dispatch_result = database.query_trtllm_alltoall(
                             op_name="alltoall_dispatch",
                             num_tokens=num_tokens,
@@ -620,7 +617,7 @@ class MoEDispatch(Operation):
                             topk=self._topk,
                             num_experts=self._num_experts,
                             moe_ep_size=self._moe_ep_size,
-                            quant_mode=_effective_qm,
+                            quant_mode=quant_mode,
                             moe_backend=self._moe_backend,
                         )
                         comm_latency = float(dispatch_result)
@@ -645,7 +642,6 @@ class MoEDispatch(Operation):
                         comm_latency = 0
                 else:
                     if enable_alltoall:
-                        _effective_qm = quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block
                         combine_result = database.query_trtllm_alltoall(
                             op_name="alltoall_combine",
                             num_tokens=num_tokens,
@@ -653,7 +649,7 @@ class MoEDispatch(Operation):
                             topk=self._topk,
                             num_experts=self._num_experts,
                             moe_ep_size=self._moe_ep_size,
-                            quant_mode=_effective_qm,
+                            quant_mode=quant_mode,
                             moe_backend=self._moe_backend,
                         )
                         comm_latency = float(combine_result)

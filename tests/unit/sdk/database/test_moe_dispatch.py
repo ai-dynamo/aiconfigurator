@@ -69,18 +69,29 @@ class TestEnableAlltoallConditions:
     """Test the enable_alltoall gating logic (SM100 only)."""
 
     def test_alltoall_enabled_default_backend(self):
-        """alltoall enabled when moe_backend=None, dp>1, moe_tp=1."""
+        """alltoall enabled when moe_backend=None, dp>1, moe_tp=1, quant_mode set."""
         db = _make_mock_db(sm_version=100)
-        dispatch = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=8, pre_dispatch=True)
+        dispatch = _make_dispatch(
+            moe_tp_size=1, moe_ep_size=8, attention_dp_size=8,
+            pre_dispatch=True, quant_mode=common.MoEQuantMode.fp8,
+        )
         dispatch.query(db, x=16)
         db.query_trtllm_alltoall.assert_called_once()
 
     def test_alltoall_enabled_cutlass_backend(self):
-        """alltoall enabled when moe_backend='CUTLASS'."""
+        """alltoall enabled when moe_backend='CUTLASS' and quant_mode set."""
         db = _make_mock_db(sm_version=100)
-        dispatch = _make_dispatch(moe_backend="CUTLASS", pre_dispatch=True)
+        dispatch = _make_dispatch(moe_backend="CUTLASS", pre_dispatch=True, quant_mode=common.MoEQuantMode.fp8)
         dispatch.query(db, x=16)
         db.query_trtllm_alltoall.assert_called_once()
+
+    def test_alltoall_disabled_when_quant_mode_none(self):
+        """alltoall disabled when quant_mode is None (falls back to DP NCCL estimation)."""
+        db = _make_mock_db(sm_version=100)
+        dispatch = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=8, pre_dispatch=True, quant_mode=None)
+        dispatch.query(db, x=16)
+        db.query_trtllm_alltoall.assert_not_called()
+        db.query_nccl.assert_called_once()
 
     def test_alltoall_disabled_deepep_backend(self):
         """alltoall disabled when moe_backend='deepep' (not in allowed set)."""
@@ -130,15 +141,6 @@ class TestSm100AlltoallPath:
         assert call_kwargs["op_name"] == "alltoall_combine"
         assert float(result) == 3.0
 
-    def test_quant_mode_none_defaults_to_fp8_block(self):
-        """When quant_mode is None, alltoall path defaults to fp8_block."""
-        db = _make_mock_db(sm_version=100)
-        dispatch = _make_dispatch(pre_dispatch=True, quant_mode=None)
-        dispatch.query(db, x=16)
-
-        call_kwargs = db.query_trtllm_alltoall.call_args[1]
-        assert call_kwargs["quant_mode"] == common.MoEQuantMode.fp8_block
-
     def test_nvfp4_quant_mode_forwarded(self):
         """nvfp4 quant_mode is correctly forwarded to alltoall (not replaced by default)."""
         db = _make_mock_db(sm_version=100)
@@ -151,7 +153,7 @@ class TestSm100AlltoallPath:
     def test_moe_backend_forwarded_to_alltoall(self):
         """moe_backend is forwarded to query_trtllm_alltoall."""
         db = _make_mock_db(sm_version=100)
-        dispatch = _make_dispatch(pre_dispatch=True, moe_backend="CUTLASS")
+        dispatch = _make_dispatch(pre_dispatch=True, moe_backend="CUTLASS", quant_mode=common.MoEQuantMode.fp8)
         dispatch.query(db, x=16)
 
         call_kwargs = db.query_trtllm_alltoall.call_args[1]
