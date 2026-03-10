@@ -17,6 +17,7 @@ pytestmark = pytest.mark.unit
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_mock_db(sm_version=100, num_gpus_per_node=8):
     """Create a mock database configured as trtllm backend."""
     db = MagicMock()
@@ -72,8 +73,11 @@ class TestEnableAlltoallConditions:
         """alltoall enabled when moe_backend=None, dp>1, moe_tp=1, quant_mode set."""
         db = _make_mock_db(sm_version=100)
         dispatch = _make_dispatch(
-            moe_tp_size=1, moe_ep_size=8, attention_dp_size=8,
-            pre_dispatch=True, quant_mode=common.MoEQuantMode.fp8,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=8,
+            pre_dispatch=True,
+            quant_mode=common.MoEQuantMode.fp8,
         )
         dispatch.query(db, x=16)
         db.query_trtllm_alltoall.assert_called_once()
@@ -189,8 +193,11 @@ class TestSm100QuantAwareVolume:
         """Helper: run pre-dispatch on DP fallback path, return the all_gather volume arg."""
         db = _make_mock_db(sm_version=100)
         dispatch = _make_dispatch(
-            moe_backend="deepep", pre_dispatch=True, attention_dp_size=8,
-            quant_mode=quant_mode, hidden_size=1024,
+            moe_backend="deepep",
+            pre_dispatch=True,
+            attention_dp_size=8,
+            quant_mode=quant_mode,
+            hidden_size=1024,
         )
         dispatch.query(db, x=16)
         return db.query_nccl.call_args[0][3]
@@ -226,8 +233,11 @@ class TestSm100TpFallbackPath:
         """TP>1 with reduce_results=True calls custom_allreduce."""
         db = _make_mock_db(sm_version=100, num_gpus_per_node=8)
         dispatch = _make_dispatch(
-            moe_tp_size=8, moe_ep_size=1, attention_dp_size=1,
-            pre_dispatch=True, reduce_results=True,
+            moe_tp_size=8,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            pre_dispatch=True,
+            reduce_results=True,
         )
         dispatch.query(db, x=16)
         db.query_custom_allreduce.assert_called_once()
@@ -236,8 +246,11 @@ class TestSm100TpFallbackPath:
         """TP>1 with reduce_results=False has zero comm latency."""
         db = _make_mock_db(sm_version=100)
         dispatch = _make_dispatch(
-            moe_tp_size=8, moe_ep_size=1, attention_dp_size=1,
-            pre_dispatch=True, reduce_results=False,
+            moe_tp_size=8,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            pre_dispatch=True,
+            reduce_results=False,
         )
         result = dispatch.query(db, x=16)
         db.query_custom_allreduce.assert_not_called()
@@ -248,8 +261,11 @@ class TestSm100TpFallbackPath:
         """Post-dispatch TP>1 with reduce_results=False also has zero comm."""
         db = _make_mock_db(sm_version=100)
         dispatch = _make_dispatch(
-            moe_tp_size=8, moe_ep_size=1, attention_dp_size=1,
-            pre_dispatch=False, reduce_results=False,
+            moe_tp_size=8,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            pre_dispatch=False,
+            reduce_results=False,
         )
         result = dispatch.query(db, x=16)
         assert float(result) == 0.0
@@ -258,8 +274,11 @@ class TestSm100TpFallbackPath:
         """On NVL72 with >4 GPUs, TP path uses NCCL all_reduce instead of custom."""
         db = _make_mock_db(sm_version=100, num_gpus_per_node=72)
         dispatch = _make_dispatch(
-            moe_tp_size=8, moe_ep_size=1, attention_dp_size=1,
-            pre_dispatch=True, reduce_results=True,
+            moe_tp_size=8,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            pre_dispatch=True,
+            reduce_results=True,
         )
         dispatch.query(db, x=16)
         db.query_nccl.assert_called_once()
@@ -274,7 +293,10 @@ class TestSm100NoCommPath:
         """tp=1, dp=1 on SM100 -> zero communication."""
         db = _make_mock_db(sm_version=100)
         dispatch = _make_dispatch(
-            moe_tp_size=1, moe_ep_size=1, attention_dp_size=1, pre_dispatch=True,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            pre_dispatch=True,
         )
         result = dispatch.query(db, x=16)
         db.query_trtllm_alltoall.assert_not_called()
@@ -295,7 +317,10 @@ class TestSmLt100PreDispatch:
         """SM<100 pre-dispatch: tp>1 -> custom_allreduce."""
         db = _make_mock_db(sm_version=90)
         dispatch = _make_dispatch(
-            moe_tp_size=8, moe_ep_size=8, attention_dp_size=1, pre_dispatch=True,
+            moe_tp_size=8,
+            moe_ep_size=8,
+            attention_dp_size=1,
+            pre_dispatch=True,
         )
         dispatch.query(db, x=16)
         db.query_custom_allreduce.assert_called_once()
@@ -306,8 +331,11 @@ class TestSmLt100PreDispatch:
         """SM<100 pre-dispatch: dp>1, tp=1 -> all_gather with volume * dp_size."""
         db = _make_mock_db(sm_version=90)
         dispatch = _make_dispatch(
-            moe_tp_size=1, moe_ep_size=8, attention_dp_size=8,
-            pre_dispatch=True, hidden_size=1024,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=8,
+            pre_dispatch=True,
+            hidden_size=1024,
         )
         dispatch.query(db, x=16)
 
@@ -320,7 +348,10 @@ class TestSmLt100PreDispatch:
         """SM<100 pre-dispatch: tp=1, dp=1 -> zero."""
         db = _make_mock_db(sm_version=90)
         dispatch = _make_dispatch(
-            moe_tp_size=1, moe_ep_size=1, attention_dp_size=1, pre_dispatch=True,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            pre_dispatch=True,
         )
         result = dispatch.query(db, x=16)
         db.query_custom_allreduce.assert_not_called()
@@ -335,7 +366,10 @@ class TestSmLt100PostDispatch:
         """SM<100 post-dispatch: tp>1 -> custom_allreduce."""
         db = _make_mock_db(sm_version=90)
         dispatch = _make_dispatch(
-            moe_tp_size=8, moe_ep_size=8, attention_dp_size=1, pre_dispatch=False,
+            moe_tp_size=8,
+            moe_ep_size=8,
+            attention_dp_size=1,
+            pre_dispatch=False,
         )
         dispatch.query(db, x=16)
         db.query_custom_allreduce.assert_called_once()
@@ -344,8 +378,11 @@ class TestSmLt100PostDispatch:
         """SM<100 post-dispatch: dp>1, tp=1 -> reduce_scatter with volume * dp_size."""
         db = _make_mock_db(sm_version=90)
         dispatch = _make_dispatch(
-            moe_tp_size=1, moe_ep_size=8, attention_dp_size=8,
-            pre_dispatch=False, hidden_size=1024,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=8,
+            pre_dispatch=False,
+            hidden_size=1024,
         )
         dispatch.query(db, x=16)
 
@@ -358,7 +395,10 @@ class TestSmLt100PostDispatch:
         """SM<100 post-dispatch: tp=1, dp=1 -> zero."""
         db = _make_mock_db(sm_version=90)
         dispatch = _make_dispatch(
-            moe_tp_size=1, moe_ep_size=1, attention_dp_size=1, pre_dispatch=False,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            pre_dispatch=False,
         )
         result = dispatch.query(db, x=16)
         assert float(result) == 0.0
@@ -371,7 +411,10 @@ class TestSmLt100NoAlltoall:
         """SM<100 with dp>1, moe_tp=1 still does NOT use alltoall."""
         db = _make_mock_db(sm_version=90)
         dispatch = _make_dispatch(
-            moe_tp_size=1, moe_ep_size=8, attention_dp_size=8, pre_dispatch=True,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=8,
+            pre_dispatch=True,
         )
         dispatch.query(db, x=16)
         db.query_trtllm_alltoall.assert_not_called()
