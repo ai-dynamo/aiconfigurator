@@ -163,6 +163,7 @@ class TestCLIArgumentParsing:
             ("tpot", "10.0", float),
             ("request_latency", "1200.0", float),
             ("prefix", "128", int),
+            ("nextn", "3", int),
         ],
     )
     def test_optional_parameters(self, cli_parser, optional_param, value, expected_type):
@@ -267,3 +268,51 @@ class TestCLIArgumentParsing:
         action = next(action for action in default_parser._actions if action.dest == "database_mode")
         expected_choices = [mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL]
         assert sorted(action.choices) == sorted(expected_choices)
+
+    def test_nextn_default_value(self, cli_parser):
+        """Test that --nextn defaults to 0."""
+        args = cli_parser.parse_args(
+            ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "8", "--system", "h200_sxm"]
+        )
+        assert args.nextn == 0
+
+    def test_nextn_accept_rates_default_value(self, cli_parser):
+        """Test that --nextn-accept-rates defaults to '0.85,0.3,0,0,0'."""
+        args = cli_parser.parse_args(
+            ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "8", "--system", "h200_sxm"]
+        )
+        assert args.nextn_accept_rates == "0.85,0.3,0,0,0"
+
+    def test_nextn_can_be_set(self, cli_parser):
+        """Test that --nextn can be set to a custom value."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn",
+                "3",
+            ]
+        )
+        assert args.nextn == 3
+
+    def test_nextn_accept_rates_can_be_set(self, cli_parser):
+        """Test that --nextn-accept-rates can be set to custom values."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn-accept-rates",
+                "0.9,0.5,0.2,0.1,0",
+            ]
+        )
+        assert args.nextn_accept_rates == "0.9,0.5,0.2,0.1,0"

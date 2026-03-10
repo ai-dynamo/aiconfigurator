@@ -520,14 +520,16 @@ class SGLANGBackend(BaseBackend):
                 / 128
                 * 4
             )
-            if model.config.nextn > 0:
-                activations = activations * (model.config.nextn + 1)
             activations = max(activations, 90 * 1024 * 1024)  # Higher minimum for SGLANG
         else:
             # Default case - increased coefficients for SGLANG
             c_dict = {1: 13, 2: 8, 4: 6.5, 8: 6.5}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 90 * 1024 * 1024)  # Higher minimum for SGLANG
+
+        # MTP correction: additional activation memory for draft tokens (applies to all models)
+        if model.config.nextn > 0:
+            activations = activations * (model.config.nextn + 1)
 
         sglang_overhead = activations * 0.15  # 15% additional overhead for SGLANG
         activations += sglang_overhead

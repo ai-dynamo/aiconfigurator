@@ -12,8 +12,8 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --all_reduce_backend)
             all_reduce_backend="$2"
-            if [[ "$all_reduce_backend" != "trtllm" && "$all_reduce_backend" != "vllm" ]]; then
-                echo "Error: --all_reduce_backend must be either 'trtllm' or 'vllm'"
+            if [[ "$all_reduce_backend" != "trtllm" && "$all_reduce_backend" != "vllm" && "$all_reduce_backend" != "sglang" ]]; then
+                echo "Error: --all_reduce_backend must be 'trtllm', 'vllm', or 'sglang'"
                 echo "Usage: $0 [OPTIONS]"
                 exit 1
             fi
@@ -31,16 +31,17 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --all_reduce_backend  Backend for AllReduce benchmark (default: trtllm)"
-            echo "                        Choices: trtllm, vllm"
-            echo "  --measure_power       Enable power monitoring during execution"
-            echo "  --power_test_duration Minimum test duration for power measurement in seconds (default: 1.0)"
-            echo "  -h, --help           Show this help message and exit"
+            echo "  --all_reduce_backend       Backend for AllReduce benchmark (default: trtllm)"
+            echo "                             Choices: trtllm, vllm, sglang"
+            echo "  --measure_power            Enable power monitoring during execution"
+            echo "  --power_test_duration      Minimum test duration for power measurement in seconds (default: 1.0)"
+            echo "  -h, --help                 Show this help message and exit"
             echo ""
             echo "Examples:"
             echo "  $0 --all_reduce_backend trtllm"
             echo "  $0 --measure_power --power_test_duration 2.0"
             echo "  $0 --all_reduce_backend vllm --measure_power"
+            echo "  $0 --all_reduce_backend sglang"
             exit 0
             ;;
         *)
@@ -115,6 +116,19 @@ elif [[ "$all_reduce_backend" == "vllm" ]]; then
                 --measure_power --power_test_duration_sec "$power_test_duration"
         else
             torchrun --nproc_per_node=$n collect_all_reduce.py --backend vllm \
+                --perf-filename "custom_allreduce_perf.txt"
+        fi
+    done
+elif [[ "$all_reduce_backend" == "sglang" ]]; then
+    # SGLang allreduce implementation
+    for n in "${gpu_count_list[@]}"; do
+        echo "Running SGLang AllReduce benchmark with $n GPUs"
+        if [[ "$measure_power" == "true" ]]; then
+            torchrun --nproc_per_node=$n collect_all_reduce.py --backend sglang \
+                --perf-filename "custom_allreduce_perf.txt" \
+                --measure_power --power_test_duration_sec "$power_test_duration"
+        else
+            torchrun --nproc_per_node=$n collect_all_reduce.py --backend sglang \
                 --perf-filename "custom_allreduce_perf.txt"
         fi
     done

@@ -39,12 +39,12 @@ from collector.helper import (
 )
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
-AIC_RESTART_WORKER = int(os.getenv("AIC_RESTART_WORKER", "0"))
 
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
 
 
 def gc_collect():
+    """Run GC and clear CUDA cache to reduce fragmentation between runs."""
     for _ in range(2):
         gc.collect()
         torch.cuda.empty_cache()
@@ -72,6 +72,7 @@ def _process_json_file(file_path):
 
 
 def cleanup_empty_json_files(directory):
+    """Remove empty or invalid JSON files under directory (e.g. autotuner cache)."""
     if not os.path.exists(directory):
         return
 
@@ -93,6 +94,7 @@ def cleanup_empty_json_files(directory):
 
 
 def get_moe_test_cases():
+    """Build list of MoE test case tuples for trtllm >= 1.1 (power_law, SM-dependent quant modes)."""
     moe_list = ["float16"]
     if get_sm_version() > 86:
         moe_list += ["fp8"]
@@ -197,6 +199,7 @@ def run_moe_torch(
     power_law_alpha=0.0,
     device="cuda:0",
 ):
+    """Run MoE forward passes and log latency/power to perf file (trtllm >= 1.1 collector)."""
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -329,12 +332,9 @@ def run_moe_torch(
     moe.to(torch.device(device))
 
     if moe_type == "w4a16_mxfp4":
-        w1_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype).cuda()
-        w2_weight = torch.randn((num_experts, hidden_size, inter_size), dtype=dtype).cuda()
-        w3_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype).cuda()
-        w1_bias = torch.randn((num_experts, inter_size), dtype=dtype).cuda()
-        w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype).cuda()
-        w3_bias = torch.randn((num_experts, inter_size), dtype=dtype).cuda()
+        w1_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
+        w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype, device=device)
+        w3_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
 
         from triton_kernels.numerics_details.mxfp import downcast_to_mxfp_torch
 
@@ -345,9 +345,21 @@ def run_moe_torch(
             tensor_scales = tensor_scales.transpose(1, 2).contiguous()
             return tensor_fp4, tensor_scales
 
+        # Convert one weight tensor at a time to lower peak memory.
+        w1_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype, device=device)
         w1_weight_fp4, w1_weight_scale = fp32_to_mxfp4(w1_weight)
+        del w1_weight
+        torch.cuda.empty_cache()
+
+        w2_weight = torch.randn((num_experts, hidden_size, inter_size), dtype=dtype, device=device)
         w2_weight_fp4, w2_weight_scale = fp32_to_mxfp4(w2_weight)
+        del w2_weight
+        torch.cuda.empty_cache()
+
+        w3_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype, device=device)
         w3_weight_fp4, w3_weight_scale = fp32_to_mxfp4(w3_weight)
+        del w3_weight
+        torch.cuda.empty_cache()
 
         weights = {}
         for expert_id in range(num_experts):
@@ -391,7 +403,11 @@ def run_moe_torch(
         if existing_files:
             json_path = existing_files[0]
             try:
-                AutoTuner.get().profiling_cache.load_cache(json_path)
+                load_cache = AutoTuner.get().profiling_cache.load_cache
+                if "rank" in inspect.signature(load_cache).parameters:
+                    load_cache(json_path, rank=device.index)
+                else:
+                    load_cache(json_path)
                 cache_loaded = True
                 print(f"Loaded profiling cache from {json_path}")
             except (OSError, json.JSONDecodeError):
@@ -517,8 +533,7 @@ def run_moe_torch(
 
     # Exit the worker process after completing MOE task to ensure complete resource cleanup
     # This forces OS to reclaim all GPU memory, CUDA context, and other resources
-    if AIC_RESTART_WORKER:
-        sys.exit(EXIT_CODE_RESTART)
+    sys.exit(EXIT_CODE_RESTART)
 
 
 if __name__ == "__main__":

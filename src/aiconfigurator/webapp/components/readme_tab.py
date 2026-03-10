@@ -66,7 +66,7 @@ def create_readme_tab(app_config):
                     1. For static mode, you specify the batch size. Context and generation phase will use the same batch size.
                     2. For pareto estimation, you need to specify the first token latency to filter out those results that have TTFT larger than the limit.
                 #### ---> Misc config
-                    For DeepSeek models, you need to define misc config about MTP and accpetance rate.
+                    For models supporting speculative decoding (MTP), you can define misc config about MTP and acceptance rate.
                     1. nextn
                         mtp0, mtp1, mtp2, mtp3, mtp4, mtp5.
                     2. nextn accept rates

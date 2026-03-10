@@ -1281,7 +1281,8 @@ class EventFn:
     @staticmethod
     def update_model_related_components(model_path):
         # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
-        if models.get_model_family(model_path) == "DEEPSEEK":
+        model_family = models.get_model_family(model_path)
+        if model_family in ("DEEPSEEK", "MOE"):
             return (
                 gr.update(value=0, visible=True),
                 gr.update(visible=True),
@@ -1291,17 +1292,19 @@ class EventFn:
                 gr.update(visible=True),
                 gr.update(visible=True),
             )
-        elif models.get_model_family(model_path) == "MOE":
+        elif model_family == "LLAMA":
+            # LLAMA supports MTP (Multi-Token Prediction) speculative decoding
             return (
-                gr.update(value=0, visible=False),
+                gr.update(value=0, visible=True),
+                gr.update(visible=True),
                 gr.update(visible=False),
-                gr.update(visible=True),
-                gr.update(visible=True),
-                gr.update(visible=True),
-                gr.update(visible=True),
-                gr.update(visible=True),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False),
             )
         else:
+            # GPT, NEMOTRONNAS, NEMOTRONH do not support nextn/MTP
             return (
                 gr.update(value=0, visible=False),
                 gr.update(visible=False),
