@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from functools import cache
+from typing import Optional
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
@@ -92,8 +94,15 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
 
 
 def _apply_model_quant_defaults(
-    model_config: config.ModelConfig, raw_config: dict, architecture: str, backend_name: str
+    model_config: config.ModelConfig,
+    raw_config: dict,
+    architecture: str,
+    backend_name: str,
+    worker_name: Optional[str] = None,
 ) -> None:
+    # Clone original model_config to track if any modifications were made
+    original_config = dataclasses.replace(model_config)
+
     inferred = _infer_quant_modes_from_raw_config(raw_config)
     applied: list[str] = []
     for key, value in inferred.items():
@@ -116,7 +125,10 @@ def _apply_model_quant_defaults(
         logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
 
     # FIXME: temporary workaround for Deepseek V3 fp8 fmha quant mode, only float16+fp8kvcache is supported
-    if architecture == "DeepseekV3ForCausalLM" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
+    if (
+        architecture in ("DeepseekV3ForCausalLM", "KimiK25ForConditionalGeneration")
+        and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
+    ):
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
 
     # FIXME: temporary workaround for Qwen3 32B FP8, only float16+fp8kvcache is supported
@@ -124,14 +136,17 @@ def _apply_model_quant_defaults(
     if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
 
-    logger.info(
-        "Model config (final quant modes): gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
-        model_config.gemm_quant_mode,
-        model_config.moe_quant_mode,
-        model_config.kvcache_quant_mode,
-        model_config.fmha_quant_mode,
-        model_config.comm_quant_mode,
-    )
+    # Only log if model_config was modified
+    if original_config != model_config:
+        logger.info(
+            "Resolved quant modes for %s: gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
+            worker_name or architecture,
+            model_config.gemm_quant_mode,
+            model_config.moe_quant_mode,
+            model_config.kvcache_quant_mode,
+            model_config.fmha_quant_mode,
+            model_config.comm_quant_mode,
+        )
 
 
 def get_model(
@@ -720,17 +735,26 @@ class LLAMAModel(BaseModel):
 # mostly for mixtral models
 class MOEModel(BaseModel):
     """
-    Traditional MoE models uses this model impl: Mixtral, LLAMA4_MOE, etc.
+    Traditional MoE models uses this model impl: Mixtral, LLAMA4_MOE, MiniMax-M2, etc.
     Some rules to follow,
     Due to implementation, attn layer name needs to be context_attention or generation_attention,
     exact match is required. Same for logits_gemm.
-    Other than DS V3, all other models don't support mtp
+    Supports MTP (Multi-Token Prediction) when nextn > 0 (e.g. MiniMax-M2).
+    When nextn == 0, _mtp_scale_factor is 1.0 and behavior is unchanged.
     TODO: redesign shared moe part.
     """
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
-        assert self._nextn == 0, "Only DS V3 supports mtp"
+
+        self._mtp_scale_factor = (
+            1.0
+            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
+            * (self._nextn + self._num_layers)
+            / self._num_layers
+            if self._nextn > 0
+            else 1.0
+        )
 
         # make sure the paralel width is same
         assert (
@@ -792,7 +816,7 @@ class MOEModel(BaseModel):
             self.generation_ops.append(
                 ops.GenerationAttention(
                     "generation_attention",
-                    self._num_layers / attn_scale_factor,
+                    self._num_layers * self._mtp_scale_factor / attn_scale_factor,
                     self._num_heads // tp_size,
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
@@ -892,18 +916,24 @@ class MOEModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("generation_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
+                ops.ElementWise(
+                    "generation_add_norm_1",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * h,
+                    2 * h,
+                    0.8,
+                ),
                 ops.GEMM(
                     "generation_qkv_gemm",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
                     h,
                     gemm_quant_mode,
                 ),
                 ops.GenerationAttention(
                     "generation_attention",
-                    self._num_layers / attn_scale_factor,
+                    self._num_layers * self._mtp_scale_factor / attn_scale_factor,
                     self._num_heads // tp_size,
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
@@ -911,13 +941,19 @@ class MOEModel(BaseModel):
                 ),
                 ops.GEMM(
                     "generation_proj_gemm",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._num_heads * self._head_size // tp_size,
                     gemm_quant_mode,
                     low_precision_input=True,
                 ),
-                ops.ElementWise("generation_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.ElementWise(
+                    "generation_add_norm_2",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * h,
+                    2 * h,
+                    0.8,
+                ),
             ]
         )
 
@@ -927,7 +963,7 @@ class MOEModel(BaseModel):
                 [
                     ops.GEMM(
                         "generation_router_gemm",
-                        self._num_layers,
+                        self._num_layers * self._mtp_scale_factor,
                         self._num_experts,
                         h,
                         common.GEMMQuantMode.float16,
@@ -940,7 +976,7 @@ class MOEModel(BaseModel):
             [
                 ops.MoEDispatch(
                     "generation_moe_pre_dispatch",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._topk,
                     self._num_experts,
@@ -951,7 +987,7 @@ class MOEModel(BaseModel):
                 ),
                 ops.MoE(
                     "generation_moe",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._moe_inter_size,
                     self._topk,
@@ -964,7 +1000,7 @@ class MOEModel(BaseModel):
                 ),
                 ops.MoEDispatch(
                     "generation_moe_post_dispatch",
-                    self._num_layers,
+                    self._num_layers * self._mtp_scale_factor,
                     h,
                     self._topk,
                     self._num_experts,
@@ -980,7 +1016,7 @@ class MOEModel(BaseModel):
             [
                 ops.GEMM(
                     "generation_logits_gemm",
-                    1,
+                    1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
                     common.GEMMQuantMode.float16,
@@ -997,7 +1033,7 @@ class MOEModel(BaseModel):
         # pp
         pp_scale_factor = pp_size - 1
         self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
-        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor, h, pp_size))
+        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
     def _validate_fp8_block_quantized_moe_config(self) -> None:
         """
@@ -1555,11 +1591,16 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             )
 
         # ===================== Context Phase =====================
+        # Note: Context phase does NOT use CUDA Graph, so maybe_execute_in_parallel
+        # falls back to sequential execution. All ops are modeled sequentially here.
         self.context_ops.extend(
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                # kv_a_proj_with_mqa: projects hidden_size -> compressed_dim (1536+512+64=2112)
                 ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
+                # q_a_layernorm: RMSNorm on q_compressed (dim=1536)
+                ops.ElementWise("context_q_a_layernorm", self._num_layers, 1536, 1536, 0.8),
                 ops.GEMM(
                     "context_q_b_proj_gemm",
                     self._num_layers,
@@ -1586,35 +1627,30 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             ]
         )
 
-        # shared moe
+        # shared moe (sequential in context phase - no CUDA Graph overlap)
+        # In WideEP ADP mode, shared_tp_size=1: each rank computes full shared expert.
+        # TRT-LLM uses fused gate_up_proj: one GEMM with output dim = 2 * inter_size.
         self.context_ops.extend(
             [
                 ops.GEMM(
-                    "context_shared_gate_gemm",
+                    "context_shared_gate_up_gemm",
                     self._num_layers,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GEMM(
-                    "context_shared_ffn1_gemm",
-                    self._num_layers,
-                    self._moe_inter_size // tp_size,
+                    2 * self._moe_inter_size,
                     h,
                     gemm_quant_mode,
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
                     self._num_layers,
-                    2 * self._moe_inter_size // tp_size,
-                    self._moe_inter_size // tp_size,
+                    2 * self._moe_inter_size,
+                    self._moe_inter_size,
                     0.8,
                 ),
                 ops.GEMM(
                     "context_shared_ffn2_gemm",
                     self._num_layers,
                     h,
-                    self._moe_inter_size // tp_size,
+                    self._moe_inter_size,
                     gemm_quant_mode,
                 ),
             ]
@@ -1689,6 +1725,17 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             ]
         )
 
+        # moe_reduce_add_shared_output: sum routed output over top_k + add shared output
+        self.context_ops.append(
+            ops.ElementWise(
+                "context_moe_reduce_add",
+                self._num_layers,
+                2 * h,
+                h,
+                0.8,
+            )
+        )
+
         self.context_ops.extend(
             [
                 ops.GEMM(
@@ -1712,12 +1759,23 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     2 * h,
                     0.8,
                 ),
+                # kv_a_proj_with_mqa: projects hidden_size -> compressed_dim (1536+512+64=2112)
                 ops.GEMM(
                     "generation_downscale_gemm",
                     self._num_layers * self._mtp_scale_factor,
                     2112,
                     h,
                     gemm_quant_mode,
+                ),
+                # q_a_layernorm: RMSNorm on q_compressed (dim=1536)
+                # In TRT-LLM, kv_a_layernorm (dim=512) runs in parallel but is much smaller,
+                # so we model only q_a_layernorm as the dominant one.
+                ops.ElementWise(
+                    "generation_q_a_layernorm",
+                    self._num_layers * self._mtp_scale_factor,
+                    1536,
+                    1536,
+                    0.8,
                 ),
                 ops.GEMM(
                     "generation_q_b_proj_gemm",
@@ -1726,12 +1784,31 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     1536,
                     gemm_quant_mode,
                 ),
-                ops.MLABmm(
-                    "generation_bmm_pre",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._num_heads // tp_size,
-                    mla_bmm_quant_mode,
-                    if_pre=True,
+                # BMM_pre (Absorption) || RoPE+KV cache prep (overlap on two streams)
+                # Main stream: q_nope * W_absorption -> absorbed_q
+                # Aux stream: RoPE(q_pe) + write compressed_kv to KV cache
+                # Effective latency = max(bmm_pre, rope_kvcache)
+                ops.OverlapOp(
+                    "generation_bmm_rope_overlap",
+                    group_a=[
+                        ops.MLABmm(
+                            "generation_bmm_pre",
+                            self._num_layers * self._mtp_scale_factor,
+                            self._num_heads // tp_size,
+                            mla_bmm_quant_mode,
+                            if_pre=True,
+                        ),
+                    ],
+                    group_b=[
+                        # mla_rope_generation: RoPE on q_pe (64d) + KV cache write (512+64=576d)
+                        ops.ElementWise(
+                            "generation_rope_kvcache",
+                            self._num_layers * self._mtp_scale_factor,
+                            576,  # kv_lora_rank(512) + qk_rope_head_dim(64)
+                            576,
+                            0.8,
+                        ),
+                    ],
                 ),
                 ops.GenerationMLA(
                     "generation_attention",
@@ -1763,107 +1840,107 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             ]
         )
 
-        # shared moe
-        self.generation_ops.extend(
-            [
-                ops.GEMM(
-                    "generation_shared_gate_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GEMM(
-                    "generation_shared_ffn1_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.ElementWise(
-                    "generation_shared_act_gate",
-                    self._num_layers * self._mtp_scale_factor,
-                    2 * self._moe_inter_size // tp_size,
-                    self._moe_inter_size // tp_size,
-                    0.8,
-                ),
-                ops.GEMM(
-                    "generation_shared_ffn2_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._moe_inter_size // tp_size,
-                    gemm_quant_mode,
-                ),
-            ]
+        # ---- MoE: Shared Expert || Routed Expert (OverlapOp) ----
+        # In TRT-LLM generation phase (CUDA Graph enabled), shared expert runs
+        # on aux stream in parallel with routed expert on main stream.
+        # Latency = max(routed_path, shared_path) instead of sum.
+
+        # Group B (Aux Stream): Shared Expert
+        # Note: In WideEP ADP mode, shared_tp_size=1 (no TP for shared expert),
+        # so we use full moe_inter_size without dividing by tp_size.
+        # TRT-LLM uses fused gate_up_proj: one GEMM with output dim = 2 * inter_size.
+        _shared_expert_ops = [
+            ops.GEMM(
+                "generation_shared_gate_up_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                2 * self._moe_inter_size,
+                h,
+                gemm_quant_mode,
+            ),
+            ops.ElementWise(
+                "generation_shared_act_gate",
+                self._num_layers * self._mtp_scale_factor,
+                2 * self._moe_inter_size,
+                self._moe_inter_size,
+                0.8,
+            ),
+            ops.GEMM(
+                "generation_shared_ffn2_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._moe_inter_size,
+                gemm_quant_mode,
+            ),
+        ]
+
+        # Group A (Main Stream): Router + AllToAll Dispatch + MoE Compute + AllToAll Combine
+        _routed_expert_ops = [
+            ops.GEMM(
+                "generation_router_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                self._num_experts,
+                h,
+                common.GEMMQuantMode.float16,
+            ),
+            ops.TrtLLMWideEPMoEDispatch(
+                "generation_moe_pre_dispatch",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                True,  # pre_dispatch
+                quant_mode=moe_quant_mode,
+            ),
+            ops.TrtLLMWideEPMoE(
+                "generation_moe",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._moe_inter_size,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                moe_quant_mode,
+                workload_distribution,
+                attention_dp_size,
+                num_slots=wideep_num_slots,
+            ),
+            ops.TrtLLMWideEPMoEDispatch(
+                "generation_moe_post_dispatch",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                False,  # post_dispatch (combine)
+                quant_mode=moe_quant_mode,
+                use_low_precision_combine=True,
+            ),
+        ]
+
+        self.generation_ops.append(
+            ops.OverlapOp(
+                "generation_moe_overlap",
+                group_a=_routed_expert_ops,
+                group_b=_shared_expert_ops,
+            )
         )
 
-        # router gemm
-        self.generation_ops.extend(
-            [
-                ops.GEMM(
-                    "generation_router_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._num_experts,
-                    h,
-                    common.GEMMQuantMode.float16,
-                )
-            ]
-        )
-
-        # WideEP: dispatch tokens to experts, pre-dispatch
-        self.generation_ops.extend(
-            [
-                ops.TrtLLMWideEPMoEDispatch(
-                    "generation_moe_pre_dispatch",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    True,  # pre_dispatch
-                    quant_mode=moe_quant_mode,
-                )
-            ]
-        )
-
-        # WideEP: MoE computation with EPLB support
-        self.generation_ops.extend(
-            [
-                ops.TrtLLMWideEPMoE(
-                    "generation_moe",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._moe_inter_size,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    moe_quant_mode,
-                    workload_distribution,
-                    attention_dp_size,
-                    num_slots=wideep_num_slots,
-                ),
-            ]
-        )
-
-        # WideEP: dispatch tokens to experts, post-dispatch (combine)
-        self.generation_ops.extend(
-            [
-                ops.TrtLLMWideEPMoEDispatch(
-                    "generation_moe_post_dispatch",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    False,  # post_dispatch (combine)
-                    quant_mode=moe_quant_mode,
-                )
-            ]
+        # moe_reduce_add_shared_output: sum routed output over top_k + add shared output
+        # This runs after both streams synchronize.
+        self.generation_ops.append(
+            ops.ElementWise(
+                "generation_moe_reduce_add",
+                self._num_layers * self._mtp_scale_factor,
+                2 * h,
+                h,
+                0.8,
+            )
         )
 
         self.generation_ops.extend(
@@ -1932,6 +2009,23 @@ class WideEPDeepSeekModel(BaseModel):
         )
 
         sms = self.config.sms
+
+        # qkv_a projection (fused q_a + kv_a + rope): hidden_size -> q_lora_rank + kv_lora_rank + qk_rope_head_dim
+        # This is replicated on every GPU (not TP-sharded), matching narrow EP's context_downscale_gemm.
+        # In sglang >=0.5.6, qkv_a_proj is computed outside the MLA attention forward via communicator,
+        # so it must be modeled as a separate GEMM op rather than included in WideEPContextMLA.
+        self.context_ops.extend(
+            [
+                ops.GEMM(
+                    "context_qkv_a_proj_gemm",
+                    self._num_layers,
+                    1536 + 512 + 64,  # q_lora_rank + kv_lora_rank + qk_rope_head_dim = 2112
+                    h,
+                    gemm_quant_mode,
+                    scale_num_tokens=tp_size,
+                ),
+            ]
+        )
 
         # context mla attention
         self.context_ops.extend(
@@ -2046,6 +2140,19 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_backend=moe_backend,
                     enable_eplb=self.config.enable_eplb,
                 )
+            ]
+        )
+
+        # qkv_a projection for generation (same as context but per-token, not per-seq)
+        self.generation_ops.extend(
+            [
+                ops.GEMM(
+                    "generation_qkv_a_proj_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    1536 + 512 + 64,  # q_lora_rank + kv_lora_rank + qk_rope_head_dim = 2112
+                    h,
+                    gemm_quant_mode,
+                ),
             ]
         )
 

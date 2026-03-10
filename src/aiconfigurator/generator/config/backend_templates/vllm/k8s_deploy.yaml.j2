@@ -58,8 +58,12 @@
             {% endfor %}
             {% if role == 'prefill' %}
             - --is-prefill-worker
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
             {% elif role == 'decode' %}
             - --is-decode-worker
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
             {% endif %}
 {%- endmacro %}
 
@@ -90,8 +94,8 @@ spec:
 
     {% if DynConfig.mode | default('disagg') == 'agg' %}
 {{ render_worker(
-    "VllmDecodeWorker",
-    "decode",
+    "VllmWorker",
+    None,
     agg_workers,
     agg_gpu,
     agg_cli_args_list | default([])

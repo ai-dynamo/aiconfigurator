@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 import logging
 import os
 import random
@@ -668,11 +667,11 @@ def save_results(
             # Save the experiment config for future aic repro
             if backend != "auto":
                 with open(os.path.join(exp_dir, "exp_config.yaml"), "w") as f:
-                    yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
+                    f.write(exp_task_config.to_yaml())
             else:
                 for exp_task_config in exp_task_configs.values():
                     with open(os.path.join(exp_dir, f"{exp_task_config.backend_name}_exp_config.yaml"), "w") as f:
-                        yaml.safe_dump(json.loads(exp_task_config.pretty()), f, sort_keys=False)
+                        f.write(exp_task_config.to_yaml())
 
             # 4. Save the generated config for this experiment, sub-directory for each best config
             if best_config_df is not None:

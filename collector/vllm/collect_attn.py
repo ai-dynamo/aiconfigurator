@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = "vllm>=0.11.0"
 
 import os
 
@@ -46,8 +47,6 @@ from collector.vllm.utils import (
     with_exit_stack,
 )
 
-compatible_version = ["0.11.0", "0.12.0"]
-
 
 class MockAttentionLayer:
     """A mock attention layer for testing."""
@@ -61,8 +60,6 @@ class MockAttentionLayer:
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
 
-
-compatible_versions = ["0.11.0", "0.12.0"]
 
 # https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends
 # support MHA GQA MQA fp16 tensor and float16/fp8 kv cache

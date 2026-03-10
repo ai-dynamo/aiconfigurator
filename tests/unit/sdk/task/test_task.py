@@ -84,7 +84,7 @@ def test_taskconfig_agg_default():
     cfg = task.config
 
     assert cfg.worker_config.system_name == "h200_sxm"
-    assert _enum_name(cfg.worker_config.gemm_quant_mode) is None
+    assert _enum_name(cfg.worker_config.gemm_quant_mode) == "float16"
     assert cfg.worker_config.num_gpu_per_worker == [1, 2, 4, 8]
     assert cfg.applied_layers == ["base-common", "agg-defaults"]
 
@@ -232,6 +232,59 @@ def test_taskconfig_disagg_total_gpus_caps_replica():
     cfg = task.config
 
     assert cfg.replica_config.max_gpu_per_replica == 16
+
+
+@pytest.mark.parametrize(
+    "serving_mode,task_kwargs,expected_keys",
+    [
+        (
+            "agg",
+            {
+                "model_path": "Qwen/Qwen3-32B",
+                "system_name": "h200_sxm",
+                "total_gpus": 8,
+            },
+            ["serving_mode", "model_path"],
+        ),
+        (
+            "disagg",
+            {
+                "model_path": "Qwen/Qwen3-32B",
+                "system_name": "h200_sxm",
+                "decode_system_name": "h200_sxm",
+                "total_gpus": 16,
+            },
+            ["serving_mode", "decode_system_name"],
+        ),
+    ],
+)
+def test_taskconfig_yaml_returns_valid_yaml(serving_mode, task_kwargs, expected_keys):
+    """Test that TaskConfig.to_yaml() returns valid YAML that can be parsed."""
+    task = TaskConfig(serving_mode=serving_mode, **task_kwargs)
+    task = TaskConfig(serving_mode=serving_mode, **task_kwargs)
+
+    yaml_output = task.to_yaml()
+
+    # Verify it's a non-empty string
+    assert isinstance(yaml_output, str)
+    assert len(yaml_output) > 0
+
+    # Verify it can be parsed as valid YAML
+    parsed = yaml.safe_load(yaml_output)
+    assert parsed is not None
+    assert isinstance(parsed, dict)
+
+    # Verify it contains expected keys
+    task_name = task.task_name
+    assert task_name in parsed
+    for key in expected_keys:
+        assert key in parsed[task_name]
+
+    # Verify serving_mode matches
+    assert parsed[task_name]["serving_mode"] == serving_mode
+
+    # Verify model_path matches
+    assert parsed[task_name]["model_path"] == task_kwargs["model_path"]
 
 
 def test_taskconfig_disagg_total_gpus_with_patch():

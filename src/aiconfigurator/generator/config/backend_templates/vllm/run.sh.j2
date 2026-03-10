@@ -60,7 +60,7 @@ for ((w=0; w<PREFILL_WORKERS; w++)); do
     python3 -m dynamo.vllm \
       --model "$MODEL_PATH" \
       {% if enable_router %}--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${EVENT_PORT}\",\"enable_kv_cache_events\":true}" {% endif %}\
-      {{ prefill_cli_args }} --is-prefill-worker 2>&1 | sed "s/^/[Prefill $w] /" ) &
+      {{ prefill_cli_args }} --is-prefill-worker --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' 2>&1 | sed "s/^/[Prefill $w] /" ) &
 done
 {% endif %}
 
@@ -80,7 +80,7 @@ for ((w=0; w<DECODE_WORKERS; w++)); do
     python3 -m dynamo.vllm \
       --model "$MODEL_PATH" \
       {% if enable_router %}--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${EVENT_PORT}\",\"enable_kv_cache_events\":true}" {% endif %}\
-      {{ decode_cli_args }} --is-decode-worker 2>&1 | sed "s/^/[Decode $w] /" ) &
+      {{ decode_cli_args }} --is-decode-worker --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' 2>&1 | sed "s/^/[Decode $w] /" ) &
 done
 {% endif %}
 wait
