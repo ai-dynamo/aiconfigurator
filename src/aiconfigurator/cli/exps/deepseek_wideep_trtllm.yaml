@@ -40,6 +40,9 @@ gb200_wideep_eplb_agg:
   config:
     nextn: 1
     nextn_accept_rates: [0.85,0.3,0,0,0]
+    worker_config:
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"
 
 gb200_wideep_eplb_slots288_agg:
   mode: "patch"
@@ -57,6 +60,9 @@ gb200_wideep_eplb_slots288_agg:
   config:
     nextn: 1
     nextn_accept_rates: [0.85,0.3,0,0,0]
+    worker_config:
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"
 
 gb200_wideep_disagg:
   mode: "patch"
@@ -90,6 +96,12 @@ gb200_wideep_eplb_disagg:
   config:
     nextn: 1
     nextn_accept_rates: [0.85,0.3,0,0,0]
+    prefill_worker_config:
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"
+    decode_worker_config:
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"
     replica_config:
       max_gpu_per_replica: 512
 
@@ -109,5 +121,11 @@ gb200_wideep_eplb_slots288_disagg:
   config:
     nextn: 1
     nextn_accept_rates: [0.85,0.3,0,0,0]
+    prefill_worker_config:
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"
+    decode_worker_config:
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"
     replica_config:
       max_gpu_per_replica: 512
