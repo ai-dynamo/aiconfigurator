@@ -220,25 +220,44 @@ Model parameters are parsed from these configs via get_model_config_from_model_p
 The list of default models for testing is derived from support_matrix.csv via get_default_models()
 """
 DefaultHFModels = {
-    # Llama 3.1 / 3.3 Models
+    # Llama 2 Models
+    "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Llama-2-13b-hf",
+    "meta-llama/Llama-2-70b-hf",
+    # Llama 3.1 Models
     "meta-llama/Meta-Llama-3.1-8B",
-    "meta-llama/Llama-3.3-70B-Instruct",
+    "meta-llama/Meta-Llama-3.1-70B",
     "meta-llama/Meta-Llama-3.1-405B",
+    "nvidia/Llama-3.1-70B-Instruct-FP8",
+    # Mixtral Models
+    "mistralai/Mixtral-8x7B-v0.1",
+    "mistralai/Mixtral-8x22B-v0.1",
     # DeepSeek Models
     "deepseek-ai/DeepSeek-V3",
     "nvidia/DeepSeek-V3.1-NVFP4",
-    # Qwen 3 Dense Models
+    # Qwen 2.5 Models
+    "Qwen/Qwen2.5-1.5B",
+    "Qwen/Qwen2.5-7B",
+    "Qwen/Qwen2.5-32B",
+    "Qwen/Qwen2.5-72B",
+    # Qwen 3 Models
+    "Qwen/Qwen3-0.6B",
+    "Qwen/Qwen3-1.7B",
+    "Qwen/Qwen3-8B",
     "Qwen/Qwen3-32B",
-    "nvidia/Qwen3-32B-NVFP4",
-    # Qwen 3 MoE Models
+    "Qwen/Qwen3-32B-FP8",
     "Qwen/Qwen3-30B-A3B",
-    "nvidia/Qwen3-30B-A3B-NVFP4",
+    "Qwen/Qwen3-30B-A3B-FP8",
     "Qwen/Qwen3-235B-A22B",
+    "Qwen/Qwen3-235B-A22B-FP8",
+    "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    "nvidia/Qwen3-235B-A22B-NVFP4",
+    "Qwen/Qwen3-32B-FP8-Static-PerTensor",
     # MiniMax Models
     "MiniMaxAI/MiniMax-M2.5",
     # GPT-OSS Models
-    "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
