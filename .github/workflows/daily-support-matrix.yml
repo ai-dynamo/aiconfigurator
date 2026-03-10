@@ -1,4 +1,4 @@
-name: "Daily Support Matrix Update"
+name: "Daily Support Matrix Update (Main)"
 
 on:
   schedule:
