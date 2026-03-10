@@ -40,9 +40,9 @@ class TestConstraints:
 
 
 # Tiered constraints by model size (parameter count)
-_SMALL = TestConstraints(total_gpus=8, isl=256, osl=256, prefix=256, ttft=2000.0, tpot=50.0)
-_MEDIUM = TestConstraints(total_gpus=32, isl=256, osl=256, prefix=256, ttft=2000.0, tpot=50.0)
-_LARGE = TestConstraints(total_gpus=128, isl=256, osl=256, prefix=256, ttft=2000000.0, tpot=50000.0)
+_SMALL = TestConstraints(total_gpus=8, isl=256, osl=256, prefix=128, ttft=2000.0, tpot=50.0)
+_MEDIUM = TestConstraints(total_gpus=32, isl=256, osl=256, prefix=128, ttft=2000.0, tpot=50.0)
+_LARGE = TestConstraints(total_gpus=128, isl=256, osl=256, prefix=128, ttft=2000000.0, tpot=50000.0)
 
 _SIZE_TIERS: list[tuple[float, TestConstraints]] = [
     (10e9, _SMALL),  # < 10B params
