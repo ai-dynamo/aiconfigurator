@@ -670,7 +670,7 @@ def run_benchmark(
     rank: int,
     world_size: int,
     device: torch.device,
-    output_file: str = "wideep_alltoall_perf.txt",
+    output_file: str = "trtllm_alltoall_perf.txt",
     num_warmup: int = 3,
     num_iterations: int = 10,
 ):
@@ -817,8 +817,8 @@ def parse_args():
         "--output",
         "-o",
         type=str,
-        default="wideep_alltoall_perf.txt",
-        help="Output file path for performance results (default: wideep_alltoall_perf.txt)",
+        default="trtllm_alltoall_perf.txt",
+        help="Output file path for performance results (default: trtllm_alltoall_perf.txt)",
     )
     parser.add_argument(
         "--warmup",
