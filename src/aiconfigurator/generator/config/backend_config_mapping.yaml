@@ -40,6 +40,12 @@ parameters:
   sglang: null
   trtllm: null
 
+# Quantization
+- param_key: quantization
+  vllm: quantization
+  sglang: quantization
+  trtllm: null
+
 # KV Cache
 - param_key: kv_cache_dtype
   vllm: kv-cache-dtype
