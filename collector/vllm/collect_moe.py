@@ -63,7 +63,7 @@ def get_moe_test_cases():
     if get_sm_version() >= 90 and per_block_cast_to_fp8 is not None:
         moe_list += ["fp8_block"]
     if get_sm_version() >= 100 and _nvfp4_moe_available:
-        moe_list = ["nvfp4"]
+        moe_list += ["nvfp4"]
 
     test_cases = []
 
