@@ -1858,7 +1858,7 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
                 num_nodes = int(row["num_nodes"])
             else:
                 # Default: assume 4 GPUs per node
-                if moe_ep_size % 4 != 0: #FIXME this is only for GB200 needs to be generalized for other systems
+                if moe_ep_size % 4 != 0:  # FIXME this is only for GB200 needs to be generalized for other systems
                     logger.warning(
                         f"moe_ep_size={moe_ep_size} is not divisible by 4, using moe_ep_size // 4 = {moe_ep_size // 4}"
                     )
@@ -5798,8 +5798,13 @@ class PerfDatabase:
 
         def get_empirical() -> float:
             return get_empirical_from_sol(
-                num_tokens, hidden_size, topk, num_experts,
-                moe_ep_size, quant_mode, node_num,
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
             )
 
         return self._query_silicon_or_hybrid(

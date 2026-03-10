@@ -582,9 +582,7 @@ class MoEDispatch(Operation):
                 logger.debug("MoEDispatch: In trtllm SM100 execution path")
 
                 _alltoall_backends = {"CUTLASS", "TRTLLM"}
-                backend_supports_alltoall = (
-                    self._moe_backend is None or self._moe_backend.upper() in _alltoall_backends
-                )
+                backend_supports_alltoall = self._moe_backend is None or self._moe_backend.upper() in _alltoall_backends
                 enable_alltoall = (
                     backend_supports_alltoall
                     and self._attention_dp_size > 1
