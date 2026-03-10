@@ -5,6 +5,12 @@ on:
     # Run daily at 7 AM PT / 11 PM China / 3 PM UTC
     - cron: "0 15 * * *"
   workflow_dispatch: # Allow manual trigger (with no inputs)
+  workflow_call:
+    inputs:
+      branch:
+        description: "Target branch to run against"
+        required: true
+        type: string
 
 jobs:
   update-support-matrix:
@@ -14,6 +20,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    env:
+      TARGET_BRANCH: ${{ inputs.branch || github.ref_name }}
     steps:
       - name: Clean workspace
         run: |
@@ -23,6 +31,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.TARGET_BRANCH }}
           lfs: true
 
       - name: Git LFS Pull
@@ -94,12 +103,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_TITLE="fix: update support matrix [${{ github.ref_name }}]"
+          PR_TITLE="fix: update support matrix [${{ env.TARGET_BRANCH }}]"
           EXISTING_PR=$(gh pr list --state open --search "in:title ${PR_TITLE}" --json number --jq '.[0].number' || echo "")
           if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
             echo "No changes detected. Closing existing PR #$EXISTING_PR"
-            gh pr close "$EXISTING_PR" --comment "Closing: support matrix is now up to date with ${{ github.ref_name }}"
-            git push origin --delete automated/update-support-matrix-${{ github.ref_name }} 2>/dev/null || true
+            gh pr close "$EXISTING_PR" --comment "Closing: support matrix is now up to date with ${{ env.TARGET_BRANCH }}"
+            git push origin --delete automated/update-support-matrix-${{ env.TARGET_BRANCH }} 2>/dev/null || true
           fi
 
       - name: Create or Update Pull Request
@@ -108,10 +117,10 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "fix: update support matrix"
-          title: "fix: update support matrix [${{ github.ref_name }}]"
+          title: "fix: update support matrix [${{ env.TARGET_BRANCH }}]"
           body-path: pr_body.md
-          branch: automated/update-support-matrix-${{ github.ref_name }}
-          base: ${{ github.ref_name }}
+          branch: automated/update-support-matrix-${{ env.TARGET_BRANCH }}
+          base: ${{ env.TARGET_BRANCH }}
           delete-branch: true
           add-paths: |
             src/aiconfigurator/systems/support_matrix.csv

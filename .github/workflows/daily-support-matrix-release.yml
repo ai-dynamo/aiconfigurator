@@ -1,0 +1,38 @@
+name: "Daily Support Matrix Update (Release)"
+
+on:
+  schedule:
+    # Run daily at 7 AM PT - 1h / 10 PM China / 2 PM UTC
+    - cron: "0 14 * * *"
+  workflow_dispatch: # Allow manual trigger (with no inputs)
+
+jobs:
+  resolve-release-branch:
+    name: Resolve Latest Release Branch
+    runs-on: prod-aiconfigurator-default-amd64-v1
+    outputs:
+      branch: ${{ steps.find.outputs.branch }}
+    steps:
+      - name: Find latest release branch
+        id: find
+        run: |
+          BRANCH=$(git ls-remote --heads "https://github.com/${{ github.repository }}.git" 'refs/heads/release/*' \
+            | sed 's|.*refs/heads/||' \
+            | sort -t'/' -k2 -V \
+            | tail -n1)
+
+          if [ -z "$BRANCH" ]; then
+            echo "::error::No release/* branches found"
+            exit 1
+          fi
+
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "Resolved latest release branch: $BRANCH"
+
+  update-support-matrix:
+    name: Update Support Matrix (Release)
+    needs: resolve-release-branch
+    uses: ./.github/workflows/daily-support-matrix.yml
+    with:
+      branch: ${{ needs.resolve-release-branch.outputs.branch }}
+    secrets: inherit
