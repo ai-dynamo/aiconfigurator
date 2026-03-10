@@ -338,7 +338,7 @@ def add_generator_override_arguments(parser: argparse.ArgumentParser) -> None:
     grp = parser.add_argument_group(
         "Generator overrides",
         "Options forwarded to the generator. "
-        "Use dotted keys (e.g. ServiceConfig.model_path=Qwen/Qwen3-32B-FP8). "
+        "Use dotted keys (e.g. ServiceConfig.model_path=Qwen/Qwen3-32B). "
         "See generator config docs for the available keys.",
     )
     grp.add_argument(
