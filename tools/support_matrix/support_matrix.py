@@ -32,14 +32,9 @@ PREFIX = 500
 TTFT = 2000.0
 TPOT = 50.0
 
-# Per-process SupportMatrix instance for ProcessPoolExecutor workers (avoids GIL).
+# Per-process SupportMatrix instance for ProcessPoolExecutor workers.
+# Set in the parent before forking; children inherit it via copy-on-write.
 _worker_matrix: "SupportMatrix | None" = None
-
-
-def _init_worker() -> None:
-    """Initialize one SupportMatrix per worker process (called once per process)."""
-    global _worker_matrix
-    _worker_matrix = SupportMatrix()
 
 
 def _process_combination_worker(
@@ -242,7 +237,10 @@ class SupportMatrix:
         combinations = self.generate_combinations()
         results = []
 
-        with ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker) as executor:
+        global _worker_matrix
+        _worker_matrix = self
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
             for future in tqdm(
                 as_completed(futures),
