@@ -1889,7 +1889,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 attention_dp_size,
                 False,  # post_dispatch (combine)
                 quant_mode=moe_quant_mode,
-                use_low_precision_combine=True,
+                use_low_precision_combine=(moe_quant_mode == common.MoEQuantMode.nvfp4),
             ),
         ]
 
