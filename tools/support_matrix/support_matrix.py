@@ -14,23 +14,64 @@ import logging
 import os
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 
 from packaging.version import Version
 from tqdm import tqdm
 
+from aiconfigurator.generator.naive import _estimate_model_weight_bytes
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.models import _get_model_info
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 logger = logging.getLogger(__name__)
 
-# Test configuration constants
-TOTAL_GPUS = 128
-ISL = 4000
-OSL = 500
-PREFIX = 500
-TTFT = 2000.0
-TPOT = 50.0
+_BYTES_PER_PARAM = 2
+
+
+@dataclass(frozen=True)
+class TestConstraints:
+    total_gpus: int
+    isl: int
+    osl: int
+    prefix: int
+    ttft: float
+    tpot: float
+
+
+# Tiered constraints by model size (parameter count)
+_SMALL = TestConstraints(total_gpus=8, isl=256, osl=256, prefix=256, ttft=2000.0, tpot=50.0)
+_MEDIUM = TestConstraints(total_gpus=32, isl=256, osl=256, prefix=256, ttft=2000.0, tpot=50.0)
+_LARGE = TestConstraints(total_gpus=128, isl=256, osl=256, prefix=256, ttft=2000000.0, tpot=50000.0)
+
+_SIZE_TIERS: list[tuple[float, TestConstraints]] = [
+    (10e9, _SMALL),  # < 10B params
+    (100e9, _MEDIUM),  # 10B - 100B params
+]
+_DEFAULT_TIER = _LARGE  # > 100B params
+
+
+def _get_test_constraints(model_path: str) -> TestConstraints:
+    """Return the appropriate test constraints based on estimated model size."""
+    weight_bytes = _estimate_model_weight_bytes(model_path)
+    num_params = weight_bytes / _BYTES_PER_PARAM
+    for threshold, constraints in _SIZE_TIERS:
+        if num_params < threshold:
+            logger.info(
+                "Model %s: ~%.1fB params → %s",
+                model_path,
+                num_params / 1e9,
+                constraints,
+            )
+            return constraints
+    logger.info(
+        "Model %s: ~%.1fB params → %s",
+        model_path,
+        num_params / 1e9,
+        _DEFAULT_TIER,
+    )
+    return _DEFAULT_TIER
+
 
 # Per-process SupportMatrix instance for ProcessPoolExecutor workers.
 # Set in the parent before forking; children inherit it via copy-on-write.
@@ -130,6 +171,7 @@ class SupportMatrix:
             Tuple of (dict with results, dict with error messages)
             Both dicts have keys "agg" and "disagg"
         """
+        constraints = _get_test_constraints(model)
         modes_to_test = ["agg", "disagg"]
         results = {}
         error_messages = {}
@@ -143,12 +185,12 @@ class SupportMatrix:
                     "system_name": system,
                     "backend_name": backend,
                     "backend_version": version,
-                    "total_gpus": TOTAL_GPUS,
-                    "isl": ISL,
-                    "osl": OSL,
-                    "prefix": PREFIX,
-                    "ttft": TTFT,
-                    "tpot": TPOT,
+                    "total_gpus": constraints.total_gpus,
+                    "isl": constraints.isl,
+                    "osl": constraints.osl,
+                    "prefix": constraints.prefix,
+                    "ttft": constraints.ttft,
+                    "tpot": constraints.tpot,
                 }
 
                 # For disagg mode, set decode_system_name
@@ -223,12 +265,19 @@ class SupportMatrix:
         print("AIConfigurator Support Matrix Test")
         print("=" * 80)
         print("Testing both agg and disagg modes for all combinations")
-        print(f"Total GPUs: {TOTAL_GPUS}")
-        print(f"Input Sequence Length (ISL): {ISL}")
-        print(f"Output Sequence Length (OSL): {OSL}")
-        print(f"Prefix: {PREFIX}")
-        print(f"Target TTFT: {TTFT}ms")
-        print(f"Target TPOT: {TPOT}ms")
+        print("Tiered constraints by model size:")
+        print(
+            f"  <10B:      GPUs={_SMALL.total_gpus}, ISL={_SMALL.isl}, OSL={_SMALL.osl}, "
+            f"PREFIX={_SMALL.prefix}, TTFT={_SMALL.ttft}ms, TPOT={_SMALL.tpot}ms"
+        )
+        print(
+            f"  10B-100B:  GPUs={_MEDIUM.total_gpus}, ISL={_MEDIUM.isl}, OSL={_MEDIUM.osl}, "
+            f"PREFIX={_MEDIUM.prefix}, TTFT={_MEDIUM.ttft}ms, TPOT={_MEDIUM.tpot}ms"
+        )
+        print(
+            f"  >100B:     GPUs={_LARGE.total_gpus}, ISL={_LARGE.isl}, OSL={_LARGE.osl}, "
+            f"PREFIX={_LARGE.prefix}, TTFT={_LARGE.ttft}ms, TPOT={_LARGE.tpot}ms"
+        )
         if max_workers is None:
             max_workers = os.cpu_count() or 1
         print(f"Max workers: {max_workers}")
