@@ -13,7 +13,7 @@ import csv
 import logging
 import os
 import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from packaging.version import Version
@@ -40,7 +40,7 @@ class TestConstraints:
 
 
 # Tiered constraints by model size (parameter count)
-_SMALL = TestConstraints(total_gpus=8, isl=256, osl=256, prefix=128, ttft=2000.0, tpot=50.0)
+_SMALL = TestConstraints(total_gpus=4, isl=256, osl=256, prefix=128, ttft=1500.0, tpot=50.0)
 _MEDIUM = TestConstraints(total_gpus=32, isl=256, osl=256, prefix=128, ttft=2000.0, tpot=50.0)
 _LARGE = TestConstraints(total_gpus=128, isl=256, osl=256, prefix=128, ttft=2000000.0, tpot=50000.0)
 
@@ -252,6 +252,11 @@ class SupportMatrix:
         Test whether each combination is supported by AIC.
         Tests both agg and disagg modes for each combination and captures error messages.
 
+        Runs in two phases:
+        1. Parallel execution with ProcessPoolExecutor.
+        2. Sequential single-process retry of every combination that failed in phase 1
+           (including combos that never ran due to a broken process pool).
+
         Args:
             max_workers: Maximum number of worker processes for parallel execution.
                          Defaults to None, which uses os.cpu_count() or 1.
@@ -284,20 +289,99 @@ class SupportMatrix:
         print("=" * 80 + "\n")
 
         combinations = self.generate_combinations()
-        results = []
+        results: list[tuple[str, str, str, str, str, str, bool, str | None]] = []
+        retry_combos: set[tuple[str, str, str, str]] = set()
 
         global _worker_matrix
         _worker_matrix = self
 
+        # -- Phase 1: parallel execution --
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
-            for future in tqdm(
-                as_completed(futures),
-                total=len(combinations),
-                desc="Testing support matrix",
-                unit="config",
-            ):
-                results.extend(future.result())
+            pbar = tqdm(total=len(combinations), desc="Phase 1: parallel testing", unit="config")
+            for future in as_completed(futures):
+                combo = futures[future]
+                model, system, backend, version = combo
+                try:
+                    results.extend(future.result())
+                except BrokenExecutor:
+                    logger.warning(
+                        "Process pool broken while running %s/%s/%s/%s. "
+                        "A worker was likely killed (OOM). "
+                        "Queuing this and remaining combos for sequential retry.",
+                        model,
+                        system,
+                        backend,
+                        version,
+                    )
+                    retry_combos.add(combo)
+                    for remaining in futures:
+                        if remaining is not future and not remaining.done():
+                            remaining.cancel()
+                            retry_combos.add(futures[remaining])
+                    pbar.update(len(combinations) - pbar.n)
+                    break
+                except Exception:
+                    logger.exception(
+                        "Unexpected error retrieving result for %s/%s/%s/%s",
+                        model,
+                        system,
+                        backend,
+                        version,
+                    )
+                    retry_combos.add(combo)
+                pbar.update(1)
+            pbar.close()
+
+        # Also collect combos whose Phase 1 results had any failure
+        for model, _arch, system, backend, version, _mode, success, _err in results:
+            if not success:
+                retry_combos.add((model, system, backend, version))
+
+        # -- Phase 2: sequential single-process retry of all failures --
+        if retry_combos:
+            results = [r for r in results if (r[0], r[2], r[3], r[4]) not in retry_combos]
+
+            print(f"\n{'=' * 80}")
+            print(f"Phase 2: retrying {len(retry_combos)} failed combination(s) sequentially")
+            print(f"{'=' * 80}\n")
+
+            for combo in tqdm(sorted(retry_combos), desc="Phase 2: sequential retry", unit="config"):
+                model, system, backend, version = combo
+                try:
+                    success_dict, error_dict = self.run_single_test(
+                        model=model,
+                        system=system,
+                        backend=backend,
+                        version=version,
+                    )
+                    architecture = self.get_architecture(model)
+                    for mode in success_dict:
+                        results.append(
+                            (model, architecture, system, backend, version, mode, success_dict[mode], error_dict[mode])
+                        )
+                except Exception:
+                    logger.exception(
+                        "Sequential retry also failed for %s/%s/%s/%s",
+                        model,
+                        system,
+                        backend,
+                        version,
+                    )
+                    architecture = self.get_architecture(model)
+                    for mode in ("agg", "disagg"):
+                        results.append(
+                            (
+                                model,
+                                architecture,
+                                system,
+                                backend,
+                                version,
+                                mode,
+                                False,
+                                traceback.format_exc().replace("\n", "\\n"),
+                            )
+                        )
 
         # Sort results by (huggingface_id, architecture, system, backend, version, mode)
         results.sort(key=lambda x: (x[0], x[1], x[2], x[3], Version(x[4]), x[5]))
