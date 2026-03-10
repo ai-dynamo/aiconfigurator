@@ -1795,6 +1795,7 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
     Note:
         kernel_source identifies the All2All communication method:
         - "MnnvlMoe": NVLink Two-Sided via MNNVL (GB200, SM >= 100)
+        - "NVLinkOneSided": NVLink One-Sided (CutlassFusedMoE on GB200)
         - "DeepEP": DeepEP normal mode (H100/H200, cross-node)
         - "DeepEPLowLatency": DeepEP low-latency mode (H100/H200, intra-node)
         - "NCCL": Standard NCCL communication (fallback)
@@ -2631,56 +2632,73 @@ class PerfDatabase:
         quant_mode: common.MoEQuantMode,
         moe_ep_size: int,
         topk: int,
+        moe_backend: Optional[str] = None,
     ) -> str:
         """
-        Automatically select All2All communication method based on GPU architecture and configuration.
+        Automatically select All2All communication method based on GPU architecture,
+        MoE backend type, and configuration.
 
-        Selection logic (based on TensorRT-LLM's select_alltoall_method_type):
-        1. SM >= 100 (GB200 with MNNVL support) -> MnnvlMoe (NVLink Two-Sided)
-        2. SM >= 90 (H100/H200) with cross-node -> DeepEP
-        3. SM >= 90 (H100/H200) within single node -> DeepEPLowLatency
-        4. SM < 90 -> NCCL (fallback)
+        Aligned with TensorRT-LLM's per-backend select_alltoall_method_type:
+
+        CutlassFusedMoE / TRTLLMGenFusedMoE (fused_moe_cutlass.py / fused_moe_trtllm_gen.py):
+          - Requires supports_mnnvl() (approximated as SM >= 100)
+          - Returns NVLinkOneSided
+          - Does NOT support DeepEP / DeepEPLowLatency
+
+        WideEPMoE (fused_moe_wide_ep.py):
+          - If supports_mnnvl() -> NVLinkTwoSided (MnnvlMoe)
+          - Else if DeepEP feasible -> DeepEP (inter-node) or DeepEPLowLatency (intra-node)
+          - Does NOT support NVLinkOneSided
+
+        DeepGemmFusedMoE / CuteDslFusedMoE:
+          - Always NotEnabled
 
         Args:
             quant_mode: MoE quantization mode
             moe_ep_size: MoE expert parallelism size
             topk: Number of experts activated per token
+            moe_backend: MoE backend identifier. "wideep" for WideEP path,
+                        "CUTLASS"/"TRTLLM"/None for CutlassFusedMoE/TRTLLMGen,
+                        "DEEPGEMM"/"CUTE_DSL" for backends without AlltoAll.
 
         Returns:
-            str: The selected kernel_source name
+            str: The selected kernel_source name, or "NotEnabled" if AlltoAll is not used.
         """
+        if moe_backend is not None and moe_backend.upper() in {"DEEPGEMM", "CUTE_DSL"}:
+            return "NotEnabled"
+
         sm_version = self.system_spec["gpu"]["sm_version"]
         num_gpus_per_node = self.system_spec["node"]["num_gpus_per_node"]
         is_inter_node = moe_ep_size > num_gpus_per_node
+        is_wideep = moe_backend is not None and moe_backend.upper() == "WIDEEP"
 
-        # Preferred kernel based on hardware
-        if sm_version >= 100:
-            # GB200 supports MNNVL (Multi-Node NVLink)
-            preferred = "MnnvlMoe"
-        elif sm_version >= 90:
-            # H100/H200: Check DeepEP feasibility
-            # DeepEP requires: tp_size == 1, ep_size > 1, top_k in supported range
-            deepep_feasible = moe_ep_size > 1 and topk <= 8
+        supports_mnnvl = sm_version >= 100
 
-            if deepep_feasible and is_inter_node:
-                # Cross-node: use DeepEP normal mode
-                preferred = "DeepEP"
-            elif deepep_feasible:
-                # Intra-node: use DeepEP low-latency mode
-                preferred = "DeepEPLowLatency"
-            else:
+        if is_wideep:
+            if supports_mnnvl:
                 preferred = "MnnvlMoe"
+            else:
+                deepep_feasible = moe_ep_size > 1 and topk <= 8
+                if deepep_feasible and is_inter_node:
+                    preferred = "DeepEP"
+                elif deepep_feasible:
+                    preferred = "DeepEPLowLatency"
+                else:
+                    preferred = "NotEnabled"
         else:
-            # SM89 and below: use NCCL standard communication
-            preferred = "NCCL"
+            if supports_mnnvl:
+                preferred = "NVLinkOneSided"
+            else:
+                preferred = "NotEnabled"
 
-        # Check if preferred kernel is available in data, otherwise fallback
+        if preferred == "NotEnabled":
+            return preferred
+
         if self._trtllm_alltoall_data:
             available_kernels = list(self._trtllm_alltoall_data.keys())
             if preferred in available_kernels:
                 return preferred
             elif available_kernels:
-                # Fallback to any available kernel
                 fallback = available_kernels[0]
                 logger.debug(f"Preferred All2All kernel '{preferred}' not available, falling back to '{fallback}'")
                 return fallback
@@ -5620,11 +5638,8 @@ class PerfDatabase:
         Query TRT-LLM All2All communication latency.
 
         Covers both WideEP (NVLinkTwoSided) and CutlassFusedMoE (NVLinkOneSided) paths.
-        The All2All communication method is automatically selected based on GPU architecture:
-        - SM >= 100 (GB200 with MNNVL) -> MnnvlMoe (NVLink Two-Sided)
-        - SM >= 90 (H100/H200) cross-node -> DeepEP
-        - SM >= 90 (H100/H200) intra-node -> DeepEPLowLatency
-        - SM < 90 -> NCCL (fallback)
+        The All2All communication method is automatically selected based on GPU architecture
+        and MoE backend type via _select_alltoall_kernel.
 
         Args:
             op_name: Operation name, one of:
@@ -5636,16 +5651,17 @@ class PerfDatabase:
             hidden_size: Hidden dimension size
             topk: Number of experts activated per token
             num_experts: Total number of experts
-            moe_ep_size: MoE expert parallelism size (must be divisible by 4 if node_num is None)
+            moe_ep_size: MoE expert parallelism size
             quant_mode: MoE quantization mode
-            node_num: Number of nodes. If None, computed as moe_ep_size // 4 (assuming 4 GPUs per node)
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
-            moe_backend: MoE backend name. Not used in kernel selection but participates
-                in lru_cache key for future extensibility (different backends may diverge).
+            moe_backend: MoE backend identifier for kernel selection.
+                "wideep" -> NVLinkTwoSided (MnnvlMoe);
+                "CUTLASS"/"TRTLLM"/None -> NVLinkOneSided;
+                "DEEPGEMM"/"CUTE_DSL" -> NotEnabled.
+            node_num: Number of nodes. If None, computed as moe_ep_size // 4
+            database_mode: Database mode
 
         Returns:
             PerformanceResult: Latency in ms, energy accessible via .energy attribute.
-            For SOL_FULL mode: tuple of (sol_time, sol_comm, sol_overhead).
 
         Raises:
             ValueError: If op_name is not valid
@@ -5766,9 +5782,10 @@ class PerfDatabase:
             )
             return PerformanceResult(emp_latency, energy=0.0)
 
-        # Automatically select All2All kernel based on GPU architecture
-        kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk)
-        logger.debug(f"query_trtllm_alltoall: auto-selected kernel_source='{kernel_source}'")
+        kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
+        logger.debug(
+            f"query_trtllm_alltoall: auto-selected kernel_source='{kernel_source}' (moe_backend={moe_backend})"
+        )
 
         # SILICON or HYBRID mode - use database
         def get_silicon():
@@ -5813,8 +5830,8 @@ class PerfDatabase:
             database_mode=database_mode,
             error_msg=(
                 f"Failed to query trtllm alltoall data for {op_name} (kernel={kernel_source}), "
-                f"node_num={node_num}, {num_tokens=}, {hidden_size=}, {topk=}, {num_experts=}, "
-                f"{moe_ep_size=}, {quant_mode=}"
+                f"moe_backend={moe_backend}, node_num={node_num}, {num_tokens=}, {hidden_size=}, "
+                f"{topk=}, {num_experts=}, {moe_ep_size=}, {quant_mode=}"
             ),
         )
 
