@@ -220,26 +220,14 @@ Model parameters are parsed from these configs via get_model_config_from_model_p
 The list of default models for testing is derived from support_matrix.csv via get_default_models()
 """
 DefaultHFModels = {
-    # Llama 2 Models
-    "meta-llama/Llama-2-7b-hf",
-    "meta-llama/Llama-2-13b-hf",
-    "meta-llama/Llama-2-70b-hf",
     # Llama 3.1 Models
     "meta-llama/Meta-Llama-3.1-8B",
     "meta-llama/Meta-Llama-3.1-70B",
     "meta-llama/Meta-Llama-3.1-405B",
     "nvidia/Llama-3.1-70B-Instruct-FP8",
-    # Mixtral Models
-    "mistralai/Mixtral-8x7B-v0.1",
-    "mistralai/Mixtral-8x22B-v0.1",
     # DeepSeek Models
     "deepseek-ai/DeepSeek-V3",
     "nvidia/DeepSeek-V3.1-NVFP4",
-    # Qwen 2.5 Models
-    "Qwen/Qwen2.5-1.5B",
-    "Qwen/Qwen2.5-7B",
-    "Qwen/Qwen2.5-32B",
-    "Qwen/Qwen2.5-72B",
     # Qwen 3 Models
     "Qwen/Qwen3-0.6B",
     "Qwen/Qwen3-1.7B",
