@@ -84,7 +84,9 @@ jobs:
       - name: Extract PR description
         if: steps.compare.outputs.needs_pr == 'true'
         run: |
-          cat diff_output/diff.json | jq -r '.pr_description' > pr_body.md
+          echo "Updated by [workflow run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" > pr_body.md
+          echo "" >> pr_body.md
+          cat diff_output/diff.json | jq -r '.pr_description' >> pr_body.md
           rm -rf diff_output
 
       - name: Close existing PR if no changes
