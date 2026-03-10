@@ -23,7 +23,7 @@ class TestTrtLLMWideEPMoEDispatch:
         mock_db.backend = "trtllm"
         mock_db.system_spec = {"gpu": {"sm_version": 100}, "node": {"num_gpus_per_node": 8}}
 
-        # Mock query_wideep_alltoall to return different values for different ops
+        # Mock query_trtllm_alltoall to return different values for different ops
         def mock_alltoall(op_name, **kwargs):
             mock_result = MagicMock()
             if op_name == "alltoall_prepare":
@@ -36,7 +36,7 @@ class TestTrtLLMWideEPMoEDispatch:
                 mock_result.__float__ = MagicMock(return_value=4.5)
             return mock_result
 
-        mock_db.query_wideep_alltoall.side_effect = mock_alltoall
+        mock_db.query_trtllm_alltoall.side_effect = mock_alltoall
         return mock_db
 
     def test_initialization_pre_dispatch(self):
@@ -125,10 +125,10 @@ class TestTrtLLMWideEPMoEDispatch:
         result = dispatch.query(mock_database, x=16)
 
         # Verify both prepare and dispatch were called
-        assert mock_database.query_wideep_alltoall.call_count == 2
+        assert mock_database.query_trtllm_alltoall.call_count == 2
 
         # Check prepare call
-        prepare_call = mock_database.query_wideep_alltoall.call_args_list[0]
+        prepare_call = mock_database.query_trtllm_alltoall.call_args_list[0]
         assert prepare_call[1]["op_name"] == "alltoall_prepare"
         assert prepare_call[1]["num_tokens"] == 16
         assert prepare_call[1]["hidden_size"] == 2048
@@ -139,7 +139,7 @@ class TestTrtLLMWideEPMoEDispatch:
         assert prepare_call[1]["node_num"] is None
 
         # Check dispatch call
-        dispatch_call = mock_database.query_wideep_alltoall.call_args_list[1]
+        dispatch_call = mock_database.query_trtllm_alltoall.call_args_list[1]
         assert dispatch_call[1]["op_name"] == "alltoall_dispatch"
 
         # Verify result is sum of prepare + dispatch
@@ -166,9 +166,9 @@ class TestTrtLLMWideEPMoEDispatch:
         result = dispatch.query(mock_database, x=16)
 
         # Verify only combine was called
-        assert mock_database.query_wideep_alltoall.call_count == 1
+        assert mock_database.query_trtllm_alltoall.call_count == 1
 
-        combine_call = mock_database.query_wideep_alltoall.call_args_list[0]
+        combine_call = mock_database.query_trtllm_alltoall.call_args_list[0]
         assert combine_call[1]["op_name"] == "alltoall_combine"
         assert combine_call[1]["num_tokens"] == 16
 
@@ -194,7 +194,7 @@ class TestTrtLLMWideEPMoEDispatch:
         result = dispatch.query(mock_database, x=16)
 
         # Verify low precision combine was called
-        combine_call = mock_database.query_wideep_alltoall.call_args_list[0]
+        combine_call = mock_database.query_trtllm_alltoall.call_args_list[0]
         assert combine_call[1]["op_name"] == "alltoall_combine_low_precision"
 
         assert float(result) == 4.5
@@ -240,7 +240,7 @@ class TestTrtLLMWideEPMoEDispatch:
         dispatch.query(mock_database, x=16)
 
         # Verify node_num was passed to queries
-        for call in mock_database.query_wideep_alltoall.call_args_list:
+        for call in mock_database.query_trtllm_alltoall.call_args_list:
             assert call[1]["node_num"] == 4
 
     @patch("aiconfigurator.sdk.operations.logger")
@@ -307,12 +307,12 @@ class TestTrtLLMWideEPMoEDispatch:
             )
 
             # Clear previous calls
-            mock_database.query_wideep_alltoall.reset_mock()
+            mock_database.query_trtllm_alltoall.reset_mock()
 
             dispatch.query(mock_database, x=16)
 
             # Verify correct quant_mode was passed
-            for call in mock_database.query_wideep_alltoall.call_args_list:
+            for call in mock_database.query_trtllm_alltoall.call_args_list:
                 assert call[1]["quant_mode"] == quant_mode
 
 

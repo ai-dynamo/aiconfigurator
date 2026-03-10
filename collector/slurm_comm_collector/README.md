@@ -72,5 +72,5 @@ bash submit_mnnvl.sh
 squeue -u $USER
 
 # Results will be saved to
-cat results/wideep_alltoall_perf.txt
+cat results/trtllm_alltoall_perf.txt
 ```

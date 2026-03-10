@@ -405,8 +405,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
         comm_latency = 0.0
 
         if self._pre_dispatch:
-            # Pre-dispatch phase: prepare + dispatch
-            prepare_result = database.query_wideep_alltoall(
+            prepare_result = database.query_trtllm_alltoall(
                 op_name="alltoall_prepare",
                 num_tokens=num_tokens,
                 hidden_size=self._hidden_size,
@@ -414,9 +413,10 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 num_experts=self._num_experts,
                 moe_ep_size=self._moe_ep_size,
                 quant_mode=self._quant_mode,
+                moe_backend="wideep",
                 node_num=self._node_num,
             )
-            dispatch_result = database.query_wideep_alltoall(
+            dispatch_result = database.query_trtllm_alltoall(
                 op_name="alltoall_dispatch",
                 num_tokens=num_tokens,
                 hidden_size=self._hidden_size,
@@ -424,13 +424,13 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 num_experts=self._num_experts,
                 moe_ep_size=self._moe_ep_size,
                 quant_mode=self._quant_mode,
+                moe_backend="wideep",
                 node_num=self._node_num,
             )
             comm_latency = float(prepare_result) + float(dispatch_result)
         else:
-            # Post-dispatch phase: combine or combine_low_precision
             combine_op = "alltoall_combine_low_precision" if self._use_low_precision_combine else "alltoall_combine"
-            combine_result = database.query_wideep_alltoall(
+            combine_result = database.query_trtllm_alltoall(
                 op_name=combine_op,
                 num_tokens=num_tokens,
                 hidden_size=self._hidden_size,
@@ -438,6 +438,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 num_experts=self._num_experts,
                 moe_ep_size=self._moe_ep_size,
                 quant_mode=self._quant_mode,
+                moe_backend="wideep",
                 node_num=self._node_num,
             )
             comm_latency = float(combine_result)
@@ -563,6 +564,8 @@ class MoEDispatch(Operation):
         self._moe_backend = kwargs.get("moe_backend")
         self._is_context = kwargs.get("is_context", True)
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
+        self._quant_mode = kwargs.get("quant_mode")
+        self._reduce_results = kwargs.get("reduce_results", True)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         num_tokens = kwargs.get("x")
@@ -577,86 +580,102 @@ class MoEDispatch(Operation):
             )
             if _sm_version == 100:
                 logger.debug("MoEDispatch: In trtllm SM100 execution path")
+
+                _alltoall_backends = {None, "CUTLASS", "TRTLLM"}
+                backend_supports_alltoall = (
+                    self._moe_backend is None or self._moe_backend.upper() in _alltoall_backends
+                )
+                enable_alltoall = (
+                    backend_supports_alltoall
+                    and self._attention_dp_size > 1
+                    and self._moe_tp_size == 1
+                )
+
+                # Quantize-aware communication volume.
+                # When quant_mode is known, compute compressed volume:
+                #   nvfp4: volume/4 + scale_factor volume
+                #   fp8:   volume/2
+                #   others / unknown: full volume (BF16)
+                quant_mode = self._quant_mode
+                if quant_mode is not None and quant_mode == common.MoEQuantMode.nvfp4:
+                    dispatch_x_volume = volume / 4
+                    dispatch_sf_volume = volume / 4 / 8
+                elif quant_mode is not None and quant_mode == common.MoEQuantMode.fp8:
+                    dispatch_x_volume = volume / 2
+                    dispatch_sf_volume = 0
+                else:
+                    dispatch_x_volume = volume
+                    dispatch_sf_volume = 0
+
                 if self._pre_dispatch:
-                    if self._attention_tp_size > 1:  # tp>1, use allreduce
-                        # to do: custom allreduce
-                        if _num_gpus_per_node == 72 and self.num_gpus > 4:  # to do: nvl72, node per gpu
-                            comm_latency = database.query_nccl(
-                                common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
-                            )
-                        else:
-                            comm_latency = database.query_custom_allreduce(
-                                common.CommQuantMode.half, self.num_gpus, volume
-                            )
+                    if enable_alltoall:
+                        # CutlassFusedMoE (NVLinkOneSided) skips alltoall_prepare —
+                        # only WideEP (TrtLLMWideEPMoEDispatch) needs prepare+dispatch.
+                        # Default to fp8_block when quant_mode unspecified (SM100 CutlassFusedMoE default).
+                        _effective_qm = quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block
+                        dispatch_result = database.query_trtllm_alltoall(
+                            op_name="alltoall_dispatch",
+                            num_tokens=num_tokens,
+                            hidden_size=self._hidden_size,
+                            topk=self._topk,
+                            num_experts=self._num_experts,
+                            moe_ep_size=self._moe_ep_size,
+                            quant_mode=_effective_qm,
+                            moe_backend=self._moe_backend,
+                        )
+                        comm_latency = float(dispatch_result)
                     elif self._attention_dp_size > 1:
-                        if self._enable_fp4_all2all:
-                            # Calculate all2all communication volume for nvfp4 all2all operation
-                            # Volume calculation considers the average case between best and worst
-                            # scenarios:
-                            # - Best case: volume * 1/4 (all selected experts are in one GPU for
-                            #   all tokens)
-                            # - Worst case: volume * min(topk, attention_dp_size)/4 (every selected
-                            #   expert is in different GPU)
-                            # - Final volume: average of best and worst cases, divided by 4 for
-                            #   nvfp4 quantization
-                            all2all_volume = (
-                                volume * (1 + min(self._topk, self._attention_dp_size)) / 2 / 4
-                            )  # mean of best and worst
-                            # to do: nvfp4 custom all2all
-                            all2all_latency = database.query_nccl(
-                                common.CommQuantMode.half, self.num_gpus, "alltoall", all2all_volume
-                            )
-                            all2all_sf_latency = database.query_nccl(
-                                common.CommQuantMode.half,
-                                self.num_gpus,
-                                "alltoall",
-                                all2all_volume / 8,
-                            )  # volume_scale_factor = 1/8 volume
-                            comm_latency = all2all_latency + all2all_sf_latency + 1e-2  # msg size static latency 10us
+                        all_gather_volume = (dispatch_x_volume + dispatch_sf_volume) * self._attention_dp_size
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half, self.num_gpus, "all_gather", all_gather_volume
+                        )
+                    elif self._attention_tp_size > 1:
+                        if self._reduce_results:
+                            if _num_gpus_per_node == 72 and self.num_gpus > 4:
+                                comm_latency = database.query_nccl(
+                                    common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
+                                )
+                            else:
+                                comm_latency = database.query_custom_allreduce(
+                                    common.CommQuantMode.half, self.num_gpus, volume
+                                )
                         else:
-                            all_gather_volume = volume * self._attention_dp_size / 4
-                            all_gather_latency = database.query_nccl(
-                                common.CommQuantMode.half,
-                                self.num_gpus,
-                                "all_gather",
-                                all_gather_volume,
-                            )  # nvfp4 allgather
-                            all_gather_sf_latency = database.query_nccl(
-                                common.CommQuantMode.half,
-                                self.num_gpus,
-                                "all_gather",
-                                all_gather_volume / 8,
-                            )  # volume_scale_factor = 1/8 volume
-                            comm_latency = all_gather_latency + all_gather_sf_latency
+                            comm_latency = 0
                     else:
                         comm_latency = 0
                 else:
-                    if self._attention_tp_size > 1:  # tp>1, use allreduce
-                        # to do: custom allreduce
-                        if _num_gpus_per_node == 72 and self.num_gpus > 4:  # to do: nvl72, node per gpu
-                            comm_latency = database.query_nccl(
-                                common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
-                            )
-                        else:
-                            comm_latency = database.query_custom_allreduce(
-                                common.CommQuantMode.half, self.num_gpus, volume
-                            )
+                    if enable_alltoall:
+                        _effective_qm = quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block
+                        combine_result = database.query_trtllm_alltoall(
+                            op_name="alltoall_combine",
+                            num_tokens=num_tokens,
+                            hidden_size=self._hidden_size,
+                            topk=self._topk,
+                            num_experts=self._num_experts,
+                            moe_ep_size=self._moe_ep_size,
+                            quant_mode=_effective_qm,
+                            moe_backend=self._moe_backend,
+                        )
+                        comm_latency = float(combine_result)
                     elif self._attention_dp_size > 1:
-                        if self._enable_fp4_all2all:
-                            # to do: nvfp4 all2all
-                            all2all_volume = (
-                                volume * (1 + min(self._topk, self._attention_dp_size)) / 2 / 4
-                            )  # nvfp4 all2all
-                            comm_latency = database.query_nccl(
-                                common.CommQuantMode.half, self.num_gpus, "alltoall", all2all_volume
-                            )
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half,
+                            self.num_gpus,
+                            "reduce_scatter",
+                            volume * self._attention_dp_size,
+                        )
+                    elif self._attention_tp_size > 1:
+                        if self._reduce_results:
+                            if _num_gpus_per_node == 72 and self.num_gpus > 4:
+                                comm_latency = database.query_nccl(
+                                    common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
+                                )
+                            else:
+                                comm_latency = database.query_custom_allreduce(
+                                    common.CommQuantMode.half, self.num_gpus, volume
+                                )
                         else:
-                            comm_latency = database.query_nccl(
-                                common.CommQuantMode.half,
-                                self.num_gpus,
-                                "reduce_scatter",
-                                volume * self._attention_dp_size,
-                            )
+                            comm_latency = 0
                     else:
                         comm_latency = 0
             else:  # sm < 100 or > 100 (for now)
