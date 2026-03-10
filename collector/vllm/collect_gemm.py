@@ -3,10 +3,16 @@
 
 __compat__ = "vllm>=0.11.0"
 
+import inspect
 import os
 
 import torch
 from vllm._custom_ops import scaled_fp4_quant
+
+# vLLM >=0.16 added is_sf_swizzled_layout / backend kwargs.
+# In <0.16, scaled_fp4_quant(input, global_scale) always returns a pre-swizzled
+# scale, so we must NOT pass those kwargs.
+_SCALED_FP4_QUANT_HAS_LAYOUT_ARG = "is_sf_swizzled_layout" in inspect.signature(scaled_fp4_quant).parameters
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
@@ -171,12 +177,19 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
             with torch.no_grad():
                 weight_bf16 = torch.randn(n, k, dtype=torch.bfloat16, device=device)
                 w_gscale_val = float(weight_bf16.abs().max()) / 6.0
-                weight_fp4, weight_scale_fp8 = scaled_fp4_quant(
-                    weight_bf16,
-                    torch.tensor(1.0 / w_gscale_val, dtype=torch.float32, device=device),
-                    is_sf_swizzled_layout=False,
-                    backend="cutlass",
-                )
+                if _SCALED_FP4_QUANT_HAS_LAYOUT_ARG:
+                    weight_fp4, weight_scale_fp8 = scaled_fp4_quant(
+                        weight_bf16,
+                        torch.tensor(1.0 / w_gscale_val, dtype=torch.float32, device=device),
+                        is_sf_swizzled_layout=False,
+                        backend="cutlass",
+                    )
+                else:
+                    # vLLM <0.16: 2-arg API, scale is already swizzled on output.
+                    weight_fp4, weight_scale_fp8 = scaled_fp4_quant(
+                        weight_bf16,
+                        torch.tensor(1.0 / w_gscale_val, dtype=torch.float32, device=device),
+                    )
                 in_gscale_val = float(x.abs().max()) / 6.0
                 # CT convention: global_scale parameters store the inverse (1/actual_scale).
                 gemm.weight_packed.data.copy_(weight_fp4)

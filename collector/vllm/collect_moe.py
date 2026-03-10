@@ -28,6 +28,8 @@ except Exception:
 # nvfp4 MoE helpers (Blackwell SM 100+).
 # Note: fused_experts does not support nvfp4; use flashinfer_cutlass_fused_moe directly.
 try:
+    import inspect as _inspect
+
     from flashinfer.fused_moe.core import ActivationType as _ActivationType
     from vllm._custom_ops import scaled_fp4_quant as _scaled_fp4_quant
     from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
@@ -35,9 +37,15 @@ try:
     )
     from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe as _flashinfer_cutlass_fused_moe
 
+    # vLLM >=0.16 added is_sf_swizzled_layout / backend kwargs.
+    # In <0.16, the 2-arg form already returns a pre-swizzled scale per expert,
+    # so we stack them directly and skip the separate _swizzle_blockscale call.
+    _SCALED_FP4_QUANT_HAS_LAYOUT_ARG = "is_sf_swizzled_layout" in _inspect.signature(_scaled_fp4_quant).parameters
+
     _nvfp4_moe_available = True
 except Exception:
     _nvfp4_moe_available = False
+    _SCALED_FP4_QUANT_HAS_LAYOUT_ARG = False
 
 from collector.common_test_cases import get_common_moe_test_cases
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
@@ -213,13 +221,21 @@ def run_moe_torch(
             fp4_list, sf_list = [], []
             for i in range(E):
                 gscale_inv = torch.tensor(1.0 / gscales[i].item(), dtype=torch.float32, device=w_bf16.device)
-                w_fp4, w_sf = _scaled_fp4_quant(
-                    w_bf16[i].contiguous(), gscale_inv, is_sf_swizzled_layout=False, backend="cutlass"
-                )
+                if _SCALED_FP4_QUANT_HAS_LAYOUT_ARG:
+                    w_fp4, w_sf = _scaled_fp4_quant(
+                        w_bf16[i].contiguous(), gscale_inv, is_sf_swizzled_layout=False, backend="cutlass"
+                    )
+                else:
+                    # vLLM <0.16: 2-arg API, scale is already swizzled per expert.
+                    w_fp4, w_sf = _scaled_fp4_quant(w_bf16[i].contiguous(), gscale_inv)
                 fp4_list.append(w_fp4)
                 sf_list.append(w_sf)
             fp4 = torch.stack(fp4_list)
-            scale = _swizzle_blockscale(torch.stack(sf_list))
+            if _SCALED_FP4_QUANT_HAS_LAYOUT_ARG:
+                scale = _swizzle_blockscale(torch.stack(sf_list))
+            else:
+                # Scales are already swizzled per-expert; just stack them.
+                scale = torch.stack(sf_list)
             return fp4, scale, gscales
 
         nvfp4_w1_fp4, nvfp4_w1_scale, w1_gscales = _quant_expert_weights_nvfp4(w1.to(torch.bfloat16))
