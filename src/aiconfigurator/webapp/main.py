@@ -160,7 +160,7 @@ def main(args):
             pareto_comparison_components = create_pareto_comparison_tab(app_config)
             if app_config["enable_profiling"]:
                 profiling_components = create_profiling_tab(app_config)
-            support_matrix_components = create_support_matrix_tab(app_config)
+            support_matrix_components = create_support_matrix_tab(app_config)  # noqa: F841
 
         # setup events
         EventHandler.setup_static_events(static_components)
