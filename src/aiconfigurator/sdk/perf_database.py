@@ -5620,6 +5620,19 @@ class PerfDatabase:
             ),
         )
 
+    @staticmethod
+    def _normalize_alltoall_moe_quant_mode_for_table(
+        quant_mode: common.MoEQuantMode,
+    ) -> common.MoEQuantMode:
+        """
+        Normalize MoE quant modes for TRT-LLM alltoall perf table lookup.
+
+        `fp8_block` is a behavioral mode that reuses the `fp8` alltoall tables.
+        """
+        if quant_mode == common.MoEQuantMode.fp8_block:
+            return common.MoEQuantMode.fp8
+        return quant_mode
+
     @functools.lru_cache(maxsize=32768)
     def query_trtllm_alltoall(
         self,
@@ -5737,6 +5750,8 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
 
+        table_quant_mode = self._normalize_alltoall_moe_quant_mode_for_table(quant_mode)
+
         # Compute node_num if not provided
         if node_num is None:
             if moe_ep_size < 4:
@@ -5791,7 +5806,9 @@ class PerfDatabase:
         def get_silicon():
             self._trtllm_alltoall_data.raise_if_not_loaded()
             kernel_data = self._trtllm_alltoall_data[kernel_source]
-            alltoall_dict = kernel_data[op_name][quant_mode][node_num][hidden_size][topk][num_experts][moe_ep_size]
+            alltoall_dict = kernel_data[op_name][table_quant_mode][node_num][hidden_size][topk][num_experts][
+                moe_ep_size
+            ]
 
             num_left, num_right = self._nearest_1d_point_helper(
                 num_tokens,

@@ -601,9 +601,11 @@ class MoEDispatch(Operation):
                     dispatch_x_volume = volume
                     dispatch_sf_volume = 0
 
+                if enable_alltoall and quant_mode is None:
+                    raise ValueError("MoEDispatch requires quant_mode when TRTLLM alltoall path is enabled.")
+
                 if self._pre_dispatch:
                     if enable_alltoall:
-                        _effective_qm = quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block
                         dispatch_result = database.query_trtllm_alltoall(
                             op_name="alltoall_dispatch",
                             num_tokens=num_tokens,
@@ -611,7 +613,7 @@ class MoEDispatch(Operation):
                             topk=self._topk,
                             num_experts=self._num_experts,
                             moe_ep_size=self._moe_ep_size,
-                            quant_mode=_effective_qm,
+                            quant_mode=quant_mode,
                             moe_backend=self._moe_backend,
                         )
                         comm_latency = float(dispatch_result)
@@ -636,7 +638,6 @@ class MoEDispatch(Operation):
                         comm_latency = 0
                 else:
                     if enable_alltoall:
-                        _effective_qm = quant_mode if quant_mode is not None else common.MoEQuantMode.fp8_block
                         combine_result = database.query_trtllm_alltoall(
                             op_name="alltoall_combine",
                             num_tokens=num_tokens,
@@ -644,7 +645,7 @@ class MoEDispatch(Operation):
                             topk=self._topk,
                             num_experts=self._num_experts,
                             moe_ep_size=self._moe_ep_size,
-                            quant_mode=_effective_qm,
+                            quant_mode=quant_mode,
                             moe_backend=self._moe_backend,
                         )
                         comm_latency = float(combine_result)

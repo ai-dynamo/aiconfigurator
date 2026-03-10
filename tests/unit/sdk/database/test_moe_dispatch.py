@@ -89,13 +89,15 @@ class TestEnableAlltoallConditions:
         dispatch.query(db, x=16)
         db.query_trtllm_alltoall.assert_called_once()
 
-    def test_alltoall_disabled_when_quant_mode_none(self):
-        """alltoall disabled when quant_mode is None (falls back to DP NCCL estimation)."""
+    def test_alltoall_requires_quant_mode_when_enabled(self):
+        """TRTLLM alltoall path fails fast when quant_mode is missing."""
         db = _make_mock_db(sm_version=100)
         dispatch = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=8, pre_dispatch=True, quant_mode=None)
-        dispatch.query(db, x=16)
+        with pytest.raises(ValueError, match="requires quant_mode"):
+            dispatch.query(db, x=16)
+
         db.query_trtllm_alltoall.assert_not_called()
-        db.query_nccl.assert_called_once()
+        db.query_nccl.assert_not_called()
 
     def test_alltoall_disabled_deepep_backend(self):
         """alltoall disabled when moe_backend='deepep' (not in allowed set)."""
