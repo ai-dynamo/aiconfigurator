@@ -1,82 +1,55 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import html as html_module
 import re
 
 import gradio as gr
 import pandas as pd
-import plotly.graph_objects as go
+from packaging.version import InvalidVersion, Version
 
 from aiconfigurator.sdk import common
 
 
 def parse_version(ver_str):
     """
-    Parse version string into comparable tuple.
-    Handles formats like '1.0.0', '1.0.0rc6', '0.5.6.post2', etc.
-    Returns a tuple for comparison.
+    Parse version string into comparable Version (PEP 440).
+    Invalid or empty strings return Version("0.0.0") so they sort first.
     """
-    if not ver_str or not isinstance(ver_str, str):
-        return (0, 0, 0, -1, 0)
-
-    version_str = ver_str.lower()
-
-    # Extract numeric version pattern (e.g., "1.2.3" from "v1.2.3rc4" or "1.2.3_suffix")
-    version_match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
-    if version_match:
-        major, minor, patch = map(int, version_match.groups())
-        version_parts = [major, minor, patch]
-
-        # Handle post releases (e.g., "0.5.6.post2")
-        if ".post" in version_str:
-            post_match = re.search(r"\.post(\d+)", version_str)
-            if post_match:
-                post_num = int(post_match.group(1))
-                version_parts.append(2)  # Post release indicator (higher than stable)
-                version_parts.append(post_num)
-            else:
-                version_parts.extend([2, 0])
-        # Handle release candidates (lower priority than stable releases)
-        elif "rc" in version_str:
-            rc_match = re.search(r"rc(\d+)", version_str)
-            if rc_match:
-                rc_num = int(rc_match.group(1))
-                version_parts.append(0)  # RC indicator
-                version_parts.append(rc_num)  # RC number
-            else:
-                version_parts.extend([0, 0])
-        else:
-            version_parts.append(1)  # Stable release (higher priority than RC)
-            version_parts.append(0)  # No RC number
-
-        return tuple(version_parts)
-
-    # Try to extract version from other patterns (e.g., "v0.20_fix0719")
-    version_match = re.search(r"v?(\d+)\.(\d+)", version_str)
-    if version_match:
-        major, minor = map(int, version_match.groups())
-        version_parts = [major, minor, 0, 1, 0]  # Assume stable release
-        return tuple(version_parts)
-
-    # For completely non-standard versions, try to extract any numbers
-    numbers = re.findall(r"\d+", version_str)
-    if numbers:
-        # Use first few numbers found, pad with zeros
-        version_parts = [int(x) for x in numbers[:3]]
-        while len(version_parts) < 3:
-            version_parts.append(0)
-        version_parts.extend([0, 0])  # Add RC indicators
-        return tuple(version_parts)
-
-    # If no numbers found, return a very low priority tuple
-    return (0, 0, 0, -1, 0)
+    if not ver_str:
+        return Version("0.0.0")
+    try:
+        return Version(ver_str)
+    except InvalidVersion:
+        return Version("0.0.0")
 
 
-# Hard-coded latest versions for each backend
-LATEST_VERSIONS = {
-    "vllm": ["0.16.0"],
-    "sglang": ["0.5.9"],
-    "trtllm": ["1.2.0rc6.post3", "1.2.0rc6"],  # Check both variants, post3 is newer
+# Cell colors for support matrix (used in styling and legend)
+COLOR_FAIL_BG = "#ffcccc"
+COLOR_FAIL_TEXT = "#cc0000"
+COLOR_AT_OR_ABOVE_MIN = "#80ff80"  # Green: version at or above target
+COLOR_BELOW_MIN = "#ccffcc"  # Light green: version below target
+
+SUPPORT_MATRIX_LEGEND = (
+    f'<div style="margin-bottom: 10px; font-size: 0.95em;">'
+    f"<strong>Legend:</strong>"
+    f'<span style="margin-left: 8px; margin-right: 24px;">'
+    f'<span style="background: {COLOR_AT_OR_ABOVE_MIN}; padding: 2px 10px; border-radius: 4px; margin-right: 8px;">Green</span>'
+    f"at or above target version</span>"
+    f'<span style="margin-right: 24px;">'
+    f'<span style="background: {COLOR_BELOW_MIN}; padding: 2px 10px; border-radius: 4px; margin-right: 8px;">Light green</span>'
+    f"below target version</span>"
+    f'<span style="margin-right: 24px;">'
+    f'<span style="background: {COLOR_FAIL_BG}; color: {COLOR_FAIL_TEXT}; padding: 2px 10px; border-radius: 4px; font-weight: bold;">FAIL</span>'
+    f" test failed (click cell to see error message)</span>"
+    f"</div>"
+)
+
+# Hard-coded target version per backend (used for "target" check and as minimum for green)
+TARGET_VERSIONS = {
+    "vllm": "0.14.0",
+    "sglang": "0.5.9",
+    "trtllm": "1.2.0rc6",
 }
 
 
@@ -89,7 +62,8 @@ def get_latest_supported_version(df, huggingface_id, system, backend):
         tuple: (version, is_latest, error_msg) where:
             - version: Latest version string if latest version passes, "FAIL" if latest version fails,
                        None if no data exists
-            - is_latest: True if the returned version is the hard-coded latest backend version, False otherwise
+            - is_latest: True if the returned version is at or above the hard-coded minimum (green),
+                         False if below (light green). Ignored when version is "FAIL".
             - error_msg: Error message if version fails, None otherwise
     """
     # Filter for this specific combination (both PASS and FAIL)
@@ -137,24 +111,29 @@ def get_latest_supported_version(df, huggingface_id, system, backend):
     if len(version_has_fail) == 0 and len(version_has_pass) == 0:
         return (None, False, None)
 
-    # Get the hard-coded latest versions for this backend (may be a list for trtllm)
-    latest_versions = LATEST_VERSIONS.get(backend, [])
+    min_ver = TARGET_VERSIONS.get(backend)
 
-    # Check each latest version (in order, checking newer versions first)
-    for latest_version in latest_versions:
+    def at_or_above_min(ver_str):
+        if min_ver is None:
+            return True
+        try:
+            return parse_version(ver_str) >= parse_version(min_ver)
+        except Exception:
+            return False
+
+    latest_version = min_ver
+    if latest_version is not None:
         if latest_version in version_has_pass:
-            # Latest version passes
-            return (latest_version, True, None)
-        elif latest_version in version_has_fail:
-            # Latest version fails - return FAIL with error message
+            return (latest_version, at_or_above_min(latest_version), None)
+        if latest_version in version_has_fail:
             error_msg = version_error_msgs.get(latest_version, "No error message available")
             return ("FAIL", False, error_msg)
 
-    # None of the hard-coded latest versions exist in data - find the latest passing version
+    # Hard-coded latest not in data or no min set - find the latest passing version
     passing_versions = sorted(version_has_pass.keys(), key=parse_version, reverse=True)
     if passing_versions:
-        # Return the latest passing version (not the hard-coded latest)
-        return (passing_versions[0], False, None)
+        v = passing_versions[0]
+        return (v, at_or_above_min(v), None)
     else:
         # No passing version exists - collect error messages from all failed versions
         all_error_msgs = []
@@ -224,13 +203,13 @@ def create_system_matrix(df, system_name, mode_filter="all"):
             cell_value = row.iloc[col_idx]
             row_idx = row.name
             if cell_value == "FAIL":
-                styles[col_idx] = "background-color: #ffcccc; color: #cc0000; font-weight: bold;"
+                styles[col_idx] = f"background-color: {COLOR_FAIL_BG}; color: {COLOR_FAIL_TEXT}; font-weight: bold;"
             elif (row_idx, col_idx - 1) in matrix_is_latest:
                 is_latest = matrix_is_latest.get((row_idx, col_idx - 1), True)
                 if not is_latest:
-                    styles[col_idx] = "background-color: #d4ed9f;"
+                    styles[col_idx] = f"background-color: {COLOR_BELOW_MIN};"
                 else:
-                    styles[col_idx] = "background-color: #ccffcc;"
+                    styles[col_idx] = f"background-color: {COLOR_AT_OR_ABOVE_MIN};"
         return styles
 
     # Apply styling using pandas Styler
@@ -239,101 +218,66 @@ def create_system_matrix(df, system_name, mode_filter="all"):
     return styled_df, matrix_error_msgs, matrix_is_latest
 
 
-def create_system_heatmap(df, system_name, mode_filter="all"):
+def _extract_error_signature(err_msg):
     """
-    Create a heatmap visualization for a specific system.
+    Extract a short error signature from a full traceback/ErrMsg for grouping.
+    Prefers the last exception line (e.g. "RuntimeError: message"), then falls back to first line or truncated.
+    """
+    if not err_msg or pd.isna(err_msg):
+        return "No error message"
+    text = str(err_msg).strip()
+    if not text:
+        return "No error message"
+    lines = [ln.strip() for ln in text.replace("\\n", "\n").split("\n") if ln.strip()]
+    # Find lines that look like "ExceptionType: message" (Python exception format)
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i]
+        if re.match(r"^[A-Za-z][A-Za-z0-9_.]*Error[^:]*:", line) or re.match(
+            r"^[A-Za-z][A-Za-z0-9_.]*Exception[^:]*:", line
+        ):
+            return line[:500]  # Cap length for display
+    if lines:
+        return lines[-1][:500] if lines else "No error message"
+    return text[:500] if len(text) > 500 else text
+
+
+def get_top_errors_for_system(df, system_name, mode_filter="all", top_n=10):
+    """
+    Return the top N most common error signatures for a system (FAIL rows only).
 
     Args:
-        df: DataFrame with support matrix data
-        system_name: Name of the system
-        mode_filter: Filter by mode ('agg', 'disagg', or 'all')
+        df: Full support matrix DataFrame
+        system_name: System to filter by
+        mode_filter: 'all', 'agg', or 'disagg'
+        top_n: Maximum number of errors to return
 
     Returns:
-        HTML string with the plotly figure
+        List of (error_signature, count) sorted by count descending.
     """
-    # Filter by system and mode
-    system_df = df[df["System"] == system_name].copy()
-
+    subset = df[(df["System"] == system_name) & (df["Status"] == "FAIL")].copy()
     if mode_filter != "all":
-        system_df = system_df[system_df["Mode"] == mode_filter]
+        subset = subset[subset["Mode"] == mode_filter]
+    if subset.empty:
+        return []
+    if "ErrMsg" not in subset.columns:
+        return []
+    subset["_signature"] = subset["ErrMsg"].apply(_extract_error_signature)
+    counts = subset["_signature"].value_counts()
+    return list(counts.head(top_n).items())
 
-    if system_df.empty:
-        fig = go.Figure()
-        fig.add_annotation(
-            text="No data available for this system",
-            xref="paper",
-            yref="paper",
-            x=0.5,
-            y=0.5,
-            showarrow=False,
-            font=dict(size=16),
-        )
-        fig.update_layout(title=f"Support Matrix for {system_name}", height=400, width=800)
-        return fig.to_html(include_plotlyjs="cdn")
 
-    # Get unique HuggingFace IDs and Backends
-    huggingface_ids = sorted(system_df["HuggingFaceID"].unique())
-    backends = sorted(system_df["Backend"].unique())
-
-    # Build the matrix data
-    matrix_data = []
-    matrix_text = []
-    matrix_hover = []  # Store hover text with error messages
-    for hf_id in huggingface_ids:
-        row = []
-        text_row = []
-        hover_row = []
-        for backend in backends:
-            latest_version, is_latest, error_msg = get_latest_supported_version(system_df, hf_id, system_name, backend)
-            if latest_version is None or latest_version == "FAIL":
-                row.append(0)  # FAIL = 0 (red)
-                text_row.append("FAIL")
-                # Format error message for hover
-                if error_msg:
-                    error_display = error_msg.replace("\\n", "<br>")
-                    hover_row.append(
-                        f"<b>Model:</b> {hf_id}<br><b>Backend:</b> {backend}<br><b>Status:</b> FAIL<br><b>Error:</b> {error_display}"
-                    )
-                else:
-                    hover_row.append(f"<b>Model:</b> {hf_id}<br><b>Backend:</b> {backend}<br><b>Status:</b> FAIL")
-            else:
-                # Use 1 for latest version (green), 0.5 for supported but not latest (yellow-green)
-                row.append(1 if is_latest else 0.5)
-                text_row.append(latest_version)
-                hover_row.append(
-                    f"<b>Model:</b> {hf_id}<br><b>Backend:</b> {backend}<br><b>Version:</b> {latest_version}"
-                )
-        matrix_data.append(row)
-        matrix_text.append(text_row)
-        matrix_hover.append(hover_row)
-
-    # Create heatmap
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=matrix_data,
-            x=backends,
-            y=huggingface_ids,
-            colorscale=[[0, "red"], [0.5, "#d4ed9f"], [1, "green"]],
-            colorbar=dict(title="Status", tickvals=[0, 0.5, 1], ticktext=["FAIL", "Supported (not latest)", "Latest"]),
-            hovertemplate="%{customdata}<extra></extra>",
-            customdata=matrix_hover,
-            text=matrix_text,
-            texttemplate="%{text}",
-            textfont={"size": 10},
-        )
-    )
-
-    fig.update_layout(
-        title=f"Support Matrix for {system_name} ({mode_filter if mode_filter != 'all' else 'All Modes'})",
-        xaxis_title="Backend",
-        yaxis_title="HuggingFace Model ID",
-        height=max(600, len(huggingface_ids) * 20),
-        width=max(800, len(backends) * 100),
-        xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
-        yaxis=dict(tickfont=dict(size=8)),
-    )
-
-    return fig.to_html(include_plotlyjs="cdn")
+def _format_top_errors_markdown(top_errors):
+    """Format top errors as Markdown for display."""
+    if not top_errors:
+        return "_No failures recorded for this system with the current filter._"
+    lines = ["#### Most common errors (top 10)\n", "| # | Count | Error |", "|---|-------|-------|"]
+    for i, (sig, count) in enumerate(top_errors, 1):
+        # Escape pipe and newline for table cells
+        cell = sig.replace("|", "\\|").replace("\n", " ")
+        if len(cell) > 200:
+            cell = cell[:197] + "..."
+        lines.append(f"| {i} | {count} | {cell} |")
+    return "\n".join(lines)
 
 
 def load_support_matrix_data():
@@ -346,25 +290,12 @@ def load_support_matrix_data():
 def create_support_matrix_tab(app_config):
     """Create the support matrix visualization tab."""
     with gr.Tab("Support Matrix"):
-        with gr.Accordion("Introduction", open=False):
+        with gr.Accordion("Introduction", open=True):
             introduction = gr.Markdown(
                 label="introduction",
                 value=r"""
                 This tab visualizes the aiconfigurator support matrix, showing the latest supported backend version
                 for each (HuggingFace Model ID, System, Backend) combination.
-                
-                **Features:**
-                - One subtab per system
-                - 2D matrix view: rows are HuggingFace IDs, columns are backends
-                - Cell values show the latest backend version that is supported (PASS)
-                - Red cells with "FAIL" indicate no supported version exists
-                - Filter by mode (agg/disagg/all) to see mode-specific support
-                
-                **Usage:**
-                1. Select a system from the tabs below
-                2. Use the mode filter to view aggregated, disaggregated, or all modes
-                3. Green cells show the latest supported version
-                4. Red cells indicate no support for that combination
                 """,
             )
 
@@ -381,7 +312,7 @@ def create_support_matrix_tab(app_config):
         )
 
         # Create subtabs for each system
-        with gr.Tabs() as system_tabs:
+        with gr.Tabs():
             system_components = {}
 
             for system_name in unique_systems:
@@ -390,7 +321,9 @@ def create_support_matrix_tab(app_config):
                     initial_matrix_df, initial_error_msgs, initial_is_latest = create_system_matrix(
                         initial_df, system_name, "all"
                     )
-                    initial_heatmap = create_system_heatmap(initial_df, system_name, "all")
+
+                    # Legend at top of table
+                    gr.HTML(SUPPORT_MATRIX_LEGEND, elem_classes=["support-matrix-legend"])
 
                     # Matrix table view using Gradio Dataframe
                     matrix_dataframe = gr.Dataframe(
@@ -443,9 +376,15 @@ def create_support_matrix_tab(app_config):
                                         formatted_msg = formatted_msg.replace("\\\\n", "\n").replace("\\n", "\n")
 
                                         title = f"Error Details - {model} / {backend}"
-                                        # Use gr.Info() to show the error - format as markdown code block for better readability
-                                        # Markdown code blocks preserve newlines and formatting
-                                        gr.Info(f"**{title}**\n\n```\n{formatted_msg}\n```")
+                                        # gr.Info renders HTML. Use scrollable container so long messages stay on screen.
+                                        escaped_msg = html_module.escape(formatted_msg)
+                                        html_message = (
+                                            f"<b>{html_module.escape(title)}</b><br><br>"
+                                            f'<div style="max-height: 85vh; overflow: auto; border: 1px solid #ccc; border-radius: 4px; padding: 8px;">'
+                                            f'<pre style="white-space: pre-wrap; margin: 0;">{escaped_msg}</pre>'
+                                            f"</div>"
+                                        )
+                                        gr.Info(html_message, duration=60)
 
                         return show_error
 
@@ -456,13 +395,19 @@ def create_support_matrix_tab(app_config):
                         outputs=None,
                     )
 
-                    # Heatmap view
-                    heatmap_html = gr.HTML(value=initial_heatmap, label="Heatmap View")
+                    # Top 10 most common errors for this system (below the table)
+                    initial_top_errors = get_top_errors_for_system(initial_df, system_name, "all", top_n=10)
+                    initial_errors_md = _format_top_errors_markdown(initial_top_errors)
+                    top_errors_markdown = gr.Markdown(
+                        value=initial_errors_md,
+                        label="Most common errors for this system",
+                        elem_classes=["support-matrix-top-errors"],
+                    )
 
                     # Store components and data
                     system_components[system_name] = {
                         "matrix_dataframe": matrix_dataframe,
-                        "heatmap_html": heatmap_html,
+                        "top_errors_markdown": top_errors_markdown,
                         "error_msgs": initial_error_msgs,
                         "is_latest": initial_is_latest,
                         "matrix_df": initial_matrix_df,
@@ -474,20 +419,21 @@ def create_support_matrix_tab(app_config):
             updates = []
             for system_name in unique_systems:
                 matrix_df, error_msgs, is_latest = create_system_matrix(initial_df, system_name, mode)
-                heatmap = create_system_heatmap(initial_df, system_name, mode)
+                top_errors = get_top_errors_for_system(initial_df, system_name, mode, top_n=10)
+                errors_md = _format_top_errors_markdown(top_errors)
                 # Update stored error messages, is_latest, and matrix_df
                 system_components[system_name]["error_msgs"] = error_msgs
                 system_components[system_name]["is_latest"] = is_latest
                 system_components[system_name]["matrix_df"] = matrix_df
                 updates.append(matrix_df)
-                updates.append(heatmap)
+                updates.append(errors_md)
             return updates
 
         # Get all output components in order
         all_outputs = []
         for system_name in unique_systems:
             all_outputs.append(system_components[system_name]["matrix_dataframe"])
-            all_outputs.append(system_components[system_name]["heatmap_html"])
+            all_outputs.append(system_components[system_name]["top_errors_markdown"])
 
         # Connect mode filter
         mode_filter.change(
