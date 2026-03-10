@@ -594,6 +594,7 @@ class TaskConfig:
         tpot: float = 50,
         request_latency: float | None = None,
         enable_wideep: bool = False,
+        enable_eplb: bool = False,
         total_gpus: int | None = None,
         profiles: list[str] | None = None,
         yaml_config: dict | None = None,
@@ -683,6 +684,7 @@ class TaskConfig:
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
         self.enable_wideep = enable_wideep
+        self.enable_eplb = enable_eplb
         self.total_gpus = total_gpus
         self.yaml_mode = yaml_mode
         self.yaml_patch = yaml_patch

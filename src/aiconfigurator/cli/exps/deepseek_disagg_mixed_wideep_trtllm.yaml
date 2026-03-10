@@ -39,10 +39,10 @@ exp_disagg_prefill_wideep_decode_standard:
     prefill_worker_config:
       enable_wideep: true
       enable_eplb: true
-      gemm_quant_mode: "fp8_block"
-      moe_quant_mode: "fp8_block"
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"
       kvcache_quant_mode: "fp8"
-      fmha_quant_mode: "fp8_block"
+      fmha_quant_mode: "fp8"
       comm_quant_mode: "half"
       num_gpu_per_worker: [4, 8, 16, 32]
       tp_list: [1, 2, 4, 8]
@@ -53,8 +53,8 @@ exp_disagg_prefill_wideep_decode_standard:
     decode_worker_config:
       enable_wideep: false
       enable_eplb: false
-      gemm_quant_mode: "fp8_block"
-      moe_quant_mode: "fp8_block"
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"
       kvcache_quant_mode: "fp8"
       fmha_quant_mode: "float16"
       comm_quant_mode: "half"
@@ -146,10 +146,10 @@ exp_disagg_both_wideep:
     nextn_accept_rates: [0.85,0,0,0,0]
     prefill_worker_config:
       enable_eplb: true
-      gemm_quant_mode: "fp8_block"
-      moe_quant_mode: "fp8_block"
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"
       kvcache_quant_mode: "fp8"
-      fmha_quant_mode: "fp8_block"
+      fmha_quant_mode: "fp8"
       comm_quant_mode: "half"
       num_gpu_per_worker: [4, 8, 16, 32]
       tp_list: [1, 2, 4, 8]
@@ -159,10 +159,10 @@ exp_disagg_both_wideep:
       moe_ep_list: [4, 8, 16, 32]
     decode_worker_config:
       enable_eplb: false
-      gemm_quant_mode: "fp8_block"
-      moe_quant_mode: "fp8_block"
+      gemm_quant_mode: "nvfp4"
+      moe_quant_mode: "nvfp4"
       kvcache_quant_mode: "fp8"
-      fmha_quant_mode: "fp8_block"
+      fmha_quant_mode: "fp8"
       comm_quant_mode: "half"
       num_gpu_per_worker: [4, 8, 16, 32, 64]
       tp_list: [1, 2, 4, 8]
