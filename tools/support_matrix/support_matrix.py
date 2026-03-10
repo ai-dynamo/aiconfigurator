@@ -13,7 +13,6 @@ import csv
 import logging
 import os
 import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from packaging.version import Version
 from tqdm import tqdm
@@ -31,90 +30,6 @@ OSL = 500
 PREFIX = 500
 TTFT = 2000.0
 TPOT = 50.0
-
-
-def _process_combination_worker(
-    combo: tuple[str, str, str, str],
-) -> list[tuple[str, str, str, str, str, str, bool, str | None]]:
-    """
-    Standalone worker function for processing a single combination in a separate process.
-    This function must be at module level to be picklable for multiprocessing.
-
-    Args:
-        combo: Tuple of (model, system, backend, version)
-
-    Returns:
-        List of result tuples (huggingface_id, architecture, system, backend, version, mode, success, err_msg)
-    """
-    model, system, backend, version = combo
-    huggingface_id = model
-
-    # Get architecture
-    try:
-        architecture = _get_model_info(huggingface_id)["architecture"]
-    except Exception:
-        architecture = "Unknown"
-
-    modes_to_test = ["agg", "disagg"]
-    results = {}
-    error_messages = {}
-
-    for mode in modes_to_test:
-        try:
-            # Create TaskConfig for the test
-            task_config_kwargs = {
-                "serving_mode": mode,
-                "model_path": huggingface_id,
-                "system_name": system,
-                "backend_name": backend,
-                "backend_version": version,
-                "total_gpus": TOTAL_GPUS,
-                "isl": ISL,
-                "osl": OSL,
-                "prefix": PREFIX,
-                "ttft": TTFT,
-                "tpot": TPOT,
-            }
-
-            # For disagg mode, set decode_system_name
-            if mode == "disagg":
-                task_config_kwargs["decode_system_name"] = system
-
-            task_config = TaskConfig(**task_config_kwargs)
-
-            # Run the configuration
-            runner = TaskRunner()
-            result = runner.run(task_config)
-
-            # Check if we got valid results
-            pareto_df = result.get("pareto_df")
-            if pareto_df is not None and not pareto_df.empty:
-                results[mode] = True
-                error_messages[mode] = None
-            else:
-                results[mode] = False
-                error_messages[mode] = "Configuration returned no results, failed to catch traceback"
-
-        except Exception:
-            results[mode] = False
-            error_messages[mode] = traceback.format_exc()
-        finally:
-            # Format error messages to one line with "\n" as separator
-            # Remove absolute path prefix to avoid PII exposure
-            if error_messages[mode]:
-                cwd = os.getcwd() + os.sep
-                error_messages[mode] = error_messages[mode].replace(cwd, "")
-                error_messages[mode] = error_messages[mode].replace("\n", "\\n")
-            else:
-                error_messages[mode] = None
-
-    # Return separate entries for agg and disagg modes
-    combo_results = []
-    for mode in modes_to_test:
-        combo_results.append(
-            (huggingface_id, architecture, system, backend, version, mode, results[mode], error_messages[mode])
-        )
-    return combo_results
 
 
 class SupportMatrix:
@@ -261,15 +176,10 @@ class SupportMatrix:
                     error_messages[mode] = None
         return results, error_messages
 
-    def test_support_matrix(
-        self, max_workers: int | None = None
-    ) -> list[tuple[str, str, str, str, str, str, bool, str | None]]:
+    def test_support_matrix(self) -> list[tuple[str, str, str, str, str, str, bool, str | None]]:
         """
         Test whether each combination is supported by AIC.
         Tests both agg and disagg modes for each combination and captures error messages.
-
-        Args:
-            max_workers: Maximum number of parallel workers. If None, uses default (typically CPU count).
 
         Returns:
             List of tuples (huggingface_id, architecture, system, backend, version, mode, success, err_msg)
@@ -286,45 +196,34 @@ class SupportMatrix:
         print(f"Prefix: {PREFIX}")
         print(f"Target TTFT: {TTFT}ms")
         print(f"Target TPOT: {TPOT}ms")
-        if max_workers is not None:
-            print(f"Parallel workers: {max_workers}")
         print("=" * 80 + "\n")
 
         combinations = self.generate_combinations()
         results = []
 
-        # Use ProcessPoolExecutor for parallel execution
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_combo = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
+        # Use tqdm for progress tracking
+        for model, system, backend, version in tqdm(
+            combinations,
+            desc="Testing support matrix",
+            unit="config",
+        ):
+            # model is already a HuggingFace ID (e.g., 'meta-llama/Llama-2-7b-hf')
+            huggingface_id = model
+            success_dict, error_dict = self.run_single_test(
+                model=huggingface_id,
+                system=system,
+                backend=backend,
+                version=version,
+            )
 
-            # Use tqdm for progress tracking
-            with tqdm(total=len(combinations), desc="Testing support matrix", unit="config") as pbar:
-                for future in as_completed(future_to_combo):
-                    try:
-                        combo_results = future.result()
-                        results.extend(combo_results)
-                    except Exception as e:
-                        combo = future_to_combo[future]
-                        logger.error(f"Error processing combination {combo}: {e}")
-                        # Add failed entries for both modes
-                        model, system, backend, version = combo
-                        huggingface_id = model
-                        try:
-                            architecture = self.get_architecture(huggingface_id)
-                        except Exception:
-                            architecture = "Unknown"
-                        error_msg = traceback.format_exc()
-                        # Format error message
-                        cwd = os.getcwd() + os.sep
-                        error_msg = error_msg.replace(cwd, "")
-                        error_msg = error_msg.replace("\n", "\\n")
-                        for mode in ["agg", "disagg"]:
-                            results.append(
-                                (huggingface_id, architecture, system, backend, version, mode, False, error_msg)
-                            )
-                    finally:
-                        pbar.update(1)
+            # Get the architecture for this model
+            architecture = self.get_architecture(huggingface_id)
+
+            # Add separate entries for agg and disagg modes
+            for mode in success_dict:
+                results.append(
+                    (huggingface_id, architecture, system, backend, version, mode, success_dict[mode], error_dict[mode])
+                )
 
         # Sort results by (huggingface_id, architecture, system, backend, version, mode)
         results.sort(key=lambda x: (x[0], x[1], x[2], x[3], Version(x[4]), x[5]))
