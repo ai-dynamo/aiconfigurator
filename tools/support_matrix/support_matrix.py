@@ -13,7 +13,7 @@ import csv
 import logging
 import os
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from packaging.version import Version
 from tqdm import tqdm
@@ -31,6 +31,37 @@ OSL = 500
 PREFIX = 500
 TTFT = 2000.0
 TPOT = 50.0
+
+# Per-process SupportMatrix instance for ProcessPoolExecutor workers (avoids GIL).
+_worker_matrix: "SupportMatrix | None" = None
+
+
+def _init_worker() -> None:
+    """Initialize one SupportMatrix per worker process (called once per process)."""
+    global _worker_matrix
+    _worker_matrix = SupportMatrix()
+
+
+def _process_combination_worker(
+    combo: tuple[str, str, str, str],
+) -> list[tuple[str, str, str, str, str, str, bool, str | None]]:
+    """
+    Run a single combination in a worker process. Uses the process-local SupportMatrix.
+    Must be a module-level function for pickling by ProcessPoolExecutor.
+    """
+    assert _worker_matrix is not None
+    model, system, backend, version = combo
+    success_dict, error_dict = _worker_matrix.run_single_test(
+        model=model,
+        system=system,
+        backend=backend,
+        version=version,
+    )
+    architecture = _worker_matrix.get_architecture(model)
+    return [
+        (model, architecture, system, backend, version, mode, success_dict[mode], error_dict[mode])
+        for mode in success_dict
+    ]
 
 
 class SupportMatrix:
@@ -185,8 +216,8 @@ class SupportMatrix:
         Tests both agg and disagg modes for each combination and captures error messages.
 
         Args:
-            max_workers: Maximum number of threads for parallel execution.
-                         Defaults to None, which uses min(32, os.cpu_count()).
+            max_workers: Maximum number of worker processes for parallel execution.
+                         Defaults to None, which uses os.cpu_count() or 1.
 
         Returns:
             List of tuples (huggingface_id, architecture, system, backend, version, mode, success, err_msg)
@@ -204,29 +235,15 @@ class SupportMatrix:
         print(f"Target TTFT: {TTFT}ms")
         print(f"Target TPOT: {TPOT}ms")
         if max_workers is None:
-            max_workers = max(1, (os.cpu_count() or 1) - 1)
+            max_workers = os.cpu_count() or 1
         print(f"Max workers: {max_workers}")
         print("=" * 80 + "\n")
 
         combinations = self.generate_combinations()
         results = []
 
-        def _process_combination(combo):
-            model, system, backend, version = combo
-            success_dict, error_dict = self.run_single_test(
-                model=model,
-                system=system,
-                backend=backend,
-                version=version,
-            )
-            architecture = self.get_architecture(model)
-            return [
-                (model, architecture, system, backend, version, mode, success_dict[mode], error_dict[mode])
-                for mode in success_dict
-            ]
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_process_combination, combo): combo for combo in combinations}
+        with ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker) as executor:
+            futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
             for future in tqdm(
                 as_completed(futures),
                 total=len(combinations),
