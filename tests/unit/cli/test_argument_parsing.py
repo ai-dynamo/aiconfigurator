@@ -77,9 +77,9 @@ class TestCLIArgumentParsing:
     def test_generate_mode_model_path(self, cli_parser):
         """Test that generate mode accepts model_path."""
         args = cli_parser.parse_args(
-            ["generate", "--model-path", "Qwen/Qwen2.5-7B", "--total-gpus", "8", "--system", "h200_sxm"]
+            ["generate", "--model-path", "Qwen/Qwen3-8B", "--total-gpus", "8", "--system", "h200_sxm"]
         )
-        assert args.model_path == "Qwen/Qwen2.5-7B"
+        assert args.model_path == "Qwen/Qwen3-8B"
 
     def test_backend_choices_validation(self, cli_parser):
         """Test that backend argument validates against supported choices."""
@@ -213,14 +213,14 @@ class TestCLIArgumentParsing:
             [
                 "default",
                 "--model-path",
-                "Qwen/Qwen2.5-7B",
+                "Qwen/Qwen3-8B",
                 "--total-gpus",
                 "8",
                 "--system",
                 "h200_sxm",
             ]
         )
-        assert args.model_path == "Qwen/Qwen2.5-7B"
+        assert args.model_path == "Qwen/Qwen3-8B"
 
     @pytest.mark.parametrize(
         "database_mode_value",
