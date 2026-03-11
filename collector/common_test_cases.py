@@ -83,7 +83,7 @@ def get_common_moe_test_cases():
             2688,
             22,
             512,
-            "nvidia/NVIDIA-Nemotron-3-Super-120B-NVFP4-FP8KV",
+            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
         ],  # nemotron-3 super (uses relu2, non-gated)
     ]
 
