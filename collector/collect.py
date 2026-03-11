@@ -774,6 +774,7 @@ def collect_vllm(
 ):
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
+
     if torch.cuda.is_available():
         from collector.vllm.registry import REGISTRY
     elif torch.xpu.is_available():
