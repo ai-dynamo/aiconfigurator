@@ -586,8 +586,6 @@ def get_sm_version():
             device = torch.cuda.current_device()
             capability = torch.cuda.get_device_capability(device)
             return capability[0] * 10 + capability[1]
-        elif torch.xpu.is_available():
-            return -1
     except Exception:
         pass
 
