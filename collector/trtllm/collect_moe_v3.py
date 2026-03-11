@@ -39,12 +39,12 @@ from collector.helper import (
 )
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
-AIC_RESTART_WORKER = int(os.getenv("AIC_RESTART_WORKER", "0"))
 
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
 
 
 def gc_collect():
+    """Run GC and clear CUDA cache to reduce fragmentation between runs."""
     for _ in range(2):
         gc.collect()
         torch.cuda.empty_cache()
@@ -72,6 +72,7 @@ def _process_json_file(file_path):
 
 
 def cleanup_empty_json_files(directory):
+    """Remove empty or invalid JSON files under directory (e.g. autotuner cache)."""
     if not os.path.exists(directory):
         return
 
@@ -93,19 +94,21 @@ def cleanup_empty_json_files(directory):
 
 
 def get_moe_test_cases():
+    """Build list of MoE test case tuples for trtllm >= 1.1 (power_law, SM-dependent quant modes)."""
     moe_list = ["float16"]
-    if get_sm_version() > 86:
+    sm_version = get_sm_version()
+    if sm_version > 86:
         moe_list += ["fp8"]
-        if get_sm_version() < 100:
-            # though trtllm gen kernel source supports fp8_block, it only provides min-latency
-            # data. not practical.
-            moe_list += [
-                # "w4afp8", FIXME: trtllm 1.2 has bugs for w4afp8
-                "fp8_block",
-                "w4a16_mxfp4",
-            ]
+        # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block.
+        # SM90 uses CUTLASS backend with FP32 scale.
+        # SM100 uses DEEPGEMM/TRTLLM backend with UE8M0 scale (MXFP8 style).
+        moe_list += ["fp8_block"]
 
-    if get_sm_version() >= 100:
+    # SM90 specific quant mode.
+    if 86 < sm_version < 100:
+        moe_list += ["w4a16_mxfp4"]
+
+    if sm_version >= 100:
         moe_list += ["nvfp4"]
 
     test_cases = []
@@ -131,6 +134,12 @@ def get_moe_test_cases():
             if moe_type == "fp8_block" and (
                 common_moe_testcase.hidden_size % 128 != 0 or common_moe_testcase.inter_size % 128 != 0
             ):
+                continue
+
+            # Blackwell DeepGEMM fp8_block has an additional TP-shard alignment requirement.
+            # Skip shapes that are known to trigger layout assert:
+            #   Assertion error ... layout.hpp:78: sf.size(-2) == ceil_div(mn, gran_mn)
+            if moe_type == "fp8_block" and sm_version >= 100 and (common_moe_testcase.inter_size // moe_tp) % 128 != 0:
                 continue
 
             # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0
@@ -197,6 +206,7 @@ def run_moe_torch(
     power_law_alpha=0.0,
     device="cuda:0",
 ):
+    """Run MoE forward passes and log latency/power to perf file (trtllm >= 1.1 collector)."""
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -273,6 +283,8 @@ def run_moe_torch(
         activation_type = ActivationType.Swiglu
         is_gated = True
 
+    sm_version = get_sm_version()
+
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
         # use triton backend for best performance on Hopper
         model_config.moe_backend = "triton"
@@ -281,12 +293,23 @@ def run_moe_torch(
         )
         swiglu_beta = torch.tensor([1.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
         swiglu_limit = torch.tensor([7.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
-        if 86 < get_sm_version() < 100:
+        if 86 < sm_version < 100:
             model_config.moe_backend = "triton"
         else:
             model_config.moe_backend = "cutlass" if not min_latency_mode else "trtllm"
     else:
-        model_config.moe_backend = "cutlass" if not min_latency_mode else "trtllm"
+        # Select backend based on platform and quant mode.
+        if min_latency_mode:
+            model_config.moe_backend = "trtllm"
+        elif moe_type == "fp8_block":
+            if sm_version >= 100:
+                # Blackwell: DeepGEMM uses MXFP8 style (E4M3 + UE8M0 scale).
+                model_config.moe_backend = "deepgemm"
+            else:
+                # Hopper: CUTLASS uses FP32 scale.
+                model_config.moe_backend = "cutlass"
+        else:
+            model_config.moe_backend = "cutlass"
 
     router_logits_dtype = torch.bfloat16
     # current min_latency mode only support experts <= 256. Thus K2 will not have min_latency mode.
@@ -329,12 +352,9 @@ def run_moe_torch(
     moe.to(torch.device(device))
 
     if moe_type == "w4a16_mxfp4":
-        w1_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype).cuda()
-        w2_weight = torch.randn((num_experts, hidden_size, inter_size), dtype=dtype).cuda()
-        w3_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype).cuda()
-        w1_bias = torch.randn((num_experts, inter_size), dtype=dtype).cuda()
-        w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype).cuda()
-        w3_bias = torch.randn((num_experts, inter_size), dtype=dtype).cuda()
+        w1_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
+        w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype, device=device)
+        w3_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
 
         from triton_kernels.numerics_details.mxfp import downcast_to_mxfp_torch
 
@@ -345,9 +365,21 @@ def run_moe_torch(
             tensor_scales = tensor_scales.transpose(1, 2).contiguous()
             return tensor_fp4, tensor_scales
 
+        # Convert one weight tensor at a time to lower peak memory.
+        w1_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype, device=device)
         w1_weight_fp4, w1_weight_scale = fp32_to_mxfp4(w1_weight)
+        del w1_weight
+        torch.cuda.empty_cache()
+
+        w2_weight = torch.randn((num_experts, hidden_size, inter_size), dtype=dtype, device=device)
         w2_weight_fp4, w2_weight_scale = fp32_to_mxfp4(w2_weight)
+        del w2_weight
+        torch.cuda.empty_cache()
+
+        w3_weight = torch.randn((num_experts, inter_size, hidden_size), dtype=dtype, device=device)
         w3_weight_fp4, w3_weight_scale = fp32_to_mxfp4(w3_weight)
+        del w3_weight
+        torch.cuda.empty_cache()
 
         weights = {}
         for expert_id in range(num_experts):
@@ -391,7 +423,11 @@ def run_moe_torch(
         if existing_files:
             json_path = existing_files[0]
             try:
-                AutoTuner.get().profiling_cache.load_cache(json_path)
+                load_cache = AutoTuner.get().profiling_cache.load_cache
+                if "rank" in inspect.signature(load_cache).parameters:
+                    load_cache(json_path, rank=device.index)
+                else:
+                    load_cache(json_path)
                 cache_loaded = True
                 print(f"Loaded profiling cache from {json_path}")
             except (OSError, json.JSONDecodeError):
@@ -439,7 +475,9 @@ def run_moe_torch(
                 for _ in range(num_iter)
             ]
         elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype)
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(
+                device=torch.device(device), dtype=router_logits_dtype
+            )
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 
@@ -478,12 +516,16 @@ def run_moe_torch(
             if not results["used_cuda_graph"] and aic_debug == 1:
                 print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
 
-        if min_latency_mode:
+        if moe_type == "fp8_block" and sm_version >= 100:
+            source = "deepgemm"
+        elif min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
         elif not is_gated:
             source = "moe_torch_flow_nongated"  # non-gated MoE (relu2)
+        elif model_config.moe_backend == "cutlass":
+            source = "moe_torch_flow_cutlass"  # SM90 CUTLASS (FP32 scale)
         else:
-            source = "moe_torch_flow"  # cutlass (gated SwiGLU)
+            source = "moe_torch_flow"  # default
 
         log_perf(
             item_list=[
@@ -517,8 +559,7 @@ def run_moe_torch(
 
     # Exit the worker process after completing MOE task to ensure complete resource cleanup
     # This forces OS to reclaim all GPU memory, CUDA context, and other resources
-    if AIC_RESTART_WORKER:
-        sys.exit(EXIT_CODE_RESTART)
+    sys.exit(EXIT_CODE_RESTART)
 
 
 if __name__ == "__main__":

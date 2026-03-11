@@ -28,6 +28,7 @@ aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 
 def get_moe_test_cases():
+    """Build list of MoE test case tuples for trtllm < 1.1 (power_law only, SM-dependent quant modes)."""
     moe_list = ["float16"]
     if get_sm_version() > 86:
         moe_list += ["fp8"]
@@ -114,6 +115,7 @@ def run_moe_torch(
     power_law_alpha=0.0,
     device="cuda:0",
 ):
+    """Run MoE forward passes and log latency/power to perf file (trtllm < 1.1 collector)."""
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -239,11 +241,13 @@ def run_moe_torch(
         num_iter = 5 if distributed == "power_law" else 1
         if distributed == "power_law":
             actual_logits_list = [
-                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(router_logits_dtype)
+                power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha).to(
+                    device=device, dtype=router_logits_dtype
+                )
                 for _ in range(num_iter)
             ]
         elif distributed == "balanced":
-            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(router_logits_dtype)
+            actual_logits = balanced_logits(num_tokens, num_experts, topk).to(device=device, dtype=router_logits_dtype)
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
 

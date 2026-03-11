@@ -516,9 +516,6 @@ class TRTLLMBackend(BaseBackend):
                 / 128
                 * 4
             )  # still an improvement opportunity in trtllm to achieve this.
-            # nextn correction for ds only, MTP
-            if model.config.nextn > 0:
-                activations = activations * (model.config.nextn + 1)
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
         else:
             c_dict = {
@@ -530,6 +527,10 @@ class TRTLLMBackend(BaseBackend):
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
         # ==== this above section is backend specific ====
+
+        # MTP correction: additional activation memory for draft tokens (applies to all models)
+        if model.config.nextn > 0:
+            activations = activations * (model.config.nextn + 1)
 
         if model.model_family == "DEEPSEEK":
             kvcache_per_token = model._num_layers * 576

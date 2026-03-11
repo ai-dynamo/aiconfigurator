@@ -14,6 +14,7 @@ Reference: aic/collector/trtllm/collect_wideep_moe.py
 
 import gc
 import glob
+import inspect
 import json
 import os
 import sys
@@ -72,6 +73,7 @@ moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wideep
 
 
 def cleanup_empty_json_files(directory):
+    """Remove empty or invalid JSON files under directory (autotuner cache)."""
     if not os.path.exists(directory):
         return
 
@@ -358,6 +360,7 @@ class WideEPMoEComputeSimulator(nn.Module):
 
     @property
     def moe_op(self) -> MoEOp:
+        """Lazy-selected MoE op (DeepGemm, Cutlass, or auto)."""
         if self._moe_op is None:
             if self.force_kernel == "deepgemm":
                 self._moe_op = DeepGemmMoEOp()
@@ -766,7 +769,11 @@ def run_wideep_moe_compute(
     if existing_files:
         json_path = existing_files[0]
         try:
-            AutoTuner.get().profiling_cache.load_cache(json_path)
+            load_cache = AutoTuner.get().profiling_cache.load_cache
+            if "rank" in inspect.signature(load_cache).parameters:
+                load_cache(json_path, rank=device.index)
+            else:
+                load_cache(json_path)
             cache_loaded = True
             print(f"Loaded profiling cache from {json_path}")
         except (OSError, json.JSONDecodeError):

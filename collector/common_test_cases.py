@@ -48,9 +48,6 @@ def get_common_moe_test_cases():
         8192,
         12288,
         16384,
-        20480,
-        32768,
-        65536,
     ]
     tp_list = [1, 2, 4, 8, 16, 32]
     ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -147,29 +144,19 @@ class GemmCommonTestCase:
 
 
 def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
-    x_list = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        384,
-        512,
-        768,
-        1024,
-        2048,
-        4096,
-        8192,
-    ]
+    x_list = list(range(16))
+    x_list += list(range(16, 128, 16)) + [i + 1 for i in range(16, 128, 16)]
+    x_list += list(range(128, 256, 32)) + [i + 1 for i in range(128, 256, 32)]
+    for x in range(256, 4096 + 257, 256):
+        x_list.append(x)
+        x_list.append(x + 1)
+        # after 4096, the zig-zag pattern can be ignored
+
+    x = 8192
+    while x <= 32768:
+        x_list.append(x)
+        x *= 2
+    x_list.sort()  # sort the x_list to make it easier to debug
     nk_list = [
         32,
         64,
@@ -191,7 +178,7 @@ def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
         10240,
         12288,
     ]
-    nk_list_ext = [16384, 65536]  # for coverage and interp purpose
+    nk_list_ext = [16384, 51200, 65536]  # for coverage and interp purpose
 
     test_cases = []
     # x_list_orig+add+ext  <==> nk_list+ext
