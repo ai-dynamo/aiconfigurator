@@ -683,8 +683,11 @@ def benchmark_nvlink_one_sided(
 
     # Calculate workspace size and create MoeAlltoAll (for workspace initialization)
     workspace_size = MoeAlltoAll.calculate_required_workspace_size(
-        test_case.ep_size, test_case.top_k, max_num_tokens,
-        test_case.hidden_size, act_dtype,
+        test_case.ep_size,
+        test_case.top_k,
+        max_num_tokens,
+        test_case.hidden_size,
+        act_dtype,
     )
     moe_a2a = MoeAlltoAll(
         mapping=mapping,
@@ -715,17 +718,28 @@ def benchmark_nvlink_one_sided(
     # One bootstrap dispatch
     # ------------------------------------------------------------------
     _, combine_payload_offset = torch.ops.trtllm.moe_a2a_dispatch(
-        token_selected_slots, payloads, workspace, metainfo,
-        runtime_max_tokens_per_rank, ep_rank, test_case.ep_size,
-        test_case.top_k, num_slots,
+        token_selected_slots,
+        payloads,
+        workspace,
+        metainfo,
+        runtime_max_tokens_per_rank,
+        ep_rank,
+        test_case.ep_size,
+        test_case.top_k,
+        num_slots,
     )
     combine_payload_offset = int(combine_payload_offset)
     torch.cuda.synchronize()
 
     # Pre-fill the combine payload region with mock MoE output (bfloat16).
     combine_payload = torch.ops.trtllm.moe_a2a_get_combine_payload_tensor(
-        workspace, ep_rank, test_case.ep_size, runtime_max_tokens_per_rank,
-        combine_payload_offset, torch.bfloat16, test_case.hidden_size,
+        workspace,
+        ep_rank,
+        test_case.ep_size,
+        runtime_max_tokens_per_rank,
+        combine_payload_offset,
+        torch.bfloat16,
+        test_case.hidden_size,
     )
     combine_payload.copy_(torch.randn_like(combine_payload))
     torch.cuda.synchronize()
@@ -753,9 +767,15 @@ def benchmark_nvlink_one_sided(
     # ========================================================================
     def dispatch_op():
         torch.ops.trtllm.moe_a2a_dispatch(
-            token_selected_slots, payloads, workspace, metainfo,
-            runtime_max_tokens_per_rank, ep_rank, test_case.ep_size,
-            test_case.top_k, num_slots,
+            token_selected_slots,
+            payloads,
+            workspace,
+            metainfo,
+            runtime_max_tokens_per_rank,
+            ep_rank,
+            test_case.ep_size,
+            test_case.top_k,
+            num_slots,
         )
 
     dispatch_latency = _benchmark_op(dispatch_op, "dispatch")
@@ -764,14 +784,23 @@ def benchmark_nvlink_one_sided(
     # Benchmark: combine
     # ========================================================================
     moe_output = combine_payload.view(
-        test_case.ep_size, runtime_max_tokens_per_rank, test_case.hidden_size,
+        test_case.ep_size,
+        runtime_max_tokens_per_rank,
+        test_case.hidden_size,
     )
 
     def combine_op():
         torch.ops.trtllm.moe_a2a_combine(
-            moe_output, test_case.num_tokens, workspace, metainfo,
-            runtime_max_tokens_per_rank, ep_rank, test_case.ep_size,
-            test_case.top_k, combine_payload_offset, True,
+            moe_output,
+            test_case.num_tokens,
+            workspace,
+            metainfo,
+            runtime_max_tokens_per_rank,
+            ep_rank,
+            test_case.ep_size,
+            test_case.top_k,
+            combine_payload_offset,
+            True,
         )
 
     combine_latency = _benchmark_op(combine_op, "combine")
@@ -900,13 +929,20 @@ def run_benchmark(
         try:
             if kernel_source == KERNEL_SOURCE_TWO_SIDED:
                 result = benchmark_nvlink_two_sided(
-                    test_case, mapping, device,
-                    num_warmup=num_warmup, num_iterations=num_iterations,
+                    test_case,
+                    mapping,
+                    device,
+                    num_warmup=num_warmup,
+                    num_iterations=num_iterations,
                 )
             else:
                 result = benchmark_nvlink_one_sided(
-                    test_case, mapping, device, max_num_tokens,
-                    num_warmup=num_warmup, num_iterations=num_iterations,
+                    test_case,
+                    mapping,
+                    device,
+                    max_num_tokens,
+                    num_warmup=num_warmup,
+                    num_iterations=num_iterations,
                 )
 
             # Log results (only rank 0)
@@ -924,45 +960,70 @@ def run_benchmark(
 
                 dispatch_bw = calculate_bandwidth_gbps(dispatch_data_size, result.dispatch_latency_ms)
                 dispatch_kb = dispatch_data_size / 1024
-                print(f"  Dispatch: {result.dispatch_latency_ms:.3f} ms "
-                      f"({dispatch_bw:.2f} GB/s, {dispatch_kb:.1f} KB)")
+                print(f"  Dispatch: {result.dispatch_latency_ms:.3f} ms ({dispatch_bw:.2f} GB/s, {dispatch_kb:.1f} KB)")
 
                 combine_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_latency_ms)
                 combine_kb = combine_data_size / 1024
-                print(f"  Combine:  {result.combine_latency_ms:.3f} ms "
-                      f"({combine_bw:.2f} GB/s, {combine_kb:.1f} KB)")
+                print(f"  Combine:  {result.combine_latency_ms:.3f} ms ({combine_bw:.2f} GB/s, {combine_kb:.1f} KB)")
 
                 if result.combine_low_precision_latency_ms > 0:
                     combine_lp_bw = calculate_bandwidth_gbps(
-                        combine_data_size, result.combine_low_precision_latency_ms,
+                        combine_data_size,
+                        result.combine_low_precision_latency_ms,
                     )
-                    print(f"  Combine (low precision): {result.combine_low_precision_latency_ms:.3f} ms "
-                          f"({combine_lp_bw:.2f} GB/s)")
+                    print(
+                        f"  Combine (low precision): {result.combine_low_precision_latency_ms:.3f} ms "
+                        f"({combine_lp_bw:.2f} GB/s)"
+                    )
 
                 # Log each operation separately
                 if result.prepare_latency_ms > 0:
                     log_alltoall_perf(
-                        test_case, "alltoall_prepare", result.prepare_latency_ms,
-                        framework, version, device_name, kernel_source, output_file,
+                        test_case,
+                        "alltoall_prepare",
+                        result.prepare_latency_ms,
+                        framework,
+                        version,
+                        device_name,
+                        kernel_source,
+                        output_file,
                     )
                 log_alltoall_perf(
-                    test_case, "alltoall_dispatch", result.dispatch_latency_ms,
-                    framework, version, device_name, kernel_source, output_file,
+                    test_case,
+                    "alltoall_dispatch",
+                    result.dispatch_latency_ms,
+                    framework,
+                    version,
+                    device_name,
+                    kernel_source,
+                    output_file,
                 )
                 log_alltoall_perf(
-                    test_case, "alltoall_combine", result.combine_latency_ms,
-                    framework, version, device_name, kernel_source, output_file,
+                    test_case,
+                    "alltoall_combine",
+                    result.combine_latency_ms,
+                    framework,
+                    version,
+                    device_name,
+                    kernel_source,
+                    output_file,
                 )
                 if result.combine_low_precision_latency_ms > 0:
                     log_alltoall_perf(
-                        test_case, "alltoall_combine_low_precision",
+                        test_case,
+                        "alltoall_combine_low_precision",
                         result.combine_low_precision_latency_ms,
-                        framework, version, device_name, kernel_source, output_file,
+                        framework,
+                        version,
+                        device_name,
+                        kernel_source,
+                        output_file,
                     )
 
         except Exception as e:
             if rank == 0:
                 import traceback
+
                 print(f"  ERROR: {e}")
                 traceback.print_exc()
 
@@ -988,7 +1049,8 @@ def parse_args():
         help=f"Communication strategy (default: {KERNEL_SOURCE_TWO_SIDED})",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=str,
         default="trtllm_alltoall_perf.txt",
         help="Output file path for performance results (default: trtllm_alltoall_perf.txt)",
