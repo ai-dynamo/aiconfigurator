@@ -107,16 +107,16 @@ class TestEnableAlltoallConditions:
         db.query_trtllm_alltoall.assert_not_called()
 
     def test_alltoall_disabled_when_dp_is_1(self):
-        """alltoall disabled when attention_dp_size=1 (tp-only config)."""
+        """alltoall disabled when attention_dp_size=1 (only this condition disables it)."""
         db = _make_mock_db(sm_version=100)
-        dispatch = _make_dispatch(moe_tp_size=8, moe_ep_size=8, attention_dp_size=1, pre_dispatch=True)
+        dispatch = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=True)
         dispatch.query(db, x=16)
         db.query_trtllm_alltoall.assert_not_called()
 
     def test_alltoall_disabled_when_moe_tp_gt_1(self):
-        """alltoall disabled when moe_tp_size>1 (even with dp=1)."""
+        """alltoall disabled when moe_tp_size>1 (only this condition disables it)."""
         db = _make_mock_db(sm_version=100)
-        dispatch = _make_dispatch(moe_tp_size=2, moe_ep_size=4, attention_dp_size=1, pre_dispatch=True)
+        dispatch = _make_dispatch(moe_tp_size=2, moe_ep_size=4, attention_dp_size=8, pre_dispatch=True)
         dispatch.query(db, x=16)
         db.query_trtllm_alltoall.assert_not_called()
 

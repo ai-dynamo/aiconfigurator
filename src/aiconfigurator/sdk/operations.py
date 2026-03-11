@@ -594,7 +594,7 @@ class MoEDispatch(Operation):
                 if quant_mode is not None and quant_mode == common.MoEQuantMode.nvfp4:
                     dispatch_x_volume = volume / 4
                     dispatch_sf_volume = volume / 4 / 8
-                elif quant_mode is not None and quant_mode == common.MoEQuantMode.fp8:
+                elif quant_mode is not None and quant_mode in (common.MoEQuantMode.fp8, common.MoEQuantMode.fp8_block):
                     dispatch_x_volume = volume / 2
                     dispatch_sf_volume = 0
                 else:
