@@ -27,12 +27,16 @@
         limits:
           gpu: "{{ gpu }}"
       extraPodSpec:
+        {% if K8sConfig.k8s_tolerations %}
+        tolerations:
+{{ K8sConfig.k8s_tolerations | indent(10, True) }}
+        {% endif %}
         {% if k8s_use_model_cache %}
         volumes:
           - name: model-cache
             persistentVolumeClaim:
               claimName: {{ k8s_model_cache_pvc }}
-        {% endif %}      
+        {% endif %}
         {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
           - name: {{ K8sConfig.k8s_image_pull_secret }}
@@ -84,6 +88,10 @@ spec:
       componentType: frontend
       replicas: {{ frontend_replicas | default(1) }}
       extraPodSpec:
+        {% if K8sConfig.k8s_tolerations %}
+        tolerations:
+{{ K8sConfig.k8s_tolerations | indent(10, True) }}
+        {% endif %}
         {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
           - name: {{ K8sConfig.k8s_image_pull_secret }}

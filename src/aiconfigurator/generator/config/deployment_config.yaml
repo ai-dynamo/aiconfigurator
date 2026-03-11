@@ -92,6 +92,16 @@ inputs:
   - key: K8sConfig.k8s_hf_home
     required: false
     default: ""
+  - key: K8sConfig.k8s_tolerations
+    required: false
+    default: |-
+      - key: dedicated
+        operator: Equal
+        value: user-workload
+        effect: NoExecute
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
 
   # Worker config
   - key: WorkerConfig.prefill_workers
