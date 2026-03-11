@@ -90,7 +90,7 @@ _DEFAULT_BUILD_CASES = [
     ),
     pytest.param(
         {
-            "model_path": "Qwen/Qwen3-8b",
+            "model_path": "Qwen/Qwen3-8B",
             "system": "b60",
             "backend": "vllm",
             "total_gpus": 4,
