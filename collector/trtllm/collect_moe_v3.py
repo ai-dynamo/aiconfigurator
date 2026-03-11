@@ -109,7 +109,7 @@ def get_moe_test_cases():
         moe_list += ["w4a16_mxfp4"]
 
     if sm_version >= 100:
-        moe_list += ["nvfp4"]
+        moe_list += ["nvfp4", "w4a16_mxfp4"]
 
     test_cases = []
 
@@ -286,17 +286,19 @@ def run_moe_torch(
     sm_version = get_sm_version()
 
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
-        # use triton backend for best performance on Hopper
-        model_config.moe_backend = "triton"
         swiglu_alpha = torch.tensor([1.702] * (num_experts // moe_ep_size), dtype=torch.float32).to(
             torch.device(device)
         )
         swiglu_beta = torch.tensor([1.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
         swiglu_limit = torch.tensor([7.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
-        if 86 < sm_version < 100:
+        if 86 < get_sm_version() < 100:
+            # Hopper: use triton backend for best performance
             model_config.moe_backend = "triton"
+        elif get_sm_version() >= 100:
+            # Blackwell: production uses TRTLLMGenFusedMoE (Bf16MxE2m1BlockScaleMoeRunner)
+            model_config.moe_backend = "trtllm"
         else:
-            model_config.moe_backend = "cutlass" if not min_latency_mode else "trtllm"
+            model_config.moe_backend = "cutlass"
     else:
         # Select backend based on platform and quant mode.
         if min_latency_mode:
