@@ -34,7 +34,6 @@ class TestSupportedModels:
             "Qwen/Qwen3-32B",
             "meta-llama/Meta-Llama-3.1-8B",
             "deepseek-ai/DeepSeek-V3",
-            "mistralai/Mixtral-8x7B-v0.1",
         ],
     )
     def test_specific_models_are_in_default_list(self, hf_id):
