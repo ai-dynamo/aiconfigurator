@@ -240,13 +240,14 @@ def check_mnnvl_support() -> bool:
         return False
 
 
-def create_mapping(rank: int, world_size: int):
+def create_mapping(rank: int, world_size: int, gpus_per_node: int):
     """
     Create TensorRT-LLM Mapping for MoE EP.
 
     Args:
         rank: Current rank
         world_size: Total number of ranks
+        gpus_per_node: Number of GPUs per node
 
     Returns:
         Mapping object
@@ -256,7 +257,7 @@ def create_mapping(rank: int, world_size: int):
     mapping = Mapping(
         world_size=world_size,
         rank=rank,
-        gpus_per_node=4,
+        gpus_per_node=gpus_per_node,
         tp_size=world_size,  # Must satisfy: tp_size * pp_size == world_size
         pp_size=1,
         moe_tp_size=1,
@@ -350,54 +351,56 @@ def generate_expert_ids(
         raise ValueError(f"Unknown distribution: {test_case.distribution}")
 
 
-def get_dispatch_data_size_bytes(num_tokens: int, hidden_size: int, top_k: int, moe_dtype: MoEDtype) -> int:
+def get_dispatch_data_size_bytes(
+    num_tokens: int, hidden_size: int, top_k: int, moe_dtype: MoEDtype, ep_size: int
+) -> int:
     """
-    Calculate total AlltoAll dispatch data volume per rank.
+    Calculate NVLink dispatch data volume per rank (remote traffic only).
 
-    Each token is sent to top_k experts (potentially on different ranks),
-    so the actual data volume is top_k times the per-token data size.
+    Hidden state is sent once per remote rank, not per expert slot.
+    With balanced distribution a token reaches min(top_k, ep_size) distinct ranks;
+    one of them is local, so remote_ranks = min(top_k, ep_size) - 1.
 
     Args:
         num_tokens: Number of tokens
         hidden_size: Hidden dimension size
         top_k: Number of experts per token
         moe_dtype: MoE data type
+        ep_size: Expert parallelism size (number of GPUs)
 
     Returns:
-        Data size in bytes
+        Remote data size in bytes
     """
     if moe_dtype == MoEDtype.FLOAT16:
-        # bfloat16: 2 bytes per element
         per_token = hidden_size * 2
     elif moe_dtype == MoEDtype.FP8:
-        # fp8: 1 byte per element
         per_token = hidden_size * 1
     elif moe_dtype == MoEDtype.NVFP4:
-        # NVFP4: 0.5 bytes per element (2 values packed in 1 byte) + scale factors
-        # Scale factors: 1 scale per 16 elements, stored as uint8
         per_token = (hidden_size // 2) + (hidden_size // 16)
     else:
         per_token = hidden_size * 2
-    return num_tokens * top_k * per_token
+    remote_ranks = min(top_k, ep_size) - 1
+    return num_tokens * remote_ranks * per_token
 
 
-def get_combine_data_size_bytes(num_tokens: int, hidden_size: int, top_k: int) -> int:
+def get_combine_data_size_bytes(num_tokens: int, hidden_size: int, top_k: int, ep_size: int) -> int:
     """
-    Calculate total AlltoAll combine data volume per rank.
+    Calculate NVLink combine data volume per rank (remote traffic only).
 
-    Combine gathers expert outputs back; each token has top_k results to collect.
-    Combine always uses bfloat16 (expert output precision).
+    Combine gathers expert outputs back. Hidden state is transferred once per
+    remote rank, not per expert. Combine always uses bfloat16.
 
     Args:
         num_tokens: Number of tokens
         hidden_size: Hidden dimension size
         top_k: Number of experts per token
+        ep_size: Expert parallelism size (number of GPUs)
 
     Returns:
-        Data size in bytes
+        Remote data size in bytes
     """
-    # Combine always uses bfloat16: 2 bytes per element
-    return num_tokens * top_k * hidden_size * 2
+    remote_ranks = min(top_k, ep_size) - 1
+    return num_tokens * remote_ranks * hidden_size * 2
 
 
 def calculate_bandwidth_gbps(data_size_bytes: int, latency_ms: float) -> float:
@@ -800,7 +803,7 @@ def benchmark_nvlink_one_sided(
             test_case.ep_size,
             test_case.top_k,
             combine_payload_offset,
-            True,
+            True,  # payload_in_workspace: MoE output was written into workspace via get_combine_payload_tensor
         )
 
     combine_latency = _benchmark_op(combine_op, "combine")
@@ -893,7 +896,8 @@ def run_benchmark(
         return
 
     # Create mapping
-    mapping = create_mapping(rank, world_size)
+    gpus_per_node = int(os.environ.get("SLURM_NTASKS_PER_NODE", torch.cuda.device_count()))
+    mapping = create_mapping(rank, world_size, gpus_per_node)
 
     # Get test cases
     test_cases = get_default_test_cases(world_size)
@@ -935,7 +939,7 @@ def run_benchmark(
                     num_warmup=num_warmup,
                     num_iterations=num_iterations,
                 )
-            else:
+            elif kernel_source == KERNEL_SOURCE_ONE_SIDED:
                 result = benchmark_nvlink_one_sided(
                     test_case,
                     mapping,
@@ -944,15 +948,24 @@ def run_benchmark(
                     num_warmup=num_warmup,
                     num_iterations=num_iterations,
                 )
+            else:
+                raise ValueError(f"Unknown kernel_source '{kernel_source}', expected one of {VALID_KERNEL_SOURCES}")
 
             # Log results (only rank 0)
             if rank == 0:
                 # Calculate data sizes and bandwidths
                 dispatch_data_size = get_dispatch_data_size_bytes(
-                    test_case.num_tokens, test_case.hidden_size, test_case.top_k, test_case.moe_dtype
+                    test_case.num_tokens,
+                    test_case.hidden_size,
+                    test_case.top_k,
+                    test_case.moe_dtype,
+                    test_case.ep_size,
                 )
                 combine_data_size = get_combine_data_size_bytes(
-                    test_case.num_tokens, test_case.hidden_size, test_case.top_k
+                    test_case.num_tokens,
+                    test_case.hidden_size,
+                    test_case.top_k,
+                    test_case.ep_size,
                 )
 
                 if result.prepare_latency_ms > 0:
