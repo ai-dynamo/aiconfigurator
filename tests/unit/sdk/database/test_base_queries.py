@@ -50,6 +50,7 @@ def test_query_trtllm_alltoall_normalizes_fp8_block_lookup(stub_perf_db):
     """
     fp8_block reuses the fp8 TRT-LLM alltoall perf tables.
     """
+    stub_perf_db.version = "1.2.0rc6"
     stub_perf_db.system_spec["gpu"]["sm_version"] = 100
     stub_perf_db._trtllm_alltoall_data = LoadedOpData(
         {

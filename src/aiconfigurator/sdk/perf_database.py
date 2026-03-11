@@ -5678,7 +5678,12 @@ class PerfDatabase:
 
         Raises:
             ValueError: If op_name is not valid
+            PerfDataNotAvailableError: If backend version not in ["1.2.0rc6"]
         """
+        if self.version not in ["1.2.0rc6"]:
+            raise PerfDataNotAvailableError(
+                f"TRT-LLM alltoall query requires backend version 1.2.0rc6, got '{self.version}'"
+            )
 
         def get_sol(
             num_tokens: int,
