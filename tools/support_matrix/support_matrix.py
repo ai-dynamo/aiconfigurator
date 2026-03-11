@@ -106,9 +106,13 @@ class SupportMatrix:
     """
 
     def __init__(self):
+        logger.info("Loading models...")
         self.models: set[str] = self.get_models()
+        logger.info("Found %d models", len(self.models))
         # database structure: {system: {backend: {version}}}
+        logger.info("Loading perf databases...")
         self.databases: dict[str, dict[str, dict[str, str]]] = self.load_databases()
+        logger.info("Databases loaded for %d systems", len(self.databases))
 
     def get_models(self):
         """Get the set of models to test - uses DefaultHFModels (models with cached configs)."""
@@ -211,7 +215,7 @@ class SupportMatrix:
                     results[mode] = True
                     error_messages[mode] = None
                 else:  # pragma: no cover
-                    logger.debug(
+                    logger.warning(
                         "Configuration returned no results: %s, %s, %s, %s, mode=%s",
                         model,
                         system,
@@ -223,7 +227,7 @@ class SupportMatrix:
                     error_messages[mode] = "Configuration returned no results, failed to catch traceback"
 
             except Exception as e:
-                logger.debug(
+                logger.warning(
                     "Configuration failed: %s, %s, %s, %s, mode=%s - Error: %s",
                     model,
                     system,
@@ -289,6 +293,7 @@ class SupportMatrix:
         print("=" * 80 + "\n")
 
         combinations = self.generate_combinations()
+        print(f"Total combinations to test: {len(combinations)}")
         results: list[tuple[str, str, str, str, str, str, bool, str | None]] = []
         retry_combos: set[tuple[str, str, str, str]] = set()
 

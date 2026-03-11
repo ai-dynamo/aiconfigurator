@@ -12,7 +12,7 @@ This script performs the following checks:
 Exit codes:
     0: All checks pass, no changes detected
     1: Changes detected (added, removed, or changed rows)
-    2: Validation errors (sanity check failures)
+    2: Validation errors (sanity or range check failures)
 
 Usage:
     python compare_support_matrix.py --old <old_csv> --new <new_csv> [--output-diff <diff_file>]
@@ -373,6 +373,18 @@ def main():
         validation_errors.extend(range_errors)
     else:
         print("✓ Range matches database")
+
+    # 3. Log all FAIL entries from the new CSV with their error messages
+    failed_rows = [row for row in new_data_rows if len(row) >= 8 and row[6] == "FAIL"]
+    if failed_rows:
+        print()
+        print(f"Failed test cases in new CSV: {len(failed_rows)}")
+        print("-" * 40)
+        for row in sorted(failed_rows, key=lambda r: (r[0], r[2], r[3], r[4], r[5])):
+            hf_id, arch, system, backend, ver, mode = row[0], row[1], row[2], row[3], row[4], row[5]
+            err_msg = row[7] if row[7] else "(no error message)"
+            print(f"  FAIL: {hf_id} ({arch}) on {system} with {backend} v{ver} ({mode})")
+            print(f"        Error: {err_msg}")
 
     print()
 
