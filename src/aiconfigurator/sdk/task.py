@@ -258,6 +258,22 @@ class TaskConfigFactory:
                 _deep_merge(config_dict, layer.resolve(ctx))
                 applied_layers.append(layer.name)
 
+        # On Blackwell, GPT-OSS defaults to w4a8_mxfp4_mxfp8 (MXFP8 activations)
+        # for higher tensor core throughput. Profiles applied after this can override.
+        if ctx.model_path in ("openai/gpt-oss-120b", "openai/gpt-oss-20b") and ctx.system_name in (
+            "gb200",
+            "gb300",
+            "b200_sxm",
+        ):
+            quant_override = {"moe_quant_mode": "w4a8_mxfp4_mxfp8"}
+            if ctx.serving_mode == "agg":
+                _deep_merge(config_dict, {"worker_config": quant_override})
+            else:
+                _deep_merge(
+                    config_dict, {"prefill_worker_config": quant_override, "decode_worker_config": quant_override}
+                )
+            applied_layers.append("gptoss-blackwell-mxfp8")
+
         for profile in ctx.profiles:
             layers = cls.PROFILE_REGISTRY.get(profile)
             if not layers:

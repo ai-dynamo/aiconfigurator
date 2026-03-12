@@ -69,9 +69,6 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
     elif quant_algo == "mxfp4":
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
         overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_mxfp4
-    elif quant_algo == "mxfp4_mxfp8":
-        overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
-        overrides["moe_quant_mode"] = common.MoEQuantMode.w4a8_mxfp4_mxfp8
     elif quant_algo == "float16":
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
         overrides["moe_quant_mode"] = common.MoEQuantMode.float16
