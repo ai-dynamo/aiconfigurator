@@ -187,7 +187,6 @@ class TestParseHFConfig:
         assert "E" not in extra_params.hybrid_override_pattern  # No MoE layers
         assert extra_params.moe_shared_expert_intermediate_size == 0
 
-
     def test_parse_llama4_scout_config(self):
         """Test Llama 4 Scout (VLM, step=1: all-MoE) → HybridConfig with alternating attn pattern."""
         config = {
@@ -256,7 +255,7 @@ class TestParseHFConfig:
         assert result["num_experts"] == 128
         cfg = result["extra_params"]
         # step=2: odd layers are MoE (1), even layers are dense (0)
-        assert sum(cfg.moe_layer_freq) == 24   # 24 MoE layers
+        assert sum(cfg.moe_layer_freq) == 24  # 24 MoE layers
         assert cfg.moe_layer_freq.count(0) == 24  # 24 dense layers
         assert cfg.dense_inter_size == 16384
 
@@ -367,13 +366,27 @@ class TestHybridMoEModelBuilder:
         hybrid_cfg = common.HybridConfig(
             attn_layer_pattern=(0, 1, 1, 1, 1, 0, 1, 1, 1, 1),
             moe_layer_freq=(0, 1, 1, 1, 1, 1, 1, 1, 1, 1),
-            swa_num_kv_heads=8, swa_head_dim=192, swa_v_head_dim=128,
-            global_v_head_dim=128, sliding_window_size=128,
+            swa_num_kv_heads=8,
+            swa_head_dim=192,
+            swa_v_head_dim=128,
+            global_v_head_dim=128,
+            sliding_window_size=128,
         )
         model = HybridMoEModel(
-            8, 64, 2048,   # topk, num_experts, moe_inter_size
-            "test-model", "HYBRIDMOE", "MiMoV2FlashForCausalLM",
-            10, 64, 4, 192, 4096, 16384, 152576, 262144,
+            8,
+            64,
+            2048,  # topk, num_experts, moe_inter_size
+            "test-model",
+            "HYBRIDMOE",
+            "MiMoV2FlashForCausalLM",
+            10,
+            64,
+            4,
+            192,
+            4096,
+            16384,
+            152576,
+            262144,
             self._make_model_config(),
         )
         model.set_hybrid_config(hybrid_cfg)
@@ -395,9 +408,20 @@ class TestHybridMoEModelBuilder:
             dense_inter_size=16384,
         )
         model = HybridMoEModel(
-            1, 16, 8192,   # topk, num_experts, moe_inter_size
-            "test-model", "HYBRIDMOE", "Llama4ForConditionalGeneration",
-            layers, 40, 8, 128, 5120, 8192, 202048, 10485760,
+            1,
+            16,
+            8192,  # topk, num_experts, moe_inter_size
+            "test-model",
+            "HYBRIDMOE",
+            "Llama4ForConditionalGeneration",
+            layers,
+            40,
+            8,
+            128,
+            5120,
+            8192,
+            202048,
+            10485760,
             self._make_model_config(),
         )
         model.set_hybrid_config(hybrid_cfg)
@@ -420,9 +444,20 @@ class TestHybridMoEModelBuilder:
             dense_inter_size=16384,
         )
         model = HybridMoEModel(
-            1, 128, 8192,   # topk, num_experts, moe_inter_size
-            "test-model", "HYBRIDMOE", "Llama4ForConditionalGeneration",
-            layers, 40, 8, 128, 5120, 8192, 202048, 1048576,
+            1,
+            128,
+            8192,  # topk, num_experts, moe_inter_size
+            "test-model",
+            "HYBRIDMOE",
+            "Llama4ForConditionalGeneration",
+            layers,
+            40,
+            8,
+            128,
+            5120,
+            8192,
+            202048,
+            1048576,
             self._make_model_config(),
         )
         model.set_hybrid_config(hybrid_cfg)

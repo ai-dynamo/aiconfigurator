@@ -512,9 +512,7 @@ def _parse_hf_config_json(config: dict) -> dict:
         # MiMo-V2-Flash: per-layer attention + FFN patterns; different dims for SWA vs global.
         moe_layer_freq_raw = config.get("moe_layer_freq", [])
         moe_layer_freq = (
-            tuple(moe_layer_freq_raw)
-            if isinstance(moe_layer_freq_raw, list)
-            else tuple([moe_layer_freq_raw] * layers)
+            tuple(moe_layer_freq_raw) if isinstance(moe_layer_freq_raw, list) else tuple([moe_layer_freq_raw] * layers)
         )
         attn_pattern = tuple(config.get("hybrid_layer_pattern", []))
         if len(attn_pattern) != layers or len(moe_layer_freq) != layers:
@@ -523,9 +521,7 @@ def _parse_hf_config_json(config: dict) -> dict:
                 f"expected {layers} entries, got attn={len(attn_pattern)} moe={len(moe_layer_freq)}"
             )
         if any(v not in (0, 1) for v in (*attn_pattern, *moe_layer_freq)):
-            raise ValueError(
-                f"Hybrid patterns for {architecture} must contain only 0/1 values"
-            )
+            raise ValueError(f"Hybrid patterns for {architecture} must contain only 0/1 values")
         extra_params = HybridConfig(
             attn_layer_pattern=attn_pattern,
             moe_layer_freq=moe_layer_freq,
@@ -549,9 +545,7 @@ def _parse_hf_config_json(config: dict) -> dict:
         # FFN: layer i is MoE (1) if (i+1) % interleave_moe_layer_step == 0, else dense (0).
         step = config.get("interleave_moe_layer_step", 1)
         if not isinstance(step, int) or step <= 0:
-            raise ValueError(
-                f"interleave_moe_layer_step must be a positive integer, got {step}"
-            )
+            raise ValueError(f"interleave_moe_layer_step must be a positive integer, got {step}")
         attn_pattern = tuple(i % 2 for i in range(layers))
         moe_freq = tuple(1 if (i + 1) % step == 0 else 0 for i in range(layers))
         extra_params = HybridConfig(

@@ -83,7 +83,7 @@ class HybridConfig:
     """
 
     attn_layer_pattern: tuple[int, ...]  # per-layer: 0=SWA/local, 1=global
-    moe_layer_freq: tuple[int, ...]      # per-layer: 0=dense, 1=MoE
+    moe_layer_freq: tuple[int, ...]  # per-layer: 0=dense, 1=MoE
     swa_num_kv_heads: int = 0
     swa_head_dim: int = 0
     swa_v_head_dim: int = 0

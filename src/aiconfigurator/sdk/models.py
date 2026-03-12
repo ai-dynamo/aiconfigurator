@@ -3141,9 +3141,7 @@ class HybridMoEModel(BaseModel):
             f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
-        assert num_experts >= self.config.moe_ep_size, (
-            f"ep size cannot be larger than num_experts {num_experts}"
-        )
+        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
         assert self.config.tp_size * self.config.attention_dp_size <= 256, (
             f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
             f"should not be larger than 256"
@@ -3218,8 +3216,17 @@ class HybridMoEModel(BaseModel):
             "dense_inter_per_tp": dense_inter // tp_size,
         }
 
-    def _moe_ops(self, prefix: str, count: float, h: int, moe_tp: int, moe_ep: int,
-                 attn_dp: int, moe_q: common.MoEQuantMode, wl_dist: str) -> list:
+    def _moe_ops(
+        self,
+        prefix: str,
+        count: float,
+        h: int,
+        moe_tp: int,
+        moe_ep: int,
+        attn_dp: int,
+        moe_q: common.MoEQuantMode,
+        wl_dist: str,
+    ) -> list:
         """Return the three MoE FFN ops (pre-dispatch, compute, post-dispatch)."""
         router_ops = (
             [ops.GEMM(f"{prefix}_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.float16)]
@@ -3227,16 +3234,30 @@ class HybridMoEModel(BaseModel):
             else []
         )
         return router_ops + [
-            ops.MoEDispatch(f"{prefix}_moe_pre_dispatch", count, h, self._topk,
-                            self._num_experts, moe_tp, moe_ep, attn_dp, True),
-            ops.MoE(f"{prefix}_moe", count, h, self._moe_inter_size, self._topk,
-                    self._num_experts, moe_tp, moe_ep, moe_q, wl_dist, attn_dp),
-            ops.MoEDispatch(f"{prefix}_moe_post_dispatch", count, h, self._topk,
-                            self._num_experts, moe_tp, moe_ep, attn_dp, False),
+            ops.MoEDispatch(
+                f"{prefix}_moe_pre_dispatch", count, h, self._topk, self._num_experts, moe_tp, moe_ep, attn_dp, True
+            ),
+            ops.MoE(
+                f"{prefix}_moe",
+                count,
+                h,
+                self._moe_inter_size,
+                self._topk,
+                self._num_experts,
+                moe_tp,
+                moe_ep,
+                moe_q,
+                wl_dist,
+                attn_dp,
+            ),
+            ops.MoEDispatch(
+                f"{prefix}_moe_post_dispatch", count, h, self._topk, self._num_experts, moe_tp, moe_ep, attn_dp, False
+            ),
         ]
 
-    def _dense_ffn_ops(self, prefix: str, count: float, h: int, tp: int,
-                       dense_inter_per_tp: int, gemm_q: common.GEMMQuantMode) -> list:
+    def _dense_ffn_ops(
+        self, prefix: str, count: float, h: int, tp: int, dense_inter_per_tp: int, gemm_q: common.GEMMQuantMode
+    ) -> list:
         """Return fused gate_up + activation + down ops for dense SwiGLU FFN."""
         return [
             ops.GEMM(f"{prefix}_dense_gate_up_gemm", count, 2 * dense_inter_per_tp, h, gemm_q),
@@ -3273,59 +3294,103 @@ class HybridMoEModel(BaseModel):
         # --- global attention + MoE FFN ---
         if counts["global_moe"] > 0:
             c = counts["global_moe"]
-            self.context_ops.extend([
-                ops.ElementWise("context_global_attn_norm", c, 2 * h, 2 * h, 0.8),
-                ops.GEMM("context_global_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
-                ops.ContextAttention("context_attention", c, self._num_heads // tp,
-                                     d["global_n_kv_per_gpu"], kvcache_q, fmha_q,
-                                     window_size=0, head_size=d["global_hd"]),
-                ops.GEMM("context_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
-                ops.ElementWise("context_global_moe_norm", c, 2 * h, 2 * h, 0.8),
-            ] + self._moe_ops("context_global", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist))
+            self.context_ops.extend(
+                [
+                    ops.ElementWise("context_global_attn_norm", c, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_global_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
+                    ops.ContextAttention(
+                        "context_attention",
+                        c,
+                        self._num_heads // tp,
+                        d["global_n_kv_per_gpu"],
+                        kvcache_q,
+                        fmha_q,
+                        window_size=0,
+                        head_size=d["global_hd"],
+                    ),
+                    ops.GEMM("context_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
+                    ops.ElementWise("context_global_moe_norm", c, 2 * h, 2 * h, 0.8),
+                ]
+                + self._moe_ops("context_global", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist)
+            )
 
         # --- SWA/local attention + MoE FFN ---
         if counts["swa_moe"] > 0:
             c = counts["swa_moe"]
-            self.context_ops.extend([
-                ops.ElementWise("context_swa_attn_norm", c, 2 * h, 2 * h, 0.8),
-                ops.GEMM("context_swa_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
-                ops.ContextAttention("context_attention", c, self._num_heads // tp,
-                                     d["swa_n_kv_per_gpu"], kvcache_q, fmha_q,
-                                     window_size=cfg.sliding_window_size, head_size=d["swa_hd"]),
-                ops.GEMM("context_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
-                ops.ElementWise("context_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
-            ] + self._moe_ops("context_swa", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist))
+            self.context_ops.extend(
+                [
+                    ops.ElementWise("context_swa_attn_norm", c, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_swa_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
+                    ops.ContextAttention(
+                        "context_attention",
+                        c,
+                        self._num_heads // tp,
+                        d["swa_n_kv_per_gpu"],
+                        kvcache_q,
+                        fmha_q,
+                        window_size=cfg.sliding_window_size,
+                        head_size=d["swa_hd"],
+                    ),
+                    ops.GEMM("context_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
+                    ops.ElementWise("context_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
+                ]
+                + self._moe_ops("context_swa", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist)
+            )
 
         # --- SWA/local attention + dense FFN ---
         if counts["swa_dense"] > 0:
             c = counts["swa_dense"]
-            self.context_ops.extend([
-                ops.ElementWise("context_swa_dense_attn_norm", c, 2 * h, 2 * h, 0.8),
-                ops.GEMM("context_swa_dense_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
-                ops.ContextAttention("context_attention", c, self._num_heads // tp,
-                                     d["swa_n_kv_per_gpu"], kvcache_q, fmha_q,
-                                     window_size=cfg.sliding_window_size, head_size=d["swa_hd"]),
-                ops.GEMM("context_swa_dense_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
-                ops.ElementWise("context_swa_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
-            ] + self._dense_ffn_ops("context_swa", c, h, tp, d["dense_inter_per_tp"], gemm_q))
+            self.context_ops.extend(
+                [
+                    ops.ElementWise("context_swa_dense_attn_norm", c, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_swa_dense_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
+                    ops.ContextAttention(
+                        "context_attention",
+                        c,
+                        self._num_heads // tp,
+                        d["swa_n_kv_per_gpu"],
+                        kvcache_q,
+                        fmha_q,
+                        window_size=cfg.sliding_window_size,
+                        head_size=d["swa_hd"],
+                    ),
+                    ops.GEMM("context_swa_dense_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
+                    ops.ElementWise("context_swa_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
+                ]
+                + self._dense_ffn_ops("context_swa", c, h, tp, d["dense_inter_per_tp"], gemm_q)
+            )
 
         # --- global attention + dense FFN ---
         if counts["global_dense"] > 0:
             c = counts["global_dense"]
-            self.context_ops.extend([
-                ops.ElementWise("context_global_dense_attn_norm", c, 2 * h, 2 * h, 0.8),
-                ops.GEMM("context_global_dense_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
-                ops.ContextAttention("context_attention", c, self._num_heads // tp,
-                                     d["global_n_kv_per_gpu"], kvcache_q, fmha_q,
-                                     window_size=0, head_size=d["global_hd"]),
-                ops.GEMM("context_global_dense_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
-                ops.ElementWise("context_global_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
-            ] + self._dense_ffn_ops("context_global", c, h, tp, d["dense_inter_per_tp"], gemm_q))
+            self.context_ops.extend(
+                [
+                    ops.ElementWise("context_global_dense_attn_norm", c, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_global_dense_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
+                    ops.ContextAttention(
+                        "context_attention",
+                        c,
+                        self._num_heads // tp,
+                        d["global_n_kv_per_gpu"],
+                        kvcache_q,
+                        fmha_q,
+                        window_size=0,
+                        head_size=d["global_hd"],
+                    ),
+                    ops.GEMM(
+                        "context_global_dense_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True
+                    ),
+                    ops.ElementWise("context_global_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
+                ]
+                + self._dense_ffn_ops("context_global", c, h, tp, d["dense_inter_per_tp"], gemm_q)
+            )
 
-        self.context_ops.extend([
-            ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
-            ops.P2P("context_p2p", pp - 1, h, pp),
-        ])
+        self.context_ops.extend(
+            [
+                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.P2P("context_p2p", pp - 1, h, pp),
+            ]
+        )
 
     def _build_generation_ops(self) -> None:
         """Build the generation (decoding) operations for all four layer types."""
@@ -3355,62 +3420,108 @@ class HybridMoEModel(BaseModel):
         # --- global attention + MoE FFN ---
         if counts["global_moe"] > 0:
             c = counts["global_moe"]
-            self.generation_ops.extend([
-                ops.ElementWise("generation_global_attn_norm", c, 2 * h, 2 * h, 0.8),
-                ops.GEMM("generation_global_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
-                ops.GenerationAttention("generation_attention", c, self._num_heads // tp,
-                                        d["global_n_kv_per_gpu"], kvcache_q,
-                                        window_size=0, head_size=d["global_hd"]),
-                ops.GEMM("generation_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
-                ops.ElementWise("generation_global_moe_norm", c, 2 * h, 2 * h, 0.8),
-            ] + self._moe_ops("generation_global", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist))
+            self.generation_ops.extend(
+                [
+                    ops.ElementWise("generation_global_attn_norm", c, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_global_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
+                    ops.GenerationAttention(
+                        "generation_attention",
+                        c,
+                        self._num_heads // tp,
+                        d["global_n_kv_per_gpu"],
+                        kvcache_q,
+                        window_size=0,
+                        head_size=d["global_hd"],
+                    ),
+                    ops.GEMM(
+                        "generation_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True
+                    ),
+                    ops.ElementWise("generation_global_moe_norm", c, 2 * h, 2 * h, 0.8),
+                ]
+                + self._moe_ops("generation_global", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist)
+            )
 
         # --- SWA/local attention + MoE FFN ---
         if counts["swa_moe"] > 0:
             c = counts["swa_moe"]
-            self.generation_ops.extend([
-                ops.ElementWise("generation_swa_attn_norm", c, 2 * h, 2 * h, 0.8),
-                ops.GEMM("generation_swa_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
-                ops.GenerationAttention("generation_attention", c, self._num_heads // tp,
-                                        d["swa_n_kv_per_gpu"], kvcache_q,
-                                        window_size=cfg.sliding_window_size, head_size=d["swa_hd"]),
-                ops.GEMM("generation_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
-                ops.ElementWise("generation_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
-            ] + self._moe_ops("generation_swa", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist))
+            self.generation_ops.extend(
+                [
+                    ops.ElementWise("generation_swa_attn_norm", c, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_swa_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
+                    ops.GenerationAttention(
+                        "generation_attention",
+                        c,
+                        self._num_heads // tp,
+                        d["swa_n_kv_per_gpu"],
+                        kvcache_q,
+                        window_size=cfg.sliding_window_size,
+                        head_size=d["swa_hd"],
+                    ),
+                    ops.GEMM("generation_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
+                    ops.ElementWise("generation_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
+                ]
+                + self._moe_ops("generation_swa", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist)
+            )
 
         # --- SWA/local attention + dense FFN ---
         if counts["swa_dense"] > 0:
             c = counts["swa_dense"]
-            self.generation_ops.extend([
-                ops.ElementWise("generation_swa_dense_attn_norm", c, 2 * h, 2 * h, 0.8),
-                ops.GEMM("generation_swa_dense_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
-                ops.GenerationAttention("generation_attention", c, self._num_heads // tp,
-                                        d["swa_n_kv_per_gpu"], kvcache_q,
-                                        window_size=cfg.sliding_window_size, head_size=d["swa_hd"]),
-                ops.GEMM("generation_swa_dense_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
-                ops.ElementWise("generation_swa_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
-            ] + self._dense_ffn_ops("generation_swa", c, h, tp, d["dense_inter_per_tp"], gemm_q))
+            self.generation_ops.extend(
+                [
+                    ops.ElementWise("generation_swa_dense_attn_norm", c, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_swa_dense_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
+                    ops.GenerationAttention(
+                        "generation_attention",
+                        c,
+                        self._num_heads // tp,
+                        d["swa_n_kv_per_gpu"],
+                        kvcache_q,
+                        window_size=cfg.sliding_window_size,
+                        head_size=d["swa_hd"],
+                    ),
+                    ops.GEMM(
+                        "generation_swa_dense_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True
+                    ),
+                    ops.ElementWise("generation_swa_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
+                ]
+                + self._dense_ffn_ops("generation_swa", c, h, tp, d["dense_inter_per_tp"], gemm_q)
+            )
 
         # --- global attention + dense FFN ---
         if counts["global_dense"] > 0:
             c = counts["global_dense"]
-            self.generation_ops.extend([
-                ops.ElementWise("generation_global_dense_attn_norm", c, 2 * h, 2 * h, 0.8),
-                ops.GEMM("generation_global_dense_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
-                ops.GenerationAttention("generation_attention", c, self._num_heads // tp,
-                                        d["global_n_kv_per_gpu"], kvcache_q,
-                                        window_size=0, head_size=d["global_hd"]),
-                ops.GEMM(
-                    "generation_global_dense_proj_gemm", c, h, d["global_proj_in"],
-                    gemm_q, low_precision_input=True,
-                ),
-                ops.ElementWise("generation_global_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
-            ] + self._dense_ffn_ops("generation_global", c, h, tp, d["dense_inter_per_tp"], gemm_q))
+            self.generation_ops.extend(
+                [
+                    ops.ElementWise("generation_global_dense_attn_norm", c, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_global_dense_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
+                    ops.GenerationAttention(
+                        "generation_attention",
+                        c,
+                        self._num_heads // tp,
+                        d["global_n_kv_per_gpu"],
+                        kvcache_q,
+                        window_size=0,
+                        head_size=d["global_hd"],
+                    ),
+                    ops.GEMM(
+                        "generation_global_dense_proj_gemm",
+                        c,
+                        h,
+                        d["global_proj_in"],
+                        gemm_q,
+                        low_precision_input=True,
+                    ),
+                    ops.ElementWise("generation_global_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
+                ]
+                + self._dense_ffn_ops("generation_global", c, h, tp, d["dense_inter_per_tp"], gemm_q)
+            )
 
-        self.generation_ops.extend([
-            ops.GEMM("generation_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
-            ops.P2P("generation_p2p", pp - 1, h, pp),
-        ])
+        self.generation_ops.extend(
+            [
+                ops.GEMM("generation_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.P2P("generation_p2p", pp - 1, h, pp),
+            ]
+        )
 
 
 if __name__ == "__main__":
