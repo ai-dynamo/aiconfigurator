@@ -563,6 +563,7 @@ class MoEDispatch(Operation):
         self._moe_backend = kwargs.get("moe_backend")
         self._is_context = kwargs.get("is_context", True)
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
+        self._quant_mode = kwargs.get("quant_mode")
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         num_tokens = kwargs.get("x")

@@ -1137,7 +1137,7 @@ class DeepSeekModel(BaseModel):
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),  # on every gpu, fused_a
+                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
                 ops.GEMM(
                     "context_q_b_proj_gemm",
                     self._num_layers,
@@ -1166,20 +1166,15 @@ class DeepSeekModel(BaseModel):
             ]
         )
 
-        # shared moe
+        # Context shared moe: gate+up fused into one GEMM (matches TRT-LLM GatedMLP).
+        # Context phase runs sequentially (no CUDA Graph), so no OverlapOp here
+        # unlike the generation phase which overlaps shared/routed on parallel streams.
         self.context_ops.extend(
             [
                 ops.GEMM(
-                    "context_shared_gate_gemm",
+                    "context_shared_gate_up_gemm",
                     self._num_layers,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GEMM(
-                    "context_shared_ffn1_gemm",
-                    self._num_layers,
-                    self._moe_inter_size // tp_size,
+                    2 * self._moe_inter_size // tp_size,
                     h,
                     gemm_quant_mode,
                 ),
@@ -1226,6 +1221,7 @@ class DeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     True,
+                    quant_mode=moe_quant_mode,
                 )
             ]
         )
@@ -1262,6 +1258,7 @@ class DeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     False,
+                    quant_mode=moe_quant_mode,
                 )
             ]
         )
@@ -1294,7 +1291,7 @@ class DeepSeekModel(BaseModel):
                     2112,
                     h,
                     gemm_quant_mode,
-                ),  # on every gpu
+                ),
                 ops.GEMM(
                     "generation_q_b_proj_gemm",
                     self._num_layers * self._mtp_scale_factor,
@@ -1339,104 +1336,85 @@ class DeepSeekModel(BaseModel):
             ]
         )
 
-        # shared moe
-        self.generation_ops.extend(
-            [
-                ops.GEMM(
-                    "generation_shared_gate_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GEMM(
-                    "generation_shared_ffn1_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._moe_inter_size // tp_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.ElementWise(
-                    "generation_shared_act_gate",
-                    self._num_layers * self._mtp_scale_factor,
-                    2 * self._moe_inter_size // tp_size,
-                    self._moe_inter_size // tp_size,
-                    0.8,
-                ),
-                ops.GEMM(
-                    "generation_shared_ffn2_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._moe_inter_size // tp_size,
-                    gemm_quant_mode,
-                ),
-            ]
-        )
+        # Generation MoE: shared experts and routed experts run in parallel
+        # on different CUDA streams (via maybe_execute_in_parallel) when CUDA
+        # Graph is enabled. Model with OverlapOp: latency = max(shared, routed).
 
-        # router gemm, num_experts is large enough, cannot be ignored anymore.
-        self.generation_ops.extend(
-            [
-                ops.GEMM(
-                    "generation_router_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._num_experts,
-                    h,
-                    common.GEMMQuantMode.float16,
-                )
-            ]
-        )
+        # group_b: shared expert path (aux CUDA stream)
+        gen_shared_ops = [
+            ops.GEMM(
+                "generation_shared_gate_up_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                2 * self._moe_inter_size // tp_size,
+                h,
+                gemm_quant_mode,
+            ),
+            ops.ElementWise(
+                "generation_shared_act_gate",
+                self._num_layers * self._mtp_scale_factor,
+                2 * self._moe_inter_size // tp_size,
+                self._moe_inter_size // tp_size,
+                0.8,
+            ),
+            ops.GEMM(
+                "generation_shared_ffn2_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._moe_inter_size // tp_size,
+                gemm_quant_mode,
+            ),
+        ]
 
-        # dispatch tokens to experts, pre-dispatch
-        self.generation_ops.extend(
-            [
-                ops.MoEDispatch(
-                    "generation_moe_pre_dispatch",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    True,
-                )
-            ]
-        )
+        # group_a: routed expert path (main CUDA stream)
+        gen_routed_ops = [
+            ops.GEMM(
+                "generation_router_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                self._num_experts,
+                h,
+                common.GEMMQuantMode.float16,
+            ),
+            ops.MoEDispatch(
+                "generation_moe_pre_dispatch",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                True,
+                quant_mode=moe_quant_mode,
+            ),
+            ops.MoE(
+                "generation_moe",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._moe_inter_size,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                moe_quant_mode,
+                workload_distribution,
+                attention_dp_size,
+            ),
+            ops.MoEDispatch(
+                "generation_moe_post_dispatch",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                False,
+                quant_mode=moe_quant_mode,
+            ),
+        ]
 
-        # moe part
-        self.generation_ops.extend(
-            [
-                ops.MoE(
-                    "generation_moe",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._moe_inter_size,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    moe_quant_mode,
-                    workload_distribution,
-                    attention_dp_size,
-                ),
-            ]
-        )
-
-        # dispatch tokens to experts, post-dispatch
-        self.generation_ops.extend(
-            [
-                ops.MoEDispatch(
-                    "generation_moe_post_dispatch",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    False,
-                )
-            ]
+        self.generation_ops.append(
+            ops.OverlapOp("generation_moe_overlap", group_a=gen_routed_ops, group_b=gen_shared_ops)
         )
 
         self.generation_ops.extend(
@@ -1450,16 +1428,6 @@ class DeepSeekModel(BaseModel):
                 )
             ]
         )
-
-        # when tp_size=0, the comm part will be 0
-        # self.context_ops.append(ops.CustomAllReduce('context_ar_1', self._num_layers, h, tp_size))
-        # self.context_ops.append(ops.CustomAllReduce('context_ar_2', self._num_layers, h, tp_size))
-        # self.generation_ops.append(
-        #     ops.CustomAllReduce('generation_ar_1', self._num_layers*self._mtp_scale_factor, h, tp_size)
-        # )
-        # self.generation_ops.append(
-        #     ops.CustomAllReduce('generation_ar_2', self._num_layers*self._mtp_scale_factor, h, tp_size)
-        # )
 
         # pp
         pp_scale_factor = pp_size - 1
@@ -1516,6 +1484,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             * (self._nextn + self._num_layers)
             / self._num_layers
         )
+        self._pdl_factor = 0.9
         self._power_law_alpha = 1.01
 
         gemm_quant_mode = self.config.gemm_quant_mode
@@ -1750,12 +1719,13 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         )
 
         # ===================== Generation Phase =====================
+        # _gen_layer_scale = num_layers * mtp_scale * pdl_factor
         self.generation_ops.extend(
             [
                 ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
                 ops.ElementWise(
                     "generation_add_norm_1",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     2 * h,
                     2 * h,
                     0.8,
@@ -1763,7 +1733,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 # kv_a_proj_with_mqa: projects hidden_size -> compressed_dim (1536+512+64=2112)
                 ops.GEMM(
                     "generation_downscale_gemm",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     2112,
                     h,
                     gemm_quant_mode,
@@ -1773,14 +1743,14 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 # so we model only q_a_layernorm as the dominant one.
                 ops.ElementWise(
                     "generation_q_a_layernorm",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     1536,
                     1536,
                     0.8,
                 ),
                 ops.GEMM(
                     "generation_q_b_proj_gemm",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     24576 // tp_size,
                     1536,
                     gemm_quant_mode,
@@ -1794,7 +1764,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     group_a=[
                         ops.MLABmm(
                             "generation_bmm_pre",
-                            self._num_layers * self._mtp_scale_factor,
+                            self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                             self._num_heads // tp_size,
                             mla_bmm_quant_mode,
                             if_pre=True,
@@ -1804,7 +1774,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                         # mla_rope_generation: RoPE on q_pe (64d) + KV cache write (512+64=576d)
                         ops.ElementWise(
                             "generation_rope_kvcache",
-                            self._num_layers * self._mtp_scale_factor,
+                            self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                             576,  # kv_lora_rank(512) + qk_rope_head_dim(64)
                             576,
                             0.8,
@@ -1813,27 +1783,27 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 ),
                 ops.GenerationMLA(
                     "generation_attention",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     128 // tp_size,
                     kvcache_quant_mode,
                 ),
                 ops.MLABmm(
                     "generation_bmm_post",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     self._num_heads // tp_size,
                     mla_bmm_quant_mode,
                     if_pre=False,
                 ),
                 ops.GEMM(
                     "generation_proj_gemm",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     h,
                     h // tp_size,
                     gemm_quant_mode,
                 ),
                 ops.ElementWise(
                     "generation_add_norm_2",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     2 * h,
                     2 * h,
                     0.8,
@@ -1853,21 +1823,21 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         _shared_expert_ops = [
             ops.GEMM(
                 "generation_shared_gate_up_gemm",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 2 * self._moe_inter_size,
                 h,
                 gemm_quant_mode,
             ),
             ops.ElementWise(
                 "generation_shared_act_gate",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 2 * self._moe_inter_size,
                 self._moe_inter_size,
                 0.8,
             ),
             ops.GEMM(
                 "generation_shared_ffn2_gemm",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 h,
                 self._moe_inter_size,
                 gemm_quant_mode,
@@ -1878,14 +1848,14 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         _routed_expert_ops = [
             ops.GEMM(
                 "generation_router_gemm",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 self._num_experts,
                 h,
                 common.GEMMQuantMode.float16,
             ),
             ops.TrtLLMWideEPMoEDispatch(
                 "generation_moe_pre_dispatch",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 h,
                 self._topk,
                 self._num_experts,
@@ -1897,7 +1867,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             ),
             ops.TrtLLMWideEPMoE(
                 "generation_moe",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 h,
                 self._moe_inter_size,
                 self._topk,
@@ -1911,7 +1881,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             ),
             ops.TrtLLMWideEPMoEDispatch(
                 "generation_moe_post_dispatch",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 h,
                 self._topk,
                 self._num_experts,
@@ -1920,7 +1890,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 attention_dp_size,
                 False,  # post_dispatch (combine)
                 quant_mode=moe_quant_mode,
-                use_low_precision_combine=True,
+                use_low_precision_combine=(moe_quant_mode == common.MoEQuantMode.nvfp4),
             ),
         ]
 
@@ -1937,7 +1907,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         self.generation_ops.append(
             ops.ElementWise(
                 "generation_moe_reduce_add",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 2 * h,
                 h,
                 0.8,

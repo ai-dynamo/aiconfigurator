@@ -128,7 +128,6 @@ class BaseBackend(ABC):
                         model_name=getattr(model, "model_name", ""),
                     )
 
-                    # ✅ IMMEDIATELY extract values - do NOT accumulate PerformanceResult objects!
                     latency_ms = float(result)
                     energy_wms = getattr(result, "energy", 0.0)
 
