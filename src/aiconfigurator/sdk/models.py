@@ -3134,18 +3134,50 @@ class HybridMoEModel(BaseModel):
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
+        assert (
+            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+        ), (
+            f"tp_size ({self.config.tp_size}) * attention_dp_size "
+            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
+            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        )
+        assert num_experts >= self.config.moe_ep_size, (
+            f"ep size cannot be larger than num_experts {num_experts}"
+        )
+        assert self.config.tp_size * self.config.attention_dp_size <= 256, (
+            f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
+            f"should not be larger than 256"
+        )
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
+        self._validate_fp8_block_quantized_moe_config()
         self._hybrid_config: common.HybridConfig | None = None
-        self._power_law_alpha = 1.01  # follow DeepSeek MoE
+        self._power_law_alpha = 1.01
+
+    def _validate_fp8_block_quantized_moe_config(self) -> None:
+        """Validate fp8_block MoE alignment: (moe_inter_size / moe_tp_size) % block_size == 0."""
+        if self.config.moe_quant_mode != common.MoEQuantMode.fp8_block:
+            return
+        raw_config = _load_model_config_from_model_path(self.model_path)
+        default_size = [128, 128]
+        weight_block_size = raw_config.get("quantization_config", {}).get("weight_block_size", default_size)[0]
+        moe_size_per_gpu = self._moe_inter_size // self.config.moe_tp_size
+        if (moe_size_per_gpu % weight_block_size) != 0:
+            raise ValueError(
+                f"Invalid quantized MoE configuration: "
+                f"(moe_intermediate_size={self._moe_inter_size} / moe_tp_size={self.config.moe_tp_size}) "
+                f"% weight_block_size={weight_block_size} != 0. "
+            )
 
     def set_hybrid_config(self, cfg: common.HybridConfig) -> None:
+        """Apply HybridConfig and rebuild context/generation ops."""
         self._hybrid_config = cfg
         self._build_context_ops()
         self._build_generation_ops()
 
     def _count_layer_types(self) -> dict[str, int]:
+        """Count layers per type: global_moe, swa_moe, swa_dense, global_dense."""
         cfg = self._hybrid_config
         counts: dict[str, int] = {"global_moe": 0, "swa_moe": 0, "swa_dense": 0, "global_dense": 0}
         for attn, moe in zip(cfg.attn_layer_pattern, cfg.moe_layer_freq):
@@ -3160,7 +3192,11 @@ class HybridMoEModel(BaseModel):
         return counts
 
     def _resolve_dims(self, tp_size: int) -> dict:
-        """Resolve SWA/local attention dims, falling back to model-level defaults when 0."""
+        """Resolve SWA/local attention dims, falling back to model-level defaults when 0.
+
+        Returns a dict with per-TP KV head counts, QKV GEMM output widths, proj GEMM input widths,
+        Q/K head dims for attention kernels, and dense FFN intermediate size per TP.
+        """
         cfg = self._hybrid_config
         swa_n_kv = cfg.swa_num_kv_heads if cfg.swa_num_kv_heads > 0 else self._num_kv_heads
         swa_hd = cfg.swa_head_dim if cfg.swa_head_dim > 0 else self._head_size
@@ -3177,8 +3213,8 @@ class HybridMoEModel(BaseModel):
             + global_n_kv_per_gpu * (self._head_size + global_v_hd),
             "swa_proj_in": self._num_heads * swa_v_hd // tp_size,
             "global_proj_in": self._num_heads * global_v_hd // tp_size,
-            "swa_v_hd": swa_v_hd,
-            "global_v_hd": global_v_hd,
+            "swa_hd": swa_hd,
+            "global_hd": self._head_size,
             "dense_inter_per_tp": dense_inter // tp_size,
         }
 
@@ -3201,15 +3237,15 @@ class HybridMoEModel(BaseModel):
 
     def _dense_ffn_ops(self, prefix: str, count: float, h: int, tp: int,
                        dense_inter_per_tp: int, gemm_q: common.GEMMQuantMode) -> list:
-        """Return gate + up + activation + down ops for dense SwiGLU FFN."""
+        """Return fused gate_up + activation + down ops for dense SwiGLU FFN."""
         return [
-            ops.GEMM(f"{prefix}_dense_gate_gemm", count, dense_inter_per_tp, h, gemm_q),
-            ops.GEMM(f"{prefix}_dense_up_gemm", count, dense_inter_per_tp, h, gemm_q),
-            ops.ElementWise(f"{prefix}_dense_act", count, dense_inter_per_tp, dense_inter_per_tp, 0.8),
+            ops.GEMM(f"{prefix}_dense_gate_up_gemm", count, 2 * dense_inter_per_tp, h, gemm_q),
+            ops.ElementWise(f"{prefix}_dense_act", count, 2 * dense_inter_per_tp, dense_inter_per_tp, 0.8),
             ops.GEMM(f"{prefix}_dense_down_gemm", count, h, dense_inter_per_tp, gemm_q, low_precision_input=True),
         ]
 
     def _build_context_ops(self) -> None:
+        """Build the context (prefill) operations for all four layer types."""
         if not self._hybrid_config:
             return
 
@@ -3242,7 +3278,7 @@ class HybridMoEModel(BaseModel):
                 ops.GEMM("context_global_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
                 ops.ContextAttention("context_attention", c, self._num_heads // tp,
                                      d["global_n_kv_per_gpu"], kvcache_q, fmha_q,
-                                     window_size=0, head_size=d["global_v_hd"]),
+                                     window_size=0, head_size=d["global_hd"]),
                 ops.GEMM("context_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
                 ops.ElementWise("context_global_moe_norm", c, 2 * h, 2 * h, 0.8),
             ] + self._moe_ops("context_global", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist))
@@ -3255,7 +3291,7 @@ class HybridMoEModel(BaseModel):
                 ops.GEMM("context_swa_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
                 ops.ContextAttention("context_attention", c, self._num_heads // tp,
                                      d["swa_n_kv_per_gpu"], kvcache_q, fmha_q,
-                                     window_size=cfg.sliding_window_size, head_size=d["swa_v_hd"]),
+                                     window_size=cfg.sliding_window_size, head_size=d["swa_hd"]),
                 ops.GEMM("context_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                 ops.ElementWise("context_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
             ] + self._moe_ops("context_swa", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist))
@@ -3268,7 +3304,7 @@ class HybridMoEModel(BaseModel):
                 ops.GEMM("context_swa_dense_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
                 ops.ContextAttention("context_attention", c, self._num_heads // tp,
                                      d["swa_n_kv_per_gpu"], kvcache_q, fmha_q,
-                                     window_size=cfg.sliding_window_size, head_size=d["swa_v_hd"]),
+                                     window_size=cfg.sliding_window_size, head_size=d["swa_hd"]),
                 ops.GEMM("context_swa_dense_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                 ops.ElementWise("context_swa_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
             ] + self._dense_ffn_ops("context_swa", c, h, tp, d["dense_inter_per_tp"], gemm_q))
@@ -3281,7 +3317,7 @@ class HybridMoEModel(BaseModel):
                 ops.GEMM("context_global_dense_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
                 ops.ContextAttention("context_attention", c, self._num_heads // tp,
                                      d["global_n_kv_per_gpu"], kvcache_q, fmha_q,
-                                     window_size=0, head_size=d["global_v_hd"]),
+                                     window_size=0, head_size=d["global_hd"]),
                 ops.GEMM("context_global_dense_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
                 ops.ElementWise("context_global_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
             ] + self._dense_ffn_ops("context_global", c, h, tp, d["dense_inter_per_tp"], gemm_q))
@@ -3292,6 +3328,7 @@ class HybridMoEModel(BaseModel):
         ])
 
     def _build_generation_ops(self) -> None:
+        """Build the generation (decoding) operations for all four layer types."""
         if not self._hybrid_config:
             return
 
@@ -3323,7 +3360,7 @@ class HybridMoEModel(BaseModel):
                 ops.GEMM("generation_global_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
                 ops.GenerationAttention("generation_attention", c, self._num_heads // tp,
                                         d["global_n_kv_per_gpu"], kvcache_q,
-                                        window_size=0, head_size=d["global_v_hd"]),
+                                        window_size=0, head_size=d["global_hd"]),
                 ops.GEMM("generation_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
                 ops.ElementWise("generation_global_moe_norm", c, 2 * h, 2 * h, 0.8),
             ] + self._moe_ops("generation_global", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist))
@@ -3336,7 +3373,7 @@ class HybridMoEModel(BaseModel):
                 ops.GEMM("generation_swa_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
                 ops.GenerationAttention("generation_attention", c, self._num_heads // tp,
                                         d["swa_n_kv_per_gpu"], kvcache_q,
-                                        window_size=cfg.sliding_window_size, head_size=d["swa_v_hd"]),
+                                        window_size=cfg.sliding_window_size, head_size=d["swa_hd"]),
                 ops.GEMM("generation_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                 ops.ElementWise("generation_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
             ] + self._moe_ops("generation_swa", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist))
@@ -3349,7 +3386,7 @@ class HybridMoEModel(BaseModel):
                 ops.GEMM("generation_swa_dense_qkv_gemm", c, d["swa_qkv_out"], h, gemm_q),
                 ops.GenerationAttention("generation_attention", c, self._num_heads // tp,
                                         d["swa_n_kv_per_gpu"], kvcache_q,
-                                        window_size=cfg.sliding_window_size, head_size=d["swa_v_hd"]),
+                                        window_size=cfg.sliding_window_size, head_size=d["swa_hd"]),
                 ops.GEMM("generation_swa_dense_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                 ops.ElementWise("generation_swa_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
             ] + self._dense_ffn_ops("generation_swa", c, h, tp, d["dense_inter_per_tp"], gemm_q))
@@ -3362,8 +3399,11 @@ class HybridMoEModel(BaseModel):
                 ops.GEMM("generation_global_dense_qkv_gemm", c, d["global_qkv_out"], h, gemm_q),
                 ops.GenerationAttention("generation_attention", c, self._num_heads // tp,
                                         d["global_n_kv_per_gpu"], kvcache_q,
-                                        window_size=0, head_size=d["global_v_hd"]),
-                ops.GEMM("generation_global_dense_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
+                                        window_size=0, head_size=d["global_hd"]),
+                ops.GEMM(
+                    "generation_global_dense_proj_gemm", c, h, d["global_proj_in"],
+                    gemm_q, low_precision_input=True,
+                ),
                 ops.ElementWise("generation_global_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
             ] + self._dense_ffn_ops("generation_global", c, h, tp, d["dense_inter_per_tp"], gemm_q))
 

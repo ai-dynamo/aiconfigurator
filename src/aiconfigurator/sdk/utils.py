@@ -320,6 +320,7 @@ class HuggingFaceDownloadError(Exception):
 
 
 def _get_hf_auth_headers() -> dict[str, str]:
+    """Return HTTP auth headers using the cached HuggingFace token, if available."""
     # Load token from ~/.cache/huggingface/token, if available
     token_path = Path.home() / ".cache" / "huggingface" / "token"
     hf_token = None
@@ -333,6 +334,7 @@ def _get_hf_auth_headers() -> dict[str, str]:
 
 
 def _download_hf_json(hf_id: str, filename: str, *, raise_on_404: bool = True) -> dict | None:
+    """Download and parse a JSON file from a HuggingFace model repo."""
     url = f"https://huggingface.co/{hf_id}/raw/main/{filename}"
     try:
         req = urllib.request.Request(url, headers=_get_hf_auth_headers())
@@ -514,8 +516,18 @@ def _parse_hf_config_json(config: dict) -> dict:
             if isinstance(moe_layer_freq_raw, list)
             else tuple([moe_layer_freq_raw] * layers)
         )
+        attn_pattern = tuple(config.get("hybrid_layer_pattern", []))
+        if len(attn_pattern) != layers or len(moe_layer_freq) != layers:
+            raise ValueError(
+                f"Hybrid pattern length mismatch for {architecture}: "
+                f"expected {layers} entries, got attn={len(attn_pattern)} moe={len(moe_layer_freq)}"
+            )
+        if any(v not in (0, 1) for v in (*attn_pattern, *moe_layer_freq)):
+            raise ValueError(
+                f"Hybrid patterns for {architecture} must contain only 0/1 values"
+            )
         extra_params = HybridConfig(
-            attn_layer_pattern=tuple(config.get("hybrid_layer_pattern", [])),
+            attn_layer_pattern=attn_pattern,
             moe_layer_freq=moe_layer_freq,
             swa_num_kv_heads=config.get("swa_num_key_value_heads", 0),
             swa_head_dim=config.get("swa_head_dim", 0),
@@ -536,6 +548,10 @@ def _parse_hf_config_json(config: dict) -> dict:
         # Attention: even layers → local (0), odd layers → global (1).
         # FFN: layer i is MoE (1) if (i+1) % interleave_moe_layer_step == 0, else dense (0).
         step = config.get("interleave_moe_layer_step", 1)
+        if not isinstance(step, int) or step <= 0:
+            raise ValueError(
+                f"interleave_moe_layer_step must be a positive integer, got {step}"
+            )
         attn_pattern = tuple(i % 2 for i in range(layers))
         moe_freq = tuple(1 if (i + 1) % step == 0 else 0 for i in range(layers))
         extra_params = HybridConfig(
@@ -576,6 +592,7 @@ def _get_model_config_path():
 
 
 def _load_pre_downloaded_hf_config(hf_id: str) -> dict:
+    """Load a cached HuggingFace config.json from the model_configs package directory."""
     config_path = _get_model_config_path() / f"{hf_id.replace('/', '--')}_config.json"
     if not config_path.exists():
         raise ValueError(f"HuggingFace model {hf_id} is not cached in model_configs directory.")
@@ -583,6 +600,7 @@ def _load_pre_downloaded_hf_config(hf_id: str) -> dict:
 
 
 def _load_pre_downloaded_hf_quant_config(hf_id: str) -> dict | None:
+    """Load a cached hf_quant_config.json, returning None if not present."""
     config_path = _get_model_config_path() / f"{hf_id.replace('/', '--')}_hf_quant_config.json"
     if not config_path.exists():
         return None
@@ -606,6 +624,7 @@ def _load_local_quant_config(path: str) -> dict | None:
 
 
 def _normalize_hf_quant_config(hf_quant_config: dict) -> dict:
+    """Extract and normalize quant_method/kv_cache_quant_method from hf_quant_config."""
     quant_section = hf_quant_config.get("quantization")
     if not isinstance(quant_section, dict):
         return {}
@@ -620,6 +639,7 @@ def _normalize_hf_quant_config(hf_quant_config: dict) -> dict:
 
 
 def _normalize_quant_algo(value: object) -> str | None:
+    """Normalize a quantization algorithm string to a canonical form."""
     if value is None:
         return None
     algo = str(value).strip().lower()
@@ -636,6 +656,7 @@ def _normalize_quant_algo(value: object) -> str | None:
 
 
 def _normalize_kv_cache_algo(value: object) -> str | None:
+    """Normalize a KV cache quantization algorithm string."""
     if value is None:
         return None
     algo = str(value).strip().lower()
@@ -680,6 +701,7 @@ def _infer_quant_dynamic(quant_cfg: dict) -> bool | None:
 
 
 def _infer_quantization_fields(raw_config: dict) -> dict[str, object]:
+    """Infer quant_method, kv_cache_quant_method, and quant_dynamic from config."""
     quant_cfg = raw_config.get("quantization_config")
     quant_cfg = quant_cfg if isinstance(quant_cfg, dict) else {}
 
@@ -740,6 +762,7 @@ def _infer_quantization_fields(raw_config: dict) -> dict[str, object]:
 
 
 def _attach_inferred_quant_fields(raw_config: dict) -> dict:
+    """Attach inferred quantization fields to config, checking text_config for multimodal models."""
     # For multimodal models the quantization_config may live under text_config.
     # Promote it to the top level so downstream inference picks it up.
     if "quantization_config" not in raw_config:
@@ -756,6 +779,7 @@ def _attach_inferred_quant_fields(raw_config: dict) -> dict:
 
 
 def _attach_hf_quant_config(raw_config: dict, hf_quant_config: dict | None) -> dict:
+    """Merge normalized hf_quant_config fields into raw_config if present."""
     if not hf_quant_config:
         return raw_config
     raw_config["hf_quant_config"] = hf_quant_config
