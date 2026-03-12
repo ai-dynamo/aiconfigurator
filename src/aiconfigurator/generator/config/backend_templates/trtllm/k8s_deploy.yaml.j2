@@ -87,6 +87,10 @@ readinessProbe:
         limits:
           gpu: "{{ gpu }}"
       extraPodSpec:
+        {% if K8sConfig.k8s_tolerations %}
+        tolerations:
+{{ K8sConfig.k8s_tolerations | indent(10, True) }}
+        {% endif %}
 {{ render_volumes() | indent(8, True) }}
         {% if K8sConfig.k8s_image_pull_secret %}
         imagePullSecrets:
@@ -164,6 +168,10 @@ spec:
       componentType: frontend
       replicas: {{ frontend_replicas }}
       extraPodSpec:
+        {% if K8sConfig.k8s_tolerations %}
+        tolerations:
+{{ K8sConfig.k8s_tolerations | indent(10, True) }}
+        {% endif %}
         {% if k8s_use_model_cache %}
         volumes:
           - name: model-cache
