@@ -109,7 +109,9 @@ def get_moe_test_cases():
         moe_list += ["w4a16_mxfp4"]
 
     if sm_version >= 100:
-        moe_list += ["nvfp4", "w4a16_mxfp4"]
+        moe_list += ["nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
+
+    _GPTOSS_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}  # noqa: N806
 
     test_cases = []
 
@@ -120,10 +122,10 @@ def get_moe_test_cases():
 
         for moe_type in moe_list:
             if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
-                if moe_type != "w4a16_mxfp4":
+                if moe_type not in _GPTOSS_MOE_TYPES:
                     continue
             else:
-                if moe_type == "w4a16_mxfp4":
+                if moe_type in _GPTOSS_MOE_TYPES:
                     continue
 
             # w4afp8 requires k shape to be multiple of 128
@@ -234,6 +236,9 @@ def run_moe_torch(
         quant_group_size = 16
     elif moe_type == "w4a16_mxfp4":
         quant_algo = QuantAlgo.W4A16_MXFP4
+        quant_group_size = 32
+    elif moe_type == "w4a8_mxfp4_mxfp8":
+        quant_algo = QuantAlgo.W4A8_MXFP4_MXFP8
         quant_group_size = 32
 
     if power_law_alpha - 0.0 < 1e-6:
