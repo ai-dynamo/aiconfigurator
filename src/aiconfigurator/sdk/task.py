@@ -552,13 +552,6 @@ _quants = {
         "fmha_quant_mode": "float16",
         "comm_quant_mode": "half",
     },
-    "mxfp4_mxfp8": {
-        "gemm_quant_mode": "float16",
-        "moe_quant_mode": "w4a8_mxfp4_mxfp8",
-        "kvcache_quant_mode": "float16",
-        "fmha_quant_mode": "float16",
-        "comm_quant_mode": "half",
-    },
 }
 
 
