@@ -38,6 +38,7 @@ def setup_warning_filters():
 
 
 import random
+import resource
 
 import torch
 from tqdm import tqdm
@@ -275,6 +276,10 @@ def worker(
     consumed_sentinel=None,
 ):
     """worker with automatic logging setup"""
+
+    # Disable core dumps — GPU crashes are expected and handled via error_queue;
+    # without this, each SIGSEGV/SIGABRT writes a multi-GB core file to disk.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
     setup_warning_filters()  # Must run in each spawned process
 
@@ -1010,6 +1015,9 @@ def main():
             "Profiling all test cases can be very slow. "
             "Consider using --limit to restrict the number of test cases."
         )
+
+    # Disable core dumps — GPU crashes are expected and handled; core files waste disk.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
     # Only set multiprocessing start method if not profiling (profiling uses sequential mode via num_processes=0)
     if not args.profile:
