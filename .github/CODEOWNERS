@@ -1,92 +1,101 @@
 # See https://help.github.com/articles/about-codeowners/
 # for more info about CODEOWNERS file
+#
+# Team structure (all under @ai-dynamo/):
+#   contributors-aiconfigurator  — all contributors; default catch-all (already exists)
+#   aic-core                     — tianhaox, jasonqinzhou, Arsene12358, simone-chen, Harrilee, ilyasher
+#   aic-sglang                   — xutizhou, AichenF  (+ aic-core for cross-review)
+#   aic-vllm                     — ilyasher, davilu-nvidia  (+ aic-core for cross-review)
+#   aic-systems                  — YijiaZhao  (+ aic-core for cross-review)
+#   aic-automation               — Ethan-ES  (+ aic-core for cross-review)
+#   Devops                       — anish-shanbhag, ilyasher  (already exists)
 
 # Default ownership for entire repository
 * @ai-dynamo/contributors-aiconfigurator
 
-# aic sdk
-/src @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
-/src/aiconfigurator/sdk/backends/base_backend.py @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/src/aiconfigurator/sdk/backends/factory.py @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/src/aiconfigurator/sdk/backends/sglang_backend.py @xutizhou @AichenF @jasonqinzhou @tianhaox @Arsene12358 @simone-chen @Harrilee
-/src/aiconfigurator/sdk/backends/trtllm_backend.py @tianhaox @jasonqinzhou @ilyasher @Arsene12358 @simone-chen @Harrilee
-/src/aiconfigurator/sdk/backends/vllm_backend.py @jasonqinzhou @ilyasher @davilu-nvidia @Arsene12358 @tianhaox @simone-chen @Harrilee
-/src/aiconfigurator/sdk/common.py @Arsene12358 @simone-chen @xutizhou @AichenF @jasonqinzhou @tianhaox @Harrilee
-/src/aiconfigurator/sdk/config.py @YijiaZhao @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/src/aiconfigurator/sdk/inference_session.py @tianhaox @xutizhou @AichenF @Arsene12358 @jasonqinzhou @simone-chen @Harrilee
-/src/aiconfigurator/sdk/inference_summary.py @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/src/aiconfigurator/sdk/models.py @Arsene12358 @simone-chen @xutizhou @AichenF @YijiaZhao @tianhaox @jasonqinzhou @Harrilee
-/src/aiconfigurator/sdk/operations.py @xutizhou @AichenF @YijiaZhao @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/src/aiconfigurator/sdk/pareto_analysis.py @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/src/aiconfigurator/sdk/perf_database.py @Arsene12358 @YijiaZhao @ilyasher @xutizhou @AichenF @tianhaox @jasonqinzhou @simone-chen @Harrilee
-/src/aiconfigurator/sdk/task.py @tianhaox @jasonqinzhou @ilyasher @Arsene12358 @simone-chen @Harrilee
-/src/aiconfigurator/sdk/utils.py @tianhaox @jasonqinzhou @simone-chen @Arsene12358 @Harrilee
+# aic sdk — core modules owned by aic-core; backend specialists co-own their file
+/src @ai-dynamo/aic-core
+/src/aiconfigurator/sdk/backends/base_backend.py @ai-dynamo/aic-core
+/src/aiconfigurator/sdk/backends/factory.py @ai-dynamo/aic-core
+/src/aiconfigurator/sdk/backends/sglang_backend.py @ai-dynamo/aic-sglang @ai-dynamo/aic-core
+/src/aiconfigurator/sdk/backends/trtllm_backend.py @ai-dynamo/aic-core @ai-dynamo/aic-vllm
+/src/aiconfigurator/sdk/backends/vllm_backend.py @ai-dynamo/aic-vllm @ai-dynamo/aic-core
+/src/aiconfigurator/sdk/common.py @ai-dynamo/aic-core @ai-dynamo/aic-sglang
+/src/aiconfigurator/sdk/config.py @ai-dynamo/aic-systems @ai-dynamo/aic-core
+/src/aiconfigurator/sdk/inference_session.py @ai-dynamo/aic-core @ai-dynamo/aic-sglang
+/src/aiconfigurator/sdk/inference_summary.py @ai-dynamo/aic-core
+/src/aiconfigurator/sdk/models.py @ai-dynamo/aic-core @ai-dynamo/aic-sglang @ai-dynamo/aic-systems
+/src/aiconfigurator/sdk/operations.py @ai-dynamo/aic-sglang @ai-dynamo/aic-systems @ai-dynamo/aic-core
+/src/aiconfigurator/sdk/pareto_analysis.py @ai-dynamo/aic-sglang @ai-dynamo/aic-core
+/src/aiconfigurator/sdk/perf_database.py @ai-dynamo/aic-core @ai-dynamo/aic-systems @ai-dynamo/aic-sglang
+/src/aiconfigurator/sdk/task.py @ai-dynamo/aic-core @ai-dynamo/aic-vllm
+/src/aiconfigurator/sdk/utils.py @ai-dynamo/aic-core
 
 # cli
-/src/aiconfigurator/cli @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
+/src/aiconfigurator/cli @ai-dynamo/aic-automation @ai-dynamo/aic-core
 
 # eval
-/src/aiconfigurator/eval @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
+/src/aiconfigurator/eval @ai-dynamo/aic-automation @ai-dynamo/aic-core
 
 # webapp
-/src/aiconfigurator/webapp @tianhaox @jasonqinzhou @Arsene12358 @Harrilee @simone-chen @ilyasher
-/src/aiconfigurator/webapp/components/profiling @Harrilee @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @ilyasher
+/src/aiconfigurator/webapp @ai-dynamo/aic-core
+/src/aiconfigurator/webapp/components/profiling @ai-dynamo/aic-core
 
 # systems & data files
-/src/aiconfigurator/systems @tianhaox @jasonqinzhou @YijiaZhao @ilyasher @simone-chen @Harrilee @Arsene12358
+/src/aiconfigurator/systems @ai-dynamo/aic-systems @ai-dynamo/aic-core
 
 # model configs
-/src/aiconfigurator/model_configs @simone-chen @tianhaox @jasonqinzhou @Arsene12358 @Harrilee @ilyasher
+/src/aiconfigurator/model_configs @ai-dynamo/aic-core
 
 # generator
-/src/aiconfigurator/generator @Ethan-ES @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
+/src/aiconfigurator/generator @ai-dynamo/aic-automation @ai-dynamo/aic-core
 
 # collector
-/collector/ @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @simone-chen @Harrilee @ilyasher
-/collector/deep_collector @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/collector/sglang @xutizhou @AichenF @tianhaox @jasonqinzhou @Arsene12358 @YijiaZhao @davilu-nvidia @simone-chen @Harrilee
-/collector/slurm_comm_collector @YijiaZhao @Arsene12358 @tianhaox @jasonqinzhou @simone-chen @Harrilee
-/collector/trtllm @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou @simone-chen @Harrilee
-/collector/vllm @jasonqinzhou @ilyasher @davilu-nvidia @tianhaox @Arsene12358 @simone-chen @Harrilee
-/collector/collect_all_reduce.py @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou @simone-chen @Harrilee
-/collector/collect_comm.sh @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou @simone-chen @Harrilee
-/collector/collect_nccl.py @YijiaZhao @Arsene12358 @tianhaox @jasonqinzhou @simone-chen @Harrilee
-/collector/collect.py @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou @simone-chen @Harrilee
-/collector/helper.py @Arsene12358 @YijiaZhao @xutizhou @AichenF @tianhaox @jasonqinzhou @simone-chen @Harrilee
-/collector/README.md @Arsene12358 @YijiaZhao @tianhaox @jasonqinzhou @simone-chen @Harrilee
+/collector/ @ai-dynamo/aic-core @ai-dynamo/aic-systems
+/collector/deep_collector @ai-dynamo/aic-sglang @ai-dynamo/aic-core
+/collector/sglang @ai-dynamo/aic-sglang @ai-dynamo/aic-systems @ai-dynamo/aic-core @davilu-nvidia
+/collector/slurm_comm_collector @ai-dynamo/aic-systems @ai-dynamo/aic-core
+/collector/trtllm @ai-dynamo/aic-core @ai-dynamo/aic-systems
+/collector/vllm @ai-dynamo/aic-vllm @ai-dynamo/aic-core
+/collector/collect_all_reduce.py @ai-dynamo/aic-systems @ai-dynamo/aic-core
+/collector/collect_comm.sh @ai-dynamo/aic-systems @ai-dynamo/aic-core
+/collector/collect_nccl.py @ai-dynamo/aic-systems @ai-dynamo/aic-core
+/collector/collect.py @ai-dynamo/aic-systems @ai-dynamo/aic-core
+/collector/helper.py @ai-dynamo/aic-systems @ai-dynamo/aic-sglang @ai-dynamo/aic-core
+/collector/README.md @ai-dynamo/aic-systems @ai-dynamo/aic-core
 
 # docs
-/docs @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
-/docs/add_a_new_model.md @Arsene12358 @tianhaox @jasonqinzhou @simone-chen @Harrilee
-/docs/advanced_tunning.md @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/docs/cli_user_guide.md @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/docs/dynamo_deployment_guide.md @Ethan-ES @davilu-nvidia @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
+/docs @ai-dynamo/aic-core
+/docs/add_a_new_model.md @ai-dynamo/aic-core
+/docs/advanced_tunning.md @ai-dynamo/aic-core
+/docs/cli_user_guide.md @ai-dynamo/aic-core
+/docs/dynamo_deployment_guide.md @ai-dynamo/aic-automation @ai-dynamo/aic-vllm @ai-dynamo/aic-core
 
 # docker
-/docker @jasonqinzhou @anish-shanbhag @ilyasher @ai-dynamo/Devops @tianhaox @Arsene12358 @simone-chen @Harrilee
+/docker @ai-dynamo/Devops @ai-dynamo/aic-core
 
 # tests
-/tests @tianhaox @jasonqinzhou @YijiaZhao @Arsene12358 @ilyasher @Harrilee @ai-dynamo/Devops @simone-chen
+/tests @ai-dynamo/aic-core @ai-dynamo/aic-systems @ai-dynamo/Devops
 
 # tools
-/tools @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
-/tools/generator_validator @Ethan-ES @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/tools/automation @tianhaox @Ethan-ES @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/tools/sanity_check @tianhaox @YijiaZhao @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/tools/simple_sdk_demo @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
-/tools/support_matrix/generate_support_matrix.py @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee
+/tools @ai-dynamo/aic-core
+/tools/generator_validator @ai-dynamo/aic-automation @ai-dynamo/aic-core
+/tools/automation @ai-dynamo/aic-automation @ai-dynamo/aic-core
+/tools/sanity_check @ai-dynamo/aic-systems @ai-dynamo/aic-core
+/tools/simple_sdk_demo @ai-dynamo/aic-core
+/tools/support_matrix/generate_support_matrix.py @ai-dynamo/aic-core
 
 # misc
-/ATTRIBUTIONS.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
-/CODE_OF_CONDUCT.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
-/CONTRIBUTING.md @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
-/DEVELOPMENT.md @ai-dynamo/Devops @anish-shanbhag @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
-/LICENSE @ai-dynamo/Devops 
-/pyproject.toml @tianhaox @jasonqinzhou @ai-dynamo/Devops @Arsene12358 @simone-chen @Harrilee @ilyasher
-/pytest.ini @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
-/README.md @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
-/SECURITY.md @ai-dynamo/Devops @simone-chen @Harrilee @ilyasher
-/.pre-commit-config.yaml @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @simone-chen @Harrilee @ilyasher
+/ATTRIBUTIONS.md @ai-dynamo/Devops @ai-dynamo/aic-core
+/CODE_OF_CONDUCT.md @ai-dynamo/Devops @ai-dynamo/aic-core
+/CONTRIBUTING.md @ai-dynamo/Devops @ai-dynamo/aic-core
+/DEVELOPMENT.md @ai-dynamo/Devops @ai-dynamo/aic-core
+/LICENSE @ai-dynamo/Devops
+/pyproject.toml @ai-dynamo/Devops @ai-dynamo/aic-core
+/pytest.ini @ai-dynamo/Devops @ai-dynamo/aic-core
+/README.md @ai-dynamo/aic-core
+/SECURITY.md @ai-dynamo/Devops @ai-dynamo/aic-core
+/.pre-commit-config.yaml @ai-dynamo/Devops @ai-dynamo/aic-core
 
 # CI/CD and workflows
-/.github/workflows @ai-dynamo/Devops @tianhaox @jasonqinzhou @Arsene12358 @Harrilee @simone-chen @ilyasher
+/.github/workflows @ai-dynamo/Devops @ai-dynamo/aic-core
