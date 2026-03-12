@@ -150,6 +150,7 @@ def get_moe_test_cases():
                 "fp8": 8,
                 "fp8_block": 8,
                 "w4a16_mxfp4": 4,
+                "w4a8_mxfp4_mxfp8": 4,
                 "w4afp8": 4,
                 "nvfp4": 4,
             }[moe_type]
