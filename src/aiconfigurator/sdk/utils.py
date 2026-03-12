@@ -17,7 +17,7 @@ from aiconfigurator.sdk.common import (
     MULTIMODAL_TEXT_CONFIG_KEY,
     BlockConfig,
     DefaultHFModels,
-    Llama4Config,
+    HybridConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -506,18 +506,50 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])
-    elif architecture == "Llama4ForConditionalGeneration":
-        extra_params = Llama4Config(
-            interleave_moe_layer_step=config.get("interleave_moe_layer_step", 1),
-            dense_inter_size=config.get("intermediate_size_mlp", 0),
-            attention_chunk_size=config.get("attention_chunk_size", 0),
+    elif architecture == "MiMoV2FlashForCausalLM":
+        # MiMo-V2-Flash: per-layer attention + FFN patterns; different dims for SWA vs global.
+        moe_layer_freq_raw = config.get("moe_layer_freq", [])
+        moe_layer_freq = (
+            tuple(moe_layer_freq_raw)
+            if isinstance(moe_layer_freq_raw, list)
+            else tuple([moe_layer_freq_raw] * layers)
         )
-        moe_count = sum(1 for i in range(layers) if (i + 1) % extra_params.interleave_moe_layer_step == 0)
+        extra_params = HybridConfig(
+            attn_layer_pattern=tuple(config.get("hybrid_layer_pattern", [])),
+            moe_layer_freq=moe_layer_freq,
+            swa_num_kv_heads=config.get("swa_num_key_value_heads", 0),
+            swa_head_dim=config.get("swa_head_dim", 0),
+            swa_v_head_dim=config.get("swa_v_head_dim", 0),
+            global_v_head_dim=config.get("v_head_dim", 0),
+            sliding_window_size=config.get("sliding_window_size", 0),
+            dense_inter_size=0,  # dense layers use model-level inter_size
+        )
         logger.info(
-            f"Llama4 config: interleave_moe_layer_step={extra_params.interleave_moe_layer_step}, "
-            f"moe_layers={moe_count}, dense_layers={layers - moe_count}, "
-            f"local_attn_layers={layers // 2}, global_attn_layers={layers - layers // 2}, "
-            f"attention_chunk_size={extra_params.attention_chunk_size}"
+            f"MiMo-V2-Flash hybrid config: "
+            f"global_attn_layers={sum(extra_params.attn_layer_pattern)}, "
+            f"swa_layers={extra_params.attn_layer_pattern.count(0)}, "
+            f"moe_layers={sum(extra_params.moe_layer_freq)}, "
+            f"dense_layers={extra_params.moe_layer_freq.count(0)}"
+        )
+    elif architecture == "Llama4ForConditionalGeneration":
+        # Llama 4: step-based patterns — generate normalized per-layer tuples.
+        # Attention: even layers → local (0), odd layers → global (1).
+        # FFN: layer i is MoE (1) if (i+1) % interleave_moe_layer_step == 0, else dense (0).
+        step = config.get("interleave_moe_layer_step", 1)
+        attn_pattern = tuple(i % 2 for i in range(layers))
+        moe_freq = tuple(1 if (i + 1) % step == 0 else 0 for i in range(layers))
+        extra_params = HybridConfig(
+            attn_layer_pattern=attn_pattern,
+            moe_layer_freq=moe_freq,
+            # All attention dims are uniform (0 → fall back to model-level defaults).
+            sliding_window_size=config.get("attention_chunk_size", 0),
+            dense_inter_size=config.get("intermediate_size_mlp", 0),
+        )
+        logger.info(
+            f"Llama4 hybrid config: interleave_moe_layer_step={step}, "
+            f"global_attn_layers={sum(attn_pattern)}, local_attn_layers={attn_pattern.count(0)}, "
+            f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
+            f"sliding_window_size={extra_params.sliding_window_size}"
         )
     return {
         "architecture": architecture,

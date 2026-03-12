@@ -187,7 +187,7 @@ class TestParseHFConfig:
 
 
     def test_parse_llama4_scout_config(self):
-        """Test parsing a Llama 4 Scout config (VLM with text_config nesting, all-MoE, step=1)."""
+        """Test Llama 4 Scout (VLM, step=1: all-MoE) → HybridConfig with alternating attn pattern."""
         config = {
             "architectures": ["Llama4ForConditionalGeneration"],
             "model_type": "llama4",
@@ -212,21 +212,22 @@ class TestParseHFConfig:
 
         assert result["architecture"] == "Llama4ForConditionalGeneration"
         assert result["layers"] == 48
-        assert result["hidden_size"] == 5120
-        assert result["n"] == 40
-        assert result["n_kv"] == 8
-        assert result["d"] == 128
-        assert result["topk"] == 1
         assert result["num_experts"] == 16
         assert result["moe_inter_size"] == 8192
-        extra_params = result["extra_params"]
-        assert extra_params is not None
-        assert extra_params.interleave_moe_layer_step == 1
-        assert extra_params.dense_inter_size == 16384
-        assert extra_params.attention_chunk_size == 8192
+        cfg = result["extra_params"]
+        assert cfg is not None
+        # step=1: all layers MoE
+        assert all(m == 1 for m in cfg.moe_layer_freq)
+        # alternating local(0)/global(1): even=0, odd=1
+        assert cfg.attn_layer_pattern == tuple(i % 2 for i in range(48))
+        assert cfg.sliding_window_size == 8192
+        assert cfg.dense_inter_size == 16384
+        # Llama 4 uses same dims for all layers → all four dim fields are 0
+        assert cfg.swa_num_kv_heads == 0
+        assert cfg.swa_head_dim == 0
 
     def test_parse_llama4_maverick_config(self):
-        """Test parsing a Llama 4 Maverick config (VLM, alternating MoE/dense, step=2)."""
+        """Test Llama 4 Maverick (VLM, step=2: alternating MoE/dense) → HybridConfig."""
         config = {
             "architectures": ["Llama4ForConditionalGeneration"],
             "model_type": "llama4",
@@ -251,11 +252,52 @@ class TestParseHFConfig:
 
         assert result["architecture"] == "Llama4ForConditionalGeneration"
         assert result["num_experts"] == 128
-        extra_params = result["extra_params"]
-        assert extra_params is not None
-        assert extra_params.interleave_moe_layer_step == 2
-        assert extra_params.dense_inter_size == 16384
-        assert extra_params.attention_chunk_size == 8192
+        cfg = result["extra_params"]
+        # step=2: odd layers are MoE (1), even layers are dense (0)
+        assert sum(cfg.moe_layer_freq) == 24   # 24 MoE layers
+        assert cfg.moe_layer_freq.count(0) == 24  # 24 dense layers
+        assert cfg.dense_inter_size == 16384
+
+    def test_parse_mimov2flash_config(self):
+        """Test MiMo-V2-Flash (explicit per-layer patterns, different SWA/global dims) → HybridConfig."""
+        hybrid_pattern = [0, 1, 1, 1, 1, 0, 1, 1, 1, 1]  # 10-layer test
+        moe_freq = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        config = {
+            "architectures": ["MiMoV2FlashForCausalLM"],
+            "num_hidden_layers": 10,
+            "hidden_size": 4096,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 4,
+            "head_dim": 192,
+            "v_head_dim": 128,
+            "intermediate_size": 16384,
+            "vocab_size": 152576,
+            "max_position_embeddings": 262144,
+            "num_experts_per_tok": 8,
+            "num_local_experts": 64,
+            "moe_intermediate_size": 2048,
+            "hybrid_layer_pattern": hybrid_pattern,
+            "moe_layer_freq": moe_freq,
+            "swa_num_key_value_heads": 8,
+            "swa_head_dim": 192,
+            "swa_v_head_dim": 128,
+            "sliding_window_size": 128,
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result["architecture"] == "MiMoV2FlashForCausalLM"
+        assert result["layers"] == 10
+        cfg = result["extra_params"]
+        assert cfg is not None
+        assert cfg.attn_layer_pattern == tuple(hybrid_pattern)
+        assert cfg.moe_layer_freq == tuple(moe_freq)
+        assert cfg.swa_num_kv_heads == 8
+        assert cfg.swa_head_dim == 192
+        assert cfg.swa_v_head_dim == 128
+        assert cfg.global_v_head_dim == 128  # from v_head_dim
+        assert cfg.sliding_window_size == 128
+        assert cfg.dense_inter_size == 0  # dense layers use model-level inter_size
 
 
 class TestGetModelConfigFromHFID:
