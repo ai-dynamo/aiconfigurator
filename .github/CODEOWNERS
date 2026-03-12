@@ -5,6 +5,7 @@
 #   contributors-aiconfigurator  — all contributors; default catch-all (already exists)
 #   aic-core                     — tianhaox, jasonqinzhou, Arsene12358, simone-chen, Harrilee, ilyasher
 #   aic-sglang                   — xutizhou, AichenF  (+ aic-core for cross-review)
+#   aic-trtllm                   — ilyasher  (+ aic-core for cross-review)
 #   aic-vllm                     — ilyasher, davilu-nvidia  (+ aic-core for cross-review)
 #   aic-systems                  — YijiaZhao  (+ aic-core for cross-review)
 #   aic-automation               — Ethan-ES  (+ aic-core for cross-review)
@@ -18,7 +19,7 @@
 /src/aiconfigurator/sdk/backends/base_backend.py @ai-dynamo/aic-core
 /src/aiconfigurator/sdk/backends/factory.py @ai-dynamo/aic-core
 /src/aiconfigurator/sdk/backends/sglang_backend.py @ai-dynamo/aic-sglang @ai-dynamo/aic-core
-/src/aiconfigurator/sdk/backends/trtllm_backend.py @ai-dynamo/aic-core @ai-dynamo/aic-vllm
+/src/aiconfigurator/sdk/backends/trtllm_backend.py @ai-dynamo/aic-trtllm @ai-dynamo/aic-core
 /src/aiconfigurator/sdk/backends/vllm_backend.py @ai-dynamo/aic-vllm @ai-dynamo/aic-core
 /src/aiconfigurator/sdk/common.py @ai-dynamo/aic-core @ai-dynamo/aic-sglang
 /src/aiconfigurator/sdk/config.py @ai-dynamo/aic-systems @ai-dynamo/aic-core
@@ -28,7 +29,7 @@
 /src/aiconfigurator/sdk/operations.py @ai-dynamo/aic-sglang @ai-dynamo/aic-systems @ai-dynamo/aic-core
 /src/aiconfigurator/sdk/pareto_analysis.py @ai-dynamo/aic-sglang @ai-dynamo/aic-core
 /src/aiconfigurator/sdk/perf_database.py @ai-dynamo/aic-core @ai-dynamo/aic-systems @ai-dynamo/aic-sglang
-/src/aiconfigurator/sdk/task.py @ai-dynamo/aic-core @ai-dynamo/aic-vllm
+/src/aiconfigurator/sdk/task.py @ai-dynamo/aic-trtllm @ai-dynamo/aic-core
 /src/aiconfigurator/sdk/utils.py @ai-dynamo/aic-core
 
 # cli
@@ -55,7 +56,7 @@
 /collector/deep_collector @ai-dynamo/aic-sglang @ai-dynamo/aic-core
 /collector/sglang @ai-dynamo/aic-sglang @ai-dynamo/aic-systems @ai-dynamo/aic-core @davilu-nvidia
 /collector/slurm_comm_collector @ai-dynamo/aic-systems @ai-dynamo/aic-core
-/collector/trtllm @ai-dynamo/aic-core @ai-dynamo/aic-systems
+/collector/trtllm @ai-dynamo/aic-trtllm @ai-dynamo/aic-core @ai-dynamo/aic-systems
 /collector/vllm @ai-dynamo/aic-vllm @ai-dynamo/aic-core
 /collector/collect_all_reduce.py @ai-dynamo/aic-systems @ai-dynamo/aic-core
 /collector/collect_comm.sh @ai-dynamo/aic-systems @ai-dynamo/aic-core
