@@ -899,6 +899,7 @@ class MOEModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     True,
+                    quant_mode=moe_quant_mode,
                 ),
                 ops.MoE(
                     "context_moe",
@@ -923,6 +924,7 @@ class MOEModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     False,
+                    quant_mode=moe_quant_mode,
                 ),
             ]
         )
@@ -985,6 +987,7 @@ class MOEModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     True,
+                    quant_mode=moe_quant_mode,
                 ),
                 ops.MoE(
                     "generation_moe",
@@ -1009,6 +1012,7 @@ class MOEModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     False,
+                    quant_mode=moe_quant_mode,
                 ),
             ]
         )
@@ -1226,6 +1230,7 @@ class DeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     True,
+                    quant_mode=moe_quant_mode,
                 )
             ]
         )
@@ -1262,6 +1267,7 @@ class DeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     False,
+                    quant_mode=moe_quant_mode,
                 )
             ]
         )
@@ -1399,6 +1405,7 @@ class DeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     True,
+                    quant_mode=moe_quant_mode,
                 )
             ]
         )
@@ -1435,6 +1442,7 @@ class DeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     False,
+                    quant_mode=moe_quant_mode,
                 )
             ]
         )
@@ -2114,6 +2122,7 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     True,
+                    quant_mode=moe_quant_mode,
                     sms=sms,
                     moe_backend=moe_backend,
                     is_context=True,
@@ -2211,6 +2220,7 @@ class WideEPDeepSeekModel(BaseModel):
                     moe_ep_size,
                     attention_dp_size,
                     True,
+                    quant_mode=moe_quant_mode,
                     sms=sms,
                     moe_backend=moe_backend,
                     is_context=False,
@@ -2762,6 +2772,7 @@ class NemotronHModel(BaseModel):
                         moe_ep_size,
                         attention_dp_size,
                         True,
+                        quant_mode=moe_quant_mode,
                     ),
                     ops.MoE(
                         "context_moe",
@@ -2787,6 +2798,7 @@ class NemotronHModel(BaseModel):
                         moe_ep_size,
                         attention_dp_size,
                         False,
+                        quant_mode=moe_quant_mode,
                     ),
                     # TRT-LLM does allreduce after combining routed + shared outputs when TP>1
                     ops.CustomAllReduce("context_moe_ar", count, h, tp_size),
@@ -3019,6 +3031,7 @@ class NemotronHModel(BaseModel):
                         moe_ep_size,
                         attention_dp_size,
                         True,
+                        quant_mode=moe_quant_mode,
                     ),
                     ops.MoE(
                         "generation_moe",
@@ -3044,6 +3057,7 @@ class NemotronHModel(BaseModel):
                         moe_ep_size,
                         attention_dp_size,
                         False,
+                        quant_mode=moe_quant_mode,
                     ),
                     # TRT-LLM does allreduce after combining routed + shared outputs when TP>1
                     ops.CustomAllReduce("generation_moe_ar", count, h, tp_size),
