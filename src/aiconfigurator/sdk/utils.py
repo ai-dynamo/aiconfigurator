@@ -17,6 +17,7 @@ from aiconfigurator.sdk.common import (
     MULTIMODAL_TEXT_CONFIG_KEY,
     BlockConfig,
     DefaultHFModels,
+    Llama4Config,
 )
 
 logger = logging.getLogger(__name__)
@@ -505,6 +506,19 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])
+    elif architecture == "Llama4ForConditionalGeneration":
+        extra_params = Llama4Config(
+            interleave_moe_layer_step=config.get("interleave_moe_layer_step", 1),
+            dense_inter_size=config.get("intermediate_size_mlp", 0),
+            attention_chunk_size=config.get("attention_chunk_size", 0),
+        )
+        moe_count = sum(1 for i in range(layers) if (i + 1) % extra_params.interleave_moe_layer_step == 0)
+        logger.info(
+            f"Llama4 config: interleave_moe_layer_step={extra_params.interleave_moe_layer_step}, "
+            f"moe_layers={moe_count}, dense_layers={layers - moe_count}, "
+            f"local_attn_layers={layers // 2}, global_attn_layers={layers - layers // 2}, "
+            f"attention_chunk_size={extra_params.attention_chunk_size}"
+        )
     return {
         "architecture": architecture,
         "layers": layers,

@@ -211,24 +211,44 @@ def get_model(
             model_config,
         )
     elif model_family == "MOE":
-        # currently we don't support wideep for sglang moe models (other than DS V3)
-        model = MOEModel(
-            topk,
-            num_experts,
-            moe_inter_size,
-            model_path,
-            model_family,
-            architecture,
-            layers,
-            n,
-            n_kv,
-            d,
-            hidden,
-            inter,
-            vocab,
-            context,
-            model_config,
-        )
+        if architecture == "Llama4ForConditionalGeneration":
+            model = Llama4Model(
+                topk,
+                num_experts,
+                moe_inter_size,
+                model_path,
+                model_family,
+                architecture,
+                layers,
+                n,
+                n_kv,
+                d,
+                hidden,
+                inter,
+                vocab,
+                context,
+                model_config,
+            )
+            model.set_llama4_config(extra_params)
+        else:
+            # currently we don't support wideep for sglang moe models (other than DS V3)
+            model = MOEModel(
+                topk,
+                num_experts,
+                moe_inter_size,
+                model_path,
+                model_family,
+                architecture,
+                layers,
+                n,
+                n_kv,
+                d,
+                hidden,
+                inter,
+                vocab,
+                context,
+                model_config,
+            )
     elif model_family == "DEEPSEEK":
         if backend_name == "sglang" and model_config.enable_wideep:
             logger.debug(f"WideEP is enabled for model {model_path} with backend {backend_name}")
@@ -3096,6 +3116,355 @@ class NemotronHModel(BaseModel):
                 h,
                 common.GEMMQuantMode.float16,
             )
+        )
+
+
+class Llama4Model(BaseModel):
+    """
+    Llama 4 Scout/Maverick: interleaved local (chunked) + global attention, interleaved MoE + dense FFN.
+
+    Layer structure for N layers:
+    - Attention: even-indexed layers → local (SWA, window=attention_chunk_size),
+                 odd-indexed layers  → global (full attention). Same KV dims for both.
+    - FFN:       layer i has MoE if (i+1) % interleave_moe_layer_step == 0, else dense SwiGLU.
+                 step=1 → all MoE (Scout); step=2 → odd layers MoE, even layers dense (Maverick).
+    """
+
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+        super().__init__(*args)
+        assert (
+            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+        ), (
+            f"tp_size ({self.config.tp_size}) * attention_dp_size "
+            f"({self.config.attention_dp_size}) should equal moe_tp_size "
+            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        )
+        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_inter_size = moe_inter_size
+        self._llama4_config: common.Llama4Config | None = None
+        self._power_law_alpha = 1.2
+
+    def set_llama4_config(self, cfg: common.Llama4Config) -> None:
+        self._llama4_config = cfg
+        self._build_context_ops()
+        self._build_generation_ops()
+
+    def _count_layer_types(self) -> dict[str, int]:
+        step = self._llama4_config.interleave_moe_layer_step
+        moe_count = sum(1 for i in range(self._num_layers) if (i + 1) % step == 0)
+        # Even-indexed layers use local (SWA) attention; odd-indexed use global.
+        local_count = (self._num_layers + 1) // 2
+        global_count = self._num_layers // 2
+        return {
+            "moe": moe_count,
+            "dense": self._num_layers - moe_count,
+            "local": local_count,
+            "global": global_count,
+        }
+
+    def _build_context_ops(self) -> None:
+        if not self._llama4_config:
+            return
+
+        cfg = self._llama4_config
+        counts = self._count_layer_types()
+        moe_count = counts["moe"]
+        dense_count = counts["dense"]
+        local_count = counts["local"]
+        global_count = counts["global"]
+
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        moe_tp_size = self.config.moe_tp_size
+        moe_ep_size = self.config.moe_ep_size
+        attention_dp_size = self.config.attention_dp_size
+        pp_size = self.config.pp_size
+        num_kv_heads_per_gpu = self._num_kv_heads_per_gpu
+        gemm_quant_mode = self.config.gemm_quant_mode
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        fmha_quant_mode = self.config.fmha_quant_mode
+        moe_quant_mode = self.config.moe_quant_mode
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
+
+        # KV dims are the same for local and global attention layers.
+        qkv_out = self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2
+        proj_in = self._num_heads * self._head_size // tp_size
+
+        self.context_ops = [ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3)]
+
+        # Pre-attention norm + QKV GEMM applied to all layers (same shape for local and global).
+        self.context_ops.extend(
+            [
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.GEMM("context_qkv_gemm", self._num_layers, qkv_out, h, gemm_quant_mode),
+            ]
+        )
+
+        # Local (chunked/SWA) context attention — even-indexed layers.
+        if local_count > 0:
+            self.context_ops.append(
+                ops.ContextAttention(
+                    "context_attention",
+                    local_count,
+                    self._num_heads // tp_size,
+                    num_kv_heads_per_gpu,
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                    window_size=cfg.attention_chunk_size,
+                    head_size=self._head_size,
+                )
+            )
+
+        # Global (full) context attention — odd-indexed layers.
+        if global_count > 0:
+            self.context_ops.append(
+                ops.ContextAttention(
+                    "context_attention",
+                    global_count,
+                    self._num_heads // tp_size,
+                    num_kv_heads_per_gpu,
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                    window_size=0,
+                    head_size=self._head_size,
+                )
+            )
+
+        # Proj GEMM + post-attention norm (all layers).
+        self.context_ops.extend(
+            [
+                ops.GEMM("context_proj_gemm", self._num_layers, h, proj_in, gemm_quant_mode, low_precision_input=True),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+            ]
+        )
+
+        # MoE FFN layers.
+        if moe_count > 0:
+            if self._num_experts >= 128:
+                self.context_ops.append(
+                    ops.GEMM(
+                        "context_router_gemm", moe_count, self._num_experts, h, common.GEMMQuantMode.float16
+                    )
+                )
+            self.context_ops.extend(
+                [
+                    ops.MoEDispatch(
+                        "context_moe_pre_dispatch",
+                        moe_count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        True,
+                    ),
+                    ops.MoE(
+                        "context_moe",
+                        moe_count,
+                        h,
+                        self._moe_inter_size,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        moe_quant_mode,
+                        workload_distribution,
+                        attention_dp_size,
+                    ),
+                    ops.MoEDispatch(
+                        "context_moe_post_dispatch",
+                        moe_count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        False,
+                    ),
+                ]
+            )
+
+        # Dense SwiGLU FFN layers (Maverick only; zero for Scout where step=1).
+        if dense_count > 0:
+            dense_inter_per_tp = cfg.dense_inter_size // tp_size
+            self.context_ops.extend(
+                [
+                    ops.GEMM("context_dense_gate_gemm", dense_count, dense_inter_per_tp, h, gemm_quant_mode),
+                    ops.GEMM("context_dense_up_gemm", dense_count, dense_inter_per_tp, h, gemm_quant_mode),
+                    ops.ElementWise(
+                        "context_dense_act", dense_count, dense_inter_per_tp, dense_inter_per_tp, 0.8
+                    ),
+                    ops.GEMM(
+                        "context_dense_down_gemm",
+                        dense_count,
+                        h,
+                        dense_inter_per_tp,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                ]
+            )
+
+        self.context_ops.append(ops.P2P("context_p2p", pp_size - 1, h, pp_size))
+
+    def _build_generation_ops(self) -> None:
+        if not self._llama4_config:
+            return
+
+        cfg = self._llama4_config
+        counts = self._count_layer_types()
+        moe_count = counts["moe"]
+        dense_count = counts["dense"]
+        local_count = counts["local"]
+        global_count = counts["global"]
+
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        moe_tp_size = self.config.moe_tp_size
+        moe_ep_size = self.config.moe_ep_size
+        attention_dp_size = self.config.attention_dp_size
+        pp_size = self.config.pp_size
+        num_kv_heads_per_gpu = self._num_kv_heads_per_gpu
+        gemm_quant_mode = self.config.gemm_quant_mode
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        moe_quant_mode = self.config.moe_quant_mode
+        workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
+
+        qkv_out = self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2
+        proj_in = self._num_heads * self._head_size // tp_size
+
+        self.generation_ops = [ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3)]
+
+        self.generation_ops.extend(
+            [
+                ops.ElementWise("generation_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.GEMM("generation_qkv_gemm", self._num_layers, qkv_out, h, gemm_quant_mode),
+            ]
+        )
+
+        # Local generation attention — even-indexed layers.
+        if local_count > 0:
+            self.generation_ops.append(
+                ops.GenerationAttention(
+                    "generation_attention",
+                    local_count,
+                    self._num_heads // tp_size,
+                    num_kv_heads_per_gpu,
+                    kvcache_quant_mode,
+                    window_size=cfg.attention_chunk_size,
+                    head_size=self._head_size,
+                )
+            )
+
+        # Global generation attention — odd-indexed layers.
+        if global_count > 0:
+            self.generation_ops.append(
+                ops.GenerationAttention(
+                    "generation_attention",
+                    global_count,
+                    self._num_heads // tp_size,
+                    num_kv_heads_per_gpu,
+                    kvcache_quant_mode,
+                    window_size=0,
+                    head_size=self._head_size,
+                )
+            )
+
+        self.generation_ops.extend(
+            [
+                ops.GEMM(
+                    "generation_proj_gemm", self._num_layers, h, proj_in, gemm_quant_mode, low_precision_input=True
+                ),
+                ops.ElementWise("generation_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+            ]
+        )
+
+        if moe_count > 0:
+            if self._num_experts >= 128:
+                self.generation_ops.append(
+                    ops.GEMM(
+                        "generation_router_gemm", moe_count, self._num_experts, h, common.GEMMQuantMode.float16
+                    )
+                )
+            self.generation_ops.extend(
+                [
+                    ops.MoEDispatch(
+                        "generation_moe_pre_dispatch",
+                        moe_count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        True,
+                    ),
+                    ops.MoE(
+                        "generation_moe",
+                        moe_count,
+                        h,
+                        self._moe_inter_size,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        moe_quant_mode,
+                        workload_distribution,
+                        attention_dp_size,
+                    ),
+                    ops.MoEDispatch(
+                        "generation_moe_post_dispatch",
+                        moe_count,
+                        h,
+                        self._topk,
+                        self._num_experts,
+                        moe_tp_size,
+                        moe_ep_size,
+                        attention_dp_size,
+                        False,
+                    ),
+                ]
+            )
+
+        if dense_count > 0:
+            dense_inter_per_tp = cfg.dense_inter_size // tp_size
+            self.generation_ops.extend(
+                [
+                    ops.GEMM("generation_dense_gate_gemm", dense_count, dense_inter_per_tp, h, gemm_quant_mode),
+                    ops.GEMM("generation_dense_up_gemm", dense_count, dense_inter_per_tp, h, gemm_quant_mode),
+                    ops.ElementWise(
+                        "generation_dense_act", dense_count, dense_inter_per_tp, dense_inter_per_tp, 0.8
+                    ),
+                    ops.GEMM(
+                        "generation_dense_down_gemm",
+                        dense_count,
+                        h,
+                        dense_inter_per_tp,
+                        gemm_quant_mode,
+                        low_precision_input=True,
+                    ),
+                ]
+            )
+
+        self.generation_ops.extend(
+            [
+                ops.GEMM(
+                    "generation_logits_gemm", 1, self._vocab_size // tp_size, h, common.GEMMQuantMode.float16
+                ),
+                ops.P2P("generation_p2p", pp_size - 1, h, pp_size),
+            ]
         )
 
 

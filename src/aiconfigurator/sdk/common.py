@@ -60,6 +60,25 @@ class NemotronHConfig:
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
 
 
+@dataclass(frozen=True)
+class Llama4Config:
+    """
+    Configuration for Llama 4 Scout/Maverick (interleaved local/global attention + interleaved MoE/dense FFN).
+
+    Attributes:
+        interleave_moe_layer_step: Step between MoE layers.
+            Layer i has MoE FFN if (i+1) % interleave_moe_layer_step == 0.
+            step=1 → all layers are MoE (Scout); step=2 → every other layer (odd) is MoE (Maverick).
+        dense_inter_size: Intermediate size for dense FFN layers (intermediate_size_mlp in HF config).
+        attention_chunk_size: Local (chunked) attention window size; even-indexed layers use this,
+            odd-indexed layers use full (global) attention.
+    """
+
+    interleave_moe_layer_step: int
+    dense_inter_size: int
+    attention_chunk_size: int
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -246,6 +265,9 @@ DefaultHFModels = {
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
+    # Llama 4 Models
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
@@ -284,12 +306,14 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
     "MiniMaxM2ForCausalLM": "MOE",
+    "Llama4ForConditionalGeneration": "MOE",
 }
 
 # Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
 # _parse_hf_config_json will flatten these before parsing.
 MULTIMODAL_TEXT_CONFIG_KEY = {
     "KimiK25ForConditionalGeneration": "text_config",
+    "Llama4ForConditionalGeneration": "text_config",
 }
 
 """

@@ -186,6 +186,78 @@ class TestParseHFConfig:
         assert extra_params.moe_shared_expert_intermediate_size == 0
 
 
+    def test_parse_llama4_scout_config(self):
+        """Test parsing a Llama 4 Scout config (VLM with text_config nesting, all-MoE, step=1)."""
+        config = {
+            "architectures": ["Llama4ForConditionalGeneration"],
+            "model_type": "llama4",
+            "text_config": {
+                "num_hidden_layers": 48,
+                "hidden_size": 5120,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "intermediate_size": 8192,
+                "intermediate_size_mlp": 16384,
+                "vocab_size": 202048,
+                "max_position_embeddings": 10485760,
+                "num_experts_per_tok": 1,
+                "num_local_experts": 16,
+                "interleave_moe_layer_step": 1,
+                "attention_chunk_size": 8192,
+            },
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result["architecture"] == "Llama4ForConditionalGeneration"
+        assert result["layers"] == 48
+        assert result["hidden_size"] == 5120
+        assert result["n"] == 40
+        assert result["n_kv"] == 8
+        assert result["d"] == 128
+        assert result["topk"] == 1
+        assert result["num_experts"] == 16
+        assert result["moe_inter_size"] == 8192
+        extra_params = result["extra_params"]
+        assert extra_params is not None
+        assert extra_params.interleave_moe_layer_step == 1
+        assert extra_params.dense_inter_size == 16384
+        assert extra_params.attention_chunk_size == 8192
+
+    def test_parse_llama4_maverick_config(self):
+        """Test parsing a Llama 4 Maverick config (VLM, alternating MoE/dense, step=2)."""
+        config = {
+            "architectures": ["Llama4ForConditionalGeneration"],
+            "model_type": "llama4",
+            "text_config": {
+                "num_hidden_layers": 48,
+                "hidden_size": 5120,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "intermediate_size": 8192,
+                "intermediate_size_mlp": 16384,
+                "vocab_size": 202048,
+                "max_position_embeddings": 1048576,
+                "num_experts_per_tok": 1,
+                "num_local_experts": 128,
+                "interleave_moe_layer_step": 2,
+                "attention_chunk_size": 8192,
+            },
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result["architecture"] == "Llama4ForConditionalGeneration"
+        assert result["num_experts"] == 128
+        extra_params = result["extra_params"]
+        assert extra_params is not None
+        assert extra_params.interleave_moe_layer_step == 2
+        assert extra_params.dense_inter_size == 16384
+        assert extra_params.attention_chunk_size == 8192
+
+
 class TestGetModelConfigFromHFID:
     """Test getting model config from HuggingFace ID."""
 
