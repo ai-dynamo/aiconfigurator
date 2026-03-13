@@ -141,7 +141,7 @@ inputs:
     default: ""
   - key: SflowConfig.variable_profile
     required: false
-    default: "minimal"
+    default: "expanded"
 
   # BenchConfig
   - key: BenchConfig.name

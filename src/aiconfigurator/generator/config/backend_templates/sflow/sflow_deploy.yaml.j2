@@ -26,7 +26,7 @@ variables:
 {% endfor %}
 artifacts:
 - name: LOCAL_MODEL_PATH
-  uri: fs:///path/to/local/model
+  uri: $[[ variables.LOCAL_MODEL_PATH ]]
 {% if sflow_bench_run_content %}
 - name: BENCH_RUN
   uri: file://bench_run.sh
@@ -216,7 +216,7 @@ workflow:
       ntasks_per_node: {{ sflow_agg_ntasks_per_node }}
     replicas:
       count: {{ sflow_agg_replicas_count }}
-      policy: parallel
+      policy: {{ sflow_agg_replicas_policy }}
     script:
 {{ sflow_agg_script | indent(4, true) }}
     resources:
@@ -244,7 +244,7 @@ workflow:
       ntasks_per_node: {{ sflow_prefill_ntasks_per_node }}
     replicas:
       count: {{ sflow_prefill_replicas_count }}
-      policy: parallel
+      policy: {{ sflow_prefill_replicas_policy }}
     script:
 {{ sflow_prefill_script | indent(4, true) }}
     resources:
@@ -271,7 +271,7 @@ workflow:
       ntasks_per_node: {{ sflow_decode_ntasks_per_node }}
     replicas:
       count: {{ sflow_decode_replicas_count }}
-      policy: parallel
+      policy: {{ sflow_decode_replicas_policy }}
     script:
 {{ sflow_decode_script | indent(4, true) }}
     resources:

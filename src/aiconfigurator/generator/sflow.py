@@ -62,9 +62,9 @@ def enrich_context_for_sflow(
 
     mode = dyn.get("mode") or ("disagg" if (wp.get("prefill") and wp.get("decode")) else "agg")
     gpn = _int(node_cfg.get("num_gpus_per_node"), 8)
-    variable_profile = str(sflow_cfg.get("variable_profile") or "minimal").strip().lower()
+    variable_profile = str(sflow_cfg.get("variable_profile") or "expanded").strip().lower()
     if variable_profile not in _SFLOW_VARIABLE_PROFILES:
-        variable_profile = "minimal"
+        variable_profile = "expanded"
 
     ctx["sflow_mode"] = mode
     ctx["sflow_operator"] = f"dynamo_{backend}"
@@ -82,7 +82,7 @@ def enrich_context_for_sflow(
 
     total_gpus = _total_gpus(wp, worker_cfg, mode)
     ctx["sflow_slurm_nodes"] = max(math.ceil(total_gpus / gpn), 1)
-    ctx["sflow_concurrency"] = _int(bench.get("estimated_concurrency") or bench.get("concurrency"), 64)
+    ctx["sflow_concurrency"] = _resolve_sflow_concurrency(bench)
     ctx["sflow_dynamo_image"] = (
         sflow_cfg.get("dynamo_image") or k8s.get("k8s_image") or f"nvcr.io/nvidia/ai-dynamo/{backend}-runtime:latest"
     )
@@ -114,21 +114,28 @@ def enrich_context_for_sflow(
     for ctx_key, worker_key, disagg_mode in roles:
         rp = wp.get(worker_key, {})
         tp = _int(rp.get("tensor_parallel_size"), 1)
-        prefix = worker_key.upper()
+        prefix = _role_variable_prefix(worker_key, mode)
         role_workers = _int(worker_cfg.get(f"{worker_key}_workers"), _int(context.get(f"{worker_key}_workers"), 1))
         role_gpu = _int(context.get(f"{worker_key}_gpu"), 1)
 
         ctx[f"sflow_{ctx_key}_ntasks"] = tp if backend == "trtllm" else None
         ctx[f"sflow_{ctx_key}_ntasks_per_node"] = min(tp, gpn) if backend == "trtllm" else 1
         ctx[f"sflow_{ctx_key}_replicas_count"] = role_workers
+        ctx[f"sflow_{ctx_key}_replicas_policy"] = "parallel"
         ctx[f"sflow_{ctx_key}_gpu_count"] = role_gpu
         if variable_profile == "expanded":
             ctx[f"sflow_{ctx_key}_replicas_count"] = f"$[[ variables.NUM_{prefix}_SERVERS ]]"
+            ctx[f"sflow_{ctx_key}_replicas_policy"] = f"$[[ variables.{prefix}_REPLICAS_POLICY ]]"
             ctx[f"sflow_{ctx_key}_gpu_count"] = (
                 f"$[[ (variables.{prefix}_TP_SIZE * variables.{prefix}_DP_SIZE * variables.{prefix}_PP_SIZE) "
                 f"if variables.{prefix}_ENABLE_ATTENTION_DP == '' else "
                 f"(variables.{prefix}_TP_SIZE * variables.{prefix}_PP_SIZE) ]]"
             )
+            if backend == "trtllm":
+                ctx[f"sflow_{ctx_key}_ntasks"] = f"$[[ variables.{prefix}_TP_SIZE ]]"
+                ctx[f"sflow_{ctx_key}_ntasks_per_node"] = (
+                    f"$[[ [ variables.{prefix}_TP_SIZE, variables.GPUS_PER_NODE ] | min ]]"
+                )
         ctx[f"sflow_{ctx_key}_script"] = _build_server_script(
             backend,
             ctx_key,
@@ -186,6 +193,10 @@ def _sglang_server_script(
     gpus_per_node: int,
 ) -> str:
     cli_args = context.get(f"{role}_cli_args", "")
+    expanded_profile = context.get("sflow_variable_profile") == "expanded"
+    var_prefix = _role_variable_prefix(role, "agg" if disagg_mode is None else "disagg")
+    if expanded_profile:
+        cli_args = _bind_sglang_cli_args(cli_args, var_prefix)
     tp = _int(role_params.get("tensor_parallel_size"), 1)
     dp = _int(role_params.get("data_parallel_size"), 1)
     pp = _int(role_params.get("pipeline_parallel_size"), 1)
@@ -344,25 +355,16 @@ def _build_bench_script(
             "- export COLUMNS=200",
             "- export BENCH_ARTIFACT_DIR=${SFLOW_WORKFLOW_OUTPUT_DIR}/aiperf_concurrency_${CONCURRENCY}",
             "- export AICONFIGURATOR_BENCH_CONCURRENCY=${CONCURRENCY}",
+            "- export AICONFIGURATOR_BENCH_MODEL=$[[ variables.SERVED_MODEL_NAME ]]",
+            "- export AICONFIGURATOR_BENCH_TOKENIZER=$[[ artifacts.LOCAL_MODEL_PATH.path ]]",
+            "- export AICONFIGURATOR_BENCH_ENDPOINT_URL=http://$[[ variables.HEAD_NODE_IP ]]:8000",
+            "- export AICONFIGURATOR_BENCH_ISL=$[[ variables.ISL ]]",
+            "- export AICONFIGURATOR_BENCH_OSL=$[[ variables.OSL ]]",
+            "- export AICONFIGURATOR_BENCH_MULTI_ROUND=$[[ variables.MULTI_ROUND ]]",
+            "- export AICONFIGURATOR_BENCH_UI=$[[ variables.AIPERF_UI ]]",
         ]
-        if profile == "expanded":
-            lines.extend(
-                [
-                    "- export AICONFIGURATOR_BENCH_MODEL=$[[ variables.SERVED_MODEL_NAME ]]",
-                    "- export AICONFIGURATOR_BENCH_TOKENIZER=$[[ artifacts.LOCAL_MODEL_PATH.path ]]",
-                    "- export AICONFIGURATOR_BENCH_ENDPOINT_URL=http://$[[ variables.HEAD_NODE_IP ]]:8000",
-                    "- export AICONFIGURATOR_BENCH_ISL=$[[ variables.ISL ]]",
-                    "- export AICONFIGURATOR_BENCH_OSL=$[[ variables.OSL ]]",
-                    "- export AICONFIGURATOR_BENCH_MULTI_ROUND=$[[ variables.MULTI_ROUND ]]",
-                    "- export AICONFIGURATOR_BENCH_UI=$[[ variables.AIPERF_UI ]]",
-                ]
-            )
         lines.extend(["- bash $[[ artifacts.BENCH_RUN.path ]]", '- echo "Benchmarking finished"'])
         return "\n".join(lines)
-
-    model_path = context.get("model_path", "")
-    isl = _int(sla.get("isl"), 4000)
-    osl = _int(sla.get("osl"), 1000)
 
     lines = [
         "- set -x",
@@ -371,29 +373,29 @@ def _build_bench_script(
     ]
     cmd = [
         "  aiperf profile --artifact-dir ${SFLOW_WORKFLOW_OUTPUT_DIR}/aiperf_concurrency_${CONCURRENCY} \\",
-        f"    --model {model_path} \\",
+        "    --model $[[ variables.SERVED_MODEL_NAME ]] \\",
         "    --tokenizer $[[ artifacts.LOCAL_MODEL_PATH.path ]] \\",
         "    --endpoint-type chat \\",
         "    --endpoint /v1/chat/completions \\",
         "    --streaming \\",
         "    --url http://$[[ variables.HEAD_NODE_IP ]]:8000 \\",
-        f"    --synthetic-input-tokens-mean {isl} \\",
+        "    --synthetic-input-tokens-mean $[[ variables.ISL ]] \\",
         "    --synthetic-input-tokens-stddev 0 \\",
-        f"    --output-tokens-mean {osl} \\",
+        "    --output-tokens-mean $[[ variables.OSL ]] \\",
         "    --output-tokens-stddev 0 \\",
-        f'    --extra-inputs "max_tokens:{osl}" \\',
-        f'    --extra-inputs "min_tokens:{osl}" \\',
+        '    --extra-inputs "max_tokens:$[[ variables.OSL ]]" \\',
+        '    --extra-inputs "min_tokens:$[[ variables.OSL ]]" \\',
         '    --extra-inputs "ignore_eos:true" \\',
         '    --extra-inputs "{\\"nvext\\":{\\"ignore_eos\\":true}}" \\',
         '    --extra-inputs "repetition_penalty:1.0" \\',
         '    --extra-inputs "temperature: 0.0" \\',
         "    --concurrency ${CONCURRENCY} \\",
-        "    --request-count $((50*${CONCURRENCY})) \\",
+        "    --request-count $(($[[ variables.MULTI_ROUND ]]*${CONCURRENCY})) \\",
         "    --warmup-request-count ${CONCURRENCY} \\",
-        "    --num-dataset-entries $((50*${CONCURRENCY})) \\",
+        "    --num-dataset-entries $(($[[ variables.MULTI_ROUND ]]*${CONCURRENCY})) \\",
         "    --random-seed 100 -H 'Authorization: Bearer NOT USED' -H 'Accept: text/event-stream' \\",
         "    --record-processors 8 \\",
-        "    --ui simple",
+        "    --ui $[[ variables.AIPERF_UI ]]",
     ]
     lines.extend(cmd)
     lines.append('- echo "Benchmarking finished"')
@@ -417,6 +419,8 @@ def _build_sflow_variables(
     bench = param_values.get("BenchConfig", {}) or {}
     wp = param_values.get("params", {}) or {}
     wc = param_values.get("WorkerConfig", {}) or {}
+    model_path = context.get("model_path", "")
+    local_model_uri = _default_local_model_uri(model_path)
 
     def _var(
         name: str,
@@ -438,7 +442,9 @@ def _build_sflow_variables(
         _var("SLURM_TIMELIMIT", "SLURM time limit", ctx["sflow_slurm_timelimit"]),
         _var("GPUS_PER_NODE", "GPUs per node", ctx["sflow_gpus_per_node"], "integer"),
         _var("SLURM_NODES", "Number of nodes", ctx["sflow_slurm_nodes"]),
-        _var("SERVED_MODEL_NAME", "Served model name", context.get("model_path", "")),
+        _var("SERVED_MODEL_NAME", "Served model name", model_path),
+        _var("MODEL_NAME", "Model path", model_path),
+        _var("LOCAL_MODEL_PATH", "Local model artifact URI", local_model_uri),
         _var("EXTRA_FRONTEND_ARGS", "Extra frontend arguments", ctx["sflow_extra_frontend_args"]),
     ]
 
@@ -451,6 +457,10 @@ def _build_sflow_variables(
 
     vars_out.extend(
         [
+            _var("ISL", "Input sequence length", _int(bench.get("isl"), 4000), "integer"),
+            _var("OSL", "Output sequence length", _int(bench.get("osl"), 1000), "integer"),
+            _var("MULTI_ROUND", "Number of benchmark rounds", 50, "integer"),
+            _var("AIPERF_UI", "AIPerf UI mode", bench.get("ui") or "simple"),
             _var("CONCURRENCY", "Concurrency", ctx["sflow_concurrency"], domain=[ctx["sflow_concurrency"]]),
             _var("AIPERF_IMAGE", "AIPerf container image", ctx["sflow_aiperf_image"]),
             _var("DYNAMO_IMAGE", "Dynamo container image", ctx["sflow_dynamo_image"]),
@@ -461,18 +471,12 @@ def _build_sflow_variables(
         return vars_out
 
     # Expanded profile: preserve minimal variables and expose backend knobs for readability/compat.
-    vars_out.extend(
-        [
-            _var("MODEL_NAME", "Model path", context.get("model_path", "")),
-            _var("ISL", "Input sequence length", _int(bench.get("isl"), 4000), "integer"),
-            _var("OSL", "Output sequence length", _int(bench.get("osl"), 1000), "integer"),
-            _var("MULTI_ROUND", "Number of benchmark rounds", 50, "integer"),
-            _var("AIPERF_UI", "AIPerf UI mode", bench.get("ui") or "simple"),
-        ]
+    role_specs = (
+        [("agg", "AGG", "aggregated")]
+        if mode == "agg"
+        else [("prefill", "CTX", "context/prefill"), ("decode", "GEN", "generation/decode")]
     )
-
-    role_specs = [("agg", "AGG")] if mode == "agg" else [("prefill", "PREFILL"), ("decode", "DECODE")]
-    for role_key, prefix in role_specs:
+    for role_key, prefix, role_label in role_specs:
         rp = wp.get(role_key, {}) or {}
         cli_args = context.get(f"{role_key}_cli_args", "") or ""
         workers = _int(wc.get(f"{role_key}_workers"), 1)
@@ -507,27 +511,27 @@ def _build_sflow_variables(
             rp.get("free_gpu_memory_fraction") or _extract_option_value(cli_args, "--mem-fraction-static") or "0.9"
         )
 
-        vars_out.append(_var(f"NUM_{prefix}_SERVERS", f"Number of {role_key} servers", workers, "integer"))
-        vars_out.append(_var(f"{prefix}_REPLICAS_POLICY", f"{role_key} replicas policy", "parallel"))
-        vars_out.append(_var(f"{prefix}_TP_SIZE", f"{role_key} tensor parallel size", tp))
-        vars_out.append(_var(f"{prefix}_PP_SIZE", f"{role_key} pipeline parallel size", pp))
-        vars_out.append(_var(f"{prefix}_DP_SIZE", f"{role_key} data parallel size", dp))
-        vars_out.append(_var(f"{prefix}_EP_SIZE", f"{role_key} expert parallel size", ep))
-        vars_out.append(_var(f"{prefix}_MOE_TP_SIZE", f"{role_key} MOE tensor parallel size", moe_tp))
-        vars_out.append(_var(f"{prefix}_BATCH_SIZE", f"{role_key} batch size", max_batch))
-        vars_out.append(_var(f"{prefix}_MAX_NUM_TOKENS", f"{role_key} max number of tokens", max_num_tokens))
-        vars_out.append(_var(f"{prefix}_MAX_SEQ_LEN", f"{role_key} max sequence length", max_seq_len))
+        vars_out.append(_var(f"NUM_{prefix}_SERVERS", f"Number of {role_label} servers", workers, "integer"))
+        vars_out.append(_var(f"{prefix}_REPLICAS_POLICY", f"{role_label} replicas policy", "parallel"))
+        vars_out.append(_var(f"{prefix}_TP_SIZE", f"{role_label} tensor parallel size", tp))
+        vars_out.append(_var(f"{prefix}_PP_SIZE", f"{role_label} pipeline parallel size", pp))
+        vars_out.append(_var(f"{prefix}_DP_SIZE", f"{role_label} data parallel size", dp))
+        vars_out.append(_var(f"{prefix}_EP_SIZE", f"{role_label} expert parallel size", ep))
+        vars_out.append(_var(f"{prefix}_MOE_TP_SIZE", f"{role_label} MOE tensor parallel size", moe_tp))
+        vars_out.append(_var(f"{prefix}_BATCH_SIZE", f"{role_label} batch size", max_batch))
+        vars_out.append(_var(f"{prefix}_MAX_NUM_TOKENS", f"{role_label} max number of tokens", max_num_tokens))
+        vars_out.append(_var(f"{prefix}_MAX_SEQ_LEN", f"{role_label} max sequence length", max_seq_len))
         vars_out.append(
             _var(
                 f"{prefix}_ENABLE_ATTENTION_DP",
-                f"{role_key} enable attention DP",
+                f"{role_label} enable attention DP",
                 "--enable-dp-attention" if enable_attention else "",
             )
         )
         vars_out.append(
             _var(
                 f"{prefix}_FREE_GPU_MEMORY_FRACTION",
-                f"{role_key} free GPU memory fraction",
+                f"{role_label} free GPU memory fraction",
                 free_mem_fraction,
             )
         )
@@ -537,12 +541,24 @@ def _build_sflow_variables(
             vars_out.append(
                 _var(
                     f"{prefix}_CUDA_GRAPH_BS",
-                    f"{role_key} CUDA graph batch sizes (space-separated list)",
+                    f"{role_label} CUDA graph batch sizes (space-separated list)",
                     graph_bs,
                 )
             )
             spec_algo = _extract_option_value(cli_args, "--speculative-algorithm") or "NEXTN"
-            vars_out.append(_var(f"{prefix}_SPECULATIVE_ALGORITHM", f"{role_key} speculative algorithm", spec_algo))
+            vars_out.append(_var(f"{prefix}_SPECULATIVE_ALGORITHM", f"{role_label} speculative algorithm", spec_algo))
+
+    if backend == "sglang" and mode != "agg":
+        compat_spec = _extract_option_value(context.get("decode_cli_args", "") or "", "--speculative-algorithm")
+        if not compat_spec:
+            compat_spec = _extract_option_value(context.get("prefill_cli_args", "") or "", "--speculative-algorithm")
+        vars_out.append(
+            _var(
+                "AGG_SPECULATIVE_ALGORITHM",
+                "Compatibility speculative algorithm alias",
+                compat_spec or "NEXTN",
+            )
+        )
 
     # Expose kv-cache dtype in expanded profile for compatibility with common reference style.
     primary_role = "agg" if mode == "agg" else "decode"
@@ -550,8 +566,7 @@ def _build_sflow_variables(
         context.get(f"{primary_role}_cli_args", "") or "",
         "--kv-cache-dtype",
     )
-    if kv_dtype:
-        vars_out.append(_var("KV_CACHE_DTYPE", "KV cache dtype", kv_dtype))
+    vars_out.append(_var("KV_CACHE_DTYPE", "KV cache dtype", kv_dtype or "auto"))
 
     return vars_out
 
@@ -559,6 +574,129 @@ def _build_sflow_variables(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _role_variable_prefix(role_key: str, mode: str) -> str:
+    if mode == "agg":
+        return "AGG"
+    if role_key == "prefill":
+        return "CTX"
+    if role_key == "decode":
+        return "GEN"
+    return role_key.upper()
+
+
+def _bind_sglang_cli_args(cli_args: str, prefix: str) -> str:
+    tokens = shlex.split(cli_args) if cli_args else []
+    if not tokens:
+        return cli_args
+
+    value_bindings = {
+        "--tensor-parallel-size": f"$[[ variables.{prefix}_TP_SIZE ]]",
+        "--pipeline-parallel-size": f"$[[ variables.{prefix}_PP_SIZE ]]",
+        "--data-parallel-size": f"$[[ variables.{prefix}_DP_SIZE ]]",
+        "--expert-parallel-size": f"$[[ variables.{prefix}_EP_SIZE ]]",
+        "--moe-dense-tp-size": f"$[[ variables.{prefix}_MOE_TP_SIZE ]]",
+        "--max-running-requests": f"$[[ variables.{prefix}_BATCH_SIZE ]]",
+        "--max-prefill-tokens": f"$[[ variables.{prefix}_MAX_NUM_TOKENS ]]",
+        "--max-total-tokens": f"$[[ variables.{prefix}_MAX_NUM_TOKENS ]]",
+        "--context-length": f"$[[ variables.{prefix}_MAX_SEQ_LEN ]]",
+        "--mem-fraction-static": f"$[[ variables.{prefix}_FREE_GPU_MEMORY_FRACTION ]]",
+        "--kv-cache-dtype": "$[[ variables.KV_CACHE_DTYPE ]]",
+        "--cuda-graph-bs": f"$[[ variables.{prefix}_CUDA_GRAPH_BS ]]",
+        "--cuda-graph-max-bs": f"$[[ variables.{prefix}_BATCH_SIZE ]]",
+        "--speculative-algorithm": f"$[[ variables.{prefix}_SPECULATIVE_ALGORITHM ]]",
+    }
+    attention_var = f"$[[ variables.{prefix}_ENABLE_ATTENTION_DP ]]"
+
+    out: list[str] = []
+    present_flags: set[str] = set()
+    attention_bound = False
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token == "--enable-dp-attention":
+            out.append(attention_var)
+            attention_bound = True
+            present_flags.add(token)
+            idx += 1
+            continue
+
+        if "=" in token and token.startswith("--"):
+            flag, _val = token.split("=", 1)
+            if flag in value_bindings:
+                out.append(flag)
+                out.append(value_bindings[flag])
+                present_flags.add(flag)
+                idx += 1
+                continue
+
+        if token in value_bindings:
+            out.append(token)
+            present_flags.add(token)
+            if idx + 1 < len(tokens) and not tokens[idx + 1].startswith("--"):
+                if token == "--cuda-graph-bs":
+                    while idx + 1 < len(tokens) and not tokens[idx + 1].startswith("--"):
+                        idx += 1
+                else:
+                    idx += 1
+            out.append(value_bindings[token])
+            idx += 1
+            continue
+
+        out.append(token)
+        if token.startswith("--") and idx + 1 < len(tokens) and not tokens[idx + 1].startswith("--"):
+            out.append(tokens[idx + 1])
+            idx += 2
+            continue
+        idx += 1
+
+    required_bindings = [
+        ("--tensor-parallel-size", f"$[[ variables.{prefix}_TP_SIZE ]]"),
+        ("--pipeline-parallel-size", f"$[[ variables.{prefix}_PP_SIZE ]]"),
+        ("--data-parallel-size", f"$[[ variables.{prefix}_DP_SIZE ]]"),
+        ("--expert-parallel-size", f"$[[ variables.{prefix}_EP_SIZE ]]"),
+        ("--moe-dense-tp-size", f"$[[ variables.{prefix}_MOE_TP_SIZE ]]"),
+        ("--max-running-requests", f"$[[ variables.{prefix}_BATCH_SIZE ]]"),
+        ("--max-prefill-tokens", f"$[[ variables.{prefix}_MAX_NUM_TOKENS ]]"),
+        ("--kv-cache-dtype", "$[[ variables.KV_CACHE_DTYPE ]]"),
+    ]
+    for flag, value in required_bindings:
+        if flag not in present_flags:
+            out.extend([flag, value])
+
+    if not attention_bound:
+        out.append(attention_var)
+
+    return " ".join(token if token.startswith("$[[") and token.endswith("]]") else shlex.quote(token) for token in out)
+
+
+def _default_local_model_uri(model_path: Any) -> str:
+    raw = str(model_path or "").strip()
+    if not raw:
+        return "fs:///path/to/local/model"
+    if "://" in raw:
+        return raw
+    if raw.startswith(("~", "/", "./", "../")):
+        return f"fs://{raw}"
+    # Non-local identifiers (for example, HuggingFace repo IDs) are not valid fs:// artifact URIs.
+    return "fs:///path/to/local/model"
+
+
+def _resolve_sflow_concurrency(bench: dict[str, Any]) -> int:
+    """Resolve a single benchmark concurrency value for sflow.
+
+    sflow benchmark runs should use the estimated concurrency as one scalar
+    value, not the multi-point BenchConfig.concurrency sweep list.
+    """
+    estimated = bench.get("estimated_concurrency")
+    if isinstance(estimated, (list, tuple)):
+        estimated = estimated[0] if estimated else None
+
+    resolved = _int(estimated, 0)
+    if resolved > 0:
+        return resolved
+    return 64
 
 
 def _int(val: Any, default: int = 0) -> int:
