@@ -260,24 +260,26 @@ class TaskConfigFactory:
 
         # On Blackwell, GPT-OSS defaults to w4a8_mxfp4_mxfp8 (MXFP8 activations)
         # for higher tensor core throughput. Profiles applied after this can override.
-        if (
-            ctx.backend_name == "trtllm"
-            and ctx.model_path in ("openai/gpt-oss-120b", "openai/gpt-oss-20b")
-            and ctx.system_name
-            in (
-                "gb200",
-                "gb300",
-                "b200_sxm",
-            )
-        ):
+        # In disagg mode, prefill and decode may run on different hardware, so only
+        # promote the workers that are actually on Blackwell.
+        _blackwell_systems = ("gb200", "gb300", "b200_sxm")
+        if ctx.backend_name == "trtllm" and ctx.model_path in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
             quant_override = {"moe_quant_mode": "w4a8_mxfp4_mxfp8"}
             if ctx.serving_mode == "agg":
-                _deep_merge(config_dict, {"worker_config": quant_override})
+                if ctx.system_name in _blackwell_systems:
+                    _deep_merge(config_dict, {"worker_config": quant_override})
+                    applied_layers.append("gptoss-blackwell-mxfp8")
             else:
-                _deep_merge(
-                    config_dict, {"prefill_worker_config": quant_override, "decode_worker_config": quant_override}
-                )
-            applied_layers.append("gptoss-blackwell-mxfp8")
+                prefill_system = ctx.system_name
+                decode_system = ctx.decode_system_name or ctx.system_name
+                promoted = {}
+                if prefill_system in _blackwell_systems:
+                    promoted["prefill_worker_config"] = quant_override
+                if decode_system in _blackwell_systems:
+                    promoted["decode_worker_config"] = quant_override
+                if promoted:
+                    _deep_merge(config_dict, promoted)
+                    applied_layers.append("gptoss-blackwell-mxfp8")
 
         for profile in ctx.profiles:
             layers = cls.PROFILE_REGISTRY.get(profile)
