@@ -60,6 +60,38 @@ class NemotronHConfig:
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
 
 
+@dataclass(frozen=True)
+class HybridConfig:
+    """
+    Unified config for hybrid attention (SWA/local + global) + mixed FFN (MoE + dense) models.
+    Covers MiMo-V2-Flash, Llama 4 Scout/Maverick, and similar architectures.
+
+    Both patterns are stored as normalized per-layer tuples of length num_layers:
+        attn_layer_pattern: 0 = SWA/local attention, 1 = global (full) attention
+        moe_layer_freq:     0 = dense SwiGLU FFN,    1 = MoE FFN
+
+    SWA/local attention dims — set to 0 to fall back to model-level defaults
+    (head_dim / num_kv_heads). MiMo-V2-Flash has different dims per attention type;
+    Llama 4 uses the same dims for all layers so all four fields are 0.
+        swa_num_kv_heads: KV heads for SWA/local layers  (0 → num_kv_heads)
+        swa_head_dim:     Q/K head dim for SWA layers     (0 → head_dim)
+        swa_v_head_dim:   V head dim for SWA layers       (0 → head_dim)
+        global_v_head_dim: V head dim for global layers   (0 → head_dim)
+
+    sliding_window_size: token window for SWA/local attention layers
+    dense_inter_size: intermediate size for dense FFN layers (0 → use inter_size)
+    """
+
+    attn_layer_pattern: tuple[int, ...]  # per-layer: 0=SWA/local, 1=global
+    moe_layer_freq: tuple[int, ...]  # per-layer: 0=dense, 1=MoE
+    swa_num_kv_heads: int = 0
+    swa_head_dim: int = 0
+    swa_v_head_dim: int = 0
+    global_v_head_dim: int = 0
+    sliding_window_size: int = 0
+    dense_inter_size: int = 0
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -246,6 +278,12 @@ DefaultHFModels = {
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
+    # Llama 4 Models
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+    # MiMo Models
+    "XiaomiMiMo/MiMo-V2-Flash",
+    "XiaomiMiMo/MiMo-7B-Base",
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
@@ -270,11 +308,12 @@ SupportedSystems = {
 """
 Model family for model definition
 """
-ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS", "NEMOTRONH"}
+ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS", "NEMOTRONH", "HYBRIDMOE"}
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
     "Qwen3ForCausalLM": "LLAMA",
+    "MiMoForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
     "KimiK25ForConditionalGeneration": "DEEPSEEK",
@@ -285,12 +324,15 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "GptOssForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
     "MiniMaxM2ForCausalLM": "MOE",
+    "MiMoV2FlashForCausalLM": "HYBRIDMOE",
+    "Llama4ForConditionalGeneration": "HYBRIDMOE",
 }
 
 # Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
 # _parse_hf_config_json will flatten these before parsing.
 MULTIMODAL_TEXT_CONFIG_KEY = {
     "KimiK25ForConditionalGeneration": "text_config",
+    "Llama4ForConditionalGeneration": "text_config",
 }
 
 """
