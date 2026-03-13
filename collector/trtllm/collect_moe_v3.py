@@ -43,6 +43,52 @@ aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
 
 
+def _patch_moe_runners_for_tuple_tactics():
+    """Monkey-patch MoE runners whose forward() asserts isinstance(tactic, list).
+
+    In trtllm 1.2.0rc5, the C++ get_valid_configs() can return tuples instead
+    of lists for some runners, causing the assertion to fail. This patch wraps
+    forward() to coerce tuples to lists before the call.
+    """
+    if tensorrt_llm.__version__ != "1.2.0rc5" or get_sm_version() < 100:
+        return
+
+    try:
+        from tensorrt_llm._torch.custom_ops import trtllm_gen_custom_ops as ops
+    except ImportError:
+        return
+
+    runner_classes = []
+    for name in [
+        "MxE4m3MxE2m1BlockScaleMoERunner",
+        "E4m3MxE2m1BlockScaleMoERunner",
+        "Bf16MxE2m1BlockScaleMoERunner",
+    ]:
+        cls = getattr(ops, name, None)
+        if cls is not None:
+            runner_classes.append(cls)
+
+    for cls in runner_classes:
+        orig_forward = cls.forward
+
+        def _patched_forward(self, inputs, tactic=[-1, -1], _orig=orig_forward, **kwargs):
+            if not isinstance(tactic, list):
+                if isinstance(tactic, str):
+                    import ast
+
+                    tactic = ast.literal_eval(tactic)
+                elif isinstance(tactic, (tuple, range)):
+                    tactic = list(tactic)
+                else:
+                    tactic = [tactic]
+            return _orig(self, inputs, tactic=tactic, **kwargs)
+
+        cls.forward = _patched_forward
+
+
+_patch_moe_runners_for_tuple_tactics()
+
+
 def gc_collect():
     """Run GC and clear CUDA cache to reduce fragmentation between runs."""
     for _ in range(2):
