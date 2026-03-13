@@ -144,7 +144,7 @@ class GemmCommonTestCase:
 
 
 def get_gemm_common_test_cases() -> list[GemmCommonTestCase]:
-    x_list = list(range(16))
+    x_list = list(range(1, 16))
     x_list += list(range(16, 128, 16)) + [i + 1 for i in range(16, 128, 16)]
     x_list += list(range(128, 256, 32)) + [i + 1 for i in range(128, 256, 32)]
     for x in range(256, 4096 + 257, 256):

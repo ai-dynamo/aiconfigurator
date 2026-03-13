@@ -419,6 +419,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     error_queue = mp.Queue()
     result_queue = mp.Queue()
     processes = []
+
     manager = mp.Manager()
     progress_value = manager.Value("i", 0)
     lock = manager.Lock()
@@ -557,8 +558,21 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             # Stall detection unchanged...
             if progress_value.value == last_progress:
                 stall_count += 1
-                if stall_count > 30:
+                if stall_count > 240:
                     logger.warning(f"Progress stalled at {progress_value.value}/{len(task_infos)}")
+                    # If all workers are dead and tasks remain unaccounted,
+                    # those tasks were lost to fatal crashes (SIGABRT, etc.)
+                    # and will never complete.  The 120-second threshold
+                    # (240 x 0.5s) far exceeds the worst-case single-task
+                    # time so false positives are not a concern.
+                    all_dead = all(not p.is_alive() for p in processes)
+                    unaccounted = len(task_infos) - progress_value.value
+                    if all_dead and unaccounted > 0:
+                        logger.warning(
+                            f"All workers dead, {unaccounted} tasks unaccounted "
+                            f"(lost to fatal worker crashes). Stopping monitoring loop."
+                        )
+                        break
             else:
                 stall_count = 0
                 last_progress = progress_value.value
@@ -610,7 +624,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 pbar.update(current - pbar.n)
 
             resume_tracker.flush()
-            time.sleep(2)
+            time.sleep(0.5)
         drain_done_events()
 
     # Collect remaining errors
