@@ -403,6 +403,11 @@ def setup_signal_handlers(worker_id, error_queue=None):
             except:
                 pass
 
+        # For SIGABRT (e.g. from DeepGEMM C++ abort()), use os._exit to avoid
+        # re-triggering the C++ destructor and generating a core dump.
+        if signum == signal.SIGABRT:
+            os._exit(1)
+
         # Re-raise the signal
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
@@ -693,6 +698,52 @@ def log_perf(
         # Delete the lock file, even if writing crashed
         if got_lock and os.path.exists(lock_file):
             os.unlink(lock_file)
+
+
+def merge_per_device_perf_files():
+    """Merge per-device perf files (e.g. gemm_perf_cuda0.txt) into base files.
+
+    After parallel collection, each worker writes to its own file to avoid
+    lock contention.  This function merges them back into the canonical
+    filename (e.g. gemm_perf.txt) and removes the per-device files.
+    """
+    import glob
+    import re
+
+    pattern = re.compile(r"^(.+)_cuda\d+(\.[^.]+)$")
+
+    grouped: dict[str, list[str]] = {}
+    for path in glob.glob("*_cuda*.txt"):
+        m = pattern.match(path)
+        if m:
+            base = m.group(1) + m.group(2)
+            grouped.setdefault(base, []).append(path)
+
+    for base_path, device_paths in grouped.items():
+        all_rows: list[dict] = []
+        headers: list[str] | None = None
+
+        for dp in sorted(device_paths):
+            if not os.path.exists(dp):
+                continue
+            with open(dp, newline="") as f:
+                reader = csv.DictReader(f)
+                if headers is None:
+                    headers = reader.fieldnames
+                for row in reader:
+                    all_rows.append(row)
+
+        if all_rows and headers:
+            with open(base_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writeheader()
+                writer.writerows(all_rows)
+
+        for dp in device_paths:
+            try:
+                os.unlink(dp)
+            except OSError:
+                pass
 
 
 # Helper functions for MoE

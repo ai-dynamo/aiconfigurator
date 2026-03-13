@@ -419,6 +419,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     error_queue = mp.Queue()
     result_queue = mp.Queue()
     processes = []
+
     manager = mp.Manager()
     progress_value = manager.Value("i", 0)
     lock = manager.Lock()
@@ -557,8 +558,24 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             # Stall detection unchanged...
             if progress_value.value == last_progress:
                 stall_count += 1
-                if stall_count > 30:
+                if stall_count > 240:
                     logger.warning(f"Progress stalled at {progress_value.value}/{len(task_infos)}")
+                    # Only break if all workers are dead and the queue is empty.
+                    # This avoids cutting collection short for slow-but-alive tasks
+                    # (e.g. cache-miss large shapes that legitimately take ~20s).
+                    # The 120-second threshold (240 x 0.5s) far exceeds the worst-case
+                    # single-task time so false positives are not a concern.
+                    try:
+                        all_dead = all(not p.is_alive() for p in processes)
+                        if all_dead and queue.empty():
+                            unaccounted = len(task_infos) - progress_value.value
+                            logger.warning(
+                                f"All workers dead, queue empty, {unaccounted} tasks unaccounted "
+                                f"(lost to fatal worker crashes). Stopping monitoring loop."
+                            )
+                            break
+                    except Exception:
+                        pass  # queue.empty() not available on all platforms
             else:
                 stall_count = 0
                 last_progress = progress_value.value
@@ -610,7 +627,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 pbar.update(current - pbar.n)
 
             resume_tracker.flush()
-            time.sleep(2)
+            time.sleep(0.5)
         drain_done_events()
 
     # Collect remaining errors
@@ -841,6 +858,11 @@ def collect_trtllm(
         backend="trtllm",
         resume_options=resume_options,
     )
+
+    if num_processes > 0:
+        from collector.helper import merge_per_device_perf_files
+
+        merge_per_device_perf_files()
 
     generate_collection_summary(all_errors, "trtllm", version)
 
