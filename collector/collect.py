@@ -43,6 +43,7 @@ def setup_warning_filters():
         category=FutureWarning,
     )
 
+
 import random
 import resource
 
@@ -57,15 +58,11 @@ import io
 import json
 import multiprocessing as mp
 import pstats
-import random
 import signal
 import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-
-import torch
-from tqdm import tqdm
 
 from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, setup_logging, setup_signal_handlers
 
