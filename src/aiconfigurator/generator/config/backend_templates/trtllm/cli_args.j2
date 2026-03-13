@@ -60,7 +60,7 @@
 {%- endif -%}
 
 {%- if cache_transceiver_max_tokens_in_buffer is defined -%}
-  {%- set _ = override_dict.update({'cache_transceiver_config': {'max_tokens_in_buffer': cache_transceiver_max_tokens_in_buffer}}) -%}
+  {%- set _ = override_dict.update({'cache_transceiver_config': {'max_tokens_in_buffer': cache_transceiver_max_tokens_in_buffer, 'backend': 'DEFAULT'}}) -%}
 {%- endif -%}
 
 {%- if disable_overlap_scheduler is defined -%}
