@@ -956,7 +956,7 @@ def _assign_experts_from_counts(num_tokens_per_expert, num_tokens, topk):
     sorted_counts = counts[sorted_experts]
     expert_ids_flat = np.repeat(sorted_experts, sorted_counts)
     h_selected = expert_ids_flat.reshape(topk, num_tokens).T.copy()
-    return torch.from_numpy(h_selected)
+    return torch.from_numpy(h_selected).to(device=num_tokens_per_expert.device)
 
 
 def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
