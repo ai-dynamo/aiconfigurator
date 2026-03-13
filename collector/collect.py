@@ -859,11 +859,6 @@ def collect_trtllm(
         resume_options=resume_options,
     )
 
-    if num_processes > 0:
-        from collector.helper import merge_per_device_perf_files
-
-        merge_per_device_perf_files()
-
     generate_collection_summary(all_errors, "trtllm", version)
 
 

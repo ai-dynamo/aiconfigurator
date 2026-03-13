@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-import os
 from collections import defaultdict
 
 import tensorrt_llm
@@ -117,10 +116,6 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
     torch.cuda.set_device(device)
     torch.set_default_device(device)
     sm_version = get_sm_version()
-
-    device_idx = device.index if device.index is not None else 0
-    stem, ext = os.path.splitext(perf_filename)
-    perf_filename = f"{stem}_cuda{device_idx}{ext}"
 
     dtype = torch.bfloat16
     x = torch.randn((m, k), dtype=dtype).to(torch.device(device))
