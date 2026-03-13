@@ -1,4 +1,5 @@
 {%- set args = [] -%}
+{%- if sglang['quantization'] is defined -%}{%- set _ = args.append('--quantization "' ~ sglang['quantization'] ~ '"') -%}{%- endif -%}
 {%- if sglang['tensor-parallel-size'] is defined -%}{%- set _ = args.append('--tensor-parallel-size "' ~ sglang['tensor-parallel-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['pipeline-parallel-size'] is defined -%}{%- set _ = args.append('--pipeline-parallel-size "' ~ sglang['pipeline-parallel-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['data-parallel-size'] is defined -%}{%- set _ = args.append('--data-parallel-size "' ~ sglang['data-parallel-size'] ~ '"') -%}{%- endif -%}
