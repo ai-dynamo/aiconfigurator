@@ -136,13 +136,13 @@ class SGLANGBackend(BaseBackend):
                 ctx_attention_latency_ms = latency_dict["context_attention"] / scale_factor
                 ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor
 
-                # third pass to get generation attn. use isl+osl//2 for avg generation attn latency.
+                # third pass to get generation attn. use isl + num_mix_steps // 2 for avg generation attn latency.
                 if gen_tokens > 0:
                     num_tokens = gen_tokens
                     summary = self.run_static(
                         model,
                         database,
-                        RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl + osl // 2, osl=2),
+                        RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl + num_mix_steps // 2, osl=2),
                         mode="static_gen",
                     )
                     latency_dict = summary.get_generation_latency_dict()
@@ -181,7 +181,9 @@ class SGLANGBackend(BaseBackend):
                 summary = self.run_static(
                     model,
                     database,
-                    RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl + osl // 2, osl=2),
+                    RuntimeConfig(
+                        batch_size=num_tokens, beam_width=1, isl=isl + num_mix_steps + num_genonly_steps // 2, osl=2
+                    ),
                     mode="static_gen",
                 )
                 latency_dict = summary.get_generation_latency_dict()
