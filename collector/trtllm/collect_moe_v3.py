@@ -359,7 +359,12 @@ def run_moe_torch(
     )
     moe.to(torch.device(device))
 
-    if moe_type == "w4a16_mxfp4":
+    # Both w4a16_mxfp4 and w4a8_mxfp4_mxfp8 use MXFP4 weights and share the same
+    # weight loading path in TRT-LLM (inherited from MXFP4WeightTRTLLMGenFusedMoEMethod).
+    # We must explicitly cast weights to MXFP4 format and call load_weights() so that
+    # the proper shuffle/permutation (torch.ops.trtllm.shuffle_matrix) is applied,
+    # which the kernel expects for correct memory access patterns.
+    if moe_type in ("w4a16_mxfp4", "w4a8_mxfp4_mxfp8"):
         w1_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
         w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype, device=device)
         w3_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)

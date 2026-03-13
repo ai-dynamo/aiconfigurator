@@ -258,7 +258,7 @@ with benchmark_with_power(
 
 ## For TensorRT-LLM
 ### Optional( Read if collecting for mxfp4 kernels)
-To collect performance data for mxfp4 kernels used in GPTOSS models, depending on the version of TensorRT-LLM, you might need to manually install triton-kernels. If your version is **>= 1.3.0rc2**, nothing needs to be done and you can run the collection process directly. For any version before **1.3.0rc2**. Follow the below instructions to install triton-kernels an expose them to TensorRT-LLM
+To collect performance data for mxfp4 kernels used in GPTOSS models, depending on the version of TensorRT-LLM, you might need to manually install triton-kernels. If your version is **>= 1.3.0rc2**, nothing needs to be done and you can run the collection process directly. For any version before **1.3.0rc2**. Follow the below instructions to install triton-kernels and expose them to TensorRT-LLM
 1. Build and install Triton (tested with the commit below):
 ```bash
 git clone https://github.com/triton-lang/triton.git
