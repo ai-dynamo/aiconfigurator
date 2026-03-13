@@ -46,7 +46,7 @@ moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tu
 def _patch_moe_runners_for_tuple_tactics():
     """Monkey-patch MoE runners whose forward() asserts isinstance(tactic, list).
 
-    In trtllm 1.2.0rc5, the C++ get_valid_configs() can return tuples instead
+    In trtllm 1.2.0rc5, the C++ get_valid_configs() can return strings instead
     of lists for some runners, causing the assertion to fail. This patch wraps
     forward() to coerce tuples to lists before the call.
     """
