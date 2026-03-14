@@ -130,9 +130,12 @@ def render_backend_templates(
     env = _TEMPLATE_ENV_CACHE.get(templates_dir)
     if env is None:
         benchmark_dir = str(_TEMPLATE_ROOT / "benchmark")
+        sflow_dir = str(_TEMPLATE_ROOT / "sflow")
         search_paths = [templates_dir]
         if os.path.isdir(benchmark_dir):
             search_paths.append(benchmark_dir)
+        if os.path.isdir(sflow_dir):
+            search_paths.append(sflow_dir)
         env = Environment(loader=FileSystemLoader(search_paths), trim_blocks=True, lstrip_blocks=True)
         _TEMPLATE_ENV_CACHE[templates_dir] = env
 
@@ -507,6 +510,23 @@ def render_backend_templates(
                     rendered_templates[f"run_{idx}.sh"] = rendered
         except Exception as e:
             logger.warning(f"Failed to render template run.sh.j2: {e}")
+
+    # sflow deploy: shared template from sflow/ folder
+    sflow_tmpl_name = "sflow_deploy.yaml.j2"
+    try:
+        env.get_template(sflow_tmpl_name)
+    except Exception:
+        pass  # template not available — skip
+    else:
+        try:
+            from ..sflow import enrich_context_for_sflow, postprocess_sflow
+
+            sflow_ctx = enrich_context_for_sflow(context, param_values, backend, rendered_templates)
+            sflow_tmpl = env.get_template(sflow_tmpl_name)
+            rendered = sflow_tmpl.render(**sflow_ctx)
+            rendered_templates["sflow.yaml"] = postprocess_sflow(rendered)
+        except Exception as e:
+            logger.warning(f"Failed to render sflow template: {e}")
 
     return rendered_templates
 
