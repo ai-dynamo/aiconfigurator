@@ -104,6 +104,9 @@ def build_disagg_parallel_lists(
     is_moe: bool,
     enable_wideep: bool = False,
     should_enable_pp: bool = False,
+    *,
+    prefill_enable_wideep: bool | None = None,
+    decode_enable_wideep: bool | None = None,
 ) -> tuple[dict, dict]:
     """Build the TP/PP/DP/MoE-TP/MoE-EP search-space lists for disagg enumeration.
 
@@ -116,14 +119,19 @@ def build_disagg_parallel_lists(
         prefill_system: System name for the prefill worker (e.g. ``"h200_sxm"``).
         decode_system: System name for the decode worker.
         is_moe: Whether the model is a Mixture-of-Experts model.
-        enable_wideep: Enable wide expert-parallelism search space.
+        enable_wideep: Enable wide expert-parallelism search space (global fallback).
         should_enable_pp: Enable pipeline-parallelism candidates (default ``False``).
+        prefill_enable_wideep: Override WideEP for prefill (None = use *enable_wideep*).
+        decode_enable_wideep: Override WideEP for decode (None = use *enable_wideep*).
 
     Returns:
         ``(prefill_worker_config, decode_worker_config)`` - two dicts each containing
         the keys ``num_gpu_per_worker``, ``tp_list``, ``pp_list``, ``dp_list``,
         ``moe_tp_list``, ``moe_ep_list``.
     """
+    _prefill_wideep = prefill_enable_wideep if prefill_enable_wideep is not None else enable_wideep
+    _decode_wideep = decode_enable_wideep if decode_enable_wideep is not None else enable_wideep
+
     prefill_worker_config: dict = {
         "num_gpu_per_worker": [1, 2, 4, 8],
         "tp_list": [1, 2, 4, 8],
@@ -153,14 +161,23 @@ def build_disagg_parallel_lists(
             decode_worker_config["pp_list"] = [1]
     else:
         if backend_name == "trtllm":
-            if enable_wideep:
+            if _prefill_wideep:
                 prefill_worker_config["num_gpu_per_worker"] = [4, 8, 16, 32]
                 prefill_worker_config["tp_list"] = [1, 2, 4, 8]
                 prefill_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32] if should_enable_pp else [1]
                 prefill_worker_config["dp_list"] = [4, 8, 16, 32]
                 prefill_worker_config["moe_tp_list"] = [1]
                 prefill_worker_config["moe_ep_list"] = [4, 8, 16, 32]
+            else:
+                parallel_config_list = [1, 2, 4, 8]
+                prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
+                prefill_worker_config["tp_list"] = parallel_config_list
+                prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
+                prefill_worker_config["dp_list"] = parallel_config_list
+                prefill_worker_config["moe_tp_list"] = parallel_config_list
+                prefill_worker_config["moe_ep_list"] = parallel_config_list
 
+            if _decode_wideep:
                 decode_worker_config["num_gpu_per_worker"] = [4, 8, 16, 32, 64]
                 decode_worker_config["tp_list"] = [1, 2, 4, 8]
                 decode_worker_config["pp_list"] = [1, 2, 4, 8, 16, 32, 64] if should_enable_pp else [1]
@@ -169,14 +186,6 @@ def build_disagg_parallel_lists(
                 decode_worker_config["moe_ep_list"] = [4, 8, 16, 32, 64]
             else:
                 parallel_config_list = [1, 2, 4, 8]
-
-                prefill_worker_config["num_gpu_per_worker"] = parallel_config_list
-                prefill_worker_config["tp_list"] = parallel_config_list
-                prefill_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
-                prefill_worker_config["dp_list"] = parallel_config_list
-                prefill_worker_config["moe_tp_list"] = parallel_config_list
-                prefill_worker_config["moe_ep_list"] = parallel_config_list
-
                 decode_worker_config["num_gpu_per_worker"] = parallel_config_list
                 decode_worker_config["tp_list"] = parallel_config_list
                 decode_worker_config["pp_list"] = parallel_config_list if should_enable_pp else [1]
@@ -322,6 +331,7 @@ class TaskConfigFactory:
                 "request_latency": ctx.request_latency,
             },
             "enable_wideep": ctx.enable_wideep,
+            "enable_eplb": False,
             "moe_backend": None,  # sglang wideep only
             "attention_backend": "flashinfer",  # sglang wideep only
         }
@@ -415,6 +425,12 @@ class TaskConfigFactory:
         decode_worker_config["system_name"] = decode_system
         decode_worker_config["backend_name"] = ctx.backend_name
         decode_worker_config["backend_version"] = ctx.resolved_backend_version_for(decode_system)
+
+        for wc in (prefill_worker_config, decode_worker_config):
+            wc.setdefault("enable_wideep", ctx.enable_wideep)
+            wc.setdefault("enable_eplb", None)
+            wc.setdefault("moe_backend", None)
+            wc.setdefault("attention_backend", "flashinfer")
 
         replica_config = {
             "num_gpu_per_replica": [
@@ -586,6 +602,7 @@ class TaskConfig:
         tpot: float = 50,
         request_latency: float | None = None,
         enable_wideep: bool = False,
+        enable_eplb: bool = False,
         total_gpus: int | None = None,
         profiles: list[str] | None = None,
         yaml_config: dict | None = None,
@@ -675,6 +692,7 @@ class TaskConfig:
         self.decode_system_name = decode_system_name
         self.backend_name = backend_name
         self.enable_wideep = enable_wideep
+        self.enable_eplb = enable_eplb
         self.total_gpus = total_gpus
         self.yaml_mode = yaml_mode
         self.yaml_patch = yaml_patch
@@ -1130,6 +1148,22 @@ class TaskRunner:
         # Get database mode from config
         database_mode = getattr(task_config, "database_mode", None)
 
+        def _wc_get(wc: object, key: str, fallback):
+            """Read from worker_config; treat None/missing as 'not set'."""
+            val = getattr(wc, key, None)
+            return val if val is not None else fallback
+
+        _pwc = task_config.prefill_worker_config
+        _dwc = task_config.decode_worker_config
+        prefill_enable_wideep = _wc_get(_pwc, "enable_wideep", task_config.enable_wideep)
+        prefill_enable_eplb = _wc_get(_pwc, "enable_eplb", getattr(task_config, "enable_eplb", False))
+        prefill_moe_backend = _wc_get(_pwc, "moe_backend", task_config.moe_backend)
+        prefill_attention_backend = _wc_get(_pwc, "attention_backend", task_config.attention_backend)
+        decode_enable_wideep = _wc_get(_dwc, "enable_wideep", task_config.enable_wideep)
+        decode_enable_eplb = _wc_get(_dwc, "enable_eplb", getattr(task_config, "enable_eplb", False))
+        decode_moe_backend = _wc_get(_dwc, "moe_backend", task_config.moe_backend)
+        decode_attention_backend = _wc_get(_dwc, "attention_backend", task_config.attention_backend)
+
         logger.debug("Task %s: Setting up prefill database", task_config.task_name)
         try:
             prefill_database = self._get_database(
@@ -1157,9 +1191,10 @@ class TaskRunner:
             comm_quant_mode=task_config.prefill_worker_config.comm_quant_mode,
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
-            moe_backend=task_config.moe_backend,  # sglang wideep only
-            attention_backend=task_config.attention_backend,  # sglang wideep only
-            enable_wideep=task_config.enable_wideep,
+            moe_backend=prefill_moe_backend,
+            attention_backend=prefill_attention_backend,
+            enable_wideep=prefill_enable_wideep,
+            enable_eplb=prefill_enable_eplb,
         )
 
         try:
@@ -1174,7 +1209,7 @@ class TaskRunner:
                 moe_ep_list=task_config.prefill_worker_config.moe_ep_list,
                 is_moe=check_is_moe(task_config.model_path),
                 backend=common.BackendName(task_config.prefill_worker_config.backend_name),
-                enable_wideep=task_config.enable_wideep,
+                enable_wideep=prefill_enable_wideep,
             )
         except Exception:  # pragma: no cover
             logger.exception(
@@ -1217,9 +1252,10 @@ class TaskRunner:
             comm_quant_mode=task_config.decode_worker_config.comm_quant_mode,
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
-            moe_backend=task_config.moe_backend,  # sglang wideep only
-            attention_backend=task_config.attention_backend,  # sglang wideep only
-            enable_wideep=task_config.enable_wideep,
+            moe_backend=decode_moe_backend,
+            attention_backend=decode_attention_backend,
+            enable_wideep=decode_enable_wideep,
+            enable_eplb=decode_enable_eplb,
         )
 
         try:
@@ -1234,7 +1270,7 @@ class TaskRunner:
                 moe_ep_list=task_config.decode_worker_config.moe_ep_list,
                 is_moe=check_is_moe(task_config.model_path),
                 backend=common.BackendName(task_config.decode_worker_config.backend_name),
-                enable_wideep=task_config.enable_wideep,
+                enable_wideep=decode_enable_wideep,
             )
         except Exception:  # pragma: no cover
             logger.exception(
