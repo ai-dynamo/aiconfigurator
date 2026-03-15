@@ -10,6 +10,7 @@ gpu:
   float16_tc_flops: 2250000000000000 # 2250TFLOPS
   int8_tc_flops: 4500000000000000 # 4500TFLOPS
   fp8_tc_flops: 4500000000000000 # 4500TFLOPS
+  fp4_tc_flops: 9000000000000000 # 9000TFLOPS
   power: 1000  # Watt
   sm_version: 100
 

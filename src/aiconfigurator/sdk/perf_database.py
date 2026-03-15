@@ -3314,6 +3314,20 @@ class PerfDatabase:
                 e.args = (exception_msg,)
             raise
 
+    def _get_quant_tc_flops(self, quant_mode) -> float:
+        """Resolve actual tensor-core FLOPS for a given quant mode.
+
+        Maps the quant mode's compute factor (1/2/4) to the corresponding
+        ``*_tc_flops`` entry in the system GPU spec.  Falls back to
+        ``float16_tc_flops * compute_factor`` when the spec entry is missing.
+        """
+        compute_to_flops_key = {1: "float16_tc_flops", 2: "fp8_tc_flops", 4: "fp4_tc_flops"}
+        gpu = self.system_spec["gpu"]
+        key = compute_to_flops_key.get(quant_mode.value.compute)
+        if key is not None and key in gpu:
+            return gpu[key]
+        return gpu["float16_tc_flops"] * quant_mode.value.compute
+
     @staticmethod
     def _normalize_gemm_quant_mode_for_table(quant_mode: common.GEMMQuantMode) -> common.GEMMQuantMode:
         """
@@ -3360,7 +3374,8 @@ class PerfDatabase:
             """
             Get the sol time, sol math and sol mem
             """
-            sol_math = 2 * m * n * k / (self.system_spec["gpu"]["float16_tc_flops"] * quant_mode.value.compute) * 1000
+            tc_flops = self._get_quant_tc_flops(quant_mode)
+            sol_math = 2 * m * n * k / tc_flops * 1000
             sol_mem = quant_mode.value.memory * (m * n + m * k + n * k) / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -5751,26 +5766,37 @@ class PerfDatabase:
         ) -> tuple[float, float, float]:
             """
             SOL estimate for the full DSA context attention block.
-            Decomposes into: GEMMs (compute-bound) + sparse attention (compute or memory-bound).
+
+            Ops are split into two groups with different throughput/memory:
+              - GEMM group (linear projections + absorption BMMs): gemm_quant_mode
+              - Attention group (indexer logits + sparse MLA): fmha_quant_mode
             """
             full_s = s + prefix
             tokens = b * s
 
-            # --- Compute (FLOPs) ---
-            # 1. kv_a_proj: [tokens, hidden_size] x [hidden_size, q_lora+kv_lora+qk_rope+index_head_dim]
+            # ── Compute (FLOPs) ─────────────────────────────────────────
             proj_out = q_lora + kv_lora + qk_rope + index_head_dim
-            gemm_kva_ops = 2 * tokens * hidden_size * proj_out
 
+            # GEMM group — throughput governed by gemm_quant_mode
+            # 1. kv_a_proj: [tokens, hidden_size] x [hidden_size, q_lora+kv_lora+qk_rope+index_head_dim]
             # 2. q_b_proj: [tokens, q_lora] x [q_lora, num_heads * qk_head_dim]
-            gemm_qb_ops = 2 * tokens * q_lora * (num_heads * qk_head_dim)
-
             # 3. Indexer wq_b: [tokens, q_lora] x [q_lora, index_n_heads * index_head_dim]
-            gemm_wqb_ops = 2 * tokens * q_lora * (index_n_heads * index_head_dim)
-
             # 4. Indexer weights_proj: [tokens, hidden_size] x [hidden_size, index_n_heads]
-            gemm_wp_ops = 2 * tokens * hidden_size * index_n_heads
+            # 5. o_proj: [tokens, num_heads*v_dim] x [num_heads*v_dim, hidden_size]
+            # 6. BMM pre (q_nope absorption): num_heads x [tokens, qk_nope] x [kv_lora, qk_nope]
+            # 7. BMM post (V projection): num_heads x [tokens, kv_lora] x [v_dim, kv_lora]
+            gemm_group_ops = (
+                2 * tokens * hidden_size * proj_out
+                + 2 * tokens * q_lora * (num_heads * qk_head_dim)
+                + 2 * tokens * q_lora * (index_n_heads * index_head_dim)
+                + 2 * tokens * hidden_size * index_n_heads
+                + 2 * tokens * (num_heads * v_dim) * hidden_size
+                + 2 * num_heads * tokens * qk_nope * kv_lora
+                + 2 * num_heads * tokens * kv_lora * v_dim
+            )
 
-            # 5. Indexer FP8 MQA logits: Q[tokens, index_n_heads, head_dim] x K[full_s, head_dim]
+            # Attention group — throughput governed by fmha_quant_mode
+            # 8. Indexer FP8 MQA logits: Q[tokens, index_n_heads, head_dim] x K[full_s, head_dim]
             #    TRT-LLM skips logits+topk when kv_len <= topk (skip_indexer optimization).
             #    wq_b and weights_proj GEMMs still run regardless.
             if full_s <= index_topk:
@@ -5778,7 +5804,7 @@ class PerfDatabase:
             else:
                 indexer_logits_ops = 2 * tokens * index_n_heads * index_head_dim * full_s
 
-            # 6. Sparse MLA attention: only selected top-k over full KV cache.
+            # 9. Sparse MLA attention: only selected top-k over full KV cache.
             #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512).
             effective_kv = min(full_s, index_topk)
             # Exact KV pair count: sum_{i=0..s-1} min(prefix+i+1, topk)
@@ -5795,44 +5821,32 @@ class PerfDatabase:
                 total_kv_pairs = ramp_pairs + sat_pairs
             sparse_attn_ops = 2 * num_heads * (attn_head_dim + kv_lora) * total_kv_pairs
 
-            # 7. BMM pre (q_nope absorption): num_heads x [tokens, qk_nope] x [kv_lora, qk_nope]
-            bmm_pre_ops = 2 * num_heads * tokens * qk_nope * kv_lora
+            attn_group_ops = indexer_logits_ops + sparse_attn_ops
 
-            # 8. BMM post (V projection): num_heads x [tokens, kv_lora] x [v_dim, kv_lora]
-            bmm_post_ops = 2 * num_heads * tokens * kv_lora * v_dim
+            # ── Memory (bytes) ──────────────────────────────────────────
+            # GEMM weights — size governed by gemm_quant_mode.memory
+            gemm_weight_bytes = (
+                hidden_size * proj_out  # kv_a_proj
+                + q_lora * num_heads * qk_head_dim  # q_b_proj
+                + q_lora * index_n_heads * index_head_dim  # wq_b
+                + hidden_size * index_n_heads  # weights_proj
+                + num_heads * v_dim * hidden_size  # o_proj
+            ) * gemm_quant_mode.value.memory
 
-            # 9. o_proj: [tokens, num_heads*v_dim] x [num_heads*v_dim, hidden_size]
-            gemm_oproj_ops = 2 * tokens * (num_heads * v_dim) * hidden_size
-
-            total_ops = (
-                gemm_kva_ops
-                + gemm_qb_ops
-                + gemm_wqb_ops
-                + gemm_wp_ops
-                + indexer_logits_ops
-                + sparse_attn_ops
-                + bmm_pre_ops
-                + bmm_post_ops
-                + gemm_oproj_ops
-            )
-
-            # --- Memory (bytes) ---
-            # Dominant terms: KV cache reads for sparse attention + GEMM weight reads
-            dtype_bytes = fmha_quant_mode.value.memory
+            # KV cache reads for sparse attention
             kv_cache_bytes = b * num_heads * effective_kv * attn_head_dim * kvcache_quant_mode.value.memory
-            # Indexer K cache read is skipped when kv_len <= topk (skip_indexer)
+            # Indexer K cache read (skipped when kv_len <= topk)
             indexer_cache_bytes = 0 if full_s <= index_topk else b * index_n_heads * full_s * index_head_dim
-            q_io_bytes = tokens * num_heads * qk_head_dim * dtype_bytes * 2  # read + write
-            weight_bytes = (
-                hidden_size * proj_out
-                + q_lora * num_heads * qk_head_dim
-                + q_lora * index_n_heads * index_head_dim
-                + hidden_size * index_n_heads
-                + num_heads * v_dim * hidden_size
-            ) * dtype_bytes
-            total_mem = kv_cache_bytes + indexer_cache_bytes + q_io_bytes + weight_bytes
+            # Q activations read + write
+            q_io_bytes = tokens * num_heads * qk_head_dim * fmha_quant_mode.value.memory * 2
 
-            sol_math = total_ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes
+
+            # ── SOL ─────────────────────────────────────────────────────
+            gemm_flops = self._get_quant_tc_flops(gemm_quant_mode)
+            attn_flops = self._get_quant_tc_flops(fmha_quant_mode)
+
+            sol_math = (gemm_group_ops / gemm_flops + attn_group_ops / attn_flops) * 1000
             sol_mem = total_mem / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -5935,56 +5949,63 @@ class PerfDatabase:
         def get_sol(
             b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode
         ) -> tuple[float, float, float]:
-            """SOL estimate for generation DSA module (1 token per request)."""
-            if kv_cache_dtype == common.KVCacheQuantMode.fp8:
-                quant_mode_gen = common.FMHAQuantMode.fp8
-            else:
-                quant_mode_gen = common.FMHAQuantMode.float16
+            """SOL estimate for generation DSA module (1 token per request).
 
-            tokens = b  # generation: 1 token per request
+            Ops split into GEMM group (gemm_quant_mode) and attention group
+            (fmha derived from kv_cache_dtype).
+            """
+            fmha_mode = common.FMHAQuantMode.float16
+
+            tokens = b
             proj_out = q_lora + kv_lora + qk_rope + index_head_dim
             effective_kv = min(s, index_topk)
 
-            # --- Compute (FLOPs) ---
-            # GEMMs: small M (=b), dominated by weight loading
+            # ── GEMM group — throughput governed by gemm_quant_mode ─────
             # 1. kv_a_proj: [tokens, hidden_size] x [hidden_size, q_lora+kv_lora+qk_rope+index_head_dim]
-            # 2. q_b_proj:  [tokens, q_lora] x [q_lora, num_heads * qk_head_dim]
+            # 2. q_b_proj: [tokens, q_lora] x [q_lora, num_heads * qk_head_dim]
             # 3. Indexer wq_b: [tokens, q_lora] x [q_lora, index_n_heads * index_head_dim]
             # 4. Indexer weights_proj: [tokens, hidden_size] x [hidden_size, index_n_heads]
             # 5. o_proj: [tokens, num_heads*v_dim] x [num_heads*v_dim, hidden_size]
-            gemm_ops = (
+            # 6. BMM pre (q_nope absorption) + BMM post (V projection)
+            gemm_group_ops = (
                 2 * tokens * hidden_size * proj_out
                 + 2 * tokens * q_lora * num_heads * qk_head_dim
                 + 2 * tokens * q_lora * index_n_heads * index_head_dim
                 + 2 * tokens * hidden_size * index_n_heads
                 + 2 * tokens * num_heads * v_dim * hidden_size
+                + 2 * num_heads * tokens * qk_nope * kv_lora
+                + 2 * num_heads * tokens * kv_lora * v_dim
             )
-            # 6. Indexer: paged MQA logits over full KV cache
-            indexer_ops = 2 * tokens * index_n_heads * index_head_dim * s
-            # 7. Sparse attention: only top-k tokens
-            #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512)
-            sparse_ops = 2 * tokens * num_heads * (attn_head_dim + kv_lora) * effective_kv
-            # 8. BMM pre (q_nope absorption) + BMM post (V projection)
-            bmm_ops = 2 * num_heads * tokens * qk_nope * kv_lora + 2 * num_heads * tokens * kv_lora * v_dim
-            total_ops = gemm_ops + indexer_ops + sparse_ops + bmm_ops
 
-            # --- Memory (bytes) ---
-            dtype_bytes = quant_mode_gen.value.memory
+            # ── Attention group — throughput governed by fmha_mode ──────
+            # 7. Indexer: paged MQA logits over full KV cache
+            # 8. Sparse attention: only top-k tokens
+            #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512)
+            attn_group_ops = (
+                2 * tokens * index_n_heads * index_head_dim * s
+                + 2 * tokens * num_heads * (attn_head_dim + kv_lora) * effective_kv
+            )
+
+            # ── Memory (bytes) ──────────────────────────────────────────
+            # GEMM weights (read once) — size governed by gemm_quant_mode.memory
+            gemm_weight_bytes = (
+                hidden_size * proj_out  # kv_a_proj
+                + q_lora * num_heads * qk_head_dim  # q_b_proj
+                + q_lora * index_n_heads * index_head_dim  # wq_b
+                + hidden_size * index_n_heads  # weights_proj
+                + num_heads * v_dim * hidden_size  # o_proj
+            ) * gemm_quant_mode.value.memory
             # Indexer K cache read: full s (paged, FP8)
             indexer_cache_bytes = b * s * index_head_dim
             # MLA KV cache read: only top-k tokens
             kv_cache_bytes = b * effective_kv * attn_head_dim * kv_cache_dtype.value.memory
-            # GEMM weights (read once)
-            weight_bytes = (
-                hidden_size * proj_out
-                + q_lora * num_heads * qk_head_dim
-                + q_lora * index_n_heads * index_head_dim
-                + hidden_size * index_n_heads
-                + num_heads * v_dim * hidden_size
-            ) * dtype_bytes
-            total_mem = indexer_cache_bytes + kv_cache_bytes + weight_bytes
+            total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes
 
-            sol_math = total_ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            # ── SOL ─────────────────────────────────────────────────────
+            gemm_flops = self._get_quant_tc_flops(gemm_quant_mode)
+            attn_flops = self._get_quant_tc_flops(fmha_mode)
+
+            sol_math = (gemm_group_ops / gemm_flops + attn_group_ops / attn_flops) * 1000
             sol_mem = total_mem / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
