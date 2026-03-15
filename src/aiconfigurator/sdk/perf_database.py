@@ -1107,18 +1107,18 @@ def load_mla_bmm_data(mla_bmm_file):
 
 def load_context_dsa_module_data(dsa_file: str):
     """
-    Load context DSA data. Produces the SAME dict structure as load_context_mla_data
-    so that the same interpolation and query infrastructure can be reused.
+    Load context DSA data.
 
-    Dict structure: data[fmha_quant_mode][kv_cache_quant_mode][num_heads][s][b]
-    (mirrors context MLA exactly)
+    Dict structure:
+        data[gemm_quant_mode][fmha_quant_mode][kv_cache_quant_mode][num_heads][s][b]
     """
     if not os.path.exists(dsa_file):
         logger.debug(f"DSA context data file {dsa_file} not found.")
         return None
 
-    # Same 5-level defaultdict as MLA — leaf is defaultdict() so try/except KeyError works
-    dsa_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    dsa_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
 
     with open(dsa_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -1134,34 +1134,31 @@ def load_context_dsa_module_data(dsa_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        entry = {"latency": latency, "power": power, "energy": energy}
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        # DSA only supports BF16 KV cache in TRT-LLM 1.2.0rc5.
-        # Register under float16 quant keys only.
-        quant_mode = common.FMHAQuantMode.float16
-        kv_dtype = common.KVCacheQuantMode.float16
-        try:
-            dsa_data[quant_mode][kv_dtype][num_heads][s][b]
-        except KeyError:
-            dsa_data[quant_mode][kv_dtype][num_heads][s][b] = entry
+        dsa_data[gemm_mode][fmha_mode][kv_dtype][num_heads][s][b] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
 
     return dsa_data
 
 
 def load_generation_dsa_module_data(dsa_file: str):
     """
-    Load generation DSA data. Produces the SAME dict structure as load_generation_mla_data
-    so that the same interpolation and query infrastructure can be reused.
+    Load generation DSA data.
 
-    Dict structure: data[kv_cache_quant_mode][num_heads][b][s]
-    (mirrors generation MLA exactly)
+    Dict structure:
+        data[gemm_quant_mode][kv_cache_quant_mode][num_heads][b][s]
     """
     if not os.path.exists(dsa_file):
         logger.debug(f"DSA generation data file {dsa_file} not found.")
         return None
 
-    # Same 4-level defaultdict as MLA — leaf is defaultdict() so try/except KeyError works
-    dsa_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+    dsa_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
 
     with open(dsa_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -1172,22 +1169,19 @@ def load_generation_dsa_module_data(dsa_file: str):
     for row in rows:
         num_heads = int(row["num_heads"])
         b = int(row["batch_size"])
-        isl = int(row["isl"])
-        step = int(row["step"])
+        s = int(row["isl"]) + int(row["step"])
         latency = float(row["latency"])
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        # s = isl + step (same as MLA generation: total kv_cache position)
-        s = isl + step
+        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
+        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        entry = {"latency": latency, "power": power, "energy": energy}
-
-        kv_dtype = common.KVCacheQuantMode.float16
-        try:
-            dsa_data[kv_dtype][num_heads][b][s]
-        except KeyError:
-            dsa_data[kv_dtype][num_heads][b][s] = entry
+        dsa_data[gemm_mode][kv_dtype][num_heads][b][s] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
 
     return dsa_data
 
@@ -2466,21 +2460,60 @@ class PerfDatabase:
                 )
 
         # DSA (DeepSeek Sparse Attention) data interpolation
-        # Uses EXACT same pattern as MLA since dict structure is identical
+        # Dict structure: data[gemm_mode][fmha_mode][kv_dtype][num_heads][s][b]
         if getattr(self, "_context_dsa_module_data", None) is not None:
-            for quant_mode in self._context_dsa_module_data:
-                for kv_cache_dtype in self._context_dsa_module_data[quant_mode]:
-                    num_heads_list = list(self._context_dsa_module_data[quant_mode][kv_cache_dtype].keys())
-                    data_dict = self._context_dsa_module_data[quant_mode][kv_cache_dtype]
-                    target_x_list = num_heads_list
-                    target_y_list = (
-                        [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-                        + [4096 + i * 2048 for i in range(14)]
-                        + [32768 + 16384 * i for i in range(6)]
-                        + [131072 + 32768 * i for i in range(12)]
-                        + [524288 + 65536 * i for i in range(9)]
-                    )
-                    target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]
+            for gemm_mode in self._context_dsa_module_data:
+                for fmha_mode in self._context_dsa_module_data[gemm_mode]:
+                    for kv_cache_dtype in self._context_dsa_module_data[gemm_mode][fmha_mode]:
+                        data_dict = self._context_dsa_module_data[gemm_mode][fmha_mode][kv_cache_dtype]
+                        num_heads_list = list(data_dict.keys())
+                        target_x_list = num_heads_list
+                        target_y_list = (
+                            [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
+                            + [4096 + i * 2048 for i in range(14)]
+                            + [32768 + 16384 * i for i in range(6)]
+                            + [131072 + 32768 * i for i in range(12)]
+                            + [524288 + 65536 * i for i in range(9)]
+                        )
+                        target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]
+
+                        self._extrapolate_data_grid(
+                            data_dict=data_dict,
+                            target_x_list=target_x_list,
+                            target_y_list=target_y_list,
+                            target_z_list=target_z_list,
+                        )
+
+        # Dict structure: data[gemm_mode][kv_dtype][num_heads][b][s]
+        if getattr(self, "_generation_dsa_module_data", None) is not None:
+            for gemm_mode in self._generation_dsa_module_data:
+                for kv_cache_dtype in self._generation_dsa_module_data[gemm_mode]:
+                    data_dict = self._generation_dsa_module_data[gemm_mode][kv_cache_dtype]
+                    tp_list = list(data_dict.keys())
+                    target_x_list = tp_list
+                    target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]
+                    target_z_list = [
+                        1,
+                        2,
+                        4,
+                        8,
+                        16,
+                        32,
+                        64,
+                        128,
+                        256,
+                        512,
+                        1024,
+                        2048,
+                        4096,
+                        8192,
+                        16384,
+                        32768,
+                        65536,
+                        131072,
+                        262144,
+                        2097152 * 8,
+                    ]
 
                     self._extrapolate_data_grid(
                         data_dict=data_dict,
@@ -2488,42 +2521,6 @@ class PerfDatabase:
                         target_y_list=target_y_list,
                         target_z_list=target_z_list,
                     )
-
-        if getattr(self, "_generation_dsa_module_data", None) is not None:
-            for kv_cache_dtype in self._generation_dsa_module_data:
-                tp_list = list(self._generation_dsa_module_data[kv_cache_dtype].keys())
-                data_dict = self._generation_dsa_module_data[kv_cache_dtype]
-                target_x_list = tp_list
-                target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]
-                target_z_list = [
-                    1,
-                    2,
-                    4,
-                    8,
-                    16,
-                    32,
-                    64,
-                    128,
-                    256,
-                    512,
-                    1024,
-                    2048,
-                    4096,
-                    8192,
-                    16384,
-                    32768,
-                    65536,
-                    131072,
-                    262144,
-                    2097152 * 8,
-                ]
-
-                self._extrapolate_data_grid(
-                    data_dict=data_dict,
-                    target_x_list=target_x_list,
-                    target_y_list=target_y_list,
-                    target_z_list=target_z_list,
-                )
 
         # post-correction
         self._correct_data()
@@ -5704,6 +5701,7 @@ class PerfDatabase:
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
+        gemm_quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
         *,
         prefix: int = 0,
@@ -5869,7 +5867,7 @@ class PerfDatabase:
                         f"Context DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode]
+                dsa_dict = dsa_module_data[gemm_quant_mode][fmha_quant_mode][kvcache_quant_mode]
                 full_s = s + prefix
                 result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                 latency = result["latency"]
@@ -5904,6 +5902,7 @@ class PerfDatabase:
         s: int,
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
+        gemm_quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
         *,
         index_n_heads: int = 64,
@@ -6013,7 +6012,7 @@ class PerfDatabase:
                         f"Generation DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[kv_cache_dtype]
+                dsa_dict = dsa_module_data[gemm_quant_mode][kv_cache_dtype]
                 result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)

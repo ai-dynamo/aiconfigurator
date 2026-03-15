@@ -81,6 +81,24 @@ SUPPORTED_MODELS: dict[str, str] = {
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _get_gemm_types():
+    """Return the list of GEMM quantization types based on GPU capability.
+
+    Controls the precision of linear-layer GEMMs inside the attention module
+    (kv_b_proj, q_b_proj, o_proj, and MLA absorption BMMs):
+      - bfloat16:  always available (BF16 weights, BF16 GEMMs)
+      - fp8_block: SM >= 89 (Ada / Hopper / Blackwell) — FP8 block-scaled GEMMs
+      - nvfp4:     SM >= 100 (Blackwell) — NVFP4 weight-only quantisation
+    """
+    types = ["bfloat16"]
+    sm = get_sm_version()
+    if sm >= 89:
+        types.append("fp8_block")
+    if sm >= 100:
+        types.append("nvfp4")
+    return types
+
+
 def _get_kv_cache_dtypes(is_dsa: bool = False):
     """Return the list of KV cache dtypes to benchmark based on GPU capability.
 
@@ -110,40 +128,44 @@ def _get_kv_cache_dtypes(is_dsa: bool = False):
 def get_context_test_cases(attn_type: str):
     """Context-phase test cases.
 
-    Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype, perf_filename].
+    Returns list of [seq_len, batch_size, num_heads, kv_cache_dtype,
+                     gemm_type, perf_filename].
     """
     is_dsa = attn_type == "dsa"
     cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
     base_fname = f"{attn_type}_context_module_perf.txt"
-    for kv_dtype in _get_kv_cache_dtypes(is_dsa=is_dsa):
-        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-            for b in b_list:
-                for s in s_list:
-                    if b * s > 131072:
-                        continue
-                    cases.append([s, b, num_heads, kv_dtype, base_fname])
+    for gemm_type in _get_gemm_types():
+        for kv_dtype in _get_kv_cache_dtypes(is_dsa=is_dsa):
+            for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
+                for b in b_list:
+                    for s in s_list:
+                        if b * s > 131072:
+                            continue
+                        cases.append([s, b, num_heads, kv_dtype, gemm_type, base_fname])
     return cases
 
 
 def get_generation_test_cases(attn_type: str):
     """Generation-phase test cases.
 
-    Returns list of [kv_cache_len, batch_size, num_heads, kv_cache_dtype, perf_filename].
+    Returns list of [kv_cache_len, batch_size, num_heads, kv_cache_dtype,
+                     gemm_type, perf_filename].
     """
     is_dsa = attn_type == "dsa"
     cases = []
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
     base_fname = f"{attn_type}_generation_module_perf.txt"
-    for kv_dtype in _get_kv_cache_dtypes(is_dsa=is_dsa):
-        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-            for b in b_list:
-                for s in s_list:
-                    if b * s > 1024 * 4096 * 2 * 2 * 2:
-                        continue
-                    cases.append([s, b, num_heads, kv_dtype, base_fname])
+    for gemm_type in _get_gemm_types():
+        for kv_dtype in _get_kv_cache_dtypes(is_dsa=is_dsa):
+            for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
+                for b in b_list:
+                    for s in s_list:
+                        if b * s > 1024 * 4096 * 2 * 2 * 2:
+                            continue
+                        cases.append([s, b, num_heads, kv_dtype, gemm_type, base_fname])
     return cases
 
 
@@ -151,14 +173,15 @@ def _build_module_test_cases(attn_type: str, mode: str):
     """Build module-level test cases for a specific attention type and phase.
 
     Output test case format is positional args for run_mla_module_worker:
-    [seq_len, batch_size, num_heads, kv_cache_dtype, perf_filename, model_path, attn_type]
+    [seq_len, batch_size, num_heads, kv_cache_dtype, gemm_type,
+     perf_filename, model_path, attn_type]
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
     cases = []
     for model_path in model_paths:
-        for s, b, h, kv_dtype, fname in base_cases:
-            cases.append([s, b, h, kv_dtype, fname, model_path, attn_type])
+        for s, b, h, kv_dtype, gemm_type, fname in base_cases:
+            cases.append([s, b, h, kv_dtype, gemm_type, fname, model_path, attn_type])
     return cases
 
 
@@ -195,10 +218,44 @@ def _round_up(a, b):
     return _ceil_div(a, b) * b
 
 
+def _apply_gemm_type_quant(model_config, gemm_type: str, use_fp8_kv_cache: bool):
+    """Apply GEMM quantization to model_config.quant_config.
+
+    Replaces the quant_config so that linear-layer GEMMs (and MLA absorption
+    BMMs where supported) run at the requested precision.
+    """
+    kv_algo = QuantAlgo.FP8 if use_fp8_kv_cache else None
+
+    if gemm_type == "bfloat16":
+        if use_fp8_kv_cache:
+            model_config.quant_config = dataclasses.replace(
+                model_config.quant_config,
+                kv_cache_quant_algo=kv_algo,
+            )
+    elif gemm_type == "fp8_block":
+        model_config.quant_config = dataclasses.replace(
+            model_config.quant_config,
+            quant_algo=QuantAlgo.FP8_BLOCK_SCALES,
+            group_size=128,
+            kv_cache_quant_algo=kv_algo,
+            exclude_modules=None,
+        )
+    elif gemm_type == "nvfp4":
+        model_config.quant_config = dataclasses.replace(
+            model_config.quant_config,
+            quant_algo=QuantAlgo.NVFP4,
+            kv_cache_quant_algo=kv_algo,
+            exclude_modules=None,
+        )
+    else:
+        raise ValueError(f"Unknown gemm_type: {gemm_type!r}")
+
+
 def create_attention_layer(
     model_path: str,
     num_heads: int = 128,
     use_fp8_kv_cache: bool = False,
+    gemm_type: str = "bfloat16",
     device: str = "cuda:0",
 ):
     """
@@ -239,11 +296,7 @@ def create_attention_layer(
     pretrained_config.num_attention_heads = num_heads
     pretrained_config.num_key_value_heads = num_heads
 
-    if use_fp8_kv_cache:
-        model_config.quant_config = dataclasses.replace(
-            model_config.quant_config,
-            kv_cache_quant_algo=QuantAlgo.FP8,
-        )
+    _apply_gemm_type_quant(model_config, gemm_type, use_fp8_kv_cache)
 
     aux_stream = torch.cuda.Stream(device=device)
     aux_stream_dict = {
@@ -406,6 +459,7 @@ def run_mla_module(
     batch_size: int,
     num_heads: int,
     kv_cache_dtype: str,
+    gemm_type: str,
     perf_filename: str,
     *,
     model_path: str,
@@ -423,13 +477,17 @@ def run_mla_module(
     is_context = "context" in perf_filename
     phase = "context" if is_context else "generation"
     variant = attn_type.upper()
-    print(f"\n[{variant} module] {phase} b={batch_size}, s={seq_len}, heads={num_heads}, kv={kv_cache_dtype}")
+    print(
+        f"\n[{variant} module] {phase} b={batch_size}, s={seq_len}, "
+        f"heads={num_heads}, gemm={gemm_type}, kv={kv_cache_dtype}"
+    )
 
     # 1. Create attention layer (from_pretrained reads config.json)
     attn_module, model_config = create_attention_layer(
         model_path=model_path,
         num_heads=num_heads,
         use_fp8_kv_cache=use_fp8_kv_cache,
+        gemm_type=gemm_type,
         device=device,
     )
 
@@ -517,8 +575,9 @@ def run_mla_module(
     log_perf(
         item_list=[
             {
-                "mla_dtype": "bfloat16",
-                "kv_cache_dtype": kv_cache_dtype,
+                "mla_dtype": "float16",
+                "kv_cache_dtype": "float16" if kv_cache_dtype == "bfloat16" else kv_cache_dtype,
+                "gemm_type": "float16" if gemm_type == "bfloat16" else gemm_type,
                 "num_heads": num_heads,
                 "batch_size": batch_size,
                 "isl": isl,
@@ -536,7 +595,10 @@ def run_mla_module(
         power_stats=results["power_stats"],
     )
 
-    print(f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, kv={kv_cache_dtype}: {latency:.4f} ms")
+    print(
+        f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
+        f"gemm={gemm_type}, kv={kv_cache_dtype}: {latency:.4f} ms"
+    )
 
     _cleanup(kv_cache_manager)
     return latency
@@ -547,6 +609,7 @@ def run_mla_module_worker(
     batch_size: int,
     num_heads: int,
     kv_cache_dtype: str,
+    gemm_type: str,
     perf_filename: str,
     model_path: str,
     attn_type: str,
@@ -558,6 +621,7 @@ def run_mla_module_worker(
         batch_size=batch_size,
         num_heads=num_heads,
         kv_cache_dtype=kv_cache_dtype,
+        gemm_type=gemm_type,
         perf_filename=perf_filename,
         model_path=model_path,
         attn_type=attn_type,
@@ -601,6 +665,13 @@ def main():
         default=None,
         help="KV cache dtype (default: run both bfloat16 and fp8 when GPU supports it)",
     )
+    parser.add_argument(
+        "--gemm-type",
+        type=str,
+        choices=["bfloat16", "fp8_block", "nvfp4"],
+        default=None,
+        help="GEMM quantisation type for linear layers (default: run all supported by GPU)",
+    )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--quick", action="store_true", help="Quick single-point test")
     args = parser.parse_args()
@@ -621,12 +692,14 @@ def main():
             s = args.seq_len or 2048
             h = args.num_heads or 128
             kv_dtype = args.kv_cache_dtype or "bfloat16"
+            gemm = args.gemm_type or "bfloat16"
             fname = f"{attn_type}_{args.mode}_module_perf.txt"
             run_mla_module(
                 seq_len=s,
                 batch_size=b,
                 num_heads=h,
                 kv_cache_dtype=kv_dtype,
+                gemm_type=gemm,
                 perf_filename=fname,
                 model_path=model_path,
                 attn_type=attn_type,
@@ -645,9 +718,12 @@ def main():
         if args.kv_cache_dtype is not None:
             test_cases = [tc for tc in test_cases if tc[3] == args.kv_cache_dtype]
 
+        if args.gemm_type is not None:
+            test_cases = [tc for tc in test_cases if tc[4] == args.gemm_type]
+
         print(f"Running {len(test_cases)} {args.mode} {attn_type.upper()} module test cases...")
 
-        for i, (s, b, h, kv_dtype, fname) in enumerate(test_cases):
+        for i, (s, b, h, kv_dtype, gemm, fname) in enumerate(test_cases):
             print(f"[{i + 1}/{len(test_cases)}]", end="")
             try:
                 run_mla_module(
@@ -655,17 +731,18 @@ def main():
                     batch_size=b,
                     num_heads=h,
                     kv_cache_dtype=kv_dtype,
+                    gemm_type=gemm,
                     perf_filename=fname,
                     model_path=model_path,
                     attn_type=attn_type,
                     device=args.device,
                 )
             except torch.cuda.OutOfMemoryError:
-                print(f"  OOM: b={b}, s={s}, heads={h}, kv={kv_dtype}")
+                print(f"  OOM: b={b}, s={s}, heads={h}, gemm={gemm}, kv={kv_dtype}")
                 torch.cuda.empty_cache()
                 gc.collect()
             except Exception as e:
-                print(f"  FAILED: b={b}, s={s}, heads={h}, kv={kv_dtype}: {e}")
+                print(f"  FAILED: b={b}, s={s}, heads={h}, gemm={gemm}, kv={kv_dtype}: {e}")
                 traceback.print_exc()
                 torch.cuda.empty_cache()
                 gc.collect()
