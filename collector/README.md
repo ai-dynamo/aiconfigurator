@@ -257,8 +257,33 @@ with benchmark_with_power(
 - Only opt-in when needed for specific use cases
 
 ## For TensorRT-LLM
-If you need to use w4a16_mxfp4 kernel, install the triton according to https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/models/core/gpt_oss#using-openai-triton-kernels-for-moe
-
+### Optional( Read if collecting for mxfp4 kernels)
+To collect performance data for mxfp4 kernels used in GPTOSS models, depending on the version of TensorRT-LLM, you might need to manually install triton-kernels. If your version is **>= 1.3.0rc2**, nothing needs to be done and you can run the collection process directly. For any version before **1.3.0rc2**. Follow the below instructions to install triton-kernels and expose them to TensorRT-LLM
+1. Build and install Triton (tested with the commit below):
+```bash
+git clone https://github.com/triton-lang/triton.git
+cd triton
+# Specific commit verified with TensorRT-LLM
+git checkout f3067cd3bd0c29065fa4ecdb724b6f29cbabea5f
+pip install -r python/requirements.txt # build-time dependencies
+pip install wheel build
+python3 setup.py bdist_wheel # if this step fails due cuda related error, you might need to set CUDA_HOME following the optional step
+pip install ./dist/*.whl
+```
+2. (Optional) You may need to set CUDA_HOME env variable to successfully build triton
+```bash
+export CUDA_HOME=/usr/local/cuda
+export CPLUS_INCLUDE_PATH=$CUDA_HOME/include:$CPLUS_INCLUDE_PATH
+export C_INCLUDE_PATH=$CUDA_HOME/include:$C_INCLUDE_PATH
+python3 setup.py bdist_wheel
+```
+3. Expose the Triton kernels to TensorRT-LLM The kernels are not packaged in the wheel, so set the environment variable TRITON_ROOT to your Triton clone:
+```bash
+export TRITON_ROOT=/local/user/triton
+# TensorRT-LLM expects the kernels at:
+#   $TRITON_ROOT/python/triton_kernels
+```
+### Run collection for all available operations
 ```bash
 python3 collect.py --backend trtllm
 ```
@@ -325,7 +350,4 @@ of the GPU system and kernel optimization.
 **Solution**: Use `/tmp/` for output files, then copy results after collection.
 
 # Support Matrix
-aiconfigurator 0.1.0
-trtllm: 0.20.0, 1.0.0rc3 on Hopper GPUs
-vllm: NA
-sglang: 0.5.6.post2 on Hopper GPUs
+refer to the [**support matrix CSV**](src/aiconfigurator/systems/support_matrix.csv)

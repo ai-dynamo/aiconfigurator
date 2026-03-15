@@ -36,6 +36,13 @@ def setup_warning_filters():
         category=UserWarning,
     )
 
+    # Suppress pynvml deprecation warning from torch.cuda
+    warnings.filterwarnings(
+        "ignore",
+        message="The pynvml package is deprecated",
+        category=FutureWarning,
+    )
+
 
 import random
 import resource
@@ -44,6 +51,7 @@ import torch
 from tqdm import tqdm
 
 setup_warning_filters()
+
 import argparse
 import cProfile
 import io

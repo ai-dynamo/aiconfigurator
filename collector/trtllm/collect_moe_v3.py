@@ -43,6 +43,52 @@ aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
 
 
+def _patch_moe_runners_for_tuple_tactics():
+    """Monkey-patch MoE runners whose forward() asserts isinstance(tactic, list).
+
+    In trtllm 1.2.0rc5, the C++ get_valid_configs() can return strings instead
+    of lists for some runners, causing the assertion to fail. This patch wraps
+    forward() to coerce tuples to lists before the call.
+    """
+    if tensorrt_llm.__version__ != "1.2.0rc5" or get_sm_version() < 100:
+        return
+
+    try:
+        from tensorrt_llm._torch.custom_ops import trtllm_gen_custom_ops as ops
+    except ImportError:
+        return
+
+    runner_classes = []
+    for name in [
+        "MxE4m3MxE2m1BlockScaleMoERunner",
+        "E4m3MxE2m1BlockScaleMoERunner",
+        "Bf16MxE2m1BlockScaleMoERunner",
+    ]:
+        cls = getattr(ops, name, None)
+        if cls is not None:
+            runner_classes.append(cls)
+
+    for cls in runner_classes:
+        orig_forward = cls.forward
+
+        def _patched_forward(self, inputs, tactic=[-1, -1], _orig=orig_forward, **kwargs):
+            if not isinstance(tactic, list):
+                if isinstance(tactic, str):
+                    import ast
+
+                    tactic = ast.literal_eval(tactic)
+                elif isinstance(tactic, (tuple, range)):
+                    tactic = list(tactic)
+                else:
+                    tactic = [tactic]
+            return _orig(self, inputs, tactic=tactic, **kwargs)
+
+        cls.forward = _patched_forward
+
+
+_patch_moe_runners_for_tuple_tactics()
+
+
 def gc_collect():
     """Run GC and clear CUDA cache to reduce fragmentation between runs."""
     for _ in range(2):
@@ -109,7 +155,9 @@ def get_moe_test_cases():
         moe_list += ["w4a16_mxfp4"]
 
     if sm_version >= 100:
-        moe_list += ["nvfp4"]
+        moe_list += ["nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
+
+    _GPTOSS_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}  # noqa: N806
 
     test_cases = []
 
@@ -120,10 +168,10 @@ def get_moe_test_cases():
 
         for moe_type in moe_list:
             if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
-                if moe_type != "w4a16_mxfp4":
+                if moe_type not in _GPTOSS_MOE_TYPES:
                     continue
             else:
-                if moe_type == "w4a16_mxfp4":
+                if moe_type in _GPTOSS_MOE_TYPES:
                     continue
 
             # w4afp8 requires k shape to be multiple of 128
@@ -148,6 +196,7 @@ def get_moe_test_cases():
                 "fp8": 8,
                 "fp8_block": 8,
                 "w4a16_mxfp4": 4,
+                "w4a8_mxfp4_mxfp8": 4,
                 "w4afp8": 4,
                 "nvfp4": 4,
             }[moe_type]
@@ -235,6 +284,9 @@ def run_moe_torch(
     elif moe_type == "w4a16_mxfp4":
         quant_algo = QuantAlgo.W4A16_MXFP4
         quant_group_size = 32
+    elif moe_type == "w4a8_mxfp4_mxfp8":
+        quant_algo = QuantAlgo.W4A8_MXFP4_MXFP8
+        quant_group_size = 32
 
     if power_law_alpha - 0.0 < 1e-6:
         distributed = "balanced"
@@ -286,17 +338,19 @@ def run_moe_torch(
     sm_version = get_sm_version()
 
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
-        # use triton backend for best performance on Hopper
-        model_config.moe_backend = "triton"
         swiglu_alpha = torch.tensor([1.702] * (num_experts // moe_ep_size), dtype=torch.float32).to(
             torch.device(device)
         )
         swiglu_beta = torch.tensor([1.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
         swiglu_limit = torch.tensor([7.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
-        if 86 < sm_version < 100:
+        if 86 < get_sm_version() < 100:
+            # Hopper: use triton backend for best performance
             model_config.moe_backend = "triton"
+        elif get_sm_version() >= 100:
+            # Blackwell: production uses TRTLLMGenFusedMoE (Bf16MxE2m1BlockScaleMoeRunner)
+            model_config.moe_backend = "trtllm"
         else:
-            model_config.moe_backend = "cutlass" if not min_latency_mode else "trtllm"
+            model_config.moe_backend = "cutlass"
     else:
         # Select backend based on platform and quant mode.
         if min_latency_mode:
@@ -351,7 +405,12 @@ def run_moe_torch(
     )
     moe.to(torch.device(device))
 
-    if moe_type == "w4a16_mxfp4":
+    # Both w4a16_mxfp4 and w4a8_mxfp4_mxfp8 use MXFP4 weights and share the same
+    # weight loading path in TRT-LLM (inherited from MXFP4WeightTRTLLMGenFusedMoEMethod).
+    # We must explicitly cast weights to MXFP4 format and call load_weights() so that
+    # the proper shuffle/permutation (torch.ops.trtllm.shuffle_matrix) is applied,
+    # which the kernel expects for correct memory access patterns.
+    if moe_type in ("w4a16_mxfp4", "w4a8_mxfp4_mxfp8"):
         w1_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
         w2_bias = torch.randn((num_experts, hidden_size), dtype=dtype, device=device)
         w3_bias = torch.randn((num_experts, inter_size), dtype=dtype, device=device)
