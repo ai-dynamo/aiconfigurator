@@ -214,8 +214,12 @@ def _create_gemm_quant_config(gemm_type: str):
     if gemm_type == "fp8_block":
         from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
+        # vLLM requires is_checkpoint_fp8_serialized=True for block-scaled
+        # FP8 (fp8.py raises ValueError otherwise).  This routes through
+        # Fp8LinearMethod (block_quant=True) → W8A8BlockFp8LinearOp →
+        # DeepGEMM on SM≥89.
         return Fp8Config(
-            is_checkpoint_fp8_serialized=False,
+            is_checkpoint_fp8_serialized=True,
             activation_scheme="dynamic",
             weight_block_size=[128, 128],
         )
@@ -340,18 +344,29 @@ def _create_attention_module(
             topk_indices_buffer=topk_indices_buffer,
         )
 
-    attn_module = attn_module.to(device)
+    # Serialized block-scaled FP8 creates weight params on meta device;
+    # to() cannot copy meta tensors, so use to_empty() when needed.
+    if any(p.is_meta for p in attn_module.parameters()):
+        attn_module = attn_module.to_empty(device=torch.device(device))
+    else:
+        attn_module = attn_module.to(device)
     attn_module.eval()
     attn_module.requires_grad_(False)
 
-    # Initialize with random weights (skip FP8 parameters which don't
-    # support in-place normal_; they will be populated by
-    # process_weights_after_loading later).
+    # Initialize with random weights.
+    # FP8 weights → zero (safe dummy value).
+    # Scale params → 1.0 (avoid NaN during process_weights_after_loading).
+    # Everything else → small normal.
     with torch.no_grad():
-        for param in attn_module.parameters():
-            if param.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        for name, param in attn_module.named_parameters():
+            if param.is_meta:
                 continue
-            param.normal_(mean=0.0, std=0.02)
+            if param.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                param.data.zero_()
+            elif param.dtype == torch.float32 and "scale" in name:
+                param.data.fill_(1.0)
+            else:
+                param.normal_(mean=0.0, std=0.02)
 
     return attn_module, vllm_config
 
