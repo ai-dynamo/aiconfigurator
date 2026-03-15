@@ -5795,7 +5795,7 @@ class PerfDatabase:
                 + 2 * num_heads * tokens * kv_lora * v_dim
             )
 
-            # Attention group — throughput governed by fmha_quant_mode
+            # Indexer logits group — always FP8 (hardcoded in both vLLM and TRT-LLM)
             # 8. Indexer FP8 MQA logits: Q[tokens, index_n_heads, head_dim] x K[full_s, head_dim]
             #    TRT-LLM skips logits+topk when kv_len <= topk (skip_indexer optimization).
             #    wq_b and weights_proj GEMMs still run regardless.
@@ -5804,6 +5804,7 @@ class PerfDatabase:
             else:
                 indexer_logits_ops = 2 * tokens * index_n_heads * index_head_dim * full_s
 
+            # Sparse MLA attention group — throughput governed by fmha_quant_mode
             # 9. Sparse MLA attention: only selected top-k over full KV cache.
             #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512).
             effective_kv = min(full_s, index_topk)
@@ -5821,8 +5822,6 @@ class PerfDatabase:
                 total_kv_pairs = ramp_pairs + sat_pairs
             sparse_attn_ops = 2 * num_heads * (attn_head_dim + kv_lora) * total_kv_pairs
 
-            attn_group_ops = indexer_logits_ops + sparse_attn_ops
-
             # ── Memory (bytes) ──────────────────────────────────────────
             # GEMM weights — size governed by gemm_quant_mode.memory
             gemm_weight_bytes = (
@@ -5835,8 +5834,10 @@ class PerfDatabase:
 
             # KV cache reads for sparse attention
             kv_cache_bytes = b * num_heads * effective_kv * attn_head_dim * kvcache_quant_mode.value.memory
-            # Indexer K cache read (skipped when kv_len <= topk)
-            indexer_cache_bytes = 0 if full_s <= index_topk else b * index_n_heads * full_s * index_head_dim
+            # Indexer K cache read (MQA: 1 shared K head, FP8 with per-128 scales).
+            # Per-token bytes: head_dim (FP8) + ceil(head_dim/128)*4 (scales).
+            indexer_entry_bytes = index_head_dim + (index_head_dim + 127) // 128 * 4
+            indexer_cache_bytes = 0 if full_s <= index_topk else b * full_s * indexer_entry_bytes
             # Q activations read + write
             q_io_bytes = tokens * num_heads * qk_head_dim * fmha_quant_mode.value.memory * 2
 
@@ -5844,9 +5845,12 @@ class PerfDatabase:
 
             # ── SOL ─────────────────────────────────────────────────────
             gemm_flops = self._get_quant_tc_flops(gemm_quant_mode)
+            indexer_fp8_flops = self._get_quant_tc_flops(common.FMHAQuantMode.fp8)
             attn_flops = self._get_quant_tc_flops(fmha_quant_mode)
 
-            sol_math = (gemm_group_ops / gemm_flops + attn_group_ops / attn_flops) * 1000
+            sol_math = (
+                gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops
+            ) * 1000
             sol_mem = total_mem / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -5977,14 +5981,14 @@ class PerfDatabase:
                 + 2 * num_heads * tokens * kv_lora * v_dim
             )
 
-            # ── Attention group — throughput governed by fmha_mode ──────
-            # 7. Indexer: paged MQA logits over full KV cache
+            # Indexer logits — always FP8 (hardcoded in both vLLM and TRT-LLM)
+            # 7. Indexer: paged FP8 MQA logits over full KV cache
+            indexer_logits_ops = 2 * tokens * index_n_heads * index_head_dim * s
+
+            # Sparse MLA attention — throughput governed by fmha_mode
             # 8. Sparse attention: only top-k tokens
             #    QK^T uses attn_head_dim (kv_lora+qk_rope=576), V aggregation uses kv_lora (512)
-            attn_group_ops = (
-                2 * tokens * index_n_heads * index_head_dim * s
-                + 2 * tokens * num_heads * (attn_head_dim + kv_lora) * effective_kv
-            )
+            sparse_attn_ops = 2 * tokens * num_heads * (attn_head_dim + kv_lora) * effective_kv
 
             # ── Memory (bytes) ──────────────────────────────────────────
             # GEMM weights (read once) — size governed by gemm_quant_mode.memory
@@ -5995,17 +5999,21 @@ class PerfDatabase:
                 + hidden_size * index_n_heads  # weights_proj
                 + num_heads * v_dim * hidden_size  # o_proj
             ) * gemm_quant_mode.value.memory
-            # Indexer K cache read: full s (paged, FP8)
-            indexer_cache_bytes = b * s * index_head_dim
+            # Indexer K cache read: full s (paged, MQA 1 head, FP8 with per-128 scales)
+            indexer_entry_bytes = index_head_dim + (index_head_dim + 127) // 128 * 4
+            indexer_cache_bytes = b * s * indexer_entry_bytes
             # MLA KV cache read: only top-k tokens
             kv_cache_bytes = b * effective_kv * attn_head_dim * kv_cache_dtype.value.memory
             total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes
 
             # ── SOL ─────────────────────────────────────────────────────
             gemm_flops = self._get_quant_tc_flops(gemm_quant_mode)
+            indexer_fp8_flops = self._get_quant_tc_flops(common.FMHAQuantMode.fp8)
             attn_flops = self._get_quant_tc_flops(fmha_mode)
 
-            sol_math = (gemm_group_ops / gemm_flops + attn_group_ops / attn_flops) * 1000
+            sol_math = (
+                gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops
+            ) * 1000
             sol_mem = total_mem / self.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem

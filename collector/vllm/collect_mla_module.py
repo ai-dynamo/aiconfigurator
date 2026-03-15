@@ -217,6 +217,7 @@ def _create_gemm_quant_config(gemm_type: str):
         return Fp8Config(
             is_checkpoint_fp8_serialized=False,
             activation_scheme="dynamic",
+            weight_block_size=[128, 128],
         )
     if gemm_type == "nvfp4":
         from vllm.model_executor.layers.quantization.modelopt import (
@@ -281,9 +282,10 @@ def _create_attention_module(
     )
 
     # Override quant_config to control linear-layer GEMM precision.
-    gemm_quant_config = _create_gemm_quant_config(gemm_type)
-    if gemm_quant_config is not None:
-        vllm_config.quant_config = gemm_quant_config
+    # DeepSeek-V3.2 ships with FP8 quantisation by default, so we
+    # must always set quant_config explicitly: None for bf16,
+    # Fp8Config (blockwise) for fp8_block, ModelOptNvFp4Config for nvfp4.
+    vllm_config.quant_config = _create_gemm_quant_config(gemm_type)
 
     # For DSA, mirror the DeepseekV32ForCausalLM.verify_and_update_config()
     # logic: fp8 cache must use ``fp8_ds_mla`` format.
