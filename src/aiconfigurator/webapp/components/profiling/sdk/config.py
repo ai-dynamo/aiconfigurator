@@ -74,7 +74,7 @@ def generate_config_yaml(
         "K8sConfig": {
             "name_prefix": name_prefix,
             "k8s_namespace": "dynamo",
-            "k8s_image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.9.0",
+            "k8s_image": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0",
             "k8s_pvc_name": "model-cache",
             "k8s_engine_mode": "inline",
         },
