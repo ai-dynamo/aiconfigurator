@@ -87,8 +87,7 @@ def get_gemm_xpu_test_cases() -> list[GemmCommonTestCase]:
 
 
 def get_gemm_test_cases():
-    # gemm dtype fp8 to be supported
-    gemm_list = ["float16"]
+    gemm_list = ["float16", "fp8"]
 
     test_cases = []
 
@@ -117,8 +116,8 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="xpu:0"):
 
     if gemm_type == "fp8":
         qc = Fp8Config(
-            is_checkpoint_fp8_serialized=True,
-            activation_scheme="static",
+            is_checkpoint_fp8_serialized=False,  # dynamic quant after creation
+            activation_scheme="dynamic",
             ignored_layers=None,
             weight_block_size=None,
         )
@@ -147,12 +146,11 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="xpu:0"):
         gemm.to(torch.device(device))
 
         if gemm_type == "fp8" and hasattr(gemm, "weight"):
-            new_weight = gemm.weight.data.t()
-            # print("new_weight stride:", new_weight.stride())
-            # mnk = 1,128,128 weight stride = (128,1)
-            # transpose to (1,128) for fp8 cutlass limit
-            gemm.weight = torch.nn.Parameter(new_weight)
-            # print("after fix, weight stride:", gemm.weight.data.stride())
+            # Use process_weights_after_loading() to quantize the weights after creation
+            if hasattr(gemm, "quant_method") and gemm.quant_method is not None:
+                quant_method = gemm.quant_method
+                if hasattr(quant_method, "process_weights_after_loading"):
+                    quant_method.process_weights_after_loading(gemm)
         elif gemm_type == "fp8_block":
             block_n, block_k = FP8_BLOCK_SHAPE
             with torch.no_grad():
