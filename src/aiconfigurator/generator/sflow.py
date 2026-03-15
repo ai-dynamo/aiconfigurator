@@ -709,7 +709,9 @@ def _int(val: Any, default: int = 0) -> int:
 
 
 def _total_gpus(wp: dict[str, Any], wc: dict[str, Any], mode: str) -> int:
-    def gpw(rp: dict[str, Any]) -> int:
+    """Compute total GPUs from WorkerConfig (pre-rule) with params fallback."""
+
+    def gpw_from_params(rp: dict[str, Any]) -> int:
         return _int(rp.get("gpus_per_worker")) or (
             _int(rp.get("tensor_parallel_size"), 1)
             * _int(rp.get("pipeline_parallel_size"), 1)
@@ -717,10 +719,11 @@ def _total_gpus(wp: dict[str, Any], wc: dict[str, Any], mode: str) -> int:
         )
 
     if mode == "agg":
-        return _int(wc.get("agg_workers"), 1) * gpw(wp.get("agg", {}))
-    return _int(wc.get("prefill_workers"), 1) * gpw(wp.get("prefill", {})) + _int(wc.get("decode_workers"), 1) * gpw(
-        wp.get("decode", {})
-    )
+        gpu = _int(wc.get("agg_gpus_per_worker")) or gpw_from_params(wp.get("agg", {}))
+        return _int(wc.get("agg_workers"), 1) * gpu
+    p_gpu = _int(wc.get("prefill_gpus_per_worker")) or gpw_from_params(wp.get("prefill", {}))
+    d_gpu = _int(wc.get("decode_gpus_per_worker")) or gpw_from_params(wp.get("decode", {}))
+    return _int(wc.get("prefill_workers"), 1) * p_gpu + _int(wc.get("decode_workers"), 1) * d_gpu
 
 
 def _extract_option_value(cli_args: str, flag: str) -> str:
