@@ -133,7 +133,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         qc = None
         group_size = None
 
-    _l2_cache_bytes = 50 * 1024 * 1024  # H100 L2 = 50MB
+    _l2_cache_bytes = 192 * 1024 * 1024  # B200/B300 L2 = 192MB (largest)
     _weight_bytes = n * k * 2  # BF16
     outside_loop_count = max(1, min(5, math.ceil(_l2_cache_bytes / _weight_bytes)))
     op_list = []
