@@ -361,7 +361,6 @@ def _build_bench_script(
             "- export AICONFIGURATOR_BENCH_ISL=$[[ variables.ISL ]]",
             "- export AICONFIGURATOR_BENCH_OSL=$[[ variables.OSL ]]",
             "- export AICONFIGURATOR_BENCH_MULTI_ROUND=$[[ variables.MULTI_ROUND ]]",
-            "- export AICONFIGURATOR_BENCH_UI=$[[ variables.AIPERF_UI ]]",
         ]
         lines.extend(["- bash $[[ artifacts.BENCH_RUN.path ]]", '- echo "Benchmarking finished"'])
         return "\n".join(lines)
@@ -395,7 +394,7 @@ def _build_bench_script(
         "    --num-dataset-entries $(($[[ variables.MULTI_ROUND ]]*${CONCURRENCY})) \\",
         "    --random-seed 100 -H 'Authorization: Bearer NOT USED' -H 'Accept: text/event-stream' \\",
         "    --record-processors 8 \\",
-        "    --ui $[[ variables.AIPERF_UI ]]",
+        "    --ui simple",
     ]
     lines.extend(cmd)
     lines.append('- echo "Benchmarking finished"')
@@ -460,7 +459,6 @@ def _build_sflow_variables(
             _var("ISL", "Input sequence length", _int(bench.get("isl"), 4000), "integer"),
             _var("OSL", "Output sequence length", _int(bench.get("osl"), 1000), "integer"),
             _var("MULTI_ROUND", "Number of benchmark rounds", 50, "integer"),
-            _var("AIPERF_UI", "AIPerf UI mode", bench.get("ui") or "simple"),
             _var("CONCURRENCY", "Concurrency", ctx["sflow_concurrency"], domain=[ctx["sflow_concurrency"]]),
             _var("AIPERF_IMAGE", "AIPerf container image", ctx["sflow_aiperf_image"]),
             _var("DYNAMO_IMAGE", "Dynamo container image", ctx["sflow_dynamo_image"]),
