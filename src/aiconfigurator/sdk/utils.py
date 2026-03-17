@@ -561,6 +561,10 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
             f"sliding_window_size={extra_params.sliding_window_size}"
         )
+    elif architecture in {"Qwen3ForCausalLM", "Qwen3MoeForCausalLM"}:
+        # Qwen3-family attention may include additional Q/K normalization.
+        extra_params = {"architecture": architecture, "use_qk_norm": True}
+
     return {
         "architecture": architecture,
         "layers": layers,

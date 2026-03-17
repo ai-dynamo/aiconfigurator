@@ -3884,9 +3884,22 @@ class PerfDatabase:
                 attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv_lookup][head_size][
                     window_size
                 ]
-                result = self._interp_3d(n, b, s, attention_dict, "bilinear")
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
+                # Decode batches often contain a mix of sequence lengths around the nominal KV length `s`.
+                # Using a single point (n,b,s) can be noisy/inaccurate, so average a small neighborhood.
+                s_min = max(1, int(s * 0.9))
+                s_max = max(s_min, int(s * 1.1))
+                sample_cnt = 5
+                s_samples = [s_min + (s_max - s_min) * i // (sample_cnt - 1) for i in range(sample_cnt)]
+
+                latency_sum = 0.0
+                energy_sum = 0.0
+                for s_i in s_samples:
+                    r = self._interp_3d(n, b, s_i, attention_dict, "bilinear")
+                    latency_sum += float(r["latency"])
+                    energy_sum += float(r.get("energy", 0.0))
+
+                latency = latency_sum / sample_cnt
+                energy = energy_sum / sample_cnt
                 return PerformanceResult(latency, energy=energy)
 
             return self._query_silicon_or_hybrid(
