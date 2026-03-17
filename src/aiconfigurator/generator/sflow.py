@@ -361,7 +361,6 @@ def _build_bench_script(
             "- export AICONFIGURATOR_BENCH_ISL=$[[ variables.ISL ]]",
             "- export AICONFIGURATOR_BENCH_OSL=$[[ variables.OSL ]]",
             "- export AICONFIGURATOR_BENCH_MULTI_ROUND=$[[ variables.MULTI_ROUND ]]",
-            "- export AICONFIGURATOR_BENCH_UI=$[[ variables.AIPERF_UI ]]",
         ]
         lines.extend(["- bash $[[ artifacts.BENCH_RUN.path ]]", '- echo "Benchmarking finished"'])
         return "\n".join(lines)
@@ -395,7 +394,7 @@ def _build_bench_script(
         "    --num-dataset-entries $(($[[ variables.MULTI_ROUND ]]*${CONCURRENCY})) \\",
         "    --random-seed 100 -H 'Authorization: Bearer NOT USED' -H 'Accept: text/event-stream' \\",
         "    --record-processors 8 \\",
-        "    --ui $[[ variables.AIPERF_UI ]]",
+        "    --ui simple",
     ]
     lines.extend(cmd)
     lines.append('- echo "Benchmarking finished"')
@@ -439,9 +438,9 @@ def _build_sflow_variables(
     vars_out: list[dict[str, Any]] = [
         _var("SLURM_ACCOUNT", "SLURM account", ctx["sflow_slurm_account"]),
         _var("SLURM_PARTITION", "SLURM partition", ctx["sflow_slurm_partition"]),
-        _var("SLURM_TIMELIMIT", "SLURM time limit", ctx["sflow_slurm_timelimit"]),
+        _var("SLURM_TIMELIMIT", "SLURM time limit", ctx["sflow_slurm_timelimit"], "integer"),
         _var("GPUS_PER_NODE", "GPUs per node", ctx["sflow_gpus_per_node"], "integer"),
-        _var("SLURM_NODES", "Number of nodes", ctx["sflow_slurm_nodes"]),
+        _var("SLURM_NODES", "Number of nodes", ctx["sflow_slurm_nodes"], "integer"),
         _var("SERVED_MODEL_NAME", "Served model name", model_path),
         _var("MODEL_NAME", "Model path", model_path),
         _var("LOCAL_MODEL_PATH", "Local model artifact URI", local_model_uri),
@@ -460,8 +459,7 @@ def _build_sflow_variables(
             _var("ISL", "Input sequence length", _int(bench.get("isl"), 4000), "integer"),
             _var("OSL", "Output sequence length", _int(bench.get("osl"), 1000), "integer"),
             _var("MULTI_ROUND", "Number of benchmark rounds", 50, "integer"),
-            _var("AIPERF_UI", "AIPerf UI mode", bench.get("ui") or "simple"),
-            _var("CONCURRENCY", "Concurrency", ctx["sflow_concurrency"], domain=[ctx["sflow_concurrency"]]),
+            _var("CONCURRENCY", "Concurrency", ctx["sflow_concurrency"], "integer", domain=[ctx["sflow_concurrency"]]),
             _var("AIPERF_IMAGE", "AIPerf container image", ctx["sflow_aiperf_image"]),
             _var("DYNAMO_IMAGE", "Dynamo container image", ctx["sflow_dynamo_image"]),
         ]
@@ -513,14 +511,16 @@ def _build_sflow_variables(
 
         vars_out.append(_var(f"NUM_{prefix}_SERVERS", f"Number of {role_label} servers", workers, "integer"))
         vars_out.append(_var(f"{prefix}_REPLICAS_POLICY", f"{role_label} replicas policy", "parallel"))
-        vars_out.append(_var(f"{prefix}_TP_SIZE", f"{role_label} tensor parallel size", tp))
-        vars_out.append(_var(f"{prefix}_PP_SIZE", f"{role_label} pipeline parallel size", pp))
-        vars_out.append(_var(f"{prefix}_DP_SIZE", f"{role_label} data parallel size", dp))
-        vars_out.append(_var(f"{prefix}_EP_SIZE", f"{role_label} expert parallel size", ep))
-        vars_out.append(_var(f"{prefix}_MOE_TP_SIZE", f"{role_label} MOE tensor parallel size", moe_tp))
-        vars_out.append(_var(f"{prefix}_BATCH_SIZE", f"{role_label} batch size", max_batch))
-        vars_out.append(_var(f"{prefix}_MAX_NUM_TOKENS", f"{role_label} max number of tokens", max_num_tokens))
-        vars_out.append(_var(f"{prefix}_MAX_SEQ_LEN", f"{role_label} max sequence length", max_seq_len))
+        vars_out.append(_var(f"{prefix}_TP_SIZE", f"{role_label} tensor parallel size", tp, "integer"))
+        vars_out.append(_var(f"{prefix}_PP_SIZE", f"{role_label} pipeline parallel size", pp, "integer"))
+        vars_out.append(_var(f"{prefix}_DP_SIZE", f"{role_label} data parallel size", dp, "integer"))
+        vars_out.append(_var(f"{prefix}_EP_SIZE", f"{role_label} expert parallel size", ep, "integer"))
+        vars_out.append(_var(f"{prefix}_MOE_TP_SIZE", f"{role_label} MOE tensor parallel size", moe_tp, "integer"))
+        vars_out.append(_var(f"{prefix}_BATCH_SIZE", f"{role_label} batch size", max_batch, "integer"))
+        vars_out.append(
+            _var(f"{prefix}_MAX_NUM_TOKENS", f"{role_label} max number of tokens", max_num_tokens, "integer")
+        )
+        vars_out.append(_var(f"{prefix}_MAX_SEQ_LEN", f"{role_label} max sequence length", max_seq_len, "integer"))
         vars_out.append(
             _var(
                 f"{prefix}_ENABLE_ATTENTION_DP",
@@ -709,7 +709,9 @@ def _int(val: Any, default: int = 0) -> int:
 
 
 def _total_gpus(wp: dict[str, Any], wc: dict[str, Any], mode: str) -> int:
-    def gpw(rp: dict[str, Any]) -> int:
+    """Compute total GPUs from WorkerConfig (pre-rule) with params fallback."""
+
+    def gpw_from_params(rp: dict[str, Any]) -> int:
         return _int(rp.get("gpus_per_worker")) or (
             _int(rp.get("tensor_parallel_size"), 1)
             * _int(rp.get("pipeline_parallel_size"), 1)
@@ -717,10 +719,11 @@ def _total_gpus(wp: dict[str, Any], wc: dict[str, Any], mode: str) -> int:
         )
 
     if mode == "agg":
-        return _int(wc.get("agg_workers"), 1) * gpw(wp.get("agg", {}))
-    return _int(wc.get("prefill_workers"), 1) * gpw(wp.get("prefill", {})) + _int(wc.get("decode_workers"), 1) * gpw(
-        wp.get("decode", {})
-    )
+        gpu = _int(wc.get("agg_gpus_per_worker")) or gpw_from_params(wp.get("agg", {}))
+        return _int(wc.get("agg_workers"), 1) * gpu
+    p_gpu = _int(wc.get("prefill_gpus_per_worker")) or gpw_from_params(wp.get("prefill", {}))
+    d_gpu = _int(wc.get("decode_gpus_per_worker")) or gpw_from_params(wp.get("decode", {}))
+    return _int(wc.get("prefill_workers"), 1) * p_gpu + _int(wc.get("decode_workers"), 1) * d_gpu
 
 
 def _extract_option_value(cli_args: str, flag: str) -> str:
