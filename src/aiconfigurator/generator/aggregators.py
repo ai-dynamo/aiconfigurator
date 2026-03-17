@@ -124,6 +124,7 @@ def collect_generator_params(
             "k8s_namespace": k8s.get("k8s_namespace"),
             "k8s_image": k8s.get("k8s_image"),
             "k8s_image_pull_secret": k8s.get("k8s_image_pull_secret"),
+            "k8s_etcd_endpoints": k8s.get("k8s_etcd_endpoints"),
             "k8s_engine_mode": k8s.get("k8s_engine_mode"),
             "use_engine_cm": use_engine_cm,
             "k8s_pvc_name": k8s_pvc_name,

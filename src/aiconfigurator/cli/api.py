@@ -142,6 +142,9 @@ def cli_default(
     prefix: int = 0,
     top_n: int = 5,
     save_dir: str | None = None,
+    generator_set: list[str] | None = None,
+    generator_config: str | None = None,
+    generator_dynamo_version: str | None = None,
 ) -> CLIResult:
     """
     Run the default CLI mode: compare aggregated vs disaggregated serving.
@@ -168,6 +171,11 @@ def cli_default(
         prefix: Prefix cache length. Default is 0.
         top_n: Number of top configurations to return for each mode (agg/disagg). Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
+        generator_set: List of inline generator overrides in KEY=VALUE format (e.g.,
+            ``["rule=benchmark", "ServiceConfig.model_path=Qwen/Qwen3-32B-FP8"]``).
+            Equivalent to repeating ``--generator-set`` on the CLI.
+        generator_config: Path to a unified generator YAML config file.
+        generator_dynamo_version: Override Dynamo version used by the generator.
 
     Returns:
         CLIResult with chosen experiment, best configs, pareto fronts, and throughputs.
@@ -182,6 +190,15 @@ def cli_default(
         ... )
         >>> print(result.chosen_exp)  # 'agg' or 'disagg'
         >>> print(result.best_throughputs)
+
+        >>> # Use benchmark rule plugin for generator
+        >>> result = cli_default(
+        ...     model_path="Qwen/Qwen3-32B-FP8",
+        ...     total_gpus=8,
+        ...     system="h200_sxm",
+        ...     save_dir="./results",
+        ...     generator_set=["rule=benchmark"],
+        ... )
 
         >>> # Compare all backends
         >>> result = cli_default(
@@ -233,6 +250,9 @@ def cli_default(
         mock_args.request_latency = request_latency
         mock_args.top_n = top_n
         mock_args.generated_config_version = None
+        mock_args.generator_set = generator_set
+        mock_args.generator_config = generator_config
+        mock_args.generator_dynamo_version = generator_dynamo_version
 
         save_results(
             args=mock_args,

@@ -743,3 +743,203 @@ def test_vllm_disagg_does_not_require_same_tp(monkeypatch):
     assert captured.get("require_same_tp") is False, (
         f"Expected require_same_tp=False for vllm disagg, got {captured.get('require_same_tp')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# PD-split independent WideEP / EPLB configuration
+# ---------------------------------------------------------------------------
+
+from aiconfigurator.sdk.task import build_disagg_parallel_lists
+
+
+class TestBuildDisaggParallelListsMixedWideep:
+    """Verify build_disagg_parallel_lists honours per-phase WideEP overrides."""
+
+    def test_prefill_wideep_on_decode_off(self):
+        prefill, decode = build_disagg_parallel_lists(
+            backend_name="trtllm",
+            prefill_system="gb200",
+            decode_system="gb200",
+            is_moe=True,
+            enable_wideep=False,
+            prefill_enable_wideep=True,
+            decode_enable_wideep=False,
+        )
+        # Prefill: WideEP search space
+        assert prefill["moe_tp_list"] == [1]
+        assert prefill["moe_ep_list"] == [4, 8, 16, 32]
+        assert prefill["num_gpu_per_worker"] == [4, 8, 16, 32]
+
+        # Decode: standard (non-WideEP) search space
+        assert decode["moe_tp_list"] == [1, 2, 4, 8]
+        assert decode["moe_ep_list"] == [1, 2, 4, 8]
+        assert decode["num_gpu_per_worker"] == [1, 2, 4, 8]
+
+    def test_prefill_wideep_off_decode_on(self):
+        prefill, decode = build_disagg_parallel_lists(
+            backend_name="trtllm",
+            prefill_system="gb200",
+            decode_system="gb200",
+            is_moe=True,
+            enable_wideep=False,
+            prefill_enable_wideep=False,
+            decode_enable_wideep=True,
+        )
+        # Prefill: standard
+        assert prefill["moe_tp_list"] == [1, 2, 4, 8]
+        assert prefill["moe_ep_list"] == [1, 2, 4, 8]
+        assert prefill["num_gpu_per_worker"] == [1, 2, 4, 8]
+
+        # Decode: WideEP
+        assert decode["moe_tp_list"] == [1]
+        assert decode["moe_ep_list"] == [4, 8, 16, 32, 64]
+        assert decode["num_gpu_per_worker"] == [4, 8, 16, 32, 64]
+
+    def test_global_fallback_when_overrides_none(self):
+        """When per-phase overrides are None, global enable_wideep is used."""
+        prefill, decode = build_disagg_parallel_lists(
+            backend_name="trtllm",
+            prefill_system="gb200",
+            decode_system="gb200",
+            is_moe=True,
+            enable_wideep=True,
+            prefill_enable_wideep=None,
+            decode_enable_wideep=None,
+        )
+        assert prefill["moe_tp_list"] == [1]
+        assert decode["moe_tp_list"] == [1]
+        assert prefill["moe_ep_list"] == [4, 8, 16, 32]
+        assert decode["moe_ep_list"] == [4, 8, 16, 32, 64]
+
+
+class TestTaskconfigDisaggMixedWideepEplb:
+    """Verify YAML patch correctly sets per-worker WideEP/EPLB in TaskConfig."""
+
+    def test_yaml_patch_sets_independent_wideep_eplb(self):
+        task = TaskConfig(
+            serving_mode="disagg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="gb200",
+            backend_name="trtllm",
+            enable_wideep=True,
+            total_gpus=128,
+            yaml_config={
+                "mode": "patch",
+                "config": {
+                    "prefill_worker_config": {
+                        "enable_wideep": True,
+                        "enable_eplb": True,
+                        "num_gpu_per_worker": [4, 8, 16, 32],
+                        "dp_list": [4, 8, 16, 32],
+                        "moe_tp_list": [1],
+                        "moe_ep_list": [4, 8, 16, 32],
+                    },
+                    "decode_worker_config": {
+                        "enable_wideep": False,
+                        "enable_eplb": False,
+                        "num_gpu_per_worker": [4, 8],
+                        "dp_list": [1, 2, 4, 8],
+                        "moe_tp_list": [1, 2, 4, 8],
+                        "moe_ep_list": [1, 2, 4, 8],
+                    },
+                },
+            },
+        )
+        cfg = task.config
+
+        assert cfg.prefill_worker_config.enable_wideep is True
+        assert cfg.prefill_worker_config.enable_eplb is True
+        assert cfg.decode_worker_config.enable_wideep is False
+        assert cfg.decode_worker_config.enable_eplb is False
+
+    def test_yaml_patch_reversed_wideep(self):
+        """Prefill OFF / Decode ON — the opposite direction."""
+        task = TaskConfig(
+            serving_mode="disagg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="gb200",
+            backend_name="trtllm",
+            total_gpus=96,
+            yaml_config={
+                "mode": "patch",
+                "config": {
+                    "prefill_worker_config": {
+                        "enable_wideep": False,
+                        "enable_eplb": False,
+                    },
+                    "decode_worker_config": {
+                        "enable_wideep": True,
+                        "enable_eplb": True,
+                    },
+                },
+            },
+        )
+        cfg = task.config
+
+        assert cfg.prefill_worker_config.enable_wideep is False
+        assert cfg.prefill_worker_config.enable_eplb is False
+        assert cfg.decode_worker_config.enable_wideep is True
+        assert cfg.decode_worker_config.enable_eplb is True
+
+    def test_both_wideep_eplb_differs(self):
+        """Both phases WideEP, but EPLB only on prefill."""
+        task = TaskConfig(
+            serving_mode="disagg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="gb200",
+            backend_name="trtllm",
+            enable_wideep=True,
+            total_gpus=128,
+            yaml_config={
+                "mode": "patch",
+                "config": {
+                    "prefill_worker_config": {"enable_eplb": True},
+                    "decode_worker_config": {"enable_eplb": False},
+                },
+            },
+        )
+        cfg = task.config
+
+        assert cfg.prefill_worker_config.enable_eplb is True
+        assert cfg.decode_worker_config.enable_eplb is False
+        assert cfg.prefill_worker_config.enable_wideep is True
+        assert cfg.decode_worker_config.enable_wideep is True
+
+
+class TestTaskrunnerDisaggMixedWideepModelConfig:
+    """Verify TaskRunner propagates per-phase WideEP/EPLB into ModelConfig."""
+
+    def test_model_configs_receive_independent_flags(self, monkeypatch):
+        captured = {}
+        pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+        monkeypatch.setattr(pa_stub, "disagg_pareto", _make_capturing_disagg_pareto(captured))
+
+        task = TaskConfig(
+            serving_mode="disagg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="gb200",
+            backend_name="trtllm",
+            enable_wideep=True,
+            total_gpus=128,
+            yaml_config={
+                "mode": "patch",
+                "config": {
+                    "prefill_worker_config": {
+                        "enable_wideep": True,
+                        "enable_eplb": True,
+                    },
+                    "decode_worker_config": {
+                        "enable_wideep": False,
+                        "enable_eplb": False,
+                    },
+                },
+            },
+        )
+        TaskRunner().run(task)
+
+        prefill_mc = captured["prefill_model_config"]
+        decode_mc = captured["decode_model_config"]
+        assert prefill_mc.enable_wideep is True
+        assert prefill_mc.enable_eplb is True
+        assert decode_mc.enable_wideep is False
+        assert decode_mc.enable_eplb is False

@@ -9,7 +9,7 @@ on:
 jobs:
   resolve-release-branch:
     name: Resolve Latest Release Branch
-    runs-on: prod-aiconfigurator-default-amd64-v1
+    runs-on: ubuntu-latest
     outputs:
       branch: ${{ steps.find.outputs.branch }}
     steps:

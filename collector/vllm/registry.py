@@ -48,3 +48,24 @@ REGISTRY: list[OpEntry] = [
         run_func="run_attention_torch",
     ),
 ]
+
+REGISTRY_XPU: list[OpEntry] = [
+    OpEntry(
+        op="gemm",
+        module="collector.vllm.collect_gemm_xpu",
+        get_func="get_gemm_test_cases",
+        run_func="run_gemm",
+    ),
+    OpEntry(
+        op="attention_context",
+        module="collector.vllm.collect_attn_xpu",
+        get_func="get_context_attention_test_cases",
+        run_func="run_attention_torch",
+    ),
+    OpEntry(
+        op="attention_generation",
+        module="collector.vllm.collect_attn_xpu",
+        get_func="get_generation_attention_test_cases",
+        run_func="run_attention_torch",
+    ),
+]

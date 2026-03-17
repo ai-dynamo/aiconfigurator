@@ -733,6 +733,7 @@ _EXPERIMENT_RESERVED_KEYS = {
     "tpot",
     "request_latency",
     "enable_wideep",
+    "enable_eplb",
     "total_gpus",
     "database_mode",
 }
@@ -866,6 +867,8 @@ def build_experiment_task_configs(
 
         if "enable_wideep" in exp_config:
             task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
+        if "enable_eplb" in exp_config:
+            task_kwargs["enable_eplb"] = exp_config["enable_eplb"]
         if "database_mode" in exp_config:
             task_kwargs["database_mode"] = exp_config["database_mode"]
 

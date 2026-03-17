@@ -12,7 +12,7 @@ This script performs the following checks:
 Exit codes:
     0: All checks pass, no changes detected
     1: Changes detected (added, removed, or changed rows)
-    2: Validation errors (sanity check failures)
+    2: Validation errors (sanity or range check failures)
 
 Usage:
     python compare_support_matrix.py --old <old_csv> --new <new_csv> [--output-diff <diff_file>]

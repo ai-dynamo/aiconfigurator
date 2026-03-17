@@ -4,6 +4,8 @@ import contextlib
 import os
 import warnings
 
+from helper import get_device_module, get_device_str
+
 
 def setup_warning_filters():
     """Configure warning filters to suppress known non-critical warnings"""
@@ -36,6 +38,7 @@ def setup_warning_filters():
 
 
 import random
+import resource
 
 import torch
 from tqdm import tqdm
@@ -274,6 +277,10 @@ def worker(
 ):
     """worker with automatic logging setup"""
 
+    # Disable core dumps — GPU crashes are expected and handled via error_queue;
+    # without this, each SIGSEGV/SIGABRT writes a multi-GB core file to disk.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
     setup_warning_filters()  # Must run in each spawned process
 
     # Setup logging for this worker - reads config from environment automatically
@@ -283,8 +290,8 @@ def worker(
     setup_signal_handlers(device_id, error_queue)
 
     # Setup device
-    device = torch.device(f"cuda:{device_id}")
-    torch.cuda.set_device(device_id)
+    device = torch.device(f"{get_device_str()}:{device_id}")
+    get_device_module().set_device(device)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
     def emit_done(task_id: str):
@@ -369,7 +376,7 @@ def worker(
                 import gc
 
                 gc.collect()
-                torch.cuda.empty_cache()
+                get_device_module().empty_cache()
 
 
 def parallel_run(tasks, func, num_processes, module_name="unknown", resume_options=None):
@@ -676,9 +683,17 @@ def collect_ops(
                 if declared:
                     try:
                         if not check_compat(declared, runtime_version):
-                            raise CompatibilityError(
-                                f"module {module_name} declares __compat__={declared!r}, runtime is v{runtime_version}"
-                            )
+                            if torch.xpu.is_available():
+                                # Disable vllm xpu runtime version check for now
+                                logger.warning(
+                                    f"module {module_name} declares __compat__={declared!r}, \
+                                    runtime is v{runtime_version}"
+                                )
+                            else:
+                                raise CompatibilityError(
+                                    f"module {module_name} declares __compat__={declared!r}, \
+                                        runtime is v{runtime_version}"
+                                )
                     except ValueError as e:
                         raise CompatibilityError(f"invalid __compat__ {declared!r}: {e}") from e
 
@@ -764,7 +779,13 @@ def collect_vllm(
 ):
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
-    from collector.vllm.registry import REGISTRY
+
+    if torch.cuda.is_available():
+        from collector.vllm.registry import REGISTRY
+    elif torch.xpu.is_available():
+        from collector.vllm.registry import REGISTRY_XPU as REGISTRY
+    else:
+        raise RuntimeError("No supported hardware detected. Neither CUDA nor XPU is available.")
 
     try:
         from vllm.version import __version__ as vllm_version
@@ -951,7 +972,7 @@ def main():
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
 
-    num_processes = torch.cuda.device_count()
+    num_processes = get_device_module().device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
     resume_options = {
         "resume": args.resume,
@@ -965,7 +986,7 @@ def main():
         num_processes = 0
         logger.info("Starting collection in sequential mode (profiling enabled)")
     else:
-        num_processes = torch.cuda.device_count()
+        num_processes = get_device_module().device_count()
         logger.info(f"Starting collection with {num_processes} GPU processes")
 
     # Set environment variables for worker processes
@@ -994,6 +1015,9 @@ def main():
             "Profiling all test cases can be very slow. "
             "Consider using --limit to restrict the number of test cases."
         )
+
+    # Disable core dumps — GPU crashes are expected and handled; core files waste disk.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
     # Only set multiprocessing start method if not profiling (profiling uses sequential mode via num_processes=0)
     if not args.profile:

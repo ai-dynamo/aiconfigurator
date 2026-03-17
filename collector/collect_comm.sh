@@ -4,6 +4,7 @@
 
 # Default backend
 all_reduce_backend="trtllm"
+device="cuda"
 measure_power=false
 power_test_duration=1.0
 
@@ -15,6 +16,14 @@ while [[ $# -gt 0 ]]; do
             if [[ "$all_reduce_backend" != "trtllm" && "$all_reduce_backend" != "vllm" && "$all_reduce_backend" != "sglang" ]]; then
                 echo "Error: --all_reduce_backend must be 'trtllm', 'vllm', or 'sglang'"
                 echo "Usage: $0 [OPTIONS]"
+                exit 1
+            fi
+            shift 2
+            ;;
+        --device)
+            device="$2"
+            if [[ "$device" != "cuda" && "$device" != "xpu" ]]; then
+                echo "Error: --device must be 'cuda' or 'xpu'"
                 exit 1
             fi
             shift 2
@@ -61,7 +70,12 @@ else
 fi
 echo "================================================"
 
-GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+if [[ "$device" == "cuda" ]]; then
+    GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+elif [[ "$device" == "xpu" ]]; then
+    GPU_COUNT=$(sycl-ls | grep '\[level_zero:gpu\]' | wc -l)
+fi
+
 echo "Found $GPU_COUNT GPUs."
 if [ "$GPU_COUNT" -ge 8 ]; then
     gpu_count_list=(2 4 8)
@@ -75,21 +89,25 @@ else
 fi
 
 # NCCL
-nccl_ops=("all_gather" "alltoall" "reduce_scatter" "all_reduce")
-dtypes=("half" "int8")
+if [[ "$device" == "cuda" ]]; then
+    nccl_ops=("all_gather" "alltoall" "reduce_scatter" "all_reduce")
+    dtypes=("half" "int8")
 
-for n in "${gpu_count_list[@]}"; do
-    for op in "${nccl_ops[@]}"; do
-        for dtype in "${dtypes[@]}"; do
-            if [[ "$measure_power" == "true" ]]; then
-                python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype" \
-                    --measure_power --power_test_duration_sec "$power_test_duration"
-            else
-                python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype"
-            fi
+    for n in "${gpu_count_list[@]}"; do
+        for op in "${nccl_ops[@]}"; do
+            for dtype in "${dtypes[@]}"; do
+                if [[ "$measure_power" == "true" ]]; then
+                    python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype" \
+                        --measure_power --power_test_duration_sec "$power_test_duration"
+                else
+                    python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype"
+                fi
+            done
         done
     done
-done
+else
+    echo "Skipping NCCL benchmarks because device is $device"
+fi
 
 echo "Running AllReduce Benchmarks with $all_reduce_backend backend..."
 

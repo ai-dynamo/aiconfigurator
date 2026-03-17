@@ -1,4 +1,4 @@
-name: "Daily Support Matrix Update"
+name: "Daily Support Matrix Update (Main)"
 
 on:
   schedule:
@@ -48,7 +48,6 @@ jobs:
       - name: Generate new support matrix
         run: |
           docker run --rm \
-            --memory=32g --memory-swap=32g \
             -v ${{ github.workspace }}/src/aiconfigurator/systems:/app/src/aiconfigurator/systems \
             aiconfigurator:matrix \
             python3 tools/support_matrix/generate_support_matrix.py \

@@ -13,24 +13,65 @@ import csv
 import logging
 import os
 import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 
 from packaging.version import Version
 from tqdm import tqdm
 
+from aiconfigurator.generator.naive import _estimate_model_weight_bytes
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.models import _get_model_info
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
 logger = logging.getLogger(__name__)
 
-# Test configuration constants
-TOTAL_GPUS = 128
-ISL = 4000
-OSL = 500
-PREFIX = 500
-TTFT = 2000.0
-TPOT = 50.0
+_BYTES_PER_PARAM = 2
+
+
+@dataclass(frozen=True)
+class TestConstraints:
+    total_gpus: int
+    isl: int
+    osl: int
+    prefix: int
+    ttft: float
+    tpot: float
+
+
+# Tiered constraints by model size (parameter count)
+_SMALL = TestConstraints(total_gpus=4, isl=256, osl=256, prefix=128, ttft=1500.0, tpot=50.0)
+_MEDIUM = TestConstraints(total_gpus=32, isl=256, osl=256, prefix=128, ttft=2000.0, tpot=50.0)
+_LARGE = TestConstraints(total_gpus=128, isl=256, osl=256, prefix=128, ttft=2000000.0, tpot=50000.0)
+
+_SIZE_TIERS: list[tuple[float, TestConstraints]] = [
+    (10e9, _SMALL),  # < 10B params
+    (100e9, _MEDIUM),  # 10B - 100B params
+]
+_DEFAULT_TIER = _LARGE  # > 100B params
+
+
+def _get_test_constraints(model_path: str) -> TestConstraints:
+    """Return the appropriate test constraints based on estimated model size."""
+    weight_bytes = _estimate_model_weight_bytes(model_path)
+    num_params = weight_bytes / _BYTES_PER_PARAM
+    for threshold, constraints in _SIZE_TIERS:
+        if num_params < threshold:
+            logger.info(
+                "Model %s: ~%.1fB params → %s",
+                model_path,
+                num_params / 1e9,
+                constraints,
+            )
+            return constraints
+    logger.info(
+        "Model %s: ~%.1fB params → %s",
+        model_path,
+        num_params / 1e9,
+        _DEFAULT_TIER,
+    )
+    return _DEFAULT_TIER
+
 
 # Per-process SupportMatrix instance for ProcessPoolExecutor workers.
 # Set in the parent before forking; children inherit it via copy-on-write.
@@ -65,9 +106,13 @@ class SupportMatrix:
     """
 
     def __init__(self):
+        logger.info("Loading models...")
         self.models: set[str] = self.get_models()
+        logger.info("Found %d models", len(self.models))
         # database structure: {system: {backend: {version}}}
+        logger.info("Loading perf databases...")
         self.databases: dict[str, dict[str, dict[str, str]]] = self.load_databases()
+        logger.info("Databases loaded for %d systems", len(self.databases))
 
     def get_models(self):
         """Get the set of models to test - uses DefaultHFModels (models with cached configs)."""
@@ -130,6 +175,7 @@ class SupportMatrix:
             Tuple of (dict with results, dict with error messages)
             Both dicts have keys "agg" and "disagg"
         """
+        constraints = _get_test_constraints(model)
         modes_to_test = ["agg", "disagg"]
         results = {}
         error_messages = {}
@@ -143,12 +189,12 @@ class SupportMatrix:
                     "system_name": system,
                     "backend_name": backend,
                     "backend_version": version,
-                    "total_gpus": TOTAL_GPUS,
-                    "isl": ISL,
-                    "osl": OSL,
-                    "prefix": PREFIX,
-                    "ttft": TTFT,
-                    "tpot": TPOT,
+                    "total_gpus": constraints.total_gpus,
+                    "isl": constraints.isl,
+                    "osl": constraints.osl,
+                    "prefix": constraints.prefix,
+                    "ttft": constraints.ttft,
+                    "tpot": constraints.tpot,
                 }
 
                 # For disagg mode, set decode_system_name
@@ -169,7 +215,7 @@ class SupportMatrix:
                     results[mode] = True
                     error_messages[mode] = None
                 else:  # pragma: no cover
-                    logger.debug(
+                    logger.warning(
                         "Configuration returned no results: %s, %s, %s, %s, mode=%s",
                         model,
                         system,
@@ -181,7 +227,7 @@ class SupportMatrix:
                     error_messages[mode] = "Configuration returned no results, failed to catch traceback"
 
             except Exception as e:
-                logger.debug(
+                logger.warning(
                     "Configuration failed: %s, %s, %s, %s, mode=%s - Error: %s",
                     model,
                     system,
@@ -210,6 +256,11 @@ class SupportMatrix:
         Test whether each combination is supported by AIC.
         Tests both agg and disagg modes for each combination and captures error messages.
 
+        Runs in two phases:
+        1. Parallel execution with ProcessPoolExecutor.
+        2. Sequential single-process retry of every combination that failed in phase 1
+           (including combos that never ran due to a broken process pool).
+
         Args:
             max_workers: Maximum number of worker processes for parallel execution.
                          Defaults to None, which uses os.cpu_count() or 1.
@@ -223,32 +274,119 @@ class SupportMatrix:
         print("AIConfigurator Support Matrix Test")
         print("=" * 80)
         print("Testing both agg and disagg modes for all combinations")
-        print(f"Total GPUs: {TOTAL_GPUS}")
-        print(f"Input Sequence Length (ISL): {ISL}")
-        print(f"Output Sequence Length (OSL): {OSL}")
-        print(f"Prefix: {PREFIX}")
-        print(f"Target TTFT: {TTFT}ms")
-        print(f"Target TPOT: {TPOT}ms")
+        print("Tiered constraints by model size:")
+        print(
+            f"  <10B:      GPUs={_SMALL.total_gpus}, ISL={_SMALL.isl}, OSL={_SMALL.osl}, "
+            f"PREFIX={_SMALL.prefix}, TTFT={_SMALL.ttft}ms, TPOT={_SMALL.tpot}ms"
+        )
+        print(
+            f"  10B-100B:  GPUs={_MEDIUM.total_gpus}, ISL={_MEDIUM.isl}, OSL={_MEDIUM.osl}, "
+            f"PREFIX={_MEDIUM.prefix}, TTFT={_MEDIUM.ttft}ms, TPOT={_MEDIUM.tpot}ms"
+        )
+        print(
+            f"  >100B:     GPUs={_LARGE.total_gpus}, ISL={_LARGE.isl}, OSL={_LARGE.osl}, "
+            f"PREFIX={_LARGE.prefix}, TTFT={_LARGE.ttft}ms, TPOT={_LARGE.tpot}ms"
+        )
         if max_workers is None:
             max_workers = os.cpu_count() or 1
         print(f"Max workers: {max_workers}")
         print("=" * 80 + "\n")
 
         combinations = self.generate_combinations()
-        results = []
+        print(f"Total combinations to test: {len(combinations)}")
+        results: list[tuple[str, str, str, str, str, str, bool, str | None]] = []
+        retry_combos: set[tuple[str, str, str, str]] = set()
 
         global _worker_matrix
         _worker_matrix = self
 
+        # -- Phase 1: parallel execution --
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
-            for future in tqdm(
-                as_completed(futures),
-                total=len(combinations),
-                desc="Testing support matrix",
-                unit="config",
-            ):
-                results.extend(future.result())
+            pbar = tqdm(total=len(combinations), desc="Phase 1: parallel testing", unit="config")
+            for future in as_completed(futures):
+                combo = futures[future]
+                model, system, backend, version = combo
+                try:
+                    results.extend(future.result())
+                except BrokenExecutor:
+                    logger.warning(
+                        "Process pool broken while running %s/%s/%s/%s. "
+                        "A worker was likely killed (OOM). "
+                        "Queuing this and remaining combos for sequential retry.",
+                        model,
+                        system,
+                        backend,
+                        version,
+                    )
+                    retry_combos.add(combo)
+                    for remaining in futures:
+                        if remaining is not future and not remaining.done():
+                            remaining.cancel()
+                            retry_combos.add(futures[remaining])
+                    pbar.update(len(combinations) - pbar.n)
+                    break
+                except Exception:
+                    logger.exception(
+                        "Unexpected error retrieving result for %s/%s/%s/%s",
+                        model,
+                        system,
+                        backend,
+                        version,
+                    )
+                    retry_combos.add(combo)
+                pbar.update(1)
+            pbar.close()
+
+        # Also collect combos whose Phase 1 results had any failure
+        for model, _arch, system, backend, version, _mode, success, _err in results:
+            if not success:
+                retry_combos.add((model, system, backend, version))
+
+        # -- Phase 2: sequential single-process retry of all failures --
+        if retry_combos:
+            results = [r for r in results if (r[0], r[2], r[3], r[4]) not in retry_combos]
+
+            print(f"\n{'=' * 80}")
+            print(f"Phase 2: retrying {len(retry_combos)} failed combination(s) sequentially")
+            print(f"{'=' * 80}\n")
+
+            for combo in tqdm(sorted(retry_combos), desc="Phase 2: sequential retry", unit="config"):
+                model, system, backend, version = combo
+                try:
+                    success_dict, error_dict = self.run_single_test(
+                        model=model,
+                        system=system,
+                        backend=backend,
+                        version=version,
+                    )
+                    architecture = self.get_architecture(model)
+                    for mode in success_dict:
+                        results.append(
+                            (model, architecture, system, backend, version, mode, success_dict[mode], error_dict[mode])
+                        )
+                except Exception:
+                    logger.exception(
+                        "Sequential retry also failed for %s/%s/%s/%s",
+                        model,
+                        system,
+                        backend,
+                        version,
+                    )
+                    architecture = self.get_architecture(model)
+                    for mode in ("agg", "disagg"):
+                        results.append(
+                            (
+                                model,
+                                architecture,
+                                system,
+                                backend,
+                                version,
+                                mode,
+                                False,
+                                traceback.format_exc().replace("\n", "\\n"),
+                            )
+                        )
 
         # Sort results by (huggingface_id, architecture, system, backend, version, mode)
         results.sort(key=lambda x: (x[0], x[1], x[2], x[3], Version(x[4]), x[5]))
