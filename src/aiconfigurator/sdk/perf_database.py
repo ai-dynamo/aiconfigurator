@@ -2699,10 +2699,11 @@ class PerfDatabase:
             available_kernels = list(self._trtllm_alltoall_data.keys())
             if preferred in available_kernels:
                 return preferred
-            elif available_kernels:
-                fallback = available_kernels[0]
-                logger.debug(f"Preferred All2All kernel '{preferred}' not available, falling back to '{fallback}'")
-                return fallback
+            else:
+                logger.warning(
+                    f"Preferred All2All kernel '{preferred}' not in available kernels {available_kernels}. "
+                    f"Returning preferred anyway; downstream will fall back to HYBRID estimation."
+                )
 
         return preferred
 
@@ -5807,6 +5808,11 @@ class PerfDatabase:
         logger.debug(
             f"query_trtllm_alltoall: auto-selected kernel_source='{kernel_source}' (moe_backend={moe_backend})"
         )
+
+        if kernel_source == "NotEnabled":
+            if database_mode == common.DatabaseMode.SOL_FULL:
+                return (0.0, 0.0, 0.0)
+            return PerformanceResult(0.0, energy=0.0)
 
         # SILICON or HYBRID mode - use database
         def get_silicon():
