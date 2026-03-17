@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ctypes
 import math
 from collections import defaultdict
 
@@ -38,6 +39,17 @@ def _compute_fp8_block_weight_scales(weight: torch.Tensor, group_size: int) -> t
 # Keyed by (gemm_type, n, k).  Only the most recently used entry is kept so
 # that GPU memory is not accumulated across (n, k) groups.
 _weight_cache: dict = {}
+
+
+def _get_l2_cache_bytes(device_id: int = 0) -> int:
+    """Query the GPU L2 cache size via the CUDA runtime API."""
+    cuda_dev_attr_l2_cache_size = 38
+    libcudart = ctypes.CDLL("libcudart.so")
+    value = ctypes.c_int()
+    ret = libcudart.cudaDeviceGetAttribute(ctypes.byref(value), cuda_dev_attr_l2_cache_size, device_id)
+    if ret != 0 or value.value <= 0:
+        raise RuntimeError(f"Failed to query L2 cache size (cudaError={ret}, value={value.value})")
+    return value.value
 
 
 def _build_weights(gemm_type: str, n: int, k: int, device, dtype, group_size, x) -> dict:
@@ -133,7 +145,7 @@ def run_gemm(gemm_type, m, n, k, perf_filename, device="cuda:0"):
         qc = None
         group_size = None
 
-    _l2_cache_bytes = 192 * 1024 * 1024  # B200/B300 L2 = 192MB (largest)
+    _l2_cache_bytes = _get_l2_cache_bytes(device.index or 0)
     _bytes_per_elem = {"float16": 2, "fp8": 1, "fp8_block": 1, "nvfp4": 0.5}
     _weight_bytes = int(n * k * _bytes_per_elem[gemm_type])
     outside_loop_count = max(1, min(5, math.ceil(_l2_cache_bytes / _weight_bytes)))
