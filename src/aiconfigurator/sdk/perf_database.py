@@ -2053,30 +2053,6 @@ class PerfDatabase:
 
         # Comm ops
         self._custom_allreduce_data = _load_op_data(PerfDataFilename.custom_allreduce)
-        # SGLang fallback: we don't have a custom_allreduce collector for SGLang, so we
-        # substitute with TRTLLM data.
-        # TODO: collect custom_allreduce data for sglang and remove this fallback.
-        if backend == "sglang" and not self._custom_allreduce_data.loaded:
-            trtllm_version = get_latest_database_version(self.system, "trtllm")
-            if trtllm_version:
-                trtllm_custom_allreduce_path = os.path.join(
-                    systems_root,
-                    self.system_spec["data_dir"],
-                    "trtllm",
-                    trtllm_version,
-                    PerfDataFilename.custom_allreduce.value,
-                )
-                data_dict = load_custom_allreduce_data(trtllm_custom_allreduce_path)
-                if data_dict is not None:
-                    self._custom_allreduce_data = LoadedOpData(
-                        data_dict,
-                        PerfDataFilename.custom_allreduce,
-                        trtllm_custom_allreduce_path,
-                    )
-                    logger.debug(
-                        "Using TRT-LLM custom_allreduce data for sglang (fallback from %s)",
-                        trtllm_custom_allreduce_path,
-                    )
         self._nccl_data = _load_op_data(PerfDataFilename.nccl)
 
         # More model-specific ops
