@@ -15,8 +15,6 @@ import sys
 import textwrap
 from collections import defaultdict
 
-import torch
-
 from aiconfigurator.sdk.perf_database import get_database
 
 # Disable interactive backend
@@ -91,7 +89,8 @@ def create_charts(
         "dsa_generation_module": [validate_database.visualize_dsa_module],
     }
 
-    if torch.xpu.is_available():
+    xpu_systems = ["b60"]
+    if system in xpu_systems:
         op_to_chart_function["generation_attention"] = [
             fn
             for fn in op_to_chart_function["generation_attention"]
