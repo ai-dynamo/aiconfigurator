@@ -30,6 +30,43 @@ import validate_database
 os.chdir(old_cwd)
 
 
+def run_cli_smoke_test(system: str, backend: str, backend_version: str) -> tuple[list[str], bool, str, str]:
+    """Run aiconfigurator cli default for the given system/backend/version. Returns (cmd, success, stdout, stderr)."""
+    cmd = [
+        "aiconfigurator",
+        "cli",
+        "default",
+        "--backend",
+        backend,
+        "--backend-version",
+        backend_version,
+        "--system",
+        system,
+        "--model",
+        "Qwen/Qwen3-32B",
+        "--total-gpus",
+        "16",
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        return (cmd, result.returncode == 0, result.stdout or "", result.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        out = getattr(e, "stdout", None) or ""
+        err = getattr(e, "stderr", None) or ""
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", errors="replace")
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", errors="replace")
+        return (cmd, False, out, err + "\n(Command timed out after 240s)")
+    except Exception as e:
+        return (cmd, False, "", str(e))
+
+
 def get_changed_files(base_ref: str, head_ref: str) -> list[str]:
     """Get list of files changed between base and head refs."""
     try:
@@ -137,6 +174,34 @@ def create_charts(
 
             with open(output_md_file, "a") as f:
                 f.write(f"- `{chart_op_name}` ✅\n")
+
+    # Smoke test: run aiconfigurator cli default for this system/backend/version
+    smoke_cmd, smoke_ok, smoke_stdout, smoke_stderr = run_cli_smoke_test(system, backend, backend_version)
+    _max_output_len = 4000
+    with open(output_md_file, "a") as f:
+        if smoke_ok:
+            f.write("- CLI smoke test ✅\n")
+        else:
+            f.write("- CLI smoke test ❌\n")
+            out_trunc = (
+                (smoke_stdout[:_max_output_len] + "... (truncated)\n")
+                if len(smoke_stdout) > _max_output_len
+                else smoke_stdout
+            )
+            err_trunc = (
+                (smoke_stderr[:_max_output_len] + "... (truncated)\n")
+                if len(smoke_stderr) > _max_output_len
+                else smoke_stderr
+            )
+            cmd_str = " ".join(smoke_cmd)
+            f.write("\n\n<details><summary>command / stdout / stderr</summary>\n\n")
+            f.write("```text\n")
+            f.write("command:\n" + cmd_str + "\n\n")
+            if out_trunc:
+                f.write("stdout:\n" + out_trunc + "\n")
+            if err_trunc:
+                f.write("stderr:\n" + err_trunc + "\n")
+            f.write("```\n\n</details>\n\n")
 
 
 def main():
