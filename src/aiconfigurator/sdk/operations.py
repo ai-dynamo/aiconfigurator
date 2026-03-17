@@ -572,6 +572,11 @@ class MoEDispatch(Operation):
         _num_gpus_per_node = database.system_spec["node"]["num_gpus_per_node"]
         _node_num = self.num_gpus / _num_gpus_per_node
 
+        if self._quant_mode is not None:
+            _quant_compress = self._quant_mode.value.memory / 2.0
+        else:
+            _quant_compress = 0.25
+
         if database.backend == common.BackendName.trtllm.value:
             assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
                 "trtllm does not support TP>1 and DP>1 for attn simultaneously"
@@ -591,18 +596,11 @@ class MoEDispatch(Operation):
                             )
                     elif self._attention_dp_size > 1:
                         if self._enable_fp4_all2all:
-                            # Calculate all2all communication volume for nvfp4 all2all operation
-                            # Volume calculation considers the average case between best and worst
-                            # scenarios:
-                            # - Best case: volume * 1/4 (all selected experts are in one GPU for
-                            #   all tokens)
-                            # - Worst case: volume * min(topk, attention_dp_size)/4 (every selected
-                            #   expert is in different GPU)
-                            # - Final volume: average of best and worst cases, divided by 4 for
-                            #   nvfp4 quantization
+                            # All2All volume = average of best/worst routing * quant compression
+                            # Best: volume * 1; Worst: volume * min(topk, dp)
                             all2all_volume = (
-                                volume * (1 + min(self._topk, self._attention_dp_size)) / 2 / 4
-                            )  # mean of best and worst
+                                volume * (1 + min(self._topk, self._attention_dp_size)) / 2 * _quant_compress
+                            )
                             # to do: nvfp4 custom all2all
                             all2all_latency = database.query_nccl(
                                 common.CommQuantMode.half, self.num_gpus, "alltoall", all2all_volume
@@ -615,13 +613,13 @@ class MoEDispatch(Operation):
                             )  # volume_scale_factor = 1/8 volume
                             comm_latency = all2all_latency + all2all_sf_latency + 1e-2  # msg size static latency 10us
                         else:
-                            all_gather_volume = volume * self._attention_dp_size / 4
+                            all_gather_volume = volume * self._attention_dp_size * _quant_compress
                             all_gather_latency = database.query_nccl(
                                 common.CommQuantMode.half,
                                 self.num_gpus,
                                 "all_gather",
                                 all_gather_volume,
-                            )  # nvfp4 allgather
+                            )
                             all_gather_sf_latency = database.query_nccl(
                                 common.CommQuantMode.half,
                                 self.num_gpus,
@@ -644,10 +642,9 @@ class MoEDispatch(Operation):
                             )
                     elif self._attention_dp_size > 1:
                         if self._enable_fp4_all2all:
-                            # to do: nvfp4 all2all
                             all2all_volume = (
-                                volume * (1 + min(self._topk, self._attention_dp_size)) / 2 / 4
-                            )  # nvfp4 all2all
+                                volume * (1 + min(self._topk, self._attention_dp_size)) / 2 * _quant_compress
+                            )
                             comm_latency = database.query_nccl(
                                 common.CommQuantMode.half, self.num_gpus, "alltoall", all2all_volume
                             )
