@@ -851,6 +851,7 @@ class ContextAttention(Operation):
         head_size: int = 128,
         use_qk_norm: bool = False,
     ) -> None:
+        """Initialize context attention query parameters."""
         super().__init__(name, scale_factor)
         self._n = n
         self._weights = 0.0
@@ -919,6 +920,7 @@ class GenerationAttention(Operation):
         head_size: int = 128,
         use_qk_norm: bool = False,
     ) -> None:
+        """Initialize generation attention query parameters."""
         super().__init__(name, scale_factor)
         self._n = n
         self._weights = 0.0

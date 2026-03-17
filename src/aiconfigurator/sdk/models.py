@@ -429,6 +429,7 @@ class BaseModel:
         model_config: config.ModelConfig,
         extra_params=None,
     ) -> None:
+        """Initialize base model metadata and derived runtime flags."""
         self.model_path = model_path
         self.model_family = model_family
         self.architecture = architecture
