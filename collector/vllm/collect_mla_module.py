@@ -241,6 +241,7 @@ def _create_attention_module(
     max_batch_size: int,
     gemm_type: str = "bfloat16",
     device: str = "cuda:0",
+    is_context: bool = True,
 ):
     """
     Create a DeepseekV2MLAAttention module from vLLM's own modeling code.
@@ -280,7 +281,7 @@ def _create_attention_module(
         block_size=block_size,
         num_gpu_blocks=num_kv_cache_blocks,
         max_num_seqs=max_batch_size,
-        max_num_batched_tokens=max(max_batch_size * max_seq_len, 131072),
+        max_num_batched_tokens=max(max_batch_size * max_seq_len, 131072) if is_context else max_batch_size,
         use_fp8_kv_cache=use_fp8_kv_cache,
         trust_remote_code=True,
     )
@@ -669,6 +670,7 @@ def run_mla_module(
         max_batch_size=batch_size,
         gemm_type=gemm_type,
         device=device,
+        is_context=is_context,
     )
 
     # 1b. Process weights (FP8 quantization + create W_UK_T / W_UV for MLA)
