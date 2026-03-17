@@ -612,7 +612,7 @@ class LLAMAModel(BaseModel):
 
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
+                ops.Embedding("context_embedding", 1, self._vocab_size // tp_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
                     "context_qkv_gemm",
@@ -672,7 +672,7 @@ class LLAMAModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
+                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size // tp_size, h, 0.3),
                 ops.ElementWise("generation_add_norm_1", self._num_layers * self._mtp_scale_factor, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
                     "generation_qkv_gemm",
@@ -730,8 +730,13 @@ class LLAMAModel(BaseModel):
         )
 
         # when tp_message_size=0, the comm part will be 0
+        self.context_ops.append(ops.CustomAllReduce("context_embedding_ar", 1, h, tp_size))
         self.context_ops.append(ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp_size))
         self.context_ops.append(ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp_size))
+
+        self.generation_ops.append(
+            ops.CustomAllReduce("generation_embedding_ar", 1 * self._mtp_scale_factor, h, tp_size)
+        )
         self.generation_ops.append(
             ops.CustomAllReduce("generation_ar_1", self._num_layers * self._mtp_scale_factor, h, tp_size)
         )
