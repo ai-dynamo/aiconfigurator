@@ -129,7 +129,9 @@ def get_supported_databases(
                     versions = [
                         v
                         for v in os.listdir(backend_path)
-                        if not v.startswith(".") and os.path.isdir(os.path.join(backend_path, v))
+                        if not v.startswith(".")
+                        and os.path.isdir(os.path.join(backend_path, v))
+                        and not os.path.isfile(os.path.join(backend_path, v, "INCOMPLETE.txt"))
                     ]
                     if versions:
                         supported_sets[system][backend.value].update(versions)
@@ -332,8 +334,11 @@ def get_all_databases(
                 for backend in common.BackendName:
                     if not os.path.exists(os.path.join(data_dir, backend.value)):
                         continue
-                    for version in os.listdir(os.path.join(data_dir, backend.value)):
+                    backend_path = os.path.join(data_dir, backend.value)
+                    for version in os.listdir(backend_path):
                         if version.startswith("."):
+                            continue
+                        if os.path.isfile(os.path.join(backend_path, version, "INCOMPLETE.txt")):
                             continue
                         database = get_database(system, backend.value, version, systems_root)
                         if database is None:
@@ -2048,6 +2053,30 @@ class PerfDatabase:
 
         # Comm ops
         self._custom_allreduce_data = _load_op_data(PerfDataFilename.custom_allreduce)
+        # SGLang fallback: we don't have a custom_allreduce collector for SGLang, so we
+        # substitute with TRTLLM data.
+        # TODO: collect custom_allreduce data for sglang and remove this fallback.
+        if backend == "sglang" and not self._custom_allreduce_data.loaded:
+            trtllm_version = get_latest_database_version(self.system, "trtllm")
+            if trtllm_version:
+                trtllm_custom_allreduce_path = os.path.join(
+                    systems_root,
+                    self.system_spec["data_dir"],
+                    "trtllm",
+                    trtllm_version,
+                    PerfDataFilename.custom_allreduce.value,
+                )
+                data_dict = load_custom_allreduce_data(trtllm_custom_allreduce_path)
+                if data_dict is not None:
+                    self._custom_allreduce_data = LoadedOpData(
+                        data_dict,
+                        PerfDataFilename.custom_allreduce,
+                        trtllm_custom_allreduce_path,
+                    )
+                    logger.debug(
+                        "Using TRT-LLM custom_allreduce data for sglang (fallback from %s)",
+                        trtllm_custom_allreduce_path,
+                    )
         self._nccl_data = _load_op_data(PerfDataFilename.nccl)
 
         # More model-specific ops

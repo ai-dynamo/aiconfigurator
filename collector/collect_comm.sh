@@ -70,6 +70,9 @@ else
 fi
 echo "================================================"
 
+# Get the directory where this script is located
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
 if [[ "$device" == "cuda" ]]; then
     GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 elif [[ "$device" == "xpu" ]]; then
@@ -97,10 +100,10 @@ if [[ "$device" == "cuda" ]]; then
         for op in "${nccl_ops[@]}"; do
             for dtype in "${dtypes[@]}"; do
                 if [[ "$measure_power" == "true" ]]; then
-                    python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype" \
+                    python3 "$SCRIPT_DIR/collect_nccl.py" -n "$n" -NCCL "$op" --dtype "$dtype" \
                         --measure_power --power_test_duration_sec "$power_test_duration"
                 else
-                    python3 collect_nccl.py -n "$n" -NCCL "$op" --dtype "$dtype"
+                    python3 "$SCRIPT_DIR/collect_nccl.py" -n "$n" -NCCL "$op" --dtype "$dtype"
                 fi
             done
         done
@@ -116,11 +119,11 @@ if [[ "$all_reduce_backend" == "trtllm" ]]; then
     for n in "${gpu_count_list[@]}"; do
         echo "Running TRTLLM AllReduce benchmark with $n GPUs using CUDA Graph method"
         if [[ "$measure_power" == "true" ]]; then
-            mpirun -n "$n" --allow-run-as-root python3 collect_all_reduce.py \
+            mpirun -n "$n" --allow-run-as-root python3 "$SCRIPT_DIR/collect_all_reduce.py" \
                 --perf-filename "custom_allreduce_perf.txt" \
                 --measure_power --power_test_duration_sec "$power_test_duration"
         else
-            mpirun -n "$n" --allow-run-as-root python3 collect_all_reduce.py \
+            mpirun -n "$n" --allow-run-as-root python3 "$SCRIPT_DIR/collect_all_reduce.py" \
                 --perf-filename "custom_allreduce_perf.txt"
         fi
     done
@@ -129,11 +132,11 @@ elif [[ "$all_reduce_backend" == "vllm" ]]; then
     for n in "${gpu_count_list[@]}"; do
         echo "Running VLLM AllReduce benchmark with $n GPUs"
         if [[ "$measure_power" == "true" ]]; then
-            torchrun --nproc_per_node=$n collect_all_reduce.py --backend vllm \
+            torchrun --nproc_per_node=$n "$SCRIPT_DIR/collect_all_reduce.py" --backend vllm \
                 --perf-filename "custom_allreduce_perf.txt" \
                 --measure_power --power_test_duration_sec "$power_test_duration"
         else
-            torchrun --nproc_per_node=$n collect_all_reduce.py --backend vllm \
+            torchrun --nproc_per_node=$n "$SCRIPT_DIR/collect_all_reduce.py" --backend vllm \
                 --perf-filename "custom_allreduce_perf.txt"
         fi
     done
@@ -142,11 +145,11 @@ elif [[ "$all_reduce_backend" == "sglang" ]]; then
     for n in "${gpu_count_list[@]}"; do
         echo "Running SGLang AllReduce benchmark with $n GPUs"
         if [[ "$measure_power" == "true" ]]; then
-            torchrun --nproc_per_node=$n collect_all_reduce.py --backend sglang \
+            torchrun --nproc_per_node=$n "$SCRIPT_DIR/collect_all_reduce.py" --backend sglang \
                 --perf-filename "custom_allreduce_perf.txt" \
                 --measure_power --power_test_duration_sec "$power_test_duration"
         else
-            torchrun --nproc_per_node=$n collect_all_reduce.py --backend sglang \
+            torchrun --nproc_per_node=$n "$SCRIPT_DIR/collect_all_reduce.py" --backend sglang \
                 --perf-filename "custom_allreduce_perf.txt"
         fi
     done
