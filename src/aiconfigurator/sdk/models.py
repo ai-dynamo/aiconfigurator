@@ -1492,7 +1492,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
 
     Kernel auto-selection:
     - MoE kernel: deepgemm (SM>=100 + fp8_block) or moe_torch_flow (default)
-    - All2All kernel: MnnvlMoe (SM>=100), DeepEP/DeepEPLowLatency (SM>=90), NCCL (fallback)
+    - All2All kernel: NVLinkTwoSided (SM>=100), DeepEP/DeepEPLowLatency (SM>=90), NCCL (fallback)
     """
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:

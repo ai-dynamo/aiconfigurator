@@ -1794,12 +1794,12 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
 
     Note:
         kernel_source identifies the All2All communication method:
-        - "MnnvlMoe": NVLink Two-Sided via MNNVL (GB200, SM >= 100)
+        - "NVLinkTwoSided": NVLink Two-Sided via MNNVL (GB200, SM >= 100)
         - "NVLinkOneSided": NVLink One-Sided (CutlassFusedMoE on GB200)
         - "DeepEP": DeepEP normal mode (H100/H200, cross-node)
         - "DeepEPLowLatency": DeepEP low-latency mode (H100/H200, intra-node)
         - "NCCL": Standard NCCL communication (fallback)
-        If data file does not have 'kernel_source' column, it defaults to "MnnvlMoe".
+        If data file does not have 'kernel_source' column, it defaults to "NVLinkTwoSided".
 
         If data file does not have 'num_nodes' column, it will be computed as moe_ep_size // 4.
         This assumes 4 GPUs per node (e.g., GB200 NVL4).
@@ -1838,7 +1838,7 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
         # Check if kernel_source column exists
         has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
         if not has_kernel_source:
-            logger.debug(f"kernel_source column not found in {trtllm_alltoall_file} - will default to 'MnnvlMoe'")
+            logger.debug(f"kernel_source column not found in {trtllm_alltoall_file} - will default to 'NVLinkTwoSided'")
 
         for row in rows:
             op_name = row["op_name"]  # alltoall_prepare, alltoall_dispatch, alltoall_combine, etc.
@@ -1852,7 +1852,7 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
             quant_mode = common.MoEQuantMode[quant_mode]
 
             # Get kernel_source from data or use default
-            kernel_source = row.get("kernel_source", "MnnvlMoe")
+            kernel_source = row.get("kernel_source", "NVLinkTwoSided")
 
             # Get num_nodes from data or compute from moe_ep_size
             if has_num_nodes:
@@ -2646,7 +2646,7 @@ class PerfDatabase:
           - Does NOT support DeepEP / DeepEPLowLatency
 
         WideEPMoE (fused_moe_wide_ep.py):
-          - If supports_mnnvl() -> NVLinkTwoSided (MnnvlMoe)
+          - If supports_mnnvl() -> NVLinkTwoSided
           - Else if DeepEP feasible -> DeepEP (inter-node) or DeepEPLowLatency (intra-node)
           - Does NOT support NVLinkOneSided
 
@@ -2676,7 +2676,7 @@ class PerfDatabase:
 
         if is_wideep:
             if supports_mnnvl:
-                preferred = "MnnvlMoe"
+                preferred = "NVLinkTwoSided"
             else:
                 deepep_feasible = moe_ep_size > 1 and topk <= 8
                 if deepep_feasible and is_inter_node:
@@ -5667,7 +5667,7 @@ class PerfDatabase:
             moe_ep_size: MoE expert parallelism size
             quant_mode: MoE quantization mode
             moe_backend: MoE backend identifier for kernel selection.
-                "wideep" -> NVLinkTwoSided (MnnvlMoe);
+                "wideep" -> NVLinkTwoSided;
                 "CUTLASS"/"TRTLLM"/None -> NVLinkOneSided;
                 "DEEPGEMM"/"CUTE_DSL" -> NotEnabled.
             node_num: Number of nodes. If None, computed as moe_ep_size // 4
