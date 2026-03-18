@@ -3122,13 +3122,13 @@ class HybridMoEModel(BaseModel):
     """
     Hybrid attention + mixed FFN model (MiMo-V2-Flash, Llama 4 Scout/Maverick, and similar).
 
-    Handles four layer types derived from HybridConfig.attn_layer_pattern and moe_layer_freq:
+    Handles four layer types derived from HybridMoEConfig.attn_layer_pattern and moe_layer_freq:
     - global_moe:  global (full) attention + MoE FFN
     - swa_moe:     SWA/local attention + MoE FFN
     - swa_dense:   SWA/local attention + dense SwiGLU FFN
     - global_dense: global attention + dense SwiGLU FFN (rare but supported)
 
-    SWA/local attention dims fall back to model-level defaults when HybridConfig fields are 0.
+    SWA/local attention dims fall back to model-level defaults when HybridMoEConfig fields are 0.
     This lets same-dim models (Llama 4) and different-dim models (MiMo-V2-Flash) share one class.
     """
 
@@ -3158,7 +3158,7 @@ class HybridMoEModel(BaseModel):
             else 1.0
         )
         self._validate_fp8_block_quantized_moe_config()
-        self._hybrid_config: common.HybridConfig | None = None
+        self._hybrid_config: common.HybridMoEConfig | None = None
         self._power_law_alpha = 1.01
 
     def _validate_fp8_block_quantized_moe_config(self) -> None:
@@ -3176,22 +3176,22 @@ class HybridMoEModel(BaseModel):
                 f"% weight_block_size={weight_block_size} != 0. "
             )
 
-    def set_hybrid_config(self, cfg: common.HybridConfig) -> None:
-        """Apply HybridConfig and rebuild context/generation ops.
+    def set_hybrid_config(self, cfg: common.HybridMoEConfig) -> None:
+        """Apply HybridMoEConfig and rebuild context/generation ops.
 
         Validates that attn_layer_pattern and moe_layer_freq have the same length
         and contain only 0/1 values before accepting the config.
         """
         if len(cfg.attn_layer_pattern) != len(cfg.moe_layer_freq):
             raise ValueError(
-                f"HybridConfig pattern length mismatch: "
+                f"HybridMoEConfig pattern length mismatch: "
                 f"attn_layer_pattern has {len(cfg.attn_layer_pattern)} entries "
                 f"but moe_layer_freq has {len(cfg.moe_layer_freq)}"
             )
         for i, (a, m) in enumerate(zip(cfg.attn_layer_pattern, cfg.moe_layer_freq)):
             if a not in (0, 1) or m not in (0, 1):
                 raise ValueError(
-                    f"HybridConfig layer {i} has invalid values: "
+                    f"HybridMoEConfig layer {i} has invalid values: "
                     f"attn={a}, moe={m} (expected 0 or 1)"
                 )
         self._hybrid_config = cfg

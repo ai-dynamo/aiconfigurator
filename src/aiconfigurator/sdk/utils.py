@@ -17,7 +17,7 @@ from aiconfigurator.sdk.common import (
     MULTIMODAL_TEXT_CONFIG_KEY,
     BlockConfig,
     DefaultHFModels,
-    HybridConfig,
+    HybridMoEConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -522,7 +522,7 @@ def _parse_hf_config_json(config: dict) -> dict:
             )
         if any(v not in (0, 1) for v in (*attn_pattern, *moe_layer_freq)):
             raise ValueError(f"Hybrid patterns for {architecture} must contain only 0/1 values")
-        extra_params = HybridConfig(
+        extra_params = HybridMoEConfig(
             attn_layer_pattern=attn_pattern,
             moe_layer_freq=moe_layer_freq,
             swa_num_kv_heads=config.get("swa_num_key_value_heads", 0),
@@ -548,7 +548,7 @@ def _parse_hf_config_json(config: dict) -> dict:
             raise ValueError(f"interleave_moe_layer_step must be a positive integer, got {step}")
         attn_pattern = tuple(i % 2 for i in range(layers))
         moe_freq = tuple(1 if (i + 1) % step == 0 else 0 for i in range(layers))
-        extra_params = HybridConfig(
+        extra_params = HybridMoEConfig(
             attn_layer_pattern=attn_pattern,
             moe_layer_freq=moe_freq,
             # All attention dims are uniform (0 → fall back to model-level defaults).

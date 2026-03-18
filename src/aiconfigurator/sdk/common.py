@@ -61,7 +61,7 @@ class NemotronHConfig:
 
 
 @dataclass(frozen=True)
-class HybridConfig:
+class HybridMoEConfig:
     """
     Unified config for hybrid attention (SWA/local + global) + mixed FFN (MoE + dense) models.
     Covers MiMo-V2-Flash, Llama 4 Scout/Maverick, and similar architectures.

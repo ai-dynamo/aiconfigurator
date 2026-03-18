@@ -188,7 +188,7 @@ class TestParseHFConfig:
         assert extra_params.moe_shared_expert_intermediate_size == 0
 
     def test_parse_llama4_scout_config(self):
-        """Test Llama 4 Scout (VLM, step=1: all-MoE) → HybridConfig with alternating attn pattern."""
+        """Test Llama 4 Scout (VLM, step=1: all-MoE) → HybridMoEConfig with alternating attn pattern."""
         config = {
             "architectures": ["Llama4ForConditionalGeneration"],
             "model_type": "llama4",
@@ -228,7 +228,7 @@ class TestParseHFConfig:
         assert cfg.swa_head_dim == 0
 
     def test_parse_llama4_maverick_config(self):
-        """Test Llama 4 Maverick (VLM, step=2: alternating MoE/dense) → HybridConfig."""
+        """Test Llama 4 Maverick (VLM, step=2: alternating MoE/dense) → HybridMoEConfig."""
         config = {
             "architectures": ["Llama4ForConditionalGeneration"],
             "model_type": "llama4",
@@ -260,7 +260,7 @@ class TestParseHFConfig:
         assert cfg.dense_inter_size == 16384
 
     def test_parse_mimov2flash_config(self):
-        """Test MiMo-V2-Flash (explicit per-layer patterns, different SWA/global dims) → HybridConfig."""
+        """Test MiMo-V2-Flash (explicit per-layer patterns, different SWA/global dims) → HybridMoEConfig."""
         hybrid_pattern = [0, 1, 1, 1, 1, 0, 1, 1, 1, 1]  # 10-layer test
         moe_freq = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1]
         hf_config = {
@@ -363,7 +363,7 @@ class TestHybridMoEModelBuilder:
 
     def test_mimov2flash_model_builds_all_three_layer_types(self):
         """MiMo-V2-Flash config produces context/generation ops for global_moe, swa_moe, swa_dense."""
-        hybrid_cfg = common.HybridConfig(
+        hybrid_cfg = common.HybridMoEConfig(
             attn_layer_pattern=(0, 1, 1, 1, 1, 0, 1, 1, 1, 1),
             moe_layer_freq=(0, 1, 1, 1, 1, 1, 1, 1, 1, 1),
             swa_num_kv_heads=8,
@@ -401,7 +401,7 @@ class TestHybridMoEModelBuilder:
     def test_llama4_scout_model_builds_global_and_swa_moe(self):
         """Llama 4 Scout (step=1, all MoE) produces global_moe + swa_moe ops."""
         layers = 8
-        hybrid_cfg = common.HybridConfig(
+        hybrid_cfg = common.HybridMoEConfig(
             attn_layer_pattern=tuple(i % 2 for i in range(layers)),
             moe_layer_freq=tuple(1 for _ in range(layers)),
             sliding_window_size=8192,
@@ -437,7 +437,7 @@ class TestHybridMoEModelBuilder:
         """Llama 4 Maverick (step=2) produces global_moe + swa_dense ops."""
         layers = 8
         step = 2
-        hybrid_cfg = common.HybridConfig(
+        hybrid_cfg = common.HybridMoEConfig(
             attn_layer_pattern=tuple(i % 2 for i in range(layers)),
             moe_layer_freq=tuple(1 if (i + 1) % step == 0 else 0 for i in range(layers)),
             sliding_window_size=8192,
