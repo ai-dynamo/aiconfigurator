@@ -3190,10 +3190,7 @@ class HybridMoEModel(BaseModel):
             )
         for i, (a, m) in enumerate(zip(cfg.attn_layer_pattern, cfg.moe_layer_freq)):
             if a not in (0, 1) or m not in (0, 1):
-                raise ValueError(
-                    f"HybridMoEConfig layer {i} has invalid values: "
-                    f"attn={a}, moe={m} (expected 0 or 1)"
-                )
+                raise ValueError(f"HybridMoEConfig layer {i} has invalid values: attn={a}, moe={m} (expected 0 or 1)")
         self._hybrid_config = cfg
         self._build_context_ops()
         self._build_generation_ops()
@@ -3547,9 +3544,7 @@ class HybridMoEModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.GEMM(
-                    "generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.float16
-                ),
+                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
                 ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]
         )
