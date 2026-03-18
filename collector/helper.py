@@ -403,6 +403,11 @@ def setup_signal_handlers(worker_id, error_queue=None):
             except:
                 pass
 
+        # For SIGABRT (e.g. from DeepGEMM C++ abort()), use os._exit to avoid
+        # re-triggering the C++ destructor and generating a core dump.
+        if signum == signal.SIGABRT:
+            os._exit(1)
+
         # Re-raise the signal
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)

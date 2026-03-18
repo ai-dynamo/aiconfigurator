@@ -18,24 +18,38 @@ concurrency_array=({{ ns.seen | sort | join(' ') }})
 concurrency_array=({{ base_concurrency | join(' ') }})
 {% endif %}
 
+if [[ -n "${AICONFIGURATOR_BENCH_CONCURRENCY:-}" ]]; then
+  concurrency_array=(${AICONFIGURATOR_BENCH_CONCURRENCY})
+fi
+
 ARTIFACT_DIR="${BENCH_ARTIFACT_DIR:-/tmp/bench_artifacts}"
+BENCH_MODEL="${AICONFIGURATOR_BENCH_MODEL:-{{ BenchConfig.model }}}"
+BENCH_ENDPOINT_TYPE="${AICONFIGURATOR_BENCH_ENDPOINT_TYPE:-{{ BenchConfig.endpoint_type }}}"
+BENCH_ENDPOINT_URL="${AICONFIGURATOR_BENCH_ENDPOINT_URL:-http://{{ ServiceConfig.head_node_ip }}:{{ ServiceConfig.port }}}"
+BENCH_TOKENIZER="${AICONFIGURATOR_BENCH_TOKENIZER:-{{ BenchConfig.tokenizer }}}"
+BENCH_ISL="${AICONFIGURATOR_BENCH_ISL:-{{ BenchConfig.isl }}}"
+BENCH_ISL_STDDEV="${AICONFIGURATOR_BENCH_ISL_STDDEV:-{{ BenchConfig.isl_stddev }}}"
+BENCH_OSL="${AICONFIGURATOR_BENCH_OSL:-{{ BenchConfig.osl }}}"
+BENCH_OSL_STDDEV="${AICONFIGURATOR_BENCH_OSL_STDDEV:-{{ BenchConfig.osl_stddev }}}"
+BENCH_UI="simple"
+BENCH_MULTI_ROUND="${AICONFIGURATOR_BENCH_MULTI_ROUND:-50}"
 
 for concurrency in "${concurrency_array[@]}"; do
   echo "Run concurrency: $concurrency"
   aiperf profile \
     --artifact-dir "${ARTIFACT_DIR}/concurrency_${concurrency}" \
-    -m {{ BenchConfig.model }} \
-    --endpoint-type {{ BenchConfig.endpoint_type }} \
-    -u http://{{ ServiceConfig.head_node_ip }}:{{ ServiceConfig.port }} \
-    --tokenizer {{ BenchConfig.tokenizer }} \
-    --isl {{ BenchConfig.isl }} --isl-stddev {{ BenchConfig.isl_stddev }} \
-    --osl {{ BenchConfig.osl }} --osl-stddev {{ BenchConfig.osl_stddev }} \
+    -m "${BENCH_MODEL}" \
+    --endpoint-type "${BENCH_ENDPOINT_TYPE}" \
+    -u "${BENCH_ENDPOINT_URL}" \
+    --tokenizer "${BENCH_TOKENIZER}" \
+    --isl "${BENCH_ISL}" --isl-stddev "${BENCH_ISL_STDDEV}" \
+    --osl "${BENCH_OSL}" --osl-stddev "${BENCH_OSL_STDDEV}" \
     --extra-inputs ignore_eos:true \
     --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
     --concurrency ${concurrency} \
-    --num-requests $(($concurrency*50)) \
+    --num-requests $(($concurrency*${BENCH_MULTI_ROUND})) \
     --warmup-request-count $(($concurrency*2)) \
     --random-seed 100 \
-    --ui {{ BenchConfig.ui }} \
+    --ui "${BENCH_UI}" \
     --streaming
 done

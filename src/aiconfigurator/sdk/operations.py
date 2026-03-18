@@ -574,6 +574,11 @@ class MoEDispatch(Operation):
         _num_gpus_per_node = database.system_spec["node"]["num_gpus_per_node"]
         _node_num = self.num_gpus / _num_gpus_per_node
 
+        if self._quant_mode is not None:
+            _quant_compress = self._quant_mode.value.memory / 2.0
+        else:
+            _quant_compress = 0.25
+
         if database.backend == common.BackendName.trtllm.value:
             assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
                 "trtllm does not support TP>1 and DP>1 for attn simultaneously"

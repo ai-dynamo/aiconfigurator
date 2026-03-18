@@ -37,12 +37,14 @@ def collect_generator_params(
     sla: Optional[dict[str, Any]] = None,
     dyn_config: Optional[dict[str, Any]] = None,
     bench: Optional[dict[str, Any]] = None,
+    sflow: Optional[dict[str, Any]] = None,
     backend: Optional[str] = None,
     generator_dynamo_version: Optional[str] = None,
 ) -> dict[str, Any]:
     prefill_params = prefill_params or {}
     decode_params = decode_params or {}
     agg_params = agg_params or {}
+    sflow = sflow or {}
     backend_key = normalize_backend(backend, DEFAULT_BACKEND)
     base_ctx = {
         "ServiceConfig": dict(service),
@@ -50,6 +52,7 @@ def collect_generator_params(
         "DynConfig": dict(dyn_config or {}),
         "SlaConfig": dict(sla or {}),
         "BenchConfig": dict(bench or {}),
+        "SflowConfig": dict(sflow or {}),
     }
     if generator_dynamo_version:
         base_ctx["generator_dynamo_version"] = generator_dynamo_version
@@ -60,6 +63,8 @@ def collect_generator_params(
     dyn_cfg = apply_defaults("DynConfig", dyn_config or {}, backend=backend_key, extra_context=base_ctx)
     base_ctx["DynConfig"] = dict(dyn_cfg)
     bench_cfg = apply_defaults("BenchConfig", bench or {}, backend=backend_key, extra_context=base_ctx)
+    base_ctx["BenchConfig"] = dict(bench_cfg)
+    sflow_cfg = apply_defaults("SflowConfig", sflow or {}, backend=backend_key, extra_context=base_ctx)
 
     mode_value = dyn_cfg.get("mode") or "disagg"
     enable_router = coerce_bool(dyn_cfg.get("enable_router"))
@@ -145,6 +150,7 @@ def collect_generator_params(
         "WorkerConfig": workers_dict,
         "SlaConfig": sla or {},
         "BenchConfig": bench_cfg,
+        "SflowConfig": dict(sflow_cfg),
         "NodeConfig": {"num_gpus_per_node": int(num_gpus_per_node)},
         "params": {
             "prefill": prefill_params,
@@ -235,6 +241,8 @@ def generate_config_from_input_dict(
                 dest = ".".join(["SlaConfig"] + rest)
             elif group == "BenchConfig":
                 dest = ".".join(["BenchConfig"] + rest)
+            elif group == "SflowConfig":
+                dest = ".".join(["SflowConfig"] + rest)
             elif group == "ModelConfig":
                 dest = ".".join(["ModelConfig"] + rest)
             elif group == "DynConfig":
@@ -253,6 +261,7 @@ def generate_config_from_input_dict(
     target.setdefault("params", {})
     target.setdefault("SlaConfig", {})
     target.setdefault("BenchConfig", {})
+    target.setdefault("SflowConfig", {})
     target.setdefault("DynConfig", {})
     target.setdefault("NodeConfig", {})
     try:
@@ -280,6 +289,7 @@ def generate_config_from_input_dict(
         num_gpus_per_node=int(target.get("NodeConfig", {}).get("num_gpus_per_node", 8)),
         sla=target.get("SlaConfig", {}),
         bench=target.get("BenchConfig", {}),
+        sflow=target.get("SflowConfig", {}),
         dyn_config=target.get("DynConfig", {}),
         backend=backend_key,
         generator_dynamo_version=target.get("generator_dynamo_version"),
