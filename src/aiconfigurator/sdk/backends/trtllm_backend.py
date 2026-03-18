@@ -146,7 +146,7 @@ class TRTLLMBackend(BaseBackend):
                     summary = self.run_static(
                         model,
                         database,
-                        RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl + isl + num_mix_steps // 2, osl=2),
+                        RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl + num_mix_steps // 2, osl=2),
                         mode="static_gen",
                     )
                     latency_dict = summary.get_generation_latency_dict()
