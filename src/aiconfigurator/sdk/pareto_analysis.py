@@ -46,6 +46,10 @@ def agg_pareto(
     Returns:
         results_df: dataframe of the results
     """
+    if backend_name in ["vllm", "sglang"]:
+        enable_chunked_prefill = True
+    else:
+        enable_chunked_prefill = False
 
     # agg is agg server, the loop over parallel is outside here.
     results_df = pd.DataFrame(columns=ColumnsAgg)
@@ -109,6 +113,7 @@ def agg_pareto(
                     top_k=10,
                     max_batch_size=512,
                     ctx_stride=512,
+                    enable_chunked_prefill=enable_chunked_prefill,
                 )
                 if not summary.check_oom():
                     all_configs_oom = False
