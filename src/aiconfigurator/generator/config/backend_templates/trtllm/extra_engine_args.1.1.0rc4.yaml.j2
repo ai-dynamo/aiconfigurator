@@ -36,6 +36,7 @@ kv_cache_config:
 {% if cache_transceiver_config.max_tokens_in_buffer is defined %}
 cache_transceiver_config:
   backend: {{ cache_transceiver_config.backend | default('DEFAULT') }}
+  max_tokens_in_buffer: {{ cache_transceiver_config.max_tokens_in_buffer }}
 {% endif %}
 
 cuda_graph_config:

@@ -268,6 +268,19 @@ def render_backend_templates(
             eng_tmpl = env.get_template(engine_template_file.name)
             for worker in worker_plan:
                 wc = make_worker_context(context, worker, param_keys, mapping_data)
+                # Populate cache_transceiver_config for trtllm so extra_engine_args emits it
+                # (template expects cache_transceiver_config.max_tokens_in_buffer; rule sets
+                # cache_transceiver_max_tokens_in_buffer scalar only)
+                if backend == "trtllm":
+                    mtib = wc.get("cache_transceiver_max_tokens_in_buffer")
+                    if mtib is not None and (
+                        not wc.get("cache_transceiver_config")
+                        or not wc["cache_transceiver_config"].get("max_tokens_in_buffer")
+                    ):
+                        ctc = dict(wc.get("cache_transceiver_config") or {})
+                        ctc.setdefault("max_tokens_in_buffer", mtib)
+                        ctc.setdefault("backend", "DEFAULT")
+                        wc["cache_transceiver_config"] = ctc
                 rendered = eng_tmpl.render(**wc)
                 if worker == "agg":
                     out_name = "extra_engine_args_agg.yaml"
