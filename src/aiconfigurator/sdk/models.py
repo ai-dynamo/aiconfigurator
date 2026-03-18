@@ -153,6 +153,7 @@ def get_model(
     model_path: str,
     model_config: config.ModelConfig,
     backend_name: str,
+    sm_version: int = 0,
 ) -> BaseModel:
     """
     Get model.
@@ -267,6 +268,7 @@ def get_model(
                 vocab,
                 context,
                 model_config,
+                sm_version=sm_version,
             )
         else:
             logger.debug(f"WideEP is not enabled for model {model_path} with backend {backend_name}")
@@ -286,6 +288,7 @@ def get_model(
                 vocab,
                 context,
                 model_config,
+                sm_version=sm_version,
             )
     elif model_family == "NEMOTRONNAS":
         model = NemotronNas(
@@ -1075,7 +1078,7 @@ class DeepSeekModel(BaseModel):
     DeepSeek V3/R1 uses this model impl.
     """
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, sm_version: int = 0) -> None:
         super().__init__(*args)
 
         # make sure the paralel width is same
@@ -1111,6 +1114,7 @@ class DeepSeekModel(BaseModel):
             * (self._nextn + self._num_layers)
             / self._num_layers
         )
+        self._pdl_factor = 0.9 if sm_version >= 100 else 1.0
         self._power_law_alpha = 1.01
 
         gemm_quant_mode = self.config.gemm_quant_mode
@@ -1284,55 +1288,55 @@ class DeepSeekModel(BaseModel):
                 ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
                 ops.ElementWise(
                     "generation_add_norm_1",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     2 * h,
                     2 * h,
                     0.8,
                 ),
                 ops.GEMM(
                     "generation_downscale_gemm",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     2112,
                     h,
                     gemm_quant_mode,
                 ),
                 ops.GEMM(
                     "generation_q_b_proj_gemm",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     24576 // tp_size,
                     1536,
                     gemm_quant_mode,
                 ),
                 ops.MLABmm(
                     "generation_bmm_pre",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     self._num_heads // tp_size,
                     mla_bmm_quant_mode,
                     if_pre=True,
-                ),  # agg gen attn part
+                ),
                 ops.GenerationMLA(
                     "generation_attention",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     128 // tp_size,
                     kvcache_quant_mode,
-                ),  # agg gen attn part
+                ),
                 ops.MLABmm(
                     "generation_bmm_post",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     self._num_heads // tp_size,
                     mla_bmm_quant_mode,
                     if_pre=False,
-                ),  # agg gen attn part
+                ),
                 ops.GEMM(
                     "generation_proj_gemm",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     h,
                     h // tp_size,
                     gemm_quant_mode,
                 ),
                 ops.ElementWise(
                     "generation_add_norm_2",
-                    self._num_layers * self._mtp_scale_factor,
+                    self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     2 * h,
                     2 * h,
                     0.8,
@@ -1348,21 +1352,21 @@ class DeepSeekModel(BaseModel):
         gen_shared_ops = [
             ops.GEMM(
                 "generation_shared_gate_up_gemm",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 2 * self._moe_inter_size // tp_size,
                 h,
                 gemm_quant_mode,
             ),
             ops.ElementWise(
                 "generation_shared_act_gate",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 2 * self._moe_inter_size // tp_size,
                 self._moe_inter_size // tp_size,
                 0.8,
             ),
             ops.GEMM(
                 "generation_shared_ffn2_gemm",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 h,
                 self._moe_inter_size // tp_size,
                 gemm_quant_mode,
@@ -1373,14 +1377,14 @@ class DeepSeekModel(BaseModel):
         gen_routed_ops = [
             ops.GEMM(
                 "generation_router_gemm",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 self._num_experts,
                 h,
                 common.GEMMQuantMode.float16,
             ),
             ops.MoEDispatch(
                 "generation_moe_pre_dispatch",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 h,
                 self._topk,
                 self._num_experts,
@@ -1392,7 +1396,7 @@ class DeepSeekModel(BaseModel):
             ),
             ops.MoE(
                 "generation_moe",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 h,
                 self._moe_inter_size,
                 self._topk,
@@ -1405,7 +1409,7 @@ class DeepSeekModel(BaseModel):
             ),
             ops.MoEDispatch(
                 "generation_moe_post_dispatch",
-                self._num_layers * self._mtp_scale_factor,
+                self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 h,
                 self._topk,
                 self._num_experts,
@@ -1459,7 +1463,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
     - All2All kernel: NVLinkTwoSided (SM>=100), DeepEP/DeepEPLowLatency (SM>=90), NCCL (fallback)
     """
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, sm_version: int = 0) -> None:
         super().__init__(*args)
 
         # make sure the parallel width is same
@@ -1488,7 +1492,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
             * (self._nextn + self._num_layers)
             / self._num_layers
         )
-        self._pdl_factor = 0.9
+        self._pdl_factor = 0.9 if sm_version >= 100 else 1.0
         self._power_law_alpha = 1.01
 
         gemm_quant_mode = self.config.gemm_quant_mode

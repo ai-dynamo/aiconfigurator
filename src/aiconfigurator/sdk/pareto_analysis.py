@@ -69,6 +69,7 @@ def agg_pareto(
                 model_path=model_path,
                 model_config=overwritten_model_config,
                 backend_name=backend_name,
+                sm_version=database.system_spec.get("gpu", {}).get("sm_version", 0),
             )
             backend = get_backend(backend_name)
             sess = InferenceSession(model=model, database=database, backend=backend)
