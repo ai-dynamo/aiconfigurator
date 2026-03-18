@@ -3149,6 +3149,14 @@ class HybridMoEModel(BaseModel):
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
+        self._mtp_scale_factor = (
+            1.0
+            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
+            * (self._nextn + self._num_layers)
+            / self._num_layers
+            if self._nextn > 0
+            else 1.0
+        )
         self._validate_fp8_block_quantized_moe_config()
         self._hybrid_config: common.HybridConfig | None = None
         self._power_law_alpha = 1.01
@@ -3169,7 +3177,23 @@ class HybridMoEModel(BaseModel):
             )
 
     def set_hybrid_config(self, cfg: common.HybridConfig) -> None:
-        """Apply HybridConfig and rebuild context/generation ops."""
+        """Apply HybridConfig and rebuild context/generation ops.
+
+        Validates that attn_layer_pattern and moe_layer_freq have the same length
+        and contain only 0/1 values before accepting the config.
+        """
+        if len(cfg.attn_layer_pattern) != len(cfg.moe_layer_freq):
+            raise ValueError(
+                f"HybridConfig pattern length mismatch: "
+                f"attn_layer_pattern has {len(cfg.attn_layer_pattern)} entries "
+                f"but moe_layer_freq has {len(cfg.moe_layer_freq)}"
+            )
+        for i, (a, m) in enumerate(zip(cfg.attn_layer_pattern, cfg.moe_layer_freq)):
+            if a not in (0, 1) or m not in (0, 1):
+                raise ValueError(
+                    f"HybridConfig layer {i} has invalid values: "
+                    f"attn={a}, moe={m} (expected 0 or 1)"
+                )
         self._hybrid_config = cfg
         self._build_context_ops()
         self._build_generation_ops()
@@ -3393,12 +3417,17 @@ class HybridMoEModel(BaseModel):
         )
 
     def _build_generation_ops(self) -> None:
-        """Build the generation (decoding) operations for all four layer types."""
+        """Build the generation (decoding) operations for all four layer types.
+
+        All generation op counts are scaled by _mtp_scale_factor to account for
+        multi-token prediction (nextn > 0), mirroring MOEModel's behavior.
+        """
         if not self._hybrid_config:
             return
 
         cfg = self._hybrid_config
         counts = self._count_layer_types()
+        sf = self._mtp_scale_factor
         h = self._hidden_size
         tp = self.config.tp_size
         moe_tp = self.config.moe_tp_size
@@ -3415,11 +3444,11 @@ class HybridMoEModel(BaseModel):
         )
         d = self._resolve_dims(tp)
 
-        self.generation_ops = [ops.Embedding("generation_embedding", 1, self._vocab_size, h, 0.3)]
+        self.generation_ops = [ops.Embedding("generation_embedding", 1 * sf, self._vocab_size, h, 0.3)]
 
         # --- global attention + MoE FFN ---
         if counts["global_moe"] > 0:
-            c = counts["global_moe"]
+            c = counts["global_moe"] * sf
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_global_attn_norm", c, 2 * h, 2 * h, 0.8),
@@ -3443,7 +3472,7 @@ class HybridMoEModel(BaseModel):
 
         # --- SWA/local attention + MoE FFN ---
         if counts["swa_moe"] > 0:
-            c = counts["swa_moe"]
+            c = counts["swa_moe"] * sf
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_swa_attn_norm", c, 2 * h, 2 * h, 0.8),
@@ -3465,7 +3494,7 @@ class HybridMoEModel(BaseModel):
 
         # --- SWA/local attention + dense FFN ---
         if counts["swa_dense"] > 0:
-            c = counts["swa_dense"]
+            c = counts["swa_dense"] * sf
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_swa_dense_attn_norm", c, 2 * h, 2 * h, 0.8),
@@ -3489,7 +3518,7 @@ class HybridMoEModel(BaseModel):
 
         # --- global attention + dense FFN ---
         if counts["global_dense"] > 0:
-            c = counts["global_dense"]
+            c = counts["global_dense"] * sf
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_global_dense_attn_norm", c, 2 * h, 2 * h, 0.8),
@@ -3518,8 +3547,10 @@ class HybridMoEModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.GEMM("generation_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
-                ops.P2P("generation_p2p", pp - 1, h, pp),
+                ops.GEMM(
+                    "generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.float16
+                ),
+                ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]
         )
 
