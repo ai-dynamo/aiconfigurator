@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+__compat__ = ">=0.16.0"
+
 """
 MLA Module Collector for vLLM — unified MLA and DSA benchmarking.
 
