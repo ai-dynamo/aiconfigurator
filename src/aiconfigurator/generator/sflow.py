@@ -488,10 +488,6 @@ def _build_sflow_variables(
             rp.get("moe_expert_parallel_size"),
             _int(_extract_option_value(cli_args, "--expert-parallel-size"), 1),
         )
-        moe_tp = _int(
-            rp.get("moe_tensor_parallel_size"),
-            _int(_extract_option_value(cli_args, "--moe-dense-tp-size"), 1),
-        )
         max_batch = _int(rp.get("max_batch_size"), _int(_extract_option_value(cli_args, "--max-running-requests"), 1))
         max_num_tokens = _int(
             rp.get("max_num_tokens")
@@ -515,7 +511,6 @@ def _build_sflow_variables(
         vars_out.append(_var(f"{prefix}_PP_SIZE", f"{role_label} pipeline parallel size", pp, "integer"))
         vars_out.append(_var(f"{prefix}_DP_SIZE", f"{role_label} data parallel size", dp, "integer"))
         vars_out.append(_var(f"{prefix}_EP_SIZE", f"{role_label} expert parallel size", ep, "integer"))
-        vars_out.append(_var(f"{prefix}_MOE_TP_SIZE", f"{role_label} MOE tensor parallel size", moe_tp, "integer"))
         vars_out.append(_var(f"{prefix}_BATCH_SIZE", f"{role_label} batch size", max_batch, "integer"))
         vars_out.append(
             _var(f"{prefix}_MAX_NUM_TOKENS", f"{role_label} max number of tokens", max_num_tokens, "integer")
@@ -596,7 +591,6 @@ def _bind_sglang_cli_args(cli_args: str, prefix: str) -> str:
         "--pipeline-parallel-size": f"$[[ variables.{prefix}_PP_SIZE ]]",
         "--data-parallel-size": f"$[[ variables.{prefix}_DP_SIZE ]]",
         "--expert-parallel-size": f"$[[ variables.{prefix}_EP_SIZE ]]",
-        "--moe-dense-tp-size": f"$[[ variables.{prefix}_MOE_TP_SIZE ]]",
         "--max-running-requests": f"$[[ variables.{prefix}_BATCH_SIZE ]]",
         "--max-prefill-tokens": f"$[[ variables.{prefix}_MAX_NUM_TOKENS ]]",
         "--max-total-tokens": f"$[[ variables.{prefix}_MAX_NUM_TOKENS ]]",
@@ -615,6 +609,15 @@ def _bind_sglang_cli_args(cli_args: str, prefix: str) -> str:
     idx = 0
     while idx < len(tokens):
         token = tokens[idx]
+        # SGLang accepts moe_dense_tp_size 1 or None only; expert TP is tensor_parallel_size.
+        if token.startswith("--moe-dense-tp-size"):
+            if "=" in token:
+                idx += 1
+                continue
+            idx += 1
+            if idx < len(tokens) and not tokens[idx].startswith("--"):
+                idx += 1
+            continue
         if token == "--enable-dp-attention":
             out.append(attention_var)
             attention_bound = True
@@ -656,7 +659,6 @@ def _bind_sglang_cli_args(cli_args: str, prefix: str) -> str:
         ("--pipeline-parallel-size", f"$[[ variables.{prefix}_PP_SIZE ]]"),
         ("--data-parallel-size", f"$[[ variables.{prefix}_DP_SIZE ]]"),
         ("--expert-parallel-size", f"$[[ variables.{prefix}_EP_SIZE ]]"),
-        ("--moe-dense-tp-size", f"$[[ variables.{prefix}_MOE_TP_SIZE ]]"),
         ("--max-running-requests", f"$[[ variables.{prefix}_BATCH_SIZE ]]"),
         ("--max-prefill-tokens", f"$[[ variables.{prefix}_MAX_NUM_TOKENS ]]"),
         ("--kv-cache-dtype", "$[[ variables.KV_CACHE_DTYPE ]]"),

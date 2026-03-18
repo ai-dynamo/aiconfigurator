@@ -12,7 +12,6 @@
 {%- if sglang['trust-remote-code'] -%}{%- set _ = args.append('--trust-remote-code') -%}{%- endif -%}
 {%- if sglang['enable-dp-attention'] -%}{%- set _ = args.append('--enable-dp-attention') -%}{%- endif -%}
 {%- if sglang['expert-parallel-size'] is defined -%}{%- set _ = args.append('--expert-parallel-size "' ~ sglang['expert-parallel-size'] ~ '"') -%}{%- endif -%}
-{%- if sglang['moe-dense-tp-size'] is defined -%}{%- set _ = args.append('--moe-dense-tp-size "' ~ sglang['moe-dense-tp-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['disable-cuda-graph'] -%}{%- set _ = args.append('--disable-cuda-graph') -%}{%- endif -%}
 {%- if sglang['cuda-graph-bs'] is defined -%}{%- set _ = args.append('--cuda-graph-bs ' ~ (sglang['cuda-graph-bs'] | join(' '))) -%}{%- endif -%}
 {%- if sglang['speculative-algorithm'] is defined -%}{%- set _ = args.append('--speculative-algorithm "' ~ sglang['speculative-algorithm'] ~ '"') -%}{%- endif -%}

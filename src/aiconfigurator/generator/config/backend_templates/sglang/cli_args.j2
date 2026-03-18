@@ -16,7 +16,6 @@
 {%- if sglang['disable-radix-cache'] -%}{%- set _ = args.append('--disable-radix-cache') -%}{%- endif -%}
 {%- if sglang['enable-dp-attention'] -%}{%- set _ = args.append('--enable-dp-attention') -%}{%- endif -%}
 {%- if sglang['expert-parallel-size'] is defined -%}{%- set _ = args.append('--expert-parallel-size "' ~ sglang['expert-parallel-size'] ~ '"') -%}{%- endif -%}
-{%- if sglang['moe-dense-tp-size'] is defined -%}{%- set _ = args.append('--moe-dense-tp-size "' ~ sglang['moe-dense-tp-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['moe-runner-backend'] is defined -%}{%- set _ = args.append('--moe-runner-backend "' ~ sglang['moe-runner-backend'] ~ '"') -%}{%- endif -%}
 {%- if sglang['moe-a2a-backend'] is defined -%}{%- set _ = args.append('--moe-a2a-backend "' ~ sglang['moe-a2a-backend'] ~ '"') -%}{%- endif -%}
 {%- if sglang['attention-backend'] is defined -%}{%- set _ = args.append('--attention-backend "' ~ sglang['attention-backend'] ~ '"') -%}{%- endif -%}
