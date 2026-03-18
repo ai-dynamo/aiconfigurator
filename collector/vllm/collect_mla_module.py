@@ -228,7 +228,11 @@ def _create_gemm_quant_config(gemm_type: str):
             ModelOptNvFp4Config,
         )
 
-        return ModelOptNvFp4Config()
+        return ModelOptNvFp4Config(
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        )
     raise ValueError(f"Unknown gemm_type: {gemm_type!r}")
 
 
@@ -362,7 +366,7 @@ def _create_attention_module(
         for name, param in attn_module.named_parameters():
             if param.is_meta:
                 continue
-            if param.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            if param.dtype in (torch.float8_e4m3fn, torch.float8_e5m2, torch.uint8):
                 param.data.zero_()
             elif param.dtype == torch.float32 and "scale" in name:
                 param.data.fill_(1.0)
