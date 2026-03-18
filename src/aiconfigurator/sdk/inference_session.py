@@ -195,6 +195,9 @@ class DisaggInferenceSession:
         self._prefill_latency_correction_scale = 1.0
         self._decode_latency_correction_scale = 1.0
 
+        self._rate_matching_prefill_degradation_factor = _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR
+        self._rate_matching_decode_degradation_factor = _RATE_MATCHING_DECODE_DEGRADATION_FACTOR
+
     def set_latency_correction_scales(
         self, prefill_latency_correction_scale: float, decode_latency_correction_scale: float
     ):
@@ -203,6 +206,23 @@ class DisaggInferenceSession:
         """
         self._prefill_latency_correction_scale = prefill_latency_correction_scale
         self._decode_latency_correction_scale = decode_latency_correction_scale
+
+    def set_rate_matching_degradation_factors(
+        self,
+        prefill_degradation_factor: float = _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
+        decode_degradation_factor: float = _RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
+    ):
+        """
+        Set the degradation factors used during rate matching between prefill and decode workers.
+
+        Args:
+            prefill_degradation_factor: Multiplicative factor applied to prefill throughput
+                to account for pipeline bubbles (default 0.9).
+            decode_degradation_factor: Multiplicative factor applied to decode throughput
+                to account for batch-size under-saturation (default 0.92).
+        """
+        self._rate_matching_prefill_degradation_factor = prefill_degradation_factor
+        self._rate_matching_decode_degradation_factor = decode_degradation_factor
 
     def _get_disagg_summary_df(
         self,
@@ -223,8 +243,8 @@ class DisaggInferenceSession:
             prefill_num_worker,
             decode_dict,
             decode_num_worker,
-            prefill_degradation_factor=_RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
-            decode_degradation_factor=_RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
+            prefill_degradation_factor=self._rate_matching_prefill_degradation_factor,
+            decode_degradation_factor=self._rate_matching_decode_degradation_factor,
         )
         return pd.DataFrame([summary_dict], columns=common.ColumnsDisagg).round(3)
 
@@ -768,8 +788,8 @@ class DisaggInferenceSession:
                 decode_summary_df=decode_summary_df,
                 return_top_k=5,
                 num_gpu_list=num_gpu_list,
-                rate_matching_prefill_degradation_factor=_RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
-                rate_matching_decode_degradation_factor=_RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
+                rate_matching_prefill_degradation_factor=self._rate_matching_prefill_degradation_factor,
+                rate_matching_decode_degradation_factor=self._rate_matching_decode_degradation_factor,
                 require_same_tp=require_same_tp,
             )
             if filtered_disagg_summary_df is not None:

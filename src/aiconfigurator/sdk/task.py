@@ -493,6 +493,8 @@ class TaskConfigFactory:
             "decode_latency_correction_scale": DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
             "prefill_max_batch_size": 1,
             "decode_max_batch_size": 512,
+            "rate_matching_prefill_degradation_factor": None,
+            "rate_matching_decode_degradation_factor": None,
         }
 
         return {
@@ -1350,6 +1352,12 @@ class TaskRunner:
             decode_max_num_tokens=task_config.advanced_tuning_config.decode_max_batch_size,
             prefill_latency_correction_scale=task_config.advanced_tuning_config.prefill_latency_correction_scale,
             decode_latency_correction_scale=task_config.advanced_tuning_config.decode_latency_correction_scale,
+            rate_matching_prefill_degradation_factor=getattr(
+                task_config.advanced_tuning_config, "rate_matching_prefill_degradation_factor", None
+            ),
+            rate_matching_decode_degradation_factor=getattr(
+                task_config.advanced_tuning_config, "rate_matching_decode_degradation_factor", None
+            ),
             require_same_tp=require_same_tp,
             autoscale=autoscale,
             target_tpot=task_config.runtime_config.tpot if autoscale else None,

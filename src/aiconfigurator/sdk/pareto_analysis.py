@@ -240,6 +240,16 @@ def disagg_pareto(
     disagg_sess = DisaggInferenceSession(prefill_database, prefill_backend, decode_database, decode_backend)
     disagg_sess.set_latency_correction_scales(prefill_latency_correction_scale, decode_latency_correction_scale)
 
+    rate_matching_prefill = kwargs.pop("rate_matching_prefill_degradation_factor", None)
+    rate_matching_decode = kwargs.pop("rate_matching_decode_degradation_factor", None)
+    if rate_matching_prefill is not None or rate_matching_decode is not None:
+        kw = {}
+        if rate_matching_prefill is not None:
+            kw["prefill_degradation_factor"] = rate_matching_prefill
+        if rate_matching_decode is not None:
+            kw["decode_degradation_factor"] = rate_matching_decode
+        disagg_sess.set_rate_matching_degradation_factors(**kw)
+
     prefill_max_num_tokens = kwargs.get("prefill_max_num_tokens", 16384)
     decode_max_num_tokens = kwargs.get("decode_max_num_tokens", 512)
     logger.debug(f"prefill_max_num_tokens: {prefill_max_num_tokens}, decode_max_num_tokens: {decode_max_num_tokens}")

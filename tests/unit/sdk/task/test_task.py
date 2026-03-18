@@ -100,6 +100,8 @@ def test_taskconfig_disagg_default():
     assert cfg.advanced_tuning_config.decode_max_batch_size == 512
     assert cfg.advanced_tuning_config.prefill_latency_correction_scale == 1.1
     assert cfg.advanced_tuning_config.decode_latency_correction_scale == 1.08
+    assert cfg.advanced_tuning_config.rate_matching_prefill_degradation_factor is None
+    assert cfg.advanced_tuning_config.rate_matching_decode_degradation_factor is None
     assert "disagg-defaults" in cfg.applied_layers
 
 
@@ -943,3 +945,75 @@ class TestTaskrunnerDisaggMixedWideepModelConfig:
         assert prefill_mc.enable_eplb is True
         assert decode_mc.enable_wideep is False
         assert decode_mc.enable_eplb is False
+
+
+class TestRateMatchingFactorsForwarding:
+    """Verify rate_matching degradation factors flow from TaskConfig to disagg_pareto."""
+
+    def test_defaults_forward_none(self, monkeypatch):
+        """When no override is set, None is passed to disagg_pareto."""
+        captured = {}
+        pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+        monkeypatch.setattr(pa_stub, "disagg_pareto", _make_capturing_disagg_pareto(captured))
+
+        task = TaskConfig(
+            serving_mode="disagg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            total_gpus=8,
+        )
+        TaskRunner().run(task)
+
+        assert captured.get("rate_matching_prefill_degradation_factor") is None
+        assert captured.get("rate_matching_decode_degradation_factor") is None
+
+    def test_custom_values_forwarded(self, monkeypatch):
+        """Custom rate_matching factors in advanced_tuning_config reach disagg_pareto."""
+        captured = {}
+        pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+        monkeypatch.setattr(pa_stub, "disagg_pareto", _make_capturing_disagg_pareto(captured))
+
+        task = TaskConfig(
+            serving_mode="disagg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            total_gpus=8,
+            yaml_config={
+                "mode": "patch",
+                "config": {
+                    "advanced_tuning_config": {
+                        "rate_matching_prefill_degradation_factor": 1.0,
+                        "rate_matching_decode_degradation_factor": 1.0,
+                    }
+                },
+            },
+        )
+        TaskRunner().run(task)
+
+        assert captured.get("rate_matching_prefill_degradation_factor") == 1.0
+        assert captured.get("rate_matching_decode_degradation_factor") == 1.0
+
+    def test_partial_override_prefill_only(self, monkeypatch):
+        """Setting only prefill factor leaves decode as None."""
+        captured = {}
+        pa_stub = sys.modules["aiconfigurator.sdk.pareto_analysis"]
+        monkeypatch.setattr(pa_stub, "disagg_pareto", _make_capturing_disagg_pareto(captured))
+
+        task = TaskConfig(
+            serving_mode="disagg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            total_gpus=8,
+            yaml_config={
+                "mode": "patch",
+                "config": {
+                    "advanced_tuning_config": {
+                        "rate_matching_prefill_degradation_factor": 0.85,
+                    }
+                },
+            },
+        )
+        TaskRunner().run(task)
+
+        assert captured.get("rate_matching_prefill_degradation_factor") == 0.85
+        assert captured.get("rate_matching_decode_degradation_factor") is None

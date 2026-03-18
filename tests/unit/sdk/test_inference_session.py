@@ -246,3 +246,60 @@ class TestRequireSameTPFiltering:
         assert df is not None and not df.empty
         for _, row in df.iterrows():
             assert row["(p)tp"] == row["(d)tp"], f"Mismatch: (p)tp={row['(p)tp']}, (d)tp={row['(d)tp']}"
+
+
+class TestRateMatchingDegradationFactors:
+    """Verify set_rate_matching_degradation_factors on DisaggInferenceSession."""
+
+    def test_default_values(self, disagg_session):
+        """New session has the module-level defaults (0.9 / 0.92)."""
+        assert disagg_session._rate_matching_prefill_degradation_factor == 0.9
+        assert disagg_session._rate_matching_decode_degradation_factor == 0.92
+
+    def test_setter_updates_both(self, disagg_session):
+        """Calling the setter with both args updates both attributes."""
+        disagg_session.set_rate_matching_degradation_factors(0.5, 0.6)
+        assert disagg_session._rate_matching_prefill_degradation_factor == 0.5
+        assert disagg_session._rate_matching_decode_degradation_factor == 0.6
+
+    def test_setter_partial_prefill_only(self, disagg_session):
+        """Setting only prefill keeps decode at default."""
+        disagg_session.set_rate_matching_degradation_factors(prefill_degradation_factor=0.7)
+        assert disagg_session._rate_matching_prefill_degradation_factor == 0.7
+        assert disagg_session._rate_matching_decode_degradation_factor == 0.92
+
+    def test_setter_partial_decode_only(self, disagg_session):
+        """Setting only decode keeps prefill at default."""
+        disagg_session.set_rate_matching_degradation_factors(decode_degradation_factor=0.8)
+        assert disagg_session._rate_matching_prefill_degradation_factor == 0.9
+        assert disagg_session._rate_matching_decode_degradation_factor == 0.8
+
+    def test_factors_used_in_disagg_result(self, disagg_session, runtime_config, model_config):
+        """Custom factors propagate into find_best_disagg_result_under_constraints output."""
+        disagg_session.set_rate_matching_degradation_factors(1.0, 1.0)
+        result_1 = _run(
+            disagg_session,
+            runtime_config,
+            model_config,
+            prefill_cfgs=[(1, 1, 1, 1, 1)],
+            decode_cfgs=[(1, 1, 1, 1, 1)],
+            require_same_tp=False,
+        )
+
+        disagg_session.set_rate_matching_degradation_factors(0.5, 0.5)
+        result_05 = _run(
+            disagg_session,
+            runtime_config,
+            model_config,
+            prefill_cfgs=[(1, 1, 1, 1, 1)],
+            decode_cfgs=[(1, 1, 1, 1, 1)],
+            require_same_tp=False,
+        )
+
+        assert result_1 is not None and result_05 is not None
+        df_1 = result_1.get_summary_df()
+        df_05 = result_05.get_summary_df()
+        assert df_1 is not None and df_05 is not None
+        tsg_1 = df_1["tokens/s/gpu"].iloc[0]
+        tsg_05 = df_05["tokens/s/gpu"].iloc[0]
+        assert tsg_1 > tsg_05, f"factor=1.0 should yield higher tokens/s/gpu ({tsg_1}) than factor=0.5 ({tsg_05})"
