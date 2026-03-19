@@ -327,12 +327,7 @@ def _get_hf_auth_headers() -> dict[str, str]:
     2. ``HUGGING_FACE_HUB_TOKEN`` environment variable
     3. ``~/.cache/huggingface/token`` file
     """
-    import os
-
-    hf_token = (
-        os.environ.get("HF_TOKEN")
-        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    )
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if not hf_token:
         # Fall back to the token file written by `huggingface-cli login`
         token_path = Path.home() / ".cache" / "huggingface" / "token"
