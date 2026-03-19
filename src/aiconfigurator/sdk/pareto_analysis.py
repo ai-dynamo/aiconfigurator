@@ -28,6 +28,7 @@ def agg_pareto(
     backend_name: str,
     model_config: config.ModelConfig,
     parallel_config_list: list[list[int]],
+    enable_chunked_prefill: bool = False,
 ) -> pd.DataFrame:
     """
     Find Pareto front for agg.
@@ -42,14 +43,12 @@ def agg_pareto(
         backend_name: name of the backend
         model_config: model config
         parallel_config_list: list of parallel configurations
+        enable_chunked_prefill: whether the inference framework will have chunked prefill enabled.
+            Affects the context tokens sweep granularity. Default is False.
 
     Returns:
         results_df: dataframe of the results
     """
-    if backend_name in ["vllm", "sglang"]:
-        enable_chunked_prefill = True
-    else:
-        enable_chunked_prefill = False
 
     # agg is agg server, the loop over parallel is outside here.
     results_df = pd.DataFrame(columns=ColumnsAgg)

@@ -158,6 +158,13 @@ def _add_default_mode_arguments(parser):
         help="Acceptance rates for MTP draft tokens. Comma-separated list of 5 floats. "
         "Default is '0.85,0.3,0,0,0' meaning 1st token has 85%% acceptance, 2nd has 30%%, rest are 0.",
     )
+    parser.add_argument(
+        "--enable-chunked-prefill",
+        action="store_true",
+        default=False,
+        help="Enable chunked prefill for finer-grained context token sweep during optimization. "
+        "When off (default), context token stride is aligned to ISL for faster sweeping.",
+    )
 
 
 def _add_experiments_mode_arguments(parser):
@@ -591,6 +598,7 @@ def build_default_task_configs(
     prefix: int = 0,
     nextn: int = 0,
     nextn_accept_rates: list[float] | None = None,
+    enable_chunked_prefill: bool = False,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
 
@@ -611,6 +619,7 @@ def build_default_task_configs(
         prefix: Prefix cache length.
         nextn: Number of draft tokens for MTP speculative decoding.
         nextn_accept_rates: Acceptance rates for MTP draft tokens.
+        enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
 
     Returns:
         Dict with TaskConfig objects. When backend='auto', returns 6 configs
@@ -677,6 +686,7 @@ def build_default_task_configs(
         "request_latency": request_latency,
         "prefix": prefix,
         "database_mode": database_mode,
+        "enable_chunked_prefill": enable_chunked_prefill,
     }
 
     # Create yaml_config to pass nextn and nextn_accept_rates if specified
@@ -869,6 +879,8 @@ def build_experiment_task_configs(
             task_kwargs["enable_wideep"] = exp_config["enable_wideep"]
         if "enable_eplb" in exp_config:
             task_kwargs["enable_eplb"] = exp_config["enable_eplb"]
+        if "enable_chunked_prefill" in exp_config:
+            task_kwargs["enable_chunked_prefill"] = exp_config["enable_chunked_prefill"]
         if "database_mode" in exp_config:
             task_kwargs["database_mode"] = exp_config["database_mode"]
 
@@ -1422,6 +1434,7 @@ def main(args):
             prefix=args.prefix,
             nextn=args.nextn,
             nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],
+            enable_chunked_prefill=args.enable_chunked_prefill,
         )
     elif args.mode == "exp":
         try:

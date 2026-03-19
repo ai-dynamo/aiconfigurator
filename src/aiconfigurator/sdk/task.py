@@ -61,6 +61,7 @@ class TaskContext:
     tpot: float | None
     request_latency: float | None
     enable_wideep: bool
+    enable_chunked_prefill: bool
     total_gpus: int | None
     profiles: list[str] = field(default_factory=list)
     yaml_patch: dict = field(default_factory=dict)
@@ -331,6 +332,7 @@ class TaskConfigFactory:
                 "request_latency": ctx.request_latency,
             },
             "enable_wideep": ctx.enable_wideep,
+            "enable_chunked_prefill": ctx.enable_chunked_prefill,
             "enable_eplb": False,
             "moe_backend": None,  # sglang wideep only
             "attention_backend": "flashinfer",  # sglang wideep only
@@ -602,6 +604,7 @@ class TaskConfig:
         tpot: float = 50,
         request_latency: float | None = None,
         enable_wideep: bool = False,
+        enable_chunked_prefill: bool = False,
         enable_eplb: bool = False,
         total_gpus: int | None = None,
         profiles: list[str] | None = None,
@@ -632,6 +635,7 @@ class TaskConfig:
             tpot: The target TPOT.
             request_latency: The target end-to-end request latency.
             enable_wideep: Whether to enable wideep.
+            enable_chunked_prefill: Whether the inference framework will have chunked prefill enabled.
             total_gpus: The total number of GPUs.
             profiles: The profiles to use.
             yaml_config: The YAML configuration.
@@ -676,6 +680,7 @@ class TaskConfig:
             tpot=tpot,
             request_latency=request_latency,
             enable_wideep=enable_wideep,
+            enable_chunked_prefill=enable_chunked_prefill,
             total_gpus=total_gpus,
             profiles=effective_profiles,
             yaml_patch=yaml_patch,
@@ -1122,6 +1127,7 @@ class TaskRunner:
             logger.info(f"{i + 1}) tp={tp}, pp={pp}, dp={dp}, moe_tp={moe_tp}, moe_ep={moe_ep}")
 
         logger.info("Task %s: Running agg pareto", task_config.task_name)
+        enable_chunked_prefill = getattr(task_config, "enable_chunked_prefill", False)
         result_df = pa.agg_pareto(
             model_path=task_config.model_path,
             runtime_config=runtime_config,
@@ -1129,6 +1135,7 @@ class TaskRunner:
             backend_name=task_config.worker_config.backend_name,
             model_config=model_config,
             parallel_config_list=parallel_config_list,
+            enable_chunked_prefill=enable_chunked_prefill,
         )
         return {
             "pareto_df": result_df,
