@@ -3179,15 +3179,18 @@ class HybridMoEModel(BaseModel):
     def set_hybrid_config(self, cfg: common.HybridMoEConfig) -> None:
         """Apply HybridMoEConfig and rebuild context/generation ops.
 
-        Validates that attn_layer_pattern and moe_layer_freq have the same length
-        and contain only 0/1 values before accepting the config.
+        Validates that attn_layer_pattern and moe_layer_freq have the same length,
+        match self._num_layers, and contain only 0/1 values before accepting the config.
         """
-        if len(cfg.attn_layer_pattern) != len(cfg.moe_layer_freq):
+        n = len(cfg.attn_layer_pattern)
+        if n != len(cfg.moe_layer_freq):
             raise ValueError(
                 f"HybridMoEConfig pattern length mismatch: "
-                f"attn_layer_pattern has {len(cfg.attn_layer_pattern)} entries "
+                f"attn_layer_pattern has {n} entries "
                 f"but moe_layer_freq has {len(cfg.moe_layer_freq)}"
             )
+        if n != self._num_layers:
+            raise ValueError(f"HybridMoEConfig pattern length ({n}) does not match num_layers ({self._num_layers})")
         for i, (a, m) in enumerate(zip(cfg.attn_layer_pattern, cfg.moe_layer_freq)):
             if a not in (0, 1) or m not in (0, 1):
                 raise ValueError(f"HybridMoEConfig layer {i} has invalid values: attn={a}, moe={m} (expected 0 or 1)")
