@@ -320,13 +320,25 @@ class HuggingFaceDownloadError(Exception):
 
 
 def _get_hf_auth_headers() -> dict[str, str]:
-    """Return HTTP auth headers using the cached HuggingFace token, if available."""
-    # Load token from ~/.cache/huggingface/token, if available
-    token_path = Path.home() / ".cache" / "huggingface" / "token"
-    hf_token = None
-    if token_path.exists():
-        with open(token_path) as f:
-            hf_token = f.read().strip()
+    """Return HTTP auth headers using the cached HuggingFace token, if available.
+
+    Token resolution order (first non-empty wins):
+    1. ``HF_TOKEN`` environment variable
+    2. ``HUGGING_FACE_HUB_TOKEN`` environment variable
+    3. ``~/.cache/huggingface/token`` file
+    """
+    import os
+
+    hf_token = (
+        os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    )
+    if not hf_token:
+        # Fall back to the token file written by `huggingface-cli login`
+        token_path = Path.home() / ".cache" / "huggingface" / "token"
+        if token_path.exists():
+            with open(token_path) as f:
+                hf_token = f.read().strip()
     headers: dict[str, str] = {}
     if hf_token:
         headers["Authorization"] = f"Bearer {hf_token}"
@@ -347,7 +359,10 @@ def _download_hf_json(hf_id: str, filename: str, *, raise_on_404: bool = True) -
         raise HuggingFaceDownloadError(
             f"Failed to download {hf_id}'s {filename} from HuggingFace: "
             f"HuggingFace returned HTTP error {e.code}: {e.reason}. "
-            f"URL: {url}. Check your authentication token in {token_path} if using a gated model."
+            f"URL: {url}. If using a gated model, authenticate via one of the following "
+            f"(in priority order): (1) set the HF_TOKEN environment variable, "
+            f"(2) set the HUGGING_FACE_HUB_TOKEN environment variable, or "
+            f"(3) run `huggingface-cli login` (token stored at {token_path})."
         ) from e
     except Exception as e:
         raise HuggingFaceDownloadError(f"Failed to download {hf_id}'s {filename} from HuggingFace: {e}") from e
