@@ -547,6 +547,17 @@ class TRTLLMBackend(BaseBackend):
         #    kvcache = kvcache * model.config.attention_dp_size # this is incorrect. tp will
         #    duplicate the kvcache while attn_dp will not.
 
+        # Split kvcache into prefill and decode portions to avoid double-counting
+        # with activations. During prefill, activations and kvcache_prefill both scale
+        # with batch_size * isl and overlap in memory (the empirical activation coefficient
+        # already captures KV cache writes). During decode, activations are tiny and
+        # kvcache_decode is separate.
+        kvcache_prefill = batch_size * isl * model.config.kvcache_quant_mode.value.memory * kvcache_per_token
+        kvcache_decode = (
+            batch_size * beam_width * osl * model.config.kvcache_quant_mode.value.memory * kvcache_per_token
+        )
+        runtime_memory = max(activations, kvcache_prefill) + kvcache_decode
+
         # starting from 2.22
         nccl_mem = database.system_spec["misc"]["nccl_mem"][min(model.config.tp_size, 8)]
 
@@ -555,7 +566,7 @@ class TRTLLMBackend(BaseBackend):
 
         one_gib = 1 << 30
         return {
-            "total": (weights + activations + kvcache + nccl_mem + others_mem) / one_gib,
+            "total": (weights + runtime_memory + nccl_mem + others_mem) / one_gib,
             "weights": weights / one_gib,
             "activations": activations / one_gib,
             "kvcache": kvcache / one_gib,
