@@ -5724,7 +5724,13 @@ class PerfDatabase:
             - combine: each remote expert returns one result in bfloat16.
               remote_ranks = min(topk, ep_size) - 1, bytes always use 2 (bf16).
             """
-            bw = self._get_p2p_bandwidth(moe_ep_size)
+            is_inter_node = node_num > 1
+
+            if is_inter_node:
+                bw = self.system_spec["node"]["inter_node_bw"]
+            else:
+                bw = self.system_spec["node"]["intra_node_bw"]
+
             remote_ranks = min(topk, moe_ep_size) - 1
 
             if op_name == "alltoall_prepare":
