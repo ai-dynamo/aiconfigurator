@@ -159,7 +159,7 @@ class BaseBackend(ABC):
 
         if mode == "static_ctx":
             context_latency_dict, context_energy_wms_dict = _run_context(batch_size, isl, prefix)
-            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, 1)
+            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, 1, prefix=prefix)
         elif mode == "static_gen":
             generation_latency_dict, generation_energy_wms_dict = _run_generation(
                 batch_size, beam_width, isl, osl, stride
@@ -172,13 +172,14 @@ class BaseBackend(ABC):
                 isl,
                 osl,
                 num_tokens=batch_size * beam_width,
+                prefix=prefix,
             )  # for gen only, all kvcache is needed.
         else:
             context_latency_dict, context_energy_wms_dict = _run_context(batch_size, isl, prefix)
             generation_latency_dict, generation_energy_wms_dict = _run_generation(
                 batch_size, beam_width, isl, osl, stride
             )
-            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl)
+            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl, prefix=prefix)
 
         if latency_correction_scale != 1.0:
             logger.debug(f"latency_correction_scale: {latency_correction_scale} is applied")
@@ -394,8 +395,17 @@ class BaseBackend(ABC):
         isl: int,
         osl: int,
         num_tokens: int = 0,
+        prefix: int = 0,
+        common_prefix_ratio: float = 0.0,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
+
+        Args:
+            prefix: number of prefix tokens (part of isl) whose KV is already cached
+                and does not need activation computation.
+            common_prefix_ratio: ratio in [0, 1] of prefix tokens that are shared
+                across the batch (only 1 copy of KV needed). The remaining
+                (1 - common_prefix_ratio) portion of prefix still needs per-request KV.
         """
         pass
