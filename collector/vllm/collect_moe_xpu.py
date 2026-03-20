@@ -3,12 +3,13 @@
 
 __compat__ = "vllm>=0.11.0"
 
-import os
 import itertools
+import os
 
 import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe import fused_experts
+
 try:
     from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 except Exception:
@@ -44,6 +45,7 @@ if torch.xpu.is_available():
         print(f"Please refer to vllm_xpu_kernels for MoE on XPU, \n{e}")
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
+
 
 def get_moe_xpu_test_cases():
     num_tokens = [
@@ -87,7 +89,7 @@ def get_moe_xpu_test_cases():
 
     # hidden_size,inter_s,topk,num_expert
     model_config_list = [
-        [2048, 1408, 4, 60, "Qwen/Qwen1.5-MoE-A2.7B"], # qwen
+        [2048, 1408, 4, 60, "Qwen/Qwen1.5-MoE-A2.7B"],  # qwen
     ]
 
     test_cases: list[MoeCommonTestCase] = []
@@ -137,6 +139,7 @@ def get_moe_xpu_test_cases():
         )
 
     return test_cases
+
 
 def get_moe_test_cases():
     """Generate MoE test cases"""
