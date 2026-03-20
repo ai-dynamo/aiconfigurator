@@ -322,6 +322,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "NemotronHForCausalLM": "NEMOTRONH",
     "MixtralForCausalLM": "MOE",
     "GptOssForCausalLM": "MOE",
+    "Qwen2MoeForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
     "MiniMaxM2ForCausalLM": "MOE",
     "MiMoV2FlashForCausalLM": "HYBRIDMOE",

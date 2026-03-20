@@ -57,6 +57,23 @@ def get_moe_xpu_test_cases():
         64,
         80,
         96,
+        128,
+        160,
+        192,
+        256,
+        320,
+        384,
+        512,
+        768,
+        1024,
+        1536,
+        2048,
+        3072,
+        4096,
+        6144,
+        8192,
+        12288,
+        16384,
     ]
     tp_list = [1, 2, 4, 8, 16, 32]
     ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -312,7 +329,6 @@ def run_moe_torch(
         def run_single_iteration():
             if distributed == "power_law":
                 for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
-                    print(f"tw={tw.shape},ti={ti.shape},w1={w1.shape},w2={w2.shape},local_num_experts={local_num_experts}")
                     local_num_tokens = tw.shape[0]
                     # args check https://github.com/vllm-project/vllm-xpu-kernels/blob/main/tests/fused_moe/test_fused_moe.py
                     _ = xpu_fused_moe(

@@ -101,6 +101,19 @@ _DEFAULT_BUILD_CASES = [
             "tpot": 100,
         },
     ),
+    pytest.param(
+        {
+            "model_path": "Qwen/Qwen1.5-MoE-A2.7B",
+            "system": "b60",
+            "backend": "vllm",
+            "total_gpus": 4,
+            "isl": 1500,
+            "osl": 150,
+            "prefix": 0,
+            "ttft": 5000,
+            "tpot": 100,
+        },
+    ),
 ]
 
 
