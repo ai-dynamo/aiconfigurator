@@ -985,59 +985,35 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
 
     # Sample initial distribution
     if num_tokens * topk > num_experts:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
+        raw_distribution = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
     else:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
+        raw_distribution = sample_power_law(num_experts, alpha, 0.01, 2)
 
     target_sum = num_tokens * topk
-    original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
-    target_distribution = original_distribution * target_sum
-    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
+    probs = raw_distribution / raw_distribution.sum()
+
+    # Use multinomial sampling instead of round to preserve power law shape
+    # when target_sum << num_experts (round would collapse everything to 0/1)
+    samples = torch.multinomial(probs, num_samples=target_sum, replacement=True)
+    num_tokens_per_expert = torch.zeros(num_experts, dtype=torch.int64)
+    for idx in samples:
+        num_tokens_per_expert[idx] += 1
 
     # Clamp to upper bound: each expert can be selected at most num_tokens times
-    # (since each token can select an expert at most once)
     upper_bound = num_tokens
     overflow = (num_tokens_per_expert - upper_bound).clamp(min=0).sum().item()
-    num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
-
-    # Redistribute overflow to experts that haven't reached the bound
     if overflow > 0:
+        num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
+        # Redistribute overflow to experts that haven't reached the bound
         sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-        for i in range(int(overflow)):
-            # Find an expert that hasn't reached the bound
-            for j in range(len(sorted_indices)):
-                expert_idx = sorted_indices[-(j + 1)]  # Start from smallest
-                if num_tokens_per_expert[expert_idx] < upper_bound:
-                    num_tokens_per_expert[expert_idx] += 1
-                    break
-
-    # Adjust to match exact target sum (respecting upper bound)
-    current_sum = num_tokens_per_expert.sum().item()
-    delta = target_sum - current_sum
-    if delta != 0:
-        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-        if delta > 0:
-            # Add to experts that haven't reached the bound
-            added = 0
-            for i in range(int(delta) * len(sorted_indices)):  # Extra iterations for safety
-                if added >= delta:
-                    break
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]  # Start from smallest
-                if num_tokens_per_expert[expert_idx] < upper_bound:
-                    num_tokens_per_expert[expert_idx] += 1
-                    added += 1
-        else:
-            for i in range(-delta):
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
-                if num_tokens_per_expert[expert_idx] > 0:
-                    num_tokens_per_expert[expert_idx] -= 1
-                else:
-                    num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -= 1
-
-    # Validate distribution
-    if len(num_tokens_per_expert) > 1:
-        sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
-        assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
+        remaining = int(overflow)
+        for i in range(remaining * len(sorted_indices)):
+            if remaining <= 0:
+                break
+            expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
+            if num_tokens_per_expert[expert_idx] < upper_bound:
+                num_tokens_per_expert[expert_idx] += 1
+                remaining -= 1
 
     # Find EP rank with max load and swap to rank 0
     with torch.no_grad():
@@ -1068,6 +1044,11 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
     aic_debug = int(os.getenv("AIC_DEBUG", "0"))
     if aic_debug >= 1:
         print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
+        ep_group_size = num_experts // ep
+        rank0_tokens = num_tokens_per_expert[:ep_group_size]
+        print(f"rank0 experts token counts (total {rank0_tokens.sum().item()}):")
+        for i, t in enumerate(rank0_tokens):
+            print(f"  expert[{i}]: {t.item()}")
 
     # Generate expert assignments (vectorized)
     h_selected_experts = _assign_experts_from_counts(num_tokens_per_expert, num_tokens, topk)
