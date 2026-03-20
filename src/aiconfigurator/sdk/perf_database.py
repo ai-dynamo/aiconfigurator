@@ -5720,9 +5720,10 @@ class PerfDatabase:
             All2All transfers token data between GPUs:
             - prepare: lightweight metadata exchange (topk * 4 bytes per token)
             - dispatch: each token sent once per unique remote rank (deduplication).
-              remote_ranks = min(topk, ep_size) - 1, bytes use quant_mode precision.
-            - combine: each remote expert returns one result in bfloat16.
-              remote_ranks = min(topk, ep_size) - 1, bytes always use 2 (bf16).
+              remote_ranks = min(topk, num_experts, ep_size - 1), bytes use quant_mode precision.
+            - combine: standard returns results in bfloat16 (2 B/elem);
+              low-precision variant returns results in fp4 (0.5 B/elem).
+              remote_ranks = min(topk, num_experts, ep_size - 1).
             """
             is_inter_node = node_num > 1
 
@@ -5731,13 +5732,13 @@ class PerfDatabase:
             else:
                 bw = self.system_spec["node"]["intra_node_bw"]
 
-            remote_ranks = min(topk, moe_ep_size) - 1
+            remote_ranks = min(topk, num_experts, moe_ep_size - 1)
 
             if op_name == "alltoall_prepare":
                 data_bytes = num_tokens * topk * 4  # token routing indices, ~4 bytes per entry
             elif "combine" in op_name:
-                # combine: results returned in bfloat16 regardless of quant mode
-                data_bytes = num_tokens * remote_ranks * hidden_size * 2
+                bytes_per_element = 0.5 if "low_precision" in op_name else 2
+                data_bytes = num_tokens * remote_ranks * hidden_size * bytes_per_element
             else:
                 # dispatch: per-rank deduplication, use quant_mode precision
                 data_bytes = num_tokens * remote_ranks * hidden_size * quant_mode.value.memory
