@@ -472,7 +472,6 @@ class TRTLLMBackend(BaseBackend):
         osl: int,
         num_tokens: int = 0,
         prefix: int = 0,
-        common_prefix_ratio: float = 0.0,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
@@ -540,19 +539,11 @@ class TRTLLMBackend(BaseBackend):
             num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size
             kvcache_per_token = num_kv_heads_per_gpu * model._head_size * model._num_layers * 2
         # should not be divided by pp_size as you need to hold all kvcache for stages.
-        # With prefix caching, the common prefix portion is shared (only 1 copy of KV),
-        # the rest needs per-request KV.
-        common_prefix_tokens = prefix * common_prefix_ratio
-        per_request_context_tokens = isl - common_prefix_tokens
-        kvcache_context = (
-            (common_prefix_tokens + batch_size * per_request_context_tokens)
+        kvcache = (
+            (batch_size * isl + batch_size * beam_width * osl)
             * model.config.kvcache_quant_mode.value.memory
             * kvcache_per_token
         )
-        kvcache_decode = (
-            batch_size * beam_width * osl * model.config.kvcache_quant_mode.value.memory * kvcache_per_token
-        )
-        kvcache = kvcache_context + kvcache_decode
         # if 'DEEPSEEK' in model.model_path or 'MOE' in model.model_path:
         #    kvcache = kvcache * model.config.attention_dp_size # this is incorrect. tp will
         #    duplicate the kvcache while attn_dp will not.

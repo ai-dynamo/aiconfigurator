@@ -396,16 +396,12 @@ class BaseBackend(ABC):
         osl: int,
         num_tokens: int = 0,
         prefix: int = 0,
-        common_prefix_ratio: float = 0.0,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
 
         Args:
             prefix: number of prefix tokens (part of isl) whose KV is already cached
-                and does not need activation computation.
-            common_prefix_ratio: ratio in [0, 1] of prefix tokens that are shared
-                across the batch (only 1 copy of KV needed). The remaining
-                (1 - common_prefix_ratio) portion of prefix still needs per-request KV.
+                (per-request) and does not need activation computation.
         """
         pass
