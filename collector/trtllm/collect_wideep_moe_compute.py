@@ -982,7 +982,7 @@ def run_wideep_moe_compute(
         if num_tokens > max_tokens:
             continue
 
-        num_iter = 5 if distributed == "power_law" else 1
+        num_iter = 20 if distributed == "power_law" else 1
 
         # In WideEP, DP size = EP size, each DP rank has num_tokens/ep_size tokens
         dp_num_tokens = num_tokens if num_tokens < moe_ep_size else num_tokens // moe_ep_size
@@ -999,54 +999,57 @@ def run_wideep_moe_compute(
             # - AutoTuner sees the same input shape as real inference
             # =====================================================================
             if distributed == "power_law":
-                _, rank0_info = power_law_logits_v3(
-                    num_tokens,
-                    num_experts,
-                    topk,
-                    moe_ep_size,
-                    power_law_alpha,
-                    use_eplb=use_eplb,
-                    num_slots=num_slots,
-                    return_rank0_info=True,
-                )
-                rank0_num_tokens = rank0_info["rank0_num_tokens"]
-                rank0_total_selections = rank0_info["rank0_total_selections"]
-                rank0_logits = rank0_info["rank0_logits"].to(router_logits_dtype).to(device)
+                # Generate num_iter INDEPENDENT distribution samples to reduce
+                # multinomial sampling variance. Each sample calls power_law_logits_v3
+                # separately, producing different rank0 token distributions.
+                # Padded tensor shapes are identical across samples (determined by
+                # total_num_tokens / ep_size), so CUDA Graph capture is safe.
+                rank0_data_list = []
+                total_selections_list = []
+                for _sample_idx in range(num_iter):
+                    _, rank0_info = power_law_logits_v3(
+                        num_tokens,
+                        num_experts,
+                        topk,
+                        moe_ep_size,
+                        power_law_alpha,
+                        use_eplb=use_eplb,
+                        num_slots=num_slots,
+                        return_rank0_info=True,
+                    )
+                    rank0_num_tokens = rank0_info["rank0_num_tokens"]
+                    rank0_total_selections = rank0_info["rank0_total_selections"]
+                    rank0_logits = rank0_info["rank0_logits"].to(router_logits_dtype).to(device)
 
-                rank0_selected_slots_global = rank0_info["rank0_selected_slots"]
-                gathered_logits = torch.gather(rank0_logits, 1, rank0_selected_slots_global.long().to(device))
-                token_final_scales = torch.softmax(gathered_logits, dim=1).to(torch.float32)
+                    rank0_selected_slots_global = rank0_info["rank0_selected_slots"]
+                    gathered_logits = torch.gather(rank0_logits, 1, rank0_selected_slots_global.long().to(device))
+                    token_final_scales = torch.softmax(gathered_logits, dim=1).to(torch.float32)
 
-                rank0_hidden = torch.randn([rank0_num_tokens, hidden_size]).bfloat16()
+                    rank0_hidden = torch.randn([rank0_num_tokens, hidden_size]).bfloat16()
 
-                # Pre-build padded tensors (all allocation happens here, outside hot path)
-                x_pad, s_pad, sc_pad, tuner_nt = _build_alltoall_equivalent_inputs(
-                    rank0_selected_slots=rank0_selected_slots_global,
-                    token_final_scales=token_final_scales,
-                    rank0_hidden=rank0_hidden,
-                    total_num_tokens=num_tokens,
-                    ep_size=moe_ep_size,
-                    num_slots=num_slots,
-                    hidden_size=hidden_size,
-                    topk=topk,
-                    device=device,
-                )
+                    x_pad, s_pad, sc_pad, tuner_nt = _build_alltoall_equivalent_inputs(
+                        rank0_selected_slots=rank0_selected_slots_global,
+                        token_final_scales=token_final_scales,
+                        rank0_hidden=rank0_hidden,
+                        total_num_tokens=num_tokens,
+                        ep_size=moe_ep_size,
+                        num_slots=num_slots,
+                        hidden_size=hidden_size,
+                        topk=topk,
+                        device=device,
+                    )
 
-                # Router computation still simulated on a single DP rank
-                dummy_router_logits = torch.randn([dp_num_tokens, num_slots]).to(router_logits_dtype).to(device)
+                    dummy_router_logits = torch.randn([dp_num_tokens, num_slots]).to(router_logits_dtype).to(device)
 
-                rank0_data_list = [
-                    {
+                    rank0_data_list.append({
                         "x_padded": x_pad,
                         "padded_slots": s_pad,
                         "padded_scales": sc_pad,
                         "tuner_num_tokens": tuner_nt,
                         "num_tokens": rank0_num_tokens,
                         "router_logits": dummy_router_logits,
-                    }
-                    for _ in range(num_iter)
-                ]
-                total_selections_list = [rank0_total_selections] * num_iter
+                    })
+                    total_selections_list.append(rank0_total_selections)
 
                 avg_rank0_tokens = sum(d["num_tokens"] for d in rank0_data_list) / len(rank0_data_list)
                 avg_rank0_selections = sum(total_selections_list) / len(total_selections_list)
