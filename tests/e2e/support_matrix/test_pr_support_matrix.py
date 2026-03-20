@@ -25,11 +25,11 @@ from aiconfigurator.cli.api import cli_support
 from aiconfigurator.sdk.common import BackendName
 from aiconfigurator.sdk.perf_database import get_latest_database_version
 
-pytestmark = [pytest.mark.e2e, pytest.mark.support_matrix]
+pytestmark = [pytest.mark.e2e, pytest.mark.build, pytest.mark.support_matrix]
 
 # Representative models — one per major architecture family.
 PR_MODELS: list[str] = [
-    "nvidia/DeepSeek-V3.1",
+    "nvidia/DeepSeek-V3.1-NVFP4",
     "meta-llama/Meta-Llama-3.1-8B",
     "MiniMaxAI/MiniMax-M2.5",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
