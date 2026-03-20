@@ -2,7 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 import dataclasses
 import itertools
+import os
 from typing import Optional
+
+
+def _get_model_path_filter() -> str | None:
+    """Return the model-path filter from the environment, or None for 'all'."""
+    val = os.environ.get("COLLECTOR_MODEL_PATH", "").strip()
+    return val if val else None
+
+
+def _filter_model_config_list(model_config_list: list[list]) -> list[list]:
+    """Filter a model_config_list to only the entry matching COLLECTOR_MODEL_PATH.
+
+    Each entry's last element is assumed to be the model name.
+    Returns the full list when no filter is set.
+    Returns an empty list when the filter doesn't match any entry in this
+    particular list (the model may exist in a different op's list).
+    Upfront validation against all known models is done in collect.py.
+    """
+    model_path = _get_model_path_filter()
+    if model_path is None:
+        return model_config_list
+    return [cfg for cfg in model_config_list if cfg[-1] == model_path]
+
 
 
 @dataclasses.dataclass
@@ -67,7 +90,7 @@ def get_common_moe_test_cases():
     # [2048,1408,4,60], #qwen1.5_moe
     # [2048,1408,6,64], #deepseekv1_moe
     # [5120,1536,6,160], #deepseekv2
-    model_config_list = [
+    model_config_list = _filter_model_config_list([
         [4096, 14336, 2, 8, "mistralai/Mixtral-8x7B-v0.1"],  # mixtral_8x7b
         [6144, 16384, 2, 8, "mistralai/Mixtral-8x22B-v0.1"],  # mixtral_8x22b
         [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3"],  # deepseekv3, will have 1 shared expert
@@ -85,7 +108,7 @@ def get_common_moe_test_cases():
             512,
             "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
         ],  # nemotron-3 super (uses relu2, non-gated)
-    ]
+    ])
 
     test_cases: list[MoeCommonTestCase] = []
 
@@ -211,9 +234,9 @@ def _get_mla_common_test_cases(is_context: bool):
     test_cases = []
 
     # num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim
-    model_config_list = [
+    model_config_list = _filter_model_config_list([
         [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-V3"],
-    ]
+    ])
 
     if is_context:
         b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -370,7 +393,7 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
 
     # Model configurations:
     # [d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name]
-    model_config_list = [
+    model_config_list = _filter_model_config_list([
         # Nemotron-H 3-Nano
         # hidden_size=2688, ssm_state_size=128, conv_kernel=4,
         # mamba_num_heads=64, mamba_head_dim=64, n_groups=8, chunk_size=128
@@ -382,7 +405,7 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
         # Generic Mamba2 configuration for interpolation coverage
         [8192, 128, 4, 64, 64, 8, 256, "MAMBA2_GENERIC_4K"],
         [1024, 64, 4, 16, 64, 4, 128, "MAMBA2_GENERIC_1K"],
-    ]
+    ])
 
     for model_config in model_config_list:
         d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name = model_config

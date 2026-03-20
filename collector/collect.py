@@ -980,6 +980,16 @@ def main():
         help="Shuffle test cases before applying --limit (uses seed 42 for reproducibility)",
     )
     parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Filter collection to a single model (e.g. 'MiniMaxAI/MiniMax-M2.5'). "
+        "Must match a model name in the test case config lists exactly. "
+        "Best used together with --ops to target a specific op, since a model "
+        "may only appear in one op's config list (e.g. MoE but not MLA). "
+        "Default: collect all models.",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="Profile the collector run and save output ",
@@ -987,12 +997,18 @@ def main():
     args = parser.parse_args()
     ops = args.ops
 
+    if args.model_path:
+        os.environ["COLLECTOR_MODEL_PATH"] = args.model_path
+
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
         logger = setup_logging(scope=args.ops if ops else ["all"], debug=args.debug)
     elif args.debug:
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
+
+    if args.model_path:
+        logger.info(f"Model filter active: collecting only for '{args.model_path}'")
 
     num_processes = get_device_module().device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
