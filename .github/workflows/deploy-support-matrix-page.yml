@@ -7,10 +7,6 @@ on:
       - "src/aiconfigurator/systems/support_matrix.csv"
       - "tools/support_matrix/generate_static_page.py"
       - "tools/support_matrix/static_page_template.html"
-  workflow_run:
-    workflows: ["Daily Support Matrix Update (Main)"]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
 
 permissions:
