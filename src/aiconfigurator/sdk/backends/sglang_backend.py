@@ -37,6 +37,8 @@ class SGLANGBackend(BaseBackend):
         osl = runtime_config.osl
         prefix = runtime_config.prefix
         b = runtime_config.batch_size
+        ctx_seq_imbalance_correction_scale = runtime_config.seq_imbalance_correction_scale
+        gen_seq_imbalance_correction_scale = runtime_config.gen_seq_imbalance_correction_scale
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
         balance_score = isl * b / ctx_tokens / osl
@@ -104,7 +106,12 @@ class SGLANGBackend(BaseBackend):
                     database,
                     # num tokens for gemm needs to be adjusted for prefix, depends on the avg prefix len per request
                     RuntimeConfig(
-                        batch_size=1, beam_width=1, isl=num_tokens, osl=1, prefix=prefix * np.floor(ctx_tokens / isl)
+                        batch_size=1,
+                        beam_width=1,
+                        isl=num_tokens,
+                        osl=1,
+                        prefix=prefix * np.floor(ctx_tokens / isl),
+                        seq_imbalance_correction_scale=ctx_seq_imbalance_correction_scale,
                     ),
                     mode="static_ctx",
                 )
@@ -127,7 +134,14 @@ class SGLANGBackend(BaseBackend):
                 summary = self.run_static(
                     model,
                     database,
-                    RuntimeConfig(batch_size=batch_size, beam_width=1, isl=num_tokens, osl=1, prefix=prefix),
+                    RuntimeConfig(
+                        batch_size=batch_size,
+                        beam_width=1,
+                        isl=num_tokens,
+                        osl=1,
+                        prefix=prefix,
+                        seq_imbalance_correction_scale=ctx_seq_imbalance_correction_scale,
+                    ),
                     mode="static_ctx",
                 )
                 latency_dict = summary.get_context_latency_dict()
@@ -142,7 +156,13 @@ class SGLANGBackend(BaseBackend):
                     summary = self.run_static(
                         model,
                         database,
-                        RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl + osl // 2, osl=2),
+                        RuntimeConfig(
+                            batch_size=num_tokens,
+                            beam_width=1,
+                            isl=isl + osl // 2,
+                            osl=2,
+                            gen_seq_imbalance_correction_scale=gen_seq_imbalance_correction_scale,
+                        ),
                         mode="static_gen",
                     )
                     latency_dict = summary.get_generation_latency_dict()
@@ -181,7 +201,13 @@ class SGLANGBackend(BaseBackend):
                 summary = self.run_static(
                     model,
                     database,
-                    RuntimeConfig(batch_size=num_tokens, beam_width=1, isl=isl + osl // 2, osl=2),
+                    RuntimeConfig(
+                        batch_size=num_tokens,
+                        beam_width=1,
+                        isl=isl + osl // 2,
+                        osl=2,
+                        gen_seq_imbalance_correction_scale=gen_seq_imbalance_correction_scale,
+                    ),
                     mode="static_gen",
                 )
                 latency_dict = summary.get_generation_latency_dict()
@@ -438,7 +464,13 @@ class SGLANGBackend(BaseBackend):
                 summary = self.run_agg(
                     model=model,
                     database=database,
-                    runtime_config=RuntimeConfig(batch_size=b, isl=isl, osl=osl, prefix=prefix),
+                    runtime_config=RuntimeConfig(
+                        batch_size=b,
+                        isl=isl,
+                        osl=osl,
+                        prefix=prefix,
+                        seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+                    ),
                     ctx_tokens=ctx_tokens,
                 )
 

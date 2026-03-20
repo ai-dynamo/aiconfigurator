@@ -194,6 +194,7 @@ def get_model(
             vocab,
             context,
             model_config,
+            extra_params,
         )
     elif model_family == "LLAMA":
         model = LLAMAModel(
@@ -209,6 +210,7 @@ def get_model(
             vocab,
             context,
             model_config,
+            extra_params,
         )
     elif model_family == "HYBRIDMOE":
         model = HybridMoEModel(
@@ -247,6 +249,7 @@ def get_model(
             vocab,
             context,
             model_config,
+            extra_params,
         )
     elif model_family == "DEEPSEEK":
         if backend_name == "sglang" and model_config.enable_wideep:
@@ -286,6 +289,7 @@ def get_model(
                 vocab,
                 context,
                 model_config,
+                extra_params,
             )
         else:
             logger.debug(f"WideEP is not enabled for model {model_path} with backend {backend_name}")
@@ -305,6 +309,7 @@ def get_model(
                 vocab,
                 context,
                 model_config,
+                extra_params,
             )
     elif model_family == "NEMOTRONNAS":
         model = NemotronNas(
@@ -321,8 +326,18 @@ def get_model(
             context,
             model_config,
         )
-        model.context_ops = extra_params
-        model.generation_ops = extra_params
+        # NemotronNAS uses extra_params as a list of BlockConfig to build its pipelines.
+        # Not all model metadata sources carry these NAS block configs, so only apply them when provided.
+        if isinstance(extra_params, list):
+            model.context_ops = extra_params
+            model.generation_ops = extra_params
+        else:
+            logger.warning(
+                "NemotronNAS model '%s' missing block configs in model metadata; leaving pipelines empty.",
+                model_path,
+            )
+            model.context_ops = []
+            model.generation_ops = []
     elif model_family == "NEMOTRONH":
         model = NemotronHModel(
             topk,
@@ -412,11 +427,15 @@ class BaseModel:
         vocab_size: int,
         context_length: int,
         model_config: config.ModelConfig,
+        extra_params=None,
     ) -> None:
+        """Initialize base model metadata and derived runtime flags."""
         self.model_path = model_path
         self.model_family = model_family
         self.architecture = architecture
         self.config = model_config
+        self.extra_params = extra_params
+        self._use_qk_norm = bool(extra_params.get("use_qk_norm", False)) if isinstance(extra_params, dict) else False
         self.context_ops = []
         self.generation_ops = []
 
@@ -647,6 +666,8 @@ class LLAMAModel(BaseModel):
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
                     fmha_quant_mode,
+                    head_size=self._head_size,
+                    use_qk_norm=self._use_qk_norm,
                 ),
                 ops.GEMM(
                     "context_proj_gemm",
@@ -706,6 +727,8 @@ class LLAMAModel(BaseModel):
                     self._num_heads // tp_size,
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
+                    head_size=self._head_size,
+                    use_qk_norm=self._use_qk_norm,
                 ),
                 ops.GEMM(
                     "generation_proj_gemm",
@@ -846,8 +869,9 @@ class MOEModel(BaseModel):
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
                     fmha_quant_mode,
-                    window_size,
-                    self._head_size,
+                    window_size=window_size,
+                    head_size=self._head_size,
+                    use_qk_norm=self._use_qk_norm,
                 )
             )
             self.generation_ops.append(
@@ -857,8 +881,9 @@ class MOEModel(BaseModel):
                     self._num_heads // tp_size,
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
-                    window_size,
-                    self._head_size,
+                    window_size=window_size,
+                    head_size=self._head_size,
+                    use_qk_norm=self._use_qk_norm,
                 )
             )
         else:
@@ -883,6 +908,7 @@ class MOEModel(BaseModel):
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     head_size=self._head_size,
+                    use_qk_norm=self._use_qk_norm,
                 ),
                 ops.GEMM(
                     "context_proj_gemm",
@@ -971,6 +997,7 @@ class MOEModel(BaseModel):
                     num_kv_heads_per_gpu,
                     kvcache_quant_mode,
                     head_size=self._head_size,
+                    use_qk_norm=self._use_qk_norm,
                 ),
                 ops.GEMM(
                     "generation_proj_gemm",

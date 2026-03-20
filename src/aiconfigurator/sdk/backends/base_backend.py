@@ -86,6 +86,7 @@ class BaseBackend(ABC):
                     s=isl,
                     prefix=prefix,
                     model_name=getattr(model, "model_name", ""),
+                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
                 )
 
                 # ✅ IMMEDIATELY extract values - do NOT use PerformanceResult arithmetic!
@@ -126,6 +127,7 @@ class BaseBackend(ABC):
                         beam_width=beam_width,
                         s=isl + i + 1,
                         model_name=getattr(model, "model_name", ""),
+                        gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
                     )
 
                     latency_ms = float(result)
