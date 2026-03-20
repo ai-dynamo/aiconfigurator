@@ -68,4 +68,10 @@ REGISTRY_XPU: list[OpEntry] = [
         get_func="get_generation_attention_test_cases",
         run_func="run_attention_torch",
     ),
+    OpEntry(
+        op="moe",
+        module="collector.vllm.collect_moe_xpu",
+        get_func="get_moe_test_cases",
+        run_func="run_moe_torch",
+    ),
 ]
