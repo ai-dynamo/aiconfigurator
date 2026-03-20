@@ -476,4 +476,6 @@ class VLLMBackend(BaseBackend):
         # TODO
         from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 
-        return TRTLLMBackend()._get_memory_usage(model, database, batch_size, beam_width, isl, osl, num_tokens, prefix)
+        return TRTLLMBackend()._get_memory_usage(
+            model, database, batch_size, beam_width, isl, osl, num_tokens, prefix=prefix
+        )
