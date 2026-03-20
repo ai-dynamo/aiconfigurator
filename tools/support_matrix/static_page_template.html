@@ -13,6 +13,7 @@
   --border:#e2e8f0;--border-focus:#6366f1;
   --accent:#6366f1;--accent-hover:#4f46e5;
   --pass-bg:#dcfce7;--pass-text:#166534;
+  --partial-bg:#fef3c7;--partial-text:#92400e;
   --fail-bg:#fee2e2;--fail-text:#b91c1c;
   --shadow:0 1px 3px rgba(0,0,0,.06);
   --radius:8px;--radius-sm:4px;
@@ -26,6 +27,7 @@
   --border:#334155;--border-focus:#818cf8;
   --accent:#818cf8;--accent-hover:#6366f1;
   --pass-bg:#052e16;--pass-text:#86efac;
+  --partial-bg:#451a03;--partial-text:#fcd34d;
   --fail-bg:#350a0a;--fail-text:#fca5a5;
   --shadow:0 1px 3px rgba(0,0,0,.3);
 }
@@ -135,6 +137,8 @@ table.matrix tbody tr:hover td{filter:brightness(0.95)}
 [data-theme="dark"] table.matrix tbody tr:hover td{filter:brightness(1.15)}
 
 td.cell-pass{background:var(--pass-bg);color:var(--pass-text);font-weight:500}
+td.cell-partial{background:var(--partial-bg);color:var(--partial-text);font-weight:500;cursor:pointer}
+td.cell-partial:hover{filter:brightness(0.92)!important;text-decoration:underline}
 td.cell-fail{
   background:var(--fail-bg);color:var(--fail-text);font-weight:600;
   cursor:pointer;
@@ -336,6 +340,7 @@ function renderLegend() {
   return '<div class="legend">' +
     '<span style="font-weight:600">Legend:</span>' +
     '<div class="legend-item"><span class="legend-swatch" style="background:var(--pass-bg)"></span> Supported</div>' +
+    '<div class="legend-item"><span class="legend-swatch" style="background:var(--partial-bg)"></span> Partial (agg or disagg only)</div>' +
     '<div class="legend-item"><span class="legend-swatch" style="background:var(--fail-bg)"></span> FAIL (click for details)</div>' +
     '</div>';
 }
@@ -392,6 +397,10 @@ function renderTable(system) {
         html += '<td class="cell-fail" data-error="' + escAttr(cell.error || '') +
                 '" data-model="' + escAttr(row.model) + '" data-backend="' + escAttr(b) +
                 '">FAIL</td>';
+      } else if (cell.status === 'partial') {
+        html += '<td class="cell-partial" data-error="' + escAttr(cell.error || '') +
+                '" data-model="' + escAttr(row.model) + '" data-backend="' + escAttr(b) +
+                '">' + escHtml(cell.version) + '</td>';
       } else {
         html += '<td class="cell-pass">' + escHtml(cell.version) + '</td>';
       }
@@ -477,8 +486,8 @@ function bindEvents() {
       refreshActivePanel();
       return;
     }
-    // FAIL cell click → modal
-    var td = e.target.closest('td.cell-fail');
+    // FAIL or partial cell click → modal
+    var td = e.target.closest('td.cell-fail, td.cell-partial');
     if (td) {
       var error = td.getAttribute('data-error');
       var model = td.getAttribute('data-model');

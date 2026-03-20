@@ -205,12 +205,41 @@ def build_matrix_for_mode(rows, system_name, mode_filter):
         cells = {}
         for backend in backends:
             version, at_target, error_msg = get_latest_supported_version(subset, model, system_name, backend)
+
+            # For "all" mode, determine if support is partial (one mode passes, other fails)
+            status = "pass"
+            if version is None or version == "FAIL":
+                status = "fail"
+
+            partial_error = None
+            if mode_filter == "all" and status == "pass":
+                agg_rows = [r for r in subset if r["Mode"] == "agg"]
+                disagg_rows = [r for r in subset if r["Mode"] == "disagg"]
+                agg_ver, _, agg_err = (
+                    get_latest_supported_version(agg_rows, model, system_name, backend)
+                    if agg_rows
+                    else (None, False, None)
+                )
+                disagg_ver, _, disagg_err = (
+                    get_latest_supported_version(disagg_rows, model, system_name, backend)
+                    if disagg_rows
+                    else (None, False, None)
+                )
+                agg_pass = agg_ver is not None and agg_ver != "FAIL"
+                disagg_pass = disagg_ver is not None and disagg_ver != "FAIL"
+                if agg_pass != disagg_pass:
+                    status = "partial"
+                    if not agg_pass:
+                        partial_error = f"[agg FAIL] {agg_err or 'No error message available'}"
+                    else:
+                        partial_error = f"[disagg FAIL] {disagg_err or 'No error message available'}"
+
             if version is None:
-                cells[backend] = {"version": "FAIL", "at_target": False, "error": "No data available"}
+                cells[backend] = {"version": "FAIL", "status": "fail", "error": "No data available"}
             elif version == "FAIL":
-                cells[backend] = {"version": "FAIL", "at_target": False, "error": error_msg}
+                cells[backend] = {"version": "FAIL", "status": "fail", "error": error_msg}
             else:
-                cells[backend] = {"version": version, "at_target": at_target, "error": None}
+                cells[backend] = {"version": version, "status": status, "error": partial_error}
         matrix_rows.append({"model": model, "cells": cells})
 
     return matrix_rows, backends
