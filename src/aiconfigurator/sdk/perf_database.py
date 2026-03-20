@@ -5740,12 +5740,7 @@ class PerfDatabase:
                 data_bytes = num_tokens * remote_ranks * hidden_size * 2
             else:
                 # dispatch: per-rank deduplication, use quant_mode precision
-                data_bytes = (
-                    num_tokens
-                    * remote_ranks
-                    * hidden_size
-                    * quant_mode.value.memory
-                )
+                data_bytes = num_tokens * remote_ranks * hidden_size * quant_mode.value.memory
 
             sol_comm = data_bytes / bw * 1000  # ms
             sol_time = sol_comm
