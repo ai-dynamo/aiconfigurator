@@ -387,16 +387,6 @@ You can also check support via the CLI:
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h100_sxm --backend-version 1.2.0rc5
 ```
 
-##### Regenerating the static page locally
-
-```bash
-python tools/support_matrix/generate_static_page.py \
-  --csv src/aiconfigurator/systems/support_matrix.csv \
-  --output docs/support-matrix/index.html
-```
-
-Open `docs/support-matrix/index.html` in a browser to preview.
-
 ## Contributing and Development
 
 We welcome contributions from the community! Check out the below resources to get started:
