@@ -232,8 +232,14 @@ class DisaggInferenceSession:
         Returns:
             InferenceSummary: the summary of the inference result
         """
-        prefill_model = models.get_model(model_path, prefill_model_config, self._prefill_backend.name.value)
-        decode_model = models.get_model(model_path, decode_model_config, self._decode_backend.name.value)
+        prefill_sm = self._prefill_database.system_spec.get("gpu", {}).get("sm_version", 0)
+        decode_sm = self._decode_database.system_spec.get("gpu", {}).get("sm_version", 0)
+        prefill_model = models.get_model(
+            model_path, prefill_model_config, self._prefill_backend.name.value, sm_version=prefill_sm
+        )
+        decode_model = models.get_model(
+            model_path, decode_model_config, self._decode_backend.name.value, sm_version=decode_sm
+        )
         prefill_sess = InferenceSession(
             model=prefill_model, database=self._prefill_database, backend=self._prefill_backend
         )
@@ -340,6 +346,7 @@ class DisaggInferenceSession:
                     model_path=model_path,
                     model_config=overwritten_model_config,
                     backend_name=self._prefill_backend.name.value,
+                    sm_version=self._prefill_database.system_spec.get("gpu", {}).get("sm_version", 0),
                 )
                 if mode == "static_ctx":
                     sess = InferenceSession(
