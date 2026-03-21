@@ -69,6 +69,10 @@ aic_debug = int(os.getenv("AIC_MOE_DEBUG", "0"))
 # AIC_ACCURATE_WIDEEP_SIM=0: Simple mode - all tokens directly
 aic_accurate_wideep_sim = os.getenv("AIC_ACCURATE_WIDEEP_SIM", "1") == "1"
 
+aic_eplb_ema_warmup_steps = int(os.getenv("AIC_EPLB_EMA_WARMUP_STEPS", "0"))
+aic_eplb_ema_decay_factor = float(os.getenv("AIC_EPLB_EMA_DECAY_FACTOR", "0.95"))
+aic_eplb_ema_noise_sigma = float(os.getenv("AIC_EPLB_EMA_NOISE_SIGMA", "0.3"))
+
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wideep_moe_compute_tuned_cache_path")
 
 
@@ -1016,6 +1020,9 @@ def run_wideep_moe_compute(
                         use_eplb=use_eplb,
                         num_slots=num_slots,
                         return_rank0_info=True,
+                        ema_warmup_steps=aic_eplb_ema_warmup_steps,
+                        ema_decay_factor=aic_eplb_ema_decay_factor,
+                        ema_noise_sigma=aic_eplb_ema_noise_sigma,
                     )
                     rank0_num_tokens = rank0_info["rank0_num_tokens"]
                     rank0_total_selections = rank0_info["rank0_total_selections"]
@@ -1041,14 +1048,16 @@ def run_wideep_moe_compute(
 
                     dummy_router_logits = torch.randn([dp_num_tokens, num_slots]).to(router_logits_dtype).to(device)
 
-                    rank0_data_list.append({
-                        "x_padded": x_pad,
-                        "padded_slots": s_pad,
-                        "padded_scales": sc_pad,
-                        "tuner_num_tokens": tuner_nt,
-                        "num_tokens": rank0_num_tokens,
-                        "router_logits": dummy_router_logits,
-                    })
+                    rank0_data_list.append(
+                        {
+                            "x_padded": x_pad,
+                            "padded_slots": s_pad,
+                            "padded_scales": sc_pad,
+                            "tuner_num_tokens": tuner_nt,
+                            "num_tokens": rank0_num_tokens,
+                            "router_logits": dummy_router_logits,
+                        }
+                    )
                     total_selections_list.append(rank0_total_selections)
 
                 avg_rank0_tokens = sum(d["num_tokens"] for d in rank0_data_list) / len(rank0_data_list)
@@ -1094,6 +1103,9 @@ def run_wideep_moe_compute(
                         power_law_alpha,
                         use_eplb=use_eplb,
                         num_slots=num_slots,
+                        ema_warmup_steps=aic_eplb_ema_warmup_steps,
+                        ema_decay_factor=aic_eplb_ema_decay_factor,
+                        ema_noise_sigma=aic_eplb_ema_noise_sigma,
                     )
                     .to(router_logits_dtype)
                     .to(device)
