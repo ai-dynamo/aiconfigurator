@@ -295,15 +295,22 @@ def generate_html(data, template_path):
     return html
 
 
+def _write_file(content, path):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(content)
+    print(f"  Wrote {len(content):,} bytes to {path}")
+
+
 def main():
     default_csv = os.path.join(_REPO_ROOT, "src", "aiconfigurator", "systems", "support_matrix.csv")
-    default_output = os.path.join(_REPO_ROOT, "docs", "support-matrix", "index.html")
-    default_template = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static_page_template.html")
+    default_outdir = os.path.join(_REPO_ROOT, "docs", "site")
+    templates_dir = os.path.dirname(os.path.abspath(__file__))
 
     parser = argparse.ArgumentParser(description="Generate static support matrix HTML page")
     parser.add_argument("--csv", default=default_csv, help="Path to support_matrix.csv")
-    parser.add_argument("--output", default=default_output, help="Output HTML file path")
-    parser.add_argument("--template", default=default_template, help="Path to HTML template")
+    parser.add_argument("--outdir", default=default_outdir, help="Output directory for the site")
+    parser.add_argument("--templates-dir", default=templates_dir, help="Directory containing HTML templates")
     args = parser.parse_args()
 
     print(f"Reading CSV from {args.csv}")
@@ -316,13 +323,18 @@ def main():
     print(f"  Systems: {systems}")
     print(f"  Summary: {data['summary']['pass']} PASS, {data['summary']['fail']} FAIL")
 
-    print(f"Reading template from {args.template}")
-    html = generate_html(data, args.template)
+    # Generate landing page
+    landing_template = os.path.join(args.templates_dir, "landing_page_template.html")
+    print("Generating landing page...")
+    with open(landing_template) as f:
+        landing_html = f.read()
+    _write_file(landing_html, os.path.join(args.outdir, "index.html"))
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    with open(args.output, "w") as f:
-        f.write(html)
-    print(f"Wrote {len(html):,} bytes to {args.output}")
+    # Generate support matrix page
+    matrix_template = os.path.join(args.templates_dir, "static_page_template.html")
+    print("Generating support matrix page...")
+    matrix_html = generate_html(data, matrix_template)
+    _write_file(matrix_html, os.path.join(args.outdir, "support-matrix", "index.html"))
 
 
 if __name__ == "__main__":

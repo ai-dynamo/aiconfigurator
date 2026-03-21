@@ -14,7 +14,7 @@ dist/
 */automation/dynamo/
 aiconf_save/
 .collector_checkpoint/
-docs/support-matrix/
+docs/site/
 
 venv/
 env/

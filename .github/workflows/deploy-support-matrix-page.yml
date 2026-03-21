@@ -7,6 +7,7 @@ on:
       - "src/aiconfigurator/systems/support_matrix.csv"
       - "tools/support_matrix/generate_static_page.py"
       - "tools/support_matrix/static_page_template.html"
+      - "tools/support_matrix/landing_page_template.html"
   workflow_dispatch:
 
 permissions:
@@ -33,12 +34,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Generate static page
+      - name: Generate static pages
         run: |
-          mkdir -p _site
           python tools/support_matrix/generate_static_page.py \
             --csv src/aiconfigurator/systems/support_matrix.csv \
-            --output _site/index.html
+            --outdir _site
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
