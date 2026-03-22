@@ -73,10 +73,8 @@ def enrich_context_for_sflow(
     ctx["sflow_slurm_partition"] = sflow_cfg.get("slurm_partition") or "YOUR_PARTITION"
     ctx["sflow_slurm_timelimit"] = sflow_cfg.get("slurm_timelimit")
     if ctx["sflow_slurm_timelimit"] in (None, ""):
-        ctx["sflow_slurm_timelimit"] = 120
-    ctx["sflow_aiperf_image"] = (
-        sflow_cfg.get("aiperf_image") or "gitlab-master.nvidia.com/perflab-compute/unified-benchmarks/aiperf:0.3.0"
-    )
+        ctx["sflow_slurm_timelimit"] = 240
+    ctx["sflow_aiperf_image"] = sflow_cfg.get("aiperf_image") or "python:3.12-slim"
     ctx["sflow_extra_frontend_args"] = sflow_cfg.get("extra_frontend_args") or ""
     ctx["sflow_variable_profile"] = variable_profile
 
@@ -352,11 +350,12 @@ def _build_bench_script(
     if bench_run_content:
         lines = [
             "- set -x",
+            "- pip install aiperf==0.3.0",
             "- export COLUMNS=200",
             "- export BENCH_ARTIFACT_DIR=${SFLOW_WORKFLOW_OUTPUT_DIR}/aiperf_concurrency_${CONCURRENCY}",
             "- export AICONFIGURATOR_BENCH_CONCURRENCY=${CONCURRENCY}",
             "- export AICONFIGURATOR_BENCH_MODEL=$[[ variables.SERVED_MODEL_NAME ]]",
-            "- export AICONFIGURATOR_BENCH_TOKENIZER=$[[ artifacts.LOCAL_MODEL_PATH.path ]]",
+            "- export AICONFIGURATOR_BENCH_TOKENIZER=$[[ variables.SERVED_MODEL_NAME ]]",
             "- export AICONFIGURATOR_BENCH_ENDPOINT_URL=http://$[[ variables.HEAD_NODE_IP ]]:8000",
             "- export AICONFIGURATOR_BENCH_ISL=$[[ variables.ISL ]]",
             "- export AICONFIGURATOR_BENCH_OSL=$[[ variables.OSL ]]",
@@ -367,6 +366,7 @@ def _build_bench_script(
 
     lines = [
         "- set -x",
+        "- pip install aiperf==0.3.0",
         "- export COLUMNS=200",
         "- |-",
     ]
@@ -458,7 +458,7 @@ def _build_sflow_variables(
         [
             _var("ISL", "Input sequence length", _int(bench.get("isl"), 4000), "integer"),
             _var("OSL", "Output sequence length", _int(bench.get("osl"), 1000), "integer"),
-            _var("MULTI_ROUND", "Number of benchmark rounds", 50, "integer"),
+            _var("MULTI_ROUND", "Number of benchmark rounds", 20, "integer"),
             _var("CONCURRENCY", "Concurrency", ctx["sflow_concurrency"], "integer", domain=[ctx["sflow_concurrency"]]),
             _var("AIPERF_IMAGE", "AIPerf container image", ctx["sflow_aiperf_image"]),
             _var("DYNAMO_IMAGE", "Dynamo container image", ctx["sflow_dynamo_image"]),

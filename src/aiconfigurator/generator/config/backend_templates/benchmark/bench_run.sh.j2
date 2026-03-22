@@ -32,7 +32,7 @@ BENCH_ISL_STDDEV="${AICONFIGURATOR_BENCH_ISL_STDDEV:-{{ BenchConfig.isl_stddev }
 BENCH_OSL="${AICONFIGURATOR_BENCH_OSL:-{{ BenchConfig.osl }}}"
 BENCH_OSL_STDDEV="${AICONFIGURATOR_BENCH_OSL_STDDEV:-{{ BenchConfig.osl_stddev }}}"
 BENCH_UI="simple"
-BENCH_MULTI_ROUND="${AICONFIGURATOR_BENCH_MULTI_ROUND:-50}"
+BENCH_MULTI_ROUND="${AICONFIGURATOR_BENCH_MULTI_ROUND:-20}"
 
 for concurrency in "${concurrency_array[@]}"; do
   echo "Run concurrency: $concurrency"
