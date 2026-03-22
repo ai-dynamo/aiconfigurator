@@ -135,7 +135,7 @@ inputs:
     default: 120
   - key: SflowConfig.aiperf_image
     required: false
-    default: "gitlab-master.nvidia.com/perflab-compute/unified-benchmarks/aiperf:0.3.0"
+    default: "python:3.12-slim"
   - key: SflowConfig.extra_frontend_args
     required: false
     default: ""
