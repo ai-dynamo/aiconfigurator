@@ -102,24 +102,6 @@ workflow:
           match_count: $[[ variables.SLURM_NODES ]]
         timeout: 1200
         interval: 2
-  - name: install_aiperf
-    operator:
-      name: aiperf
-      ntasks_per_node: 1
-    resources:
-      nodes:
-        indices:
-        - 0
-    script:
-    - pip install aiperf==0.3.0
-    - echo "AIPerf installed"
-    - sleep 3600
-    probes:
-      readiness:
-        log_watch:
-          regex_pattern: AIPerf installed
-        timeout: 1200
-        interval: 2
   - name: gpu_monitor
     operator:
       name: {{ sflow_operator }}
@@ -141,7 +123,6 @@ workflow:
         interval: 2
     depends_on:
     - load_image
-    - install_aiperf
 {% if backend != 'vllm' %}
   - name: nats_server
     operator: {{ sflow_operator }}
@@ -159,7 +140,6 @@ workflow:
         interval: 2
     depends_on:
     - load_image
-    - install_aiperf
   - name: etcd_server
     operator: {{ sflow_operator }}
     script:
@@ -182,7 +162,6 @@ workflow:
         interval: 2
     depends_on:
     - load_image
-    - install_aiperf
 {% endif %}
   - name: frontend_server
     operator: {{ sflow_operator }}
@@ -201,7 +180,6 @@ workflow:
     depends_on:
 {% if backend == 'vllm' %}
     - load_image
-    - install_aiperf
 {% else %}
     - nats_server
     - etcd_server
