@@ -103,10 +103,10 @@ _DEFAULT_BUILD_CASES = [
     ),
     pytest.param(
         {
-            "model_path": "Qwen/Qwen1.5-MoE-A2.7B",
+            "model_path": "Qwen/Qwen3-30B-A3B",
             "system": "b60",
             "backend": "vllm",
-            "total_gpus": 4,
+            "total_gpus": 8,
             "isl": 1500,
             "osl": 150,
             "prefix": 0,

@@ -106,7 +106,7 @@ def get_moe_xpu_test_cases():
     # hidden_size,inter_s,topk,num_expert
     model_config_list = [
         [2048, 1408, 4, 60, "Qwen/Qwen1.5-MoE-A2.7B"],
-        [5120, 8192, 1, 16, "meta-llama/Llama-4-Scout-17B-16E-Instruct"],
+        [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],
     ]
 
     test_cases: list[MoeCommonTestCase] = []
