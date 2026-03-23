@@ -1,0 +1,53 @@
+name: "Deploy Support Matrix to GitHub Pages"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/aiconfigurator/systems/support_matrix.csv"
+      - "tools/support_matrix/generate_static_page.py"
+      - "tools/support_matrix/static_page_template.html"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate static page
+        run: |
+          mkdir -p _site
+          python tools/support_matrix/generate_static_page.py \
+            --csv src/aiconfigurator/systems/support_matrix.csv \
+            --output _site/index.html
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
