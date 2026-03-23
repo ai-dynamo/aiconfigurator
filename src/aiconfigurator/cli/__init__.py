@@ -7,7 +7,7 @@ CLI module for aiconfigurator.
 Provides both command-line interface and programmatic Python API.
 
 Python API usage:
-    from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_support
+    from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_generate_sflow, cli_support
 
     # cli_default: Run agg vs disagg comparison
     result = cli_default(
@@ -42,6 +42,7 @@ from aiconfigurator.cli.api import (
     cli_default,
     cli_exp,
     cli_generate,
+    cli_generate_sflow,
     cli_support,
 )
 
@@ -50,5 +51,6 @@ __all__ = [
     "cli_default",
     "cli_exp",
     "cli_generate",
+    "cli_generate_sflow",
     "cli_support",
 ]

@@ -11,6 +11,7 @@ This module provides simple function interfaces to the CLI's "default", "exp",
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -1011,6 +1012,144 @@ def _run_disagg_estimate(
 # This is already a clean Python function in generator.api
 from aiconfigurator.generator.api import generate_naive_config as cli_generate
 
+
+def cli_generate_sflow(
+    input_file: str,
+    *,
+    backend: str = "trtllm",
+    save_dir: str | None = None,
+    config_names: list[str] | None = None,
+    num_gpus_per_node: int | None = None,
+    generator_set: list[str] | None = None,
+    generator_config: str | None = None,
+    generator_dynamo_version: str | None = None,
+) -> dict[str, dict[str, str]]:
+    """Generate sflow deployment configs from pre-computed parameter files.
+
+    This is the programmatic equivalent of:
+        aiconfigurator cli generate --type sflow --input-file <path> --save-dir <dir>
+
+    Args:
+        input_file: Path to JSON or CSV file with pre-computed configurations.
+        backend: Default backend name when not specified in input file.
+        save_dir: Directory to save generated artifacts. If None, artifacts
+            are returned but not saved to disk.
+        config_names: List of config names to generate (None = all).
+        num_gpus_per_node: Override GPUs per node (auto-detected if None).
+        generator_set: Inline generator overrides (list of KEY=VALUE strings).
+        generator_config: Path to generator YAML config file.
+        generator_dynamo_version: Override Dynamo version for template selection.
+
+    Returns:
+        Dict mapping config name to dict of artifact name -> rendered content.
+
+    Example:
+        >>> from aiconfigurator.cli.api import cli_generate_sflow
+        >>> results = cli_generate_sflow(
+        ...     input_file="configs.json",
+        ...     save_dir="./sflow_output",
+        ...     generator_set=["SflowConfig.slurm_account=myaccount"],
+        ... )
+        >>> print(list(results.keys()))  # config names
+        ['E8', 'E12', 'E16']
+    """
+    from aiconfigurator.cli.sflow_input import load_sflow_input
+    from aiconfigurator.generator.aggregators import collect_generator_params
+    from aiconfigurator.generator.api import generate_backend_artifacts, load_generator_overrides
+    from aiconfigurator.sdk.utils import safe_mkdir
+
+    input_configs = load_sflow_input(input_file, backend_default=backend)
+    if not input_configs:
+        raise ValueError(f"No configs found in {input_file}")
+
+    if config_names:
+        names_set = set(config_names)
+        input_configs = [c for c in input_configs if c.name in names_set]
+        if not input_configs:
+            raise ValueError(f"No configs matched names: {config_names}")
+
+    generator_overrides = load_generator_overrides(generator_config, generator_set)
+    if generator_dynamo_version:
+        generator_overrides["generator_dynamo_version"] = generator_dynamo_version
+
+    all_results: dict[str, dict[str, str]] = {}
+
+    for cfg in input_configs:
+        gpn = num_gpus_per_node
+        if gpn is None:
+            from aiconfigurator.cli.main import _resolve_gpus_per_node
+
+            gpn = _resolve_gpus_per_node(cfg.system)
+
+        service_cfg = {
+            "model_path": cfg.model,
+            "served_model_path": cfg.model,
+            "include_frontend": True,
+        }
+        if "ServiceConfig" in generator_overrides:
+            service_cfg.update(generator_overrides["ServiceConfig"])
+
+        k8s_cfg = dict(generator_overrides.get("K8sConfig", {}))
+
+        sla_cfg: dict = {"isl": cfg.isl, "osl": cfg.osl}
+        if cfg.ttft is not None:
+            sla_cfg["ttft"] = cfg.ttft
+        if cfg.tpot is not None:
+            sla_cfg["tpot"] = cfg.tpot
+        if "SlaConfig" in generator_overrides:
+            sla_cfg.update(generator_overrides["SlaConfig"])
+
+        sflow_cfg = dict(generator_overrides.get("SflowConfig", {}))
+        dyn_cfg: dict = {"mode": cfg.serving_mode}
+        if "DynConfig" in generator_overrides:
+            dyn_cfg.update(generator_overrides["DynConfig"])
+
+        bench_cfg: dict = {}
+        if cfg.concurrency is not None:
+            bench_cfg["concurrency"] = cfg.concurrency
+        if "BenchConfig" in generator_overrides:
+            bench_cfg.update(generator_overrides["BenchConfig"])
+
+        params = collect_generator_params(
+            service=service_cfg,
+            k8s=k8s_cfg,
+            prefill_params=cfg.prefill_params,
+            decode_params=cfg.decode_params,
+            agg_params=cfg.agg_params,
+            prefill_workers=cfg.prefill_workers,
+            decode_workers=cfg.decode_workers,
+            agg_workers=cfg.agg_workers,
+            num_gpus_per_node=gpn,
+            sla=sla_cfg,
+            dyn_config=dyn_cfg,
+            bench=bench_cfg,
+            sflow=sflow_cfg,
+            backend=cfg.backend,
+            generator_dynamo_version=generator_overrides.get("generator_dynamo_version"),
+        )
+
+        if "Params" in generator_overrides:
+            params.update(generator_overrides["Params"])
+        rule_name = generator_overrides.get("rule")
+        if rule_name:
+            params["rule"] = rule_name
+
+        output_dir = None
+        if save_dir:
+            config_dir = os.path.join(save_dir, cfg.name)
+            output_dir = safe_mkdir(config_dir, exist_ok=True)
+
+        artifacts = generate_backend_artifacts(
+            params=params,
+            backend=cfg.backend,
+            backend_version=cfg.backend_version,
+            output_dir=output_dir,
+        )
+        all_results[cfg.name] = artifacts
+
+    return all_results
+
+
 __all__ = [
     "CLIResult",
     "EstimateResult",
@@ -1018,5 +1157,6 @@ __all__ = [
     "cli_estimate",
     "cli_exp",
     "cli_generate",
+    "cli_generate_sflow",
     "cli_support",
 ]

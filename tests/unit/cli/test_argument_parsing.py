@@ -50,20 +50,17 @@ class TestCLIArgumentParsing:
         action = next(action for action in cli_parser._actions if action.dest == "mode")
         assert set(action.choices.keys()) == {"default", "exp", "generate", "support", "estimate"}
 
-    def test_generate_mode_required_args(self, cli_parser):
-        """Test that generate mode requires the correct arguments."""
+    def test_generate_mode_has_type_arg(self, cli_parser):
+        """Test that generate mode has --type argument with naive/sflow choices."""
         subparsers = [action for action in cli_parser._actions if action.dest == "mode"]
         assert len(subparsers) == 1
 
         subparser_action = subparsers[0]
         generate_parser = subparser_action.choices["generate"]
 
-        required_actions = [action for action in generate_parser._actions if getattr(action, "required", False)]
-        required_args = [action.dest for action in required_actions]
-
-        assert "model_path" in required_args
-        assert "total_gpus" in required_args
-        assert "system" in required_args
+        type_actions = [a for a in generate_parser._actions if a.dest == "generate_type"]
+        assert len(type_actions) == 1
+        assert set(type_actions[0].choices) == {"naive", "sflow"}
 
     def test_generate_mode_defaults(self, cli_parser):
         """Test that generate mode has correct defaults."""

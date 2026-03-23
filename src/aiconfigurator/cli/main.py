@@ -177,27 +177,57 @@ def _add_experiments_mode_arguments(parser):
 
 
 def _add_generate_mode_arguments(parser):
-    """Add arguments for the generate mode (naive config generation)."""
+    """Add arguments for the generate mode (naive config generation or sflow from file)."""
+    parser.add_argument(
+        "--type",
+        dest="generate_type",
+        choices=["naive", "sflow"],
+        default="naive",
+        help="Generation type: 'naive' for minimal agg config (default), "
+        "'sflow' to generate sflow configs from a pre-computed input file.",
+    )
+    parser.add_argument(
+        "--input-file",
+        type=str,
+        default=None,
+        help="Path to a JSON or CSV file with pre-computed configurations (required for --type sflow).",
+    )
+    parser.add_argument(
+        "--config-names",
+        type=str,
+        default=None,
+        help="Comma-separated list of config names to generate from the input file (default: all). "
+        "Only used with --type sflow.",
+    )
+    parser.add_argument(
+        "--num-gpus-per-node",
+        type=int,
+        default=None,
+        help="Override GPUs per node (auto-detected from system spec if omitted). Only used with --type sflow.",
+    )
+    # These args are required for naive mode but not for sflow mode.
+    # Validation is done in _run_generate_mode().
     parser.add_argument(
         "--model-path",
         "--model",
         dest="model_path",
-        type=_validate_model_path,
-        required=True,
+        type=str,
+        default=None,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
-        "local path to directory containing config.json.",
+        "local path to directory containing config.json. Required for --type naive.",
     )
     parser.add_argument(
         "--total-gpus",
         type=int,
-        required=True,
-        help="Total GPUs for deployment.",
+        default=None,
+        help="Total GPUs for deployment. Required for --type naive.",
     )
     parser.add_argument(
         "--system",
         type=str,
-        required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
+        default=None,
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300. "
+        "Required for --type naive.",
     )
     parser.add_argument(
         "--backend",
@@ -471,16 +501,19 @@ def configure_parser(parser):
     )
     _add_experiments_mode_arguments(experiments_parser)
 
-    # Generate mode - naive config without sweeping
+    # Generate mode - naive config or sflow from file
     generate_parser = subparsers.add_parser(
         "generate",
         parents=[common_cli_parser],
-        help="Generate naive agg config without SLA optimization (no sweeping).",
+        help="Generate deployment configs (naive agg or sflow from input file).",
         description=(
-            "Generate a working agg configuration without running the parameter sweep. "
-            "Calculates the smallest TP that fits the model in memory "
-            "(TP * VRAM/GPU > 1.5 * model_weight). No SLA optimization is performed."
+            "Generate deployment configs without running a parameter sweep.\n\n"
+            "  --type naive (default): Generate a minimal agg configuration by calculating\n"
+            "    the smallest TP that fits the model in memory.\n\n"
+            "  --type sflow: Generate sflow deployment configs from pre-computed\n"
+            "    configurations supplied as a JSON or CSV file."
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_generate_mode_arguments(generate_parser)
 
@@ -1027,7 +1060,31 @@ def _execute_task_configs(
 
 
 def _run_generate_mode(args):
-    """Run the generate mode to create a naive agg config without sweeping."""
+    """Run the generate mode: dispatch to naive or sflow generation."""
+    generate_type = getattr(args, "generate_type", "naive")
+    if generate_type == "sflow":
+        _run_sflow_generate(args)
+        return
+
+    # Validate required args for naive mode
+    if not args.model_path:
+        raise SystemExit("--model-path is required for --type naive")
+    if not args.total_gpus:
+        raise SystemExit("--total-gpus is required for --type naive")
+    if not args.system:
+        raise SystemExit("--system is required for --type naive")
+
+    # Validate model path for naive mode
+    try:
+        args.model_path = _validate_model_path(args.model_path)
+    except argparse.ArgumentTypeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    _run_naive_generate(args)
+
+
+def _run_naive_generate(args):
+    """Run the naive generate mode to create a minimal agg config without sweeping."""
     model_path = args.model_path
     logger.info("Generating naive agg configuration for %s on %d GPUs", model_path, args.total_gpus)
 
@@ -1082,6 +1139,129 @@ def _run_generate_mode(args):
     print("-" * 60)
     print("\nTo deploy, run the generated shell script or apply the k8s manifest.")
     print("=" * 60 + "\n")
+
+
+def _resolve_gpus_per_node(system_name: str) -> int:
+    """Load num_gpus_per_node from the system YAML spec, falling back to 8."""
+    for systems_root in perf_database.get_systems_paths():
+        system_yaml = os.path.join(systems_root, f"{system_name}.yaml")
+        if os.path.isfile(system_yaml):
+            with open(system_yaml, encoding="utf-8") as fh:
+                spec = yaml.safe_load(fh) or {}
+            return spec.get("node", {}).get("num_gpus_per_node", 8)
+    return 8
+
+
+def _run_sflow_generate(args):
+    """Generate sflow deployment configs from a pre-computed input file (JSON or CSV)."""
+    from aiconfigurator.cli.sflow_input import load_sflow_input
+    from aiconfigurator.generator.aggregators import collect_generator_params
+    from aiconfigurator.generator.api import generate_backend_artifacts, load_generator_overrides_from_args
+    from aiconfigurator.sdk.utils import safe_mkdir
+
+    input_file = args.input_file
+    if not input_file:
+        raise SystemExit("--input-file is required for --type sflow")
+
+    input_configs = load_sflow_input(input_file, backend_default=args.backend)
+    if not input_configs:
+        raise SystemExit(f"No configs found in {input_file}")
+
+    # Optional filtering
+    if args.config_names:
+        names = {n.strip() for n in args.config_names.split(",")}
+        input_configs = [c for c in input_configs if c.name in names]
+        if not input_configs:
+            raise SystemExit(f"No configs matched names: {args.config_names}")
+
+    generator_overrides = load_generator_overrides_from_args(args)
+    save_dir = args.save_dir or "./sflow_output"
+
+    logger.info("Generating sflow configs for %d configuration(s) from %s", len(input_configs), input_file)
+
+    for cfg in input_configs:
+        num_gpus_per_node = args.num_gpus_per_node or _resolve_gpus_per_node(cfg.system)
+
+        service_cfg = {
+            "model_path": cfg.model,
+            "served_model_path": cfg.model,
+            "include_frontend": True,
+        }
+        if "ServiceConfig" in generator_overrides:
+            service_cfg.update(generator_overrides["ServiceConfig"])
+
+        k8s_cfg = dict(generator_overrides.get("K8sConfig", {}))
+
+        sla_cfg = {"isl": cfg.isl, "osl": cfg.osl}
+        if cfg.ttft is not None:
+            sla_cfg["ttft"] = cfg.ttft
+        if cfg.tpot is not None:
+            sla_cfg["tpot"] = cfg.tpot
+        if "SlaConfig" in generator_overrides:
+            sla_cfg.update(generator_overrides["SlaConfig"])
+
+        sflow_cfg = dict(generator_overrides.get("SflowConfig", {}))
+
+        dyn_cfg = {"mode": cfg.serving_mode}
+        if "DynConfig" in generator_overrides:
+            dyn_cfg.update(generator_overrides["DynConfig"])
+
+        bench_cfg = {}
+        if cfg.concurrency is not None:
+            bench_cfg["concurrency"] = cfg.concurrency
+        if "BenchConfig" in generator_overrides:
+            bench_cfg.update(generator_overrides["BenchConfig"])
+
+        params = collect_generator_params(
+            service=service_cfg,
+            k8s=k8s_cfg,
+            prefill_params=cfg.prefill_params,
+            decode_params=cfg.decode_params,
+            agg_params=cfg.agg_params,
+            prefill_workers=cfg.prefill_workers,
+            decode_workers=cfg.decode_workers,
+            agg_workers=cfg.agg_workers,
+            num_gpus_per_node=num_gpus_per_node,
+            sla=sla_cfg,
+            dyn_config=dyn_cfg,
+            bench=bench_cfg,
+            sflow=sflow_cfg,
+            backend=cfg.backend,
+            generator_dynamo_version=generator_overrides.get("generator_dynamo_version"),
+        )
+
+        # Apply additional overrides
+        if "Params" in generator_overrides:
+            params.update(generator_overrides["Params"])
+        rule_name = generator_overrides.get("rule")
+        if rule_name:
+            params["rule"] = rule_name
+
+        config_dir = os.path.join(save_dir, cfg.name)
+        safe_mkdir(config_dir, exist_ok=True)
+
+        # Save generator config for reproducibility
+        with open(os.path.join(config_dir, "generator_config.yaml"), "w") as f:
+            yaml.safe_dump(params, f, sort_keys=False)
+
+        try:
+            artifacts = generate_backend_artifacts(
+                params=params,
+                backend=cfg.backend,
+                backend_version=cfg.backend_version,
+                output_dir=config_dir,
+            )
+            logger.info("Generated %d artifacts for '%s' in %s", len(artifacts), cfg.name, config_dir)
+        except Exception:
+            logger.exception("Failed to generate artifacts for '%s'", cfg.name)
+
+    # Print summary
+    print(f"\nGenerated sflow configs for {len(input_configs)} configuration(s) in {save_dir}")
+    for cfg in input_configs:
+        config_dir = os.path.join(save_dir, cfg.name)
+        sflow_path = os.path.join(config_dir, "sflow.yaml")
+        status = "OK" if os.path.isfile(sflow_path) else "FAILED"
+        print(f"  [{status}] {cfg.name} ({cfg.serving_mode}, {cfg.backend})")
 
 
 def _run_support_matrix_mode(args):
