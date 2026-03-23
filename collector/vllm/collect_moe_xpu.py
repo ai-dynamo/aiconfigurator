@@ -78,9 +78,24 @@ def get_moe_xpu_test_cases():
         12288,
         16384,
     ]
-    tp_list = [1, 2, 4, 8,]
-    ep_list = [1, 2, 4, 8,]
-    num_gpu_list = [1, 2, 4, 8,]
+    tp_list = [
+        1,
+        2,
+        4,
+        8,
+    ]
+    ep_list = [
+        1,
+        2,
+        4,
+        8,
+    ]
+    num_gpu_list = [
+        1,
+        2,
+        4,
+        8,
+    ]
 
     token_distributions = [
         ("balanced", 0.0),
@@ -91,7 +106,7 @@ def get_moe_xpu_test_cases():
     # hidden_size,inter_s,topk,num_expert
     model_config_list = [
         [2048, 1408, 4, 60, "Qwen/Qwen1.5-MoE-A2.7B"],
-        [5120, 8192, 1, 16, "meta-llama/Llama-4-Scout-17B-16E-Instruct"]
+        [5120, 8192, 1, 16, "meta-llama/Llama-4-Scout-17B-16E-Instruct"],
     ]
 
     test_cases: list[MoeCommonTestCase] = []
