@@ -101,7 +101,7 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 - `--decode-num-workers`: Number of decode workers (required for disagg)
 
 **Example output (agg):**
-```
+```text
 ============================================================
   Performance Estimate (agg)
 ============================================================
@@ -141,7 +141,7 @@ aiconfigurator cli estimate \
 
 **Python API equivalent:**
 ```python
-from aiconfigurator.cli import cli_estimate
+from aiconfigurator.cli.api import cli_estimate
 
 # Aggregated estimation
 result = cli_estimate(
