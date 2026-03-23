@@ -129,7 +129,9 @@ def get_supported_databases(
                     versions = [
                         v
                         for v in os.listdir(backend_path)
-                        if not v.startswith(".") and os.path.isdir(os.path.join(backend_path, v))
+                        if not v.startswith(".")
+                        and os.path.isdir(os.path.join(backend_path, v))
+                        and not os.path.isfile(os.path.join(backend_path, v, "INCOMPLETE.txt"))
                     ]
                     if versions:
                         supported_sets[system][backend.value].update(versions)
@@ -332,8 +334,11 @@ def get_all_databases(
                 for backend in common.BackendName:
                     if not os.path.exists(os.path.join(data_dir, backend.value)):
                         continue
-                    for version in os.listdir(os.path.join(data_dir, backend.value)):
+                    backend_path = os.path.join(data_dir, backend.value)
+                    for version in os.listdir(backend_path):
                         if version.startswith("."):
+                            continue
+                        if os.path.isfile(os.path.join(backend_path, version, "INCOMPLETE.txt")):
                             continue
                         database = get_database(system, backend.value, version, systems_root)
                         if database is None:

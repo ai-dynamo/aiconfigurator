@@ -305,7 +305,7 @@ class VLLMBackend(BaseBackend):
                 num_tokens = num_gen_requests + ctx_tokens
             else:
                 num_tokens = ctx_tokens
-            memory = self._get_memory_usage(model, database, b, 1, isl, osl, num_tokens)
+            memory = self._get_memory_usage(model, database, b, 1, isl, osl, num_tokens, prefix=prefix)
             tp = model.config.tp_size
             pp = model.config.pp_size
             dp = model.config.attention_dp_size
@@ -503,8 +503,11 @@ class VLLMBackend(BaseBackend):
         isl: int,
         osl: int,
         num_tokens: int = 0,
+        prefix: int = 0,
     ) -> dict[str, float]:
         # TODO
         from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 
-        return TRTLLMBackend()._get_memory_usage(model, database, batch_size, beam_width, isl, osl, num_tokens)
+        return TRTLLMBackend()._get_memory_usage(
+            model, database, batch_size, beam_width, isl, osl, num_tokens, prefix=prefix
+        )
