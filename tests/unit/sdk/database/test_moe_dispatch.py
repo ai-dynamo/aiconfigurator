@@ -6,6 +6,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations import MoEDispatch, PerformanceResult
@@ -66,6 +67,7 @@ def _make_dispatch(
 # ===================================================================
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestEnableAlltoallConditions:
     """Test the enable_alltoall gating logic (SM100 only)."""
 
@@ -121,6 +123,7 @@ class TestEnableAlltoallConditions:
         db.query_trtllm_alltoall.assert_not_called()
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestSm100AlltoallPath:
     """Test the alltoall communication path (SM100, enable_alltoall=True)."""
 
@@ -166,6 +169,7 @@ class TestSm100AlltoallPath:
         assert call_kwargs["moe_backend"] == "CUTLASS"
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestSm100DpFallbackPath:
     """Test SM100 DP>1 path when alltoall is NOT enabled."""
 
@@ -188,6 +192,7 @@ class TestSm100DpFallbackPath:
         assert db.query_nccl.call_args[0][2] == "reduce_scatter"
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestSm100QuantAwareVolume:
     """Test quantize-aware communication volume calculation (SM100 DP fallback)."""
 
@@ -228,6 +233,7 @@ class TestSm100QuantAwareVolume:
         assert actual == pytest.approx(expected_total)
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestSm100TpFallbackPath:
     """Test SM100 TP>1 path (no alltoall, no DP)."""
 
@@ -288,6 +294,7 @@ class TestSm100TpFallbackPath:
         db.query_custom_allreduce.assert_not_called()
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestSm100NoCommPath:
     """Test zero communication when neither TP nor DP applies (SM100)."""
 
@@ -312,6 +319,7 @@ class TestSm100NoCommPath:
 # ===================================================================
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestSmLt100PreDispatch:
     """Test SM<100 pre-dispatch paths (tp > dp priority, no alltoall)."""
 
@@ -361,6 +369,7 @@ class TestSmLt100PreDispatch:
         assert float(result) == 0.0
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestSmLt100PostDispatch:
     """Test SM<100 post-dispatch paths."""
 
@@ -406,6 +415,7 @@ class TestSmLt100PostDispatch:
         assert float(result) == 0.0
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestSmLt100NoAlltoall:
     """Verify SM<100 never uses alltoall regardless of config."""
 
