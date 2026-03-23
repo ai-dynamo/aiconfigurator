@@ -25,10 +25,14 @@ tailwind.config = {
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js" crossorigin></script>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5/papaparse.min.js" crossorigin></script>
 <style>
-  .scrollbar-thin::-webkit-scrollbar { height: 8px; }
-  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
-  .scrollbar-thin::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 4px; }
-  .dark .scrollbar-thin::-webkit-scrollbar-thumb { background: #475569; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  .dark ::-webkit-scrollbar-thumb { background: #475569; }
+  .dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+  .dark ::-webkit-scrollbar-corner { background: transparent; }
+  html.dark { color-scheme: dark; }
 </style>
 </head>
 <body class="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 min-h-screen font-sans">
@@ -42,6 +46,19 @@ const REPO = 'ai-dynamo/aiconfigurator';
 const CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
 const TARGET_VERSIONS = { vllm: '0.14.0', sglang: '0.5.9', trtllm: '1.2.0rc6' };
 const PREFERRED_DEFAULT_SYSTEM = 'b200_sxm';
+const SYSTEM_ORDER = ['b200', 'gb200', 'gb300', 'h100', 'h200', '__other__', 'a100', 'l40s'];
+
+function sortSystems(systems) {
+  return [...systems].sort((a, b) => {
+    const keyA = SYSTEM_ORDER.findIndex(p => a.toLowerCase().startsWith(p));
+    const keyB = SYSTEM_ORDER.findIndex(p => b.toLowerCase().startsWith(p));
+    const idxA = keyA === -1 ? SYSTEM_ORDER.indexOf('__other__') : keyA;
+    const idxB = keyB === -1 ? SYSTEM_ORDER.indexOf('__other__') : keyB;
+    if (idxA !== idxB) return idxA - idxB;
+    return a.localeCompare(b, undefined, { sensitivity: 'base' });
+  });
+}
+
 const PHASE_ORDER = { dev: 0, a: 1, b: 2, rc: 3, release: 4, post: 5 };
 
 // ── Version Logic (ported from generate_static_page.py) ────────────
@@ -186,7 +203,7 @@ function buildMatrixForMode(rows, systemName, modeFilter) {
   if (modeFilter !== 'all') subset = subset.filter(r => r.Mode === modeFilter);
   if (!subset.length) return { matrixRows: [], backends: [] };
 
-  const models = [...new Set(subset.map(r => r.HuggingFaceID))].sort();
+  const models = [...new Set(subset.map(r => r.HuggingFaceID))].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
   const backends = [...new Set(subset.map(r => r.Backend))].sort();
 
   const matrixRows = models.map(model => {
@@ -490,6 +507,36 @@ function SystemTabs({ systems, activeSystem, onSelectSystem }) {
   );
 }
 
+function getIssueRepo() {
+  const { hostname, pathname } = window.location;
+  if (hostname.endsWith('.github.io')) {
+    const owner = hostname.replace('.github.io', '');
+    const repo = pathname.split('/').filter(Boolean)[0];
+    if (owner && repo) return `${owner}/${repo}`;
+  }
+  return REPO;
+}
+
+function buildFileIssueUrl() {
+  return `https://github.com/${getIssueRepo()}/issues/new?`
+    + 'template=support_matrix_request.md'
+    + '&title=' + encodeURIComponent('[Support Matrix] Request coverage for <model/hardware/framework>')
+    + '&labels=' + encodeURIComponent('support-matrix');
+}
+
+function buildCallForFixUrl(model, system, backend, errorSnippet) {
+  const title = `[Support Matrix] Fix: ${model} on ${system} / ${backend}`;
+  const body = `## Failed combination\n\n`
+    + `- **Model:** ${model}\n`
+    + `- **System:** ${system}\n`
+    + `- **Backend:** ${backend}\n\n`
+    + `## Error\n\n\`\`\`\n${(errorSnippet || 'No error message').substring(0, 2000)}\n\`\`\`\n`;
+  return `https://github.com/${getIssueRepo()}/issues/new?`
+    + 'labels=' + encodeURIComponent('support-matrix,bug')
+    + '&title=' + encodeURIComponent(title)
+    + '&body=' + encodeURIComponent(body);
+}
+
 function Legend() {
   return (
     <div className="flex flex-wrap gap-4 items-center mb-4 text-sm text-slate-500 dark:text-slate-400">
@@ -506,6 +553,11 @@ function Legend() {
         <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-red-100 dark:bg-red-950"></span>
         FAIL (click for details)
       </div>
+      <a href={buildFileIssueUrl()} target="_blank" rel="noopener"
+        className="ml-auto px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-400 dark:hover:bg-indigo-500
+                   text-white text-xs font-semibold rounded transition-colors no-underline whitespace-nowrap">
+        Not seeing coverage for your case? File an issue!
+      </a>
     </div>
   );
 }
@@ -642,15 +694,21 @@ function TopErrors({ errors }) {
   );
 }
 
-function ErrorModal({ model, backend, error, onClose }) {
+function ErrorModal({ model, system, backend, error, onClose }) {
   if (!error) return null;
   const formatted = error.replace(/\\\\n/g, '\n').replace(/\\n/g, '\n');
+  const issueUrl = buildCallForFixUrl(model, system, backend, formatted);
   return (
     <div className="fixed inset-0 bg-black/50 z-[1000] flex items-center justify-center p-6" onClick={onClose}>
       <div className="bg-white dark:bg-slate-800 rounded-lg max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl"
            onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-200 dark:border-slate-700 shrink-0">
           <h3 className="flex-1 text-base font-bold">Error Details &mdash; {model} / {backend}</h3>
+          <a href={issueUrl} target="_blank" rel="noopener"
+            className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-400 dark:hover:bg-indigo-500
+                       text-white text-xs font-semibold rounded transition-colors no-underline whitespace-nowrap">
+            Call for Fix
+          </a>
           <button onClick={onClose}
             className="bg-transparent border-none text-xl cursor-pointer text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 px-1 rounded transition-colors">
             &times;
@@ -737,7 +795,7 @@ function App() {
     fetchCsv(branchName)
       .then(rows => {
         setCsvRows(rows);
-        const systems = [...new Set(rows.map(r => r.System))].sort();
+        const systems = sortSystems([...new Set(rows.map(r => r.System))]);
         if (systems.includes(PREFERRED_DEFAULT_SYSTEM)) {
           setActiveSystem(PREFERRED_DEFAULT_SYSTEM);
         } else {
@@ -753,7 +811,7 @@ function App() {
 
   useEffect(() => { loadCsv('main'); }, [loadCsv]);
 
-  const systems = useMemo(() => [...new Set(csvRows.map(r => r.System))].sort(), [csvRows]);
+  const systems = useMemo(() => sortSystems([...new Set(csvRows.map(r => r.System))]), [csvRows]);
   const totalPass = useMemo(() => csvRows.filter(r => r.Status === 'PASS').length, [csvRows]);
   const totalFail = useMemo(() => csvRows.filter(r => r.Status === 'FAIL').length, [csvRows]);
 
@@ -817,7 +875,7 @@ function App() {
               matrixRows={matrixRows} backends={backends}
               searchQuery={searchQuery} sortCol={sortCol} sortAsc={sortAsc}
               onSort={handleSort}
-              onCellClick={(model, backend, err) => setModal({ model, backend, error: err })}
+              onCellClick={(model, backend, err) => setModal({ model, system: activeSystem, backend, error: err })}
             />
             <TopErrors errors={topErrors} />
           </div>
@@ -828,7 +886,7 @@ function App() {
 
       {modal && (
         <ErrorModal
-          model={modal.model} backend={modal.backend} error={modal.error}
+          model={modal.model} system={modal.system} backend={modal.backend} error={modal.error}
           onClose={() => setModal(null)}
         />
       )}
