@@ -251,13 +251,16 @@ function csvUrl(branch) {
   return `https://raw.githubusercontent.com/${REPO}/refs/heads/${branch}/${CSV_PATH}`;
 }
 
-async function fetchBranchList() {
-  const res = await fetch(`https://api.github.com/repos/${REPO}/git/matching-refs/heads/release/`);
-  if (!res.ok) throw new Error(`GitHub API returned ${res.status}`);
-  const refs = await res.json();
-  const MIN_VERSION = [0, 7, 0, 0, 0, 0, 0];
-  return refs
-    .map(r => r.ref.replace('refs/heads/', ''))
+const HARDCODED_RELEASE_BRANCHES = [
+  'release/0.7.0-post.1',
+  'release/0.7.0',
+];
+const BRANCH_CACHE_KEY = 'sm-release-branches';
+const BRANCH_CACHE_TTL = 3600000; // 1 hour
+const MIN_VERSION = [0, 7, 0, 0, 0, 0, 0];
+
+function filterAndSortBranches(names) {
+  return names
     .filter(n => /^release\/[\d]/.test(n))
     .filter(n => compareVersionTuples(parseVersionTuple(n.replace('release/', '')), MIN_VERSION) >= 0)
     .sort((a, b) => {
@@ -265,6 +268,38 @@ async function fetchBranchList() {
       const vb = parseVersionTuple(b.replace('release/', ''));
       return compareVersionTuples(vb, va);
     });
+}
+
+async function fetchBranchList() {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${REPO}/git/matching-refs/heads/release/`);
+    if (res.ok) {
+      const refs = await res.json();
+      const branches = filterAndSortBranches(refs.map(r => r.ref.replace('refs/heads/', '')));
+      if (branches.length > 0) {
+        localStorage.setItem(BRANCH_CACHE_KEY, JSON.stringify({ branches, ts: Date.now() }));
+        return { branches, source: 'api' };
+      }
+    }
+    if (res.status === 403 || res.status === 429) {
+      throw new Error('rate_limited');
+    }
+    throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    const warning = err.message === 'rate_limited'
+      ? 'GitHub API rate limited. Branch list may be outdated.'
+      : 'Could not fetch branch list.';
+
+    const cached = localStorage.getItem(BRANCH_CACHE_KEY);
+    if (cached) {
+      try {
+        const { branches } = JSON.parse(cached);
+        if (branches.length > 0) return { branches, source: 'cache', warning };
+      } catch {}
+    }
+
+    return { branches: filterAndSortBranches(HARDCODED_RELEASE_BRANCHES), source: 'hardcoded', warning };
+  }
 }
 
 async function fetchCsv(branch) {
@@ -285,7 +320,7 @@ function GitHubIcon() {
   );
 }
 
-function Header({ activeBranch, onSelectBranch, releaseBranches, branchesLoading }) {
+function Header({ activeBranch, onSelectBranch, releaseBranches, branchesLoading, branchWarning }) {
   const [dark, setDark] = useState(() => {
     const saved = localStorage.getItem('sm-theme');
     return saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -308,6 +343,7 @@ function Header({ activeBranch, onSelectBranch, releaseBranches, branchesLoading
         onSelectBranch={onSelectBranch}
         releaseBranches={releaseBranches}
         branchesLoading={branchesLoading}
+        branchWarning={branchWarning}
       />
       <a href="https://github.com/ai-dynamo/aiconfigurator" target="_blank" rel="noopener"
          title="View on GitHub"
@@ -326,10 +362,22 @@ function Header({ activeBranch, onSelectBranch, releaseBranches, branchesLoading
   );
 }
 
-function BranchSelector({ activeBranch, onSelectBranch, releaseBranches, branchesLoading }) {
+function BranchSelector({ activeBranch, onSelectBranch, releaseBranches, branchesLoading, branchWarning }) {
   const isReleaseBranch = activeBranch !== 'main';
+  const isCustom = isReleaseBranch && !releaseBranches.includes(activeBranch);
+  const [customInput, setCustomInput] = useState('');
+  const [showCustom, setShowCustom] = useState(false);
+
+  const handleCustomGo = () => {
+    const val = customInput.trim();
+    if (!val) return;
+    onSelectBranch(val.startsWith('release/') ? val : `release/${val}`);
+    setShowCustom(false);
+    setCustomInput('');
+  };
+
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2 flex-wrap">
       <span className="text-sm font-semibold text-slate-500 dark:text-slate-400">Branch:</span>
       <div className="flex border border-slate-200 dark:border-slate-700 rounded overflow-hidden">
         <button
@@ -342,11 +390,32 @@ function BranchSelector({ activeBranch, onSelectBranch, releaseBranches, branche
           main
         </button>
         {branchesLoading ? (
-          <span className="px-3 py-1.5 text-sm text-slate-400 animate-pulse">Loading branches...</span>
-        ) : releaseBranches.length > 0 ? (
+          <span className="px-3 py-1.5 text-sm text-slate-400 animate-pulse">Loading...</span>
+        ) : showCustom ? (
+          <div className="flex">
+            <input
+              type="text" placeholder="branch or version"
+              value={customInput} onChange={e => setCustomInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleCustomGo(); if (e.key === 'Escape') setShowCustom(false); }}
+              autoFocus
+              className="px-2 py-1.5 text-sm w-36 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-none outline-none"
+            />
+            <button onClick={handleCustomGo}
+              className="px-2 py-1.5 text-sm bg-indigo-500 text-white cursor-pointer hover:bg-indigo-600 transition-colors">
+              Go
+            </button>
+            <button onClick={() => setShowCustom(false)}
+              className="px-2 py-1.5 text-sm bg-slate-100 dark:bg-slate-700 text-slate-500 cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
+              &times;
+            </button>
+          </div>
+        ) : (
           <select
             value={isReleaseBranch ? activeBranch : ''}
-            onChange={e => { if (e.target.value) onSelectBranch(e.target.value); }}
+            onChange={e => {
+              if (e.target.value === '__custom__') { setShowCustom(true); return; }
+              if (e.target.value) onSelectBranch(e.target.value);
+            }}
             className={`px-2 py-1.5 text-sm transition-all cursor-pointer border-none outline-none
               ${isReleaseBranch
                 ? 'bg-indigo-500 dark:bg-indigo-400 text-white font-semibold'
@@ -356,9 +425,16 @@ function BranchSelector({ activeBranch, onSelectBranch, releaseBranches, branche
             {releaseBranches.map(b => (
               <option key={b} value={b}>{b.replace('release/', '')} {b === releaseBranches[0] ? '(latest)' : ''}</option>
             ))}
+            {isCustom && <option value={activeBranch}>{activeBranch.replace('release/', '')} (custom)</option>}
+            <option value="__custom__">Other branch...</option>
           </select>
-        ) : null}
+        )}
       </div>
+      {branchWarning && (
+        <span className="text-xs text-amber-600 dark:text-amber-400" title={branchWarning}>
+          &#9888; {branchWarning}
+        </span>
+      )}
     </div>
   );
 }
@@ -628,6 +704,7 @@ function App() {
   const [branch, setBranch] = useState('main');
   const [releaseBranches, setReleaseBranches] = useState([]);
   const [branchesLoading, setBranchesLoading] = useState(true);
+  const [branchWarning, setBranchWarning] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [csvRows, setCsvRows] = useState([]);
@@ -642,8 +719,14 @@ function App() {
 
   useEffect(() => {
     fetchBranchList()
-      .then(branches => setReleaseBranches(branches))
-      .catch(() => setReleaseBranches([]))
+      .then(({ branches, warning }) => {
+        setReleaseBranches(branches);
+        setBranchWarning(warning || null);
+      })
+      .catch(() => {
+        setReleaseBranches(filterAndSortBranches(HARDCODED_RELEASE_BRANCHES));
+        setBranchWarning('Could not fetch branch list.');
+      })
       .finally(() => setBranchesLoading(false));
   }, []);
 
@@ -715,6 +798,7 @@ function App() {
         onSelectBranch={handleSelectBranch}
         releaseBranches={releaseBranches}
         branchesLoading={branchesLoading}
+        branchWarning={branchWarning}
       />
 
       {error && <ErrorBanner message={error} onRetry={() => loadCsv(branch)} />}
