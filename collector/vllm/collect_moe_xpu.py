@@ -48,6 +48,7 @@ aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 
 def get_moe_xpu_test_cases():
+    # narrow down a bit for xpu
     num_tokens = [
         1,
         2,
@@ -77,9 +78,9 @@ def get_moe_xpu_test_cases():
         12288,
         16384,
     ]
-    tp_list = [1, 2, 4, 8, 16, 32]
-    ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    num_gpu_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    tp_list = [1, 2, 4, 8,]
+    ep_list = [1, 2, 4, 8,]
+    num_gpu_list = [1, 2, 4, 8,]
 
     token_distributions = [
         ("balanced", 0.0),
@@ -89,7 +90,8 @@ def get_moe_xpu_test_cases():
 
     # hidden_size,inter_s,topk,num_expert
     model_config_list = [
-        [2048, 1408, 4, 60, "Qwen/Qwen1.5-MoE-A2.7B"],  # qwen
+        [2048, 1408, 4, 60, "Qwen/Qwen1.5-MoE-A2.7B"],
+        [5120, 8192, 1, 16, "meta-llama/Llama-4-Scout-17B-16E-Instruct"]
     ]
 
     test_cases: list[MoeCommonTestCase] = []
@@ -207,6 +209,7 @@ def run_moe_torch(
     """Run vLLM MoE performance benchmarking"""
     get_device_module().set_device(device)
     torch.set_default_device(device)
+    # print(f"moe_ep_size: {moe_ep_size}, moe_tp_size: {moe_tp_size}")
 
     # Configure quantization parameters
     dtype = torch.float16
@@ -228,7 +231,6 @@ def run_moe_torch(
     # Create weight tensors
     # w1: gate + up projection weights [num_experts, 2 * inter_size, hidden_size]
     # w2: down projection weights [num_experts, hidden_size, inter_size]
-    print(local_num_experts, inter_size, moe_tp_size)
     w1 = torch.randn(
         local_num_experts,
         2 * local_inter_size,
@@ -334,6 +336,14 @@ def run_moe_torch(
                 for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
                     local_num_tokens = tw.shape[0]
                     # args check https://github.com/vllm-project/vllm-xpu-kernels/blob/main/tests/fused_moe/test_fused_moe.py
+                    # DEBUG
+                    # print("hidden_states slice shape:", hidden_states[:local_num_tokens].shape,
+                    #     "w13 shape:", w1.shape,
+                    #     "w2 shape:", w2.shape,
+                    #     "topk_weights (tw) shape:", tw.shape,
+                    #     "topk_ids (ti) shape:", ti.shape,
+                    #     "n_experts_per_token (topk):", topk,
+                    #     "num_experts (local_num_experts):", local_num_experts,)
                     _ = xpu_fused_moe(
                         hidden_states=hidden_states[:local_num_tokens],
                         w13=w1,
@@ -347,6 +357,8 @@ def run_moe_torch(
                         n_experts_per_token=topk,
                         activation="silu",
                         num_experts=local_num_experts,
+                        ep_rank=0,
+                        ep_size=moe_ep_size,
                     )
             else:
                 _ = fused_experts(
