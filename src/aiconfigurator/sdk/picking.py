@@ -476,3 +476,117 @@ def pick_autoscale(
         "best_config_df": disagg_df,
         "best_latencies": _extract_best_latencies(disagg_df),
     }
+
+
+# ---------------------------------------------------------------------------
+# pick_optimization_type
+# ---------------------------------------------------------------------------
+
+
+def pick_optimization_type(
+    pareto_df: pd.DataFrame,
+    optimization_type: str,
+    total_gpus: int,
+    serving_mode: str,
+    top_n: int = 5,
+) -> dict[str, Any]:
+    """Pick configurations based on optimization objective without explicit SLA targets.
+
+    When the user provides ``optimizationType`` (``"throughput"`` or ``"latency"``)
+    instead of explicit TTFT/ITL targets, this function selects the best
+    configuration by optimizing the corresponding metric directly:
+
+    - **throughput**: maximize ``tokens/s/gpu`` (or ``tokens/s/gpu_cluster``
+      when ``total_gpus`` is set).
+    - **latency**: minimize inter-token latency (``tpot``).
+
+    No SLA filtering is applied — the function simply ranks configurations
+    by the optimization objective.
+
+    Args:
+        pareto_df: Performance DataFrame (``ColumnsAgg`` or ``ColumnsDisagg``).
+        optimization_type: ``"throughput"`` or ``"latency"``.
+        total_gpus: Total GPUs available for deployment. Used to compute
+            ``tokens/s/gpu_cluster`` for throughput ranking.
+        serving_mode: ``"agg"`` or ``"disagg"``.
+        top_n: Number of top configurations to return.
+
+    Returns:
+        Dict with keys:
+        - ``best_config_df``: Top-N configurations DataFrame, sorted by
+          the optimization objective.
+        - ``best_throughput``: ``tokens/s/gpu_cluster`` of the rank-1 config.
+        - ``best_latencies``: Dict with ``ttft``, ``tpot``,
+          ``request_latency`` from the rank-1 config.
+        - ``pareto_frontier_df``: Pareto frontier DataFrame.
+    """
+    from aiconfigurator.sdk.pareto_analysis import get_pareto_front
+
+    empty_result: dict[str, Any] = {
+        "best_config_df": pd.DataFrame(),
+        "best_throughput": 0.0,
+        "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
+        "pareto_frontier_df": pd.DataFrame(),
+    }
+
+    if pareto_df is None or pareto_df.empty:
+        return empty_result
+
+    df = pareto_df.copy()
+
+    # Compute cluster-level throughput metric
+    if total_gpus > 0 and "num_total_gpus" in df.columns:
+        df["tokens/s/gpu_cluster"] = (
+            df["tokens/s/gpu"]
+            * (total_gpus // df["num_total_gpus"])
+            * df["num_total_gpus"]
+            / total_gpus
+        )
+    else:
+        df["tokens/s/gpu_cluster"] = df["tokens/s/gpu"]
+
+    # Deduplicate by parallelization strategy
+    group_by_key = "(d)parallel" if serving_mode == "disagg" else "parallel"
+
+    if optimization_type == "latency":
+        # Latency mode: minimize tpot, break ties by higher throughput
+        sort_cols = ["tpot", "tokens/s/gpu_cluster"]
+        sort_asc = [True, False]
+        # Pareto front: lower tpot is better, higher throughput is better
+        pareto_frontier_df = get_pareto_front(
+            df,
+            "tpot",
+            "tokens/s/gpu_cluster",
+            maximize_x=False,
+            maximize_y=True,
+        )
+    else:
+        # Throughput mode (default): maximize tokens/s/gpu_cluster, break ties by lower tpot
+        sort_cols = ["tokens/s/gpu_cluster", "tpot"]
+        sort_asc = [False, True]
+        # Pareto front: higher throughput on both axes
+        pareto_frontier_df = get_pareto_front(
+            df,
+            "tokens/s/user",
+            "tokens/s/gpu_cluster",
+            maximize_x=True,
+            maximize_y=True,
+        )
+
+    best_config_df = (
+        df.sort_values(by=sort_cols, ascending=sort_asc)
+        .drop_duplicates(subset=[group_by_key], keep="first")
+        .head(top_n)
+        .reset_index(drop=True)
+    )
+
+    best_throughput = (
+        float(best_config_df["tokens/s/gpu_cluster"].iloc[0]) if not best_config_df.empty else 0.0
+    )
+
+    return {
+        "best_config_df": best_config_df,
+        "best_throughput": best_throughput,
+        "best_latencies": _extract_best_latencies(best_config_df),
+        "pareto_frontier_df": pareto_frontier_df,
+    }
