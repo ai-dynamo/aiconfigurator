@@ -26,7 +26,7 @@ build_config:
   {% endif %}
 
 kv_cache_config:
-  free_gpu_memory_fraction: {{ kv_cache_config.free_gpu_memory_fraction | default(0.80) }}
+  free_gpu_memory_fraction: {{ kv_cache_config.free_gpu_memory_fraction | default(0.90) }}
   dtype: {{ kv_cache_config.dtype | default('auto') }}
   {% if kv_cache_config.tokens_per_block is defined %}
   tokens_per_block: {{ kv_cache_config.tokens_per_block }}
