@@ -4,7 +4,7 @@ agg_decode cuda_graph_batch_sizes = ((range(1, 16 + 1, 1) | list) + (range(16, 3
 agg_decode cuda_graph_enable_padding = true
 
 prefill max_batch_size = (max_batch_size if max_batch_size else 1)
-agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
+agg_decode max_batch_size = (max_batch_size if max_batch_size else 128)
 
 prefill disable_overlap_scheduler = true
 decode disable_overlap_scheduler = false
