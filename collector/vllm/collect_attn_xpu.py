@@ -319,8 +319,8 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
-    # XPU's FlashAttention implementation currently expects Query and Output 
-    # to be float16/bfloat16 even if the KV Cache is FP8. 
+    # XPU's FlashAttention implementation currently expects Query and Output
+    # to be float16/bfloat16 even if the KV Cache is FP8.
     # TODO: Remove the code if FP8 support will not be in the roadmap.
     if "xpu" not in str(device) and use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
         query_vllm = query_vllm.to(current_platform.fp8_dtype())
