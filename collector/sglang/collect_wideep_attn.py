@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Compatible with SGLang 0.5.9 and ROCm 7.0 (HIP). On ROCm, only triton attention backend is used.
 import json
 import os
 from importlib.metadata import version as get_version
@@ -19,7 +20,7 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 # SGLang imports
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
-from sglang.srt.utils import BumpAllocator, suppress_other_loggers
+from sglang.srt.utils import BumpAllocator, is_hip, suppress_other_loggers
 from torch.profiler import ProfilerActivity, profile, record_function
 
 try:
@@ -32,6 +33,19 @@ except ModuleNotFoundError:
     from helper import _get_deepseek_model_path, benchmark_with_power, get_sm_version, log_perf
 
 DEEPSEEK_MODEL_PATH = _get_deepseek_model_path()
+
+
+def _get_attention_backends():
+    """Attention backends: ROCm (HIP) uses aiter; CUDA uses flashinfer + fa3 or trtllm_mla on SM100+."""
+    if is_hip():
+        return ["aiter"]  # todo: support triton backend
+    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
+    return ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+
+
+def _accelerator_name():
+    """Name for error messages (CUDA vs HIP)."""
+    return "HIP" if is_hip() else "CUDA"
 
 
 def cleanup_distributed():
@@ -58,8 +72,7 @@ def get_attention_prefill_test_cases():
     context_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     context_seq_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 
-    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
-    attention_backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+    attention_backends = _get_attention_backends()
     head_nums = [128, 64, 32, 16]
 
     for attention_backend in attention_backends:
@@ -88,8 +101,7 @@ def get_attention_decode_test_cases():
     generation_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     generation_seq_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 
-    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
-    attention_backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+    attention_backends = _get_attention_backends()
     head_nums = [128, 64, 32, 16]
 
     for attention_backend in attention_backends:
@@ -142,7 +154,7 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
     )
 
     server_args.attention_backend = attention_backend
-    print(f"Using attention backend: {attention_backend}, gpu_id: {gpu_id}")
+    print(f"Using attention backend: {attention_backend}, gpu_id: {gpu_id}" + (" (ROCm/HIP)" if is_hip() else ""))
 
     if num_layers > 0 and load_format == "dummy":
         override_args = {"num_hidden_layers": num_layers}
@@ -239,14 +251,16 @@ def run_attention_torch(
 
                 model_runner.attn_backend.init_forward_metadata(forward_batch)
 
+                dev = str(device) if isinstance(device, torch.device) else device
                 hidden_states = torch.randn(
                     batch_size * seq_length,
                     model_runner.model.config.hidden_size,
                     dtype=torch.bfloat16,
-                    device="cuda",
+                    device=dev,
                 )
-                positions = torch.arange(seq_length, device="cuda").unsqueeze(0).expand(batch_size, -1).flatten()
-                zero_allocator = BumpAllocator(buffer_size=256, dtype=torch.float32, device="cuda")
+                positions = torch.arange(seq_length, device=dev).unsqueeze(0).expand(batch_size, -1)
+                positions = positions.reshape(1, -1).contiguous()
+                zero_allocator = BumpAllocator(buffer_size=256, dtype=torch.float32, device=dev)
 
                 # Set up attn_inputs_ for new SGLang communicator pattern
                 # qkv_latent needs shape: (tokens, q_lora_rank + kv_lora_rank + qk_rope_head_dim)
@@ -261,6 +275,9 @@ def run_attention_torch(
 
                 attn_inputs = AttentionInputs(hidden_states, forward_batch, dummy_qkv_latent_func)
                 get_attn_tp_context().set_attn_inputs(attn_inputs)
+
+                # print(f"Warmup: positions={positions}, hidden_states={hidden_states}, forward_batch={forward_batch}, zero_allocator={zero_allocator}")
+                # print(f"Warmup: position.dim={positions.dim()}")
 
                 for _ in range(num_warmup):
                     with torch.no_grad():
@@ -331,7 +348,7 @@ def run_attention_torch(
                         if output_path is None
                         else os.path.join(output_path, "wideep_context_mla_perf.txt")
                     )
-                    device_name = torch.cuda.get_device_name(device)
+                    device_name = torch.cuda.get_device_name(device) if torch.cuda.is_available() else str(device)
                     version = get_version("sglang")
                     log_perf(
                         item_list=[
@@ -375,8 +392,9 @@ def run_attention_torch(
 
                 # Only break on illegal memory access (context corruption), not OOM
                 error_str = str(e).lower()
-                if "cuda" in error_str and "illegal" in error_str:
-                    print("  CUDA illegal access detected - stopping tests to prevent cascading failures")
+                acc = _accelerator_name()
+                if ("cuda" in error_str or "hip" in error_str) and "illegal" in error_str:
+                    print(f"  {acc} illegal access detected - stopping tests to prevent cascading failures")
                     break
 
                 print("  Skipping this configuration...")
@@ -435,8 +453,8 @@ def run_attention_torch(
                     return torch.randn(h.shape[0], qkv_latent_dim, dtype=h.dtype, device=h.device)
 
                 # === DIRECTLY TO DECODE (skip prefill pass to reduce peak memory) ===
-                # Set output_ids as tensor of last token IDs for decode
-                batch.output_ids = torch.randint(0, 10000, (batch_size,), dtype=torch.int64, device="cuda")
+                dev = str(device) if isinstance(device, torch.device) else device
+                batch.output_ids = torch.randint(0, 10000, (batch_size,), dtype=torch.int64, device=dev)
                 batch.prepare_for_decode()
                 model_worker_batch_decode = batch.get_model_worker_batch()
                 forward_batch_decode = ForwardBatch.init_new(model_worker_batch_decode, model_runner)
@@ -445,10 +463,10 @@ def run_attention_torch(
                     batch_size,
                     model_runner.model.config.hidden_size,
                     dtype=torch.bfloat16,
-                    device="cuda",
+                    device=dev,
                 )
-                decode_positions = torch.full((batch_size,), seq_length, device="cuda")
-                zero_allocator = BumpAllocator(buffer_size=2048, dtype=torch.float32, device="cuda")
+                decode_positions = torch.full((batch_size,), seq_length, device=dev)
+                zero_allocator = BumpAllocator(buffer_size=2048, dtype=torch.float32, device=dev)
 
                 # Set up attn_inputs_ for decode
                 attn_inputs_decode = AttentionInputs(decode_hidden, forward_batch_decode, dummy_qkv_latent_func)
@@ -512,7 +530,7 @@ def run_attention_torch(
                         if output_path is None
                         else os.path.join(output_path, "wideep_generation_mla_perf.txt")
                     )
-                    device_name = torch.cuda.get_device_name(device)
+                    device_name = torch.cuda.get_device_name(device) if torch.cuda.is_available() else str(device)
                     version = get_version("sglang")
                     log_perf(
                         item_list=[
@@ -553,8 +571,9 @@ def run_attention_torch(
 
                 # Only break on illegal memory access (context corruption), not OOM
                 error_str = str(e).lower()
-                if "cuda" in error_str and "illegal" in error_str:
-                    print("  CUDA illegal access detected - stopping tests to prevent cascading failures")
+                acc = _accelerator_name()
+                if ("cuda" in error_str or "hip" in error_str) and "illegal" in error_str:
+                    print(f"  {acc} illegal access detected - stopping tests to prevent cascading failures")
                     break
 
                 print("  Skipping this configuration...")
@@ -568,16 +587,14 @@ def run_attention_torch(
 
 def get_wideep_mla_context_test_cases():
     """Returns list of (attention_backend, head_num, perf_filename) tuples."""
-    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
-    backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+    backends = _get_attention_backends()
     head_nums = [128, 64, 32, 16]
     return [[backend, head_num, "wideep_context_mla_perf.txt"] for backend in backends for head_num in head_nums]
 
 
 def get_wideep_mla_generation_test_cases():
     """Returns list of (attention_backend, head_num, perf_filename) tuples."""
-    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
-    backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+    backends = _get_attention_backends()
     head_nums = [128, 64, 32, 16]
     return [[backend, head_num, "wideep_generation_mla_perf.txt"] for backend in backends for head_num in head_nums]
 
