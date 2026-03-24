@@ -720,6 +720,46 @@ def balanced_logits(num_tokens, num_experts, topk):
     return router_logits
 
 
+def _sample_dirichlet_multinomial(pi_np, concentration, num_tokens, topk):
+    """Sample one expert token distribution via Dirichlet-Multinomial.
+
+    Each call produces a distribution that can differ significantly from pi,
+    but E[result] is proportional to pi.  The ``concentration`` parameter
+    controls inter-iteration variance: smaller = more volatile, larger = more
+    stable.
+
+    Args:
+        pi_np: Normalized probability vector (numpy, shape [num_experts]).
+        concentration: Dirichlet concentration parameter.
+        num_tokens: Number of tokens.
+        topk: Experts selected per token.
+
+    Returns:
+        numpy float64 array of shape [num_experts] with token counts.
+    """
+    num_experts = len(pi_np)
+    target_sum = num_tokens * topk
+    alpha_dir = concentration * np.maximum(pi_np, 1e-10)
+    p_i = np.random.dirichlet(alpha_dir)
+    tokens_i = np.random.multinomial(target_sum, p_i).astype(np.float64)
+
+    # Clamp: each expert at most num_tokens
+    overflow = np.clip(tokens_i - num_tokens, 0, None).sum()
+    tokens_i = np.clip(tokens_i, 0, num_tokens)
+    if overflow > 0:
+        idx_asc = np.argsort(tokens_i)
+        remaining = int(overflow)
+        j = 0
+        while remaining > 0:
+            ei = idx_asc[j % num_experts]
+            if tokens_i[ei] < num_tokens:
+                tokens_i[ei] += 1
+                remaining -= 1
+            j += 1
+
+    return tokens_i
+
+
 def sample_power_law(size, alpha, xmin, xmax):
     """Sample from a power law distribution using inverse CDF method.
 
@@ -1258,18 +1298,27 @@ def _generate_power_law_distribution_with_ema_eplb(
     ema_warmup_steps=10,
     ema_decay_factor=0.95,
     ema_noise_sigma=0.3,
+    dirichlet_concentration=0,
+    return_ema_trace=False,
 ):
     """Generate power law distribution with EMA-simulated EPLB.
 
     Simulates TRT-LLM's EMA-based EPLB:
-    1. Generate a base expert popularity profile (power-law)
-    2. Run ``ema_warmup_steps`` noisy samples to build an EMA load factor
-    3. Compute EPLB using the EMA load factor (not exact current distribution)
-    4. Sample one fresh noisy distribution and route through EMA-based placement
+    1. Generate warmup distributions and accumulate EMA
+    2. Compute EPLB from the EMA (before seeing fresh distribution)
+    3. Sample one fresh distribution and route through EMA-based placement
+    4. Determine actual slowest rank from fresh routing (not EMA estimate)
 
-    The ``ema_noise_sigma`` parameter controls temporal correlation of expert
-    popularity.  Small sigma means expert rankings are stable across batches
-    (realistic); large sigma approaches fully-random rankings (worst case).
+    Two noise models are supported:
+
+    - **Dirichlet-Multinomial** (``dirichlet_concentration > 0``): Each iteration
+      samples ``p ~ Dir(concentration * π)`` then ``tokens ~ Multinomial(N, p)``.
+      Expert rankings can change between iterations; concentration controls
+      inter-iteration variance.  This is the recommended mode.
+
+    - **Lognormal** (legacy, ``dirichlet_concentration == 0``): Each iteration
+      applies ``base_profile * lognormal(0, sigma)`` noise.  Expert rankings are
+      largely preserved.  Retained for backward compatibility.
 
     Args:
         num_tokens: Number of tokens
@@ -1278,55 +1327,87 @@ def _generate_power_law_distribution_with_ema_eplb(
         ep: Expert parallelism size
         alpha: Power law exponent
         num_slots: Total slots (default: num_experts)
-        ema_warmup_steps: Number of power-law samples used to warm up EMA
+        ema_warmup_steps: Number of samples used to warm up EMA
         ema_decay_factor: EMA decay factor (matches TRT-LLM default 0.95)
-        ema_noise_sigma: Log-normal noise sigma applied to the base profile
-                         each step. 0 = perfectly stable expert rankings.
+        ema_noise_sigma: Log-normal noise sigma (legacy mode only)
+        dirichlet_concentration: Dirichlet concentration parameter.
+            >0 enables Dirichlet-Multinomial mode (recommended).
+            0 falls back to legacy lognormal mode.
 
     Returns:
-        Same as _generate_power_law_distribution_with_eplb:
         (num_tokens_per_slot, h_selected_slots)
+        When return_ema_trace=True: (num_tokens_per_slot, h_selected_slots, ema_trace)
     """
     import torch
 
     if num_slots is None:
         num_slots = num_experts
 
-    # Generate a stable base popularity profile for this sample group
-    base_profile = _sample_expert_token_distribution(num_tokens, num_experts, topk, alpha)
+    use_dirichlet = dirichlet_concentration > 0
 
-    # Phase 1: Build EMA load factor from N warmup samples (correlated via base_profile)
+    if use_dirichlet:
+        # Build normalized power-law probability vector π
+        raw = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
+        pi_np = raw.numpy().astype(np.float64)
+        pi_np = pi_np / pi_np.sum()
+    else:
+        # Legacy: generate base_profile for lognormal noise
+        base_profile = _sample_expert_token_distribution(num_tokens, num_experts, topk, alpha)
+
+    # Phase 1: EMA warmup (EMA does NOT see the fresh distribution)
     ema_load_factor = np.zeros(num_experts, dtype=np.float64)
+    ema_trace_steps = [] if return_ema_trace else None
     for _step in range(ema_warmup_steps):
-        dist = _sample_expert_token_distribution(
-            num_tokens, num_experts, topk, alpha, base_profile=base_profile, noise_sigma=ema_noise_sigma
-        )
-        ema_load_factor = ema_load_factor * ema_decay_factor + dist.cpu().numpy().astype(np.float64)
+        if use_dirichlet:
+            dist_np = _sample_dirichlet_multinomial(pi_np, dirichlet_concentration, num_tokens, topk)
+        else:
+            dist_t = _sample_expert_token_distribution(
+                num_tokens, num_experts, topk, alpha, base_profile=base_profile, noise_sigma=ema_noise_sigma
+            )
+            dist_np = dist_t.cpu().numpy().astype(np.float64)
+        ema_load_factor = ema_load_factor * ema_decay_factor + dist_np
+        if ema_trace_steps is not None:
+            ema_trace_steps.append(
+                {
+                    "step": _step,
+                    "sample_dist": dist_np.copy(),
+                    "ema_load_factor": ema_load_factor.copy(),
+                }
+            )
 
-    # Phase 2: Compute EPLB placement using EMA (not exact current distribution)
+    # Phase 2: Compute EPLB from EMA (BEFORE seeing fresh)
     eplb_result = compute_eplb(ema_load_factor, num_experts, ep, num_slots)
 
-    slowest_rank = eplb_result["slowest_rank"]
     rank_slots = eplb_result["rank_slots"]
     slot_to_expert = eplb_result["slot_to_expert"]
     expert_replica_count = eplb_result["expert_replica_count"]
 
-    # Phase 3: Sample one fresh distribution (correlated with same base_profile)
-    fresh_expert_tokens = _sample_expert_token_distribution(
-        num_tokens, num_experts, topk, alpha, base_profile=base_profile, noise_sigma=ema_noise_sigma
-    )
-    fresh_np = fresh_expert_tokens.cpu().numpy().astype(np.float64)
+    # Phase 3: Sample one fresh distribution (EMA has NOT seen this)
+    if use_dirichlet:
+        fresh_np = _sample_dirichlet_multinomial(pi_np, dirichlet_concentration, num_tokens, topk)
+        fresh_expert_tokens = torch.from_numpy(fresh_np)
+    else:
+        fresh_expert_tokens = _sample_expert_token_distribution(
+            num_tokens, num_experts, topk, alpha, base_profile=base_profile, noise_sigma=ema_noise_sigma
+        )
+        fresh_np = fresh_expert_tokens.cpu().numpy().astype(np.float64)
     target_sum = num_tokens * topk
 
     # Phase 4: Route fresh distribution through EMA-based placement
-    # Each slot gets its expert's fresh tokens divided by that expert's replica count
     slot_tokens_fresh = np.zeros(num_slots, dtype=np.float64)
     for slot_id in range(num_slots):
         expert_id = slot_to_expert[slot_id]
         replica_count = expert_replica_count[expert_id]
         slot_tokens_fresh[slot_id] = fresh_np[expert_id] / replica_count
 
-    # Remap: put slowest rank's slots into rank 0 position
+    # Determine ACTUAL slowest rank from fresh routing (not EMA estimate)
+    fresh_tokens_per_rank = []
+    for rank_id in range(ep):
+        rank_load = sum(slot_tokens_fresh[s] for s in rank_slots[rank_id])
+        fresh_tokens_per_rank.append(rank_load)
+    slowest_rank = int(np.argmax(fresh_tokens_per_rank))
+
+    # Remap: put actual slowest rank's slots into rank 0 position
     new_slot_tokens = torch.zeros(num_slots, dtype=torch.float64)
     new_slot_to_expert = [0] * num_slots
     new_slot_idx = 0
@@ -1357,10 +1438,12 @@ def _generate_power_law_distribution_with_ema_eplb(
 
     aic_debug = int(os.getenv("AIC_DEBUG", "0"))
     if aic_debug >= 1:
-        print(f"EMA-EPLB: warmup_steps={ema_warmup_steps}, decay={ema_decay_factor}, noise_sigma={ema_noise_sigma}")
+        mode = f"Dirichlet(conc={dirichlet_concentration})" if use_dirichlet else f"Lognormal(σ={ema_noise_sigma})"
+        print(f"EMA-EPLB [{mode}]: warmup={ema_warmup_steps}, decay={ema_decay_factor}")
         print(f"EMA-EPLB: num_experts={num_experts}, num_slots={num_slots}, redundant={num_slots - num_experts}")
-        print(f"EMA-EPLB: slowest_rank={slowest_rank}, tokens_per_rank={eplb_result['tokens_per_rank']}")
-        print(f"EMA-EPLB: rank0 slots={rank_slots[slowest_rank][:5]}... (showing first 5)")
+        print(
+            f"EMA-EPLB: slowest_rank={slowest_rank} (actual), fresh_tokens_per_rank={[f'{x:.0f}' for x in fresh_tokens_per_rank[:4]]}..."
+        )
         print(f"EMA-EPLB: expert_replica_count (top 5)={expert_replica_count[:5]}")
         print("EMA-EPLB: num_tokens_per_slot", num_tokens_per_slot[:10], "...", num_tokens_per_slot.sum().item())
 
@@ -1373,6 +1456,15 @@ def _generate_power_law_distribution_with_ema_eplb(
         )
 
     h_selected_slots = _assign_experts_from_counts(num_tokens_per_slot, num_tokens, topk)
+
+    if return_ema_trace:
+        ema_trace = {
+            "base_profile": pi_np.copy() if use_dirichlet else base_profile.cpu().numpy().copy(),
+            "steps": ema_trace_steps,
+            "fresh_sample": fresh_np.copy(),
+            "ema_final": ema_load_factor.copy(),
+        }
+        return num_tokens_per_slot, h_selected_slots, ema_trace
 
     return num_tokens_per_slot, h_selected_slots
 
@@ -1389,6 +1481,7 @@ def power_law_logits_v3(
     ema_warmup_steps=0,
     ema_decay_factor=0.95,
     ema_noise_sigma=0.3,
+    dirichlet_concentration=0,
 ):
     """Generate power law distributed router logits for MoE.
 
@@ -1412,8 +1505,10 @@ def power_law_logits_v3(
         ema_decay_factor: EMA decay factor, matching TRT-LLM default (0.95).
                           Only used when use_eplb=True and ema_warmup_steps > 0.
         ema_noise_sigma: Log-normal noise sigma for expert popularity perturbation.
-                         Controls temporal correlation of expert rankings.
-                         Only used when use_eplb=True and ema_warmup_steps > 0.
+                         Legacy mode, used when dirichlet_concentration == 0.
+        dirichlet_concentration: Dirichlet concentration parameter.
+                         >0 enables Dirichlet-Multinomial noise model (recommended).
+                         0 falls back to legacy lognormal mode.
 
     Returns:
         If return_rank0_info=False:
@@ -1440,6 +1535,7 @@ def power_law_logits_v3(
                 ema_warmup_steps=ema_warmup_steps,
                 ema_decay_factor=ema_decay_factor,
                 ema_noise_sigma=ema_noise_sigma,
+                dirichlet_concentration=dirichlet_concentration,
             )
         else:
             num_tokens_per_slot, h_selected_slots = _generate_power_law_distribution_with_eplb(
