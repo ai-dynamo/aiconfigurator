@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Configurator — Support Matrix</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        accent:  { DEFAULT: '#6366f1', hover: '#4f46e5', dark: '#818cf8' },
+        pass:    { bg: '#dcfce7', text: '#166534', 'bg-dark': '#052e16', 'text-dark': '#86efac' },
+        partial: { bg: '#fef3c7', text: '#92400e', 'bg-dark': '#451a03', 'text-dark': '#fcd34d' },
+        fail:    { bg: '#fee2e2', text: '#b91c1c', 'bg-dark': '#350a0a', 'text-dark': '#fca5a5' },
+      }
+    }
+  }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5/papaparse.min.js" crossorigin></script>
+<style>
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  .dark ::-webkit-scrollbar-thumb { background: #475569; }
+  .dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+  .dark ::-webkit-scrollbar-corner { background: transparent; }
+  html.dark { color-scheme: dark; }
+</style>
+</head>
+<body class="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 min-h-screen font-sans">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+// ── Constants ───────────────────────────────────────────────────────
+const REPO = 'ai-dynamo/aiconfigurator';
+const CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
+const TARGET_VERSIONS = { vllm: '0.14.0', sglang: '0.5.9', trtllm: '1.2.0rc6' };
+const PREFERRED_DEFAULT_SYSTEM = 'b200_sxm';
+const SYSTEM_ORDER = ['b200', 'gb200', 'gb300', 'h100', 'h200', '__other__', 'a100', 'l40s'];
+
+function sortSystems(systems) {
+  return [...systems].sort((a, b) => {
+    const keyA = SYSTEM_ORDER.findIndex(p => a.toLowerCase().startsWith(p));
+    const keyB = SYSTEM_ORDER.findIndex(p => b.toLowerCase().startsWith(p));
+    const idxA = keyA === -1 ? SYSTEM_ORDER.indexOf('__other__') : keyA;
+    const idxB = keyB === -1 ? SYSTEM_ORDER.indexOf('__other__') : keyB;
+    if (idxA !== idxB) return idxA - idxB;
+    return a.localeCompare(b, undefined, { sensitivity: 'base' });
+  });
+}
+
+const PHASE_ORDER = { dev: 0, a: 1, b: 2, rc: 3, release: 4, post: 5 };
+
+// ── Version Logic (ported from generate_static_page.py) ────────────
+function parseVersionTuple(verStr) {
+  if (!verStr) return [0, 0, 0, 0, 0, 0, 0];
+  const s = verStr.trim();
+
+  const rcPostMatch = s.match(/^(\d[\d.]*)rc(\d+)[.\-]post[.\-]?(\d+)$/);
+  if (rcPostMatch) {
+    const parts = rcPostMatch[1].split('.').filter(Boolean).map(Number);
+    while (parts.length < 3) parts.push(0);
+    return [...parts, PHASE_ORDER.rc, parseInt(rcPostMatch[2]), 1, parseInt(rcPostMatch[3])];
+  }
+
+  const rcMatch = s.match(/^(\d[\d.]*)(?:rc|a|b)(\d+)(.*)$/);
+  if (rcMatch) {
+    const parts = rcMatch[1].split('.').filter(Boolean).map(Number);
+    while (parts.length < 3) parts.push(0);
+    return [...parts, PHASE_ORDER.rc, parseInt(rcMatch[2]), 0, 0];
+  }
+
+  const postMatch = s.match(/^(\d[\d.]*)[.\-]post[.\-]?(\d+)$/);
+  if (postMatch) {
+    const parts = postMatch[1].split('.').filter(Boolean).map(Number);
+    while (parts.length < 3) parts.push(0);
+    return [...parts, PHASE_ORDER.post, parseInt(postMatch[2]), 0, 0];
+  }
+
+  const parts = [];
+  for (const x of s.split('.')) {
+    const n = parseInt(x, 10);
+    if (isNaN(n)) break;
+    parts.push(n);
+  }
+  while (parts.length < 3) parts.push(0);
+  return [...parts, PHASE_ORDER.release, 0, 0, 0];
+}
+
+function versionGe(a, b) {
+  const ta = parseVersionTuple(a);
+  const tb = parseVersionTuple(b);
+  for (let i = 0; i < 7; i++) {
+    if (ta[i] > tb[i]) return true;
+    if (ta[i] < tb[i]) return false;
+  }
+  return true;
+}
+
+function versionSortKey(verStr) {
+  return parseVersionTuple(verStr);
+}
+
+function compareVersionTuples(a, b) {
+  for (let i = 0; i < 7; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+// ── Error Signature Extraction ──────────────────────────────────────
+function extractErrorSignature(errMsg) {
+  if (!errMsg) return 'No error message';
+  const text = String(errMsg).trim();
+  if (!text) return 'No error message';
+  const lines = text.replace(/\\n/g, '\n').split('\n').map(l => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^[A-Za-z][A-Za-z0-9_.]*Error[^:]*:/.test(lines[i]) ||
+        /^[A-Za-z][A-Za-z0-9_.]*Exception[^:]*:/.test(lines[i])) {
+      return lines[i].substring(0, 500);
+    }
+  }
+  if (lines.length) return lines[lines.length - 1].substring(0, 500);
+  return text.substring(0, 500);
+}
+
+// ── Matrix Building Logic ───────────────────────────────────────────
+function getLatestSupportedVersion(rows, huggingfaceId, system, backend) {
+  const subset = rows.filter(r =>
+    r.HuggingFaceID === huggingfaceId && r.System === system && r.Backend === backend
+  );
+  if (!subset.length) return { version: null, atTarget: false, error: null };
+
+  const versionHasFail = {};
+  const versionHasPass = {};
+  const versionErrorMsgs = {};
+
+  for (const row of subset) {
+    const version = row.Version;
+    const status = row.Status;
+    const errorMsg = (row.ErrMsg || '').trim() || null;
+
+    if (status === 'FAIL') {
+      versionHasFail[version] = true;
+      if (errorMsg) {
+        if (version in versionErrorMsgs) {
+          const existing = versionErrorMsgs[version];
+          if (existing && existing !== errorMsg) {
+            versionErrorMsgs[version] = `${existing} | ${errorMsg}`;
+          }
+        } else {
+          versionErrorMsgs[version] = errorMsg;
+        }
+      }
+    } else if (status === 'PASS') {
+      versionHasPass[version] = true;
+    }
+  }
+
+  if (!Object.keys(versionHasFail).length && !Object.keys(versionHasPass).length) {
+    return { version: null, atTarget: false, error: null };
+  }
+
+  const targetVer = TARGET_VERSIONS[backend] || null;
+  const atOrAboveTarget = (ver) => targetVer === null || versionGe(ver, targetVer);
+
+  if (targetVer !== null) {
+    if (versionHasPass[targetVer]) {
+      return { version: targetVer, atTarget: atOrAboveTarget(targetVer), error: null };
+    }
+    if (versionHasFail[targetVer]) {
+      return { version: 'FAIL', atTarget: false, error: versionErrorMsgs[targetVer] || 'No error message available' };
+    }
+  }
+
+  const passing = Object.keys(versionHasPass)
+    .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
+  if (passing.length) {
+    return { version: passing[0], atTarget: atOrAboveTarget(passing[0]), error: null };
+  }
+
+  const allMsgs = [];
+  const failVersions = Object.keys(versionHasFail)
+    .sort((a, b) => compareVersionTuples(versionSortKey(b), versionSortKey(a)));
+  for (const ver of failVersions) {
+    if (versionErrorMsgs[ver]) allMsgs.push(`${ver}: ${versionErrorMsgs[ver]}`);
+  }
+  return { version: 'FAIL', atTarget: false, error: allMsgs.length ? allMsgs.join(' | ') : 'No error message available' };
+}
+
+function buildMatrixForMode(rows, systemName, modeFilter) {
+  let subset = rows.filter(r => r.System === systemName);
+  if (modeFilter !== 'all') subset = subset.filter(r => r.Mode === modeFilter);
+  if (!subset.length) return { matrixRows: [], backends: [] };
+
+  const models = [...new Set(subset.map(r => r.HuggingFaceID))].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  const backends = [...new Set(subset.map(r => r.Backend))].sort();
+
+  const matrixRows = models.map(model => {
+    const cells = {};
+    for (const backend of backends) {
+      const { version, atTarget, error } = getLatestSupportedVersion(subset, model, systemName, backend);
+      let status = 'pass';
+      if (version === null || version === 'FAIL') status = 'fail';
+
+      let partialError = null;
+      if (modeFilter === 'all' && status === 'pass') {
+        const aggRows = subset.filter(r => r.Mode === 'agg');
+        const disaggRows = subset.filter(r => r.Mode === 'disagg');
+        const aggResult = aggRows.length
+          ? getLatestSupportedVersion(aggRows, model, systemName, backend)
+          : { version: null, atTarget: false, error: null };
+        const disaggResult = disaggRows.length
+          ? getLatestSupportedVersion(disaggRows, model, systemName, backend)
+          : { version: null, atTarget: false, error: null };
+        const aggPass = aggResult.version !== null && aggResult.version !== 'FAIL';
+        const disaggPass = disaggResult.version !== null && disaggResult.version !== 'FAIL';
+        if (aggPass !== disaggPass) {
+          status = 'partial';
+          partialError = !aggPass
+            ? `[agg FAIL] ${aggResult.error || 'No error message available'}`
+            : `[disagg FAIL] ${disaggResult.error || 'No error message available'}`;
+        }
+      }
+
+      if (version === null) {
+        cells[backend] = { version: 'FAIL', status: 'fail', error: 'No data available' };
+      } else if (version === 'FAIL') {
+        cells[backend] = { version: 'FAIL', status: 'fail', error };
+      } else {
+        cells[backend] = { version, status, error: partialError };
+      }
+    }
+    return { model, cells };
+  });
+
+  return { matrixRows, backends };
+}
+
+function buildTopErrors(rows, systemName, modeFilter, topN = 10) {
+  let subset = rows.filter(r => r.System === systemName && r.Status === 'FAIL');
+  if (modeFilter !== 'all') subset = subset.filter(r => r.Mode === modeFilter);
+  if (!subset.length) return [];
+
+  const counts = {};
+  for (const row of subset) {
+    const sig = extractErrorSignature(row.ErrMsg || '');
+    counts[sig] = (counts[sig] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([signature, count]) => ({ signature, count }));
+}
+
+// ── Data Fetching ───────────────────────────────────────────────────
+function csvUrl(branch) {
+  return `https://raw.githubusercontent.com/${REPO}/refs/heads/${branch}/${CSV_PATH}`;
+}
+
+const HARDCODED_RELEASE_BRANCHES = [
+  'release/0.7.0-post.1',
+  'release/0.7.0',
+];
+const BRANCH_CACHE_KEY = 'sm-release-branches';
+const BRANCH_CACHE_TTL = 3600000; // 1 hour
+const MIN_VERSION = [0, 7, 0, 0, 0, 0, 0];
+
+function filterAndSortBranches(names) {
+  return names
+    .filter(n => /^release\/[\d]/.test(n))
+    .filter(n => compareVersionTuples(parseVersionTuple(n.replace('release/', '')), MIN_VERSION) >= 0)
+    .sort((a, b) => {
+      const va = parseVersionTuple(a.replace('release/', ''));
+      const vb = parseVersionTuple(b.replace('release/', ''));
+      return compareVersionTuples(vb, va);
+    });
+}
+
+async function fetchBranchList() {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${REPO}/git/matching-refs/heads/release/`);
+    if (res.ok) {
+      const refs = await res.json();
+      const branches = filterAndSortBranches(refs.map(r => r.ref.replace('refs/heads/', '')));
+      if (branches.length > 0) {
+        localStorage.setItem(BRANCH_CACHE_KEY, JSON.stringify({ branches, ts: Date.now() }));
+        return { branches, source: 'api' };
+      }
+    }
+    if (res.status === 403 || res.status === 429) {
+      throw new Error('rate_limited');
+    }
+    throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    const warning = err.message === 'rate_limited'
+      ? 'GitHub API rate limited. Branch list may be outdated.'
+      : 'Could not fetch branch list.';
+
+    const cached = localStorage.getItem(BRANCH_CACHE_KEY);
+    if (cached) {
+      try {
+        const { branches } = JSON.parse(cached);
+        if (branches.length > 0) return { branches, source: 'cache', warning };
+      } catch {}
+    }
+
+    return { branches: filterAndSortBranches(HARDCODED_RELEASE_BRANCHES), source: 'hardcoded', warning };
+  }
+}
+
+async function fetchCsv(branch) {
+  const res = await fetch(csvUrl(branch));
+  if (!res.ok) throw new Error(`Failed to fetch CSV (HTTP ${res.status}) from branch "${branch}"`);
+  const text = await res.text();
+  const result = Papa.parse(text, { header: true, skipEmptyLines: true });
+  return result.data;
+}
+
+// ── React Components ────────────────────────────────────────────────
+
+function GitHubIcon() {
+  return (
+    <svg height="20" width="20" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+    </svg>
+  );
+}
+
+function Header({ activeBranch, onSelectBranch, releaseBranches, branchesLoading, branchWarning }) {
+  const [dark, setDark] = useState(() => {
+    const saved = localStorage.getItem('sm-theme');
+    return saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', dark);
+    localStorage.setItem('sm-theme', dark ? 'dark' : 'light');
+  }, [dark]);
+
+  return (
+    <div className="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-3 flex items-center gap-3 sticky top-0 z-50 shadow-sm flex-wrap">
+      <a href="/aiconfigurator/"><img src="https://avatars.githubusercontent.com/u/201626793" alt="ai-dynamo" width="32" height="32" className="rounded-full" /></a>
+      <div className="min-w-0 mr-auto">
+        <h1 className="text-lg font-bold leading-tight"><a href="/aiconfigurator/">AI Configurator</a>
+        <span className="text-sm text-slate-500 dark:text-slate-400"> - Support Matrix</span></h1>
+      </div>
+      <BranchSelector
+        activeBranch={activeBranch}
+        onSelectBranch={onSelectBranch}
+        releaseBranches={releaseBranches}
+        branchesLoading={branchesLoading}
+        branchWarning={branchWarning}
+      />
+      <a href="https://github.com/ai-dynamo/aiconfigurator" target="_blank" rel="noopener"
+         title="View on GitHub"
+         className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors">
+        <GitHubIcon />
+      </a>
+      <button onClick={() => setDark(d => !d)} title="Toggle dark/light mode"
+        className="border border-slate-200 dark:border-slate-700 rounded px-2 py-1 cursor-pointer
+                   text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors flex items-center justify-center w-8 h-8">
+        {dark
+          ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        }
+      </button>
+    </div>
+  );
+}
+
+function BranchSelector({ activeBranch, onSelectBranch, releaseBranches, branchesLoading, branchWarning }) {
+  const isReleaseBranch = activeBranch !== 'main';
+  const isCustom = isReleaseBranch && !releaseBranches.includes(activeBranch);
+  const [customInput, setCustomInput] = useState('');
+  const [showCustom, setShowCustom] = useState(false);
+
+  const handleCustomGo = () => {
+    const val = customInput.trim();
+    if (!val) return;
+    onSelectBranch(val.startsWith('release/') ? val : `release/${val}`);
+    setShowCustom(false);
+    setCustomInput('');
+  };
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="text-sm font-semibold text-slate-500 dark:text-slate-400">Branch:</span>
+      <div className="flex border border-slate-200 dark:border-slate-700 rounded overflow-hidden">
+        <button
+          onClick={() => onSelectBranch('main')}
+          className={`px-3 py-1.5 text-sm border-r border-slate-200 dark:border-slate-700 transition-all cursor-pointer
+            ${activeBranch === 'main'
+              ? 'bg-indigo-500 dark:bg-indigo-400 text-white font-semibold'
+              : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
+        >
+          main
+        </button>
+        {branchesLoading ? (
+          <span className="px-3 py-1.5 text-sm text-slate-400 animate-pulse">Loading...</span>
+        ) : showCustom ? (
+          <div className="flex">
+            <input
+              type="text" placeholder="branch or version"
+              value={customInput} onChange={e => setCustomInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleCustomGo(); if (e.key === 'Escape') setShowCustom(false); }}
+              autoFocus
+              className="px-2 py-1.5 text-sm w-36 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-none outline-none"
+            />
+            <button onClick={handleCustomGo}
+              className="px-2 py-1.5 text-sm bg-indigo-500 text-white cursor-pointer hover:bg-indigo-600 transition-colors">
+              Go
+            </button>
+            <button onClick={() => setShowCustom(false)}
+              className="px-2 py-1.5 text-sm bg-slate-100 dark:bg-slate-700 text-slate-500 cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
+              &times;
+            </button>
+          </div>
+        ) : (
+          <select
+            value={isReleaseBranch ? activeBranch : ''}
+            onChange={e => {
+              if (e.target.value === '__custom__') { setShowCustom(true); return; }
+              if (e.target.value) onSelectBranch(e.target.value);
+            }}
+            className={`px-2 py-1.5 text-sm transition-all cursor-pointer border-none outline-none
+              ${isReleaseBranch
+                ? 'bg-indigo-500 dark:bg-indigo-400 text-white font-semibold'
+                : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
+          >
+            <option value="" disabled>Release branches...</option>
+            {releaseBranches.map(b => (
+              <option key={b} value={b}>{b.replace('release/', '')} {b === releaseBranches[0] ? '(latest)' : ''}</option>
+            ))}
+            {isCustom && <option value={activeBranch}>{activeBranch.replace('release/', '')} (custom)</option>}
+            <option value="__custom__">Other branch...</option>
+          </select>
+        )}
+      </div>
+      {branchWarning && (
+        <span className="text-xs text-amber-600 dark:text-amber-400" title={branchWarning}>
+          &#9888; {branchWarning}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function Controls({ activeMode, onSetMode, searchQuery, onSetSearch, totalPass, totalFail }) {
+  const modes = ['all', 'agg', 'disagg'];
+  return (
+    <div className="px-6 py-3 flex flex-wrap gap-3 items-center border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
+      <span className="text-sm font-semibold text-slate-500 dark:text-slate-400">Mode:</span>
+      <div className="flex border border-slate-200 dark:border-slate-700 rounded overflow-hidden">
+        {modes.map(m => (
+          <button key={m}
+            onClick={() => onSetMode(m)}
+            className={`px-3.5 py-1.5 text-sm border-r last:border-r-0 border-slate-200 dark:border-slate-700 transition-all cursor-pointer capitalize
+              ${activeMode === m
+                ? 'bg-indigo-500 dark:bg-indigo-400 text-white font-semibold'
+                : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
+          >
+            {m === 'all' ? 'All' : m.charAt(0).toUpperCase() + m.slice(1)}
+          </button>
+        ))}
+      </div>
+      <input
+        type="text" placeholder="Search models..."
+        value={searchQuery} onChange={e => onSetSearch(e.target.value)}
+        className="px-3 py-1.5 border border-slate-200 dark:border-slate-700 rounded text-sm min-w-[220px]
+                   bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 focus:outline-none
+                   focus:border-indigo-400 transition-colors"
+      />
+      <div className="ml-auto text-xs text-slate-500 dark:text-slate-400 flex gap-2">
+        <span className="text-green-700 dark:text-green-400">{totalPass} PASS</span>
+        <span className="text-red-600 dark:text-red-400">{totalFail} FAIL</span>
+      </div>
+    </div>
+  );
+}
+
+function SystemTabs({ systems, activeSystem, onSelectSystem }) {
+  return (
+    <div className="flex flex-wrap border-b-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-6">
+      {systems.map(s => (
+        <button key={s}
+          onClick={() => onSelectSystem(s)}
+          className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap -mb-[2px] border-b-2 transition-all cursor-pointer
+            ${activeSystem === s
+              ? 'text-indigo-500 dark:text-indigo-400 border-indigo-500 dark:border-indigo-400 font-bold'
+              : 'text-slate-500 dark:text-slate-400 border-transparent hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'}`}
+        >
+          {s}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function getIssueRepo() {
+  const { hostname, pathname } = window.location;
+  if (hostname.endsWith('.github.io')) {
+    const owner = hostname.replace('.github.io', '');
+    const repo = pathname.split('/').filter(Boolean)[0];
+    if (owner && repo) return `${owner}/${repo}`;
+  }
+  return REPO;
+}
+
+function buildFileIssueUrl() {
+  return `https://github.com/${getIssueRepo()}/issues/new?`
+    + 'template=support_matrix_request.md'
+    + '&title=' + encodeURIComponent('[Support Matrix] Request coverage for <model/hardware/framework>')
+    + '&labels=' + encodeURIComponent('support-matrix');
+}
+
+function buildCallForFixUrl(model, system, backend, errorSnippet) {
+  const title = `[Support Matrix] Fix: ${model} on ${system} / ${backend}`;
+  const body = `## Failed combination\n\n`
+    + `- **Model:** ${model}\n`
+    + `- **System:** ${system}\n`
+    + `- **Backend:** ${backend}\n\n`
+    + `## Error\n\n\`\`\`\n${(errorSnippet || 'No error message').substring(0, 2000)}\n\`\`\`\n`;
+  return `https://github.com/${getIssueRepo()}/issues/new?`
+    + 'labels=' + encodeURIComponent('support-matrix,bug')
+    + '&title=' + encodeURIComponent(title)
+    + '&body=' + encodeURIComponent(body);
+}
+
+function Legend() {
+  return (
+    <div className="flex flex-wrap gap-4 items-center mb-4 text-sm text-slate-500 dark:text-slate-400">
+      <span className="font-semibold">Legend:</span>
+      <div className="flex items-center gap-1.5">
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-green-100 dark:bg-green-950"></span>
+        Supported
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-amber-100 dark:bg-amber-950"></span>
+        Partial (agg or disagg only)
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="inline-block w-9 h-5 rounded border border-slate-200 dark:border-slate-600 bg-red-100 dark:bg-red-950"></span>
+        FAIL (click for details)
+      </div>
+      <a href={buildFileIssueUrl()} target="_blank" rel="noopener"
+        className="ml-auto px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-400 dark:hover:bg-indigo-500
+                   text-white text-xs font-semibold rounded transition-colors no-underline whitespace-nowrap">
+        Not seeing coverage for your case? File an issue!
+      </a>
+    </div>
+  );
+}
+
+function SortArrow({ col, sortCol, sortAsc }) {
+  if (sortCol !== col) return <span className="ml-1 text-[0.65rem] opacity-40">&#9650;</span>;
+  return <span className="ml-1 text-[0.65rem]">{sortAsc ? '\u25B2' : '\u25BC'}</span>;
+}
+
+function MatrixTable({ matrixRows, backends, searchQuery, sortCol, sortAsc, onSort, onCellClick }) {
+  let filtered = matrixRows;
+  if (searchQuery) {
+    const q = searchQuery.toLowerCase();
+    filtered = matrixRows.filter(r => r.model.toLowerCase().includes(q));
+  }
+
+  if (sortCol !== null) {
+    filtered = [...filtered].sort((a, b) => {
+      let va, vb;
+      if (sortCol === 'model') { va = a.model; vb = b.model; }
+      else { va = (a.cells[sortCol] || {}).version || ''; vb = (b.cells[sortCol] || {}).version || ''; }
+      if (va === vb) return 0;
+      if (va === 'FAIL') return sortAsc ? 1 : -1;
+      if (vb === 'FAIL') return sortAsc ? -1 : 1;
+      return sortAsc ? (va < vb ? -1 : 1) : (va > vb ? -1 : 1);
+    });
+  }
+
+  if (!matrixRows.length) {
+    return <div className="py-8 text-center text-slate-400 italic">No data for this system / mode combination.</div>;
+  }
+  if (!filtered.length) {
+    return <div className="py-8 text-center text-slate-400 italic">No models match your search.</div>;
+  }
+
+  const cellClass = (status) => {
+    switch (status) {
+      case 'pass': return 'bg-green-100 dark:bg-green-950 text-green-800 dark:text-green-300 font-medium';
+      case 'partial': return 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 font-medium cursor-pointer hover:brightness-95 dark:hover:brightness-125';
+      case 'fail': return 'bg-red-100 dark:bg-red-950 text-red-700 dark:text-red-300 font-semibold cursor-pointer hover:brightness-95 dark:hover:brightness-125';
+      default: return '';
+    }
+  };
+
+  return (
+    <div className="overflow-x-auto mb-6 rounded-lg border border-slate-200 dark:border-slate-700 scrollbar-thin">
+      <table className="w-full text-sm border-collapse">
+        <thead>
+          <tr>
+            <th onClick={() => onSort('model')}
+                className={`bg-slate-50 dark:bg-slate-800 sticky top-0 z-10 px-3 py-2 text-left font-bold
+                  border-b-2 border-slate-200 dark:border-slate-600 cursor-pointer select-none whitespace-nowrap
+                  hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors
+                  ${sortCol === 'model' ? 'text-indigo-600 dark:text-indigo-400' : ''}`}>
+              HuggingFace ID <SortArrow col="model" sortCol={sortCol} sortAsc={sortAsc} />
+            </th>
+            {backends.map(b => (
+              <th key={b} onClick={() => onSort(b)}
+                  className={`bg-slate-50 dark:bg-slate-800 sticky top-0 z-10 px-3 py-2 text-left font-bold
+                    border-b-2 border-slate-200 dark:border-slate-600 cursor-pointer select-none whitespace-nowrap
+                    hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors
+                    ${sortCol === b ? 'text-indigo-600 dark:text-indigo-400' : ''}`}>
+                {b}
+                {TARGET_VERSIONS[b] && (
+                  <small className="font-normal text-slate-400 ml-1">(target: {TARGET_VERSIONS[b]})</small>
+                )}
+                <SortArrow col={b} sortCol={sortCol} sortAsc={sortAsc} />
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {filtered.map(row => (
+            <tr key={row.model} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/50 transition-colors">
+              <td className="px-3 py-2 border-b border-slate-200 dark:border-slate-700 font-medium max-w-xs overflow-hidden text-ellipsis whitespace-nowrap"
+                  title={row.model}>
+                {row.model}
+              </td>
+              {backends.map(b => {
+                const cell = row.cells[b];
+                if (!cell) return <td key={b} className="px-3 py-2 border-b border-slate-200 dark:border-slate-700">&mdash;</td>;
+                const clickable = cell.status === 'fail' || cell.status === 'partial';
+                return (
+                  <td key={b}
+                      onClick={clickable ? () => onCellClick(row.model, b, cell.error) : undefined}
+                      className={`px-3 py-2 border-b border-slate-200 dark:border-slate-700 whitespace-nowrap ${cellClass(cell.status)}`}>
+                    {cell.version}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TopErrors({ errors }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-4">
+      <button onClick={() => setOpen(!open)}
+        className="font-bold text-sm cursor-pointer py-2 text-slate-700 dark:text-slate-200 hover:text-indigo-500 dark:hover:text-indigo-400 select-none transition-colors bg-transparent border-none text-left">
+        {open ? '\u25BC' : '\u25B6'} Most common errors (top 10)
+      </button>
+      {open && (
+        errors.length === 0
+          ? <p className="py-2 text-slate-400 italic text-sm">No failures recorded for this system / mode.</p>
+          : (
+            <table className="mt-2 w-full text-sm border-collapse">
+              <thead>
+                <tr>
+                  <th className="bg-slate-50 dark:bg-slate-800 px-2 py-2 text-left border-b-2 border-slate-200 dark:border-slate-600 font-semibold w-8">#</th>
+                  <th className="bg-slate-50 dark:bg-slate-800 px-2 py-2 text-left border-b-2 border-slate-200 dark:border-slate-600 font-semibold w-14">Count</th>
+                  <th className="bg-slate-50 dark:bg-slate-800 px-2 py-2 text-left border-b-2 border-slate-200 dark:border-slate-600 font-semibold">Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {errors.map((e, i) => (
+                  <tr key={i}>
+                    <td className="px-2 py-1.5 border-b border-slate-200 dark:border-slate-700 text-center">{i + 1}</td>
+                    <td className="px-2 py-1.5 border-b border-slate-200 dark:border-slate-700 text-center font-semibold">{e.count}</td>
+                    <td className="px-2 py-1.5 border-b border-slate-200 dark:border-slate-700 font-mono text-xs break-words max-w-xl">
+                      {e.signature.length > 300 ? e.signature.substring(0, 297) + '...' : e.signature}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+      )}
+    </div>
+  );
+}
+
+function ErrorModal({ model, system, backend, error, onClose }) {
+  if (!error) return null;
+  const formatted = error.replace(/\\\\n/g, '\n').replace(/\\n/g, '\n');
+  const issueUrl = buildCallForFixUrl(model, system, backend, formatted);
+  return (
+    <div className="fixed inset-0 bg-black/50 z-[1000] flex items-center justify-center p-6" onClick={onClose}>
+      <div className="bg-white dark:bg-slate-800 rounded-lg max-w-3xl w-full max-h-[85vh] flex flex-col shadow-2xl"
+           onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-200 dark:border-slate-700 shrink-0">
+          <h3 className="flex-1 text-base font-bold">Error Details &mdash; {model} / {backend}</h3>
+          <a href={issueUrl} target="_blank" rel="noopener"
+            className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-400 dark:hover:bg-indigo-500
+                       text-white text-xs font-semibold rounded transition-colors no-underline whitespace-nowrap">
+            Call for Fix
+          </a>
+          <button onClick={onClose}
+            className="bg-transparent border-none text-xl cursor-pointer text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 px-1 rounded transition-colors">
+            &times;
+          </button>
+        </div>
+        <div className="px-5 py-4 overflow-y-auto flex-1">
+          <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed bg-slate-50 dark:bg-slate-900 p-4 rounded border border-slate-200 dark:border-slate-700">
+            {formatted}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LoadingSpinner() {
+  return (
+    <div className="flex flex-col items-center justify-center py-24 gap-4">
+      <div className="w-10 h-10 border-4 border-slate-200 dark:border-slate-700 border-t-indigo-500 dark:border-t-indigo-400 rounded-full animate-spin"></div>
+      <p className="text-sm text-slate-400">Loading support matrix...</p>
+    </div>
+  );
+}
+
+function ErrorBanner({ message, onRetry }) {
+  return (
+    <div className="mx-6 mt-6 p-4 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-lg text-sm text-red-700 dark:text-red-300 flex items-center gap-3">
+      <span className="text-lg">&#9888;</span>
+      <span className="flex-1">{message}</span>
+      {onRetry && (
+        <button onClick={onRetry}
+          className="px-3 py-1 bg-red-100 dark:bg-red-900 border border-red-300 dark:border-red-700 rounded text-xs font-semibold cursor-pointer hover:bg-red-200 dark:hover:bg-red-800 transition-colors">
+          Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Footer() {
+  return (
+    <div className="text-center py-6 text-xs text-slate-400 dark:text-slate-500 border-t border-slate-200 dark:border-slate-700 mt-8">
+      AI Configurator Support Matrix &middot; Data from <code className="text-xs">support_matrix.csv</code>
+    </div>
+  );
+}
+
+// ── App ─────────────────────────────────────────────────────────────
+
+function App() {
+  const [branch, setBranch] = useState('main');
+  const [releaseBranches, setReleaseBranches] = useState([]);
+  const [branchesLoading, setBranchesLoading] = useState(true);
+  const [branchWarning, setBranchWarning] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [csvRows, setCsvRows] = useState([]);
+
+  const [activeSystem, setActiveSystem] = useState(null);
+  const [activeMode, setActiveMode] = useState('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortCol, setSortCol] = useState(null);
+  const [sortAsc, setSortAsc] = useState(true);
+
+  const [modal, setModal] = useState(null);
+
+  useEffect(() => {
+    fetchBranchList()
+      .then(({ branches, warning }) => {
+        setReleaseBranches(branches);
+        setBranchWarning(warning || null);
+      })
+      .catch(() => {
+        setReleaseBranches(filterAndSortBranches(HARDCODED_RELEASE_BRANCHES));
+        setBranchWarning('Could not fetch branch list.');
+      })
+      .finally(() => setBranchesLoading(false));
+  }, []);
+
+  const loadCsv = useCallback((branchName) => {
+    setLoading(true);
+    setError(null);
+    setBranch(branchName);
+    fetchCsv(branchName)
+      .then(rows => {
+        setCsvRows(rows);
+        const systems = sortSystems([...new Set(rows.map(r => r.System))]);
+        if (systems.includes(PREFERRED_DEFAULT_SYSTEM)) {
+          setActiveSystem(PREFERRED_DEFAULT_SYSTEM);
+        } else {
+          setActiveSystem(systems[0] || null);
+        }
+        setSortCol(null);
+        setSortAsc(true);
+        setSearchQuery('');
+      })
+      .catch(err => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { loadCsv('main'); }, [loadCsv]);
+
+  const systems = useMemo(() => sortSystems([...new Set(csvRows.map(r => r.System))]), [csvRows]);
+  const totalPass = useMemo(() => csvRows.filter(r => r.Status === 'PASS').length, [csvRows]);
+  const totalFail = useMemo(() => csvRows.filter(r => r.Status === 'FAIL').length, [csvRows]);
+
+  const { matrixRows, backends } = useMemo(
+    () => activeSystem ? buildMatrixForMode(csvRows, activeSystem, activeMode) : { matrixRows: [], backends: [] },
+    [csvRows, activeSystem, activeMode]
+  );
+
+  const topErrors = useMemo(
+    () => activeSystem ? buildTopErrors(csvRows, activeSystem, activeMode) : [],
+    [csvRows, activeSystem, activeMode]
+  );
+
+  const handleSort = useCallback((col) => {
+    setSortCol(prev => {
+      if (prev === col) { setSortAsc(a => !a); return col; }
+      setSortAsc(true);
+      return col;
+    });
+  }, []);
+
+  const handleSelectSystem = useCallback((sys) => {
+    setActiveSystem(sys);
+    setSortCol(null);
+    setSortAsc(true);
+  }, []);
+
+  const handleSelectBranch = useCallback((branchName) => {
+    if (branchName !== branch) loadCsv(branchName);
+  }, [branch, loadCsv]);
+
+  useEffect(() => {
+    const handler = (e) => { if (e.key === 'Escape') setModal(null); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, []);
+
+  return (
+    <>
+      <Header
+        activeBranch={branch}
+        onSelectBranch={handleSelectBranch}
+        releaseBranches={releaseBranches}
+        branchesLoading={branchesLoading}
+        branchWarning={branchWarning}
+      />
+
+      {error && <ErrorBanner message={error} onRetry={() => loadCsv(branch)} />}
+
+      {loading ? <LoadingSpinner /> : !error && (
+        <>
+          <Controls
+            activeMode={activeMode} onSetMode={(m) => { setActiveMode(m); setSortCol(null); setSortAsc(true); }}
+            searchQuery={searchQuery} onSetSearch={setSearchQuery}
+            totalPass={totalPass} totalFail={totalFail}
+          />
+          <SystemTabs systems={systems} activeSystem={activeSystem} onSelectSystem={handleSelectSystem} />
+          <div className="p-6 max-w-full">
+            <Legend />
+            <MatrixTable
+              matrixRows={matrixRows} backends={backends}
+              searchQuery={searchQuery} sortCol={sortCol} sortAsc={sortAsc}
+              onSort={handleSort}
+              onCellClick={(model, backend, err) => setModal({ model, system: activeSystem, backend, error: err })}
+            />
+            <TopErrors errors={topErrors} />
+          </div>
+        </>
+      )}
+
+      <Footer />
+
+      {modal && (
+        <ErrorModal
+          model={modal.model} system={modal.system} backend={modal.backend} error={modal.error}
+          onClose={() => setModal(null)}
+        />
+      )}
+    </>
+  );
+}
+
+// ── Mount ───────────────────────────────────────────────────────────
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>

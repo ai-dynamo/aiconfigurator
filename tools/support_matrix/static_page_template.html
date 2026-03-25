@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Configurator — Support Matrix</title>
+<style>
+/* ── Reset & Custom Properties ─────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#ffffff;--bg-alt:#f7f8fa;--bg-card:#ffffff;
+  --text:#1e293b;--text-muted:#64748b;--text-inv:#ffffff;
+  --border:#e2e8f0;--border-focus:#6366f1;
+  --accent:#6366f1;--accent-hover:#4f46e5;
+  --pass-bg:#dcfce7;--pass-text:#166534;
+  --partial-bg:#fef3c7;--partial-text:#92400e;
+  --fail-bg:#fee2e2;--fail-text:#b91c1c;
+  --shadow:0 1px 3px rgba(0,0,0,.06);
+  --radius:8px;--radius-sm:4px;
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --transition:0.2s ease;
+}
+[data-theme="dark"]{
+  --bg:#0f172a;--bg-alt:#1e293b;--bg-card:#1e293b;
+  --text:#e2e8f0;--text-muted:#94a3b8;--text-inv:#0f172a;
+  --border:#334155;--border-focus:#818cf8;
+  --accent:#818cf8;--accent-hover:#6366f1;
+  --pass-bg:#052e16;--pass-text:#86efac;
+  --partial-bg:#451a03;--partial-text:#fcd34d;
+  --fail-bg:#350a0a;--fail-text:#fca5a5;
+  --shadow:0 1px 3px rgba(0,0,0,.3);
+}
+html{font-size:15px;scroll-behavior:smooth}
+body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
+
+/* ── Header ────────────────────────────────────────────────────────── */
+.header{
+  background:var(--bg-card);border-bottom:1px solid var(--border);
+  padding:1rem 1.5rem;display:flex;align-items:center;gap:1rem;
+  position:sticky;top:0;z-index:100;box-shadow:var(--shadow);
+}
+.header-titles{flex:1;min-width:0}
+.header-titles h1{font-size:1.25rem;font-weight:700;line-height:1.2}
+.subtitle{font-size:.85rem;color:var(--text-muted);font-weight:400}
+.header .meta{font-size:.8rem;color:var(--text-muted);white-space:nowrap}
+.github-link{
+  color:var(--text-muted);display:flex;align-items:center;
+  transition:color var(--transition);
+}
+.github-link:hover{color:var(--text)}
+.theme-toggle{
+  background:none;border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:.35rem .6rem;cursor:pointer;font-size:1rem;color:var(--text);
+  transition:background var(--transition);
+}
+.theme-toggle:hover{background:var(--bg-alt)}
+
+/* ── Controls Bar ──────────────────────────────────────────────────── */
+.controls{
+  padding:.75rem 1.5rem;display:flex;flex-wrap:wrap;gap:.75rem;
+  align-items:center;border-bottom:1px solid var(--border);background:var(--bg-card);
+}
+.mode-group{display:flex;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden}
+.mode-btn{
+  padding:.4rem .9rem;border:none;background:var(--bg);cursor:pointer;
+  font-size:.85rem;color:var(--text);transition:all var(--transition);
+  border-right:1px solid var(--border);
+}
+.mode-btn:last-child{border-right:none}
+.mode-btn.active{background:var(--accent);color:var(--text-inv);font-weight:600}
+.mode-btn:hover:not(.active){background:var(--bg-alt)}
+.search-box{
+  padding:.4rem .75rem;border:1px solid var(--border);border-radius:var(--radius-sm);
+  font-size:.85rem;min-width:220px;background:var(--bg);color:var(--text);
+  transition:border-color var(--transition);
+}
+.search-box:focus{outline:none;border-color:var(--border-focus)}
+.controls label{font-size:.85rem;font-weight:600;color:var(--text-muted)}
+.summary-badge{
+  margin-left:auto;font-size:.8rem;color:var(--text-muted);
+  display:flex;gap:.6rem;align-items:center;
+}
+.summary-badge .pass{color:var(--green)}
+.summary-badge .fail{color:var(--fail-text)}
+
+/* ── System Tabs ───────────────────────────────────────────────────── */
+.tab-bar{
+  display:flex;flex-wrap:wrap;gap:0;border-bottom:2px solid var(--border);
+  background:var(--bg-card);padding:0 1.5rem;
+}
+.tab-btn{
+  padding:.6rem 1.1rem;border:none;background:none;cursor:pointer;
+  font-size:.85rem;color:var(--text-muted);white-space:nowrap;
+  border-bottom:2px solid transparent;margin-bottom:-2px;
+  transition:all var(--transition);font-weight:500;
+}
+.tab-btn:hover{color:var(--text);background:var(--bg-alt)}
+.tab-btn.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:700}
+
+/* ── Main Content ──────────────────────────────────────────────────── */
+.content{padding:1rem 1.5rem;max-width:100%}
+.system-panel{display:none}
+.system-panel.active{display:block}
+
+/* ── Legend ─────────────────────────────────────────────────────────── */
+.legend{
+  display:flex;flex-wrap:wrap;gap:1rem;align-items:center;
+  margin-bottom:1rem;font-size:.85rem;color:var(--text-muted);
+}
+.legend-item{display:flex;align-items:center;gap:.4rem}
+.legend-swatch{
+  display:inline-block;width:2.2rem;height:1.2rem;border-radius:var(--radius-sm);
+  border:1px solid var(--border);
+}
+
+/* ── Matrix Table ──────────────────────────────────────────────────── */
+.table-wrap{overflow-x:auto;margin-bottom:1.5rem;border-radius:var(--radius);border:1px solid var(--border)}
+table.matrix{
+  width:100%;border-collapse:collapse;font-size:.85rem;
+}
+table.matrix th{
+  background:var(--bg-alt);position:sticky;top:0;z-index:10;
+  padding:.6rem .75rem;text-align:left;font-weight:700;
+  border-bottom:2px solid var(--border);cursor:pointer;
+  user-select:none;white-space:nowrap;transition:background var(--transition);
+}
+table.matrix th:hover{background:var(--border)}
+table.matrix th .sort-arrow{margin-left:.3rem;font-size:.7rem;opacity:.4}
+table.matrix th.sorted .sort-arrow{opacity:1}
+table.matrix td{
+  padding:.5rem .75rem;border-bottom:1px solid var(--border);
+  white-space:nowrap;transition:background var(--transition);
+}
+table.matrix tr:last-child td{border-bottom:none}
+table.matrix tbody tr:hover td{filter:brightness(0.95)}
+[data-theme="dark"] table.matrix tbody tr:hover td{filter:brightness(1.15)}
+
+td.cell-pass{background:var(--pass-bg);color:var(--pass-text);font-weight:500}
+td.cell-partial{background:var(--partial-bg);color:var(--partial-text);font-weight:500;cursor:pointer}
+td.cell-partial:hover{filter:brightness(0.92)!important;text-decoration:underline}
+td.cell-fail{
+  background:var(--fail-bg);color:var(--fail-text);font-weight:600;
+  cursor:pointer;
+}
+td.cell-fail:hover{filter:brightness(0.92)!important;text-decoration:underline}
+td.model-name{font-weight:500;max-width:320px;overflow:hidden;text-overflow:ellipsis}
+.no-results{padding:2rem;text-align:center;color:var(--text-muted);font-style:italic}
+
+/* ── Error Modal ───────────────────────────────────────────────────── */
+.modal-overlay{
+  display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
+  z-index:1000;align-items:center;justify-content:center;padding:1.5rem;
+}
+.modal-overlay.open{display:flex}
+.modal{
+  background:var(--bg-card);border-radius:var(--radius);max-width:800px;width:100%;
+  max-height:85vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.2);
+}
+.modal-header{
+  display:flex;align-items:center;gap:.75rem;padding:1rem 1.25rem;
+  border-bottom:1px solid var(--border);flex-shrink:0;
+}
+.modal-header h3{flex:1;font-size:1rem;font-weight:700}
+.modal-close{
+  background:none;border:none;font-size:1.4rem;cursor:pointer;
+  color:var(--text-muted);padding:.2rem .4rem;border-radius:var(--radius-sm);
+  transition:all var(--transition);
+}
+.modal-close:hover{background:var(--bg-alt);color:var(--text)}
+.modal-body{
+  padding:1.25rem;overflow-y:auto;flex:1;
+}
+.modal-body pre{
+  white-space:pre-wrap;word-break:break-word;font-family:var(--mono);
+  font-size:.8rem;line-height:1.5;background:var(--bg-alt);
+  padding:1rem;border-radius:var(--radius-sm);border:1px solid var(--border);
+}
+
+/* ── Top Errors Section ────────────────────────────────────────────── */
+.top-errors{margin-top:1rem}
+.top-errors summary{
+  font-weight:700;font-size:.95rem;cursor:pointer;padding:.6rem 0;
+  color:var(--text);user-select:none;
+}
+.top-errors summary:hover{color:var(--accent)}
+.errors-table{margin-top:.5rem;width:100%;border-collapse:collapse;font-size:.82rem}
+.errors-table th{
+  background:var(--bg-alt);padding:.5rem .6rem;text-align:left;
+  border-bottom:2px solid var(--border);font-weight:600;
+}
+.errors-table td{
+  padding:.45rem .6rem;border-bottom:1px solid var(--border);
+  vertical-align:top;
+}
+.errors-table td:nth-child(1){width:2rem;text-align:center}
+.errors-table td:nth-child(2){width:3.5rem;text-align:center;font-weight:600}
+.errors-table .err-sig{
+  font-family:var(--mono);font-size:.78rem;word-break:break-word;
+  max-width:600px;
+}
+
+/* ── Footer ────────────────────────────────────────────────────────── */
+.footer{
+  text-align:center;padding:1.5rem;font-size:.78rem;color:var(--text-muted);
+  border-top:1px solid var(--border);margin-top:2rem;
+}
+
+/* ── Responsive ────────────────────────────────────────────────────── */
+@media(max-width:768px){
+  .header{flex-wrap:wrap}
+  .controls{flex-direction:column;align-items:stretch}
+  .search-box{min-width:100%}
+  .summary-badge{margin-left:0;margin-top:.25rem}
+  .content{padding:.75rem}
+  .tab-bar{padding:0 .75rem}
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-titles"><h1>AI Configurator</h1><span class="subtitle">Support Matrix</span></div>
+  <a href="https://github.com/ai-dynamo/aiconfigurator" target="_blank" rel="noopener" title="View on GitHub" class="github-link">
+    <svg height="20" width="20" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+  </a>
+  <span class="meta" id="generated-at"></span>
+  <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode">&#9790;</button>
+</div>
+
+<!-- Controls -->
+<div class="controls">
+  <label>Mode:</label>
+  <div class="mode-group" id="mode-group">
+    <button class="mode-btn active" data-mode="all">All</button>
+    <button class="mode-btn" data-mode="agg">Agg</button>
+    <button class="mode-btn" data-mode="disagg">Disagg</button>
+  </div>
+  <input type="text" class="search-box" id="search-box" placeholder="Search models…">
+  <div class="summary-badge" id="summary-badge"></div>
+</div>
+
+<!-- System Tabs -->
+<div class="tab-bar" id="tab-bar"></div>
+
+<!-- Content -->
+<div class="content" id="content"></div>
+
+<!-- Error Modal -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">Error Details</h3>
+      <button class="modal-close" id="modal-close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <pre id="modal-body-pre"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="footer">
+  AI Configurator Support Matrix &middot; Auto-generated from <code>support_matrix.csv</code>
+</div>
+
+<script>
+// ── Data (injected by generate_static_page.py) ──────────────────────
+const DATA = /*__MATRIX_DATA__*/null;
+
+// ── State ───────────────────────────────────────────────────────────
+const state = {
+  activeSystem: null,
+  activeMode: 'all',
+  searchQuery: '',
+  sortCol: null,
+  sortAsc: true,
+};
+
+// ── Theme ───────────────────────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem('sm-theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = saved || (prefersDark ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-theme', theme);
+  updateThemeIcon(theme);
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('sm-theme', next);
+  updateThemeIcon(next);
+}
+
+function updateThemeIcon(theme) {
+  document.getElementById('theme-toggle').textContent = theme === 'dark' ? '\u2600' : '\u263E';
+}
+
+// ── Render ──────────────────────────────────────────────────────────
+function init() {
+  if (!DATA) { document.getElementById('content').innerHTML = '<p>No data loaded.</p>'; return; }
+  initTheme();
+
+  document.getElementById('generated-at').textContent = 'Generated: ' + DATA.generated_at;
+  document.getElementById('summary-badge').innerHTML =
+    '<span class="pass">' + DATA.summary.pass + ' PASS</span>' +
+    '<span class="fail">' + DATA.summary.fail + ' FAIL</span>';
+
+  const systems = Object.keys(DATA.systems);
+  state.activeSystem = systems[0];
+  renderTabs(systems);
+  renderAllPanels(systems);
+  showPanel(state.activeSystem);
+  bindEvents();
+}
+
+function renderTabs(systems) {
+  const bar = document.getElementById('tab-bar');
+  bar.innerHTML = systems.map(function(s) {
+    return '<button class="tab-btn' + (s === state.activeSystem ? ' active' : '') +
+           '" data-system="' + s + '">' + escHtml(s) + '</button>';
+  }).join('');
+}
+
+function renderAllPanels(systems) {
+  const content = document.getElementById('content');
+  content.innerHTML = systems.map(function(s) {
+    return '<div class="system-panel" id="panel-' + s + '">' + renderPanel(s) + '</div>';
+  }).join('');
+}
+
+function renderPanel(system) {
+  return renderLegend() + renderTable(system) + renderTopErrors(system);
+}
+
+function renderLegend() {
+  return '<div class="legend">' +
+    '<span style="font-weight:600">Legend:</span>' +
+    '<div class="legend-item"><span class="legend-swatch" style="background:var(--pass-bg)"></span> Supported</div>' +
+    '<div class="legend-item"><span class="legend-swatch" style="background:var(--partial-bg)"></span> Partial (agg or disagg only)</div>' +
+    '<div class="legend-item"><span class="legend-swatch" style="background:var(--fail-bg)"></span> FAIL (click for details)</div>' +
+    '</div>';
+}
+
+function renderTable(system) {
+  const info = DATA.systems[system];
+  const rows = info.matrix[state.activeMode] || [];
+  const backends = info.backends || [];
+  if (!rows.length) return '<div class="no-results">No data for this system / mode combination.</div>';
+
+  let filtered = rows;
+  if (state.searchQuery) {
+    const q = state.searchQuery.toLowerCase();
+    filtered = rows.filter(function(r) { return r.model.toLowerCase().indexOf(q) !== -1; });
+  }
+
+  if (state.sortCol !== null) {
+    const col = state.sortCol;
+    const asc = state.sortAsc;
+    filtered = filtered.slice().sort(function(a, b) {
+      var va, vb;
+      if (col === 'model') { va = a.model; vb = b.model; }
+      else { va = (a.cells[col] || {}).version || ''; vb = (b.cells[col] || {}).version || ''; }
+      if (va === vb) return 0;
+      if (va === 'FAIL') return asc ? 1 : -1;
+      if (vb === 'FAIL') return asc ? -1 : 1;
+      return asc ? (va < vb ? -1 : 1) : (va > vb ? -1 : 1);
+    });
+  }
+
+  if (!filtered.length) return '<div class="no-results">No models match your search.</div>';
+
+  var arrow = function(col) {
+    if (state.sortCol !== col) return '<span class="sort-arrow">&#9650;</span>';
+    return '<span class="sort-arrow">' + (state.sortAsc ? '&#9650;' : '&#9660;') + '</span>';
+  };
+
+  var html = '<div class="table-wrap"><table class="matrix">';
+  html += '<thead><tr>';
+  html += '<th data-sort="model" class="' + (state.sortCol === 'model' ? 'sorted' : '') + '">HuggingFace ID ' + arrow('model') + '</th>';
+  backends.forEach(function(b) {
+    var target = DATA.target_versions[b] ? ' <small style="font-weight:400;color:var(--text-muted)">(target: ' + escHtml(DATA.target_versions[b]) + ')</small>' : '';
+    html += '<th data-sort="' + b + '" class="' + (state.sortCol === b ? 'sorted' : '') + '">' + escHtml(b) + target + ' ' + arrow(b) + '</th>';
+  });
+  html += '</tr></thead><tbody>';
+
+  filtered.forEach(function(row) {
+    html += '<tr>';
+    html += '<td class="model-name" title="' + escAttr(row.model) + '">' + escHtml(row.model) + '</td>';
+    backends.forEach(function(b) {
+      var cell = row.cells[b];
+      if (!cell) { html += '<td>—</td>'; return; }
+      if (cell.version === 'FAIL') {
+        html += '<td class="cell-fail" data-error="' + escAttr(cell.error || '') +
+                '" data-model="' + escAttr(row.model) + '" data-backend="' + escAttr(b) +
+                '">FAIL</td>';
+      } else if (cell.status === 'partial') {
+        html += '<td class="cell-partial" data-error="' + escAttr(cell.error || '') +
+                '" data-model="' + escAttr(row.model) + '" data-backend="' + escAttr(b) +
+                '">' + escHtml(cell.version) + '</td>';
+      } else {
+        html += '<td class="cell-pass">' + escHtml(cell.version) + '</td>';
+      }
+    });
+    html += '</tr>';
+  });
+
+  html += '</tbody></table></div>';
+  return html;
+}
+
+function renderTopErrors(system) {
+  var errors = (DATA.systems[system].top_errors || {})[state.activeMode] || [];
+  if (!errors.length) return '<div class="top-errors"><details><summary>Most common errors (top 10)</summary><p style="padding:.5rem 0;color:var(--text-muted);font-style:italic">No failures recorded for this system / mode.</p></details></div>';
+
+  var html = '<div class="top-errors"><details><summary>Most common errors (top 10)</summary>';
+  html += '<table class="errors-table"><thead><tr><th>#</th><th>Count</th><th>Error</th></tr></thead><tbody>';
+  errors.forEach(function(e, i) {
+    var sig = e.signature.length > 300 ? e.signature.substring(0, 297) + '...' : e.signature;
+    html += '<tr><td>' + (i + 1) + '</td><td>' + e.count + '</td><td class="err-sig">' + escHtml(sig) + '</td></tr>';
+  });
+  html += '</tbody></table></details></div>';
+  return html;
+}
+
+// ── Refresh helpers ─────────────────────────────────────────────────
+function refreshActivePanel() {
+  var panel = document.getElementById('panel-' + state.activeSystem);
+  if (panel) panel.innerHTML = renderPanel(state.activeSystem);
+}
+
+function showPanel(system) {
+  document.querySelectorAll('.system-panel').forEach(function(p) { p.classList.remove('active'); });
+  var panel = document.getElementById('panel-' + system);
+  if (panel) panel.classList.add('active');
+
+  document.querySelectorAll('.tab-btn').forEach(function(b) {
+    b.classList.toggle('active', b.getAttribute('data-system') === system);
+  });
+  state.activeSystem = system;
+  state.sortCol = null;
+  state.sortAsc = true;
+  refreshActivePanel();
+}
+
+// ── Events ──────────────────────────────────────────────────────────
+function bindEvents() {
+  // Tab clicks
+  document.getElementById('tab-bar').addEventListener('click', function(e) {
+    var btn = e.target.closest('.tab-btn');
+    if (btn) showPanel(btn.getAttribute('data-system'));
+  });
+
+  // Mode buttons
+  document.getElementById('mode-group').addEventListener('click', function(e) {
+    var btn = e.target.closest('.mode-btn');
+    if (!btn) return;
+    state.activeMode = btn.getAttribute('data-mode');
+    document.querySelectorAll('.mode-btn').forEach(function(b) { b.classList.remove('active'); });
+    btn.classList.add('active');
+    state.sortCol = null;
+    state.sortAsc = true;
+    refreshActivePanel();
+  });
+
+  // Search
+  var searchTimeout;
+  document.getElementById('search-box').addEventListener('input', function(e) {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(function() {
+      state.searchQuery = e.target.value.trim();
+      refreshActivePanel();
+    }, 200);
+  });
+
+  // Sort (delegated)
+  document.getElementById('content').addEventListener('click', function(e) {
+    var th = e.target.closest('th[data-sort]');
+    if (th) {
+      var col = th.getAttribute('data-sort');
+      if (state.sortCol === col) { state.sortAsc = !state.sortAsc; }
+      else { state.sortCol = col; state.sortAsc = true; }
+      refreshActivePanel();
+      return;
+    }
+    // FAIL or partial cell click → modal
+    var td = e.target.closest('td.cell-fail, td.cell-partial');
+    if (td) {
+      var error = td.getAttribute('data-error');
+      var model = td.getAttribute('data-model');
+      var backend = td.getAttribute('data-backend');
+      if (error) openModal(model, backend, error);
+    }
+  });
+
+  // Modal close
+  document.getElementById('modal-close').addEventListener('click', closeModal);
+  document.getElementById('modal-overlay').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+  });
+
+  // Theme toggle
+  document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+}
+
+// ── Modal ───────────────────────────────────────────────────────────
+function openModal(model, backend, error) {
+  document.getElementById('modal-title').textContent = 'Error Details — ' + model + ' / ' + backend;
+  var formatted = error.replace(/\\\\n/g, '\n').replace(/\\n/g, '\n');
+  document.getElementById('modal-body-pre').textContent = formatted;
+  document.getElementById('modal-overlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+// ── Utilities ───────────────────────────────────────────────────────
+function escHtml(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Init ────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
