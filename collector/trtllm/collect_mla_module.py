@@ -65,6 +65,36 @@ from tensorrt_llm.quantization.mode import QuantAlgo
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
+# Fix NVFP4 weight_scale 2D bug in TRT-LLM <= rc6: weight_scale is allocated 1D
+# but post_load_weights() asserts dim()==2. Patch only if defined on the class
+# itself (rc9+ removed post_load_weights from DeepseekV32Attention).
+try:
+    from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV32Attention
+
+    if "post_load_weights" in DeepseekV32Attention.__dict__:
+
+        def _post_load_weights(self):
+            assert self.kv_a_proj_with_mqa.weight.data.dtype == self.indexer.wk.weight.data.dtype
+            offset = self.kv_lora_rank + self.qk_rope_head_dim + self.q_lora_rank
+            self.kv_a_proj_with_mqa.weight.data[offset : offset + self.indexer.head_dim].copy_(
+                self.indexer.wk.weight.data
+            )
+            if getattr(self.indexer.wk, "weight_scale", None) is not None:
+                _pad = lambda x, n: (x + n - 1) // n * n
+                for m in (self.kv_a_proj_with_mqa, self.indexer.wk):
+                    ws = m.weight_scale
+                    if ws.dim() == 1:
+                        nr = _pad(m.weight.shape[0], 128)
+                        m.weight_scale.data = ws.data.view(nr, ws.numel() // nr)
+                scale = self.indexer.wk.weight_scale.data
+                self.kv_a_proj_with_mqa.weight_scale.data[offset : offset + scale.shape[0]].copy_(scale)
+            self.indexer.wk = None
+
+        DeepseekV32Attention.post_load_weights = _post_load_weights
+except ImportError:
+    pass
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Supported Models — model_path → attention type
 # ═══════════════════════════════════════════════════════════════════════
@@ -218,6 +248,14 @@ def _round_up(a, b):
     return _ceil_div(a, b) * b
 
 
+def _replace_quant_config(qc, **kwargs):
+    """Replace fields in quant_config; supports both dataclass and Pydantic BaseModel."""
+    if dataclasses.is_dataclass(qc):
+        return dataclasses.replace(qc, **kwargs)
+    # Pydantic BaseModel (TRT-LLM >= rc9 uses StrictBaseModel / Pydantic v2)
+    return qc.model_copy(update=kwargs)
+
+
 def _apply_gemm_type_quant(model_config, gemm_type: str, use_fp8_kv_cache: bool):
     """Apply GEMM quantization to model_config.quant_config.
 
@@ -228,12 +266,12 @@ def _apply_gemm_type_quant(model_config, gemm_type: str, use_fp8_kv_cache: bool)
 
     if gemm_type == "bfloat16":
         if use_fp8_kv_cache:
-            model_config.quant_config = dataclasses.replace(
+            model_config.quant_config = _replace_quant_config(
                 model_config.quant_config,
                 kv_cache_quant_algo=kv_algo,
             )
     elif gemm_type == "fp8_block":
-        model_config.quant_config = dataclasses.replace(
+        model_config.quant_config = _replace_quant_config(
             model_config.quant_config,
             quant_algo=QuantAlgo.FP8_BLOCK_SCALES,
             group_size=128,
@@ -241,7 +279,7 @@ def _apply_gemm_type_quant(model_config, gemm_type: str, use_fp8_kv_cache: bool)
             exclude_modules=None,
         )
     elif gemm_type == "nvfp4":
-        model_config.quant_config = dataclasses.replace(
+        model_config.quant_config = _replace_quant_config(
             model_config.quant_config,
             quant_algo=QuantAlgo.NVFP4,
             kv_cache_quant_algo=kv_algo,
@@ -376,11 +414,18 @@ def create_kv_cache_and_metadata(
         kv_cache_len = seq_len
 
     # --- KV Cache Manager ---
-    kv_cache_manager_cls = get_kv_cache_manager_cls(model_config)
     kv_cache_config = KvCacheConfig(
         max_tokens=batch_size * _round_up(max_seq, tokens_per_block),
         enable_block_reuse=False,
     )
+    import inspect as _inspect
+
+    _kv_sig = _inspect.signature(get_kv_cache_manager_cls)
+    if "kv_cache_config" in _kv_sig.parameters:
+        # TRT-LLM >= rc9: requires kv_cache_config argument
+        kv_cache_manager_cls = get_kv_cache_manager_cls(model_config, kv_cache_config)
+    else:
+        kv_cache_manager_cls = get_kv_cache_manager_cls(model_config)
     kv_cache_dtype = DataType.FP8 if use_fp8_kv_cache else torch_dtype_to_binding(torch.bfloat16)
 
     layer_mask = [True]  # single layer
@@ -412,7 +457,7 @@ def create_kv_cache_and_metadata(
 
     sm_major = torch.cuda.get_device_capability()[0]
     _enable_flash_mla = (
-        model_config.attn_backend == "TRTLLM" and (kv_lora_rank + qk_rope_head_dim) == 576 and sm_major >= 9
+        model_config.attn_backend == "TRTLLM" and (kv_lora_rank + qk_rope_head_dim) == 576 and sm_major == 9
     )
 
     attn_metadata = attention_cls.Metadata(
