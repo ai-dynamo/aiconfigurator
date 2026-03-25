@@ -22,6 +22,38 @@ class NemotronNas(BaseModel):
     models
     """
 
+    @classmethod
+    def create(cls, model_info: dict, model_config, backend_name: str) -> NemotronNas:
+        model = cls(
+            model_info["model_path"],
+            model_info["model_family"],
+            model_info["architecture"],
+            model_info["layers"],
+            model_info["n"],
+            model_info["n_kv"],
+            model_info["d"],
+            model_info["hidden_size"],
+            model_info["inter_size"],
+            model_info["vocab"],
+            model_info["context"],
+            model_config,
+        )
+        extra_params = model_info.get("extra_params")
+        if isinstance(extra_params, list):
+            model.context_ops = extra_params
+            model.generation_ops = extra_params
+        else:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "NemotronNAS model '%s' missing block configs in model metadata; leaving pipelines empty.",
+                model_info["model_path"],
+            )
+            model.context_ops = []
+            model.generation_ops = []
+        return model
+
     def __init__(self, *args):
         """
         Initialize NemotronNas model with configurable transformer blocks.

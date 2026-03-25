@@ -21,6 +21,27 @@ class MOEModel(BaseModel):
     TODO: redesign shared moe part.
     """
 
+    @classmethod
+    def create(cls, model_info: dict, model_config, backend_name: str) -> MOEModel:
+        return cls(
+            model_info["topk"],
+            model_info["num_experts"],
+            model_info["moe_inter_size"],
+            model_info["model_path"],
+            model_info["model_family"],
+            model_info["architecture"],
+            model_info["layers"],
+            model_info["n"],
+            model_info["n_kv"],
+            model_info["d"],
+            model_info["hidden_size"],
+            model_info["inter_size"],
+            model_info["vocab"],
+            model_info["context"],
+            model_config,
+            model_info.get("extra_params"),
+        )
+
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
         super().__init__(*args)
 

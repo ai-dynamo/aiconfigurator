@@ -10,18 +10,12 @@ All public names are re-exported here for backward compatibility:
 
 from __future__ import annotations
 
+import importlib
 import logging
+import pkgutil
 
 from aiconfigurator.sdk import config
-from aiconfigurator.sdk.models.base import BaseModel
-from aiconfigurator.sdk.models.deepseek import (
-    DeepSeekModel,
-    TrtllmWideEPDeepSeekModel,
-    WideEPDeepSeekModel,
-)
-
-# Import all model modules to trigger @register_model decoration
-from aiconfigurator.sdk.models.gpt import GPTModel
+from aiconfigurator.sdk.models.base import _MODEL_REGISTRY, BaseModel
 from aiconfigurator.sdk.models.helpers import (
     _apply_model_quant_defaults,
     _architecture_to_model_family,
@@ -31,11 +25,14 @@ from aiconfigurator.sdk.models.helpers import (
     check_is_moe,
     get_model_family,
 )
-from aiconfigurator.sdk.models.hybrid_moe import HybridMoEModel
-from aiconfigurator.sdk.models.llama import LLAMAModel
-from aiconfigurator.sdk.models.moe import MOEModel
-from aiconfigurator.sdk.models.nemotron_h import NemotronHModel
-from aiconfigurator.sdk.models.nemotron_nas import NemotronNas
+
+# Auto-import all model modules to trigger @register_model decoration.
+# Any .py file in this package (except base, helpers, __init__) is auto-imported.
+_SKIP = {"base", "helpers"}
+for _, _name, _ in pkgutil.iter_modules(__path__):
+    if _name not in _SKIP:
+        importlib.import_module(f".{_name}", __name__)
+del _SKIP, _name
 
 logger = logging.getLogger(__name__)
 
@@ -51,215 +48,39 @@ def get_model(
     model_info = _get_model_info(model_path)
     raw_config = model_info.get("raw_config", {})
     architecture = model_info["architecture"]
-    layers = model_info["layers"]
-    n = model_info["n"]
-    n_kv = model_info["n_kv"]
-    d = model_info["d"]
-    hidden = model_info["hidden_size"]
-    inter = model_info["inter_size"]
-    vocab = model_info["vocab"]
-    context = model_info["context"]
-    topk = model_info["topk"]
-    num_experts = model_info["num_experts"]
-    moe_inter_size = model_info["moe_inter_size"]
-    extra_params = model_info["extra_params"]
-    # Convert architecture (e.g., 'LlamaForCausalLM') to model family (e.g., 'LLAMA')
     model_family = _architecture_to_model_family(architecture)
 
     _apply_model_quant_defaults(model_config, raw_config, architecture, backend_name)
 
     if model_config.overwrite_num_layers > 0:
-        layers = model_config.overwrite_num_layers
+        model_info["layers"] = model_config.overwrite_num_layers
 
-    # --- Special dispatch for DEEPSEEK (backend/wideep variants) ---
-    if model_family == "DEEPSEEK":
-        if backend_name == "sglang" and model_config.enable_wideep:
-            logger.debug(f"WideEP is enabled for model {model_path} with backend {backend_name}")
-            model = WideEPDeepSeekModel(
-                topk,
-                num_experts,
-                moe_inter_size,
-                model_path,
-                model_family,
-                architecture,
-                layers,
-                n,
-                n_kv,
-                d,
-                hidden,
-                inter,
-                vocab,
-                context,
-                model_config,
-            )
-        elif backend_name == "trtllm" and model_config.enable_wideep:
-            logger.debug(f"TensorRT-LLM WideEP is enabled for model {model_path}")
-            model = TrtllmWideEPDeepSeekModel(
-                topk,
-                num_experts,
-                moe_inter_size,
-                model_path,
-                model_family,
-                architecture,
-                layers,
-                n,
-                n_kv,
-                d,
-                hidden,
-                inter,
-                vocab,
-                context,
-                model_config,
-                extra_params,
-            )
-        else:
-            logger.debug(f"WideEP is not enabled for model {model_path} with backend {backend_name}")
-            model = DeepSeekModel(
-                topk,
-                num_experts,
-                moe_inter_size,
-                model_path,
-                model_family,
-                architecture,
-                layers,
-                n,
-                n_kv,
-                d,
-                hidden,
-                inter,
-                vocab,
-                context,
-                model_config,
-                extra_params,
-            )
-        return model
+    # Enrich model_info with derived fields for create()
+    model_info["model_path"] = model_path
+    model_info["model_family"] = model_family
 
-    # --- Standard registry lookup ---
-    if model_family == "GPT":
-        model = GPTModel(
-            model_path,
-            model_family,
-            architecture,
-            layers,
-            n,
-            n_kv,
-            d,
-            hidden,
-            inter,
-            vocab,
-            context,
-            model_config,
-            extra_params,
+    cls = _MODEL_REGISTRY.get(model_family)
+    if cls is None:
+        raise ValueError(
+            f"Unknown model family: {model_family}. Registered families: {', '.join(sorted(_MODEL_REGISTRY.keys()))}"
         )
-    elif model_family == "LLAMA":
-        model = LLAMAModel(
-            model_path,
-            model_family,
-            architecture,
-            layers,
-            n,
-            n_kv,
-            d,
-            hidden,
-            inter,
-            vocab,
-            context,
-            model_config,
-            extra_params,
-        )
-    elif model_family == "HYBRIDMOE":
-        model = HybridMoEModel(
-            topk,
-            num_experts,
-            moe_inter_size,
-            model_path,
-            model_family,
-            architecture,
-            layers,
-            n,
-            n_kv,
-            d,
-            hidden,
-            inter,
-            vocab,
-            context,
-            model_config,
-        )
-        model.set_hybrid_config(extra_params)
-    elif model_family == "MOE":
-        # currently we don't support wideep for sglang moe models (other than DS V3)
-        model = MOEModel(
-            topk,
-            num_experts,
-            moe_inter_size,
-            model_path,
-            model_family,
-            architecture,
-            layers,
-            n,
-            n_kv,
-            d,
-            hidden,
-            inter,
-            vocab,
-            context,
-            model_config,
-            extra_params,
-        )
-    elif model_family == "NEMOTRONNAS":
-        model = NemotronNas(
-            model_path,
-            model_family,
-            architecture,
-            layers,
-            n,
-            n_kv,
-            d,
-            hidden,
-            inter,
-            vocab,
-            context,
-            model_config,
-        )
-        # NemotronNAS uses extra_params as a list of BlockConfig to build its pipelines.
-        # Not all model metadata sources carry these NAS block configs, so only apply them when provided.
-        if isinstance(extra_params, list):
-            model.context_ops = extra_params
-            model.generation_ops = extra_params
-        else:
-            logger.warning(
-                "NemotronNAS model '%s' missing block configs in model metadata; leaving pipelines empty.",
-                model_path,
-            )
-            model.context_ops = []
-            model.generation_ops = []
-    elif model_family == "NEMOTRONH":
-        model = NemotronHModel(
-            topk,
-            num_experts,
-            moe_inter_size,
-            model_path,
-            model_family,
-            architecture,
-            layers,
-            n,
-            n_kv,
-            d,
-            hidden,
-            inter,
-            vocab,
-            context,
-            model_config,
-        )
-        # extra_params is NemotronHConfig with hybrid layer configuration
-        model.set_hybrid_config(extra_params)
-    else:
-        raise ValueError(f"Unknown model family: {model_family}")
-
-    return model
+    return cls.create(model_info, model_config, backend_name)
 
 
-# Re-export everything for backward compatibility
+# Re-export model classes for backward compatibility.
+# These are available via auto-discovery above; explicit names here for static analysis / IDE support.
+from aiconfigurator.sdk.models.deepseek import (
+    DeepSeekModel,
+    TrtllmWideEPDeepSeekModel,
+    WideEPDeepSeekModel,
+)
+from aiconfigurator.sdk.models.gpt import GPTModel
+from aiconfigurator.sdk.models.hybrid_moe import HybridMoEModel
+from aiconfigurator.sdk.models.llama import LLAMAModel
+from aiconfigurator.sdk.models.moe import MOEModel
+from aiconfigurator.sdk.models.nemotron_h import NemotronHModel
+from aiconfigurator.sdk.models.nemotron_nas import NemotronNas
+
 __all__ = [
     "BaseModel",
     "DeepSeekModel",
