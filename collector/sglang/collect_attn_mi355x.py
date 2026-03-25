@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Compatible with ROCm 7.0 (HIP): Aiter or Triton attention (see SGLANG_COLLECT_ATTN_BACKEND), skips FP8/TRTLLM, allows graph fallback.
+# CUDA: FlashAttention / TRT-LLM MHA / Triton (SM110+). ROCm (HIP): Aiter or Triton via SGLANG_COLLECT_ATTN_BACKEND; skips FP8/TRTLLM; allow_graph_fail for graphs.
+
+__compat__ = "sglang>=0.5.5"
+
 import logging
 import math
 import os
@@ -35,7 +38,7 @@ dp_attention._ATTN_DP_RANK = 0
 dp_attention._LOCAL_ATTN_DP_SIZE = 1
 dp_attention._LOCAL_ATTN_DP_RANK = 0
 
-# todo: support triton backend
+# from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -43,7 +46,6 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMo
 try:
     from helper import benchmark_with_power, get_sm_version, log_perf
 except ModuleNotFoundError:
-    import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -52,12 +54,14 @@ except ModuleNotFoundError:
 
 logger = logging.getLogger(__name__)
 
+DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
+
 
 def _create_non_trtllm_attn_backend(model_runner):
     """Pick Aiter vs Triton for non-TRTLLM attention (ROCm / fallback paths).
 
     Env ``SGLANG_COLLECT_ATTN_BACKEND``:
-      - ``auto`` (default): ``triton`` on HIP, ``aiter`` on CUDA.
+      - ``auto`` (default): ``aiter`` on HIP, ``triton`` on CUDA.
       - ``aiter``: :class:`AiterAttnBackend`.
       - ``triton``: :class:`TritonAttnBackend`; on import/runtime failure, falls back to Aiter.
 
@@ -98,11 +102,6 @@ def _get_effective_sm_version():
     return get_sm_version()
 
 
-DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
-
-compatible_version = ["0.5.5.post3", "0.5.6.post2"]
-
-
 class Timing(NamedTuple):
     mean: float
 
@@ -122,6 +121,7 @@ class MockModelConfig:
         self.full_attention_layer_ids = []
         self.is_multimodal = False
         self.hidden_size = num_attention_heads * head_dim
+        self.is_local_attention_model = False
 
         class MockHFConfig:
             def __init__(self):
@@ -141,6 +141,7 @@ class MockServerArgs:
         self.kv_cache_dtype = "auto"
         self.speculative_eagle_topk = 0
         self.speculative_num_draft_tokens = 0
+        self.speculative_num_steps = None
         self.page_size = page_size
         self.multi_item_scoring_delimiter = None
         self.dllm_algorithm = None
@@ -148,7 +149,11 @@ class MockServerArgs:
         self.enable_piecewise_cuda_graph = False
         self.model_path = None
         self.revision = None
-        self.speculative_num_steps= 0
+        # Required by TritonAttnBackend
+        self.triton_attention_num_kv_splits = 8
+        self.triton_attention_split_tile_size = None
+        self.disable_cuda_graph = False
+        self.chunked_prefill_size = -1
 
 
 class MockModelRunner:
@@ -181,6 +186,10 @@ class MockModelRunner:
         self.is_hybrid_swa = self.model_config.is_hybrid_swa
         self.server_args.kv_cache_dtype = kv_cache_dtype
         self.server_args.page_size = page_size
+        # Required by TritonAttnBackend
+        self.gpu_id = 0
+        self.hybrid_gdn_config = None
+        self.kimi_linear_config = None
 
 
 def create_req_to_token_pool(batch_size, total_len, page_size, torch_device, device_str):
@@ -381,20 +390,32 @@ def run_attention_torch(
     )
     model_runner.token_to_kv_pool = kv_pool
 
-    # TRTLLM backend is NVIDIA-only; otherwise Aiter or Triton (see _create_non_trtllm_attn_backend)
-    sm_version = _get_effective_sm_version()
-    if sm_version >= 100 and not is_hip():
-        try:
-            from sglang.srt.layers.attention.trtllm_mha_backend import (
-                TRTLLMHAAttnBackend,
-            )
-
-            attn_backend = TRTLLMHAAttnBackend(model_runner)
-            kernel_source = "trtllm_mha"
-        except ImportError:
-            attn_backend, kernel_source = _create_non_trtllm_attn_backend(model_runner)
-    else:
+    # TRTLLM is NVIDIA-only; ROCm uses Aiter/Triton via _create_non_trtllm_attn_backend
+    if is_hip():
         attn_backend, kernel_source = _create_non_trtllm_attn_backend(model_runner)
+    else:
+        sm_version = get_sm_version()
+        if sm_version >= 110:
+            # SM120+ (workstation Blackwell): TRTLLM prefill (TllmGenFmhaRunner) is unsupported;
+            # FA3 is not compiled for SM120. Use Triton JIT-compiled backend instead.
+            from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
+
+            attn_backend = TritonAttnBackend(model_runner)
+            kernel_source = "triton"
+        elif sm_version >= 100:
+            try:
+                from sglang.srt.layers.attention.trtllm_mha_backend import (
+                    TRTLLMHAAttnBackend,
+                )
+
+                attn_backend = TRTLLMHAAttnBackend(model_runner)
+                kernel_source = "trtllm_mha"
+            except ImportError:
+                attn_backend = FlashAttentionBackend(model_runner)
+                kernel_source = "flash_attention"
+        else:
+            attn_backend = FlashAttentionBackend(model_runner)
+            kernel_source = "flash_attention"
 
     model_runner.attn_backend = attn_backend
 

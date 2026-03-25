@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ROCm 7.0 (HIP): MLA uses AiterAttnBackend (same class as MHA; dispatches to aiter.mla kernels).
+# ROCm (HIP): MLA via AiterAttnBackend (aiter MLA kernels), same spirit as collect_wideep_attn aiter path.
+
+__compat__ = "sglang>=0.5.5"
+
 import math
 import os
 import random
@@ -25,7 +28,7 @@ except ModuleNotFoundError:
 
 
 def _runtime_hip_available() -> bool:
-    """True when this PyTorch build targets HIP/ROCm (torch.version.hip is set)."""
+    """True when PyTorch is built for ROCm (torch.version.hip is set)."""
     return bool(getattr(torch.version, "hip", None))
 
 
@@ -42,14 +45,20 @@ sglang.srt.layers.dp_attention.get_attention_dp_size = lambda: 1
 sglang.srt.layers.dp_attention.get_attention_dp_rank = lambda: 0
 sglang.srt.layers.dp_attention.is_dp_attention_enabled = lambda: False
 sglang.srt.layers.dp_attention._ENABLE_DP_ATTENTION_FLAG = False
-# Patch imported versions in other modules
-# import sglang.srt.layers.attention.flashinfer_mla_backend
-# import sglang.srt.layers.attention.trtllm_mla_backend
+# NVIDIA-only MLA backends: patch TP size when importable (may be absent on minimal ROCm images).
+try:
+    import sglang.srt.layers.attention.flashinfer_mla_backend as _flashinfer_mla_backend
 
-# sglang.srt.layers.attention.flashinfer_mla_backend.get_attention_tp_size = lambda: 1
-# sglang.srt.layers.attention.trtllm_mla_backend.get_attention_tp_size = lambda: 1
+    _flashinfer_mla_backend.get_attention_tp_size = lambda: 1
+except ImportError:
+    _flashinfer_mla_backend = None  # type: ignore[misc, assignment]
 
-compatible_version = ["0.5.5.post3", "0.5.6.post2"]
+try:
+    import sglang.srt.layers.attention.trtllm_mla_backend as _trtllm_mla_backend
+
+    _trtllm_mla_backend.get_attention_tp_size = lambda: 1
+except ImportError:
+    _trtllm_mla_backend = None  # type: ignore[misc, assignment]
 
 _FP8_KV_DTYPES = (torch.float8_e4m3fn,)
 if hasattr(torch, "float8_e4m3fnuz"):
@@ -71,7 +80,6 @@ MAX_KV_LOC = (INT32_MAX // (KV_LORA_RANK + QK_ROPE_HEAD_DIM)) - MLA_PAGE_SIZE
 # Collector uses TRTLLM MLA on Blackwell (prefill & decode), matches DeepSeek V3 default.
 
 # We only cover deepseek v3 in this collector script.
-
 
 class MockModelConfig:
     def __init__(
@@ -99,7 +107,7 @@ class MockModelConfig:
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.scaling = scaling
-        # AiterAttnBackend reads head_dim / dtype / is_multimodal from model_config
+        self.is_local_attention_model = False
         self.head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.dtype = torch.bfloat16
         self.is_multimodal = False
@@ -116,7 +124,7 @@ class MockServerArgs:
         self.speculative_eagle_topk = 0
         self.speculative_num_draft_tokens = 0
         self.speculative_attention_mode = "prefill"
-        # Default to FA3 for Hopper; overridden to trtllm_mla for Blackwell below
+        # Default to FA3 for Hopper; overridden to trtllm_mla for Blackwell / aiter for HIP below
         self.prefill_attention_backend = "fa3"
         self.decode_attention_backend = "fa3"
         self.page_size = page_size
@@ -167,9 +175,7 @@ def create_req_to_token_pool(
     )
     req_indices = torch.arange(batch_size, dtype=torch.int32, device=torch_device).view(batch_size, 1)
     token_offsets = torch.arange(total_len, dtype=torch.int32, device=torch_device).view(1, total_len)
-    # Map (batch i, position j) -> flat KV slot i * total_len + j. Do not add page_size here:
-    # kv_cache_size is sized for batch_size * total_len slots; an offset would push indices past the pool (GPU fault).
-    token_matrix = (req_indices * total_len) + token_offsets
+    token_matrix = (req_indices * total_len) + token_offsets + page_size
     pool.req_to_token[:batch_size, :total_len] = token_matrix
     return pool, token_matrix.contiguous()
 
@@ -186,13 +192,7 @@ def benchmark_layer(
     kernel_source: str = "flash_attention",
     **kwargs,
 ):
-    # Use benchmark_with_power context manager
     device = q.device
-
-    # RadixAttention: without k_rope, k is viewed as qk_head_dim (576 for fused MLA).
-    # Aiter: fuse q/k for decode (mla_decode_fwd). For EXTEND, prefill must not hit
-    # flash_attn_varlen_func (CK head_dim<=256); run_mla uses a fake prefix so Aiter uses
-    # mla_prefill_fwd — still expects fused q/k at the RadixAttention boundary.
     use_fused_mla = kernel_source == "aiter_attention"
 
     def kernel_func():
@@ -217,7 +217,6 @@ def benchmark_layer(
 
 
 def _mla_sm_gate_ok():
-    """MLA non-Aiter path needs SM90+ FlashAttention; ROCm uses Aiter instead."""
     if is_hip():
         return True
     try:
@@ -226,8 +225,23 @@ def _mla_sm_gate_ok():
         return False
 
 
+# Aiter mla_prefill_asm_fwd: 16 or 128 local heads (runtime error text). Decode (generation) on ROCm
+# still hits GPU faults with local_heads==16 in practice — restrict generation sweep to 128 only.
+_AITER_MLA_PREFILL_LOCAL_HEADS = frozenset({16, 128})
+
+
+def _aiter_mla_supported_local_heads(
+    num_heads: int, tp_size: int, *, is_generation_phase: bool
+) -> bool:
+    """ROCm Aiter MLA: prefill allows local heads in {16, 128}; generation only local_heads==128."""
+    if tp_size <= 0 or num_heads % tp_size != 0:
+        return False
+    local = num_heads // tp_size
+    if is_generation_phase:
+        return local == 128
+    return local in _AITER_MLA_PREFILL_LOCAL_HEADS
+
 def get_context_mla_test_cases():
-    # MLA: Hopper+ uses FA3 FlashAttention; ROCm uses Aiter MLA kernels
     if not _mla_sm_gate_ok():
         return []
 
@@ -241,14 +255,15 @@ def get_context_mla_test_cases():
     for n in n_list:
         for b in b_list:
             for s in s_list:
-                # Aiter MLA prefill uses a 1-token synthetic prefix; need s>=2 so extend has tokens.
                 if is_hip() and s < 2:
                     continue
                 for dtype in dtype_list:
                     for tp_size in [1, 2, 4, 8, 16, 32, 64]:
                         if b * s > 65536:
                             continue
-                        if is_hip() and not _aiter_mla_supported_local_heads(n, tp_size):
+                        if is_hip() and not _aiter_mla_supported_local_heads(
+                            n, tp_size, is_generation_phase=False
+                        ):
                             continue
                         test_cases.append(
                             [
@@ -273,11 +288,23 @@ def get_generation_mla_test_cases():
     if not _mla_sm_gate_ok():
         return []
 
-    dtype_list = [torch.bfloat16]
-    if not is_hip():
-        dtype_list.extend(_FP8_KV_DTYPES)
+    if is_hip():
+        dtype_list = [torch.bfloat16]
+    else:
+        try:
+            sm_version = get_sm_version()
+        except Exception:
+            sm_version = 0
+        if sm_version == 120:
+            dtype_list = list(_FP8_KV_DTYPES)
+        else:
+            dtype_list = [torch.bfloat16, *_FP8_KV_DTYPES]
     test_cases = []
     n_list = [64, 128]
+    try:
+        _gen_sm = get_sm_version() if not is_hip() else 0
+    except Exception:
+        _gen_sm = 0
     for n in n_list:
         for b in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]:
             for s in [
@@ -301,12 +328,15 @@ def get_generation_mla_test_cases():
             ]:
                 for dtype in dtype_list:
                     for tp_size in [1, 2, 4, 8, 16, 32, 64]:
+                        if _gen_sm == 120 and n // tp_size != 128:
+                            continue
                         if b * s > 1024 * 4096 * 4:
                             continue
-                        if is_hip() and not _aiter_mla_supported_local_heads(n, tp_size):                            
+                        if is_hip() and not _aiter_mla_supported_local_heads(
+                            n, tp_size, is_generation_phase=True
+                        ):
                             continue
                         total_len = s
-                        # Guard against hitting int32 limits in the legacy flashmla kernel path.
                         if b * total_len > MAX_KV_LOC:
                             continue
                         test_cases.append(
@@ -351,9 +381,17 @@ def run_mla(
 
     assert kv_cache_dtype in (torch.bfloat16, *_FP8_KV_DTYPES), "Unsupported kv cache dtype"
     if is_hip() and kv_cache_dtype in _FP8_KV_DTYPES:
-        raise ValueError("FP8 KV cache MLA collection on HIP is not enabled; use bfloat16 test cases only")
+        raise ValueError("FP8 KV cache MLA on HIP is not enabled; use bfloat16 cases only")
     assert num_heads % tp_size == 0, "num_heads must be divisible by tp_size"
     local_num_heads = num_heads // tp_size
+    if is_hip() and not _aiter_mla_supported_local_heads(
+        num_heads, tp_size, is_generation_phase=not is_context_phase
+    ):
+        raise ValueError(
+            "ROCm Aiter MLA: prefill allows local heads in {16, 128}; "
+            f"generation requires local_heads==128 (got num_heads={num_heads}, tp_size={tp_size} "
+            f"-> local_heads={local_num_heads}, is_context={is_context_phase})"
+        )
 
     model_runner = MockModelRunner(
         torch_device,
@@ -375,7 +413,6 @@ def run_mla(
     is_blackwell_dev = is_blackwell() and not is_hip()
 
     if is_blackwell_dev:
-        # DeepSeek V3 default: both phases trtllm_mla
         model_runner.server_args.prefill_attention_backend = "trtllm_mla"
         model_runner.server_args.decode_attention_backend = "trtllm_mla"
     elif is_hip():
@@ -413,7 +450,6 @@ def run_mla(
     model_runner.model_config.scaling = MLA_SCALING
     model_runner.model_config.head_dim = head_dim_total
 
-    # AiterAttnBackend (and other backends) read token_to_kv_pool during __init__.
     total_tokens = max(1, batch_size * total_len)
     kv_cache_size = max(MLA_PAGE_SIZE, math.ceil(total_tokens / MLA_PAGE_SIZE) * MLA_PAGE_SIZE)
     kv_pool = MLATokenToKVPool(
@@ -427,13 +463,14 @@ def run_mla(
         enable_memory_saver=False,
     )
     model_runner.token_to_kv_pool = kv_pool
-    # AiterAttnBackend.__init__ (some SGLang versions) reads token_to_kv_pool.get_value_buffer
-    # before MLA branching; pool must exist before any backend is constructed.
     assert model_runner.token_to_kv_pool is not None
 
     if is_blackwell_dev:
+        import gc
+
         from sglang.srt.layers.attention.trtllm_mla_backend import TRTLLMMLABackend
 
+        gc.collect()
         attn_backend = TRTLLMMLABackend(model_runner)
         kernel_source = "trtllm_mla"
     elif is_hip():
@@ -442,7 +479,8 @@ def run_mla(
         attn_backend = AiterAttnBackend(model_runner)
         kernel_source = "aiter_attention"
     else:
-        # Hopper and others: use FA3-compatible FlashAttention path for MLA
+        from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
+
         attn_backend = FlashAttentionBackend(model_runner)
         kernel_source = "flash_attention"
 
@@ -459,13 +497,9 @@ def run_mla(
 
     if is_context_phase:
         seq_lens = torch.full((batch_size,), input_len, dtype=torch.int32, device=torch_device)
-        # Aiter forward_extend: extend_no_prefix + flash_attn_varlen uses CK (head_dim<=256) and
-        # fails on fused 576-dim MLA. Non-zero prefix routes to mla_prefill_fwd instead.
         if kernel_source == "aiter_attention":
             if input_len < 2:
-                raise ValueError(
-                    "collect_mla Aiter prefill requires input_len>=2 (skip s<2 on HIP in test cases)"
-                )
+                raise ValueError("Aiter MLA prefill needs input_len>=2")
             prefix_lens = torch.ones(batch_size, dtype=torch.int32, device=torch_device)
             eff_tokens = input_len - 1
             extend_seq_lens = torch.full((batch_size,), eff_tokens, dtype=torch.int32, device=torch_device)
@@ -474,8 +508,6 @@ def run_mla(
             eff_tokens = input_len
             extend_seq_lens = seq_lens
 
-        # For prefill (TRTLLM/FlashInfer MHA), we use projected heads (nope=128), not latent (512).
-        # q: [batch_size * eff_tokens, num_heads, qk_nope_head_dim]
         q_shape = (batch_size * eff_tokens, local_num_heads, v_head_dim)
         q = torch.randn(q_shape, device=torch_device, dtype=torch.bfloat16)
         q_rope = torch.randn(
@@ -485,7 +517,6 @@ def run_mla(
             device=torch_device,
             dtype=torch.bfloat16,
         )
-        # k: [batch_size * eff_tokens, 1, qk_nope_head_dim]
         k_shape = (batch_size * eff_tokens, 1, v_head_dim)
         k = torch.randn(k_shape, device=torch_device, dtype=torch.bfloat16)
         k_rope = torch.randn(
@@ -495,8 +526,7 @@ def run_mla(
             device=torch_device,
             dtype=torch.bfloat16,
         )
-        # v: [batch_size * eff_tokens, 1, v_head_dim]. For V3, v_head_dim = 128 = qk_nope_head_dim.
-        v = k  # Dimensions match if v_head_dim == qk_nope_head_dim
+        v = k
 
         if kernel_source == "aiter_attention":
             positions = torch.cat(
@@ -641,6 +671,10 @@ def run_mla(
         step = input_len
 
     str_type = "fp8" if kv_cache_dtype in _FP8_KV_DTYPES else "float16"
+    dev_index = torch_device.index if torch_device.index is not None else 0
+    device_name = (
+        torch.cuda.get_device_name(dev_index) if torch.cuda.is_available() else str(torch_device)
+    )
     log_perf(
         item_list=[
             {
@@ -656,7 +690,7 @@ def run_mla(
         ],
         framework="SGLang",
         version=pkg_resources.get_distribution("sglang").version,
-        device_name=torch.cuda.get_device_name(device),
+        device_name=device_name,
         op_name=f"mla_{'context' if is_context_phase else 'generation'}",
         kernel_source=kernel_source,
         perf_filename=perf_filename,
