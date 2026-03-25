@@ -520,6 +520,7 @@ def pick_optimization_type(
           ``request_latency`` from the rank-1 config.
         - ``pareto_frontier_df``: Pareto frontier DataFrame.
     """
+    # Lazy import to avoid circular dependency (pareto_analysis → picking)
     from aiconfigurator.sdk.pareto_analysis import get_pareto_front
 
     empty_result: dict[str, Any] = {

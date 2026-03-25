@@ -24,6 +24,7 @@ from typing import Any
 import yaml
 
 from aiconfigurator.sdk import perf_database
+from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -320,8 +321,6 @@ def build_naive_generator_params(
     architecture = ""
     is_moe = False
     try:
-        from aiconfigurator.sdk.utils import get_model_config_from_model_path
-
         model_config = get_model_config_from_model_path(model_name)
         architecture = model_config.get("architecture", "")
         num_experts = model_config.get("num_experts", 0)
@@ -368,6 +367,15 @@ def build_naive_generator_params(
 
     if mode == "disagg":
         # Disaggregated: separate prefill and decode workers with identical parallelization
+        if total_gpus < 2 * min_gpus:
+            logger.warning(
+                "Disaggregated mode requires at least %d GPUs (%d prefill + %d decode), "
+                "but only %d are available. Workers may overcommit GPU resources.",
+                2 * min_gpus,
+                min_gpus,
+                min_gpus,
+                total_gpus,
+            )
         prefill_workers = 1
         decode_workers = max(1, (total_gpus // min_gpus) - 1) if total_gpus > min_gpus else 1
         params = {
@@ -382,6 +390,8 @@ def build_naive_generator_params(
                 "name_prefix": name_prefix,
             },
             "params": {
+                # TODO: consider tuning prefill-specific defaults for
+                # max_batch_size and max_num_tokens separately from decode.
                 "prefill": dict(worker_params),
                 "decode": dict(worker_params),
             },
