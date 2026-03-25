@@ -1003,8 +1003,7 @@ def main():
         all_models = get_all_model_names()
         if args.model_path not in all_models:
             parser.error(
-                f"Model '{args.model_path}' not found. Available models:\n"
-                + "\n".join(f"  - {m}" for m in all_models)
+                f"Model '{args.model_path}' not found. Available models:\n" + "\n".join(f"  - {m}" for m in all_models)
             )
         os.environ["COLLECTOR_MODEL_PATH"] = args.model_path
     else:
