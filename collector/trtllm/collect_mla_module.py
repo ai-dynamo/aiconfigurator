@@ -164,16 +164,26 @@ def _build_module_test_cases(attn_type: str, mode: str):
 
 def get_context_module_test_cases():
     """collect.py entrypoint for context module collection across all models."""
+    from collector.common_test_cases import _get_model_path_filter
+
+    model_filter = _get_model_path_filter()
     cases = []
-    for _, attn_type in SUPPORTED_MODELS.items():
+    for model_path, attn_type in SUPPORTED_MODELS.items():
+        if model_filter is not None and model_path != model_filter:
+            continue
         cases.extend(_build_module_test_cases(attn_type=attn_type, mode="context"))
     return cases
 
 
 def get_generation_module_test_cases():
     """collect.py entrypoint for generation module collection across all models."""
+    from collector.common_test_cases import _get_model_path_filter
+
+    model_filter = _get_model_path_filter()
     cases = []
-    for _, attn_type in SUPPORTED_MODELS.items():
+    for model_path, attn_type in SUPPORTED_MODELS.items():
+        if model_filter is not None and model_path != model_filter:
+            continue
         cases.extend(_build_module_test_cases(attn_type=attn_type, mode="generation"))
     return cases
 

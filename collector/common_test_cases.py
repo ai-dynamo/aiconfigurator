@@ -57,6 +57,12 @@ _MLA_MODEL_CONFIGS: list[list] = [
     [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-V3"],
 ]
 
+# MLA module: models from collect_mla_module.py's SUPPORTED_MODELS that are not
+# already covered by _MLA_MODEL_CONFIGS above.
+_MLA_MODULE_MODEL_NAMES: list[str] = [
+    "deepseek-ai/DeepSeek-V3.2",
+]
+
 # Mamba2: [d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name]
 _MAMBA2_MODEL_CONFIGS: list[list] = [
     # Nemotron-H 3-Nano
@@ -81,7 +87,7 @@ def get_all_model_names() -> list[str]:
     cannot accidentally exclude models from the allowlist.
     """
     all_configs = _MOE_MODEL_CONFIGS + _MLA_MODEL_CONFIGS + _MAMBA2_MODEL_CONFIGS
-    return [cfg[-1] for cfg in all_configs]
+    return [cfg[-1] for cfg in all_configs] + _MLA_MODULE_MODEL_NAMES
 
 
 @dataclasses.dataclass
