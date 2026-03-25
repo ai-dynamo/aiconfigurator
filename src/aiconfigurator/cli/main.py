@@ -382,6 +382,14 @@ def _add_estimate_mode_arguments(parser):
         default=False,
         help="Print per-operation latency breakdown for mix step and generation-only step.",
     )
+    parser.add_argument(
+        "--free-gpu-memory-fraction",
+        type=float,
+        default=0.9,
+        help="Fraction of free GPU memory available for KV cache (default: 0.9). "
+        "Used to estimate max concurrent sequences and warn when batch_size "
+        "exceeds KV cache capacity.",
+    )
 
 
 def _add_support_mode_arguments(parser):
@@ -1316,6 +1324,7 @@ def _run_estimate_mode(args):
         fmha_quant_mode=args.fmha_quant_mode,
         moe_quant_mode=args.moe_quant_mode,
         comm_quant_mode=args.comm_quant_mode,
+        free_gpu_memory_fraction=args.free_gpu_memory_fraction,
     )
 
     if estimate_mode == "disagg":
@@ -1383,7 +1392,12 @@ def _run_estimate_mode(args):
         raw = result.raw
         print(f"  (p) Memory:       {raw.get('(p)memory', 'N/A')} GB")
         print(f"  (d) Memory:       {raw.get('(d)memory', 'N/A')} GB")
+    if result.max_kv_cache_batch_size is not None:
+        print(f"  Max KV Cache BS:  {result.max_kv_cache_batch_size}")
     print("=" * 60)
+
+    if result.kv_cache_warning:
+        print(f"\n  WARNING: {result.kv_cache_warning}")
 
     if args.print_per_ops_latency and result.per_ops_data:
         _print_per_ops_latency(result.per_ops_data)
