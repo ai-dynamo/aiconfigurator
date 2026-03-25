@@ -9,7 +9,6 @@ import os
 import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers.fused_moe import fused_experts
-
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
@@ -200,11 +199,7 @@ def run_moe_torch(
     # print(f"moe_ep_size: {moe_ep_size}, moe_tp_size: {moe_tp_size}")
 
     # Configure quantization parameters
-    dtype = torch.float16
     quant_config = None
-    block_shape: list[int] | None = None
-    a1_scale = None
-    a2_scale = None
 
     # Calculate local number of experts
     local_inter_size = inter_size // moe_tp_size
