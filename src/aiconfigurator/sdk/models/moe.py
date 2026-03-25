@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.models.base import BaseModel, calc_expectation, register_model
+from aiconfigurator.sdk.models.base import BaseModel, register_model
+from aiconfigurator.sdk.models.helpers import calc_expectation
 from aiconfigurator.sdk.utils import _load_model_config_from_model_path
 
 

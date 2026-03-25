@@ -13,16 +13,7 @@ from __future__ import annotations
 import logging
 
 from aiconfigurator.sdk import config
-from aiconfigurator.sdk.models.base import (
-    BaseModel,
-    _apply_model_quant_defaults,
-    _architecture_to_model_family,
-    _get_model_info,
-    _infer_quant_modes_from_raw_config,
-    calc_expectation,
-    check_is_moe,
-    get_model_family,
-)
+from aiconfigurator.sdk.models.base import BaseModel
 from aiconfigurator.sdk.models.deepseek import (
     DeepSeekModel,
     TrtllmWideEPDeepSeekModel,
@@ -31,6 +22,15 @@ from aiconfigurator.sdk.models.deepseek import (
 
 # Import all model modules to trigger @register_model decoration
 from aiconfigurator.sdk.models.gpt import GPTModel
+from aiconfigurator.sdk.models.helpers import (
+    _apply_model_quant_defaults,
+    _architecture_to_model_family,
+    _get_model_info,
+    _infer_quant_modes_from_raw_config,
+    calc_expectation,
+    check_is_moe,
+    get_model_family,
+)
 from aiconfigurator.sdk.models.hybrid_moe import HybridMoEModel
 from aiconfigurator.sdk.models.llama import LLAMAModel
 from aiconfigurator.sdk.models.moe import MOEModel
