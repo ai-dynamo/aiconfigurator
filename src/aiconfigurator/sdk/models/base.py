@@ -23,6 +23,13 @@ def register_model(family: str):
     """Decorator to register a model class for a given model family name."""
 
     def decorator(cls):
+        if family in _MODEL_REGISTRY:
+            logger.warning(
+                "Overwriting model registration for family %r: %s -> %s",
+                family,
+                _MODEL_REGISTRY[family].__name__,
+                cls.__name__,
+            )
         _MODEL_REGISTRY[family] = cls
         return cls
 
@@ -260,7 +267,7 @@ class BaseModel:
             logger.warning(
                 f"num_layers {self._num_layers} is not divisible by pp_size "
                 f"{model_config.pp_size}. this will introduce additional rounding error. "
-                f"Currently we're nothing to correct this."
+                f"Currently we're doing nothing to correct this."
             )
 
         assert self._num_heads % model_config.tp_size == 0, (
