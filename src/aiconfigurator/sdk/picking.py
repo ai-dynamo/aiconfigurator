@@ -538,10 +538,7 @@ def pick_optimization_type(
     # Compute cluster-level throughput metric
     if total_gpus > 0 and "num_total_gpus" in df.columns:
         df["tokens/s/gpu_cluster"] = (
-            df["tokens/s/gpu"]
-            * (total_gpus // df["num_total_gpus"])
-            * df["num_total_gpus"]
-            / total_gpus
+            df["tokens/s/gpu"] * (total_gpus // df["num_total_gpus"]) * df["num_total_gpus"] / total_gpus
         )
     else:
         df["tokens/s/gpu_cluster"] = df["tokens/s/gpu"]
@@ -581,9 +578,7 @@ def pick_optimization_type(
         .reset_index(drop=True)
     )
 
-    best_throughput = (
-        float(best_config_df["tokens/s/gpu_cluster"].iloc[0]) if not best_config_df.empty else 0.0
-    )
+    best_throughput = float(best_config_df["tokens/s/gpu_cluster"].iloc[0]) if not best_config_df.empty else 0.0
 
     return {
         "best_config_df": best_config_df,

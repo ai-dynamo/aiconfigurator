@@ -99,9 +99,7 @@ def test_cli_generate_combinations(
     # Check expected parallelism constraints based on model size
     if expected_min_tp == "max":
         # Huge model should cap at max parallelism
-        assert effective_parallel == max_tp, (
-            f"{description}: expected parallelism={max_tp}, got {effective_parallel}"
-        )
+        assert effective_parallel == max_tp, f"{description}: expected parallelism={max_tp}, got {effective_parallel}"
     elif expected_min_tp is not None:
         # Large model should require parallelism >= expected_min_tp
         assert effective_parallel >= expected_min_tp, (

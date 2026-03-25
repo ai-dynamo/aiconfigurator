@@ -63,11 +63,13 @@ class TestPickOptimizationType:
     """Verify pick_optimization_type sorts by the right metric."""
 
     def test_throughput_selects_highest_tokens_per_gpu(self):
-        df = _make_agg_df([
-            {"tokens/s/gpu": 100, "tpot": 20, "ttft": 50, "parallel": "tp1"},
-            {"tokens/s/gpu": 200, "tpot": 30, "ttft": 60, "parallel": "tp2"},
-            {"tokens/s/gpu": 150, "tpot": 25, "ttft": 55, "parallel": "tp4"},
-        ])
+        df = _make_agg_df(
+            [
+                {"tokens/s/gpu": 100, "tpot": 20, "ttft": 50, "parallel": "tp1"},
+                {"tokens/s/gpu": 200, "tpot": 30, "ttft": 60, "parallel": "tp2"},
+                {"tokens/s/gpu": 150, "tpot": 25, "ttft": 55, "parallel": "tp4"},
+            ]
+        )
         result = pick_optimization_type(
             pareto_df=df,
             optimization_type="throughput",
@@ -78,11 +80,13 @@ class TestPickOptimizationType:
         assert best["tokens/s/gpu"] == 200
 
     def test_latency_selects_lowest_tpot(self):
-        df = _make_agg_df([
-            {"tokens/s/gpu": 100, "tpot": 20, "ttft": 50, "parallel": "tp1"},
-            {"tokens/s/gpu": 200, "tpot": 30, "ttft": 60, "parallel": "tp2"},
-            {"tokens/s/gpu": 150, "tpot": 10, "ttft": 45, "parallel": "tp4"},
-        ])
+        df = _make_agg_df(
+            [
+                {"tokens/s/gpu": 100, "tpot": 20, "ttft": 50, "parallel": "tp1"},
+                {"tokens/s/gpu": 200, "tpot": 30, "ttft": 60, "parallel": "tp2"},
+                {"tokens/s/gpu": 150, "tpot": 10, "ttft": 45, "parallel": "tp4"},
+            ]
+        )
         result = pick_optimization_type(
             pareto_df=df,
             optimization_type="latency",
@@ -93,9 +97,11 @@ class TestPickOptimizationType:
         assert best["tpot"] == 10
 
     def test_returns_best_latencies(self):
-        df = _make_agg_df([
-            {"tokens/s/gpu": 100, "tpot": 15, "ttft": 40, "parallel": "tp1"},
-        ])
+        df = _make_agg_df(
+            [
+                {"tokens/s/gpu": 100, "tpot": 15, "ttft": 40, "parallel": "tp1"},
+            ]
+        )
         result = pick_optimization_type(
             pareto_df=df,
             optimization_type="throughput",
@@ -108,10 +114,11 @@ class TestPickOptimizationType:
         assert lat["request_latency"] > 0
 
     def test_returns_best_throughput(self):
-        df = _make_agg_df([
-            {"tokens/s/gpu": 100, "tpot": 20, "ttft": 50, "parallel": "tp1",
-             "num_total_gpus": 2},
-        ])
+        df = _make_agg_df(
+            [
+                {"tokens/s/gpu": 100, "tpot": 20, "ttft": 50, "parallel": "tp1", "num_total_gpus": 2},
+            ]
+        )
         result = pick_optimization_type(
             pareto_df=df,
             optimization_type="throughput",
@@ -141,11 +148,7 @@ class TestPickOptimizationType:
         assert result["best_config_df"].empty
 
     def test_top_n_limits_output(self):
-        rows = [
-            {"tokens/s/gpu": i * 10, "tpot": 50 - i, "ttft": 40,
-             "parallel": f"tp{i}"}
-            for i in range(1, 10)
-        ]
+        rows = [{"tokens/s/gpu": i * 10, "tpot": 50 - i, "ttft": 40, "parallel": f"tp{i}"} for i in range(1, 10)]
         df = _make_agg_df(rows)
         result = pick_optimization_type(
             pareto_df=df,
@@ -157,10 +160,12 @@ class TestPickOptimizationType:
         assert len(result["best_config_df"]) == 3
 
     def test_pareto_frontier_returned(self):
-        df = _make_agg_df([
-            {"tokens/s/gpu": 100, "tpot": 20, "ttft": 50, "parallel": "tp1"},
-            {"tokens/s/gpu": 200, "tpot": 30, "ttft": 60, "parallel": "tp2"},
-        ])
+        df = _make_agg_df(
+            [
+                {"tokens/s/gpu": 100, "tpot": 20, "ttft": 50, "parallel": "tp1"},
+                {"tokens/s/gpu": 200, "tpot": 30, "ttft": 60, "parallel": "tp2"},
+            ]
+        )
         result = pick_optimization_type(
             pareto_df=df,
             optimization_type="throughput",
@@ -172,10 +177,12 @@ class TestPickOptimizationType:
 
     def test_dedup_by_parallel_key(self):
         """When two rows share the same 'parallel' value, only the best is kept."""
-        df = _make_agg_df([
-            {"tokens/s/gpu": 100, "tpot": 20, "ttft": 50, "parallel": "tp1"},
-            {"tokens/s/gpu": 200, "tpot": 30, "ttft": 60, "parallel": "tp1"},
-        ])
+        df = _make_agg_df(
+            [
+                {"tokens/s/gpu": 100, "tpot": 20, "ttft": 50, "parallel": "tp1"},
+                {"tokens/s/gpu": 200, "tpot": 30, "ttft": 60, "parallel": "tp1"},
+            ]
+        )
         result = pick_optimization_type(
             pareto_df=df,
             optimization_type="throughput",
@@ -188,12 +195,12 @@ class TestPickOptimizationType:
 
     def test_throughput_tiebreak_by_tpot(self):
         """When throughput is tied, lower tpot should win."""
-        df = _make_agg_df([
-            {"tokens/s/gpu": 100, "tpot": 30, "ttft": 50, "parallel": "tp1",
-             "num_total_gpus": 1},
-            {"tokens/s/gpu": 100, "tpot": 10, "ttft": 50, "parallel": "tp2",
-             "num_total_gpus": 1},
-        ])
+        df = _make_agg_df(
+            [
+                {"tokens/s/gpu": 100, "tpot": 30, "ttft": 50, "parallel": "tp1", "num_total_gpus": 1},
+                {"tokens/s/gpu": 100, "tpot": 10, "ttft": 50, "parallel": "tp2", "num_total_gpus": 1},
+            ]
+        )
         result = pick_optimization_type(
             pareto_df=df,
             optimization_type="throughput",
@@ -205,12 +212,12 @@ class TestPickOptimizationType:
 
     def test_latency_tiebreak_by_throughput(self):
         """When tpot is tied, higher throughput should win."""
-        df = _make_agg_df([
-            {"tokens/s/gpu": 100, "tpot": 10, "ttft": 50, "parallel": "tp1",
-             "num_total_gpus": 1},
-            {"tokens/s/gpu": 200, "tpot": 10, "ttft": 50, "parallel": "tp2",
-             "num_total_gpus": 1},
-        ])
+        df = _make_agg_df(
+            [
+                {"tokens/s/gpu": 100, "tpot": 10, "ttft": 50, "parallel": "tp1", "num_total_gpus": 1},
+                {"tokens/s/gpu": 200, "tpot": 10, "ttft": 50, "parallel": "tp2", "num_total_gpus": 1},
+            ]
+        )
         result = pick_optimization_type(
             pareto_df=df,
             optimization_type="latency",
