@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import logging
+
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models.base import BaseModel, register_model
+
+logger = logging.getLogger(__name__)
 
 
 @register_model("NEMOTRONNAS")
@@ -43,9 +47,6 @@ class NemotronNas(BaseModel):
             model.context_ops = extra_params
             model.generation_ops = extra_params
         else:
-            import logging
-
-            logger = logging.getLogger(__name__)
             logger.warning(
                 "NemotronNAS model '%s' missing block configs in model metadata; leaving pipelines empty.",
                 model_info["model_path"],

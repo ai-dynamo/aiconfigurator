@@ -153,12 +153,12 @@ class NewMoEModel(BaseModel):
 
 ### `model_info` dict keys
 
-The `model_info` dict passed to `create()` contains these keys (defined by `utils.py:get_model_config_from_model_path()`):
+The `model_info` dict passed to `create()` contains these keys. Most come from `utils.py:get_model_config_from_model_path()`; two are injected by `get_model()` before calling `create()`:
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `model_path` | `str` | HuggingFace model path or local path |
-| `model_family` | `str` | Resolved family name (e.g., `"LLAMA"`) |
+| `model_path` | `str` | HuggingFace model path or local path *(injected by `get_model()`)* |
+| `model_family` | `str` | Resolved family name (e.g., `"LLAMA"`) *(injected by `get_model()`)* |
 | `architecture` | `str` | HuggingFace architecture (e.g., `"LlamaForCausalLM"`) |
 | `layers` | `int` | Number of transformer layers |
 | `n` | `int` | Number of attention heads |

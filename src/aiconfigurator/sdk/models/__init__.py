@@ -29,6 +29,7 @@ from aiconfigurator.sdk.models.helpers import (
 # Auto-import all model modules to trigger @register_model decoration.
 # Any .py file in this package (except base, helpers, __init__) is auto-imported.
 _SKIP = {"base", "helpers"}
+_name = None
 for _, _name, _ in pkgutil.iter_modules(__path__):
     if _name not in _SKIP:
         importlib.import_module(f".{_name}", __name__)
@@ -45,7 +46,8 @@ def get_model(
     """
     Get model.
     """
-    model_info = _get_model_info(model_path)
+    # Shallow-copy so mutations below don't poison the @cache'd original.
+    model_info = dict(_get_model_info(model_path))
     raw_config = model_info.get("raw_config", {})
     architecture = model_info["architecture"]
     model_family = _architecture_to_model_family(architecture)
