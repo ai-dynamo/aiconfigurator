@@ -3,7 +3,6 @@
 
 """Unit tests for pick_optimization_type in sdk/picking.py."""
 
-import numpy as np
 import pandas as pd
 import pytest
 

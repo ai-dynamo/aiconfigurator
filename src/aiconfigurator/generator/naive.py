@@ -411,6 +411,9 @@ def build_naive_generator_params(
                 "decode_workers": decode_workers,
                 "decode_gpus_per_worker": min_gpus,
             },
+            "ModelConfig": {
+                "is_moe": is_moe,
+            },
             "backend": backend_name,
         }
     else:
@@ -443,6 +446,9 @@ def build_naive_generator_params(
             "WorkerConfig": {
                 "agg_workers": agg_workers,
                 "agg_gpus_per_worker": min_gpus,
+            },
+            "ModelConfig": {
+                "is_moe": is_moe,
             },
             "backend": backend_name,
         }

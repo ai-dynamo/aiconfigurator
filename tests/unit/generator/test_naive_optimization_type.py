@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for optimization-type–aware parallelization in generator/naive.py."""
+"""Unit tests for optimization-type-aware parallelization in generator/naive.py."""
 
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -11,7 +12,6 @@ from aiconfigurator.generator.naive import (
     _resolve_parallelization,
     build_naive_generator_params,
 )
-
 
 # ---------------------------------------------------------------------------
 # _resolve_parallelization
@@ -119,8 +119,8 @@ class TestResolveParallelization:
 class TestBuildNaiveOptimizationType:
     """Test build_naive_generator_params with mode and optimization_type args."""
 
-    _SYS = {"gpus_per_node": 8, "vram_per_gpu": 141 * 1024**3}
-    _WEIGHT = 30 * 1024**3  # 30 GiB → fits in 1 GPU
+    _SYS: ClassVar[dict] = {"gpus_per_node": 8, "vram_per_gpu": 141 * 1024**3}
+    _WEIGHT = 30 * 1024**3  # 30 GiB -> fits in 1 GPU
 
     @patch(
         "aiconfigurator.generator.naive._estimate_model_weight_bytes",
