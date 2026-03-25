@@ -570,7 +570,7 @@ class MoEDispatch(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         num_tokens = kwargs.get("x")
         volume = num_tokens * self._hidden_size
-        _sm_version = database.system_spec["gpu"]["sm_version"] if "_sm_version" in database.system_spec["gpu"] else -1
+        _sm_version = database.system_spec["gpu"]["sm_version"] if "sm_version" in database.system_spec["gpu"] else -1
         _num_gpus_per_node = database.system_spec["node"]["num_gpus_per_node"]
         _node_num = self.num_gpus / _num_gpus_per_node
 
