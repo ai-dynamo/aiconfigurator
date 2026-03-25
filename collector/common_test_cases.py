@@ -27,6 +27,62 @@ def _filter_model_config_list(model_config_list: list[list]) -> list[list]:
     return [cfg for cfg in model_config_list if cfg[-1] == model_path]
 
 
+# Raw model config lists — module-level so get_all_model_names() can read them
+# without instantiating test case objects or calling generator functions.
+
+# MoE: [hidden_size, inter_size, topk, num_experts, model_name]
+_MOE_MODEL_CONFIGS: list[list] = [
+    [4096, 14336, 2, 8, "mistralai/Mixtral-8x7B-v0.1"],  # mixtral_8x7b
+    [6144, 16384, 2, 8, "mistralai/Mixtral-8x22B-v0.1"],  # mixtral_8x22b
+    [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3"],  # deepseekv3, will have 1 shared expert
+    [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],  # qwen3-moe, 30b-a3b
+    [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B"],  # qwen3-moe, 235b-a22b
+    [6144, 2560, 8, 160, "Qwen/Qwen3-Coder-480B-A35B-Instruct"],  # qwen3-moe, 480b-a35b
+    [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2
+    [3072, 1536, 8, 256, "MiniMaxAI/MiniMax-M2.5"],  # minimax m2.5
+    [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
+    [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
+    [2688, 1856, 6, 128, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"],  # nemotron-3 nano (uses relu2, non-gated)
+    [
+        4096,
+        2688,
+        22,
+        512,
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+    ],  # nemotron-3 super (uses relu2, non-gated)
+]
+
+# MLA: [num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, model_name]
+_MLA_MODEL_CONFIGS: list[list] = [
+    [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-V3"],
+]
+
+# Mamba2: [d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name]
+_MAMBA2_MODEL_CONFIGS: list[list] = [
+    # Nemotron-H 3-Nano
+    # hidden_size=2688, ssm_state_size=128, conv_kernel=4,
+    # mamba_num_heads=64, mamba_head_dim=64, n_groups=8, chunk_size=128
+    [2688, 128, 4, 64, 64, 8, 128, "NEMOTRON_H_3_Nano"],
+    # Nemotron-H 3-Super
+    # hidden_size=4096, ssm_state_size=128, conv_kernel=4,
+    # mamba_num_heads=128, mamba_head_dim=64, n_groups=8, chunk_size=128
+    [4096, 128, 4, 128, 64, 8, 128, "NEMOTRON_H_3_Super"],
+    # Generic Mamba2 configuration for interpolation coverage
+    [8192, 128, 4, 64, 64, 8, 256, "MAMBA2_GENERIC_4K"],
+    [1024, 64, 4, 16, 64, 4, 128, "MAMBA2_GENERIC_1K"],
+]
+
+
+def get_all_model_names() -> list[str]:
+    """Return all known model names across all op types.
+
+    Reads directly from the raw config list data — does not instantiate test
+    case objects or call generator functions, so pruning logic in the generators
+    cannot accidentally exclude models from the allowlist.
+    """
+    all_configs = _MOE_MODEL_CONFIGS + _MLA_MODEL_CONFIGS + _MAMBA2_MODEL_CONFIGS
+    return [cfg[-1] for cfg in all_configs]
+
 
 @dataclasses.dataclass
 class MoeCommonTestCase:
@@ -90,26 +146,7 @@ def get_common_moe_test_cases():
     # [2048,1408,4,60], #qwen1.5_moe
     # [2048,1408,6,64], #deepseekv1_moe
     # [5120,1536,6,160], #deepseekv2
-    model_config_list = _filter_model_config_list([
-        [4096, 14336, 2, 8, "mistralai/Mixtral-8x7B-v0.1"],  # mixtral_8x7b
-        [6144, 16384, 2, 8, "mistralai/Mixtral-8x22B-v0.1"],  # mixtral_8x22b
-        [7168, 2048, 8, 256, "deepseek-ai/DeepSeek-V3"],  # deepseekv3, will have 1 shared expert
-        [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],  # qwen3-moe, 30b-a3b
-        [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B"],  # qwen3-moe, 235b-a22b
-        [6144, 2560, 8, 160, "Qwen/Qwen3-Coder-480B-A35B-Instruct"],  # qwen3-moe, 480b-a35b
-        [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2
-        [3072, 1536, 8, 256, "MiniMaxAI/MiniMax-M2.5"],  # minimax m2.5
-        [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
-        [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
-        [2688, 1856, 6, 128, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"],  # nemotron-3 nano (uses relu2, non-gated)
-        [
-            4096,
-            2688,
-            22,
-            512,
-            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
-        ],  # nemotron-3 super (uses relu2, non-gated)
-    ])
+    model_config_list = _filter_model_config_list(_MOE_MODEL_CONFIGS)
 
     test_cases: list[MoeCommonTestCase] = []
 
@@ -235,9 +272,7 @@ def _get_mla_common_test_cases(is_context: bool):
     test_cases = []
 
     # num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim
-    model_config_list = _filter_model_config_list([
-        [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-V3"],
-    ])
+    model_config_list = _filter_model_config_list(_MLA_MODEL_CONFIGS)
 
     if is_context:
         b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -394,19 +429,7 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
 
     # Model configurations:
     # [d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name]
-    model_config_list = _filter_model_config_list([
-        # Nemotron-H 3-Nano
-        # hidden_size=2688, ssm_state_size=128, conv_kernel=4,
-        # mamba_num_heads=64, mamba_head_dim=64, n_groups=8, chunk_size=128
-        [2688, 128, 4, 64, 64, 8, 128, "NEMOTRON_H_3_Nano"],
-        # Nemotron-H 3-Super
-        # hidden_size=4096, ssm_state_size=128, conv_kernel=4,
-        # mamba_num_heads=128, mamba_head_dim=64, n_groups=8, chunk_size=128
-        [4096, 128, 4, 128, 64, 8, 128, "NEMOTRON_H_3_Super"],
-        # Generic Mamba2 configuration for interpolation coverage
-        [8192, 128, 4, 64, 64, 8, 256, "MAMBA2_GENERIC_4K"],
-        [1024, 64, 4, 16, 64, 4, 128, "MAMBA2_GENERIC_1K"],
-    ])
+    model_config_list = _filter_model_config_list(_MAMBA2_MODEL_CONFIGS)
 
     for model_config in model_config_list:
         d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name = model_config

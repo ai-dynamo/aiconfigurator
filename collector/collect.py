@@ -998,7 +998,17 @@ def main():
     ops = args.ops
 
     if args.model_path:
+        from collector.common_test_cases import get_all_model_names
+
+        all_models = get_all_model_names()
+        if args.model_path not in all_models:
+            parser.error(
+                f"Model '{args.model_path}' not found. Available models:\n"
+                + "\n".join(f"  - {m}" for m in all_models)
+            )
         os.environ["COLLECTOR_MODEL_PATH"] = args.model_path
+    else:
+        os.environ.pop("COLLECTOR_MODEL_PATH", None)
 
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
