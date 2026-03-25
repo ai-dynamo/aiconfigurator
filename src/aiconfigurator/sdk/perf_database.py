@@ -129,9 +129,7 @@ def get_supported_databases(
                     versions = [
                         v
                         for v in os.listdir(backend_path)
-                        if not v.startswith(".")
-                        and os.path.isdir(os.path.join(backend_path, v))
-                        and not os.path.isfile(os.path.join(backend_path, v, "INCOMPLETE.txt"))
+                        if not v.startswith(".") and os.path.isdir(os.path.join(backend_path, v))
                     ]
                     if versions:
                         supported_sets[system][backend.value].update(versions)
@@ -334,11 +332,8 @@ def get_all_databases(
                 for backend in common.BackendName:
                     if not os.path.exists(os.path.join(data_dir, backend.value)):
                         continue
-                    backend_path = os.path.join(data_dir, backend.value)
-                    for version in os.listdir(backend_path):
+                    for version in os.listdir(os.path.join(data_dir, backend.value)):
                         if version.startswith("."):
-                            continue
-                        if os.path.isfile(os.path.join(backend_path, version, "INCOMPLETE.txt")):
                             continue
                         database = get_database(system, backend.value, version, systems_root)
                         if database is None:
@@ -5718,12 +5713,12 @@ class PerfDatabase:
             Get the SOL time for All2All communication.
 
             All2All transfers token data between GPUs:
-            - prepare: lightweight metadata exchange (topk * 4 bytes per token)
-            - dispatch: each token sent once per unique remote rank (deduplication).
-              remote_ranks = min(topk, num_experts, ep_size - 1), bytes use quant_mode precision.
-            - combine: standard returns results in bfloat16 (2 B/elem);
-              low-precision variant returns results in fp4 (0.5 B/elem).
-              remote_ranks = min(topk, num_experts, ep_size - 1).
+            - dispatch: each GPU sends (num_tokens * topk / ep_size) tokens to other GPUs
+            - combine: reverse direction
+            - prepare: lightweight metadata exchange
+
+            The total data transferred per GPU is proportional to
+            num_tokens * topk * hidden_size * (1 - 1/ep_size), since each GPU keeps 1/ep_size locally.
             """
             is_inter_node = node_num > 1
 
@@ -5732,20 +5727,23 @@ class PerfDatabase:
             else:
                 bw = self.system_spec["node"]["intra_node_bw"]
 
-            remote_ranks = min(topk, num_experts, moe_ep_size - 1)
-
             if op_name == "alltoall_prepare":
                 data_bytes = num_tokens * topk * 4  # token routing indices, ~4 bytes per entry
-            elif "combine" in op_name:
-                bytes_per_element = 0.5 if "low_precision" in op_name else 2
-                data_bytes = num_tokens * remote_ranks * hidden_size * bytes_per_element
             else:
-                # dispatch: per-rank deduplication, use quant_mode precision
-                data_bytes = num_tokens * remote_ranks * hidden_size * quant_mode.value.memory
+                # dispatch/combine: transfer token activations
+                data_bytes = (
+                    num_tokens
+                    * topk
+                    * hidden_size
+                    * quant_mode.value.memory
+                    * (1.0 - 1.0 / moe_ep_size)  # fraction sent to remote GPUs
+                )
 
             sol_comm = data_bytes / bw * 1000  # ms
-            sol_time = sol_comm
-            return sol_time, sol_comm, 0.0
+            p2p_latency_ms = self.system_spec["node"]["p2p_latency"] * 1000
+            sol_overhead = p2p_latency_ms
+            sol_time = sol_comm + sol_overhead
+            return sol_time, sol_comm, sol_overhead
 
         def get_empirical_from_sol(
             num_tokens: int,
