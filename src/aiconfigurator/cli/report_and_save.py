@@ -451,8 +451,24 @@ def save_results(
 
     backend_str = backend or first_task.backend_name
 
+    # Get a safe model name for directory naming:
+    # - For local paths: use basename (e.g., "/data/models/my_model" -> "my_model")
+    # - For root path: return "root" (e.g., "/" -> "root")
+    # - For HuggingFace IDs: return as-is (e.g., "Qwen/Qwen3-32B" -> "Qwen/Qwen3-32B")
+    def get_safe_model_name(path: str) -> str:
+        # Check if it's a local path (existing directory)
+        if os.path.isdir(path):
+            # Use abspath to resolve .. and . to actual path
+            normalized = os.path.abspath(path)
+            basename = os.path.basename(normalized)
+            return basename if basename else "root"
+        # Otherwise treat as HuggingFace model ID
+        return path
+
+    safe_model_name = get_safe_model_name(first_task_config.model_path)
+
     result_prefix = (
-        f"{first_task_config.model_path}_{first_task.system_name}_{backend_str}_"
+        f"{safe_model_name}_{first_task.system_name}_{backend_str}_"
         f"isl{first_task_config.runtime_config.isl}_osl{first_task_config.runtime_config.osl}_"
         f"ttft{int(first_task_config.runtime_config.ttft)}_tpot{int(first_task_config.runtime_config.tpot)}"
     )
