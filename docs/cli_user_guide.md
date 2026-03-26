@@ -292,8 +292,8 @@ By default, we output top 5 configs we have found. You can get the configs and s
 
 **Generator Dynamo version**
 - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
-- If `--generator-dynamo-version` is not provided, the default is the latest database version for the backend.
-- If `--generated_config_version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the first entry in `--generator-dynamo-version`.
+- If `--generator-dynamo-version` is not provided, the default is the first entry in `backend_version_matrix.yaml` (currently `1.0.0`).
+- If `--generated-config-version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the selected Dynamo version mapping.
 
 Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/DynConfig/WorkerConfig/Workers.<role> sections, or add inline overrides via `--generator-set KEY=VALUE`. Examples:
 
