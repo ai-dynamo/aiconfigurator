@@ -129,7 +129,9 @@ def get_supported_databases(
                     versions = [
                         v
                         for v in os.listdir(backend_path)
-                        if not v.startswith(".") and os.path.isdir(os.path.join(backend_path, v))
+                        if not v.startswith(".")
+                        and os.path.isdir(os.path.join(backend_path, v))
+                        and not os.path.isfile(os.path.join(backend_path, v, "INCOMPLETE.txt"))
                     ]
                     if versions:
                         supported_sets[system][backend.value].update(versions)
@@ -332,8 +334,11 @@ def get_all_databases(
                 for backend in common.BackendName:
                     if not os.path.exists(os.path.join(data_dir, backend.value)):
                         continue
-                    for version in os.listdir(os.path.join(data_dir, backend.value)):
+                    backend_path = os.path.join(data_dir, backend.value)
+                    for version in os.listdir(backend_path):
                         if version.startswith("."):
+                            continue
+                        if os.path.isfile(os.path.join(backend_path, version, "INCOMPLETE.txt")):
                             continue
                         database = get_database(system, backend.value, version, systems_root)
                         if database is None:
@@ -360,7 +365,14 @@ def get_all_databases(
 # by default float16
 def load_custom_allreduce_data(custom_allreduce_file):
     """
-    Load the custom allreduce data for trtllm with power support (backward compatible).
+    Load the custom allreduce data with power support (backward compatible).
+
+    Supports multiple data formats:
+    - TRTLLM: kernel_source="TRTLLM", last column="implementation"
+    - vLLM/SGLang: kernel_source="*_graph" or "*_eager", last column="backend"
+
+    For vLLM/SGLang with both graph and eager modes, only graph mode data is kept
+    (better performance for decode phase).
 
     Returns:
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
@@ -380,6 +392,17 @@ def load_custom_allreduce_data(custom_allreduce_file):
         logger.debug(f"Legacy database format detected in {custom_allreduce_file} - power will default to 0.0")
 
     for row in rows:
+        # Check kernel_source to filter graph vs eager mode (for vLLM/SGLang)
+        kernel_source = row.get("kernel_source", "")
+        backend = row.get("backend", "")
+
+        # For vLLM/SGLang format: only keep graph mode data (skip eager mode)
+        # kernel_source patterns: "vLLM_custom_graph", "SGLang_CustomAllReduce_graph", etc.
+        # backend patterns: "vllm_graph", "sglang_graph", etc.
+        # For b60 xpu, we force eager custom allreduce data for now
+        if (kernel_source.endswith("_eager") or backend.endswith("_eager")) and "b60" not in custom_allreduce_file:
+            continue  # Skip eager mode, use graph mode only
+
         dtype, tp_size, message_size, latency = (
             row["allreduce_dtype"],
             row["num_gpus"],
@@ -1105,19 +1128,59 @@ def load_mla_bmm_data(mla_bmm_file):
     return mla_bmm_data
 
 
+def _normalize_dtype_key(raw: str) -> str:
+    """Map collector dtype strings to enum member names (bfloat16 → float16)."""
+    return "float16" if raw == "bfloat16" else raw
+
+
+DSA_MODEL_DIMS: dict[str, dict] = {
+    "DeepseekV32ForCausalLM": {
+        "hidden_size": 7168,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "index_topk": 2048,
+        "index_head_dim": 128,
+        "index_n_heads": 64,
+    },
+    "GlmMoeDsaForCausalLM": {
+        "hidden_size": 6144,
+        "q_lora_rank": 2048,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 192,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 256,
+        "index_topk": 2048,
+        "index_head_dim": 128,
+        "index_n_heads": 32,
+    },
+}
+
+DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
+
+
 def load_context_dsa_module_data(dsa_file: str):
     """
     Load context DSA data.
 
     Dict structure:
-        data[gemm_quant_mode][fmha_quant_mode][kv_cache_quant_mode][num_heads][s][b]
+        data[architecture][gemm_quant_mode][fmha_quant_mode][kv_cache_quant_mode][num_heads][s][b]
+
+    ``architecture`` comes from the HF config ``architectures[0]``
+    (e.g. "DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM") and distinguishes
+    models with different structural dims.
+    Legacy CSV rows without an ``architecture`` column default to "DeepseekV32ForCausalLM".
     """
     if not os.path.exists(dsa_file):
         logger.debug(f"DSA context data file {dsa_file} not found.")
         return None
 
     dsa_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+        lambda: defaultdict(
+            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+        )
     )
 
     with open(dsa_file, encoding="utf-8") as f:
@@ -1134,11 +1197,12 @@ def load_context_dsa_module_data(dsa_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-        fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
-        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+        arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
+        gemm_mode = common.GEMMQuantMode[_normalize_dtype_key(row["gemm_type"])]
+        fmha_mode = common.FMHAQuantMode[_normalize_dtype_key(row["mla_dtype"])]
+        kv_dtype = common.KVCacheQuantMode[_normalize_dtype_key(row["kv_cache_dtype"])]
 
-        dsa_data[gemm_mode][fmha_mode][kv_dtype][num_heads][s][b] = {
+        dsa_data[arch][gemm_mode][fmha_mode][kv_dtype][num_heads][s][b] = {
             "latency": latency,
             "power": power,
             "energy": energy,
@@ -1152,13 +1216,20 @@ def load_generation_dsa_module_data(dsa_file: str):
     Load generation DSA data.
 
     Dict structure:
-        data[gemm_quant_mode][kv_cache_quant_mode][num_heads][b][s]
+        data[architecture][gemm_quant_mode][kv_cache_quant_mode][num_heads][b][s]
+
+    ``architecture`` comes from the HF config ``architectures[0]``
+    (e.g. "DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM") and distinguishes
+    models with different structural dims.
+    Legacy CSV rows without an ``architecture`` column default to "DeepseekV32ForCausalLM".
     """
     if not os.path.exists(dsa_file):
         logger.debug(f"DSA generation data file {dsa_file} not found.")
         return None
 
-    dsa_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    dsa_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
 
     with open(dsa_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -1174,10 +1245,11 @@ def load_generation_dsa_module_data(dsa_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-        kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
+        arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
+        gemm_mode = common.GEMMQuantMode[_normalize_dtype_key(row["gemm_type"])]
+        kv_dtype = common.KVCacheQuantMode[_normalize_dtype_key(row["kv_cache_dtype"])]
 
-        dsa_data[gemm_mode][kv_dtype][num_heads][b][s] = {
+        dsa_data[arch][gemm_mode][kv_dtype][num_heads][b][s] = {
             "latency": latency,
             "power": power,
             "energy": energy,
@@ -1756,10 +1828,10 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
     return wideep_moe_compute_data
 
 
-def load_wideep_alltoall_data(wideep_alltoall_file):
+def load_trtllm_alltoall_data(trtllm_alltoall_file):
     """
-    Load the TensorRT-LLM wideep All2All data from wideep_alltoall_perf.txt.
-    This data represents All2All communication time (prepare, dispatch, combine).
+    Load TensorRT-LLM AlltoAll communication perf data from trtllm_alltoall_perf.txt.
+    Covers both WideEP (NVLinkTwoSided) and CutlassFusedMoE (NVLinkOneSided) paths.
 
     Returns:
         dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
@@ -1769,20 +1841,21 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
 
     Note:
         kernel_source identifies the All2All communication method:
-        - "MnnvlMoe": NVLink Two-Sided via MNNVL (GB200, SM >= 100)
+        - "NVLinkTwoSided": NVLink Two-Sided via MNNVL (GB200, SM >= 100)
+        - "NVLinkOneSided": NVLink One-Sided (CutlassFusedMoE on GB200)
         - "DeepEP": DeepEP normal mode (H100/H200, cross-node)
         - "DeepEPLowLatency": DeepEP low-latency mode (H100/H200, intra-node)
         - "NCCL": Standard NCCL communication (fallback)
-        If data file does not have 'kernel_source' column, it defaults to "MnnvlMoe".
+        If data file does not have 'kernel_source' column, it defaults to "NVLinkTwoSided".
 
         If data file does not have 'num_nodes' column, it will be computed as moe_ep_size // 4.
         This assumes 4 GPUs per node (e.g., GB200 NVL4).
     """
-    if not os.path.exists(wideep_alltoall_file):
-        logger.debug(f"TensorRT-LLM wideep All2All data file {wideep_alltoall_file} not found.")
+    if not os.path.exists(trtllm_alltoall_file):
+        logger.debug(f"TensorRT-LLM AlltoAll data file {trtllm_alltoall_file} not found.")
         return None
 
-    wideep_alltoall_data = defaultdict(
+    trtllm_alltoall_data = defaultdict(
         lambda: defaultdict(
             lambda: defaultdict(
                 lambda: defaultdict(
@@ -1794,25 +1867,25 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
         )
     )
 
-    logger.debug(f"Loading TensorRT-LLM wideep All2All data from: {wideep_alltoall_file}")
-    with open(wideep_alltoall_file, encoding="utf-8") as f:
+    logger.debug(f"Loading TensorRT-LLM AlltoAll data from: {trtllm_alltoall_file}")
+    with open(trtllm_alltoall_file, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 
         # Check if power columns exist (backward compatibility)
         has_power = len(rows) > 0 and "power" in rows[0]
         if not has_power:
-            logger.debug(f"Legacy database format detected in {wideep_alltoall_file} - power will default to 0.0")
+            logger.debug(f"Legacy database format detected in {trtllm_alltoall_file} - power will default to 0.0")
 
         # Check if num_nodes column exists
         has_num_nodes = len(rows) > 0 and "num_nodes" in rows[0]
         if not has_num_nodes:
-            logger.debug(f"num_nodes column not found in {wideep_alltoall_file} - will be computed as moe_ep_size // 4")
+            logger.debug(f"num_nodes column not found in {trtllm_alltoall_file} - will be computed as moe_ep_size // 4")
 
         # Check if kernel_source column exists
         has_kernel_source = len(rows) > 0 and "kernel_source" in rows[0]
         if not has_kernel_source:
-            logger.debug(f"kernel_source column not found in {wideep_alltoall_file} - will default to 'MnnvlMoe'")
+            logger.debug(f"kernel_source column not found in {trtllm_alltoall_file} - will default to 'NVLinkTwoSided'")
 
         for row in rows:
             op_name = row["op_name"]  # alltoall_prepare, alltoall_dispatch, alltoall_combine, etc.
@@ -1826,14 +1899,14 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
             quant_mode = common.MoEQuantMode[quant_mode]
 
             # Get kernel_source from data or use default
-            kernel_source = row.get("kernel_source", "MnnvlMoe")
+            kernel_source = row.get("kernel_source", "NVLinkTwoSided")
 
             # Get num_nodes from data or compute from moe_ep_size
             if has_num_nodes:
                 num_nodes = int(row["num_nodes"])
             else:
                 # Default: assume 4 GPUs per node
-                if moe_ep_size % 4 != 0:
+                if moe_ep_size % 4 != 0:  # FIXME this is only for GB200 needs to be generalized for other systems
                     logger.warning(
                         f"moe_ep_size={moe_ep_size} is not divisible by 4, using moe_ep_size // 4 = {moe_ep_size // 4}"
                     )
@@ -1844,7 +1917,7 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
             energy = power * latency  # watt-milliseconds
 
             # Store all three values with kernel_source and num_nodes dimensions
-            wideep_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
+            trtllm_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
                 moe_ep_size
             ][num_tokens] = {
                 "latency": latency,
@@ -1857,7 +1930,7 @@ def load_wideep_alltoall_data(wideep_alltoall_file):
             #     f"{num_tokens} -> {latency}"
             # )
 
-    return wideep_alltoall_data
+    return trtllm_alltoall_data
 
 
 class LoadedOpData(UserDict):
@@ -1933,7 +2006,7 @@ class PerfDatabase:
         _wideep_deepep_ll_data (dict): the wideep deepep ll data
         TensorRT-LLM wideep:
         _wideep_moe_compute_data (dict): the wideep moe compute data (pure computation, no all2all)
-        _wideep_alltoall_data (dict): the wideep all2all data (prepare, dispatch, combine)
+        _trtllm_alltoall_data (dict): the wideep all2all data (prepare, dispatch, combine)
 
     Methods:
         query_gemm: query the gemm data
@@ -1993,7 +2066,7 @@ class PerfDatabase:
                 PerfDataFilename.wideep_deepep_normal: load_wideep_deepep_normal_data,
                 PerfDataFilename.wideep_deepep_ll: load_wideep_deepep_ll_data,
                 PerfDataFilename.wideep_moe_compute: load_wideep_moe_compute_data,
-                PerfDataFilename.wideep_alltoall: load_wideep_alltoall_data,
+                PerfDataFilename.trtllm_alltoall: load_trtllm_alltoall_data,
                 PerfDataFilename.dsa_context_module: load_context_dsa_module_data,
                 PerfDataFilename.dsa_generation_module: load_generation_dsa_module_data,
             }
@@ -2031,6 +2104,8 @@ class PerfDatabase:
         self._mamba2_data = _load_op_data(PerfDataFilename.mamba2)
         self._compute_scale_data = _load_op_data(PerfDataFilename.compute_scale)
         self._scale_matrix_data = _load_op_data(PerfDataFilename.scale_matrix)
+        self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
+        self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
 
         # sglang wideep path
         if backend == "sglang":
@@ -2049,7 +2124,7 @@ class PerfDatabase:
         # TensorRT-LLM wideep path
         if backend == "trtllm":
             self._wideep_moe_compute_data = _load_op_data(PerfDataFilename.wideep_moe_compute)
-            self._wideep_alltoall_data = _load_op_data(PerfDataFilename.wideep_alltoall)
+            self._trtllm_alltoall_data = _load_op_data(PerfDataFilename.trtllm_alltoall)
 
         # pre-correction
         self._correct_data()
@@ -2460,22 +2535,62 @@ class PerfDatabase:
                 )
 
         # DSA (DeepSeek Sparse Attention) data interpolation
-        # Dict structure: data[gemm_mode][fmha_mode][kv_dtype][num_heads][s][b]
+        # Dict structure: data[architecture][gemm_mode][fmha_mode][kv_dtype][num_heads][s][b]
         if getattr(self, "_context_dsa_module_data", None) is not None:
-            for gemm_mode in self._context_dsa_module_data:
-                for fmha_mode in self._context_dsa_module_data[gemm_mode]:
-                    for kv_cache_dtype in self._context_dsa_module_data[gemm_mode][fmha_mode]:
-                        data_dict = self._context_dsa_module_data[gemm_mode][fmha_mode][kv_cache_dtype]
-                        num_heads_list = list(data_dict.keys())
-                        target_x_list = num_heads_list
-                        target_y_list = (
-                            [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
-                            + [4096 + i * 2048 for i in range(14)]
-                            + [32768 + 16384 * i for i in range(6)]
-                            + [131072 + 32768 * i for i in range(12)]
-                            + [524288 + 65536 * i for i in range(9)]
-                        )
-                        target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]
+            for arch in self._context_dsa_module_data:
+                for gemm_mode in self._context_dsa_module_data[arch]:
+                    for fmha_mode in self._context_dsa_module_data[arch][gemm_mode]:
+                        for kv_cache_dtype in self._context_dsa_module_data[arch][gemm_mode][fmha_mode]:
+                            data_dict = self._context_dsa_module_data[arch][gemm_mode][fmha_mode][kv_cache_dtype]
+                            num_heads_list = list(data_dict.keys())
+                            target_x_list = num_heads_list
+                            target_y_list = (
+                                [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
+                                + [4096 + i * 2048 for i in range(14)]
+                                + [32768 + 16384 * i for i in range(6)]
+                                + [131072 + 32768 * i for i in range(12)]
+                                + [524288 + 65536 * i for i in range(9)]
+                            )
+                            target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]
+
+                            self._extrapolate_data_grid(
+                                data_dict=data_dict,
+                                target_x_list=target_x_list,
+                                target_y_list=target_y_list,
+                                target_z_list=target_z_list,
+                            )
+
+        # Dict structure: data[architecture][gemm_mode][kv_dtype][num_heads][b][s]
+        if getattr(self, "_generation_dsa_module_data", None) is not None:
+            for arch in self._generation_dsa_module_data:
+                for gemm_mode in self._generation_dsa_module_data[arch]:
+                    for kv_cache_dtype in self._generation_dsa_module_data[arch][gemm_mode]:
+                        data_dict = self._generation_dsa_module_data[arch][gemm_mode][kv_cache_dtype]
+                        tp_list = list(data_dict.keys())
+                        target_x_list = tp_list
+                        target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]
+                        target_z_list = [
+                            1,
+                            2,
+                            4,
+                            8,
+                            16,
+                            32,
+                            64,
+                            128,
+                            256,
+                            512,
+                            1024,
+                            2048,
+                            4096,
+                            8192,
+                            16384,
+                            32768,
+                            65536,
+                            131072,
+                            262144,
+                            2097152 * 8,
+                        ]
 
                         self._extrapolate_data_grid(
                             data_dict=data_dict,
@@ -2483,44 +2598,6 @@ class PerfDatabase:
                             target_y_list=target_y_list,
                             target_z_list=target_z_list,
                         )
-
-        # Dict structure: data[gemm_mode][kv_dtype][num_heads][b][s]
-        if getattr(self, "_generation_dsa_module_data", None) is not None:
-            for gemm_mode in self._generation_dsa_module_data:
-                for kv_cache_dtype in self._generation_dsa_module_data[gemm_mode]:
-                    data_dict = self._generation_dsa_module_data[gemm_mode][kv_cache_dtype]
-                    tp_list = list(data_dict.keys())
-                    target_x_list = tp_list
-                    target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]
-                    target_z_list = [
-                        1,
-                        2,
-                        4,
-                        8,
-                        16,
-                        32,
-                        64,
-                        128,
-                        256,
-                        512,
-                        1024,
-                        2048,
-                        4096,
-                        8192,
-                        16384,
-                        32768,
-                        65536,
-                        131072,
-                        262144,
-                        2097152 * 8,
-                    ]
-
-                    self._extrapolate_data_grid(
-                        data_dict=data_dict,
-                        target_x_list=target_x_list,
-                        target_y_list=target_y_list,
-                        target_z_list=target_z_list,
-                    )
 
         # post-correction
         self._correct_data()
@@ -2612,59 +2689,77 @@ class PerfDatabase:
         quant_mode: common.MoEQuantMode,
         moe_ep_size: int,
         topk: int,
+        moe_backend: Optional[str] = None,
     ) -> str:
         """
-        Automatically select All2All communication method based on GPU architecture and configuration.
+        Automatically select All2All communication method based on GPU architecture,
+        MoE backend type, and configuration.
 
-        Selection logic (based on TensorRT-LLM's select_alltoall_method_type):
-        1. SM >= 100 (GB200 with MNNVL support) -> MnnvlMoe (NVLink Two-Sided)
-        2. SM >= 90 (H100/H200) with cross-node -> DeepEP
-        3. SM >= 90 (H100/H200) within single node -> DeepEPLowLatency
-        4. SM < 90 -> NCCL (fallback)
+        Aligned with TensorRT-LLM's per-backend select_alltoall_method_type:
+
+        CutlassFusedMoE / TRTLLMGenFusedMoE (fused_moe_cutlass.py / fused_moe_trtllm_gen.py):
+          - Requires supports_mnnvl() (approximated as SM >= 100)
+          - Returns NVLinkOneSided
+          - Does NOT support DeepEP / DeepEPLowLatency
+
+        WideEPMoE (fused_moe_wide_ep.py):
+          - If supports_mnnvl() -> NVLinkTwoSided
+          - Else if DeepEP feasible -> DeepEP (inter-node) or DeepEPLowLatency (intra-node)
+          - Does NOT support NVLinkOneSided
+
+        DeepGemmFusedMoE / CuteDslFusedMoE:
+          - Always NotEnabled
 
         Args:
             quant_mode: MoE quantization mode
             moe_ep_size: MoE expert parallelism size
             topk: Number of experts activated per token
+            moe_backend: MoE backend identifier. "wideep" for WideEP path,
+                        "CUTLASS"/"TRTLLM"/None for CutlassFusedMoE/TRTLLMGen,
+                        "DEEPGEMM"/"CUTE_DSL" for backends without AlltoAll.
 
         Returns:
-            str: The selected kernel_source name
+            str: The selected kernel_source name, or "NotEnabled" if AlltoAll is not used.
         """
+        if moe_backend is not None and moe_backend.upper() in {"DEEPGEMM", "CUTE_DSL"}:
+            return "NotEnabled"
+
         sm_version = self.system_spec["gpu"]["sm_version"]
         num_gpus_per_node = self.system_spec["node"]["num_gpus_per_node"]
         is_inter_node = moe_ep_size > num_gpus_per_node
+        is_wideep = moe_backend is not None and moe_backend.upper() == "WIDEEP"
 
-        # Preferred kernel based on hardware
-        if sm_version >= 100:
-            # GB200 supports MNNVL (Multi-Node NVLink)
-            preferred = "MnnvlMoe"
-        elif sm_version >= 90:
-            # H100/H200: Check DeepEP feasibility
-            # DeepEP requires: tp_size == 1, ep_size > 1, top_k in supported range
-            deepep_feasible = moe_ep_size > 1 and topk <= 8
+        supports_mnnvl = sm_version >= 100
 
-            if deepep_feasible and is_inter_node:
-                # Cross-node: use DeepEP normal mode
-                preferred = "DeepEP"
-            elif deepep_feasible:
-                # Intra-node: use DeepEP low-latency mode
-                preferred = "DeepEPLowLatency"
+        if is_wideep:
+            if supports_mnnvl:
+                preferred = "NVLinkTwoSided"
             else:
-                preferred = "MnnvlMoe"
+                deepep_feasible = moe_ep_size > 1 and topk <= 8
+                if deepep_feasible and is_inter_node:
+                    preferred = "DeepEP"
+                elif deepep_feasible:
+                    preferred = "DeepEPLowLatency"
+                else:
+                    preferred = "NotEnabled"
         else:
-            # SM89 and below: use NCCL standard communication
-            preferred = "NCCL"
+            if supports_mnnvl:
+                preferred = "NVLinkOneSided"
+            else:
+                preferred = "NotEnabled"
 
-        # Check if preferred kernel is available in data, otherwise fallback
-        if self._wideep_alltoall_data:
-            available_kernels = list(self._wideep_alltoall_data.keys())
+        if preferred == "NotEnabled":
+            return preferred
+
+        if self._trtllm_alltoall_data:
+            available_kernels = list(self._trtllm_alltoall_data.keys())
             if preferred in available_kernels:
                 return preferred
-            elif available_kernels:
-                # Fallback to any available kernel
-                fallback = available_kernels[0]
-                logger.debug(f"Preferred All2All kernel '{preferred}' not available, falling back to '{fallback}'")
-                return fallback
+            else:
+                logger.warning(
+                    f"Preferred All2All kernel '{preferred}' not in available kernels {available_kernels}. "
+                    f"Returning preferred anyway; downstream will fall back to HYBRID estimation."
+                )
 
         return preferred
 
@@ -3860,9 +3955,22 @@ class PerfDatabase:
                 attention_dict = self._generation_attention_data[kvcache_quant_mode][n_kv_lookup][head_size][
                     window_size
                 ]
-                result = self._interp_3d(n, b, s, attention_dict, "bilinear")
-                latency = result["latency"]
-                energy = result.get("energy", 0.0)
+                # Decode batches often contain a mix of sequence lengths around the nominal KV length `s`.
+                # Using a single point (n,b,s) can be noisy/inaccurate, so average a small neighborhood.
+                s_min = max(1, int(s * 0.9))
+                s_max = max(s_min, int(s * 1.1))
+                sample_cnt = 5
+                s_samples = [s_min + (s_max - s_min) * i // (sample_cnt - 1) for i in range(sample_cnt)]
+
+                latency_sum = 0.0
+                energy_sum = 0.0
+                for s_i in s_samples:
+                    r = self._interp_3d(n, b, s_i, attention_dict, "bilinear")
+                    latency_sum += float(r["latency"])
+                    energy_sum += float(r.get("energy", 0.0))
+
+                latency = latency_sum / sample_cnt
+                energy = energy_sum / sample_cnt
                 return PerformanceResult(latency, energy=energy)
 
             return self._query_silicon_or_hybrid(
@@ -4577,6 +4685,8 @@ class PerfDatabase:
                               Energy accessible via .energy attribute (W·ms).
         """
 
+        num_gemms = 3 if is_gated else 2  # gated (SwiGLU): 3 GEMMs; non-gated (Relu2): 2 GEMMs
+
         def get_sol(
             num_tokens: int,
             hidden_size: int,
@@ -4595,17 +4705,13 @@ class PerfDatabase:
             # tp already impacted inter_size.
             # only consider even workload.
             total_tokens = num_tokens * topk
-            ops = total_tokens * hidden_size * inter_size * 3 * 2 // moe_ep_size // moe_tp_size  # ffn1, ffn2, gate
+            ops = total_tokens * hidden_size * inter_size * num_gemms * 2 // moe_ep_size // moe_tp_size
             mem_bytes = quant_mode.value.memory * (
                 total_tokens // moe_ep_size * hidden_size * 2  # input+output
-                + total_tokens
-                // moe_ep_size
-                * inter_size
-                * 3
-                // moe_tp_size  # intermediate, assume ffn1/gate all need to write results.
+                + total_tokens // moe_ep_size * inter_size * num_gemms // moe_tp_size  # intermediate
                 + hidden_size
                 * inter_size
-                * 3
+                * num_gemms
                 // moe_tp_size
                 * min(num_experts // moe_ep_size, total_tokens // moe_ep_size)
             )
@@ -4641,6 +4747,68 @@ class PerfDatabase:
             )[0]
             scale_factor = 0.4
             return latency / scale_factor
+
+        def _estimate_overflow_with_last_token_util(
+            query_tokens: int,
+            moe_dict: dict,
+            hidden_size: int,
+            inter_size: int,
+            topk: int,
+            num_experts: int,
+            moe_tp_size: int,
+            moe_ep_size: int,
+            quant_mode: common.MoEQuantMode,
+            workload_distribution: str,
+        ) -> PerformanceResult:
+            """Estimate overflow latency using utilization at the largest collected token.
+            Call only when query_tokens > max(moe_dict.keys()).
+            """
+            token_points = sorted(moe_dict.keys())
+            last_token = token_points[-1]
+            last_point = moe_dict[last_token]
+            if isinstance(last_point, dict):
+                last_latency = float(last_point["latency"])
+                last_power = float(last_point.get("power", 0.0))
+                last_energy = float(last_point.get("energy", 0.0))
+            else:
+                last_latency = float(last_point)
+                last_power = 0.0
+                last_energy = 0.0
+
+            sol_last = get_sol(
+                last_token,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )[0]
+            sol_query = get_sol(
+                query_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )[0]
+
+            util = min(1.0, sol_last / last_latency)  # clamp MFU ≤ 1.0
+            util = max(util, 1e-8)  # guard against near-zero sol_last
+            est_latency = sol_query / util
+
+            est_energy = 0.0
+            if last_power > 0:
+                est_energy = last_power * est_latency
+            elif last_energy > 0:
+                est_energy = last_energy * (est_latency / last_latency)
+
+            return PerformanceResult(est_latency, energy=est_energy)
 
         if database_mode is None:
             database_mode = self._default_database_mode
@@ -4705,6 +4873,20 @@ class PerfDatabase:
                     moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
+                    token_points = sorted(moe_dict.keys())
+                    if num_tokens_corrected > token_points[-1]:
+                        return _estimate_overflow_with_last_token_util(
+                            num_tokens_corrected,
+                            moe_dict,
+                            hidden_size,
+                            inter_size,
+                            topk,
+                            num_experts,
+                            moe_tp_size,
+                            moe_ep_size,
+                            quant_mode,
+                            workload_distribution,
+                        )
                     num_left, num_right = self._nearest_1d_point_helper(
                         num_tokens_corrected,
                         list(moe_dict.keys()),
@@ -4767,7 +4949,20 @@ class PerfDatabase:
                         moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
                             hidden_size
                         ][inter_size][moe_tp_size][moe_ep_size]
-
+                    token_points = sorted(moe_dict.keys())
+                    if num_tokens > token_points[-1]:
+                        return _estimate_overflow_with_last_token_util(
+                            num_tokens,
+                            moe_dict,
+                            hidden_size,
+                            inter_size,
+                            topk,
+                            num_experts,
+                            moe_tp_size,
+                            moe_ep_size,
+                            quant_mode,
+                            workload_distribution,
+                        )
                     num_left, num_right = self._nearest_1d_point_helper(
                         num_tokens,
                         list(moe_dict.keys()),
@@ -4793,6 +4988,20 @@ class PerfDatabase:
                     moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
+                    token_points = sorted(moe_dict.keys())
+                    if num_tokens > token_points[-1]:
+                        return _estimate_overflow_with_last_token_util(
+                            num_tokens,
+                            moe_dict,
+                            hidden_size,
+                            inter_size,
+                            topk,
+                            num_experts,
+                            moe_tp_size,
+                            moe_ep_size,
+                            quant_mode,
+                            workload_distribution,
+                        )
                     num_left, num_right = self._nearest_1d_point_helper(
                         num_tokens, list(moe_dict.keys()), inner_only=False
                     )
@@ -5363,7 +5572,7 @@ class PerfDatabase:
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
 
-        def get_empirical(
+        def get_empirical_from_sol(
             num_tokens: int,
             hidden_size: int,
             inter_size: int,
@@ -5375,9 +5584,7 @@ class PerfDatabase:
             quant_mode: common.MoEQuantMode,
             workload_distribution: str,
         ) -> float:
-            """
-            Get the empirical estimation: SOL / scale_factor.
-            """
+            """Get the empirical estimation: SOL / scale_factor."""
             latency = get_sol(
                 num_tokens,
                 hidden_size,
@@ -5424,7 +5631,7 @@ class PerfDatabase:
                 workload_distribution,
             )
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(
+            emp_latency = get_empirical_from_sol(
                 num_tokens,
                 hidden_size,
                 inter_size,
@@ -5437,6 +5644,7 @@ class PerfDatabase:
                 workload_distribution,
             )
             return PerformanceResult(emp_latency, energy=0.0)
+
         # Automatically select MoE kernel based on GPU architecture and quant mode
         kernel_source = self._select_moe_kernel(quant_mode)
         logger.debug(f"query_wideep_moe_compute: auto-selected kernel_source='{kernel_source}'")
@@ -5450,6 +5658,7 @@ class PerfDatabase:
             if workload_distribution in available_distributions:
                 used_distribution = workload_distribution
             else:
+                # Fallback: try to find a similar distribution or use the first available
                 used_distribution = available_distributions[0] if available_distributions else None
                 if used_distribution is None:
                     raise KeyError(f"No distribution available for kernel={kernel_source}, quant_mode={quant_mode}")
@@ -5497,8 +5706,21 @@ class PerfDatabase:
             ),
         )
 
+    @staticmethod
+    def _normalize_alltoall_moe_quant_mode_for_table(
+        quant_mode: common.MoEQuantMode,
+    ) -> common.MoEQuantMode:
+        """
+        Normalize MoE quant modes for TRT-LLM alltoall perf table lookup.
+
+        `fp8_block` is a behavioral mode that reuses the `fp8` alltoall tables.
+        """
+        if quant_mode == common.MoEQuantMode.fp8_block:
+            return common.MoEQuantMode.fp8
+        return quant_mode
+
     @functools.lru_cache(maxsize=32768)
-    def query_wideep_alltoall(
+    def query_trtllm_alltoall(
         self,
         op_name: str,
         num_tokens: int,
@@ -5509,15 +5731,14 @@ class PerfDatabase:
         quant_mode: common.MoEQuantMode,
         node_num: int | None = None,
         database_mode: common.DatabaseMode | None = None,
+        moe_backend: str | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
-        Query WideEP All2All communication latency.
+        Query TRT-LLM All2All communication latency.
 
-        The All2All communication method is automatically selected based on GPU architecture:
-        - SM >= 100 (GB200 with MNNVL) -> MnnvlMoe (NVLink Two-Sided)
-        - SM >= 90 (H100/H200) cross-node -> DeepEP
-        - SM >= 90 (H100/H200) intra-node -> DeepEPLowLatency
-        - SM < 90 -> NCCL (fallback)
+        Covers both WideEP (NVLinkTwoSided) and CutlassFusedMoE (NVLinkOneSided) paths.
+        The All2All communication method is automatically selected based on GPU architecture
+        and MoE backend type via _select_alltoall_kernel.
 
         Args:
             op_name: Operation name, one of:
@@ -5529,18 +5750,26 @@ class PerfDatabase:
             hidden_size: Hidden dimension size
             topk: Number of experts activated per token
             num_experts: Total number of experts
-            moe_ep_size: MoE expert parallelism size (must be divisible by 4 if node_num is None)
+            moe_ep_size: MoE expert parallelism size
             quant_mode: MoE quantization mode
-            node_num: Number of nodes. If None, computed as moe_ep_size // 4 (assuming 4 GPUs per node)
-            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+            moe_backend: MoE backend identifier for kernel selection.
+                "wideep" -> NVLinkTwoSided;
+                "CUTLASS"/"TRTLLM"/None -> NVLinkOneSided;
+                "DEEPGEMM"/"CUTE_DSL" -> NotEnabled.
+            node_num: Number of nodes. If None, computed as moe_ep_size // 4
+            database_mode: Database mode
 
         Returns:
             PerformanceResult: Latency in ms, energy accessible via .energy attribute.
-            For SOL_FULL mode: tuple of (sol_time, sol_comm, sol_overhead).
 
         Raises:
             ValueError: If op_name is not valid
+            PerfDataNotAvailableError: If backend version not in ["1.2.0rc6"]
         """
+        if self.version not in ["1.2.0rc6"]:
+            raise PerfDataNotAvailableError(
+                f"TRT-LLM alltoall query requires backend version 1.2.0rc6, got '{self.version}'"
+            )
 
         def get_sol(
             num_tokens: int,
@@ -5555,12 +5784,12 @@ class PerfDatabase:
             Get the SOL time for All2All communication.
 
             All2All transfers token data between GPUs:
-            - dispatch: each GPU sends (num_tokens * topk / ep_size) tokens to other GPUs
-            - combine: reverse direction
-            - prepare: lightweight metadata exchange
-
-            The total data transferred per GPU is proportional to
-            num_tokens * topk * hidden_size * (1 - 1/ep_size), since each GPU keeps 1/ep_size locally.
+            - prepare: lightweight metadata exchange (topk * 4 bytes per token)
+            - dispatch: each token sent once per unique remote rank (deduplication).
+              remote_ranks = min(topk, num_experts, ep_size - 1), bytes use quant_mode precision.
+            - combine: standard returns results in bfloat16 (2 B/elem);
+              low-precision variant returns results in fp4 (0.5 B/elem).
+              remote_ranks = min(topk, num_experts, ep_size - 1).
             """
             is_inter_node = node_num > 1
 
@@ -5569,26 +5798,22 @@ class PerfDatabase:
             else:
                 bw = self.system_spec["node"]["intra_node_bw"]
 
+            remote_ranks = min(topk, num_experts, moe_ep_size - 1)
+
             if op_name == "alltoall_prepare":
-                # Prepare is lightweight metadata exchange, data volume is small
                 data_bytes = num_tokens * topk * 4  # token routing indices, ~4 bytes per entry
+            elif "combine" in op_name:
+                bytes_per_element = 0.5 if "low_precision" in op_name else 2
+                data_bytes = num_tokens * remote_ranks * hidden_size * bytes_per_element
             else:
-                # dispatch/combine: transfer token activations
-                data_bytes = (
-                    num_tokens
-                    * topk
-                    * hidden_size
-                    * quant_mode.value.memory
-                    * (1.0 - 1.0 / moe_ep_size)  # fraction sent to remote GPUs
-                )
+                # dispatch: per-rank deduplication, use quant_mode precision
+                data_bytes = num_tokens * remote_ranks * hidden_size * quant_mode.value.memory
 
             sol_comm = data_bytes / bw * 1000  # ms
-            p2p_latency_ms = self.system_spec["node"]["p2p_latency"] * 1000
-            sol_overhead = p2p_latency_ms
-            sol_time = sol_comm + sol_overhead
-            return sol_time, sol_comm, sol_overhead
+            sol_time = sol_comm
+            return sol_time, sol_comm, 0.0
 
-        def get_empirical(
+        def get_empirical_from_sol(
             num_tokens: int,
             hidden_size: int,
             topk: int,
@@ -5597,9 +5822,7 @@ class PerfDatabase:
             quant_mode: common.MoEQuantMode,
             node_num: int,
         ) -> float:
-            """
-            Get the empirical estimation: SOL / scale_factor.
-            """
+            """Get the empirical estimation: SOL / scale_factor."""
             latency = get_sol(
                 num_tokens,
                 hidden_size,
@@ -5615,13 +5838,15 @@ class PerfDatabase:
         if database_mode is None:
             database_mode = self._default_database_mode
 
+        table_quant_mode = self._normalize_alltoall_moe_quant_mode_for_table(quant_mode)
+
         # Compute node_num if not provided
         if node_num is None:
             if moe_ep_size < 4:
                 node_num = 1
             else:
                 node_num = moe_ep_size // 4
-            logger.debug(f"query_wideep_alltoall: node_num not specified, using {node_num} (moe_ep_size={moe_ep_size})")
+            logger.debug(f"query_trtllm_alltoall: node_num not specified, using {node_num} (moe_ep_size={moe_ep_size})")
 
         valid_op_names = ["alltoall_prepare", "alltoall_dispatch", "alltoall_combine", "alltoall_combine_low_precision"]
         if op_name not in valid_op_names:
@@ -5649,7 +5874,7 @@ class PerfDatabase:
                 node_num,
             )
         elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(
+            emp_latency = get_empirical_from_sol(
                 num_tokens,
                 hidden_size,
                 topk,
@@ -5659,15 +5884,24 @@ class PerfDatabase:
                 node_num,
             )
             return PerformanceResult(emp_latency, energy=0.0)
-        # Automatically select All2All kernel based on GPU architecture
-        kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk)
-        logger.debug(f"query_wideep_alltoall: auto-selected kernel_source='{kernel_source}'")
+
+        kernel_source = self._select_alltoall_kernel(quant_mode, moe_ep_size, topk, moe_backend=moe_backend)
+        logger.debug(
+            f"query_trtllm_alltoall: auto-selected kernel_source='{kernel_source}' (moe_backend={moe_backend})"
+        )
+
+        if kernel_source == "NotEnabled":
+            if database_mode == common.DatabaseMode.SOL_FULL:
+                return (0.0, 0.0, 0.0)
+            return PerformanceResult(0.0, energy=0.0)
 
         # SILICON or HYBRID mode - use database
         def get_silicon():
-            self._wideep_alltoall_data.raise_if_not_loaded()
-            kernel_data = self._wideep_alltoall_data[kernel_source]
-            alltoall_dict = kernel_data[op_name][quant_mode][node_num][hidden_size][topk][num_experts][moe_ep_size]
+            self._trtllm_alltoall_data.raise_if_not_loaded()
+            kernel_data = self._trtllm_alltoall_data[kernel_source]
+            alltoall_dict = kernel_data[op_name][table_quant_mode][node_num][hidden_size][topk][num_experts][
+                moe_ep_size
+            ]
 
             num_left, num_right = self._nearest_1d_point_helper(
                 num_tokens,
@@ -5690,17 +5924,24 @@ class PerfDatabase:
             return PerformanceResult(lat, energy=energy)
 
         def get_empirical() -> float:
-            # Simple empirical fallback: ~0.1ms per operation as baseline
-            return 0.1
+            return get_empirical_from_sol(
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
+            )
 
         return self._query_silicon_or_hybrid(
             get_silicon=get_silicon,
             get_empirical=get_empirical,
             database_mode=database_mode,
             error_msg=(
-                f"Failed to query wideep alltoall data for {op_name} (kernel={kernel_source}), "
-                f"node_num={node_num}, {num_tokens=}, {hidden_size=}, {topk=}, {num_experts=}, "
-                f"{moe_ep_size=}, {quant_mode=}"
+                f"Failed to query trtllm alltoall data for {op_name} (kernel={kernel_source}), "
+                f"moe_backend={moe_backend}, node_num={node_num}, {num_tokens=}, {hidden_size=}, "
+                f"{topk=}, {num_experts=}, {moe_ep_size=}, {quant_mode=}"
             ),
         )
 
@@ -5716,13 +5957,14 @@ class PerfDatabase:
         num_heads: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode,
+        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16,
         database_mode: common.DatabaseMode | None = None,
         *,
         prefix: int = 0,
-        index_n_heads: int = 64,
-        index_head_dim: int = 128,
-        index_topk: int = 2048,
+        architecture: str = DEFAULT_DSA_ARCHITECTURE,
+        index_n_heads: int | None = None,
+        index_head_dim: int | None = None,
+        index_topk: int | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query context DSA module-level latency and energy.
@@ -5738,21 +5980,27 @@ class PerfDatabase:
             fmha_quant_mode: FMHA quantization mode
             database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
             prefix: Prefix length in KV cache
-            index_n_heads: Number of heads in the indexer
-            index_head_dim: Head dim in the indexer
-            index_topk: Top-k selected by the indexer
+            architecture: HF architecture string (e.g. "DeepseekV32ForCausalLM")
+            index_n_heads: Number of heads in the indexer (default from DSA_MODEL_DIMS)
+            index_head_dim: Head dim in the indexer (default from DSA_MODEL_DIMS)
+            index_topk: Top-k selected by the indexer (default from DSA_MODEL_DIMS)
 
         Returns:
             PerformanceResult or (sol_time, sol_math, sol_mem) for SOL_FULL
         """
-        # DeepSeek-V3.2 DSA structural dims.
-        # FIXME: should use model config to get the structural dims.
-        hidden_size = 7168
-        q_lora = 1536
-        kv_lora = 512
-        qk_nope = 128
-        qk_rope = 64
-        v_dim = 128
+        dims = DSA_MODEL_DIMS.get(architecture, DSA_MODEL_DIMS[DEFAULT_DSA_ARCHITECTURE])
+        hidden_size = dims["hidden_size"]
+        q_lora = dims["q_lora_rank"]
+        kv_lora = dims["kv_lora_rank"]
+        qk_nope = dims["qk_nope_head_dim"]
+        qk_rope = dims["qk_rope_head_dim"]
+        v_dim = dims["v_head_dim"]
+        if index_n_heads is None:
+            index_n_heads = dims["index_n_heads"]
+        if index_head_dim is None:
+            index_head_dim = dims["index_head_dim"]
+        if index_topk is None:
+            index_topk = dims["index_topk"]
         qk_head_dim = qk_nope + qk_rope
         attn_head_dim = kv_lora + qk_rope
 
@@ -5885,7 +6133,7 @@ class PerfDatabase:
                         f"Context DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[gemm_quant_mode][fmha_quant_mode][kvcache_quant_mode]
+                dsa_dict = dsa_module_data[architecture][gemm_quant_mode][fmha_quant_mode][kvcache_quant_mode]
                 full_s = s + prefix
                 result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                 latency = result["latency"]
@@ -5920,12 +6168,13 @@ class PerfDatabase:
         s: int,
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode,
+        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16,
         database_mode: common.DatabaseMode | None = None,
         *,
-        index_n_heads: int = 64,
-        index_head_dim: int = 128,
-        index_topk: int = 2048,
+        architecture: str = DEFAULT_DSA_ARCHITECTURE,
+        index_n_heads: int | None = None,
+        index_head_dim: int | None = None,
+        index_topk: int | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query generation DSA module-level latency and energy.
@@ -5940,13 +6189,19 @@ class PerfDatabase:
             index_head_dim: Head dim in the indexer
             index_topk: Top-k selected by the indexer
         """
-        # FIXME: should use model config to get the structural dims.
-        hidden_size = 7168
-        q_lora = 1536
-        kv_lora = 512
-        qk_nope = 128
-        qk_rope = 64
-        v_dim = 128
+        dims = DSA_MODEL_DIMS.get(architecture, DSA_MODEL_DIMS[DEFAULT_DSA_ARCHITECTURE])
+        hidden_size = dims["hidden_size"]
+        q_lora = dims["q_lora_rank"]
+        kv_lora = dims["kv_lora_rank"]
+        qk_nope = dims["qk_nope_head_dim"]
+        qk_rope = dims["qk_rope_head_dim"]
+        v_dim = dims["v_head_dim"]
+        if index_n_heads is None:
+            index_n_heads = dims["index_n_heads"]
+        if index_head_dim is None:
+            index_head_dim = dims["index_head_dim"]
+        if index_topk is None:
+            index_topk = dims["index_topk"]
         qk_head_dim = qk_nope + qk_rope
         attn_head_dim = kv_lora + qk_rope
 
@@ -6041,7 +6296,7 @@ class PerfDatabase:
                         f"Generation DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[gemm_quant_mode][kv_cache_dtype]
+                dsa_dict = dsa_module_data[architecture][gemm_quant_mode][kv_cache_dtype]
                 result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)

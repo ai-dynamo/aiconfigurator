@@ -6,6 +6,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.performance_result import PerformanceResult
 
 pytestmark = pytest.mark.unit
 
@@ -168,6 +169,76 @@ class TestMoE:
             database_mode=common.DatabaseMode.SOL,
         )
         assert result > 0
+
+    def test_query_moe_silicon_within_range_uses_interpolation(self, comprehensive_perf_db):
+        """When num_tokens <= max(moe_dict), result comes from interpolation (or exact hit)."""
+        # Fixture has token points [1, 2, 4, 8, 16, 32]; 8 is an exact grid point.
+        num_tokens = 8
+        result = comprehensive_perf_db.query_moe(
+            num_tokens,
+            2048,
+            8192,
+            2,
+            8,
+            2,
+            2,
+            common.MoEQuantMode.float16,
+            "uniform",
+            database_mode=common.DatabaseMode.SILICON,
+        )
+        assert isinstance(result, PerformanceResult)
+        assert float(result) > 0
+        # Exact hit: fixture uses 0.1 * num_tokens per point
+        expected = comprehensive_perf_db._moe_data[common.MoEQuantMode.float16]["uniform"][2][8][2048][8192][2][2][
+            num_tokens
+        ]
+        assert math.isclose(float(result), expected, rel_tol=1e-6)
+
+    def test_query_moe_silicon_overflow_uses_util_extrapolation(self, comprehensive_perf_db):
+        """When num_tokens > max(moe_dict), result comes from _estimate_overflow_with_last_token_util."""
+        # Fixture max token point is 32; query beyond it to trigger overflow path.
+        max_stored = 32
+        num_tokens_overflow = 64
+        result = comprehensive_perf_db.query_moe(
+            num_tokens_overflow,
+            2048,
+            8192,
+            2,
+            8,
+            2,
+            2,
+            common.MoEQuantMode.float16,
+            "uniform",
+            database_mode=common.DatabaseMode.SILICON,
+        )
+        assert isinstance(result, PerformanceResult)
+        assert float(result) > 0
+        # Extrapolated latency should be greater than latency at max stored point
+        latency_at_max = comprehensive_perf_db._moe_data[common.MoEQuantMode.float16]["uniform"][2][8][2048][8192][2][
+            2
+        ][max_stored]
+        assert float(result) > latency_at_max
+
+    def test_query_moe_silicon_boundary_at_max_tokens(self, comprehensive_perf_db):
+        """When num_tokens == max(moe_dict), interpolation path is used (exact hit), not overflow."""
+        max_stored = 32
+        result = comprehensive_perf_db.query_moe(
+            max_stored,
+            2048,
+            8192,
+            2,
+            8,
+            2,
+            2,
+            common.MoEQuantMode.float16,
+            "uniform",
+            database_mode=common.DatabaseMode.SILICON,
+        )
+        assert isinstance(result, PerformanceResult)
+        expected = comprehensive_perf_db._moe_data[common.MoEQuantMode.float16]["uniform"][2][8][2048][8192][2][2][
+            max_stored
+        ]
+        assert math.isclose(float(result), expected, rel_tol=1e-6)
 
 
 class TestMLABMM:

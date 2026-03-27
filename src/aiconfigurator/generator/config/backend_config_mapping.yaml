@@ -36,7 +36,8 @@ parameters:
 - param_key: moe_tensor_parallel_size
   vllm: null
   # https://github.com/sgl-project/sglang/issues/8530
-  # sglang moe_tensor_parallel_size only supports 1 or None for now
+  # SGLang: expert MoE TP is folded into tensor-parallel-size (see sglang.rule). Do not map to
+  # --moe-dense-tp-size (dense sublayers only; SGLang allows 1 or None).
   sglang: null
   trtllm: null
 

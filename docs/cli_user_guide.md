@@ -56,6 +56,111 @@ print(result["parallelism"])  # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8
 
 > **Note:** This is a naive configuration without memory validation or performance optimization. For production deployments, use `aiconfigurator cli default` to run the full parameter sweep with SLA optimization.
 
+### Estimate mode
+This mode runs a single-point performance estimation to predict TTFT (time to first token), TPOT (time per output token), and power consumption for a given model, system, and configuration. Unlike `default` mode, no parameter sweep or SLA optimization is performed — you specify the exact configuration and get back the predicted metrics.
+
+```bash
+aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-size 2 --batch-size 64 --isl 2048 --osl 512
+```
+
+**Required arguments:**
+- `--model-path` (alias `--model`): HuggingFace model path (e.g., `Qwen/Qwen3-32B`) or local path containing `config.json`
+- `--system`: System name (`h200_sxm`, `h100_sxm`, `b200_sxm`, `gb200`, `a100_sxm`, `l40s`, `gb300`)
+
+**Optional arguments (shared):**
+- `--estimate-mode`: `agg` (default) or `disagg`
+- `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
+- `--backend-version`: Backend database version. Default: latest
+- `--database-mode`: Database mode (`SILICON`, `HYBRID`, `EMPIRICAL`, `SOL`). Default: `SILICON`
+- `--isl`: Input sequence length. Default: `1024`
+- `--osl`: Output sequence length. Default: `1024`
+- `--batch-size`: Batch size (max concurrent requests, used for agg). Default: `128`
+- `--ctx-tokens`: Context tokens budget for IFB scheduling. Default: same as ISL
+- `--tp-size`: Tensor parallelism size. Default: `1`
+- `--pp-size`: Pipeline parallelism size. Default: `1`
+- `--attention-dp-size`: Attention data parallelism size. Default: `1`
+- `--moe-tp-size`: MoE tensor parallelism size (auto-inferred if omitted)
+- `--moe-ep-size`: MoE expert parallelism size (auto-inferred if omitted)
+- `--gemm-quant-mode`: GEMM quantization mode (auto-inferred from model config if omitted)
+- `--kvcache-quant-mode`: KV cache quantization mode (auto-inferred if omitted)
+- `--fmha-quant-mode`: FMHA quantization mode (auto-inferred if omitted)
+- `--moe-quant-mode`: MoE quantization mode (auto-inferred if omitted)
+- `--comm-quant-mode`: Communication quantization mode (auto-inferred if omitted)
+- `--print-per-ops-latency`: Print per-operation latency breakdown
+- `--systems-paths`: Override system YAML/data search paths (comma-separated; `default` maps to the built-in systems path)
+
+**Disagg-specific arguments** (used when `--estimate-mode disagg`):
+- `--decode-system`: System name for decode workers. Defaults to `--system`
+- `--prefill-tp-size`, `--prefill-pp-size`, `--prefill-attention-dp-size`: Prefill parallelism overrides (default to shared args)
+- `--prefill-moe-tp-size`, `--prefill-moe-ep-size`: Prefill MoE parallelism overrides
+- `--prefill-batch-size`: Prefill batch size (required for disagg)
+- `--prefill-num-workers`: Number of prefill workers (required for disagg)
+- `--decode-tp-size`, `--decode-pp-size`, `--decode-attention-dp-size`: Decode parallelism overrides (default to shared args)
+- `--decode-moe-tp-size`, `--decode-moe-ep-size`: Decode MoE parallelism overrides
+- `--decode-batch-size`: Decode batch size (required for disagg)
+- `--decode-num-workers`: Number of decode workers (required for disagg)
+
+**Example output (agg):**
+```text
+============================================================
+  Performance Estimate (agg)
+============================================================
+  Model:            Qwen/Qwen3-32B
+  System:           h200_sxm
+  Backend:          trtllm (1.2.0rc5)
+------------------------------------------------------------
+  ISL:              2048
+  OSL:              512
+  Batch Size:       64
+  Context Tokens:   2048
+  TP Size:          2
+  PP Size:          1
+------------------------------------------------------------
+  TTFT:             487.990 ms
+  TPOT:             29.118 ms
+  Request Latency:  15367.492 ms
+  Power (per GPU):  0.0 W
+------------------------------------------------------------
+  tokens/s:         2,153.38
+  tokens/s/gpu:     1,076.69
+  tokens/s/user:    34.34
+  seq/s:            4.214
+  Concurrency:      64
+  Memory (GPU):     54.55 GB
+============================================================
+```
+
+**Disagg example:**
+```bash
+aiconfigurator cli estimate \
+  --model-path Qwen/Qwen3-32B --system h200_sxm \
+  --estimate-mode disagg --isl 2048 --osl 512 --tp-size 2 \
+  --prefill-batch-size 4 --prefill-num-workers 2 \
+  --decode-batch-size 64 --decode-num-workers 2
+```
+
+**Python API equivalent:**
+```python
+from aiconfigurator.cli.api import cli_estimate
+
+# Aggregated estimation
+result = cli_estimate(
+    "Qwen/Qwen3-32B", "h100_sxm",
+    batch_size=64, isl=2048, osl=512, tp_size=2,
+)
+print(f"TTFT: {result.ttft:.2f} ms, TPOT: {result.tpot:.2f} ms")
+print(f"Power: {result.power_w:.1f} W")
+print(f"Throughput: {result.tokens_per_second_per_gpu:,.2f} tokens/s/gpu")
+
+# Disaggregated estimation
+result = cli_estimate(
+    "Qwen/Qwen3-32B", "h100_sxm", mode="disagg",
+    isl=2048, osl=512, tp_size=2,
+    prefill_batch_size=4, prefill_num_workers=2,
+    decode_batch_size=64, decode_num_workers=2,
+)
+```
+
 ### Support mode (optional)
 This is an optional pre-flight check to verify if AIConfigurator supports a specific model and hardware combination for both aggregated and disaggregated serving modes. You can skip this and run `cli default` directly. Support is determined by a majority-vote of tests in the support matrix for models sharing the same architecture.
 
@@ -292,8 +397,8 @@ By default, we output top 5 configs we have found. You can get the configs and s
 
 **Generator Dynamo version**
 - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
-- If `--generator-dynamo-version` is not provided, the default is the latest database version for the backend.
-- If `--generated_config_version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the first entry in `--generator-dynamo-version`.
+- If `--generator-dynamo-version` is not provided, the default is the first entry in `backend_version_matrix.yaml` (currently `1.0.0`).
+- If `--generated-config-version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the selected Dynamo version mapping.
 
 Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/DynConfig/WorkerConfig/Workers.<role> sections, or add inline overrides via `--generator-set KEY=VALUE`. Examples:
 

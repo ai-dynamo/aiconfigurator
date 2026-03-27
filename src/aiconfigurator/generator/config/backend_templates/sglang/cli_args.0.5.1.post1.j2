@@ -4,7 +4,7 @@
 {%- if sglang['data-parallel-size'] is defined -%}{%- set _ = args.append('--data-parallel-size "' ~ sglang['data-parallel-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['page-size'] is defined -%}{%- set _ = args.append('--page-size "' ~ sglang['page-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['max-prefill-tokens'] is defined -%}{%- set _ = args.append('--max-prefill-tokens "' ~ sglang['max-prefill-tokens'] ~ '"') -%}{%- endif -%}
-{%- if sglang['enable-mixed-chunk'] is defined -%}{%- set _ = args.append('--enable-mixed-chunk') -%}{%- endif -%}
+{%- if sglang['enable-mixed-chunk'] is defined and sglang['enable-mixed-chunk'] -%}{%- set _ = args.append('--enable-mixed-chunk') -%}{%- endif -%}
 {%- if sglang['kv-cache-dtype'] is defined -%}{%- set _ = args.append('--kv-cache-dtype "' ~ sglang['kv-cache-dtype'] ~ '"') -%}{%- endif -%}
 {%- if sglang['context-length'] is defined -%}{%- set _ = args.append('--context-length "' ~ sglang['context-length'] ~ '"') -%}{%- endif -%}
 {%- if sglang['max-running-requests'] is defined -%}{%- set _ = args.append('--max-running-requests "' ~ sglang['max-running-requests'] ~ '"') -%}{%- endif -%}
@@ -12,7 +12,6 @@
 {%- if sglang['trust-remote-code'] -%}{%- set _ = args.append('--trust-remote-code') -%}{%- endif -%}
 {%- if sglang['enable-dp-attention'] -%}{%- set _ = args.append('--enable-dp-attention') -%}{%- endif -%}
 {%- if sglang['expert-parallel-size'] is defined -%}{%- set _ = args.append('--expert-parallel-size "' ~ sglang['expert-parallel-size'] ~ '"') -%}{%- endif -%}
-{%- if sglang['moe-dense-tp-size'] is defined -%}{%- set _ = args.append('--moe-dense-tp-size "' ~ sglang['moe-dense-tp-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['disable-cuda-graph'] -%}{%- set _ = args.append('--disable-cuda-graph') -%}{%- endif -%}
 {%- if sglang['cuda-graph-bs'] is defined -%}{%- set _ = args.append('--cuda-graph-bs ' ~ (sglang['cuda-graph-bs'] | join(' '))) -%}{%- endif -%}
 {%- if sglang['disable-cuda-graph-padding'] -%}{%- set _ = args.append('--disable-cuda-graph-padding') -%}{%- endif -%}

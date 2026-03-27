@@ -17,6 +17,7 @@ from aiconfigurator.sdk.common import (
     MULTIMODAL_TEXT_CONFIG_KEY,
     BlockConfig,
     DefaultHFModels,
+    HybridMoEConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -319,12 +320,20 @@ class HuggingFaceDownloadError(Exception):
 
 
 def _get_hf_auth_headers() -> dict[str, str]:
-    # Load token from ~/.cache/huggingface/token, if available
-    token_path = Path.home() / ".cache" / "huggingface" / "token"
-    hf_token = None
-    if token_path.exists():
-        with open(token_path) as f:
-            hf_token = f.read().strip()
+    """Return HTTP auth headers using the cached HuggingFace token, if available.
+
+    Token resolution order (first non-empty wins):
+    1. ``HF_TOKEN`` environment variable
+    2. ``HUGGING_FACE_HUB_TOKEN`` environment variable
+    3. ``~/.cache/huggingface/token`` file
+    """
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if not hf_token:
+        # Fall back to the token file written by `huggingface-cli login`
+        token_path = Path.home() / ".cache" / "huggingface" / "token"
+        if token_path.exists():
+            with open(token_path) as f:
+                hf_token = f.read().strip()
     headers: dict[str, str] = {}
     if hf_token:
         headers["Authorization"] = f"Bearer {hf_token}"
@@ -332,6 +341,7 @@ def _get_hf_auth_headers() -> dict[str, str]:
 
 
 def _download_hf_json(hf_id: str, filename: str, *, raise_on_404: bool = True) -> dict | None:
+    """Download and parse a JSON file from a HuggingFace model repo."""
     url = f"https://huggingface.co/{hf_id}/raw/main/{filename}"
     try:
         req = urllib.request.Request(url, headers=_get_hf_auth_headers())
@@ -344,7 +354,10 @@ def _download_hf_json(hf_id: str, filename: str, *, raise_on_404: bool = True) -
         raise HuggingFaceDownloadError(
             f"Failed to download {hf_id}'s {filename} from HuggingFace: "
             f"HuggingFace returned HTTP error {e.code}: {e.reason}. "
-            f"URL: {url}. Check your authentication token in {token_path} if using a gated model."
+            f"URL: {url}. If using a gated model, authenticate via one of the following "
+            f"(in priority order): (1) set the HF_TOKEN environment variable, "
+            f"(2) set the HUGGING_FACE_HUB_TOKEN environment variable, or "
+            f"(3) run `huggingface-cli login` (token stored at {token_path})."
         ) from e
     except Exception as e:
         raise HuggingFaceDownloadError(f"Failed to download {hf_id}'s {filename} from HuggingFace: {e}") from e
@@ -505,6 +518,63 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture == "DeciLMForCausalLM":
         if "block_configs" in config:
             extra_params = _parse_nemotron_block_configs(config["block_configs"])
+    elif architecture == "MiMoV2FlashForCausalLM":
+        # MiMo-V2-Flash: per-layer attention + FFN patterns; different dims for SWA vs global.
+        moe_layer_freq_raw = config.get("moe_layer_freq", [])
+        moe_layer_freq = (
+            tuple(moe_layer_freq_raw) if isinstance(moe_layer_freq_raw, list) else tuple([moe_layer_freq_raw] * layers)
+        )
+        attn_pattern = tuple(config.get("hybrid_layer_pattern", []))
+        if len(attn_pattern) != layers or len(moe_layer_freq) != layers:
+            raise ValueError(
+                f"Hybrid pattern length mismatch for {architecture}: "
+                f"expected {layers} entries, got attn={len(attn_pattern)} moe={len(moe_layer_freq)}"
+            )
+        if any(v not in (0, 1) for v in (*attn_pattern, *moe_layer_freq)):
+            raise ValueError(f"Hybrid patterns for {architecture} must contain only 0/1 values")
+        extra_params = HybridMoEConfig(
+            attn_layer_pattern=attn_pattern,
+            moe_layer_freq=moe_layer_freq,
+            swa_num_kv_heads=config.get("swa_num_key_value_heads", 0),
+            swa_head_dim=config.get("swa_head_dim", 0),
+            swa_v_head_dim=config.get("swa_v_head_dim", 0),
+            global_v_head_dim=config.get("v_head_dim", 0),
+            sliding_window_size=config.get("sliding_window_size", 0),
+            dense_inter_size=0,  # dense layers use model-level inter_size
+        )
+        logger.info(
+            f"MiMo-V2-Flash hybrid config: "
+            f"global_attn_layers={sum(extra_params.attn_layer_pattern)}, "
+            f"swa_layers={extra_params.attn_layer_pattern.count(0)}, "
+            f"moe_layers={sum(extra_params.moe_layer_freq)}, "
+            f"dense_layers={extra_params.moe_layer_freq.count(0)}"
+        )
+    elif architecture == "Llama4ForConditionalGeneration":
+        # Llama 4: step-based patterns — generate normalized per-layer tuples.
+        # Attention: even layers → local (0), odd layers → global (1).
+        # FFN: layer i is MoE (1) if (i+1) % interleave_moe_layer_step == 0, else dense (0).
+        step = config.get("interleave_moe_layer_step", 1)
+        if not isinstance(step, int) or step <= 0:
+            raise ValueError(f"interleave_moe_layer_step must be a positive integer, got {step}")
+        attn_pattern = tuple(i % 2 for i in range(layers))
+        moe_freq = tuple(1 if (i + 1) % step == 0 else 0 for i in range(layers))
+        extra_params = HybridMoEConfig(
+            attn_layer_pattern=attn_pattern,
+            moe_layer_freq=moe_freq,
+            # All attention dims are uniform (0 → fall back to model-level defaults).
+            sliding_window_size=config.get("attention_chunk_size", 0),
+            dense_inter_size=config.get("intermediate_size_mlp", 0),
+        )
+        logger.info(
+            f"Llama4 hybrid config: interleave_moe_layer_step={step}, "
+            f"global_attn_layers={sum(attn_pattern)}, local_attn_layers={attn_pattern.count(0)}, "
+            f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
+            f"sliding_window_size={extra_params.sliding_window_size}"
+        )
+    elif architecture in {"Qwen3ForCausalLM", "Qwen3MoeForCausalLM"}:
+        # Qwen3-family attention may include additional Q/K normalization.
+        extra_params = {"architecture": architecture, "use_qk_norm": True}
+
     return {
         "architecture": architecture,
         "layers": layers,
@@ -530,6 +600,7 @@ def _get_model_config_path():
 
 
 def _load_pre_downloaded_hf_config(hf_id: str) -> dict:
+    """Load a cached HuggingFace config.json from the model_configs package directory."""
     config_path = _get_model_config_path() / f"{hf_id.replace('/', '--')}_config.json"
     if not config_path.exists():
         raise ValueError(f"HuggingFace model {hf_id} is not cached in model_configs directory.")
@@ -537,6 +608,7 @@ def _load_pre_downloaded_hf_config(hf_id: str) -> dict:
 
 
 def _load_pre_downloaded_hf_quant_config(hf_id: str) -> dict | None:
+    """Load a cached hf_quant_config.json, returning None if not present."""
     config_path = _get_model_config_path() / f"{hf_id.replace('/', '--')}_hf_quant_config.json"
     if not config_path.exists():
         return None
@@ -560,6 +632,7 @@ def _load_local_quant_config(path: str) -> dict | None:
 
 
 def _normalize_hf_quant_config(hf_quant_config: dict) -> dict:
+    """Extract and normalize quant_method/kv_cache_quant_method from hf_quant_config."""
     quant_section = hf_quant_config.get("quantization")
     if not isinstance(quant_section, dict):
         return {}
@@ -574,6 +647,7 @@ def _normalize_hf_quant_config(hf_quant_config: dict) -> dict:
 
 
 def _normalize_quant_algo(value: object) -> str | None:
+    """Normalize a quantization algorithm string to a canonical form."""
     if value is None:
         return None
     algo = str(value).strip().lower()
@@ -590,6 +664,7 @@ def _normalize_quant_algo(value: object) -> str | None:
 
 
 def _normalize_kv_cache_algo(value: object) -> str | None:
+    """Normalize a KV cache quantization algorithm string."""
     if value is None:
         return None
     algo = str(value).strip().lower()
@@ -634,6 +709,7 @@ def _infer_quant_dynamic(quant_cfg: dict) -> bool | None:
 
 
 def _infer_quantization_fields(raw_config: dict) -> dict[str, object]:
+    """Infer quant_method, kv_cache_quant_method, and quant_dynamic from config."""
     quant_cfg = raw_config.get("quantization_config")
     quant_cfg = quant_cfg if isinstance(quant_cfg, dict) else {}
 
@@ -694,6 +770,7 @@ def _infer_quantization_fields(raw_config: dict) -> dict[str, object]:
 
 
 def _attach_inferred_quant_fields(raw_config: dict) -> dict:
+    """Attach inferred quantization fields to config, checking text_config for multimodal models."""
     # For multimodal models the quantization_config may live under text_config.
     # Promote it to the top level so downstream inference picks it up.
     if "quantization_config" not in raw_config:
@@ -710,6 +787,7 @@ def _attach_inferred_quant_fields(raw_config: dict) -> dict:
 
 
 def _attach_hf_quant_config(raw_config: dict, hf_quant_config: dict | None) -> dict:
+    """Merge normalized hf_quant_config fields into raw_config if present."""
     if not hf_quant_config:
         return raw_config
     raw_config["hf_quant_config"] = hf_quant_config

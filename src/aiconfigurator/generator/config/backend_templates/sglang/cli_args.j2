@@ -10,13 +10,12 @@
 {%- if sglang['max-running-requests'] is defined -%}{%- set _ = args.append('--max-running-requests "' ~ sglang['max-running-requests'] ~ '"') -%}{%- endif -%}
 {%- if sglang['chunked-prefill-size'] is defined -%}{%- set _ = args.append('--chunked-prefill-size "' ~ sglang['chunked-prefill-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['max-prefill-tokens'] is defined -%}{%- set _ = args.append('--max-prefill-tokens "' ~ sglang['max-prefill-tokens'] ~ '"') -%}{%- endif -%}
-{%- if sglang['enable-mixed-chunk'] is defined -%}{%- set _ = args.append('--enable-mixed-chunk') -%}{%- endif -%}
+{%- if sglang['enable-mixed-chunk'] is defined and sglang['enable-mixed-chunk'] -%}{%- set _ = args.append('--enable-mixed-chunk') -%}{%- endif -%}
 {%- if sglang['skip-tokenizer-init'] -%}{%- set _ = args.append('--skip-tokenizer-init') -%}{%- endif -%}
 {%- if sglang['trust-remote-code'] -%}{%- set _ = args.append('--trust-remote-code') -%}{%- endif -%}
 {%- if sglang['disable-radix-cache'] -%}{%- set _ = args.append('--disable-radix-cache') -%}{%- endif -%}
 {%- if sglang['enable-dp-attention'] -%}{%- set _ = args.append('--enable-dp-attention') -%}{%- endif -%}
 {%- if sglang['expert-parallel-size'] is defined -%}{%- set _ = args.append('--expert-parallel-size "' ~ sglang['expert-parallel-size'] ~ '"') -%}{%- endif -%}
-{%- if sglang['moe-dense-tp-size'] is defined -%}{%- set _ = args.append('--moe-dense-tp-size "' ~ sglang['moe-dense-tp-size'] ~ '"') -%}{%- endif -%}
 {%- if sglang['moe-runner-backend'] is defined -%}{%- set _ = args.append('--moe-runner-backend "' ~ sglang['moe-runner-backend'] ~ '"') -%}{%- endif -%}
 {%- if sglang['moe-a2a-backend'] is defined -%}{%- set _ = args.append('--moe-a2a-backend "' ~ sglang['moe-a2a-backend'] ~ '"') -%}{%- endif -%}
 {%- if sglang['attention-backend'] is defined -%}{%- set _ = args.append('--attention-backend "' ~ sglang['attention-backend'] ~ '"') -%}{%- endif -%}

@@ -75,6 +75,7 @@ def main(args):
     from aiconfigurator.webapp.components.profiling.create_profiling_tab import create_profiling_tab
     from aiconfigurator.webapp.components.readme_tab import create_readme_tab
     from aiconfigurator.webapp.components.static_tab import create_static_tab
+    from aiconfigurator.webapp.components.support_matrix_tab import create_support_matrix_tab
     from aiconfigurator.webapp.events.event_handler import EventHandler
 
     app_config = {
@@ -92,7 +93,8 @@ def main(args):
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    if not perf_database.get_all_databases():
+    # Check if any databases exist without loading them
+    if not perf_database.get_supported_databases():
         raise SystemExit(perf_database.build_no_databases_message())
 
     with gr.Blocks(
@@ -104,6 +106,21 @@ def main(args):
         }
         .config-column:last-child {
             border-right: none;
+        }
+        /* Remove scrollbar from support matrix table */
+        .support-matrix-table table,
+        .support-matrix-table .table-wrap,
+        .support-matrix-table .table-container {
+            overflow: visible !important;
+            max-height: none !important;
+        }
+        /* Hide scrollbars on support matrix table */
+        .support-matrix-table::-webkit-scrollbar {
+            display: none !important;
+        }
+        .support-matrix-table {
+            scrollbar-width: none !important;
+            -ms-overflow-style: none !important;
         }
     """,
     ) as demo:
@@ -143,6 +160,7 @@ def main(args):
             pareto_comparison_components = create_pareto_comparison_tab(app_config)
             if app_config["enable_profiling"]:
                 profiling_components = create_profiling_tab(app_config)
+            support_matrix_components = create_support_matrix_tab(app_config)  # noqa: F841
 
         # setup events
         EventHandler.setup_static_events(static_components)

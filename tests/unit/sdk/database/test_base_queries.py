@@ -6,6 +6,7 @@ import math
 import pytest
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.perf_database import LoadedOpData
 
 # Import PerfDatabase and its dependencies
 
@@ -43,6 +44,53 @@ def test_query_gemm_empirical_mode(stub_perf_db):
     assert math.isclose(empirical_value, sol_value / 0.8), (
         f"EMPIRICAL expected {sol_value / 0.8}, got {empirical_value}"
     )
+
+
+def test_query_trtllm_alltoall_normalizes_fp8_block_lookup(stub_perf_db):
+    """
+    fp8_block reuses the fp8 TRT-LLM alltoall perf tables.
+    """
+    stub_perf_db.version = "1.2.0rc6"
+    stub_perf_db.system_spec["gpu"]["sm_version"] = 100
+    stub_perf_db._trtllm_alltoall_data = LoadedOpData(
+        {
+            "NVLinkOneSided": {
+                "alltoall_dispatch": {
+                    common.MoEQuantMode.fp8: {
+                        1: {
+                            1024: {
+                                8: {
+                                    256: {
+                                        8: {
+                                            16: {"latency": 3.0, "power": 0.0, "energy": 0.0},
+                                            32: {"latency": 6.0, "power": 0.0, "energy": 0.0},
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        common.PerfDataFilename.trtllm_alltoall,
+        "dummy_trtllm_alltoall_perf.txt",
+    )
+
+    result = stub_perf_db.query_trtllm_alltoall(
+        op_name="alltoall_dispatch",
+        num_tokens=16,
+        hidden_size=1024,
+        topk=8,
+        num_experts=256,
+        moe_ep_size=8,
+        quant_mode=common.MoEQuantMode.fp8_block,
+        node_num=1,
+        database_mode=common.DatabaseMode.SILICON,
+        moe_backend="CUTLASS",
+    )
+
+    assert math.isclose(float(result), 3.0)
 
 
 def test_query_custom_allreduce_database_mode_calculation(stub_perf_db):

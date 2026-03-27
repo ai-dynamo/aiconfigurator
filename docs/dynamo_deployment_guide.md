@@ -454,7 +454,7 @@ aiconfigurator cli default \
   --generator-set Workers.decode.cache_transceiver_backend=default
 ```
 
-Since different versions of TensorRT-LLM often have variations in configuration, please specify `--generated-config-version` to match the version used when generating configs. For the specific TensorRT-LLM version corresponding to a official dynamo image, you can refer to, for example, this [pyproject](https://github.com/ai-dynamo/dynamo/blob/v0.5.0/pyproject.toml#L51), or check directly inside the container by running: `python -c import tensorrt_llm; print(tensorrt_llm.__version__)`. In this case, since the image is nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0, you should set `--generated-config-version 1.0.0rc6`.
+Since different TensorRT-LLM versions can require different config fields, set `--generated-config-version` to match the runtime used to deploy. For the TensorRT-LLM version corresponding to an official Dynamo image, refer to this [pyproject](https://github.com/ai-dynamo/dynamo/blob/v0.5.0/pyproject.toml#L51), or check directly in the container via `python -c "import tensorrt_llm; print(tensorrt_llm.__version__)"`. For `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.5.0`, use `--generated-config-version 1.0.0rc6`.
 
 
 ### Apply (inline mode - default)

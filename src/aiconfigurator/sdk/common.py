@@ -60,6 +60,38 @@ class NemotronHConfig:
     moe_shared_expert_intermediate_size: int = 0  # Optional: 0 for non-MoE NemotronH models
 
 
+@dataclass(frozen=True)
+class HybridMoEConfig:
+    """
+    Unified config for hybrid attention (SWA/local + global) + mixed FFN (MoE + dense) models.
+    Covers MiMo-V2-Flash, Llama 4 Scout/Maverick, and similar architectures.
+
+    Both patterns are stored as normalized per-layer tuples of length num_layers:
+        attn_layer_pattern: 0 = SWA/local attention, 1 = global (full) attention
+        moe_layer_freq:     0 = dense SwiGLU FFN,    1 = MoE FFN
+
+    SWA/local attention dims — set to 0 to fall back to model-level defaults
+    (head_dim / num_kv_heads). MiMo-V2-Flash has different dims per attention type;
+    Llama 4 uses the same dims for all layers so all four fields are 0.
+        swa_num_kv_heads: KV heads for SWA/local layers  (0 → num_kv_heads)
+        swa_head_dim:     Q/K head dim for SWA layers     (0 → head_dim)
+        swa_v_head_dim:   V head dim for SWA layers       (0 → head_dim)
+        global_v_head_dim: V head dim for global layers   (0 → head_dim)
+
+    sliding_window_size: token window for SWA/local attention layers
+    dense_inter_size: intermediate size for dense FFN layers (0 → use inter_size)
+    """
+
+    attn_layer_pattern: tuple[int, ...]  # per-layer: 0=SWA/local, 1=global
+    moe_layer_freq: tuple[int, ...]  # per-layer: 0=dense, 1=MoE
+    swa_num_kv_heads: int = 0
+    swa_head_dim: int = 0
+    swa_v_head_dim: int = 0
+    global_v_head_dim: int = 0
+    sliding_window_size: int = 0
+    dense_inter_size: int = 0
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -220,26 +252,14 @@ Model parameters are parsed from these configs via get_model_config_from_model_p
 The list of default models for testing is derived from support_matrix.csv via get_default_models()
 """
 DefaultHFModels = {
-    # Llama 2 Models
-    "meta-llama/Llama-2-7b-hf",
-    "meta-llama/Llama-2-13b-hf",
-    "meta-llama/Llama-2-70b-hf",
     # Llama 3.1 Models
     "meta-llama/Meta-Llama-3.1-8B",
     "meta-llama/Meta-Llama-3.1-70B",
     "meta-llama/Meta-Llama-3.1-405B",
     "nvidia/Llama-3.1-70B-Instruct-FP8",
-    # Mixtral Models
-    "mistralai/Mixtral-8x7B-v0.1",
-    "mistralai/Mixtral-8x22B-v0.1",
     # DeepSeek Models
     "deepseek-ai/DeepSeek-V3",
     "nvidia/DeepSeek-V3.1-NVFP4",
-    # Qwen 2.5 Models
-    "Qwen/Qwen2.5-1.5B",
-    "Qwen/Qwen2.5-7B",
-    "Qwen/Qwen2.5-32B",
-    "Qwen/Qwen2.5-72B",
     # Qwen 3 Models
     "Qwen/Qwen3-0.6B",
     "Qwen/Qwen3-1.7B",
@@ -258,10 +278,16 @@ DefaultHFModels = {
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
+    # Llama 4 Models
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+    # MiMo Models
+    "XiaomiMiMo/MiMo-V2-Flash",
+    "XiaomiMiMo/MiMo-7B-Base",
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "nvidia/NVIDIA-Nemotron-3-Super-120B-NVFP4-FP8KV",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     "nvidia/Nemotron-H-56B-Base-8K",
 }
 
@@ -276,16 +302,18 @@ SupportedSystems = {
     "gb300",
     "a100_sxm",
     "l40s",
+    "b60",
 }
 
 """
 Model family for model definition
 """
-ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS", "NEMOTRONH"}
+ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS", "NEMOTRONH", "HYBRIDMOE"}
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
     "Qwen3ForCausalLM": "LLAMA",
+    "MiMoForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
     "KimiK25ForConditionalGeneration": "DEEPSEEK",
@@ -294,14 +322,18 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "NemotronHForCausalLM": "NEMOTRONH",
     "MixtralForCausalLM": "MOE",
     "GptOssForCausalLM": "MOE",
+    "Qwen2MoeForCausalLM": "MOE",
     "Qwen3MoeForCausalLM": "MOE",
     "MiniMaxM2ForCausalLM": "MOE",
+    "MiMoV2FlashForCausalLM": "HYBRIDMOE",
+    "Llama4ForConditionalGeneration": "HYBRIDMOE",
 }
 
 # Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
 # _parse_hf_config_json will flatten these before parsing.
 MULTIMODAL_TEXT_CONFIG_KEY = {
     "KimiK25ForConditionalGeneration": "text_config",
+    "Llama4ForConditionalGeneration": "text_config",
 }
 
 """
@@ -500,7 +532,8 @@ class PerfDataFilename(Enum):
     wideep_deepep_ll = "wideep_deepep_ll_perf.txt"
     # TensorRT-LLM WideEP specific
     wideep_moe_compute = "wideep_moe_perf.txt"
-    wideep_alltoall = "wideep_alltoall_perf.txt"
+    # TensorRT-LLM AlltoAll (covers WideEP NVLinkTwoSided + CutlassFusedMoE NVLinkOneSided)
+    trtllm_alltoall = "trtllm_alltoall_perf.txt"
     compute_scale = "computescale_perf.txt"
     scale_matrix = "scale_matrix_perf.txt"
     mamba2 = "mamba2_perf.txt"
@@ -544,6 +577,8 @@ class MoEQuantMode(Enum):
     w4afp8 = QuantMapping(0.5, 2, "w4afp8")  # specific for trtllm torch ds w4a8
     nvfp4 = QuantMapping(9 / 16, 4, "nvfp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
     w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4")  # native data format for gpt oss
+    w4a8_mxfp4_mxfp8 = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8")
+    # mxfp4 weights, mxfp8 activations (recommended for Blackwell)
 
 
 class FMHAQuantMode(Enum):

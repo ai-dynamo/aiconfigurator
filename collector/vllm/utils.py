@@ -147,20 +147,38 @@ def create_common_attn_metadata(
         )
     except TypeError:
         # Older API expects explicit CPU tensors without underscores.
-        return CommonAttentionMetadata(
-            query_start_loc=query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens=seq_lens,
-            seq_lens_cpu=seq_lens_cpu,
-            num_computed_tokens_cpu=num_computed_tokens_cpu,
-            num_reqs=batch_spec.batch_size,
-            num_actual_tokens=num_tokens,
-            max_query_len=max_query_len,
-            max_seq_len=max_seq_len,
-            block_table_tensor=block_table_tensor,
-            slot_mapping=slot_mapping,
-            causal=True,
-        )
+        try:
+            return CommonAttentionMetadata(
+                query_start_loc=query_start_loc,
+                query_start_loc_cpu=query_start_loc_cpu,
+                seq_lens=seq_lens,
+                seq_lens_cpu=seq_lens_cpu,
+                num_computed_tokens_cpu=num_computed_tokens_cpu,
+                num_reqs=batch_spec.batch_size,
+                num_actual_tokens=num_tokens,
+                max_query_len=max_query_len,
+                max_seq_len=max_seq_len,
+                block_table_tensor=block_table_tensor,
+                slot_mapping=slot_mapping,
+                causal=True,
+            )
+        except TypeError:
+            return CommonAttentionMetadata(
+                query_start_loc=query_start_loc,
+                query_start_loc_cpu=query_start_loc_cpu,
+                seq_lens=seq_lens,
+                seq_lens_cpu=seq_lens_cpu,
+                seq_start_loc_cpu=None,
+                seq_start_loc=None,
+                num_computed_tokens_cpu=num_computed_tokens_cpu,
+                num_reqs=batch_spec.batch_size,
+                num_actual_tokens=num_tokens,
+                max_query_len=max_query_len,
+                max_seq_len=max_seq_len,
+                block_table_tensor=block_table_tensor,
+                slot_mapping=slot_mapping,
+                causal=True,
+            )
 
 
 def get_attention_backend(backend_name: AttentionBackendEnum):
@@ -174,23 +192,29 @@ def get_attention_backend(backend_name: AttentionBackendEnum):
 
     # Legacy API: _Backend enum with manual mapping
     if _Backend is not None and isinstance(backend_name, _Backend):
-        backend_map = {
-            _Backend.FLASH_ATTN: (
-                "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
-                if current_platform.is_cuda()
-                else "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
-            ),
-            _Backend.FLASHINFER: "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
-            _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
-            _Backend.TRITON_ATTN: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
-            _Backend.TREE_ATTN: "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
-            _Backend.XFORMERS: "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",
-            _Backend.CUTLASS_MLA: "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
-            _Backend.FLASHMLA: "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
-            _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
-            _Backend.FLASHINFER_MLA: "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",
-            _Backend.TRITON_MLA: "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
-        }
+        if torch.xpu.is_available():
+            backend_map = {
+                _Backend.FLASH_ATTN_VLLM_V1: "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",
+            }
+        else:
+            backend_map = {
+                _Backend.FLASH_ATTN: (
+                    "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+                    if current_platform.is_cuda()
+                    else "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
+                ),
+                _Backend.FLASHINFER: "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
+                _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
+                _Backend.TRITON_ATTN: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+                _Backend.TREE_ATTN: "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
+                _Backend.XFORMERS: "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",
+                _Backend.CUTLASS_MLA: "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
+                _Backend.FLASHMLA: "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
+                _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
+                _Backend.FLASHINFER_MLA: "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",
+                _Backend.TRITON_MLA: "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
+            }
+
         if backend_name not in backend_map:
             raise ValueError(f"Unknown backend: {backend_name}")
         backend_class_name = backend_map[backend_name]

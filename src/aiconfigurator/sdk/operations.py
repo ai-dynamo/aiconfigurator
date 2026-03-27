@@ -405,8 +405,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
         comm_latency = 0.0
 
         if self._pre_dispatch:
-            # Pre-dispatch phase: prepare + dispatch
-            prepare_result = database.query_wideep_alltoall(
+            prepare_result = database.query_trtllm_alltoall(
                 op_name="alltoall_prepare",
                 num_tokens=num_tokens,
                 hidden_size=self._hidden_size,
@@ -414,9 +413,10 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 num_experts=self._num_experts,
                 moe_ep_size=self._moe_ep_size,
                 quant_mode=self._quant_mode,
+                moe_backend="wideep",
                 node_num=self._node_num,
             )
-            dispatch_result = database.query_wideep_alltoall(
+            dispatch_result = database.query_trtllm_alltoall(
                 op_name="alltoall_dispatch",
                 num_tokens=num_tokens,
                 hidden_size=self._hidden_size,
@@ -424,13 +424,13 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 num_experts=self._num_experts,
                 moe_ep_size=self._moe_ep_size,
                 quant_mode=self._quant_mode,
+                moe_backend="wideep",
                 node_num=self._node_num,
             )
             comm_latency = float(prepare_result) + float(dispatch_result)
         else:
-            # Post-dispatch phase: combine or combine_low_precision
             combine_op = "alltoall_combine_low_precision" if self._use_low_precision_combine else "alltoall_combine"
-            combine_result = database.query_wideep_alltoall(
+            combine_result = database.query_trtllm_alltoall(
                 op_name=combine_op,
                 num_tokens=num_tokens,
                 hidden_size=self._hidden_size,
@@ -438,6 +438,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 num_experts=self._num_experts,
                 moe_ep_size=self._moe_ep_size,
                 quant_mode=self._quant_mode,
+                moe_backend="wideep",
                 node_num=self._node_num,
             )
             comm_latency = float(combine_result)
@@ -563,13 +564,20 @@ class MoEDispatch(Operation):
         self._moe_backend = kwargs.get("moe_backend")
         self._is_context = kwargs.get("is_context", True)
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
+        self._quant_mode = kwargs.get("quant_mode")
+        self._reduce_results = kwargs.get("reduce_results", True)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         num_tokens = kwargs.get("x")
         volume = num_tokens * self._hidden_size
-        _sm_version = database.system_spec["gpu"]["sm_version"]
+        _sm_version = database.system_spec["gpu"].get("sm_version", -1)
         _num_gpus_per_node = database.system_spec["node"]["num_gpus_per_node"]
         _node_num = self.num_gpus / _num_gpus_per_node
+
+        if self._quant_mode is not None:
+            _quant_compress = self._quant_mode.value.memory / 2.0
+        else:
+            _quant_compress = 0.25
 
         if database.backend == common.BackendName.trtllm.value:
             assert self._attention_tp_size == 1 or self._attention_dp_size == 1, (
@@ -577,86 +585,94 @@ class MoEDispatch(Operation):
             )
             if _sm_version == 100:
                 logger.debug("MoEDispatch: In trtllm SM100 execution path")
+
+                _alltoall_backends = {"CUTLASS", "TRTLLM"}
+                backend_supports_alltoall = self._moe_backend is None or self._moe_backend.upper() in _alltoall_backends
+                enable_alltoall = backend_supports_alltoall and self._attention_dp_size > 1 and self._moe_tp_size == 1
+
+                # Quantize-aware communication volume.
+                # When quant_mode is known, compute compressed volume:
+                #   nvfp4: volume/4 + scale_factor volume
+                #   fp8:   volume/2
+                #   others / unknown: full volume (BF16)
+                quant_mode = self._quant_mode
+                if quant_mode is not None and quant_mode == common.MoEQuantMode.nvfp4:
+                    dispatch_x_volume = volume / 4
+                    dispatch_sf_volume = volume / 4 / 8
+                elif quant_mode is not None and quant_mode in (common.MoEQuantMode.fp8, common.MoEQuantMode.fp8_block):
+                    dispatch_x_volume = volume / 2
+                    dispatch_sf_volume = 0
+                else:
+                    dispatch_x_volume = volume
+                    dispatch_sf_volume = 0
+
+                if enable_alltoall and quant_mode is None:
+                    raise ValueError("MoEDispatch requires quant_mode when TRTLLM alltoall path is enabled.")
+
                 if self._pre_dispatch:
-                    if self._attention_tp_size > 1:  # tp>1, use allreduce
-                        # to do: custom allreduce
-                        if _num_gpus_per_node == 72 and self.num_gpus > 4:  # to do: nvl72, node per gpu
-                            comm_latency = database.query_nccl(
-                                common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
-                            )
-                        else:
-                            comm_latency = database.query_custom_allreduce(
-                                common.CommQuantMode.half, self.num_gpus, volume
-                            )
+                    if enable_alltoall:
+                        dispatch_result = database.query_trtllm_alltoall(
+                            op_name="alltoall_dispatch",
+                            num_tokens=num_tokens,
+                            hidden_size=self._hidden_size,
+                            topk=self._topk,
+                            num_experts=self._num_experts,
+                            moe_ep_size=self._moe_ep_size,
+                            quant_mode=quant_mode,
+                            moe_backend=self._moe_backend,
+                        )
+                        comm_latency = float(dispatch_result)
                     elif self._attention_dp_size > 1:
-                        if self._enable_fp4_all2all:
-                            # Calculate all2all communication volume for nvfp4 all2all operation
-                            # Volume calculation considers the average case between best and worst
-                            # scenarios:
-                            # - Best case: volume * 1/4 (all selected experts are in one GPU for
-                            #   all tokens)
-                            # - Worst case: volume * min(topk, attention_dp_size)/4 (every selected
-                            #   expert is in different GPU)
-                            # - Final volume: average of best and worst cases, divided by 4 for
-                            #   nvfp4 quantization
-                            all2all_volume = (
-                                volume * (1 + min(self._topk, self._attention_dp_size)) / 2 / 4
-                            )  # mean of best and worst
-                            # to do: nvfp4 custom all2all
-                            all2all_latency = database.query_nccl(
-                                common.CommQuantMode.half, self.num_gpus, "alltoall", all2all_volume
-                            )
-                            all2all_sf_latency = database.query_nccl(
-                                common.CommQuantMode.half,
-                                self.num_gpus,
-                                "alltoall",
-                                all2all_volume / 8,
-                            )  # volume_scale_factor = 1/8 volume
-                            comm_latency = all2all_latency + all2all_sf_latency + 1e-2  # msg size static latency 10us
+                        all_gather_volume = (dispatch_x_volume + dispatch_sf_volume) * self._attention_dp_size
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half, self.num_gpus, "all_gather", all_gather_volume
+                        )
+                    elif self._attention_tp_size > 1:
+                        if self._reduce_results:
+                            if _num_gpus_per_node == 72 and self.num_gpus > 4:
+                                comm_latency = database.query_nccl(
+                                    common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
+                                )
+                            else:
+                                comm_latency = database.query_custom_allreduce(
+                                    common.CommQuantMode.half, self.num_gpus, volume
+                                )
                         else:
-                            all_gather_volume = volume * self._attention_dp_size / 4
-                            all_gather_latency = database.query_nccl(
-                                common.CommQuantMode.half,
-                                self.num_gpus,
-                                "all_gather",
-                                all_gather_volume,
-                            )  # nvfp4 allgather
-                            all_gather_sf_latency = database.query_nccl(
-                                common.CommQuantMode.half,
-                                self.num_gpus,
-                                "all_gather",
-                                all_gather_volume / 8,
-                            )  # volume_scale_factor = 1/8 volume
-                            comm_latency = all_gather_latency + all_gather_sf_latency
+                            comm_latency = 0
                     else:
                         comm_latency = 0
                 else:
-                    if self._attention_tp_size > 1:  # tp>1, use allreduce
-                        # to do: custom allreduce
-                        if _num_gpus_per_node == 72 and self.num_gpus > 4:  # to do: nvl72, node per gpu
-                            comm_latency = database.query_nccl(
-                                common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
-                            )
-                        else:
-                            comm_latency = database.query_custom_allreduce(
-                                common.CommQuantMode.half, self.num_gpus, volume
-                            )
+                    if enable_alltoall:
+                        combine_result = database.query_trtllm_alltoall(
+                            op_name="alltoall_combine",
+                            num_tokens=num_tokens,
+                            hidden_size=self._hidden_size,
+                            topk=self._topk,
+                            num_experts=self._num_experts,
+                            moe_ep_size=self._moe_ep_size,
+                            quant_mode=quant_mode,
+                            moe_backend=self._moe_backend,
+                        )
+                        comm_latency = float(combine_result)
                     elif self._attention_dp_size > 1:
-                        if self._enable_fp4_all2all:
-                            # to do: nvfp4 all2all
-                            all2all_volume = (
-                                volume * (1 + min(self._topk, self._attention_dp_size)) / 2 / 4
-                            )  # nvfp4 all2all
-                            comm_latency = database.query_nccl(
-                                common.CommQuantMode.half, self.num_gpus, "alltoall", all2all_volume
-                            )
+                        comm_latency = database.query_nccl(
+                            common.CommQuantMode.half,
+                            self.num_gpus,
+                            "reduce_scatter",
+                            volume * self._attention_dp_size,
+                        )
+                    elif self._attention_tp_size > 1:
+                        if self._reduce_results:
+                            if _num_gpus_per_node == 72 and self.num_gpus > 4:
+                                comm_latency = database.query_nccl(
+                                    common.CommQuantMode.half, self.num_gpus, "all_reduce", volume
+                                )
+                            else:
+                                comm_latency = database.query_custom_allreduce(
+                                    common.CommQuantMode.half, self.num_gpus, volume
+                                )
                         else:
-                            comm_latency = database.query_nccl(
-                                common.CommQuantMode.half,
-                                self.num_gpus,
-                                "reduce_scatter",
-                                volume * self._attention_dp_size,
-                            )
+                            comm_latency = 0
                     else:
                         comm_latency = 0
             else:  # sm < 100 or > 100 (for now)
@@ -833,7 +849,9 @@ class ContextAttention(Operation):
         fmha_quant_mode: common.FMHAQuantMode,
         window_size: int = 0,
         head_size: int = 128,
+        use_qk_norm: bool = False,
     ) -> None:
+        """Initialize context attention query parameters."""
         super().__init__(name, scale_factor)
         self._n = n
         self._weights = 0.0
@@ -842,6 +860,7 @@ class ContextAttention(Operation):
         self._fmha_quant_mode = fmha_quant_mode
         self._window_size = window_size
         self._head_size = head_size
+        self._use_qk_norm = use_qk_norm
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query context attention latency with energy data."""
@@ -860,6 +879,25 @@ class ContextAttention(Operation):
             window_size=self._window_size,
             head_size=self._head_size,
         )
+        q_num = self._n * self._head_size
+        k_num = self._n_kv * self._head_size
+        v_num = self._n_kv * self._head_size
+        extra_latency = 0
+        if self._use_qk_norm:
+            qk_norm_latency = 2 * database.query_mem_op(q_num * 2) + 2 * database.query_mem_op(k_num * 2)
+            extra_latency += qk_norm_latency * 2  # elementwise before norm
+        apply_rope_latency = 2 * database.query_mem_op(q_num * 2 + k_num * 2)  # apply rope
+
+        kv_write_latency = database.query_mem_op(k_num * self._fmha_quant_mode.value.memory) + database.query_mem_op(
+            v_num * self._fmha_quant_mode.value.memory
+        )
+        extra_latency += apply_rope_latency + kv_write_latency
+        result += extra_latency * 1.1  # correction factor for extra latency
+
+        seq_imbalance_correction_scale = float(kwargs.get("seq_imbalance_correction_scale", 1.0))
+        if seq_imbalance_correction_scale != 1.0:
+            result = result * seq_imbalance_correction_scale
+
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
@@ -880,7 +918,9 @@ class GenerationAttention(Operation):
         kv_cache_dtype: common.KVCacheQuantMode,
         window_size: int = 0,
         head_size: int = 128,
+        use_qk_norm: bool = False,
     ) -> None:
+        """Initialize generation attention query parameters."""
         super().__init__(name, scale_factor)
         self._n = n
         self._weights = 0.0
@@ -888,11 +928,13 @@ class GenerationAttention(Operation):
         self._kv_cache_dtype = kv_cache_dtype
         self._window_size = window_size
         self._head_size = head_size
+        self._use_qk_norm = use_qk_norm
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query generation attention latency with energy data."""
         beam_width = kwargs.get("beam_width")
-        assert beam_width == 1, "only support beam_width=1"
+        if beam_width != 1:
+            raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
 
@@ -905,6 +947,16 @@ class GenerationAttention(Operation):
             window_size=self._window_size,
             head_size=self._head_size,
         )
+        # Generation/decoding stage uses a separate correction scale (do NOT reuse ctx scale).
+        # Backward-compatible fallback: if only the old key is provided, use it.
+        gen_seq_imbalance_correction_scale = float(
+            kwargs.get(
+                "gen_seq_imbalance_correction_scale",
+                kwargs.get("seq_imbalance_correction_scale", 1.0),
+            )
+        )
+        if gen_seq_imbalance_correction_scale != 1.0:
+            result = result * gen_seq_imbalance_correction_scale
         return PerformanceResult(float(result) * self._scale_factor, energy=result.energy * self._scale_factor)
 
     def get_weights(self, **kwargs):
@@ -974,7 +1026,8 @@ class GenerationMLA(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query generation MLA latency with energy data."""
         beam_width = kwargs.get("beam_width")
-        assert beam_width == 1, "only support beam_width=1"
+        if beam_width != 1:
+            raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
 
@@ -1008,7 +1061,8 @@ class MLABmm(Operation):
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query MLA BMM latency with power data."""
         beam_width = kwargs.get("beam_width")
-        assert beam_width == 1, "only support beam_width=1"
+        if beam_width != 1:
+            raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
         batch_size = kwargs.get("batch_size")
 
         result = database.query_mla_bmm(batch_size, self._num_heads, self._quant_mode, self._if_pre)
@@ -1407,21 +1461,17 @@ class ContextDSAModule(Operation):
         name: str,
         scale_factor: float,
         num_heads: int,
-        index_n_heads: int,
-        index_head_dim: int,
-        index_topk: int,
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
+        architecture: str = "DeepseekV32ForCausalLM",
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
-        self._index_n_heads = index_n_heads
-        self._index_head_dim = index_head_dim
-        self._index_topk = index_topk
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
         self._gemm_quant_mode = gemm_quant_mode
+        self._architecture = architecture
         self._weights = 0.0
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
@@ -1435,12 +1485,10 @@ class ContextDSAModule(Operation):
             s=isl,
             prefix=prefix,
             num_heads=self._num_heads,
-            index_n_heads=self._index_n_heads,
-            index_head_dim=self._index_head_dim,
-            index_topk=self._index_topk,
             kvcache_quant_mode=self._kvcache_quant_mode,
             fmha_quant_mode=self._fmha_quant_mode,
             gemm_quant_mode=self._gemm_quant_mode,
+            architecture=self._architecture,
         )
         return PerformanceResult(
             float(result) * self._scale_factor,
@@ -1466,25 +1514,22 @@ class GenerationDSAModule(Operation):
         name: str,
         scale_factor: float,
         num_heads: int,
-        index_n_heads: int,
-        index_head_dim: int,
-        index_topk: int,
         kv_cache_dtype: common.KVCacheQuantMode,
         gemm_quant_mode: common.GEMMQuantMode,
+        architecture: str = "DeepseekV32ForCausalLM",
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
-        self._index_n_heads = index_n_heads
-        self._index_head_dim = index_head_dim
-        self._index_topk = index_topk
         self._kv_cache_dtype = kv_cache_dtype
         self._gemm_quant_mode = gemm_quant_mode
+        self._architecture = architecture
         self._weights = 0.0
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         """Query generation DSA latency with energy data."""
         beam_width = kwargs.get("beam_width")
-        assert beam_width == 1, "only support beam_width=1"
+        if beam_width != 1:
+            raise ValueError(f"{self.__class__.__name__} only supports beam_width=1, got {beam_width}")
         batch_size = kwargs.get("batch_size")
         s = kwargs.get("s")
 
@@ -1492,11 +1537,9 @@ class GenerationDSAModule(Operation):
             b=batch_size,
             s=s,
             num_heads=self._num_heads,
-            index_n_heads=self._index_n_heads,
-            index_head_dim=self._index_head_dim,
-            index_topk=self._index_topk,
             kv_cache_dtype=self._kv_cache_dtype,
             gemm_quant_mode=self._gemm_quant_mode,
+            architecture=self._architecture,
         )
         return PerformanceResult(
             float(result) * self._scale_factor,

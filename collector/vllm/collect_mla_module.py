@@ -36,7 +36,6 @@ Usage:
 import argparse
 import gc
 import math
-import os
 import traceback
 
 import torch
@@ -56,18 +55,13 @@ from collector.vllm.utils import (
 )
 
 # ═══════════════════════════════════════════════════════════════════════
-# Supported Models — attn_type → real config source
+# Supported Models — model_path → attention type
 # ═══════════════════════════════════════════════════════════════════════
 
-SUPPORTED_MODELS: dict[str, dict] = {
-    "mla": {
-        "attn_type": "mla",
-        "model": os.environ.get("AICONFIGURATOR_VLLM_MLA_MODEL", "deepseek-ai/DeepSeek-V3"),
-    },
-    "dsa": {
-        "attn_type": "dsa",
-        "model": os.environ.get("AICONFIGURATOR_VLLM_DSA_MODEL", "deepseek-ai/DeepSeek-V3.2"),
-    },
+SUPPORTED_MODELS: dict[str, str] = {
+    "deepseek-ai/DeepSeek-V3": "mla",
+    "deepseek-ai/DeepSeek-V3.2": "dsa",
+    "zai-org/GLM-5": "dsa",
 }
 
 
@@ -169,12 +163,14 @@ def _build_module_test_cases(attn_type: str, mode: str):
     """Build module-level test cases for a specific attention type and phase.
 
     Output format: [seq_len, batch_size, num_heads, kv_cache_dtype,
-                    compute_dtype, gemm_type, perf_filename, attn_type]
+                    compute_dtype, gemm_type, perf_filename, model_path, attn_type]
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
+    model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
     cases = []
-    for s, b, h, kv_dtype, compute_dtype, gemm_type, fname in base_cases:
-        cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, fname, attn_type])
+    for model_path in model_paths:
+        for s, b, h, kv_dtype, compute_dtype, gemm_type, fname in base_cases:
+            cases.append([s, b, h, kv_dtype, compute_dtype, gemm_type, fname, model_path, attn_type])
     return cases
 
 
@@ -239,6 +235,7 @@ def _create_gemm_quant_config(gemm_type: str):
 
 
 def _create_attention_module(
+    model_path: str,
     attn_type: str,
     num_heads: int,
     use_fp8_kv_cache: bool,
@@ -252,12 +249,14 @@ def _create_attention_module(
     """
     Create a DeepseekV2MLAAttention module from vLLM's own modeling code.
 
-    Loads a real HF config first, overrides the layer-local attention
+    Loads a real HF config from model_path, overrides the layer-local attention
     dimensions we want to benchmark in-memory, and then constructs the module
     with dummy weights. The module includes all projections + attention +
     output.
 
     Args:
+        model_path: HuggingFace model path (e.g. "deepseek-ai/DeepSeek-V3.2").
+        attn_type: Attention type ("mla" or "dsa").
         use_prefill_fp8: When True and on SM100+, enable FP8 prefill
             attention via ``attention_config.use_prefill_query_quantization``.
         gemm_type: Precision for linear-layer GEMMs — "bfloat16",
@@ -265,8 +264,7 @@ def _create_attention_module(
     """
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 
-    model_info = SUPPORTED_MODELS[attn_type]
-    model_name = model_info["model"]
+    model_name = model_path
 
     block_size = 64
     max_model_len = max(max_seq_len + 1, 4096)
@@ -639,6 +637,7 @@ def run_mla_module(
     gemm_type: str,
     perf_filename: str,
     *,
+    model_path: str,
     attn_type: str,
     device: str = "cuda:0",
     warming_up: int = 10,
@@ -663,11 +662,12 @@ def run_mla_module(
     variant = attn_type.upper()
     print(
         f"\n[{variant} module] {phase} b={batch_size}, s={seq_len}, "
-        f"heads={num_heads}, gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}"
+        f"heads={num_heads}, gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
     )
 
     # 1. Create attention module
     attn_module, vllm_config = _create_attention_module(
+        model_path=model_path,
         attn_type=attn_type,
         num_heads=num_heads,
         use_fp8_kv_cache=use_fp8_kv_cache,
@@ -778,9 +778,17 @@ def run_mla_module(
 
     op_name = f"{attn_type}_{phase}_module"
 
+    # Record architecture to distinguish different DSA models in the perf CSV.
+    # perf_database uses this as a dict key when loading data.
+    # Aligns with sdk/models.py which uses architectures[0] throughout.
+    hf_cfg = vllm_config.model_config.hf_config
+    architecture = getattr(hf_cfg, "architectures", [getattr(hf_cfg, "model_type", "unknown")])[0]
+
     log_perf(
         item_list=[
             {
+                "model": model_path,
+                "architecture": architecture,
                 "mla_dtype": "float16" if compute_dtype == "bfloat16" else compute_dtype,
                 "kv_cache_dtype": "float16" if kv_cache_dtype == "bfloat16" else kv_cache_dtype,
                 "gemm_type": "float16" if gemm_type == "bfloat16" else gemm_type,
@@ -818,6 +826,7 @@ def run_mla_module_worker(
     compute_dtype: str,
     gemm_type: str,
     perf_filename: str,
+    model_path: str,
     attn_type: str,
     device: str = "cuda:0",
 ):
@@ -830,6 +839,7 @@ def run_mla_module_worker(
         compute_dtype=compute_dtype,
         gemm_type=gemm_type,
         perf_filename=perf_filename,
+        model_path=model_path,
         attn_type=attn_type,
         device=device,
     )
@@ -846,7 +856,7 @@ def _cleanup():
 
 
 def main():
-    model_choices = list(SUPPORTED_MODELS.keys())
+    model_names = list(SUPPORTED_MODELS.keys())
 
     parser = argparse.ArgumentParser(
         description="MLA/DSA module-level collector for vLLM",
@@ -856,8 +866,8 @@ def main():
         "--model",
         type=str,
         default=None,
-        choices=model_choices,
-        help=f"Model attention type to benchmark. If not specified, runs all: {model_choices}",
+        choices=model_names,
+        help=f"Model to benchmark. If not specified, runs all: {model_names}",
     )
     parser.add_argument("--num-heads", type=int, default=None, help="Filter by number of heads")
     parser.add_argument("--batch-size", type=int, default=None, help="Single batch size (for --quick)")
@@ -893,10 +903,9 @@ def main():
     else:
         models_to_run = SUPPORTED_MODELS
 
-    for model_key, model_info in models_to_run.items():
-        attn_type = model_info["attn_type"]
+    for model_path, attn_type in models_to_run.items():
         print(f"\n{'=' * 60}")
-        print(f"Model: {model_key} ({model_info['model']})  |  Attention: {attn_type.upper()}")
+        print(f"Model: {model_path}  |  Attention: {attn_type.upper()}")
         print(f"{'=' * 60}")
 
         if args.quick:
@@ -915,6 +924,7 @@ def main():
                 compute_dtype=compute,
                 gemm_type=gemm,
                 perf_filename=fname,
+                model_path=model_path,
                 attn_type=attn_type,
                 device=args.device,
             )
@@ -950,6 +960,7 @@ def main():
                     compute_dtype=compute,
                     gemm_type=gemm,
                     perf_filename=fname,
+                    model_path=model_path,
                     attn_type=attn_type,
                     device=args.device,
                 )

@@ -4,6 +4,8 @@ import contextlib
 import os
 import warnings
 
+from helper import get_device_module, get_device_str
+
 
 def setup_warning_filters():
     """Configure warning filters to suppress known non-critical warnings"""
@@ -34,13 +36,22 @@ def setup_warning_filters():
         category=UserWarning,
     )
 
+    # Suppress pynvml deprecation warning from torch.cuda
+    warnings.filterwarnings(
+        "ignore",
+        message="The pynvml package is deprecated",
+        category=FutureWarning,
+    )
+
 
 import random
+import resource
 
 import torch
 from tqdm import tqdm
 
 setup_warning_filters()
+
 import argparse
 import cProfile
 import io
@@ -274,6 +285,10 @@ def worker(
 ):
     """worker with automatic logging setup"""
 
+    # Disable core dumps — GPU crashes are expected and handled via error_queue;
+    # without this, each SIGSEGV/SIGABRT writes a multi-GB core file to disk.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
     setup_warning_filters()  # Must run in each spawned process
 
     # Setup logging for this worker - reads config from environment automatically
@@ -283,8 +298,8 @@ def worker(
     setup_signal_handlers(device_id, error_queue)
 
     # Setup device
-    device = torch.device(f"cuda:{device_id}")
-    torch.cuda.set_device(device_id)
+    device = torch.device(f"{get_device_str()}:{device_id}")
+    get_device_module().set_device(device)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
     def emit_done(task_id: str):
@@ -369,7 +384,7 @@ def worker(
                 import gc
 
                 gc.collect()
-                torch.cuda.empty_cache()
+                get_device_module().empty_cache()
 
 
 def parallel_run(tasks, func, num_processes, module_name="unknown", resume_options=None):
@@ -412,6 +427,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     error_queue = mp.Queue()
     result_queue = mp.Queue()
     processes = []
+
     manager = mp.Manager()
     progress_value = manager.Value("i", 0)
     lock = manager.Lock()
@@ -550,8 +566,21 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             # Stall detection unchanged...
             if progress_value.value == last_progress:
                 stall_count += 1
-                if stall_count > 30:
+                if stall_count > 240:
                     logger.warning(f"Progress stalled at {progress_value.value}/{len(task_infos)}")
+                    # If all workers are dead and tasks remain unaccounted,
+                    # those tasks were lost to fatal crashes (SIGABRT, etc.)
+                    # and will never complete.  The 120-second threshold
+                    # (240 x 0.5s) far exceeds the worst-case single-task
+                    # time so false positives are not a concern.
+                    all_dead = all(not p.is_alive() for p in processes)
+                    unaccounted = len(task_infos) - progress_value.value
+                    if all_dead and unaccounted > 0:
+                        logger.warning(
+                            f"All workers dead, {unaccounted} tasks unaccounted "
+                            f"(lost to fatal worker crashes). Stopping monitoring loop."
+                        )
+                        break
             else:
                 stall_count = 0
                 last_progress = progress_value.value
@@ -603,7 +632,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 pbar.update(current - pbar.n)
 
             resume_tracker.flush()
-            time.sleep(2)
+            time.sleep(0.5)
         drain_done_events()
 
     # Collect remaining errors
@@ -676,9 +705,17 @@ def collect_ops(
                 if declared:
                     try:
                         if not check_compat(declared, runtime_version):
-                            raise CompatibilityError(
-                                f"module {module_name} declares __compat__={declared!r}, runtime is v{runtime_version}"
-                            )
+                            if torch.xpu.is_available():
+                                # Disable vllm xpu runtime version check for now
+                                logger.warning(
+                                    f"module {module_name} declares __compat__={declared!r}, \
+                                    runtime is v{runtime_version}"
+                                )
+                            else:
+                                raise CompatibilityError(
+                                    f"module {module_name} declares __compat__={declared!r}, \
+                                        runtime is v{runtime_version}"
+                                )
                     except ValueError as e:
                         raise CompatibilityError(f"invalid __compat__ {declared!r}: {e}") from e
 
@@ -764,7 +801,13 @@ def collect_vllm(
 ):
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
-    from collector.vllm.registry import REGISTRY
+
+    if torch.cuda.is_available():
+        from collector.vllm.registry import REGISTRY
+    elif torch.xpu.is_available():
+        from collector.vllm.registry import REGISTRY_XPU as REGISTRY
+    else:
+        raise RuntimeError("No supported hardware detected. Neither CUDA nor XPU is available.")
 
     try:
         from vllm.version import __version__ as vllm_version
@@ -937,12 +980,34 @@ def main():
         help="Shuffle test cases before applying --limit (uses seed 42 for reproducibility)",
     )
     parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Filter collection to a single model (e.g. 'MiniMaxAI/MiniMax-M2.5'). "
+        "Must match a model name in the test case config lists exactly. "
+        "Best used together with --ops to target a specific op, since a model "
+        "may only appear in one op's config list (e.g. MoE but not MLA). "
+        "Default: collect all models.",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="Profile the collector run and save output ",
     )
     args = parser.parse_args()
     ops = args.ops
+
+    if args.model_path:
+        from collector.common_test_cases import get_all_model_names
+
+        all_models = get_all_model_names()
+        if args.model_path not in all_models:
+            parser.error(
+                f"Model '{args.model_path}' not found. Available models:\n" + "\n".join(f"  - {m}" for m in all_models)
+            )
+        os.environ["COLLECTOR_MODEL_PATH"] = args.model_path
+    else:
+        os.environ.pop("COLLECTOR_MODEL_PATH", None)
 
     # Setup logging - debug flag is handled inside setup_logging
     if logger is None:
@@ -951,7 +1016,10 @@ def main():
         # Update log level if debug flag changed
         setup_logging(debug=args.debug)
 
-    num_processes = torch.cuda.device_count()
+    if args.model_path:
+        logger.info(f"Model filter active: collecting only for '{args.model_path}'")
+
+    num_processes = get_device_module().device_count()
     logger.info(f"Starting collection with {num_processes} GPU processes")
     resume_options = {
         "resume": args.resume,
@@ -965,7 +1033,7 @@ def main():
         num_processes = 0
         logger.info("Starting collection in sequential mode (profiling enabled)")
     else:
-        num_processes = torch.cuda.device_count()
+        num_processes = get_device_module().device_count()
         logger.info(f"Starting collection with {num_processes} GPU processes")
 
     # Set environment variables for worker processes
@@ -994,6 +1062,9 @@ def main():
             "Profiling all test cases can be very slow. "
             "Consider using --limit to restrict the number of test cases."
         )
+
+    # Disable core dumps — GPU crashes are expected and handled; core files waste disk.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
     # Only set multiprocessing start method if not profiling (profiling uses sequential mode via num_processes=0)
     if not args.profile:

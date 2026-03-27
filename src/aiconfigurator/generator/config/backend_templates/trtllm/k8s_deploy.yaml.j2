@@ -73,10 +73,16 @@ readinessProbe:
 {%- macro render_worker(component_name, sub_component_type, replicas, gpu, engine_path, inline_payload, cli_args_list=None, disagg_mode=None, publish_metrics=False) -%}
 {{ "    " ~ component_name ~ ":" }}
       envFromSecret: hf-token-secret
-      {% if K8sConfig.k8s_hf_home %}
+      {% if K8sConfig.k8s_hf_home or K8sConfig.k8s_etcd_endpoints %}
       envs:
+        {% if K8sConfig.k8s_etcd_endpoints %}
+        - name: ETCD_ENDPOINTS
+          value: {{ K8sConfig.k8s_etcd_endpoints }}
+        {% endif %}
+        {% if K8sConfig.k8s_hf_home %}
         - name: HF_HOME
           value: {{ K8sConfig.k8s_hf_home }}
+        {% endif %}
       {% endif %}
       componentType: worker
       {% if sub_component_type %}
@@ -182,8 +188,12 @@ spec:
             - name: model-cache
               mountPath: {{ k8s_model_cache_mount }}
           {% endif %}
-      {% if enable_router or K8sConfig.k8s_hf_home %}
+      {% if enable_router or K8sConfig.k8s_hf_home or K8sConfig.k8s_etcd_endpoints %}
       envs:
+        {% if K8sConfig.k8s_etcd_endpoints %}
+        - name: ETCD_ENDPOINTS
+          value: {{ K8sConfig.k8s_etcd_endpoints }}
+        {% endif %}
         {% if enable_router %}
         - name: DYN_ROUTER_MODE
           value: kv

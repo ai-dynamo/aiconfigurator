@@ -183,6 +183,9 @@ def task_config_to_generator_config(
         backend=backend_name,
         extra_context={"generator_dynamo_version": generator_dynamo_version},
     )
+    sflow_cfg = {}
+    sflow_cfg = _deep_merge(sflow_cfg, overrides.get("SflowConfig"))
+    sflow_cfg = apply_defaults("SflowConfig", sflow_cfg, backend=backend_name)
 
     worker_overrides = overrides.get("Workers", {})
     worker_count_overrides = overrides.get("WorkerCounts") or overrides.get("WorkerConfig") or {}
@@ -250,6 +253,7 @@ def task_config_to_generator_config(
         num_gpus_per_node=num_gpus_per_node,
         sla=sla_cfg,
         bench=bench_cfg,
+        sflow=sflow_cfg,
         dyn_config=dyn_cfg,
         backend=backend_name,
         generator_dynamo_version=generator_dynamo_version,

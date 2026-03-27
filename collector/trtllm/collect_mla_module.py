@@ -102,7 +102,7 @@ except ImportError:
 SUPPORTED_MODELS: dict[str, str] = {
     "deepseek-ai/DeepSeek-V3": "mla",
     "deepseek-ai/DeepSeek-V3.2": "dsa",
-    # "zai-org/GLM-5": "dsa", is not supported yet
+    "zai-org/GLM-5": "dsa",
 }
 
 
@@ -617,9 +617,17 @@ def run_mla_module(
 
     op_name = f"{attn_type}_{phase}_module"
 
+    # Record architecture to distinguish different DSA models in the perf CSV.
+    # perf_database uses this as a dict key when loading data.
+    # Aligns with sdk/models.py which uses architectures[0] throughout.
+    pc = model_config.pretrained_config
+    architecture = getattr(pc, "architectures", [getattr(pc, "model_type", "unknown")])[0]
+
     log_perf(
         item_list=[
             {
+                "model": model_path,
+                "architecture": architecture,
                 "mla_dtype": "float16",
                 "kv_cache_dtype": "float16" if kv_cache_dtype == "bfloat16" else kv_cache_dtype,
                 "gemm_type": "float16" if gemm_type == "bfloat16" else gemm_type,

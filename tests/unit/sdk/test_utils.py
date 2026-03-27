@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
+from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.models import HybridMoEModel
 from aiconfigurator.sdk.utils import (
     _parse_hf_config_json,
     enumerate_ttft_tpot_constraints,
@@ -184,6 +186,286 @@ class TestParseHFConfig:
         assert extra_params is not None
         assert "E" not in extra_params.hybrid_override_pattern  # No MoE layers
         assert extra_params.moe_shared_expert_intermediate_size == 0
+
+    def test_parse_llama4_scout_config(self):
+        """Test Llama 4 Scout (VLM, step=1: all-MoE) → HybridMoEConfig with alternating attn pattern."""
+        config = {
+            "architectures": ["Llama4ForConditionalGeneration"],
+            "model_type": "llama4",
+            "text_config": {
+                "num_hidden_layers": 48,
+                "hidden_size": 5120,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "intermediate_size": 8192,
+                "intermediate_size_mlp": 16384,
+                "vocab_size": 202048,
+                "max_position_embeddings": 10485760,
+                "num_experts_per_tok": 1,
+                "num_local_experts": 16,
+                "interleave_moe_layer_step": 1,
+                "attention_chunk_size": 8192,
+            },
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result["architecture"] == "Llama4ForConditionalGeneration"
+        assert result["layers"] == 48
+        assert result["num_experts"] == 16
+        assert result["moe_inter_size"] == 8192
+        cfg = result["extra_params"]
+        assert cfg is not None
+        # step=1: all layers MoE
+        assert all(m == 1 for m in cfg.moe_layer_freq)
+        # alternating local(0)/global(1): even=0, odd=1
+        assert cfg.attn_layer_pattern == tuple(i % 2 for i in range(48))
+        assert cfg.sliding_window_size == 8192
+        assert cfg.dense_inter_size == 16384
+        # Llama 4 uses same dims for all layers → all four dim fields are 0
+        assert cfg.swa_num_kv_heads == 0
+        assert cfg.swa_head_dim == 0
+
+    def test_parse_llama4_maverick_config(self):
+        """Test Llama 4 Maverick (VLM, step=2: alternating MoE/dense) → HybridMoEConfig."""
+        config = {
+            "architectures": ["Llama4ForConditionalGeneration"],
+            "model_type": "llama4",
+            "text_config": {
+                "num_hidden_layers": 48,
+                "hidden_size": 5120,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "intermediate_size": 8192,
+                "intermediate_size_mlp": 16384,
+                "vocab_size": 202048,
+                "max_position_embeddings": 1048576,
+                "num_experts_per_tok": 1,
+                "num_local_experts": 128,
+                "interleave_moe_layer_step": 2,
+                "attention_chunk_size": 8192,
+            },
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result["architecture"] == "Llama4ForConditionalGeneration"
+        assert result["num_experts"] == 128
+        cfg = result["extra_params"]
+        # step=2: odd layers are MoE (1), even layers are dense (0)
+        assert sum(cfg.moe_layer_freq) == 24  # 24 MoE layers
+        assert cfg.moe_layer_freq.count(0) == 24  # 24 dense layers
+        assert cfg.dense_inter_size == 16384
+
+    def test_parse_mimov2flash_config(self):
+        """Test MiMo-V2-Flash (explicit per-layer patterns, different SWA/global dims) → HybridMoEConfig."""
+        hybrid_pattern = [0, 1, 1, 1, 1, 0, 1, 1, 1, 1]  # 10-layer test
+        moe_freq = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        hf_config = {
+            "architectures": ["MiMoV2FlashForCausalLM"],
+            "num_hidden_layers": 10,
+            "hidden_size": 4096,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 4,
+            "head_dim": 192,
+            "v_head_dim": 128,
+            "intermediate_size": 16384,
+            "vocab_size": 152576,
+            "max_position_embeddings": 262144,
+            "num_experts_per_tok": 8,
+            "num_local_experts": 64,
+            "moe_intermediate_size": 2048,
+            "hybrid_layer_pattern": hybrid_pattern,
+            "moe_layer_freq": moe_freq,
+            "swa_num_key_value_heads": 8,
+            "swa_head_dim": 192,
+            "swa_v_head_dim": 128,
+            "sliding_window_size": 128,
+        }
+
+        result = _parse_hf_config_json(hf_config)
+
+        assert result["architecture"] == "MiMoV2FlashForCausalLM"
+        assert result["layers"] == 10
+        cfg = result["extra_params"]
+        assert cfg is not None
+        assert cfg.attn_layer_pattern == tuple(hybrid_pattern)
+        assert cfg.moe_layer_freq == tuple(moe_freq)
+        assert cfg.swa_num_kv_heads == 8
+        assert cfg.swa_head_dim == 192
+        assert cfg.swa_v_head_dim == 128
+        assert cfg.global_v_head_dim == 128  # from v_head_dim
+        assert cfg.sliding_window_size == 128
+        assert cfg.dense_inter_size == 0  # dense layers use model-level inter_size
+
+    def test_mimo_pattern_length_mismatch_raises(self):
+        """Test that mismatched hybrid pattern length raises ValueError."""
+        hf_config = {
+            "architectures": ["MiMoV2FlashForCausalLM"],
+            "num_hidden_layers": 10,
+            "hidden_size": 4096,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 4,
+            "head_dim": 192,
+            "intermediate_size": 16384,
+            "vocab_size": 152576,
+            "max_position_embeddings": 262144,
+            "num_experts_per_tok": 8,
+            "num_local_experts": 64,
+            "moe_intermediate_size": 2048,
+            "hybrid_layer_pattern": [0, 1, 1],  # wrong length
+            "moe_layer_freq": [0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        }
+        with pytest.raises(ValueError, match="pattern length mismatch"):
+            _parse_hf_config_json(hf_config)
+
+    def test_llama4_invalid_step_raises(self):
+        """Test that interleave_moe_layer_step <= 0 raises ValueError."""
+        hf_config = {
+            "architectures": ["Llama4ForConditionalGeneration"],
+            "text_config": {
+                "num_hidden_layers": 8,
+                "hidden_size": 1024,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "intermediate_size": 2048,
+                "vocab_size": 10000,
+                "max_position_embeddings": 4096,
+                "num_experts_per_tok": 1,
+                "num_local_experts": 4,
+                "interleave_moe_layer_step": 0,
+                "attention_chunk_size": 512,
+            },
+        }
+        with pytest.raises(ValueError, match="positive integer"):
+            _parse_hf_config_json(hf_config)
+
+
+class TestHybridMoEModelBuilder:
+    """Builder-level tests that verify HybridMoEModel wiring through set_hybrid_config."""
+
+    @staticmethod
+    def _make_model_config():
+        return config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.float16,
+            fmha_quant_mode=common.FMHAQuantMode.float16,
+            moe_quant_mode=common.MoEQuantMode.float16,
+        )
+
+    def test_mimov2flash_model_builds_all_three_layer_types(self):
+        """MiMo-V2-Flash config produces context/generation ops for global_moe, swa_moe, swa_dense."""
+        hybrid_cfg = common.HybridMoEConfig(
+            attn_layer_pattern=(0, 1, 1, 1, 1, 0, 1, 1, 1, 1),
+            moe_layer_freq=(0, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+            swa_num_kv_heads=8,
+            swa_head_dim=192,
+            swa_v_head_dim=128,
+            global_v_head_dim=128,
+            sliding_window_size=128,
+        )
+        model = HybridMoEModel(
+            8,
+            64,
+            2048,  # topk, num_experts, moe_inter_size
+            "test-model",
+            "HYBRIDMOE",
+            "MiMoV2FlashForCausalLM",
+            10,
+            64,
+            4,
+            192,
+            4096,
+            16384,
+            152576,
+            262144,
+            self._make_model_config(),
+        )
+        model.set_hybrid_config(hybrid_cfg)
+
+        assert len(model.context_ops) > 0
+        assert len(model.generation_ops) > 0
+        op_names = [op._name for op in model.context_ops]
+        assert any("global" in n for n in op_names), "Missing global attention ops"
+        assert any("swa" in n and "moe" in n for n in op_names), "Missing swa_moe ops"
+        assert any("swa" in n and "dense" in n for n in op_names), "Missing swa_dense ops"
+
+    def test_llama4_scout_model_builds_global_and_swa_moe(self):
+        """Llama 4 Scout (step=1, all MoE) produces global_moe + swa_moe ops."""
+        layers = 8
+        hybrid_cfg = common.HybridMoEConfig(
+            attn_layer_pattern=tuple(i % 2 for i in range(layers)),
+            moe_layer_freq=tuple(1 for _ in range(layers)),
+            sliding_window_size=8192,
+            dense_inter_size=16384,
+        )
+        model = HybridMoEModel(
+            1,
+            16,
+            8192,  # topk, num_experts, moe_inter_size
+            "test-model",
+            "HYBRIDMOE",
+            "Llama4ForConditionalGeneration",
+            layers,
+            40,
+            8,
+            128,
+            5120,
+            8192,
+            202048,
+            10485760,
+            self._make_model_config(),
+        )
+        model.set_hybrid_config(hybrid_cfg)
+
+        assert len(model.context_ops) > 0
+        assert len(model.generation_ops) > 0
+        op_names = [op._name for op in model.context_ops]
+        assert any("global" in n for n in op_names)
+        assert any("swa" in n for n in op_names)
+        assert not any("dense" in n for n in op_names), "Scout has no dense layers"
+
+    def test_llama4_maverick_model_builds_global_moe_and_swa_dense(self):
+        """Llama 4 Maverick (step=2) produces global_moe + swa_dense ops."""
+        layers = 8
+        step = 2
+        hybrid_cfg = common.HybridMoEConfig(
+            attn_layer_pattern=tuple(i % 2 for i in range(layers)),
+            moe_layer_freq=tuple(1 if (i + 1) % step == 0 else 0 for i in range(layers)),
+            sliding_window_size=8192,
+            dense_inter_size=16384,
+        )
+        model = HybridMoEModel(
+            1,
+            128,
+            8192,  # topk, num_experts, moe_inter_size
+            "test-model",
+            "HYBRIDMOE",
+            "Llama4ForConditionalGeneration",
+            layers,
+            40,
+            8,
+            128,
+            5120,
+            8192,
+            202048,
+            1048576,
+            self._make_model_config(),
+        )
+        model.set_hybrid_config(hybrid_cfg)
+
+        assert len(model.context_ops) > 0
+        op_names = [op._name for op in model.context_ops]
+        assert any("global" in n and "moe" in n for n in op_names)
+        assert any("dense" in n for n in op_names), "Maverick needs dense FFN ops"
 
 
 class TestGetModelConfigFromHFID:
