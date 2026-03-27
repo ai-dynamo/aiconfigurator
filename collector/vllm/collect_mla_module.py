@@ -42,6 +42,15 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.platforms import current_platform
+
+# ═══════════════════════════════════════════════════════════════════════
+# Config registry patch — vLLM 0.16.0 registers the GlmMoeDsaForCausalLM
+# model class but omits the config-type mapping for "glm_moe_dsa", so
+# AutoConfig.from_pretrained() fails.  The config layout is identical to
+# DeepSeek-V3 (GlmMoeDsaForCausalLM inherits DeepseekV2ForCausalLM), so
+# reusing DeepseekV3Config is safe.
+# ═══════════════════════════════════════════════════════════════════════
+from vllm.transformers_utils.config import _CONFIG_REGISTRY
 from vllm.version import __version__ as vllm_version
 
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
@@ -53,6 +62,9 @@ from collector.vllm.utils import (
     setup_distributed,
     with_exit_stack,
 )
+
+if "glm_moe_dsa" not in _CONFIG_REGISTRY:
+    _CONFIG_REGISTRY["glm_moe_dsa"] = "DeepseekV3Config"
 
 # ═══════════════════════════════════════════════════════════════════════
 # Supported Models — model_path → attention type

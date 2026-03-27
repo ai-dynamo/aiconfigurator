@@ -53,6 +53,15 @@ from tensorrt_llm._torch.models.modeling_deepseekv3 import (
 )
 from tensorrt_llm._torch.modules.rms_norm import RMSNorm
 from tensorrt_llm._torch.pyexecutor._util import get_kv_cache_manager_cls
+
+# ═══════════════════════════════════════════════════════════════════════
+# Config registry patch — TRT-LLM's _CONFIG_REGISTRY only maps
+# "deepseek_v32" but GLM-5 uses model_type "glm_moe_dsa".  Without this
+# patch load_pretrained_config() falls through to AutoConfig which also
+# doesn't know "glm_moe_dsa", causing a KeyError.  The config layout is
+# identical to DeepSeek-V3, so reusing DeepseekV3Config is safe.
+# ═══════════════════════════════════════════════════════════════════════
+from tensorrt_llm._torch.pyexecutor.config_utils import _CONFIG_REGISTRY
 from tensorrt_llm._torch.pyexecutor.model_loader import initialize_dummy_weights
 from tensorrt_llm._torch.utils import AuxStreamType, get_model_extra_attrs, model_extra_attrs
 from tensorrt_llm._utils import torch_dtype_to_binding
@@ -64,6 +73,9 @@ from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.quantization.mode import QuantAlgo
 
 from helper import benchmark_with_power, get_sm_version, log_perf
+
+if "glm_moe_dsa" not in _CONFIG_REGISTRY:
+    _CONFIG_REGISTRY["glm_moe_dsa"] = "DeepseekV3Config"
 
 # Fix NVFP4 weight_scale 2D bug in TRT-LLM <= rc6: weight_scale is allocated 1D
 # but post_load_weights() asserts dim()==2. Patch only if defined on the class
@@ -305,6 +317,23 @@ def create_attention_layer(
     """
     mapping = Mapping(world_size=1, rank=0, tp_size=1, pp_size=1)
 
+    # GLM-5 uses model_type "glm_moe_dsa" / arch "GlmMoeDsaForCausalLM" which
+    # TRT-LLM doesn't recognise.  ModelConfig.from_pretrained() only auto-builds
+    # sparse_attention_config for "DeepseekV32ForCausalLM", so we pre-read the
+    # HF config and supply it manually for GLM-5.
+    sparse_attention_config = None
+    import transformers
+
+    _cfg_dict, _ = transformers.PretrainedConfig.get_config_dict(model_path)
+    if _cfg_dict.get("model_type") == "glm_moe_dsa":
+        from tensorrt_llm._torch.model_config import DeepSeekSparseAttentionConfig
+
+        sparse_attention_config = DeepSeekSparseAttentionConfig(
+            index_n_heads=_cfg_dict["index_n_heads"],
+            index_head_dim=_cfg_dict["index_head_dim"],
+            index_topk=_cfg_dict["index_topk"],
+        )
+
     model_config = ModelConfig.from_pretrained(
         model_path,
         mapping=mapping,
@@ -312,7 +341,7 @@ def create_attention_layer(
         use_cuda_graph=False,
         force_dynamic_quantization=False,
         spec_config=None,
-        sparse_attention_config=None,
+        sparse_attention_config=sparse_attention_config,
         max_num_tokens=131072,
         max_seq_len=163840,
         moe_max_num_tokens=None,
@@ -328,6 +357,14 @@ def create_attention_layer(
     )
 
     pretrained_config = model_config.pretrained_config
+
+    # GLM-5 uses model_type "glm_moe_dsa" / arch "GlmMoeDsaForCausalLM" but
+    # TRT-LLM only recognises "deepseek_v32" / "DeepseekV32ForCausalLM".
+    # The architecture is identical, so we remap to avoid falling into the
+    # wrong code path (MLA instead of DSA).
+    if pretrained_config.model_type == "glm_moe_dsa":
+        pretrained_config.model_type = "deepseek_v32"
+        pretrained_config.architectures = ["DeepseekV32ForCausalLM"]
 
     # Override for single-layer, single-GPU benchmark
     pretrained_config.num_hidden_layers = 1
