@@ -2867,6 +2867,9 @@ class WideEPDeepSeekModel(BaseModel):
                     if tp_size > 1
                     else []
                 ),
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),  # on every gpu, fused_a
                 ops.WideEPContextMLA(
                     "context_attention",
                     self._num_layers,
@@ -2983,6 +2986,21 @@ class WideEPDeepSeekModel(BaseModel):
         # generation mla attention
         self.generation_ops.extend(
             [
+                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
+                ops.ElementWise(
+                    "generation_add_norm_1",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * h,
+                    2 * h,
+                    0.8,
+                ),
+                ops.GEMM(
+                    "generation_downscale_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    2112,
+                    h,
+                    gemm_quant_mode,
+                ),
                 ops.WideEPGenerationMLA(
                     "generation_attention",
                     self._num_layers * self._mtp_scale_factor,

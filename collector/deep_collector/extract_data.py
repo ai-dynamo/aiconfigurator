@@ -43,10 +43,11 @@ def parse_log_file(log_path: str) -> list[dict]:
 
     # Use regex to match each configuration block
     # Format: [config] ... [tuning] Best dispatch ... [tuning] Best combine ...
-    config_pattern = r"\[config\] num_tokens=(\d+), hidden=(\d+), num_topk=(\d+) ,num_experts=(\d+)"
+    config_pattern = r"\[config\] num_tokens=(\d+), hidden=(\d+), num_topk=(\d+), num_experts=(\d+)"
 
     # Find all configuration lines
     config_matches = list(re.finditer(config_pattern, content))
+    print(config_matches)
 
     for i, config_match in enumerate(config_matches):
         # Extract configuration fields
@@ -118,6 +119,7 @@ def parse_log_file(log_path: str) -> list[dict]:
             )
 
         results.append(result)
+    print(results)
 
     return results
 

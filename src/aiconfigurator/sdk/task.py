@@ -1127,7 +1127,9 @@ class TaskRunner:
             nextn=task_config.nextn,
             nextn_accept_rates=task_config.nextn_accept_rates,
             moe_backend=task_config.moe_backend,  # sglang wideep only
-            attention_backend=task_config.attention_backend,  # sglang wideep only
+            attention_backend=getattr(
+                task_config.worker_config, "attention_backend", task_config.attention_backend
+            ),
             enable_wideep=task_config.enable_wideep,
         )
         try:

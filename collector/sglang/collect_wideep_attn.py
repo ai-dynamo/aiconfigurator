@@ -34,6 +34,35 @@ except ModuleNotFoundError:
 DEEPSEEK_MODEL_PATH = _get_deepseek_model_path()
 
 
+def _get_nsa_default_kv_cache_dtype(device_name: str) -> str:
+    if "H" in device_name:
+        return "float16"
+    if "B" in device_name:
+        return "fp8"
+    return "fp8"
+
+
+def _get_deepseek_model_variant(model_path: str) -> str:
+    config_path = os.path.join(model_path, "config.json")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+        model_type = str(config.get("model_type", "")).lower()
+        architectures = [str(a).lower() for a in (config.get("architectures") or [])]
+        if model_type == "deepseek_v32" or any("deepseekv32" in a for a in architectures):
+            print("=== DETECTED DEEPSEEK-V3.2 FROM config.json ===")
+            return "v3_2"
+    except Exception:
+        pass
+    normalized = model_path.lower().replace("_", ".")
+    if "v3.2" in normalized or "v32" in normalized:
+        return "v3_2"
+    return "v3"
+
+
+MODEL_VARIANT = _get_deepseek_model_variant(DEEPSEEK_MODEL_PATH)
+
+
 def cleanup_distributed():
     """Clean up distributed environment if it exists"""
     import sglang.srt.distributed.parallel_state as parallel_state
@@ -55,11 +84,17 @@ def get_attention_prefill_test_cases():
     """
     test_cases = []
 
-    context_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    #context_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    context_batch_sizes = [1, 2]
     context_seq_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 
-    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
-    attention_backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+    
+    
+    if MODEL_VARIANT == "v3_2":
+        attention_backends = ["nsa"]
+    else:
+        # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
+        attention_backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
     head_nums = [128, 64, 32, 16]
 
     for attention_backend in attention_backends:
@@ -88,8 +123,12 @@ def get_attention_decode_test_cases():
     generation_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     generation_seq_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 
-    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
-    attention_backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+    
+    if MODEL_VARIANT == "v3_2":
+        attention_backends = ["nsa"]
+    else:
+        # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
+        attention_backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
     head_nums = [128, 64, 32, 16]
 
     for attention_backend in attention_backends:
@@ -108,7 +147,17 @@ def get_attention_decode_test_cases():
     return test_cases
 
 
-def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype="auto", device="cuda", tp_rank=0):
+def load_model_runner(
+    model_path,
+    attention_backend,
+    head_num,
+    test_layer,
+    dtype="auto",
+    device="cuda",
+    tp_rank=0,
+    nsa_prefill_backend=None,
+    nsa_decode_backend=None,
+):
     """Load model runner
     Environment variables:
     - SGLANG_TEST_NUM_LAYERS=2  # Load only 2 layers
@@ -143,6 +192,18 @@ def load_model_runner(model_path, attention_backend, head_num, test_layer, dtype
 
     server_args.attention_backend = attention_backend
     print(f"Using attention backend: {attention_backend}, gpu_id: {gpu_id}")
+    if attention_backend == "nsa":
+        has_backend = False
+        if nsa_prefill_backend is not None:
+            server_args.nsa_prefill_backend = nsa_prefill_backend
+            print(f"Using nsa prefill backend: {nsa_prefill_backend}, gpu_id: {gpu_id}")
+            has_backend = True
+        if nsa_decode_backend is not None:
+            server_args.nsa_decode_backend = nsa_decode_backend
+            print(f"Using nsa decode backend: {nsa_decode_backend}, gpu_id: {gpu_id}")
+            has_backend = True
+        if not has_backend:
+            raise ValueError("NSA backend requires either prefill or decode backend")
 
     if num_layers > 0 and load_format == "dummy":
         override_args = {"num_hidden_layers": num_layers}
@@ -185,6 +246,8 @@ def run_attention_torch(
     enable_profiler,
     device,
     output_path,
+    nsa_prefill_backend=None,
+    nsa_decode_backend=None,
 ):
     """Run attention benchmark for both prefill and decode phases"""
 
@@ -326,18 +389,26 @@ def run_attention_torch(
                 # Save via log_perf - save to collector/ directory to match non-wideep behavior
                 try:
                     collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    perf_name = (
+                        "wideep_context_nsa_perf.txt" if attention_backend == "nsa" else "wideep_context_mla_perf.txt"
+                    )
                     perf_filename = (
-                        os.path.join(collector_dir, "wideep_context_mla_perf.txt")
+                        os.path.join(collector_dir, perf_name)
                         if output_path is None
-                        else os.path.join(output_path, "wideep_context_mla_perf.txt")
+                        else os.path.join(output_path, perf_name)
                     )
                     device_name = torch.cuda.get_device_name(device)
                     version = get_version("sglang")
+                    kernel_source = attention_backend
+                    kv_cache_dtype = "fp8"
+                    if attention_backend == "nsa":
+                        kernel_source = f"nsa_{nsa_prefill_backend}"
+                        kv_cache_dtype = _get_nsa_default_kv_cache_dtype(device_name)
                     log_perf(
                         item_list=[
                             {
                                 "mla_dtype": "fp8_block",
-                                "kv_cache_dtype": "fp8",
+                                "kv_cache_dtype": kv_cache_dtype,
                                 "num_heads": head_num,
                                 "batch_size": batch_size,
                                 "isl": seq_length,
@@ -350,7 +421,7 @@ def run_attention_torch(
                         version=version,
                         device_name=device_name,
                         op_name="mla_context",
-                        kernel_source=attention_backend,
+                        kernel_source=kernel_source,
                         perf_filename=perf_filename,
                     )
                 except Exception as e:
@@ -507,18 +578,28 @@ def run_attention_torch(
                 # Save via log_perf - save to collector/ directory to match non-wideep behavior
                 try:
                     collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    perf_name = (
+                        "wideep_generation_nsa_perf.txt"
+                        if attention_backend == "nsa"
+                        else "wideep_generation_mla_perf.txt"
+                    )
                     perf_filename = (
-                        os.path.join(collector_dir, "wideep_generation_mla_perf.txt")
+                        os.path.join(collector_dir, perf_name)
                         if output_path is None
-                        else os.path.join(output_path, "wideep_generation_mla_perf.txt")
+                        else os.path.join(output_path, perf_name)
                     )
                     device_name = torch.cuda.get_device_name(device)
                     version = get_version("sglang")
+                    kernel_source = attention_backend
+                    kv_cache_dtype = "fp8"
+                    if attention_backend == "nsa":
+                        kernel_source = f"nsa_{nsa_decode_backend}"
+                        kv_cache_dtype = _get_nsa_default_kv_cache_dtype(device_name)
                     log_perf(
                         item_list=[
                             {
                                 "mla_dtype": "fp8_block",
-                                "kv_cache_dtype": "fp8",
+                                "kv_cache_dtype": kv_cache_dtype,
                                 "num_heads": head_num,
                                 "batch_size": batch_size,
                                 "isl": seq_length,
@@ -531,7 +612,7 @@ def run_attention_torch(
                         version=version,
                         device_name=device_name,
                         op_name="mla_generation",
-                        kernel_source=attention_backend,
+                        kernel_source=kernel_source,
                         perf_filename=perf_filename,
                         power_stats=power_stats,
                     )
@@ -568,18 +649,30 @@ def run_attention_torch(
 
 def get_wideep_mla_context_test_cases():
     """Returns list of (attention_backend, head_num, perf_filename) tuples."""
-    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
-    backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+    
+    if MODEL_VARIANT == "v3_2":
+        backends = ["nsa"]
+        perf_filename = "wideep_context_nsa_perf.txt"
+    else:
+        # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
+        backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+        perf_filename = "wideep_context_mla_perf.txt"
     head_nums = [128, 64, 32, 16]
-    return [[backend, head_num, "wideep_context_mla_perf.txt"] for backend in backends for head_num in head_nums]
+    return [[backend, head_num, perf_filename] for backend in backends for head_num in head_nums]
 
 
 def get_wideep_mla_generation_test_cases():
     """Returns list of (attention_backend, head_num, perf_filename) tuples."""
-    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
-    backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+    
+    if MODEL_VARIANT == "v3_2":
+        backends = ["nsa"]
+        perf_filename = "wideep_generation_nsa_perf.txt"
+    else:
+        # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
+        backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+        perf_filename = "wideep_generation_mla_perf.txt"
     head_nums = [128, 64, 32, 16]
-    return [[backend, head_num, "wideep_generation_mla_perf.txt"] for backend in backends for head_num in head_nums]
+    return [[backend, head_num, perf_filename] for backend in backends for head_num in head_nums]
 
 
 def run_mla(attention_backend, head_num, is_prefill, gpu_id, output_path=None):
@@ -594,40 +687,63 @@ def run_mla(attention_backend, head_num, is_prefill, gpu_id, output_path=None):
     if is_prefill:
         all_cases = get_attention_prefill_test_cases()
         phase_name = "Context"
+        nsa_prefill_backends = ["flashmla_sparse"]
+        nsa_backends = nsa_prefill_backends if attention_backend == "nsa" else [None]
     else:
         all_cases = get_attention_decode_test_cases()
         phase_name = "Generation"
+        nsa_decode_backends = ["fa3"]
+        nsa_backends = nsa_decode_backends if attention_backend == "nsa" else [None]
 
     cases = [tc for tc in all_cases if tc[2] == attention_backend and tc[3] == head_num]
 
-    print(f"\n{'=' * 60}")
-    print(f"MLA {phase_name}: backend={attention_backend}, head_num={head_num}, GPU={gpu_id}")
-    print(f"Test cases: {len(cases)}")
-    print(f"{'=' * 60}")
+    for nsa_backend in nsa_backends:
+        if attention_backend == "nsa":
+            backend_label = f"nsa_{nsa_backend}"
+            nsa_prefill_backend = nsa_backend if is_prefill else None
+            nsa_decode_backend = nsa_backend if not is_prefill else None
+        else:
+            backend_label = attention_backend
+            nsa_prefill_backend = None
+            nsa_decode_backend = None
 
-    cleanup_distributed()
-    torch.cuda.empty_cache()
+        print(f"\n{'=' * 60}")
+        print(f"MLA {phase_name}: backend={backend_label}, head_num={head_num}, GPU={gpu_id}")
+        print(f"Test cases: {len(cases)}")
+        print(f"{'=' * 60}")
 
-    model_runner = load_model_runner(
-        DEEPSEEK_MODEL_PATH, attention_backend, head_num, test_layer=0, dtype="auto", device="cuda:0"
-    )
+        cleanup_distributed()
+        torch.cuda.empty_cache()
 
-    run_attention_torch(
-        model_runner,
-        cases,
-        attention_backend,
-        head_num,
-        test_layer=0,
-        num_warmup=3,
-        num_iterations=10,
-        enable_profiler=False,
-        device="cuda:0",
-        output_path=output_path,
-    )
+        model_runner = load_model_runner(
+            DEEPSEEK_MODEL_PATH,
+            attention_backend,
+            head_num,
+            test_layer=0,
+            dtype="auto",
+            device="cuda:0",
+            nsa_prefill_backend=nsa_prefill_backend,
+            nsa_decode_backend=nsa_decode_backend,
+        )
 
-    del model_runner
-    cleanup_distributed()
-    torch.cuda.empty_cache()
+        run_attention_torch(
+            model_runner,
+            cases,
+            attention_backend,
+            head_num,
+            test_layer=0,
+            num_warmup=3,
+            num_iterations=10,
+            enable_profiler=False,
+            device="cuda:0",
+            output_path=output_path,
+            nsa_prefill_backend=nsa_prefill_backend,
+            nsa_decode_backend=nsa_decode_backend,
+        )
+
+        del model_runner
+        cleanup_distributed()
+        torch.cuda.empty_cache()
 
 
 def _run_mla_subprocess(attention_backend, head_num, is_prefill, gpu_id):
@@ -707,7 +823,6 @@ if __name__ == "__main__":
     print(f"Loading model from {DEEPSEEK_MODEL_PATH}...")
     print("\nTip: SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 python collect_wideep_attn.py")
 
-    # Run all context and generation test cases
     for test_case in get_wideep_mla_context_test_cases():
         run_wideep_mla_context(*test_case, device=args.device)
 
