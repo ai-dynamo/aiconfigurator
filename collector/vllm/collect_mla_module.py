@@ -82,51 +82,40 @@ SUPPORTED_MODELS: dict[str, str] = {
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _get_gemm_types():
-    """Return the list of GEMM quantization types based on GPU capability.
+def _get_precision_combos(phase: str):
+    """Return (compute_dtype, kv_cache_dtype, gemm_type) triples for a phase.
 
-    Controls the precision of linear-layer GEMMs inside the attention module
-    (fused_qkv_a_proj, kv_b_proj, q_b_proj, o_proj):
-      - bfloat16:  always available (BF16 weights, BF16 GEMMs)
-      - fp8_block: SM >= 89 (Ada / Hopper / Blackwell) — FP8 block-scaled GEMMs
-      - nvfp4:     SM >= 100 (Blackwell) — NVFP4 weight-only quantisation
+    Each triple describes the full quantisation configuration for one
+    benchmark sweep.  GPU capability (SM version) determines which
+    combos are available.
+
+    Precision axes:
+      gemm_type    — linear-layer GEMMs (projections inside the module)
+        bfloat16:  always
+        fp8_block: SM >= 89 (Ada / Hopper / Blackwell)
+        nvfp4:     SM >= 100 (Blackwell)
+
+      (compute_dtype, kv_cache_dtype) — attention compute + KV cache
+        context:    (bf16, bf16) always;  (fp8, fp8) SM >= 100
+        generation: (bf16, bf16) always;  (bf16, fp8) SM >= 90
     """
-    types = ["bfloat16"]
     sm = get_sm_version()
+
+    gemm_types = ["bfloat16"]
     if sm >= 89:
-        types.append("fp8_block")
+        gemm_types.append("fp8_block")
     if sm >= 100:
-        types.append("nvfp4")
-    return types
+        gemm_types.append("nvfp4")
 
+    attn_combos = [("bfloat16", "bfloat16")]
+    if phase == "context":
+        if sm >= 100:
+            attn_combos.append(("fp8", "fp8"))
+    else:
+        if sm >= 90:
+            attn_combos.append(("bfloat16", "fp8"))
 
-def _get_context_precision_combos():
-    """Return (compute_dtype, kv_cache_dtype) combos for context (prefill).
-
-    Prefill precision combinations:
-      - (bf16, bf16): always available
-      - (fp8,  fp8):  FP8 prefill attention + FP8 KV cache, SM100+ only
-                       (requires FlashInfer or TRT-LLM prefill kernel)
-    """
-    combos = [("bfloat16", "bfloat16")]
-    sm = get_sm_version()
-    if sm >= 100:
-        combos.append(("fp8", "fp8"))
-    return combos
-
-
-def _get_generation_precision_combos():
-    """Return (compute_dtype, kv_cache_dtype) combos for generation (decode).
-
-    Decode precision combinations:
-      - (bf16, bf16): always available
-      - (bf16, fp8):  BF16 compute + FP8 KV cache, SM90+ (Hopper/Blackwell)
-    """
-    combos = [("bfloat16", "bfloat16")]
-    sm = get_sm_version()
-    if sm >= 90:
-        combos.append(("bfloat16", "fp8"))
-    return combos
+    return [(c, kv, g) for g in gemm_types for c, kv in attn_combos]
 
 
 def get_context_test_cases(attn_type: str):
@@ -139,14 +128,13 @@ def get_context_test_cases(attn_type: str):
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     s_list = [1, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384, 32768]
     base_fname = f"{attn_type}_context_module_perf.txt"
-    for gemm_type in _get_gemm_types():
-        for compute_dtype, kv_dtype in _get_context_precision_combos():
-            for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-                for b in b_list:
-                    for s in s_list:
-                        if b * s > 131072:
-                            continue
-                        cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, base_fname])
+    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("context"):
+        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
+            for b in b_list:
+                for s in s_list:
+                    if b * s > 131072:
+                        continue
+                    cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, base_fname])
     return cases
 
 
@@ -160,14 +148,13 @@ def get_generation_test_cases(attn_type: str):
     b_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     s_list = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
     base_fname = f"{attn_type}_generation_module_perf.txt"
-    for gemm_type in _get_gemm_types():
-        for compute_dtype, kv_dtype in _get_generation_precision_combos():
-            for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
-                for b in b_list:
-                    for s in s_list:
-                        if b * s > 1024 * 4096 * 2 * 2 * 2:
-                            continue
-                        cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, base_fname])
+    for compute_dtype, kv_dtype, gemm_type in _get_precision_combos("generation"):
+        for num_heads in [128, 64, 32, 16, 8, 4, 2, 1]:
+            for b in b_list:
+                for s in s_list:
+                    if b * s > 1024 * 4096 * 2 * 2 * 2:
+                        continue
+                    cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type, base_fname])
     return cases
 
 
