@@ -385,19 +385,18 @@ def setup_signal_handlers(worker_id):
 
     def signal_handler(signum, frame):
         try:
-            sig_name = signal.Signals(signum).name
-        except (ValueError, AttributeError):
-            sig_name = str(signum)
-        logger.error(f"Worker {worker_id} received {sig_name}")
-        if frame is not None:
-            logger.error("".join(_tb.format_stack(frame)))
-
-        for handler in logger.handlers:
-            handler.flush()
-
-        # Re-raise the signal
-        signal.signal(signum, signal.SIG_DFL)
-        os.kill(os.getpid(), signum)
+            try:
+                sig_name = signal.Signals(signum).name
+            except (ValueError, AttributeError):
+                sig_name = str(signum)
+            logger.error(f"Worker {worker_id} received {sig_name}")
+            if frame is not None:
+                logger.error("".join(_tb.format_stack(frame)))
+            for handler in logger.handlers:
+                handler.flush()
+        finally:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
 
     # Register handlers for common signals
     for sig in [signal.SIGTERM, signal.SIGABRT]:
