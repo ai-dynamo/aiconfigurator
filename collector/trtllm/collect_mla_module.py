@@ -346,6 +346,12 @@ def create_attention_layer(
 
     pretrained_config = model_config.pretrained_config
 
+    # Preserve the original HF architecture before any TRT-LLM remapping,
+    # so callers can record the true architecture in perf CSVs.
+    model_config._original_architecture = getattr(
+        pretrained_config, "architectures", [getattr(pretrained_config, "model_type", "unknown")]
+    )[0]
+
     # GLM-5 uses model_type "glm_moe_dsa" / arch "GlmMoeDsaForCausalLM" but
     # TRT-LLM only recognises "deepseek_v32" / "DeepseekV32ForCausalLM".
     # The architecture is identical, so we remap to avoid falling into the
@@ -643,11 +649,9 @@ def run_mla_module(
 
     op_name = f"{attn_type}_{phase}_module"
 
-    # Record architecture to distinguish different DSA models in the perf CSV.
-    # perf_database uses this as a dict key when loading data.
-    # Aligns with sdk/models.py which uses architectures[0] throughout.
-    pc = model_config.pretrained_config
-    architecture = getattr(pc, "architectures", [getattr(pc, "model_type", "unknown")])[0]
+    # Use the original HF architecture (saved before TRT-LLM remapping)
+    # so that GLM-5 records "GlmMoeDsaForCausalLM", not "DeepseekV32ForCausalLM".
+    architecture = model_config._original_architecture
 
     log_perf(
         item_list=[
