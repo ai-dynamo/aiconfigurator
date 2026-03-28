@@ -68,6 +68,7 @@ from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, se
 
 logger = None
 RESUME_SCHEMA_VERSION = "collector-resume-v1"
+STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before stall bailout
 
 
 class ResumeCheckpoint:
@@ -566,7 +567,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             # Stall detection unchanged...
             if progress_value.value == last_progress:
                 stall_count += 1
-                if stall_count > 240:
+                if stall_count > STALL_THRESHOLD:
                     logger.warning(f"Progress stalled at {progress_value.value}/{len(task_infos)}")
                     # If all workers are dead and tasks remain unaccounted,
                     # those tasks were lost to fatal crashes (SIGABRT, etc.)
