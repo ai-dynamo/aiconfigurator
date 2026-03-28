@@ -105,12 +105,15 @@ def _plot_worker_setup_table(
     # Check if it is disagg config by checking for prefill/decode specific columns
     is_disagg = "(p)tp" in top_configs.columns
 
+    top_configs["cluster_request_rate"] = top_configs["request_rate"] * top_configs["replicas"]
+
     if is_disagg:
         field_names = [
             "Rank",
             "backend",
             "\033[1mtokens/s/gpu\033[0m",
             "tokens/s/user",
+            "req/s",
             "TTFT",
             "request_latency",
             "concurrency",
@@ -164,6 +167,7 @@ def _plot_worker_setup_table(
                 [
                     f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
                     f"{row['tokens/s/user']:.2f}",
+                    f"{row['cluster_request_rate']:.2f}",
                     f"{row['ttft']:.2f}",
                     f"{row['request_latency']:.2f}",
                     f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
@@ -193,6 +197,7 @@ def _plot_worker_setup_table(
             "backend",
             "\033[1mtokens/s/gpu\033[0m",
             "tokens/s/user",
+            "req/s",
             "TTFT",
             "request_latency",
             "concurrency",
@@ -230,6 +235,7 @@ def _plot_worker_setup_table(
                 [
                     f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
                     f"{row['tokens/s/user']:.2f}",
+                    f"{row['cluster_request_rate']:.2f}",
                     f"{row['ttft']:.2f}",
                     f"{row['request_latency']:.2f}",
                     f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
@@ -343,6 +349,9 @@ def log_final_summary(
     if not best_config_df.empty:
         best_conf_details = best_config_df.iloc[0]
         summary_box.append(f"    - Per-User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
+        replicas = chosen_task_config.total_gpus // int(best_conf_details["num_total_gpus"])
+        cluster_rr = float(best_conf_details["request_rate"]) * replicas
+        summary_box.append(f"    - Request Rate: {cluster_rr:.2f} req/s")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
         summary_box.append(f"    - Request Latency: {best_conf_details['request_latency']:.2f}ms")
