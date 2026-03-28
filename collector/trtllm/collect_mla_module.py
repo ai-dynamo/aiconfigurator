@@ -256,6 +256,14 @@ def _replace_quant_config(qc, **kwargs):
     return qc.model_copy(update=kwargs)
 
 
+def _set_quant_config(model_config, new_qc):
+    """Set quant_config, bypassing ModelConfig freeze if necessary."""
+    try:
+        model_config.quant_config = new_qc
+    except AttributeError:
+        object.__setattr__(model_config, "quant_config", new_qc)
+
+
 def _apply_gemm_type_quant(model_config, gemm_type: str, use_fp8_kv_cache: bool):
     """Apply GEMM quantization to model_config.quant_config.
 
@@ -266,24 +274,33 @@ def _apply_gemm_type_quant(model_config, gemm_type: str, use_fp8_kv_cache: bool)
 
     if gemm_type == "bfloat16":
         if use_fp8_kv_cache:
-            model_config.quant_config = _replace_quant_config(
-                model_config.quant_config,
-                kv_cache_quant_algo=kv_algo,
+            _set_quant_config(
+                model_config,
+                _replace_quant_config(
+                    model_config.quant_config,
+                    kv_cache_quant_algo=kv_algo,
+                ),
             )
     elif gemm_type == "fp8_block":
-        model_config.quant_config = _replace_quant_config(
-            model_config.quant_config,
-            quant_algo=QuantAlgo.FP8_BLOCK_SCALES,
-            group_size=128,
-            kv_cache_quant_algo=kv_algo,
-            exclude_modules=None,
+        _set_quant_config(
+            model_config,
+            _replace_quant_config(
+                model_config.quant_config,
+                quant_algo=QuantAlgo.FP8_BLOCK_SCALES,
+                group_size=128,
+                kv_cache_quant_algo=kv_algo,
+                exclude_modules=None,
+            ),
         )
     elif gemm_type == "nvfp4":
-        model_config.quant_config = _replace_quant_config(
-            model_config.quant_config,
-            quant_algo=QuantAlgo.NVFP4,
-            kv_cache_quant_algo=kv_algo,
-            exclude_modules=None,
+        _set_quant_config(
+            model_config,
+            _replace_quant_config(
+                model_config.quant_config,
+                quant_algo=QuantAlgo.NVFP4,
+                kv_cache_quant_algo=kv_algo,
+                exclude_modules=None,
+            ),
         )
     else:
         raise ValueError(f"Unknown gemm_type: {gemm_type!r}")
@@ -322,6 +339,11 @@ def create_attention_layer(
             index_topk=_cfg_dict["index_topk"],
         )
 
+    # Capture the original HF architecture *before* from_pretrained() which
+    # may remap the model_type.  We return it separately because ModelConfig
+    # may be frozen (TRT-LLM >= 0.18, PR #4814) and cannot accept new attrs.
+    original_architecture = _cfg_dict.get("architectures", [_cfg_dict.get("model_type", "unknown")])[0]
+
     model_config = ModelConfig.from_pretrained(
         model_path,
         mapping=mapping,
@@ -345,12 +367,6 @@ def create_attention_layer(
     )
 
     pretrained_config = model_config.pretrained_config
-
-    # Preserve the original HF architecture before any TRT-LLM remapping,
-    # so callers can record the true architecture in perf CSVs.
-    model_config._original_architecture = getattr(
-        pretrained_config, "architectures", [getattr(pretrained_config, "model_type", "unknown")]
-    )[0]
 
     # GLM-5 uses model_type "glm_moe_dsa" / arch "GlmMoeDsaForCausalLM" but
     # TRT-LLM only recognises "deepseek_v32" / "DeepseekV32ForCausalLM".
@@ -403,7 +419,7 @@ def create_attention_layer(
     layer.next_layer_layernorm = next_ln
 
     attn_module = layer.self_attn
-    return attn_module, model_config
+    return attn_module, model_config, original_architecture
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -560,7 +576,7 @@ def run_mla_module(
     )
 
     # 1. Create attention layer (from_pretrained reads config.json)
-    attn_module, model_config = create_attention_layer(
+    attn_module, model_config, original_architecture = create_attention_layer(
         model_path=model_path,
         num_heads=num_heads,
         use_fp8_kv_cache=use_fp8_kv_cache,
@@ -649,9 +665,7 @@ def run_mla_module(
 
     op_name = f"{attn_type}_{phase}_module"
 
-    # Use the original HF architecture (saved before TRT-LLM remapping)
-    # so that GLM-5 records "GlmMoeDsaForCausalLM", not "DeepseekV32ForCausalLM".
-    architecture = model_config._original_architecture
+    architecture = original_architecture
 
     log_perf(
         item_list=[
