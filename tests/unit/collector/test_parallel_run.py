@@ -14,6 +14,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import signal
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -61,6 +62,8 @@ def _task_fn(label, behavior, device):
     """Dispatch based on *behavior* encoded in each task's params."""
     if behavior == "exit_restart":
         sys.exit(EXIT_CODE_RESTART)
+    elif behavior == "sigabrt":
+        os.kill(os.getpid(), signal.SIGABRT)
     elif behavior == "error":
         raise ValueError(f"simulated: {label}")
     # "normal": return silently
@@ -272,3 +275,34 @@ class TestSentinelBalance:
         n_val = len([e for e in errors if e.get("error_type") == "ValueError"])
         expected_errors = sum(1 for i in range(20) if i % 3 == 2)
         assert n_val == expected_errors
+
+
+class TestSignalCrashRecovery:
+    """Fatal signal exits should be accounted for exactly once."""
+
+    def test_sigabrt_tasks_are_marked_done(self, tmp_path):
+        tasks = _tasks(
+            [
+                ("a", "normal"),
+                ("b", "sigabrt"),
+                ("c", "normal"),
+                ("d", "sigabrt"),
+                ("e", "normal"),
+            ]
+        )
+        errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="sigabrt_done")
+        assert len([e for e in errors if e.get("error_type") == "WorkerSignalCrash"]) >= 2
+
+    def test_sigabrt_and_restart_mix(self, tmp_path):
+        tasks = _tasks(
+            [
+                ("a", "sigabrt"),
+                ("b", "exit_restart"),
+                ("c", "normal"),
+                ("d", "sigabrt"),
+                ("e", "exit_restart"),
+                ("f", "normal"),
+            ]
+        )
+        errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="sigabrt_restart_mix")
+        assert len([e for e in errors if e.get("error_type") == "WorkerSignalCrash"]) >= 2

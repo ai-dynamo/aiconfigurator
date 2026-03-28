@@ -13,7 +13,6 @@ import signal
 import sys
 import threading
 import time
-import traceback
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -378,30 +377,23 @@ def power_monitoring_only(device, measure_power: bool | None = None):
         pass
 
 
-def setup_signal_handlers(worker_id, error_queue=None):
+def setup_signal_handlers(worker_id):
     """Setup signal handlers to log crashes."""
+    import traceback as _tb
+
     logger = logging.getLogger(f"worker_{worker_id}")
 
     def signal_handler(signum, frame):
-        error_info = {
-            "worker_id": worker_id,
-            "signal": signum,
-            "signal_name": signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum),
-            "timestamp": datetime.now().isoformat(),
-            "traceback": "".join(traceback.format_stack(frame)),
-        }
+        try:
+            sig_name = signal.Signals(signum).name
+        except (ValueError, AttributeError):
+            sig_name = str(signum)
+        logger.error(f"Worker {worker_id} received {sig_name}")
+        if frame is not None:
+            logger.error("".join(_tb.format_stack(frame)))
 
-        logger.error(f"Worker {worker_id} received signal {signum}")
-
-        # Force flush all handlers
         for handler in logger.handlers:
             handler.flush()
-
-        if error_queue:
-            try:
-                error_queue.put(error_info)
-            except:
-                pass
 
         # Re-raise the signal
         signal.signal(signum, signal.SIG_DFL)
