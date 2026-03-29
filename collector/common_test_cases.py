@@ -3,10 +3,7 @@
 import dataclasses
 import itertools
 import os
-from functools import lru_cache
 from typing import Optional
-
-from aiconfigurator.sdk.models import get_model_family
 
 
 def _get_model_path_filter() -> str | None:
@@ -30,13 +27,18 @@ def _filter_model_config_list(model_config_list: list[list]) -> list[list]:
     return [cfg for cfg in model_config_list if cfg[-1] == model_path]
 
 
-@lru_cache(maxsize=64)
+_WIDEEP_MOE_MODEL_NAMES: set[str] = {
+    "deepseek-ai/DeepSeek-V3",
+    "deepseek-ai/DeepSeek-V3.2",
+    "zai-org/GLM-5",
+    "MiniMaxAI/MiniMax-M2.5",
+    "moonshotai/Kimi-K2-Instruct",
+}
+
+
 def is_wideep_moe_model(model_name: str) -> bool:
-    """Return True if *model_name* belongs to a family that needs wideep MoE collection."""
-    try:
-        return get_model_family(model_name) in {"MOE", "DEEPSEEK", "DEEPSEEKV32"}
-    except Exception:
-        return False
+    """Return True if *model_name* needs wideep MoE collection (DEEPSEEK / DEEPSEEKV32 family)."""
+    return model_name in _WIDEEP_MOE_MODEL_NAMES
 
 
 # Raw model config lists — module-level so get_all_model_names() can read them
