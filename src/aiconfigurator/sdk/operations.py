@@ -588,7 +588,10 @@ class MoEDispatch(Operation):
 
                 _alltoall_backends = {"CUTLASS", "TRTLLM"}
                 backend_supports_alltoall = self._moe_backend is None or self._moe_backend.upper() in _alltoall_backends
-                enable_alltoall = backend_supports_alltoall and self._attention_dp_size > 1 and self._moe_tp_size == 1
+                is_nvl72 = _num_gpus_per_node >= 72
+                enable_alltoall = (
+                    backend_supports_alltoall and self._attention_dp_size > 1 and self._moe_tp_size == 1 and is_nvl72
+                )
 
                 # Quantize-aware communication volume.
                 # When quant_mode is known, compute compressed volume:

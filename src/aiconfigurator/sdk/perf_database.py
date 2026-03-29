@@ -5770,12 +5770,8 @@ class PerfDatabase:
 
         Raises:
             ValueError: If op_name is not valid
-            PerfDataNotAvailableError: If backend version not in ["1.2.0rc6"]
+            PerfDataNotAvailableError: If alltoall perf data is unavailable for this version
         """
-        if self.version not in ["1.2.0rc6"]:
-            raise PerfDataNotAvailableError(
-                f"TRT-LLM alltoall query requires backend version 1.2.0rc6, got '{self.version}'"
-            )
 
         def get_sol(
             num_tokens: int,
@@ -5903,6 +5899,11 @@ class PerfDatabase:
 
         # SILICON or HYBRID mode - use database
         def get_silicon():
+            if not getattr(self, "_trtllm_alltoall_data", None):
+                raise PerfDataNotAvailableError(
+                    f"TRT-LLM alltoall perf data not available for version '{self.version}'. "
+                    "Use HYBRID or EMPIRICAL database mode."
+                )
             self._trtllm_alltoall_data.raise_if_not_loaded()
             kernel_data = self._trtllm_alltoall_data[kernel_source]
             alltoall_dict = kernel_data[op_name][table_quant_mode][node_num][hidden_size][topk][num_experts][
