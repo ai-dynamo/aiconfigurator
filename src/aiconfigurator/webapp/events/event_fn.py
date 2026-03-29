@@ -1185,13 +1185,19 @@ class EventFn:
             )
         supported_quant_mode = database.supported_quant_mode
 
-        if get_model_family(model_path) != "DEEPSEEK":
+        model_family = get_model_family(model_path)
+        if model_family not in ("DEEPSEEK", "DEEPSEEKV32"):
             gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
             kvcache_quant_mode_choices = sorted(supported_quant_mode["generation_attention"])
             fmha_quant_mode_choices = sorted(supported_quant_mode["context_attention"])
             moe_quant_mode_choices = sorted(supported_quant_mode["moe"])
         else:
-            if backend_name == "sglang":
+            if model_family == "DEEPSEEKV32":
+                gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
+                kvcache_quant_mode_choices = sorted(supported_quant_mode["dsa_generation_module"])
+                fmha_quant_mode_choices = sorted(supported_quant_mode["dsa_context_module"])
+                moe_quant_mode_choices = sorted(supported_quant_mode["moe"])
+            elif backend_name == "sglang":
                 if enable_wideep:
                     gemm_quant_mode_choices = sorted(supported_quant_mode["gemm"])
                     kvcache_quant_mode_choices = sorted(supported_quant_mode["wideep_generation_mla"])
@@ -1293,7 +1299,7 @@ class EventFn:
     def update_model_related_components(model_path):
         # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
         model_family = models.get_model_family(model_path)
-        if model_family in ("DEEPSEEK", "MOE"):
+        if model_family in ("DEEPSEEK", "DEEPSEEKV32", "MOE"):
             return (
                 gr.update(value=0, visible=True),
                 gr.update(visible=True),

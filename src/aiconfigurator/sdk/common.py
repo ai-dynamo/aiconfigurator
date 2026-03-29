@@ -257,9 +257,12 @@ DefaultHFModels = {
     "meta-llama/Meta-Llama-3.1-70B",
     "meta-llama/Meta-Llama-3.1-405B",
     "nvidia/Llama-3.1-70B-Instruct-FP8",
-    # DeepSeek Models
+    # DeepSeek V3/V3.1 Models
     "deepseek-ai/DeepSeek-V3",
     "nvidia/DeepSeek-V3.1-NVFP4",
+    # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
+    "deepseek-ai/DeepSeek-V3.2",
+    "zai-org/GLM-5",
     # Qwen 3 Models
     "Qwen/Qwen3-0.6B",
     "Qwen/Qwen3-1.7B",
@@ -308,7 +311,7 @@ SupportedSystems = {
 """
 Model family for model definition
 """
-ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "NEMOTRONNAS", "NEMOTRONH", "HYBRIDMOE"}
+ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "DEEPSEEKV32", "NEMOTRONNAS", "NEMOTRONH", "HYBRIDMOE"}
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
@@ -316,6 +319,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MiMoForCausalLM": "LLAMA",
     "DeepSeekForCausalLM": "DEEPSEEK",
     "DeepseekV3ForCausalLM": "DEEPSEEK",
+    "DeepseekV32ForCausalLM": "DEEPSEEKV32",
+    "GlmMoeDsaForCausalLM": "DEEPSEEKV32",
     "KimiK25ForConditionalGeneration": "DEEPSEEK",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",

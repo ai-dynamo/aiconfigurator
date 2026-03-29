@@ -540,7 +540,7 @@ class SGLANGBackend(BaseBackend):
             c_dict = {1: 28, 2: 17, 4: 13, 8: 13}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 90 * 1024 * 1024)  # Higher minimum for SGLANG
-        elif model.model_family == "DEEPSEEK":
+        elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32"):
             c_dict = {1: 28, 2: 17, 4: 13, 8: 13}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations += (
@@ -568,7 +568,7 @@ class SGLANGBackend(BaseBackend):
         activations += sglang_overhead
 
         # ==== KV Cache calculation - SGLANG specific ====
-        if model.model_family == "DEEPSEEK":
+        if model.model_family in ("DEEPSEEK", "DEEPSEEKV32"):
             kvcache_per_token = model._num_layers * 576
         else:
             num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size

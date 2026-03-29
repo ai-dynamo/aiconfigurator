@@ -571,6 +571,20 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
             f"sliding_window_size={extra_params.sliding_window_size}"
         )
+    elif architecture in {"DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"}:
+        # DeepSeek-V3.2 / GLM-5 share the DSA attention pattern but have different
+        # projection/indexer dimensions, so keep these structural fields attached
+        # to the parsed config for model construction and perf-database lookup.
+        extra_params = {
+            "q_lora_rank": config["q_lora_rank"],
+            "kv_lora_rank": config["kv_lora_rank"],
+            "qk_nope_head_dim": config["qk_nope_head_dim"],
+            "qk_rope_head_dim": config["qk_rope_head_dim"],
+            "v_head_dim": config["v_head_dim"],
+            "index_head_dim": config["index_head_dim"],
+            "index_n_heads": config["index_n_heads"],
+            "index_topk": config["index_topk"],
+        }
     elif architecture in {"Qwen3ForCausalLM", "Qwen3MoeForCausalLM"}:
         # Qwen3-family attention may include additional Q/K normalization.
         extra_params = {"architecture": architecture, "use_qk_norm": True}

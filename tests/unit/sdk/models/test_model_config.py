@@ -62,6 +62,8 @@ class TestSupportedModels:
             ("Qwen/Qwen3-32B", False),
             ("meta-llama/Meta-Llama-3.1-8B", False),
             ("deepseek-ai/DeepSeek-V3", True),
+            ("deepseek-ai/DeepSeek-V3.2", True),
+            ("zai-org/GLM-5", True),
             ("Qwen/Qwen3-30B-A3B", True),
             # NemotronH: check hybrid_override_pattern for 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' in pattern
@@ -96,6 +98,8 @@ class TestHFModelSupport:
             ("Qwen/Qwen3-32B", "LLAMA"),
             ("meta-llama/Meta-Llama-3.1-8B", "LLAMA"),
             ("deepseek-ai/DeepSeek-V3", "DEEPSEEK"),
+            ("deepseek-ai/DeepSeek-V3.2", "DEEPSEEKV32"),
+            ("zai-org/GLM-5", "DEEPSEEKV32"),
             ("Qwen/Qwen3-30B-A3B", "MOE"),
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "NEMOTRONH"),
             ("nvidia/Nemotron-H-56B-Base-8K", "NEMOTRONH"),
@@ -112,6 +116,8 @@ class TestHFModelSupport:
             ("Qwen/Qwen3-32B", False),
             ("meta-llama/Meta-Llama-3.1-8B", False),
             ("deepseek-ai/DeepSeek-V3", True),
+            ("deepseek-ai/DeepSeek-V3.2", True),
+            ("zai-org/GLM-5", True),
             ("Qwen/Qwen3-30B-A3B", True),
             # NemotronH: is_moe depends on 'E' in hybrid_override_pattern
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' (MoE layers)

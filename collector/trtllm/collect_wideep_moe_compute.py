@@ -38,7 +38,7 @@ from tensorrt_llm._torch.modules.fused_moe.quantization import (
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
 try:
-    from common_test_cases import get_common_moe_test_cases
+    from common_test_cases import get_common_moe_test_cases, is_wideep_moe_model
 
     from helper import (
         EXIT_CODE_RESTART,
@@ -50,7 +50,7 @@ try:
     )
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from common_test_cases import get_common_moe_test_cases
+    from common_test_cases import get_common_moe_test_cases, is_wideep_moe_model
 
     from helper import (
         EXIT_CODE_RESTART,
@@ -546,9 +546,8 @@ def get_wideep_moe_compute_all_test_cases():
     test_cases = []
 
     for common_moe_testcase in get_common_moe_test_cases():
-        # Focus on DeepSeek-V3 model only
         model_name = common_moe_testcase.model_name
-        if "deepseek" not in model_name.lower() or "v3" not in model_name.lower():
+        if not is_wideep_moe_model(model_name):
             continue
 
         # Only power_law distribution (skip balanced)

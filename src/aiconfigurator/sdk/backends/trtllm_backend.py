@@ -535,7 +535,7 @@ class TRTLLMBackend(BaseBackend):
             c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             activations = max(activations, 70 * 1024 * 1024)  # minimum act
-        elif model.model_family == "DEEPSEEK":
+        elif model.model_family in ("DEEPSEEK", "DEEPSEEKV32"):
             c_dict = {1: 22, 2: 13, 4: 10, 8: 10}
             activations = 2 * num_tokens * h * c_dict[min(model.config.tp_size, 8)]
             # moe workspace, 128 for block scale, float for 4bytes
@@ -565,7 +565,7 @@ class TRTLLMBackend(BaseBackend):
         if model.config.nextn > 0:
             activations = activations * (model.config.nextn + 1)
 
-        if model.model_family == "DEEPSEEK":
+        if model.model_family in ("DEEPSEEK", "DEEPSEEKV32"):
             kvcache_per_token = model._num_layers * 576
         else:
             num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size

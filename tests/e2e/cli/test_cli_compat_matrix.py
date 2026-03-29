@@ -68,7 +68,7 @@ class TestModelSystemCombinations:
     ):
         # Skip combinations that are known to be unsupported by the codebase.
         if backend == "vllm" and get_model_family(model) == "DEEPSEEK":
-            pytest.skip("DEEPSEEK models are not supported on the vllm backend.")
+            pytest.skip("DeepSeek-V3/V3.1 family models are not supported on the vllm backend.")
 
         # Skip combinations that don't have a database available for "latest".
         version = _latest_db_version(system, backend)
