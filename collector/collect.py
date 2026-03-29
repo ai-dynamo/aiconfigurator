@@ -280,7 +280,7 @@ def worker(
     progress_value,
     lock,
     error_queue=None,
-    result_queue=None,
+    done_tasks=None,
     module_name="unknown",
     current_task_ids=None,
     consumed_sentinel=None,
@@ -303,15 +303,6 @@ def worker(
     device = torch.device(f"{get_device_str()}:{device_id}")
     get_device_module().set_device(device)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
-
-    def emit_done(task_id: str):
-        """Notify the main process that a task was attempted (success or failure)."""
-        if not result_queue:
-            return
-        try:
-            result_queue.put(task_id)
-        except Exception:
-            pass
 
     # Process tasks
     while True:
@@ -376,19 +367,22 @@ def worker(
                 # which we don't want (error already reported above).
                 exit(0)
         finally:
-            # emit_done lives in finally so it runs for ALL exit paths:
-            # normal return, Exception, SystemExit (sys.exit), KeyboardInterrupt.
-            emit_done(task_id)
+            # All three writes below use synchronous manager RPCs, so they
+            # are guaranteed to complete before the worker picks up the next
+            # task.  This means even if the *next* task kills the process
+            # via signal, the bookkeeping for *this* task is already safe.
+            if done_tasks is not None:
+                try:
+                    done_tasks[task_id] = True
+                except Exception:
+                    pass
 
-            # CRITICAL: Increment progress regardless of success or failure
-            # This marks the task as "attempted" and tracks overall progress
             with lock:
                 progress_value.value += 1
             if current_task_ids is not None:
                 current_task_ids[device_id] = None
 
             # Periodic memory cleanup to reduce fragmentation
-            # Only do this every 100 tasks to avoid overhead
             if progress_value.value % 100 == 0:
                 import gc
 
@@ -434,7 +428,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
     queue = mp.Queue()
     error_queue = mp.Queue()
-    result_queue = mp.Queue()
     processes = []
 
     manager = mp.Manager()
@@ -448,6 +441,12 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # Used to decide whether a replacement sentinel is needed on restart.
     consumed_sentinel = manager.dict(dict.fromkeys(range(num_processes), False))
     current_task_ids = manager.dict(dict.fromkeys(range(num_processes), None))
+    # Synchronous record of completed task IDs.  Workers write here via
+    # manager RPC in their finally block — same mechanism as progress_value,
+    # so it is guaranteed to be visible before the worker touches the next
+    # task.  Unlike mp.Queue (async feeder thread) this cannot be lost when
+    # a worker is killed by a signal on a subsequent task.
+    done_tasks = manager.dict()
 
     def start_process(device_id):
         p = mp.Process(
@@ -459,7 +458,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 progress_value,
                 lock,
                 error_queue,
-                result_queue,
+                done_tasks,
                 module_name,
                 current_task_ids,
                 consumed_sentinel,
@@ -499,13 +498,13 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             "timestamp": datetime.now().isoformat(),
         }
 
-    def drain_done_events():
-        while not result_queue.empty():
-            try:
-                task_id = result_queue.get_nowait()
-            except Exception:
-                break
+    def sync_done_to_checkpoint():
+        for task_id in list(done_tasks.keys()):
             resume_tracker.mark_done(task_id)
+            try:
+                del done_tasks[task_id]
+            except KeyError:
+                pass
 
     # Start processes
     for device_id in range(num_processes):
@@ -567,7 +566,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 error = error_queue.get()
                 errors.append(error)
                 process_stats[error["device_id"]]["errors"].append(error["task_id"])
-            drain_done_events()
+            sync_done_to_checkpoint()
 
             # Update postfix only if count changed
             if len(errors) != last_error_count:
@@ -637,12 +636,12 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
             resume_tracker.flush()
             time.sleep(0.5)
-        drain_done_events()
+        sync_done_to_checkpoint()
 
     # Collect remaining errors
     while not error_queue.empty():
         errors.append(error_queue.get())
-    drain_done_events()
+    sync_done_to_checkpoint()
     resume_tracker.flush(force=True)
 
     # Wait for processes
