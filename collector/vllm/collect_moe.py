@@ -24,6 +24,17 @@ except Exception:
     except Exception:
         per_block_cast_to_fp8 = None  # type: ignore[assignment]
 
+# NVFP4 support: requires Blackwell (SM>=100) and FlashInfer TRTLLM FP4 kernel.
+try:
+    from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe
+    from vllm import _custom_ops as _vllm_ops
+    from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+        prepare_static_weights_for_trtllm_fp4_moe,
+    )
+
+except Exception:
+    pass
+
 from collector.common_test_cases import get_common_moe_test_cases
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
@@ -39,6 +50,8 @@ def get_moe_test_cases():
         moe_list += ["fp8"]
     if get_sm_version() >= 90 and per_block_cast_to_fp8 is not None:
         moe_list += ["fp8_block"]
+    if get_sm_version() >= 100:
+        moe_list += ["nvfp4"]
 
     test_cases = []
 
@@ -59,6 +72,18 @@ def get_moe_test_cases():
             if moe_type == "fp8_block" and (
                 common_moe_testcase.hidden_size % 128 != 0
                 or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
+            ):
+                continue
+
+            # nvfp4 uses TRTLLM FP4 kernel which has stricter constraints:
+            # - hidden_size must be divisible by 512 (GEMM tiling requirement)
+            # - local_inter_size (inter_size // tp) must be divisible by 64
+            #   (GEMM1 N = 2*local_inter must be multiple of 128, GEMM2 K must be multiple of 64)
+            # - topk must be <= 10 (MaxNumTopExperts in routing kernel)
+            if moe_type == "nvfp4" and (
+                common_moe_testcase.hidden_size % 512 != 0
+                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 64 != 0
+                or common_moe_testcase.topk > 10
             ):
                 continue
 
@@ -136,7 +161,57 @@ def run_moe_torch(
         device=device,
     )
 
-    if moe_type in ["fp8", "fp8_block"]:
+    # NVFP4 path: uses FlashInfer TRTLLM FP4 monolithic kernel (not fused_experts).
+    use_nvfp4 = moe_type == "nvfp4"
+    nvfp4_data: dict | None = None
+
+    if use_nvfp4:
+        # Raw packed FP4 weights and block scales
+        w1_raw = torch.randint(
+            0, 255, (local_num_experts, 2 * local_inter_size, hidden_size // 2), dtype=torch.uint8, device=device
+        )
+        w2_raw = torch.randint(
+            0, 255, (local_num_experts, hidden_size, local_inter_size // 2), dtype=torch.uint8, device=device
+        )
+        w1_scale_raw = torch.ones(
+            local_num_experts, 2 * local_inter_size, hidden_size // 16, dtype=torch.float8_e4m3fn, device=device
+        )
+        w2_scale_raw = torch.ones(
+            local_num_experts, hidden_size, local_inter_size // 16, dtype=torch.float8_e4m3fn, device=device
+        )
+
+        # Shuffle weights and scales for TRTLLM kernel layout
+        w1_shuf, w1_scale_shuf, w2_shuf, w2_scale_shuf = prepare_static_weights_for_trtllm_fp4_moe(
+            w1_raw,
+            w2_raw,
+            w1_scale_raw,
+            w2_scale_raw,
+            hidden_size=hidden_size,
+            intermediate_size=local_inter_size,
+            num_experts=local_num_experts,
+        )
+        del w1_raw, w2_raw, w1_scale_raw, w2_scale_raw
+
+        # Per-expert scales
+        a13_scale = torch.ones(local_num_experts, dtype=torch.float32, device=device)
+        a2_scale_nvfp4 = torch.ones(local_num_experts, dtype=torch.float32, device=device)
+        w13_scale_2 = torch.ones(local_num_experts, dtype=torch.float32, device=device)
+        w2_scale_2 = torch.ones(local_num_experts, dtype=torch.float32, device=device)
+
+        nvfp4_data = dict(
+            w1=w1_shuf,
+            w1_scale=w1_scale_shuf,
+            w2=w2_shuf,
+            w2_scale=w2_scale_shuf,
+            g1_scale_c=a13_scale * w13_scale_2 / a2_scale_nvfp4,
+            a1_gscale=1.0 / a13_scale,
+            g1_alphas=a13_scale * w13_scale_2,
+            g2_alphas=a2_scale_nvfp4 * w2_scale_2,
+        )
+        # Free the float16 weights; they are not used for nvfp4.
+        del w1, w2
+
+    elif moe_type in ["fp8", "fp8_block"]:
         dtype = torch.float8_e4m3fn
         if moe_type == "fp8_block":
             block_shape = [128, 128]
@@ -219,8 +294,53 @@ def run_moe_torch(
             num_warmups = 1
             num_runs = 1
 
+        def _run_nvfp4_once(hs, tw, ti):
+            """Run a single nvfp4 MoE iteration via FlashInfer TRTLLM FP4 kernel."""
+            # Quantize input to FP4
+            x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
+                hs.to(torch.bfloat16),
+                nvfp4_data["a1_gscale"][0:1],
+                is_sf_swizzled_layout=False,
+            )
+            # Pack topk: (expert_id << 16) | bf16_weight_as_int16
+            packed = (ti.to(torch.int32) << 16) | tw.to(torch.bfloat16).view(torch.int16).to(torch.int32)
+            trtllm_fp4_block_scale_routed_moe(
+                topk_ids=packed,
+                routing_bias=None,
+                hidden_states=x_fp4,
+                hidden_states_scale=x_scale.view(torch.float8_e4m3fn).flatten(),
+                gemm1_weights=nvfp4_data["w1"],
+                gemm1_weights_scale=nvfp4_data["w1_scale"].view(torch.float8_e4m3fn),
+                gemm1_bias=None,
+                gemm1_alpha=None,
+                gemm1_beta=None,
+                gemm1_clamp_limit=None,
+                gemm2_weights=nvfp4_data["w2"],
+                gemm2_weights_scale=nvfp4_data["w2_scale"].view(torch.float8_e4m3fn),
+                gemm2_bias=None,
+                output1_scale_scalar=nvfp4_data["g1_scale_c"],
+                output1_scale_gate_scalar=nvfp4_data["g1_alphas"],
+                output2_scale_scalar=nvfp4_data["g2_alphas"],
+                num_experts=num_experts,
+                top_k=topk,
+                n_group=0,
+                topk_group=0,
+                intermediate_size=local_inter_size,
+                local_expert_offset=0,
+                local_num_experts=local_num_experts,
+                routed_scaling_factor=None,
+                routing_method_type=1,  # Renormalize
+                do_finalize=True,
+            )
+
         def run_single_iteration():
-            if distributed == "power_law":
+            if use_nvfp4:
+                if distributed == "power_law":
+                    for tw, ti in zip(topk_weights_list, topk_ids_list):
+                        _run_nvfp4_once(hidden_states[: tw.shape[0]], tw, ti)
+                else:
+                    _run_nvfp4_once(hidden_states, topk_weights, topk_ids)
+            elif distributed == "power_law":
                 for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
                     local_num_tokens = tw.shape[0]
                     _ = fused_experts(
@@ -229,7 +349,7 @@ def run_moe_torch(
                         w2,
                         tw,
                         ti,
-                        inplace=True,
+                        inplace=False,
                         quant_config=quant_config,
                         global_num_experts=num_experts,
                         expert_map=expert_map,
@@ -241,7 +361,7 @@ def run_moe_torch(
                     w2,
                     topk_weights,
                     topk_ids,
-                    inplace=True,
+                    inplace=False,
                     quant_config=quant_config,
                     global_num_experts=num_experts,
                     expert_map=expert_map,
@@ -271,7 +391,7 @@ def run_moe_torch(
 
         print(f"moe latency: {latency}")
 
-        source = "vllm_fused_moe"
+        source = "vllm_flashinfer_trtllm_moe_fp4" if use_nvfp4 else "vllm_fused_moe"
 
         log_perf(
             item_list=[
