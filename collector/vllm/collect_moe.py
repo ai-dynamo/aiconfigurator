@@ -25,15 +25,20 @@ except Exception:
         per_block_cast_to_fp8 = None  # type: ignore[assignment]
 
 # NVFP4 support: requires Blackwell (SM>=100) and FlashInfer TRTLLM FP4 kernel.
+trtllm_fp4_block_scale_routed_moe = None
+_vllm_ops = None
+prepare_static_weights_for_trtllm_fp4_moe = None
 try:
-    from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe
-    from vllm import _custom_ops as _vllm_ops
+    from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe  # type: ignore[assignment]
+    from vllm import _custom_ops as _vllm_ops  # type: ignore[assignment]
     from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-        prepare_static_weights_for_trtllm_fp4_moe,
+        prepare_static_weights_for_trtllm_fp4_moe,  # type: ignore[assignment]
     )
 
 except Exception:
-    pass
+    trtllm_fp4_block_scale_routed_moe = None
+    _vllm_ops = None
+    prepare_static_weights_for_trtllm_fp4_moe = None
 
 from collector.common_test_cases import get_common_moe_test_cases
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
@@ -166,6 +171,22 @@ def run_moe_torch(
     nvfp4_data: dict | None = None
 
     if use_nvfp4:
+        _missing = [
+            name
+            for name, obj in [
+                ("trtllm_fp4_block_scale_routed_moe", trtllm_fp4_block_scale_routed_moe),
+                ("_vllm_ops", _vllm_ops),
+                ("prepare_static_weights_for_trtllm_fp4_moe", prepare_static_weights_for_trtllm_fp4_moe),
+            ]
+            if obj is None
+        ]
+        if _missing:
+            raise ImportError(
+                f"NVFP4 MoE requires flashinfer and vllm FP4 support, but the following "
+                f"could not be imported: {', '.join(_missing)}. "
+                f"Install a compatible flashinfer build and ensure vllm >= 0.11 with FP4 support."
+            )
+
         # Raw packed FP4 weights and block scales
         w1_raw = torch.randint(
             0, 255, (local_num_experts, 2 * local_inter_size, hidden_size // 2), dtype=torch.uint8, device=device
@@ -302,13 +323,15 @@ def run_moe_torch(
                 nvfp4_data["a1_gscale"][0:1],
                 is_sf_swizzled_layout=False,
             )
+            num_tok = x_fp4.shape[0]
+            scale_cols = hs.shape[1] // 16
             # Pack topk: (expert_id << 16) | bf16_weight_as_int16
             packed = (ti.to(torch.int32) << 16) | tw.to(torch.bfloat16).view(torch.int16).to(torch.int32)
             trtllm_fp4_block_scale_routed_moe(
                 topk_ids=packed,
                 routing_bias=None,
                 hidden_states=x_fp4,
-                hidden_states_scale=x_scale.view(torch.float8_e4m3fn).flatten(),
+                hidden_states_scale=x_scale.view(num_tok, scale_cols).to(torch.float8_e4m3fn),
                 gemm1_weights=nvfp4_data["w1"],
                 gemm1_weights_scale=nvfp4_data["w1_scale"].view(torch.float8_e4m3fn),
                 gemm1_bias=None,
