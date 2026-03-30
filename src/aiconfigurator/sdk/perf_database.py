@@ -3056,7 +3056,7 @@ class PerfDatabase:
             if inner_only and x != values[0]:
                 raise ValueError(f"x is not equal to the only value in the list. {x=}, {values=}")
             return values[0], values[0]
-            
+
         sorted_values = sorted(values)
 
         if x < sorted_values[0]:
