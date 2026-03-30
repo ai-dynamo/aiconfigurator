@@ -84,11 +84,9 @@ def get_attention_prefill_test_cases():
     """
     test_cases = []
 
-    #context_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    # context_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     context_batch_sizes = [1, 2]
     context_seq_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-
-
 
     if MODEL_VARIANT == "v3_2":
         attention_backends = ["nsa"]
@@ -122,7 +120,6 @@ def get_attention_decode_test_cases():
 
     generation_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
     generation_seq_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-
 
     if MODEL_VARIANT == "v3_2":
         attention_backends = ["nsa"]

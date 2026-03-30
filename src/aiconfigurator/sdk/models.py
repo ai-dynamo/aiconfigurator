@@ -3008,7 +3008,7 @@ class WideEPDeepSeekModel(BaseModel):
                     kvcache_quant_mode,
                     fmha_quant_mode,
                     attn_backend,
-                )
+                ),
             ]
         )
 
