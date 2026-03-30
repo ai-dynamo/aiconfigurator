@@ -15,7 +15,7 @@ Read the relevant reference file in `.claude/rules/generator/` before starting t
 
 The generator transforms deployment intent into backend-specific artifacts through 6 stages:
 
-```
+```text
 Raw Input (YAML + CLI --set)
   -> [1] Input Parsing        (api.py)
   -> [2] Default Application   (rendering/schemas.py, deployment_config.yaml)

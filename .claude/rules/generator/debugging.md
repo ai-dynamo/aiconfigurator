@@ -16,7 +16,7 @@ backwards-tracing diagnostic approach.
 The generator has 6 stages. A bug can originate at any stage but manifests at the output.
 Trace backwards from the output:
 
-```
+```text
 Stage 6: TEMPLATE RENDERING (most visible)
   Symptom: Wrong CLI flag name, missing block, wrong YAML structure
   Check:   Read the template (.j2 file), verify variable names match context
@@ -122,7 +122,7 @@ Common root causes:
 
 ## Checklist
 
-```
+```text
 [ ] Reproduce the bug with exact inputs
 [ ] Identify the wrong output (specific flag/value/block)
 [ ] Trace backwards through the 6-stage pipeline

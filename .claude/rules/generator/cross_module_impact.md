@@ -5,7 +5,7 @@ When modifying the generator, check this map to identify affected modules outsid
 
 ## Dependency Directions
 
-```
+```text
 CLI (cli/)
   |-- calls --> generator/api.py (generate_config_from_input_dict, parse_cli_params)
   |-- calls --> generator/main.py (render-config, render-artifacts subcommands)
@@ -63,7 +63,7 @@ Collector (collector/)
 
 | Check | File(s) | Why |
 |---|---|---|
-| 1. All backends | `rule_plugin/default/*.rule` | Same rule may need update in all backends |
+| 1. All backends | `rule_plugin/*.rule` | Same rule may need update in all backends |
 | 2. Benchmark rules | `rule_plugin/benchmark/*.rule` | Benchmark may need different logic |
 | 3. Bridge output | `module_bridge.py` | If rule uses fields from bridge output |
 | 4. Template consumers | `backend_templates/**/*.j2` | Templates may assume rule output format |

@@ -86,7 +86,8 @@ If new user-facing parameters were added:
 
 ### 6. Update Rule Files (if needed)
 
-Files: `src/aiconfigurator/generator/rule_plugin/<backend>.rule`
+Files: `src/aiconfigurator/generator/rule_plugin/<backend>.rule` (production)
+and `src/aiconfigurator/generator/rule_plugin/benchmark/<backend>.rule` (benchmark)
 
 If parameter computation logic changed:
 - Update expressions
@@ -151,7 +152,7 @@ version bump.
 
 ## Checklist
 
-```
+```text
 [ ] Gather new version info: what changed (new/deprecated/renamed flags)
 [ ] Update backend_version_matrix.yaml
 [ ] Determine if version-specific templates are needed

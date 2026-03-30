@@ -24,7 +24,7 @@ covers safe practices for adding and modifying Jinja2 templates.
 
 ## Template Types by Backend
 
-```
+```text
 backend_templates/
   vllm/       cli_args[.version].j2, k8s_deploy.yaml.j2, run.sh.j2
   sglang/     cli_args[.version].j2, k8s_deploy.yaml.j2, run.sh.j2, sflow_deploy.yaml.j2
@@ -103,7 +103,7 @@ Flag any variable that cannot be traced to a source.
 
 ## Checklist
 
-```
+```text
 [ ] Identify all affected backends and version templates
 [ ] Read current template + mapping + rule file
 [ ] Cross-backend parity check for affected parameters

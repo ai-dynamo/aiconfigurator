@@ -13,7 +13,7 @@ the testing strategy.
 
 ## Test Strategy Layers
 
-```
+```text
 Layer 1: UNIT TESTS (fast, always run)
   - Test individual functions in isolation
   - Mock: schema loading, template rendering
@@ -123,7 +123,7 @@ Always test these scenarios:
 
 ## Test File Organization
 
-```
+```text
 tests/
   unit/
     generator/
@@ -144,7 +144,7 @@ tests/
 
 ## Checklist
 
-```
+```text
 [ ] Determine test layer (unit / integration / validator)
 [ ] Write unit tests for changed logic
 [ ] Update or create golden snapshots for output-affecting changes

@@ -14,14 +14,14 @@ This reference covers safe practices for writing and modifying rules.
 
 | File | Purpose |
 |---|---|
-| `src/aiconfigurator/generator/rule_plugin/default/*.rule` | Production rules per backend |
+| `src/aiconfigurator/generator/rule_plugin/*.rule` | Production rules per backend |
 | `src/aiconfigurator/generator/rule_plugin/benchmark/*.rule` | Benchmark rules per backend |
 | `src/aiconfigurator/generator/rendering/rule_engine.py` | Rule DSL evaluation engine |
 | `src/aiconfigurator/generator/config/backend_config_mapping.yaml` | Parameter backend support |
 
 ## DSL Reference
 
-```
+```text
 # === SCOPE PREFIXES ===
 # Apply to specific worker roles:
 prefill <key> = <expr>              # Only prefill workers
@@ -131,7 +131,7 @@ agg max_num_tokens = ((max_batch_size + SlaConfig.isl + 1500 + tokens_per_block 
 
 ## Checklist
 
-```
+```text
 [ ] Identify parameter purpose, backend support, and worker scope
 [ ] Read all existing .rule files (production + benchmark)
 [ ] Write rule with correct scope prefix and null guards

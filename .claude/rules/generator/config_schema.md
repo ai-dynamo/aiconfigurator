@@ -30,7 +30,7 @@ covers safe practices for modifying them.
     trtllm: <value or expr>
     vllm: <value or expr>
     sglang: <value or expr>
-  backend_constraint:                 # Optional: restrict to specific backends
+  backends:                            # Optional: restrict to specific backends
     - trtllm
 ```
 
@@ -119,7 +119,7 @@ See `.claude/rules/generator/template_authoring.md` for template authoring detai
 
 ## Checklist
 
-```
+```text
 [ ] Define parameter: section, required/optional, default, backend support
 [ ] Add entry to deployment_config.yaml with correct syntax
 [ ] Test default expression with edge cases (None, empty string)
