@@ -52,8 +52,8 @@ class TestInterpolationMethods:
         with pytest.raises(AssertionError):
             comprehensive_perf_db._nearest_1d_point_helper(10, [], inner_only=True)
 
-        # Single value list
-        with pytest.raises(AssertionError):
+        # Single value list with mismatched x
+        with pytest.raises(ValueError):
             comprehensive_perf_db._nearest_1d_point_helper(10, [5], inner_only=True)
 
         # Value out of range with inner_only=True
