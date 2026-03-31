@@ -1294,7 +1294,7 @@ class GDNKernel(Operation):
     """
     Single Gated DeltaNet (GDN) kernel op for Qwen3.5 linear_attention layers.
 
-    Covers five kernel sources:
+    Covers four kernel sources:
       Context phase:
         - "causal_conv1d_fn": Causal 1D convolution over full sequence
         - "chunk_gated_delta_rule": GDN chunked scan (core recurrence)

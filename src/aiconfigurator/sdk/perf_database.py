@@ -1389,18 +1389,17 @@ def load_gdn_data(gdn_file: str):
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
         entry = {"latency": latency, "power": power, "energy": energy}
 
-        try:
-            if phase == "context":
-                data[kernel_source][phase][model_key][batch_size][seq_len]
+        by_model = data[kernel_source][phase][model_key]
+        if phase == "context":
+            if batch_size in by_model and seq_len in by_model[batch_size]:
                 logger.debug(f"value conflict in gdn data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}")
             else:
-                data[kernel_source][phase][model_key][batch_size]
+                by_model.setdefault(batch_size, {})[seq_len] = entry
+        else:
+            if batch_size in by_model:
                 logger.debug(f"value conflict in gdn data: {kernel_source} {phase} {model_key} {batch_size}")
-        except KeyError:
-            if phase == "context":
-                data[kernel_source][phase][model_key][batch_size][seq_len] = entry
             else:
-                data[kernel_source][phase][model_key][batch_size] = entry
+                by_model[batch_size] = entry
 
     # Convert defaultdicts to regular dicts for predictable behavior
     result = {}
@@ -5415,8 +5414,8 @@ class PerfDatabase:
             elif kernel_source in ("chunk_gated_delta_rule", "fused_sigmoid_gating_delta_rule_update"):
                 # GDN recurrence: reads q, k, v, beta, A state; writes updated state + output
                 state_size = num_k_heads * head_k_dim * head_v_dim  # per-head outer-product state
-                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 4
-                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 4
+                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 4 * batch_size
+                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 4 * batch_size
             else:
                 read_bytes = x * d_model * 2
                 write_bytes = x * d_model * 2
