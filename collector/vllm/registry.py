@@ -70,6 +70,8 @@ REGISTRY: list[OpEntry] = [
         module="collector.vllm.collect_mla_module",
         get_func="get_dsa_generation_module_test_cases",
         run_func="run_mla_module_worker",
+    ),
+    OpEntry(
         op="gdn",
         module="collector.vllm.collect_gdn",
         get_func="get_gdn_test_cases",
