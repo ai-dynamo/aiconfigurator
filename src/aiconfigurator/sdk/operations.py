@@ -1290,6 +1290,70 @@ class Mamba2Kernel(Operation):
         return self._weights * self._scale_factor
 
 
+class GDNKernel(Operation):
+    """
+    Single Gated DeltaNet (GDN) kernel op for Qwen3.5 linear_attention layers.
+
+    Covers five kernel sources:
+      Context phase:
+        - "causal_conv1d_fn": Causal 1D convolution over full sequence
+        - "chunk_gated_delta_rule": GDN chunked scan (core recurrence)
+      Generation phase:
+        - "causal_conv1d_update": Single-step causal conv state update
+        - "fused_sigmoid_gating_delta_rule_update": Single-step GDN recurrence
+
+    Uses full (unsharded) dimensions for database lookup; collector data is per-layer.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        kernel_source: str,
+        phase: str,
+        d_model: int,
+        num_k_heads: int,
+        head_k_dim: int,
+        num_v_heads: int,
+        head_v_dim: int,
+        d_conv: int,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        self._kernel_source = kernel_source
+        self._phase = phase
+        self._d_model = d_model
+        self._num_k_heads = num_k_heads
+        self._head_k_dim = head_k_dim
+        self._num_v_heads = num_v_heads
+        self._head_v_dim = head_v_dim
+        self._d_conv = d_conv
+        self._weights = 0.0
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        batch_size = kwargs.get("batch_size")
+        s = kwargs.get("s")
+        seq_len = s if self._phase == "context" else None
+        result = database.query_gdn(
+            phase=self._phase,
+            kernel_source=self._kernel_source,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            d_model=self._d_model,
+            num_k_heads=self._num_k_heads,
+            head_k_dim=self._head_k_dim,
+            num_v_heads=self._num_v_heads,
+            head_v_dim=self._head_v_dim,
+            d_conv=self._d_conv,
+        )
+        return PerformanceResult(
+            latency=float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+        )
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
 class Mamba2(Operation):
     """
     Mamba2 operation for NemotronH hybrid models.

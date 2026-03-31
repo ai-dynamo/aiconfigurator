@@ -18,6 +18,7 @@ from aiconfigurator.sdk.common import (
     BlockConfig,
     DefaultHFModels,
     HybridMoEConfig,
+    Qwen35Config,
 )
 
 logger = logging.getLogger(__name__)
@@ -588,6 +589,29 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture in {"Qwen3ForCausalLM", "Qwen3MoeForCausalLM"}:
         # Qwen3-family attention may include additional Q/K normalization.
         extra_params = {"architecture": architecture, "use_qk_norm": True}
+    elif architecture in {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}:
+        # Qwen3.5 hybrid GDN + full-attention model.
+        layer_types_raw = config.get("layer_types", [])
+        if len(layer_types_raw) != layers:
+            raise ValueError(f"Qwen3.5 layer_types length {len(layer_types_raw)} != num_hidden_layers {layers}")
+        extra_params = Qwen35Config(
+            layer_types=tuple(layer_types_raw),
+            linear_num_key_heads=config["linear_num_key_heads"],
+            linear_key_head_dim=config["linear_key_head_dim"],
+            linear_num_value_heads=config["linear_num_value_heads"],
+            linear_value_head_dim=config["linear_value_head_dim"],
+            linear_conv_kernel_dim=config["linear_conv_kernel_dim"],
+            topk=topk,
+            num_experts=num_experts,
+            moe_inter_size=moe_inter_size,
+            shared_expert_inter_size=config.get("shared_expert_intermediate_size", 0),
+        )
+        logger.info(
+            f"Qwen3.5 hybrid config: architecture={architecture}, "
+            f"linear_attn_layers={extra_params.layer_types.count('linear_attention')}, "
+            f"full_attn_layers={extra_params.layer_types.count('full_attention')}, "
+            f"num_experts={extra_params.num_experts}"
+        )
 
     return {
         "architecture": architecture,

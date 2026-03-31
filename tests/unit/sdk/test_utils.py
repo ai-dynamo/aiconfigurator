@@ -187,6 +187,132 @@ class TestParseHFConfig:
         assert "E" not in extra_params.hybrid_override_pattern  # No MoE layers
         assert extra_params.moe_shared_expert_intermediate_size == 0
 
+    def test_parse_qwen35_dense_config(self):
+        """Test parsing Qwen3.5-27B (dense hybrid) config → Qwen35Config."""
+        # Mimics Qwen/Qwen3.5-27B HF config structure (params nested under text_config).
+        # 64 layers: 48 linear_attention + 16 full_attention (3:1 ratio).
+        layer_types = ["linear_attention"] * 3 + ["full_attention"]
+        layer_types = layer_types * 16  # 64 layers total (48 GDN + 16 GQA)
+        config = {
+            "architectures": ["Qwen3_5ForConditionalGeneration"],
+            "text_config": {
+                "num_hidden_layers": 64,
+                "num_attention_heads": 24,
+                "num_key_value_heads": 4,
+                "hidden_size": 5120,
+                "intermediate_size": 17408,
+                "vocab_size": 151936,
+                "max_position_embeddings": 32768,
+                "head_dim": 256,
+                "layer_types": layer_types,
+                "linear_num_key_heads": 16,
+                "linear_key_head_dim": 128,
+                "linear_num_value_heads": 48,
+                "linear_value_head_dim": 128,
+                "linear_conv_kernel_dim": 4,
+            },
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result["architecture"] == "Qwen3_5ForConditionalGeneration"
+        assert result["layers"] == 64
+        assert result["hidden_size"] == 5120
+        assert result["inter_size"] == 17408
+        assert result["n"] == 24
+        assert result["n_kv"] == 4
+        assert result["d"] == 256
+
+        extra_params = result["extra_params"]
+        assert isinstance(extra_params, common.Qwen35Config)
+        assert len(extra_params.layer_types) == 64
+        assert extra_params.layer_types.count("linear_attention") == 48
+        assert extra_params.layer_types.count("full_attention") == 16
+        assert extra_params.linear_num_key_heads == 16
+        assert extra_params.linear_key_head_dim == 128
+        assert extra_params.linear_num_value_heads == 48
+        assert extra_params.linear_value_head_dim == 128
+        assert extra_params.linear_conv_kernel_dim == 4
+        # Dense model: no MoE routing
+        assert extra_params.topk == 0
+        assert extra_params.num_experts == 0
+        # For dense models moe_inter_size falls back to intermediate_size
+        assert extra_params.moe_inter_size == 17408
+        assert extra_params.shared_expert_inter_size == 0
+
+    def test_parse_qwen35_moe_config(self):
+        """Test parsing Qwen3.5-35B-A3B (MoE hybrid) config → Qwen35Config with MoE fields."""
+        # 40 layers: 30 linear_attention + 10 full_attention (3:1 ratio).
+        layer_types = ["linear_attention"] * 3 + ["full_attention"]
+        layer_types = layer_types * 10  # 40 layers total (30 GDN + 10 GQA)
+        config = {
+            "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+            "text_config": {
+                "num_hidden_layers": 40,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 2,
+                "hidden_size": 2048,
+                "vocab_size": 151936,
+                "max_position_embeddings": 32768,
+                "head_dim": 256,
+                "layer_types": layer_types,
+                "linear_num_key_heads": 16,
+                "linear_key_head_dim": 128,
+                "linear_num_value_heads": 32,
+                "linear_value_head_dim": 128,
+                "linear_conv_kernel_dim": 4,
+                # MoE fields
+                "num_experts_per_tok": 8,
+                "num_experts": 256,
+                "moe_intermediate_size": 512,
+                "shared_expert_intermediate_size": 512,
+            },
+        }
+
+        result = _parse_hf_config_json(config)
+
+        assert result["architecture"] == "Qwen3_5MoeForConditionalGeneration"
+        assert result["layers"] == 40
+        assert result["hidden_size"] == 2048
+        assert result["topk"] == 8
+        assert result["num_experts"] == 256
+
+        extra_params = result["extra_params"]
+        assert isinstance(extra_params, common.Qwen35Config)
+        assert len(extra_params.layer_types) == 40
+        assert extra_params.layer_types.count("linear_attention") == 30
+        assert extra_params.layer_types.count("full_attention") == 10
+        assert extra_params.linear_num_value_heads == 32
+        assert extra_params.topk == 8
+        assert extra_params.num_experts == 256
+        assert extra_params.moe_inter_size == 512
+        assert extra_params.shared_expert_inter_size == 512
+
+    def test_parse_qwen35_layer_types_length_mismatch_raises(self):
+        """Test that mismatched layer_types length raises ValueError."""
+        layer_types = ["linear_attention"] * 3 + ["full_attention"]  # 4 entries, not 64
+        config = {
+            "architectures": ["Qwen3_5ForConditionalGeneration"],
+            "text_config": {
+                "num_hidden_layers": 64,
+                "num_attention_heads": 24,
+                "num_key_value_heads": 4,
+                "hidden_size": 5120,
+                "intermediate_size": 17408,
+                "vocab_size": 151936,
+                "max_position_embeddings": 32768,
+                "head_dim": 256,
+                "layer_types": layer_types,  # length 4, not 64 → should raise
+                "linear_num_key_heads": 16,
+                "linear_key_head_dim": 128,
+                "linear_num_value_heads": 48,
+                "linear_value_head_dim": 128,
+                "linear_conv_kernel_dim": 4,
+            },
+        }
+        with pytest.raises(ValueError, match="layer_types length"):
+            _parse_hf_config_json(config)
+
     def test_parse_llama4_scout_config(self):
         """Test Llama 4 Scout (VLM, step=1: all-MoE) → HybridMoEConfig with alternating attn pattern."""
         config = {

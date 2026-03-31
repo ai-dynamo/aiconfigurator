@@ -77,4 +77,10 @@ REGISTRY: list[OpEntry] = [
         get_func="get_wideep_moe_test_cases",
         run_func="run_wideep_moe",
     ),
+    OpEntry(
+        op="gdn",
+        module="collector.sglang.collect_gdn",
+        get_func="get_gdn_test_cases",
+        run_func="run_gdn_torch",
+    ),
 ]

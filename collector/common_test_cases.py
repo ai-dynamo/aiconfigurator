@@ -81,6 +81,20 @@ _MLA_MODULE_MODEL_NAMES: list[str] = [
     "zai-org/GLM-5",
 ]
 
+# GDN (Gated DeltaNet): [d_model, d_conv, num_k_heads, head_k_dim, num_v_heads, head_v_dim, model_name]
+# Covers all 8 unique dimension sets across the full Qwen3.5 collection.
+# d_conv=4, head_k_dim=128, head_v_dim=128, num_k_heads=16 are constant across all models.
+_GDN_MODEL_CONFIGS: list[list] = [
+    [1024, 4, 16, 128, 16, 128, "Qwen/Qwen3.5-0.8B"],
+    [2048, 4, 16, 128, 16, 128, "Qwen/Qwen3.5-2B"],
+    [2560, 4, 16, 128, 32, 128, "Qwen/Qwen3.5-4B"],
+    [4096, 4, 16, 128, 32, 128, "Qwen/Qwen3.5-9B"],
+    [5120, 4, 16, 128, 48, 128, "Qwen/Qwen3.5-27B"],
+    [2048, 4, 16, 128, 32, 128, "Qwen/Qwen3.5-35B-A3B"],  # same d_model as 2B, different num_v_heads
+    [3072, 4, 16, 128, 64, 128, "Qwen/Qwen3.5-122B-A10B"],
+    [4096, 4, 16, 128, 64, 128, "Qwen/Qwen3.5-397B-A17B"],  # same d_model as 9B, different num_v_heads
+]
+
 # Mamba2: [d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size, model_name]
 _MAMBA2_MODEL_CONFIGS: list[list] = [
     # Nemotron-H 3-Nano
@@ -104,7 +118,7 @@ def get_all_model_names() -> list[str]:
     case objects or call generator functions, so pruning logic in the generators
     cannot accidentally exclude models from the allowlist.
     """
-    all_configs = _MOE_MODEL_CONFIGS + _MLA_MODEL_CONFIGS + _MAMBA2_MODEL_CONFIGS
+    all_configs = _MOE_MODEL_CONFIGS + _MLA_MODEL_CONFIGS + _MAMBA2_MODEL_CONFIGS + _GDN_MODEL_CONFIGS
     return [cfg[-1] for cfg in all_configs] + _MLA_MODULE_MODEL_NAMES
 
 
@@ -490,6 +504,122 @@ def get_common_mamba2_test_cases() -> list[Mamba2CommonTestCase]:
                 num_tokens_list=None,
                 batch_size_list=generation_batch_sizes,
                 seq_len_list=None,  # Not used for generation
+                model_name=model_name,
+            )
+        )
+
+    return test_cases
+
+
+# =============================================================================
+# GDN (Gated DeltaNet) Test Cases  — Qwen3.5 linear_attention layers
+# =============================================================================
+
+
+@dataclasses.dataclass
+class GdnCommonTestCase:
+    """Test case configuration for GDN (Gated DeltaNet) kernel benchmarking."""
+
+    phase: str  # "context" or "generation"
+    d_model: int  # hidden_size
+    d_conv: int  # Conv1d kernel size
+    num_k_heads: int  # Number of GDN key heads
+    head_k_dim: int  # Key head dimension
+    num_v_heads: int  # Number of GDN value heads
+    head_v_dim: int  # Value head dimension
+    batch_size_list: Optional[list[int]]
+    seq_len_list: Optional[list[int]]  # For context phase; None for generation
+    model_name: str
+
+
+def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
+    """
+    Generate common test cases for GDN (Gated DeltaNet) kernel benchmarking.
+
+    Covers all 8 unique dimension sets across the full Qwen3.5 collection
+    for both context (prefill) and generation (decode) phases.
+    """
+    test_cases: list[GdnCommonTestCase] = []
+
+    # Sequence lengths for context (prefill) phase
+    context_seq_lens = [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+        8192,
+        16384,
+        32768,
+    ]
+
+    # Batch sizes for context phase
+    context_batch_sizes = [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+    ]
+
+    # Batch sizes for generation (decode) phase
+    generation_batch_sizes = [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+    ]
+
+    model_config_list = _filter_model_config_list(_GDN_MODEL_CONFIGS)
+
+    for model_config in model_config_list:
+        d_model, d_conv, num_k_heads, head_k_dim, num_v_heads, head_v_dim, model_name = model_config
+
+        # Context (prefill) test case
+        test_cases.append(
+            GdnCommonTestCase(
+                phase="context",
+                d_model=d_model,
+                d_conv=d_conv,
+                num_k_heads=num_k_heads,
+                head_k_dim=head_k_dim,
+                num_v_heads=num_v_heads,
+                head_v_dim=head_v_dim,
+                batch_size_list=context_batch_sizes,
+                seq_len_list=context_seq_lens,
+                model_name=model_name,
+            )
+        )
+
+        # Generation (decode) test case
+        test_cases.append(
+            GdnCommonTestCase(
+                phase="generation",
+                d_model=d_model,
+                d_conv=d_conv,
+                num_k_heads=num_k_heads,
+                head_k_dim=head_k_dim,
+                num_v_heads=num_v_heads,
+                head_v_dim=head_v_dim,
+                batch_size_list=generation_batch_sizes,
+                seq_len_list=None,
                 model_name=model_name,
             )
         )

@@ -92,6 +92,29 @@ class HybridMoEConfig:
     dense_inter_size: int = 0
 
 
+@dataclass(frozen=True)
+class Qwen35Config:
+    """Config for Qwen3.5 hybrid GDN + full-attention model (dense and MoE).
+
+    layer_types: per-layer tuple of "linear_attention" (GDN) or "full_attention" (standard GQA)
+    linear_*: GDN layer dimensions (linear_key_head_dim=128, linear_value_head_dim=128,
+              linear_conv_kernel_dim=4, linear_num_key_heads=16 across all current models)
+    MoE fields default to 0 for the dense 27B; populated for 35B-A3B and 397B-A17B.
+    """
+
+    layer_types: tuple[str, ...]  # per-layer: "linear_attention" (GDN) or "full_attention"
+    linear_num_key_heads: int  # K heads for GDN layers
+    linear_key_head_dim: int  # K/Q head dim for GDN layers
+    linear_num_value_heads: int  # V heads for GDN layers
+    linear_value_head_dim: int  # V head dim for GDN layers
+    linear_conv_kernel_dim: int  # Conv1D kernel size for GDN layers
+    # MoE fields (0 for dense models)
+    topk: int = 0
+    num_experts: int = 0
+    moe_inter_size: int = 0
+    shared_expert_inter_size: int = 0
+
+
 def _get_support_matrix_resource():
     """Get the support_matrix.csv as a Traversable resource."""
     return pkg_resources.files("aiconfigurator") / "systems" / "support_matrix.csv"
@@ -285,6 +308,10 @@ DefaultHFModels = {
     # Llama 4 Models
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+    # Qwen3.5 Models
+    "Qwen/Qwen3.5-27B",
+    "Qwen/Qwen3.5-35B-A3B",
+    "Qwen/Qwen3.5-397B-A17B",
     # MiMo Models
     "XiaomiMiMo/MiMo-V2-Flash",
     "XiaomiMiMo/MiMo-7B-Base",
@@ -312,7 +339,7 @@ SupportedSystems = {
 """
 Model family for model definition
 """
-ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "DEEPSEEKV32", "NEMOTRONNAS", "NEMOTRONH", "HYBRIDMOE"}
+ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "DEEPSEEKV32", "NEMOTRONNAS", "NEMOTRONH", "HYBRIDMOE", "QWEN35"}
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
@@ -333,6 +360,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MiniMaxM2ForCausalLM": "MOE",
     "MiMoV2FlashForCausalLM": "HYBRIDMOE",
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
+    "Qwen3_5ForConditionalGeneration": "QWEN35",
+    "Qwen3_5MoeForConditionalGeneration": "QWEN35",
 }
 
 # Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").
@@ -340,6 +369,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
 MULTIMODAL_TEXT_CONFIG_KEY = {
     "KimiK25ForConditionalGeneration": "text_config",
     "Llama4ForConditionalGeneration": "text_config",
+    "Qwen3_5ForConditionalGeneration": "text_config",
+    "Qwen3_5MoeForConditionalGeneration": "text_config",
 }
 
 """
@@ -543,6 +574,7 @@ class PerfDataFilename(Enum):
     compute_scale = "computescale_perf.txt"
     scale_matrix = "scale_matrix_perf.txt"
     mamba2 = "mamba2_perf.txt"
+    gdn = "gdn_perf.txt"
     # Module-level attention profiling (complete self_attn forward)
     mla_context_module = "mla_context_module_perf.txt"
     mla_generation_module = "mla_generation_module_perf.txt"

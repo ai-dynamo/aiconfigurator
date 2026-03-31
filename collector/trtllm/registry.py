@@ -96,6 +96,12 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mamba2_torch",
     ),
     OpEntry(
+        op="gdn",
+        module="collector.trtllm.collect_gdn",
+        get_func="get_gdn_test_cases",
+        run_func="run_gdn_torch",
+    ),
+    OpEntry(
         op="mla_context_module",
         module="collector.trtllm.collect_mla_module",
         get_func="get_mla_context_module_test_cases",
