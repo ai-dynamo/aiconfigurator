@@ -168,6 +168,12 @@ class BaseBackend(ABC):
         stride: int = 32,
         latency_correction_scale: float = 1.0,
     ) -> float:
+        """
+        Run static inference and return only the total latency in milliseconds.
+
+        This shares the same latency breakdown path as ``run_static`` but skips
+        building an ``InferenceSummary``.
+        """
         (
             context_latency_dict,
             _,
