@@ -34,6 +34,154 @@ class BaseBackend(ABC):
         _get_memory_usage: this is backend-specific. It should be implemented in the subclass.
     """
 
+    def _run_context_phase(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        batch_size: int,
+        isl: int,
+        prefix: int,
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        context_latency_dict = defaultdict(float)
+        context_energy_wms_dict = defaultdict(float)
+
+        effective_isl = isl - prefix
+        if effective_isl <= 0:
+            raise ValueError(f"isl must be greater than 0 after removing prefix, but got {effective_isl}")
+
+        for op in model.context_ops:
+            x = batch_size * effective_isl if "logits_gemm" not in op._name else batch_size
+            result = op.query(
+                database,
+                x=x,
+                batch_size=batch_size,
+                beam_width=1,
+                s=effective_isl,
+                prefix=prefix,
+                model_name=getattr(model, "model_name", ""),
+                seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+            )
+            context_latency_dict[op._name] += float(result)
+            context_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
+
+        return context_latency_dict, context_energy_wms_dict
+
+    def _run_generation_phase(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        batch_size: int,
+        beam_width: int,
+        isl: int,
+        osl: int,
+        stride: int,
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        generation_latency_dict = defaultdict(float)
+        generation_energy_wms_dict = defaultdict(float)
+
+        batch_size = batch_size * (model._nextn + 1)
+
+        for i in range(0, osl - 1, stride):
+            latency_dict = defaultdict(float)
+            energy_wms_dict = defaultdict(float)
+
+            for op in model.generation_ops:
+                result = op.query(
+                    database,
+                    x=batch_size * beam_width,
+                    batch_size=batch_size,
+                    beam_width=beam_width,
+                    s=isl + i + 1,
+                    model_name=getattr(model, "model_name", ""),
+                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
+                )
+                latency_dict[op._name] += float(result)
+                energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
+
+            repeat_count = min(stride, osl - 1 - i)
+            for op in latency_dict:
+                generation_latency_dict[op] += latency_dict[op] * repeat_count
+                generation_energy_wms_dict[op] += energy_wms_dict[op] * repeat_count
+
+        return generation_latency_dict, generation_energy_wms_dict
+
+    def _run_static_breakdown(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        mode: str,
+        stride: int = 32,
+        latency_correction_scale: float = 1.0,
+    ) -> tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, float]]:
+        batch_size, beam_width, isl, osl, prefix = (
+            runtime_config.batch_size,
+            runtime_config.beam_width,
+            runtime_config.isl,
+            runtime_config.osl,
+            runtime_config.prefix,
+        )
+
+        context_latency_dict, context_energy_wms_dict = {}, {}
+        generation_latency_dict, generation_energy_wms_dict = {}, {}
+
+        if mode == "static_ctx":
+            context_latency_dict, context_energy_wms_dict = self._run_context_phase(
+                model, database, runtime_config, batch_size, isl, prefix
+            )
+        elif mode == "static_gen":
+            generation_latency_dict, generation_energy_wms_dict = self._run_generation_phase(
+                model, database, runtime_config, batch_size, beam_width, isl, osl, stride
+            )
+        else:
+            context_latency_dict, context_energy_wms_dict = self._run_context_phase(
+                model, database, runtime_config, batch_size, isl, prefix
+            )
+            generation_latency_dict, generation_energy_wms_dict = self._run_generation_phase(
+                model, database, runtime_config, batch_size, beam_width, isl, osl, stride
+            )
+
+        if latency_correction_scale != 1.0:
+            logger.debug(f"latency_correction_scale: {latency_correction_scale} is applied")
+            for op in context_latency_dict:
+                context_latency_dict[op] *= latency_correction_scale
+                context_energy_wms_dict[op] *= latency_correction_scale
+            for op in generation_latency_dict:
+                generation_latency_dict[op] *= latency_correction_scale
+                generation_energy_wms_dict[op] *= latency_correction_scale
+
+        return (
+            context_latency_dict,
+            context_energy_wms_dict,
+            generation_latency_dict,
+            generation_energy_wms_dict,
+        )
+
+    def run_static_latency_only(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        mode: str,
+        stride: int = 32,
+        latency_correction_scale: float = 1.0,
+    ) -> float:
+        """
+        Run static inference and return only the total latency in milliseconds.
+
+        This shares the same latency breakdown path as ``run_static`` but skips
+        building an ``InferenceSummary``.
+        """
+        (
+            context_latency_dict,
+            _,
+            generation_latency_dict,
+            _,
+        ) = self._run_static_breakdown(model, database, runtime_config, mode, stride, latency_correction_scale)
+        return sum(context_latency_dict.values()) + sum(generation_latency_dict.values())
+
     def run_static(
         self,
         model: BaseModel,
@@ -58,94 +206,6 @@ class BaseBackend(ABC):
                 corrected latency = latency * latency_correction_scale
         """
 
-        def _run_context(batch_size: int, isl: int, prefix) -> tuple[dict[str, float], dict[str, float]]:
-            """
-            Run context phase.
-
-            Returns:
-                tuple: (context_latency_dict, context_energy_wms_dict)
-                       latency in ms, energy in W·ms (watt-milliseconds)
-            """
-            context_latency_dict = defaultdict(float)  # milliseconds
-            context_energy_wms_dict = defaultdict(float)  # W·ms (watt-milliseconds)
-
-            # isl is corrected based on prefix.
-            # Please handle the real logic in your context attention related operations.
-            isl = isl - prefix
-            if isl <= 0:
-                raise ValueError(f"isl must be greater than 0 after removing prefix, but got {isl}")
-
-            for op in model.context_ops:
-                # query latency and store the latency
-                x = batch_size * isl if "logits_gemm" not in op._name else batch_size
-                result = op.query(
-                    database,
-                    x=x,
-                    batch_size=batch_size,
-                    beam_width=1,
-                    s=isl,
-                    prefix=prefix,
-                    model_name=getattr(model, "model_name", ""),
-                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
-                )
-
-                # ✅ IMMEDIATELY extract values - do NOT use PerformanceResult arithmetic!
-                latency_ms = float(result)  # Extract latency in milliseconds
-                energy_wms = getattr(result, "energy", 0.0)  # Extract energy in watt-milliseconds
-
-                # Aggregate in separate dicts (simple addition)
-                context_latency_dict[op._name] += latency_ms
-                context_energy_wms_dict[op._name] += energy_wms
-
-            return context_latency_dict, context_energy_wms_dict
-
-        def _run_generation(
-            batch_size: int, beam_width: int, isl: int, osl: int, stride: int
-        ) -> tuple[dict[str, float], dict[str, float]]:
-            """
-            Run generation phase.
-
-            Returns:
-                tuple: (generation_latency_dict, generation_energy_wms_dict)
-                       latency in ms, energy in W·ms
-            """
-            # mtp/speculative decoding correction
-            batch_size = batch_size * (model._nextn + 1)
-
-            generation_latency_dict = defaultdict(float)  # milliseconds
-            generation_energy_wms_dict = defaultdict(float)  # W·ms
-
-            for i in range(0, osl - 1, stride):
-                latency_dict = defaultdict(float)
-                energy_wms_dict = defaultdict(float)  # W·ms
-
-                for op in model.generation_ops:
-                    result = op.query(
-                        database,
-                        x=batch_size * beam_width,
-                        batch_size=batch_size,
-                        beam_width=beam_width,
-                        s=isl + i + 1,
-                        model_name=getattr(model, "model_name", ""),
-                        gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
-                    )
-
-                    latency_ms = float(result)
-                    energy_wms = getattr(result, "energy", 0.0)
-
-                    latency_dict[op._name] += latency_ms
-                    energy_wms_dict[op._name] += energy_wms
-
-                # usually stride, but might be less at the end
-                repeat_count = min(stride, osl - 1 - i)
-
-                for op in latency_dict:
-                    # Both latency and energy are additive - multiply by repeat_count
-                    generation_latency_dict[op] += latency_dict[op] * repeat_count
-                    generation_energy_wms_dict[op] += energy_wms_dict[op] * repeat_count  # SIMPLIFIED
-
-            return generation_latency_dict, generation_energy_wms_dict
-
         summary = InferenceSummary(runtime_config)
         batch_size, beam_width, isl, osl, prefix = (
             runtime_config.batch_size,
@@ -155,17 +215,16 @@ class BaseBackend(ABC):
             runtime_config.prefix,
         )
 
-        # Execute phases (UPDATED to return energy_wms dicts)
-        context_latency_dict, context_energy_wms_dict = {}, {}
-        generation_latency_dict, generation_energy_wms_dict = {}, {}
+        (
+            context_latency_dict,
+            context_energy_wms_dict,
+            generation_latency_dict,
+            generation_energy_wms_dict,
+        ) = self._run_static_breakdown(model, database, runtime_config, mode, stride, latency_correction_scale)
 
         if mode == "static_ctx":
-            context_latency_dict, context_energy_wms_dict = _run_context(batch_size, isl, prefix)
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, 1, prefix=prefix)
         elif mode == "static_gen":
-            generation_latency_dict, generation_energy_wms_dict = _run_generation(
-                batch_size, beam_width, isl, osl, stride
-            )
             memory = self._get_memory_usage(
                 model,
                 database,
@@ -177,20 +236,7 @@ class BaseBackend(ABC):
                 prefix=prefix,
             )  # for gen only, all kvcache is needed.
         else:
-            context_latency_dict, context_energy_wms_dict = _run_context(batch_size, isl, prefix)
-            generation_latency_dict, generation_energy_wms_dict = _run_generation(
-                batch_size, beam_width, isl, osl, stride
-            )
             memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl, prefix=prefix)
-
-        if latency_correction_scale != 1.0:
-            logger.debug(f"latency_correction_scale: {latency_correction_scale} is applied")
-            for op in context_latency_dict:
-                context_latency_dict[op] *= latency_correction_scale
-                context_energy_wms_dict[op] *= latency_correction_scale  # Energy scales with latency!
-            for op in generation_latency_dict:
-                generation_latency_dict[op] *= latency_correction_scale
-                generation_energy_wms_dict[op] *= latency_correction_scale  # Energy scales with latency!
 
         # Calculate total latencies and energies (simple sums - decoupled!)
         context_latency_ms = sum(context_latency_dict.values())  # milliseconds

@@ -46,13 +46,20 @@ def test_validate_database(system, backend, version, fail_ok):
         "AIC_VALIDATE_VERSION": version,
         "MPLBACKEND": "agg",
     }
-    result = sp.run(
-        [sys.executable, "-c", "import import_ipynb; import validate_database"],
-        cwd=SANITY_CHECK_DIR,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = sp.run(
+            [sys.executable, "-c", "import import_ipynb; import validate_database"],
+            cwd=SANITY_CHECK_DIR,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except sp.TimeoutExpired:
+        error_message = f"validate_database timed out (300s) for {system}/{backend}/{version}"
+        if fail_ok:
+            pytest.xfail(error_message)
+        pytest.fail(error_message)
     success = result.returncode == 0
     error_message = (
         f"validate_database failed for {system}/{backend}/{version}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"

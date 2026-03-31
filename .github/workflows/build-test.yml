@@ -14,6 +14,7 @@ jobs:
   build-and-test:
     name: Build and Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,7 +32,7 @@ jobs:
             pytest \
             -m "unit or build" \
             -v --tb=short --maxfail=1 --timeout=600 \
-            -n 4 \
+            -n 2 \
             --md-report --md-report-verbose=1 --md-report-flavor gfm --md-report-output test_report.md
       - name: Copy test report from test Container
         if: always()
