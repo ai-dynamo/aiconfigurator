@@ -914,10 +914,6 @@ class MOEModel(BaseModel):
         )
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
-        assert self.config.tp_size * self.config.attention_dp_size <= 256, (
-            f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
-            f"should not be larger than 256"
-        )
 
         self._topk = topk
         self._num_experts = num_experts
@@ -1227,10 +1223,6 @@ class DeepSeekModel(BaseModel):
         )
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
-        assert self.config.tp_size * self.config.attention_dp_size <= 256, (
-            f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
-            f"should not be larger than 256"
-        )
 
         self._topk = topk
         self._num_experts = num_experts
@@ -1601,10 +1593,6 @@ class DeepSeekV32Model(BaseModel):
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
-        assert self.config.tp_size * self.config.attention_dp_size <= 256, (
-            f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
-            f"should not be larger than 256"
-        )
 
         self._topk = topk
         self._num_experts = num_experts
@@ -1854,10 +1842,6 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
-        assert self.config.tp_size * self.config.attention_dp_size <= 256, (
-            f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
-            f"should not be larger than 256"
-        )
 
         self._topk = topk
         self._num_experts = num_experts
@@ -2340,10 +2324,6 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         )
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
-        assert self.config.tp_size * self.config.attention_dp_size <= 256, (
-            f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
-            f"should not be larger than 256"
-        )
 
         self._topk = topk
         self._num_experts = num_experts
@@ -3971,10 +3951,6 @@ class HybridMoEModel(BaseModel):
             f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
         )
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
-        assert self.config.tp_size * self.config.attention_dp_size <= 256, (
-            f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
-            f"should not be larger than 256"
-        )
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
@@ -4399,6 +4375,7 @@ class Qwen35Model(BaseModel):
         super().__init__(*args)
         cfg: common.Qwen35Config = self.extra_params
         assert isinstance(cfg, common.Qwen35Config), "Qwen35Model requires Qwen35Config extra_params"
+        assert self._nextn == 0, "Qwen35Model does not support mtp"
 
         if cfg.num_experts > 0:
             assert (
@@ -4455,6 +4432,7 @@ class Qwen35Model(BaseModel):
 
         self.context_ops = [
             ops.Embedding("context_embedding", 1, self._vocab_size // tp, h, 0.3),
+            ops.CustomAllReduce("context_embedding_ar", 1, h, tp),
         ]
 
         # --- linear_attention (GDN) layers ---
@@ -4583,6 +4561,27 @@ class Qwen35Model(BaseModel):
                     ),
                 ]
             )
+            if cfg.shared_expert_inter_size > 0:
+                ops_list.extend(
+                    [
+                        ops.GEMM(f"{prefix}_shared_up_gemm", count, cfg.shared_expert_inter_size // tp, h, gemm_q),
+                        ops.ElementWise(
+                            f"{prefix}_shared_relu2",
+                            count,
+                            cfg.shared_expert_inter_size // tp,
+                            cfg.shared_expert_inter_size // tp,
+                            0.8,
+                        ),
+                        ops.GEMM(
+                            f"{prefix}_shared_down_gemm",
+                            count,
+                            h,
+                            cfg.shared_expert_inter_size // tp,
+                            gemm_q,
+                            low_precision_input=True,
+                        ),
+                    ]
+                )
         else:
             ops_list.extend(
                 [
@@ -4627,6 +4626,7 @@ class Qwen35Model(BaseModel):
 
         self.generation_ops = [
             ops.Embedding("generation_embedding", 1, self._vocab_size // tp, h, 0.3),
+            ops.CustomAllReduce("generation_embedding_ar", 1, h, tp),
         ]
 
         # --- linear_attention (GDN) layers ---
@@ -4756,6 +4756,27 @@ class Qwen35Model(BaseModel):
                     ),
                 ]
             )
+            if cfg.shared_expert_inter_size > 0:
+                ops_list.extend(
+                    [
+                        ops.GEMM(f"{prefix}_shared_up_gemm", count, cfg.shared_expert_inter_size // tp, h, gemm_q),
+                        ops.ElementWise(
+                            f"{prefix}_shared_relu2",
+                            count,
+                            cfg.shared_expert_inter_size // tp,
+                            cfg.shared_expert_inter_size // tp,
+                            0.8,
+                        ),
+                        ops.GEMM(
+                            f"{prefix}_shared_down_gemm",
+                            count,
+                            h,
+                            cfg.shared_expert_inter_size // tp,
+                            gemm_q,
+                            low_precision_input=True,
+                        ),
+                    ]
+                )
         else:
             ops_list.extend(
                 [
