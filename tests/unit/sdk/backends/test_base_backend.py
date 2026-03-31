@@ -129,7 +129,9 @@ def test_run_static_latency_only_matches_run_static_latency(
         latency_correction_scale=latency_correction_scale,
     )
 
-    summary_latency = sum(summary.get_context_latency_dict().values()) + sum(summary.get_generation_latency_dict().values())
+    summary_latency = sum(summary.get_context_latency_dict().values()) + sum(
+        summary.get_generation_latency_dict().values()
+    )
     request_latency = float(summary.get_summary_df().iloc[0]["request_latency"])
 
     assert latency_only == pytest.approx(summary_latency)
