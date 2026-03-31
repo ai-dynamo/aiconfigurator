@@ -35,6 +35,8 @@ Usage:
 import argparse
 import dataclasses
 import gc
+import os
+import sys
 import traceback
 import weakref
 
@@ -67,6 +69,10 @@ from tensorrt_llm.bindings.internal.batch_manager import CacheType
 from tensorrt_llm.functional import AllReduceStrategy
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.quantization.mode import QuantAlgo
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
