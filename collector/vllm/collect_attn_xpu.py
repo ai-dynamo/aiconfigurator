@@ -319,7 +319,10 @@ def run_attention_torch(
     test_ite = 6
     warm_up = 3
 
-    if use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
+    # XPU's FlashAttention implementation currently expects Query and Output
+    # to be float16/bfloat16 even if the KV Cache is FP8.
+    # TODO: Remove the code if FP8 support will not be in the roadmap.
+    if "xpu" not in str(device) and use_fp8_kv_cache and backend_name_str in ("FLASH_ATTN", "FLASHINFER"):
         query_vllm = query_vllm.to(current_platform.fp8_dtype())
         output = output.to(torch.bfloat16)
 
@@ -422,7 +425,7 @@ def get_context_attention_test_cases(if_unit_test=False):
         n_kv_list = [0]
 
     # kv cache dtype fp8 to be supported
-    kv_cache_dtype_list = [False]
+    kv_cache_dtype_list = [False, True]
 
     # DEBUG
     # print(f"b_list: {b_list}, s_list: {s_list}, n_list: {n_list}, n_kv_list: {n_kv_list}")
@@ -491,7 +494,7 @@ def get_generation_attention_test_cases():
     n_kv_list = [1, 2, 4, 8]
 
     # kv cache dtype fp8 to be supported
-    kv_cache_dtype_list = [False]
+    kv_cache_dtype_list = [False, True]
 
     max_bsn = 8192 * 1024
     for n in sorted(n_list, reverse=True):

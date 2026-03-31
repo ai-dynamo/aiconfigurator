@@ -2121,6 +2121,11 @@ class PerfDatabase:
             self._wideep_deepep_normal_data = _load_op_data(PerfDataFilename.wideep_deepep_normal)
             self._wideep_deepep_ll_data = _load_op_data(PerfDataFilename.wideep_deepep_ll)
 
+        # DSA module-level attention data (DeepSeek Sparse Attention)
+        # Uses same dict structure as MLA so interpolation/query can be reused
+        self._context_dsa_module_data = _load_op_data(PerfDataFilename.dsa_context_module)
+        self._generation_dsa_module_data = _load_op_data(PerfDataFilename.dsa_generation_module)
+
         # TensorRT-LLM wideep path
         if backend == "trtllm":
             self._wideep_moe_compute_data = _load_op_data(PerfDataFilename.wideep_moe_compute)

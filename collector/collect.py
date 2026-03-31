@@ -68,6 +68,7 @@ from helper import EXIT_CODE_RESTART, create_test_case_id, save_error_report, se
 
 logger = None
 RESUME_SCHEMA_VERSION = "collector-resume-v1"
+STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before stall bailout
 
 
 class ResumeCheckpoint:
@@ -279,8 +280,9 @@ def worker(
     progress_value,
     lock,
     error_queue=None,
-    result_queue=None,
+    done_tasks=None,
     module_name="unknown",
+    current_task_ids=None,
     consumed_sentinel=None,
 ):
     """worker with automatic logging setup"""
@@ -295,26 +297,19 @@ def worker(
     worker_logger = setup_logging(worker_id=device_id)
 
     # Setup signal handlers
-    setup_signal_handlers(device_id, error_queue)
+    setup_signal_handlers(device_id)
 
     # Setup device
     device = torch.device(f"{get_device_str()}:{device_id}")
     get_device_module().set_device(device)
     worker_logger.info(f"Worker {device_id} initialized for {module_name}")
 
-    def emit_done(task_id: str):
-        """Notify the main process that a task was attempted (success or failure)."""
-        if not result_queue:
-            return
-        try:
-            result_queue.put(task_id)
-        except Exception:
-            pass
-
     # Process tasks
     while True:
         task_info = queue.get()
         if task_info is None:
+            if current_task_ids is not None:
+                current_task_ids[device_id] = None
             if consumed_sentinel is not None:
                 consumed_sentinel[device_id] = True
             worker_logger.debug("Received termination signal")
@@ -327,6 +322,9 @@ def worker(
         else:
             task = task_info
             task_id = create_test_case_id(task, "unknown", module_name)
+
+        if current_task_ids is not None:
+            current_task_ids[device_id] = task_id
 
         try:
             worker_logger.debug(f"Starting task {task_id}")
@@ -369,17 +367,22 @@ def worker(
                 # which we don't want (error already reported above).
                 exit(0)
         finally:
-            # emit_done lives in finally so it runs for ALL exit paths:
-            # normal return, Exception, SystemExit (sys.exit), KeyboardInterrupt.
-            emit_done(task_id)
+            # All three writes below use synchronous manager RPCs, so they
+            # are guaranteed to complete before the worker picks up the next
+            # task.  This means even if the *next* task kills the process
+            # via signal, the bookkeeping for *this* task is already safe.
+            if done_tasks is not None:
+                try:
+                    done_tasks[task_id] = True
+                except Exception:
+                    pass
 
-            # CRITICAL: Increment progress regardless of success or failure
-            # This marks the task as "attempted" and tracks overall progress
             with lock:
                 progress_value.value += 1
+            if current_task_ids is not None:
+                current_task_ids[device_id] = None
 
             # Periodic memory cleanup to reduce fragmentation
-            # Only do this every 100 tasks to avoid overhead
             if progress_value.value % 100 == 0:
                 import gc
 
@@ -425,7 +428,6 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
     queue = mp.Queue()
     error_queue = mp.Queue()
-    result_queue = mp.Queue()
     processes = []
 
     manager = mp.Manager()
@@ -438,6 +440,13 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # Per-worker flag: True once a worker has consumed its None sentinel.
     # Used to decide whether a replacement sentinel is needed on restart.
     consumed_sentinel = manager.dict(dict.fromkeys(range(num_processes), False))
+    current_task_ids = manager.dict(dict.fromkeys(range(num_processes), None))
+    # Synchronous record of completed task IDs.  Workers write here via
+    # manager RPC in their finally block — same mechanism as progress_value,
+    # so it is guaranteed to be visible before the worker touches the next
+    # task.  Unlike mp.Queue (async feeder thread) this cannot be lost when
+    # a worker is killed by a signal on a subsequent task.
+    done_tasks = manager.dict()
 
     def start_process(device_id):
         p = mp.Process(
@@ -449,8 +458,9 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 progress_value,
                 lock,
                 error_queue,
-                result_queue,
+                done_tasks,
                 module_name,
+                current_task_ids,
                 consumed_sentinel,
             ),
         )
@@ -488,13 +498,13 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             "timestamp": datetime.now().isoformat(),
         }
 
-    def drain_done_events():
-        while not result_queue.empty():
-            try:
-                task_id = result_queue.get_nowait()
-            except Exception:
-                break
+    def sync_done_to_checkpoint():
+        for task_id in list(done_tasks.keys()):
             resume_tracker.mark_done(task_id)
+            try:
+                del done_tasks[task_id]
+            except KeyError:
+                pass
 
     # Start processes
     for device_id in range(num_processes):
@@ -556,31 +566,18 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 error = error_queue.get()
                 errors.append(error)
                 process_stats[error["device_id"]]["errors"].append(error["task_id"])
-            drain_done_events()
+            sync_done_to_checkpoint()
 
             # Update postfix only if count changed
             if len(errors) != last_error_count:
                 pbar.set_postfix({"errors": len(errors)})
                 last_error_count = len(errors)
 
-            # Stall detection unchanged...
             if progress_value.value == last_progress:
                 stall_count += 1
-                if stall_count > 240:
+                if stall_count > STALL_THRESHOLD:
                     logger.warning(f"Progress stalled at {progress_value.value}/{len(task_infos)}")
-                    # If all workers are dead and tasks remain unaccounted,
-                    # those tasks were lost to fatal crashes (SIGABRT, etc.)
-                    # and will never complete.  The 120-second threshold
-                    # (240 x 0.5s) far exceeds the worst-case single-task
-                    # time so false positives are not a concern.
-                    all_dead = all(not p.is_alive() for p in processes)
-                    unaccounted = len(task_infos) - progress_value.value
-                    if all_dead and unaccounted > 0:
-                        logger.warning(
-                            f"All workers dead, {unaccounted} tasks unaccounted "
-                            f"(lost to fatal worker crashes). Stopping monitoring loop."
-                        )
-                        break
+                    stall_count = 0
             else:
                 stall_count = 0
                 last_progress = progress_value.value
@@ -590,10 +587,10 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             # via sys.exit(EXIT_CODE_RESTART) should not be restarted once
             # all tasks are dispatched, otherwise the new worker blocks
             # forever on queue.get().
-            remaining = len(task_infos) - progress_value.value
             for i, p in enumerate(processes):
                 if not p.is_alive():
                     exit_code = p.exitcode
+                    active_task_id = current_task_ids.get(i)
                     process_stats[i]["restarts"] += 1
                     if exit_code == EXIT_CODE_RESTART:
                         logger.debug(
@@ -613,11 +610,17 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                         process_stats[i]["errors"].append("process_exit")
                         pbar.set_postfix({"errors": len(errors)})
                         last_error_count = len(errors)
+                        if active_task_id is not None:
+                            resume_tracker.mark_done(active_task_id)
+                            current_task_ids[i] = None
+                            with lock:
+                                progress_value.value += 1
 
                     if process_stats[i]["restarts"] > 8192:
                         logger.error(f"Process {i} exceeded restart limit, not restarting")
                         continue
 
+                    remaining = len(task_infos) - progress_value.value
                     if remaining > 0:
                         need_sentinel = consumed_sentinel.get(i, False)
                         consumed_sentinel[i] = False
@@ -633,12 +636,12 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
 
             resume_tracker.flush()
             time.sleep(0.5)
-        drain_done_events()
+        sync_done_to_checkpoint()
 
     # Collect remaining errors
     while not error_queue.empty():
         errors.append(error_queue.get())
-    drain_done_events()
+    sync_done_to_checkpoint()
     resume_tracker.flush(force=True)
 
     # Wait for processes
