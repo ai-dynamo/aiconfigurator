@@ -73,6 +73,29 @@ class InferenceSession:
             self._model, self._database, runtime_config, mode, stride, latency_correction_scale
         )
 
+    def run_static_latency_only(
+        self,
+        runtime_config: config.RuntimeConfig,
+        mode: str,
+        stride: int = 32,
+        latency_correction_scale: float = 1.0,
+    ) -> float:
+        """
+        Run static inference and return only scalar latency in milliseconds.
+
+        Args:
+            runtime_config (RuntimeConfig): the runtime config
+            mode (str): the mode to run inference, static, static_ctx, static_gen
+            stride (int): the stride is used to accelerate the estimation, for a give osl,
+                will only computes the i, i+stride, i+2*stride, ... step, default is 32.
+
+        Returns:
+            float: the total latency in milliseconds
+        """
+        return self._backend.run_static_latency_only(
+            self._model, self._database, runtime_config, mode, stride, latency_correction_scale
+        )
+
     def run_agg(self, runtime_config: config.RuntimeConfig, **kwargs) -> InferenceSummary:
         """
         Run agg inference
