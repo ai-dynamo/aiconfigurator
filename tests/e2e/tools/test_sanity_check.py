@@ -30,7 +30,6 @@ def _supported_system_backend_latest():
     return result
 
 
-@pytest.mark.xdist_group("validate_db")
 @pytest.mark.parametrize(
     "system,backend,version,fail_ok",
     _supported_system_backend_latest(),
