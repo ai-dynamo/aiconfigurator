@@ -854,13 +854,11 @@ def _run_agg_estimate(
         raise RuntimeError("Estimation produced no results. The configuration may be invalid.")
 
     kv_warning = None
-    max_kv_bs = backend._calculate_max_kv_cache_batch_size(model, database, isl, osl, free_gpu_memory_fraction)
-    if max_kv_bs > 0 and batch_size > max_kv_bs:
+    if backend._is_kv_cache_oom(model, database, batch_size, isl, osl, free_gpu_memory_fraction):
         kv_warning = (
             f"Requested batch_size ({batch_size}) exceeds estimated KV cache capacity "
-            f"({max_kv_bs} concurrent sequences with free_gpu_memory_fraction="
-            f"{free_gpu_memory_fraction}). TRT-LLM will queue excess requests, "
-            f"causing significantly higher TTFT and inaccurate TPOT."
+            f"(free_gpu_memory_fraction={free_gpu_memory_fraction}). "
+            f"TRT-LLM will queue excess requests, causing significantly higher TTFT and inaccurate TPOT."
         )
         logger.warning(kv_warning)
 

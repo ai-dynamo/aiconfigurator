@@ -437,15 +437,11 @@ class TRTLLMBackend(BaseBackend):
         # during the loop, as b, ctx_tokens and system memory are monotonic, we can break the
         # inner loop when the system is oom.
         free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction", 1.0)
-        max_kv_bs = self._calculate_max_kv_cache_batch_size(model, database, isl, osl, free_gpu_memory_fraction)
-        if max_kv_bs > 0 and max_kv_bs < max_batch_size:
-            logger.debug(
-                "KV cache limits effective batch size to %d (requested max_batch_size=%d)",
-                max_kv_bs,
-                max_batch_size,
-            )
-        effective_max = min(max_batch_size, max_kv_bs) if max_kv_bs > 0 else max_batch_size
-        b_list = [b for b in b_list_default if b <= effective_max]
+        b_list = [
+            b
+            for b in b_list_default
+            if b <= max_batch_size and not self._is_kv_cache_oom(model, database, b, isl, osl, free_gpu_memory_fraction)
+        ]
         ctx_tokens_list = self._get_ctx_tokens_list_for_agg_sweep(isl, ctx_stride, enable_chunked_prefill)
 
         results_df = pd.DataFrame(columns=common.ColumnsAgg)
@@ -605,59 +601,55 @@ class TRTLLMBackend(BaseBackend):
             "others": others_mem / one_gib,
         }
 
-    def _calculate_max_kv_cache_batch_size(
+    def _is_kv_cache_oom(
         self,
         model: BaseModel,
         database: PerfDatabase,
+        batch_size: int,
         isl: int,
         osl: int,
         free_gpu_memory_fraction: float = 0.9,
         max_seq_len: int | None = None,
-        num_tokens: int | None = None,
-    ) -> int:
-        """Return the max batch size the KV cache can hold concurrently.
+    ) -> bool:
+        """Return True if batch_size exceeds the KV cache capacity.
 
-        Uses _get_memory_usage(batch_size=1) to derive non-KV memory and the
-        per-token KV cost, avoiding duplicated kvcache_per_token logic.
+        Uses fixed activation (num_tokens=2*isl, matching TRT-LLM's --max_num_tokens)
+        and block-based KV allocation to check whether the requested batch_size
+        can be served concurrently without queuing.
 
         Args:
             max_seq_len: Tokens reserved per sequence for block allocation.
                 Defaults to isl+osl. Pass isl+osl+slack to match a TRT-LLM
                 deployment that uses --max_seq_len isl+osl+slack.
-            num_tokens: Fixed token count for activation estimation, matching
-                TRT-LLM's --max_num_tokens. Defaults to 2*isl.
-
-        Returns:
-            Max concurrent sequences. 0 if the model itself barely fits.
         """
+        import math
+
         if max_seq_len is None:
             max_seq_len = isl + osl
-        if num_tokens is None:
-            num_tokens = 2 * isl
 
-        memory = self._get_memory_usage(model, database, 1, 1, isl, osl, num_tokens=num_tokens)
+        # Fixed activation (num_tokens=2*isl) matches TRT-LLM's --max_num_tokens.
+        # bs-scaled activation overestimates non_kv at large batch sizes.
+        memory = self._get_memory_usage(model, database, 1, 1, isl, osl, num_tokens=2 * isl)
         non_kv_gib = memory["total"] - memory["kvcache"]
         gpu_capacity_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)
         available_kv_gib = (gpu_capacity_gib - non_kv_gib) * free_gpu_memory_fraction
 
         if available_kv_gib <= 0:
-            return 0
+            return True  # model barely fits, no KV room for any sequence
 
-        # Derive kvcache_per_token from _get_memory_usage result (avoids duplicating
-        # the per-token KV cost formula).  kvcache at bs=1 = (isl+osl)*kvcache_per_token.
+        # Derive kvcache_per_token from _get_memory_usage (avoids duplicating the formula).
+        # kvcache at bs=1 = (isl+osl)*kvcache_per_token.
         kvcache_per_token_gib = memory["kvcache"] / (isl + osl)
         if kvcache_per_token_gib <= 0:
-            return 0
+            return False
 
         # Block-based allocation: TRT-LLM reserves ceil(max_seq_len/tokens_per_block)
         # blocks per sequence regardless of actual sequence length.
         tokens_per_block = 32
-        import math
-
         kvcache_per_block_gib = kvcache_per_token_gib * tokens_per_block
         total_blocks = int(available_kv_gib / kvcache_per_block_gib)
         blocks_per_seq = math.ceil(max_seq_len / tokens_per_block)
         if blocks_per_seq <= 0:
-            return 0
+            return False
 
-        return total_blocks // blocks_per_seq
+        return batch_size > total_blocks // blocks_per_seq
