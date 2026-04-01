@@ -3400,6 +3400,21 @@ class SGLangWideEPMOEModel(BaseModel):
             ]
         )
 
+    def _validate_fp8_block_quantized_moe_config(self) -> None:
+        """Validate fp8_block MoE alignment: (moe_inter_size / moe_tp_size) % block_size == 0."""
+        if self.config.moe_quant_mode != common.MoEQuantMode.fp8_block:
+            return
+        raw_config = _load_model_config_from_model_path(self.model_path)
+        default_size = [128, 128]
+        weight_block_size = raw_config.get("quantization_config", {}).get("weight_block_size", default_size)[0]
+        moe_size_per_gpu = self._moe_inter_size // self.config.moe_tp_size
+        if (moe_size_per_gpu % weight_block_size) != 0:
+            raise ValueError(
+                f"Invalid quantized MoE configuration: "
+                f"(moe_intermediate_size={self._moe_inter_size} / moe_tp_size={self.config.moe_tp_size}) "
+                f"% weight_block_size={weight_block_size} != 0. "
+            )
+
 
 class NemotronNas(BaseModel):
     """
