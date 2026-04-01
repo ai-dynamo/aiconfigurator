@@ -16,6 +16,15 @@ from aiconfigurator.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
 
+# Fraction of available KV cache memory assumed to be reserved by TRT-LLM
+# for internal block-allocator overhead.  Applied in production to make the
+# KV OOM check conservative; set to 0 in tests to validate the raw formula.
+KV_CACHE_MEMORY_RESERVED_FRACTION: float = 0.015
+
+# Acceptable formula error relative to real TRT-LLM benchmark measurements.
+# Used as the %-based tolerance band in KV cache capacity tests.
+KV_CACHE_MEMORY_TOLERANCE: float = 0.02
+
 
 class TRTLLMBackend(BaseBackend):
     """
@@ -610,6 +619,7 @@ class TRTLLMBackend(BaseBackend):
         osl: int,
         free_gpu_memory_fraction: float = 0.9,
         max_seq_len: int | None = None,
+        kv_cache_capacity_tolerance: float = KV_CACHE_MEMORY_TOLERANCE,
     ) -> bool:
         """Return True if batch_size exceeds the KV cache capacity.
 
@@ -621,6 +631,11 @@ class TRTLLMBackend(BaseBackend):
             max_seq_len: Tokens reserved per sequence for block allocation.
                 Defaults to isl+osl. Pass isl+osl+slack to match a TRT-LLM
                 deployment that uses --max_seq_len isl+osl+slack.
+            kv_cache_capacity_tolerance: Lower-bound reduction applied to the
+                computed threshold before comparing, making the OOM check
+                conservative by the given fraction. Set to 0 in tests to validate
+                the raw formula against benchmark data. Defaults to
+                KV_CACHE_MEMORY_TOLERANCE.
         """
         import math
 
@@ -633,6 +648,7 @@ class TRTLLMBackend(BaseBackend):
         non_kv_gib = memory["total"] - memory["kvcache"]
         gpu_capacity_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)
         available_kv_gib = (gpu_capacity_gib - non_kv_gib) * free_gpu_memory_fraction
+        available_kv_gib *= 1 - KV_CACHE_MEMORY_RESERVED_FRACTION
 
         if available_kv_gib <= 0:
             return True  # model barely fits, no KV room for any sequence
@@ -652,4 +668,5 @@ class TRTLLMBackend(BaseBackend):
         if blocks_per_seq <= 0:
             return False
 
-        return batch_size > total_blocks // blocks_per_seq
+        max_concurrent_seqs = total_blocks // blocks_per_seq
+        return batch_size > int(max_concurrent_seqs * (1 - kv_cache_capacity_tolerance))

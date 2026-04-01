@@ -18,6 +18,7 @@ import pytest
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends.factory import get_backend
+from aiconfigurator.sdk.backends.trtllm_backend import KV_CACHE_MEMORY_TOLERANCE
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
@@ -257,14 +258,28 @@ def test_kv_oom_boundary(system, model_path, tp, isl, osl, frac, bench_max_bs):
         kvcache_quant_mode=common.KVCacheQuantMode.float16,
     )
 
-    tol = max(1, int(bench_max_bs * 0.035))
+    tol = max(1, int(bench_max_bs * KV_CACHE_MEMORY_TOLERANCE))
     bs_below = bench_max_bs - tol
     bs_above = bench_max_bs + tol + 1
 
     assert not backend._is_kv_cache_oom(
-        model, database, bs_below, isl, osl, frac, max_seq_len=isl + osl + _BENCHMARK_SLACK
+        model,
+        database,
+        bs_below,
+        isl,
+        osl,
+        frac,
+        max_seq_len=isl + osl + _BENCHMARK_SLACK,
+        kv_cache_capacity_tolerance=0,
     ), f"bs={bs_below} (bench={bench_max_bs}, tol={tol}) should NOT be KV OOM"
 
     assert backend._is_kv_cache_oom(
-        model, database, bs_above, isl, osl, frac, max_seq_len=isl + osl + _BENCHMARK_SLACK
+        model,
+        database,
+        bs_above,
+        isl,
+        osl,
+        frac,
+        max_seq_len=isl + osl + _BENCHMARK_SLACK,
+        kv_cache_capacity_tolerance=0,
     ), f"bs={bs_above} (bench={bench_max_bs}, tol={tol}) should be KV OOM"
