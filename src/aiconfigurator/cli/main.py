@@ -193,6 +193,14 @@ def _add_default_mode_arguments(parser):
         "Controls how many KV blocks TRT-LLM pre-allocates per sequence. "
         "Set this to match your actual deployment for accurate KV cache capacity filtering.",
     )
+    parser.add_argument(
+        "--enable-wideep",
+        action="store_true",
+        default=False,
+        help="Enable Wide Expert Parallelism (WideEP) for MoE models. "
+        "When set, MoE models use EP-only parallelism with deepep_moe backend. "
+        "Applies to both DeepSeek and Qwen3-235B on SGLang.",
+    )
 
 
 def _add_experiments_mode_arguments(parser):
@@ -646,6 +654,7 @@ def build_default_task_configs(
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
+    enable_wideep: bool = False,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.
 
@@ -667,6 +676,7 @@ def build_default_task_configs(
         nextn: Number of draft tokens for MTP speculative decoding.
         nextn_accept_rates: Acceptance rates for MTP draft tokens.
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
+        enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
 
     Returns:
         Dict with TaskConfig objects. When backend='auto', returns 6 configs
@@ -736,6 +746,7 @@ def build_default_task_configs(
         "enable_chunked_prefill": enable_chunked_prefill,
         "free_gpu_memory_fraction": free_gpu_memory_fraction,
         "max_seq_len": max_seq_len,
+        "enable_wideep": enable_wideep,
     }
 
     # Create yaml_config to pass nextn and nextn_accept_rates if specified
@@ -1494,6 +1505,7 @@ def main(args):
             enable_chunked_prefill=args.enable_chunked_prefill,
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
             max_seq_len=args.max_seq_len,
+            enable_wideep=getattr(args, "enable_wideep", False),
         )
     elif args.mode == "exp":
         try:

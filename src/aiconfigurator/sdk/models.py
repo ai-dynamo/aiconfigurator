@@ -240,25 +240,45 @@ def get_model(
         )
         model.set_hybrid_config(extra_params)
     elif model_family == "MOE":
-        # currently we don't support wideep for sglang moe models (other than DS V3)
-        model = MOEModel(
-            topk,
-            num_experts,
-            moe_inter_size,
-            model_path,
-            model_family,
-            architecture,
-            layers,
-            n,
-            n_kv,
-            d,
-            hidden,
-            inter,
-            vocab,
-            context,
-            model_config,
-            extra_params,
-        )
+        if backend_name == "sglang" and model_config.enable_wideep:
+            logger.debug(f"WideEP is enabled for MOE model {model_path} with backend {backend_name}")
+            model = SGLangWideEPMOEModel(
+                topk,
+                num_experts,
+                moe_inter_size,
+                model_path,
+                model_family,
+                architecture,
+                layers,
+                n,
+                n_kv,
+                d,
+                hidden,
+                inter,
+                vocab,
+                context,
+                model_config,
+                extra_params,
+            )
+        else:
+            model = MOEModel(
+                topk,
+                num_experts,
+                moe_inter_size,
+                model_path,
+                model_family,
+                architecture,
+                layers,
+                n,
+                n_kv,
+                d,
+                hidden,
+                inter,
+                vocab,
+                context,
+                model_config,
+                extra_params,
+            )
     elif model_family == "DEEPSEEK":
         if backend_name == "sglang" and model_config.enable_wideep:
             logger.debug(f"WideEP is enabled for model {model_path} with backend {backend_name}")
@@ -3077,6 +3097,305 @@ class WideEPDeepSeekModel(BaseModel):
                     is_context=False,
                     moe_backend=moe_backend,
                     enable_eplb=False,
+                )
+            ]
+        )
+
+
+class SGLangWideEPMOEModel(BaseModel):
+    """
+    SGLang WideEP model for MoE family models (e.g. Qwen3-235B).
+    Uses the same wideep/deepep perf tables and moe_backend="deepep_moe" as WideEPDeepSeekModel,
+    but with standard GQA attention (not MLA) following the MOEModel op graph.
+    """
+
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+        super().__init__(*args)
+
+        # MTP scale factor: throughput boost / compute overhead
+        self._mtp_scale_factor = (
+            1.0
+            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
+            * (self._nextn + self._num_layers)
+            / self._num_layers
+            if self._nextn > 0
+            else 1.0
+        )
+
+        # make sure the parallel width is same
+        assert (
+            self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
+        ), (
+            f"tp_size ({self.config.tp_size}) * attention_dp_size "
+            f"({self.config.attention_dp_size}) should be equal to moe_tp_size "
+            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
+        )
+
+        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
+        assert self.config.tp_size * self.config.attention_dp_size <= 256, (
+            f"moe ep size {self.config.moe_ep_size} * moe tp size {self.config.moe_tp_size} "
+            f"should not be larger than 256"
+        )
+
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_inter_size = moe_inter_size
+
+        # Validate quantized MoE block size alignment
+        self._validate_fp8_block_quantized_moe_config()
+
+        self._power_law_alpha_prefill = 0.6 if self.config.enable_eplb else 1.2
+        self._power_law_alpha_decode = 1.2
+
+        moe_quant_mode = self.config.moe_quant_mode
+        moe_backend = self.config.moe_backend
+
+        h = self._hidden_size
+        tp_size = self.config.tp_size
+        moe_tp_size = self.config.moe_tp_size
+        moe_ep_size = self.config.moe_ep_size
+        attention_dp_size = self.config.attention_dp_size
+        pp_size = self.config.pp_size
+        num_kv_heads_per_gpu = self._num_kv_heads_per_gpu
+        gemm_quant_mode = self.config.gemm_quant_mode
+        kvcache_quant_mode = self.config.kvcache_quant_mode
+        fmha_quant_mode = self.config.fmha_quant_mode
+
+        context_workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha_prefill}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
+        generation_workload_distribution = (
+            self.config.workload_distribution + f"_{self._power_law_alpha_decode}"
+            if self.config.workload_distribution == "power_law"
+            else self.config.workload_distribution
+        )
+
+        sms = self.config.sms
+
+        if self.architecture == "GptOssForCausalLM":
+            attn_scale_factor = 2
+            window_size = 128
+            self.context_ops.append(
+                ops.ContextAttention(
+                    "context_attention",
+                    self._num_layers / attn_scale_factor,
+                    self._num_heads // tp_size,
+                    num_kv_heads_per_gpu,
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                    window_size=window_size,
+                    head_size=self._head_size,
+                    use_qk_norm=self._use_qk_norm,
+                )
+            )
+            self.generation_ops.append(
+                ops.GenerationAttention(
+                    "generation_attention",
+                    self._num_layers * self._mtp_scale_factor / attn_scale_factor,
+                    self._num_heads // tp_size,
+                    num_kv_heads_per_gpu,
+                    kvcache_quant_mode,
+                    window_size=window_size,
+                    head_size=self._head_size,
+                    use_qk_norm=self._use_qk_norm,
+                )
+            )
+        else:
+            attn_scale_factor = 1
+
+        # === CONTEXT OPS ===
+        self.context_ops.extend(
+            [
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                ops.GEMM(
+                    "context_qkv_gemm",
+                    self._num_layers,
+                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
+                    h,
+                    gemm_quant_mode,
+                ),
+                ops.ContextAttention(
+                    "context_attention",
+                    self._num_layers / attn_scale_factor,
+                    self._num_heads // tp_size,
+                    num_kv_heads_per_gpu,
+                    kvcache_quant_mode,
+                    fmha_quant_mode,
+                    head_size=self._head_size,
+                    use_qk_norm=self._use_qk_norm,
+                ),
+                ops.GEMM(
+                    "context_proj_gemm",
+                    self._num_layers,
+                    h,
+                    self._num_heads * self._head_size // tp_size,
+                    gemm_quant_mode,
+                    low_precision_input=True,
+                ),
+                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+            ]
+        )
+
+        # router, only take it into account when num_experts >= 128
+        if self._num_experts >= 128:
+            self.context_ops.extend(
+                [
+                    ops.GEMM(
+                        "context_router_gemm",
+                        self._num_layers,
+                        self._num_experts,
+                        h,
+                        common.GEMMQuantMode.float16,
+                    )
+                ]
+            )
+
+        # dispatch tokens to experts
+        self.context_ops.extend(
+            [
+                ops.MoEDispatch(
+                    "context_moe_pre_dispatch",
+                    self._num_layers,
+                    h,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    True,
+                    quant_mode=moe_quant_mode,
+                    sms=sms,
+                    moe_backend=moe_backend,
+                    is_context=True,
+                    scale_num_tokens=tp_size,
+                ),
+            ]
+        )
+
+        # moe computation
+        self.context_ops.extend(
+            [
+                ops.MoE(
+                    "context_moe",
+                    self._num_layers,
+                    h,
+                    self._moe_inter_size,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    moe_quant_mode,
+                    context_workload_distribution,
+                    attention_dp_size,
+                    is_context=True,
+                    moe_backend=moe_backend,
+                    enable_eplb=self.config.enable_eplb,
+                ),
+            ]
+        )
+
+        # === GENERATION OPS ===
+        self.generation_ops.extend(
+            [
+                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
+                ops.ElementWise("generation_add_norm_1", self._num_layers * self._mtp_scale_factor, 2 * h, 2 * h, 0.8),
+                ops.GEMM(
+                    "generation_qkv_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    self._num_heads * self._head_size // tp_size + self._head_size * num_kv_heads_per_gpu * 2,
+                    h,
+                    gemm_quant_mode,
+                ),
+                ops.GenerationAttention(
+                    "generation_attention",
+                    self._num_layers / attn_scale_factor * self._mtp_scale_factor,
+                    self._num_heads // tp_size,
+                    num_kv_heads_per_gpu,
+                    kvcache_quant_mode,
+                    head_size=self._head_size,
+                    use_qk_norm=self._use_qk_norm,
+                ),
+                ops.GEMM(
+                    "generation_proj_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._num_heads * self._head_size // tp_size,
+                    gemm_quant_mode,
+                    low_precision_input=True,
+                ),
+                ops.ElementWise("generation_add_norm_2", self._num_layers * self._mtp_scale_factor, 2 * h, 2 * h, 0.8),
+            ]
+        )
+
+        # router, only take it into account when num_experts >= 128
+        if self._num_experts >= 128:
+            self.generation_ops.extend(
+                [
+                    ops.GEMM(
+                        "generation_router_gemm",
+                        self._num_layers * self._mtp_scale_factor,
+                        self._num_experts,
+                        h,
+                        common.GEMMQuantMode.float16,
+                    )
+                ]
+            )
+
+        # dispatch tokens to experts
+        self.generation_ops.extend(
+            [
+                ops.MoEDispatch(
+                    "generation_moe_pre_dispatch",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    True,
+                    quant_mode=moe_quant_mode,
+                    sms=sms,
+                    moe_backend=moe_backend,
+                    is_context=False,
+                ),
+            ]
+        )
+
+        # moe computation
+        self.generation_ops.extend(
+            [
+                ops.MoE(
+                    "generation_moe",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._moe_inter_size,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    moe_quant_mode,
+                    generation_workload_distribution,
+                    attention_dp_size,
+                    is_context=False,
+                    moe_backend=moe_backend,
+                    enable_eplb=False,
+                ),
+            ]
+        )
+
+        # logits gemm
+        self.generation_ops.extend(
+            [
+                ops.GEMM(
+                    "generation_logits_gemm",
+                    1 * self._mtp_scale_factor,
+                    self._vocab_size // tp_size,
+                    h,
+                    common.GEMMQuantMode.float16,
                 )
             ]
         )

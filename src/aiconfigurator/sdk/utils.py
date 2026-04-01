@@ -158,9 +158,7 @@ def enumerate_parallel_config(
                                     continue
                                 # sglang
                                 elif backend == common.BackendName.sglang:
-                                    if (enable_wideep and moe_tp > 1) or (
-                                        not enable_wideep and moe_ep > 1
-                                    ):  # wideep only has ep
+                                    if enable_wideep and moe_tp > 1:  # wideep only has ep
                                         continue
                                 elif backend == common.BackendName.vllm:
                                     pass  # TODO
