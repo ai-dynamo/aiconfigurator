@@ -429,9 +429,6 @@ class EstimateResult:
     per_ops_data: dict | None = None
     """Per-operation latency breakdown (populated when available)."""
 
-    max_kv_cache_batch_size: int | None = None
-    """Max concurrent sequences the KV cache can hold (None if not computed)."""
-
     kv_cache_warning: str | None = None
     """Warning message when batch_size exceeds KV cache capacity."""
 
@@ -856,15 +853,9 @@ def _run_agg_estimate(
     if result_dict is None:
         raise RuntimeError("Estimation produced no results. The configuration may be invalid.")
 
-    max_kv_bs = backend._calculate_max_kv_cache_batch_size(
-        model,
-        database,
-        isl,
-        osl,
-        free_gpu_memory_fraction=free_gpu_memory_fraction,
-    )
     kv_warning = None
-    if max_kv_bs is not None and batch_size > max_kv_bs:
+    max_kv_bs = backend._calculate_max_kv_cache_batch_size(model, database, isl, osl, free_gpu_memory_fraction)
+    if max_kv_bs > 0 and batch_size > max_kv_bs:
         kv_warning = (
             f"Requested batch_size ({batch_size}) exceeds estimated KV cache capacity "
             f"({max_kv_bs} concurrent sequences with free_gpu_memory_fraction="
@@ -890,7 +881,6 @@ def _run_agg_estimate(
         raw=result_dict,
         mode="agg",
         per_ops_data=summary.get_per_ops_data(),
-        max_kv_cache_batch_size=max_kv_bs,
         kv_cache_warning=kv_warning,
     )
 

@@ -436,7 +436,8 @@ class TRTLLMBackend(BaseBackend):
         # max(8192, 4*isl).
         # during the loop, as b, ctx_tokens and system memory are monotonic, we can break the
         # inner loop when the system is oom.
-        max_kv_bs = self._calculate_max_kv_cache_batch_size(model, database, isl, osl)
+        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction", 1.0)
+        max_kv_bs = self._calculate_max_kv_cache_batch_size(model, database, isl, osl, free_gpu_memory_fraction)
         if max_kv_bs > 0 and max_kv_bs < max_batch_size:
             logger.debug(
                 "KV cache limits effective batch size to %d (requested max_batch_size=%d)",
@@ -610,96 +611,53 @@ class TRTLLMBackend(BaseBackend):
         database: PerfDatabase,
         isl: int,
         osl: int,
-        beam_width: int = 1,
         free_gpu_memory_fraction: float = 0.9,
-        max_num_tokens: int = 8192,
         max_seq_len: int | None = None,
-        tokens_per_block: int = 32,
+        num_tokens: int | None = None,
     ) -> int:
-        """
-        Calculate the maximum batch size the KV cache can support concurrently.
+        """Return the max batch size the KV cache can hold concurrently.
 
-        TRT-LLM allocates KV cache in fixed-size blocks and reserves blocks
-        for each sequence up to ``max_seq_len``.  If the requested batch_size
-        exceeds this capacity, TRT-LLM queues excess requests instead of
-        running them concurrently, leading to inflated TTFT and inaccurate
-        TPOT without raising an OOM error.
+        Uses _get_memory_usage(batch_size=1) to derive non-KV memory and the
+        per-token KV cost, avoiding duplicated kvcache_per_token logic.
 
         Args:
-            model: Model with architecture parameters.
-            database: Performance database with system spec (GPU memory, etc.).
-            isl: Input sequence length.
-            osl: Output sequence length.
-            beam_width: Beam width (default 1 for standard LLM serving).
-            free_gpu_memory_fraction: Fraction of free GPU memory that TRT-LLM
-                allocates for KV cache (default 0.9, matching TRT-LLM Python API).
-            max_num_tokens: Max tokens per forward step, used for activation
-                memory estimation (default 8192).
-            max_seq_len: Maximum sequence length TRT-LLM reserves KV blocks for.
-                Defaults to ``isl + osl`` when None.  TRT-LLM's ``--max_seq_len``
-                is typically set to ``isl + osl + slack``.
-            tokens_per_block: Tokens per KV cache block (default 32, matching
-                TRT-LLM default).
+            max_seq_len: Tokens reserved per sequence for block allocation.
+                Defaults to isl+osl. Pass isl+osl+slack to match a TRT-LLM
+                deployment that uses --max_seq_len isl+osl+slack.
+            num_tokens: Fixed token count for activation estimation, matching
+                TRT-LLM's --max_num_tokens. Defaults to 2*isl.
 
         Returns:
-            Maximum number of concurrent sequences the KV cache can hold.
-            Returns 0 if the model itself barely fits (no room for KV cache).
+            Max concurrent sequences. 0 if the model itself barely fits.
         """
-        import math
-
         if max_seq_len is None:
-            max_seq_len = isl + beam_width * osl
+            max_seq_len = isl + osl
+        if num_tokens is None:
+            num_tokens = 2 * isl
 
-        memory = self._get_memory_usage(
-            model,
-            database,
-            batch_size=1,
-            beam_width=beam_width,
-            isl=isl,
-            osl=osl,
-            num_tokens=max_num_tokens,
-            prefix=0,
-        )
-        non_kv_memory_gib = memory["total"] - memory["kvcache"]
-
+        memory = self._get_memory_usage(model, database, 1, 1, isl, osl, num_tokens=num_tokens)
+        non_kv_gib = memory["total"] - memory["kvcache"]
         gpu_capacity_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)
-        available_kv_gib = (gpu_capacity_gib - non_kv_memory_gib) * free_gpu_memory_fraction
+        available_kv_gib = (gpu_capacity_gib - non_kv_gib) * free_gpu_memory_fraction
 
         if available_kv_gib <= 0:
             return 0
 
-        if model.model_family == "DEEPSEEK":
-            kvcache_per_token = model._num_layers * 576
-        else:
-            num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size
-            kvcache_per_token = num_kv_heads_per_gpu * model._head_size * model._num_layers * 2
-
-        kv_bytes_per_token = model.config.kvcache_quant_mode.value.memory * kvcache_per_token
-        if kv_bytes_per_token <= 0:
+        # Derive kvcache_per_token from _get_memory_usage result (avoids duplicating
+        # the per-token KV cost formula).  kvcache at bs=1 = (isl+osl)*kvcache_per_token.
+        kvcache_per_token_gib = memory["kvcache"] / (isl + osl)
+        if kvcache_per_token_gib <= 0:
             return 0
 
-        kv_bytes_per_block = tokens_per_block * kv_bytes_per_token
-        available_kv_bytes = available_kv_gib * (1 << 30)
-        total_blocks = int(available_kv_bytes / kv_bytes_per_block)
-        blocks_per_seq = math.ceil(max_seq_len / tokens_per_block)
+        # Block-based allocation: TRT-LLM reserves ceil(max_seq_len/tokens_per_block)
+        # blocks per sequence regardless of actual sequence length.
+        tokens_per_block = 32
+        import math
 
+        kvcache_per_block_gib = kvcache_per_token_gib * tokens_per_block
+        total_blocks = int(available_kv_gib / kvcache_per_block_gib)
+        blocks_per_seq = math.ceil(max_seq_len / tokens_per_block)
         if blocks_per_seq <= 0:
             return 0
 
-        max_batch_size = total_blocks // blocks_per_seq
-
-        logger.debug(
-            "KV cache capacity: total_blocks=%d, blocks_per_seq=%d, "
-            "max_kv_batch_size=%d (gpu=%.1f GiB, non_kv=%.2f GiB, "
-            "available_kv=%.2f GiB, fraction=%.2f, max_seq_len=%d)",
-            total_blocks,
-            blocks_per_seq,
-            max_batch_size,
-            gpu_capacity_gib,
-            non_kv_memory_gib,
-            available_kv_gib,
-            free_gpu_memory_fraction,
-            max_seq_len,
-        )
-
-        return max_batch_size
+        return total_blocks // blocks_per_seq

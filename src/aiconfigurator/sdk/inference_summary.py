@@ -216,6 +216,12 @@ class InferenceSummary:
             logger.warning("WARNING: memory status is not set")
         return self._is_oom
 
+    def get_memory(self) -> dict:
+        """
+        Get memory breakdown dict (keys: total, weights, activations, kvcache, nccl, others).
+        """
+        return self._memory
+
     def get_static_info(self) -> tuple[str, str, str, str]:
         """
         Get static info.

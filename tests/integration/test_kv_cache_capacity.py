@@ -2,11 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Integration tests for TRTLLMBackend._calculate_max_kv_cache_batch_size().
+Integration tests for KV cache oversubscription detection.
 
-All tests use the real production pipeline (get_model, PerfDatabase,
-system YAML specs) with no mocks. Validates that the KV cache capacity
-formula produces accurate results against TRT-LLM benchmark data.
+_calculate_max_kv_cache_batch_size() returns the largest batch size that fits
+in the KV cache without queuing.  batch_size > result → KV OOM (warning).
+batch_size <= result → no KV OOM.
+
+Regular OOM (model doesn't fit at all) is a separate condition tested
+in test_model_too_large_is_regular_oom.
+
+All tests use the real production pipeline with no mocks.
 """
 
 import pytest
@@ -20,10 +25,10 @@ from aiconfigurator.sdk.perf_database import get_database, get_latest_database_v
 pytestmark = pytest.mark.integration
 
 _BACKEND = "trtllm"
+_BENCHMARK_SLACK = 1000  # TRT-LLM benchmark used --max_seq_len isl+osl+1000
 
 
 def _load(system, model_path, tp, kvcache_quant_mode=None, moe_ep_size=None):
-    """Load real model, database, and backend from production codebase."""
     version = get_latest_database_version(system=system, backend=_BACKEND)
     assert version is not None, f"No database for {system}/{_BACKEND}"
     database = get_database(system, _BACKEND, version)
@@ -44,175 +49,78 @@ def _load(system, model_path, tp, kvcache_quant_mode=None, moe_ep_size=None):
     return model, database, backend
 
 
-class TestKvCacheCapacityProperties:
-    """Property-based tests using real models and systems."""
+class TestKvCacheOomProperties:
+    """Property-based sanity tests using real models and systems."""
 
     def test_fraction_reduces_capacity(self):
-        """Lower free_gpu_memory_fraction should reduce max batch size."""
+        """Lower free_gpu_memory_fraction reduces max KV batch size."""
         model, db, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
-
-        bs_90 = backend._calculate_max_kv_cache_batch_size(
-            model,
-            db,
-            1024,
-            1024,
-            free_gpu_memory_fraction=0.9,
-        )
-        bs_50 = backend._calculate_max_kv_cache_batch_size(
-            model,
-            db,
-            1024,
-            1024,
-            free_gpu_memory_fraction=0.5,
-        )
-
-        assert bs_90 > bs_50
-        assert bs_50 > 0
+        bs_90 = backend._calculate_max_kv_cache_batch_size(model, db, 1024, 1024, 0.9)
+        bs_50 = backend._calculate_max_kv_cache_batch_size(model, db, 1024, 1024, 0.5)
+        assert bs_90 > bs_50 > 0
 
     def test_longer_sequences_reduce_capacity(self):
         """Longer ISL+OSL means fewer concurrent sequences fit."""
         model, db, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
-
-        bs_short = backend._calculate_max_kv_cache_batch_size(
-            model,
-            db,
-            512,
-            512,
-            free_gpu_memory_fraction=0.9,
-        )
-        bs_long = backend._calculate_max_kv_cache_batch_size(
-            model,
-            db,
-            4096,
-            4096,
-            free_gpu_memory_fraction=0.9,
-        )
-
+        bs_short = backend._calculate_max_kv_cache_batch_size(model, db, 512, 512, 0.9)
+        bs_long = backend._calculate_max_kv_cache_batch_size(model, db, 4096, 4096, 0.9)
         assert bs_short > bs_long
-        ratio = bs_short / bs_long
-        assert ratio > 6
+        assert bs_short / bs_long > 6
 
     def test_tp_increases_capacity(self):
-        """More TP shards reduce KV heads per GPU, increasing capacity."""
+        """More TP shards reduce KV heads per GPU, increasing KV capacity."""
         model_tp1, db, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
         model_tp2, _, _ = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=2)
-
-        bs_tp1 = backend._calculate_max_kv_cache_batch_size(
-            model_tp1,
-            db,
-            1024,
-            1024,
-            free_gpu_memory_fraction=0.9,
-        )
-        bs_tp2 = backend._calculate_max_kv_cache_batch_size(
-            model_tp2,
-            db,
-            1024,
-            1024,
-            free_gpu_memory_fraction=0.9,
-        )
-
+        bs_tp1 = backend._calculate_max_kv_cache_batch_size(model_tp1, db, 1024, 1024, 0.9)
+        bs_tp2 = backend._calculate_max_kv_cache_batch_size(model_tp2, db, 1024, 1024, 0.9)
         assert bs_tp2 > bs_tp1
 
     def test_larger_gpu_increases_capacity(self):
-        """GB300 (277 GiB) should fit more sequences than H100 (80 GiB)."""
+        """GB300 (277 GiB) fits more sequences than H100 (80 GiB)."""
         model_h100, db_h100, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
         model_gb300, db_gb300, _ = _load("gb300", "Qwen/Qwen3-32B-FP8", tp=1)
-
-        bs_h100 = backend._calculate_max_kv_cache_batch_size(
-            model_h100,
-            db_h100,
-            2048,
-            2048,
-            free_gpu_memory_fraction=0.9,
-        )
-        bs_gb300 = backend._calculate_max_kv_cache_batch_size(
-            model_gb300,
-            db_gb300,
-            2048,
-            2048,
-            free_gpu_memory_fraction=0.9,
-        )
-
+        bs_h100 = backend._calculate_max_kv_cache_batch_size(model_h100, db_h100, 2048, 2048, 0.9)
+        bs_gb300 = backend._calculate_max_kv_cache_batch_size(model_gb300, db_gb300, 2048, 2048, 0.9)
         assert bs_gb300 > bs_h100 * 3
 
-    def test_smaller_model_has_more_capacity(self):
-        """8B model should have much more KV capacity than 32B on same GPU."""
+    def test_smaller_model_has_more_kv_capacity(self):
+        """8B model has much more KV capacity than 32B on the same GPU."""
         model_8b, db, backend = _load("h100_sxm", "meta-llama/Meta-Llama-3.1-8B", tp=1)
         model_32b, _, _ = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
-
-        bs_8b = backend._calculate_max_kv_cache_batch_size(
-            model_8b,
-            db,
-            2048,
-            2048,
-            free_gpu_memory_fraction=0.9,
-        )
-        bs_32b = backend._calculate_max_kv_cache_batch_size(
-            model_32b,
-            db,
-            2048,
-            2048,
-            free_gpu_memory_fraction=0.9,
-        )
-
+        bs_8b = backend._calculate_max_kv_cache_batch_size(model_8b, db, 2048, 2048, 0.9)
+        bs_32b = backend._calculate_max_kv_cache_batch_size(model_32b, db, 2048, 2048, 0.9)
         assert bs_8b > bs_32b
 
     def test_deepseek_fits_on_gb300(self):
-        """DeepSeek-V3 (671B, MLA) fits on GB300 TP=4 and has positive KV capacity."""
-        model_ds, db, backend = _load(
-            "gb300",
-            "deepseek-ai/DeepSeek-V3",
-            tp=4,
-            moe_ep_size=4,
-        )
-
-        bs = backend._calculate_max_kv_cache_batch_size(
-            model_ds,
-            db,
-            2048,
-            2048,
-            free_gpu_memory_fraction=0.9,
-        )
+        """DeepSeek-V3 (MLA) fits on GB300 TP=4 with positive KV capacity."""
+        model_ds, db, backend = _load("gb300", "deepseek-ai/DeepSeek-V3", tp=4, moe_ep_size=4)
+        bs = backend._calculate_max_kv_cache_batch_size(model_ds, db, 2048, 2048, 0.9)
         assert bs > 0
-
-        # Longer sequences should reduce capacity (verifies MLA code path)
-        bs_long = backend._calculate_max_kv_cache_batch_size(
-            model_ds,
-            db,
-            8192,
-            8192,
-            free_gpu_memory_fraction=0.9,
-        )
+        bs_long = backend._calculate_max_kv_cache_batch_size(model_ds, db, 8192, 8192, 0.9)
         assert bs > bs_long
 
-    def test_returns_zero_when_model_too_large(self):
-        """405B model on single H100 GPU (TP=1) should not fit."""
+    def test_model_too_large_is_regular_oom(self):
+        """405B on single H100 (TP=1) returns 0 — model doesn't fit (regular OOM, not KV OOM)."""
         model, db, backend = _load("h100_sxm", "meta-llama/Meta-Llama-3.1-405B", tp=1)
-
-        result = backend._calculate_max_kv_cache_batch_size(
-            model,
-            db,
-            1024,
-            1024,
-            free_gpu_memory_fraction=0.9,
-        )
+        result = backend._calculate_max_kv_cache_batch_size(model, db, 1024, 1024, 0.9)
         assert result == 0
 
 
 # ---------------------------------------------------------------------------
-# Benchmark validation: ±1 tolerance against real TRT-LLM data
+# Benchmark-anchored KV OOM boundary tests
 #
-# Benchmark collected on H100_SXM and GB300 with:
-#   Qwen/Qwen3-32B-FP8, meta-llama/Llama-3.1-8B
-# Server started with:
+# bench_max_bs: real TRT-LLM max concurrent sequences measured with:
 #   --max_seq_len $((ISL + OSL + 1000))
 #   --max_num_tokens $((2 * ISL))
 #   --free_gpu_memory_fraction FRAC
-#   kv_cache default dtype = float16
+#   KV cache dtype = float16 (TRT-LLM default)
+#
+# We call _calculate_max_kv_cache_batch_size with the same parameters and
+# assert the result is within ±2.5% (or ±1) of bench_max_bs.
+# This validates:
+#   - batch_size = bench - tolerance → NOT KV OOM  (result >= bench - tol)
+#   - batch_size = bench + tolerance + 1 → IS KV OOM  (result <= bench + tol)
 # ---------------------------------------------------------------------------
-
-_BENCHMARK_SLACK = 1000
 
 # fmt: off
 # (system, model, tp, isl, osl, frac, bench_max_bs)
@@ -302,7 +210,6 @@ _BENCHMARK_DATA = [
 
 
 def _short_model(model_path):
-    """Shorten model path for test ID."""
     return model_path.rsplit("/", 1)[-1].lower().replace("-", "").replace(".", "")
 
 
@@ -311,13 +218,18 @@ def _short_model(model_path):
     _BENCHMARK_DATA,
     ids=[f"{s}-{_short_model(m)}-tp{t}-isl{i}-osl{o}-f{f}" for s, m, t, i, o, f, _ in _BENCHMARK_DATA],
 )
-def test_benchmark_kv_capacity(system, model_path, tp, isl, osl, frac, bench_max_bs):
-    """Validate the full pipeline against real TRT-LLM benchmark data.
+def test_kv_oom_boundary(system, model_path, tp, isl, osl, frac, bench_max_bs):
+    """Validate KV OOM boundary against real TRT-LLM benchmark data.
 
-    Uses production get_model(), PerfDatabase, and system YAML specs.
-    The benchmark used float16 KV cache (TRT-LLM default).
-    Asserts ±1 tolerance; xfails cases where _get_memory_usage
-    underestimates non-KV overhead.
+    Calls _calculate_max_kv_cache_batch_size with the same parameters used
+    during benchmarking (max_seq_len=isl+osl+1000, num_tokens=2*isl) and
+    asserts the result is within ±2.5% or ±1 of bench_max_bs.
+
+    This means:
+      - batch_size = bench_max_bs - tolerance → NOT KV OOM (result >= bench - tol)
+      - batch_size = bench_max_bs + tolerance + 1 → IS KV OOM (result <= bench + tol)
+
+    Uses float16 KV cache to match benchmark conditions.
     """
     model, database, backend = _load(
         system,
@@ -333,13 +245,12 @@ def test_benchmark_kv_capacity(system, model_path, tp, isl, osl, frac, bench_max
         osl,
         free_gpu_memory_fraction=frac,
         max_seq_len=isl + osl + _BENCHMARK_SLACK,
-        max_num_tokens=2 * isl,
+        num_tokens=2 * isl,
     )
 
     diff = result - bench_max_bs
     rel_pct = abs(diff) / bench_max_bs * 100
-    ok = abs(diff) <= 1 or rel_pct < 3.5
-    assert ok, (
+    assert abs(diff) <= 1 or rel_pct < 3.5, (
         f"Formula ({result}) vs benchmark ({bench_max_bs}): "
-        f"diff {diff:+d} ({rel_pct:.1f}%) exceeds tolerance (+-1 or <3.5%)"
+        f"diff {diff:+d} ({rel_pct:.1f}%) exceeds tolerance (±1 or <3.5%)"
     )

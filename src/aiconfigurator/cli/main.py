@@ -1392,8 +1392,6 @@ def _run_estimate_mode(args):
         raw = result.raw
         print(f"  (p) Memory:       {raw.get('(p)memory', 'N/A')} GB")
         print(f"  (d) Memory:       {raw.get('(d)memory', 'N/A')} GB")
-    if result.max_kv_cache_batch_size is not None:
-        print(f"  Max KV Cache BS:  {result.max_kv_cache_batch_size}")
     print("=" * 60)
 
     if result.kv_cache_warning:
