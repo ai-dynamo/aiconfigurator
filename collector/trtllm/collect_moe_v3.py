@@ -411,8 +411,8 @@ def run_moe_torch(
     # random weights without calling load_weights() for fp8_block. We must do
     # the conversion here to avoid cudaErrorIllegalAddress from TMA OOB access.
     if moe_type == "fp8_block" and sm_version >= 100:
-        from torch import nn
         from tensorrt_llm.quantization.utils.fp8_utils import transform_sf_into_required_layout
+        from torch import nn
 
         # Transform w3_w1 weight scales: float32 [G, N/128, K/128] -> int32 UE8M0 [G, N, sf_k_tma]
         transformed_w3w1 = transform_sf_into_required_layout(
@@ -437,7 +437,7 @@ def run_moe_torch(
         # Rebuild quant_scales tuple with the transformed tensors
         moe.quant_method.setup_quant_scales(moe)
         if aic_debug == 1:
-            print(f"[SM100 fix] Converted weight scales to int32 UE8M0 format")
+            print("[SM100 fix] Converted weight scales to int32 UE8M0 format")
 
     # Both w4a16_mxfp4 and w4a8_mxfp4_mxfp8 use MXFP4 weights and share the same
     # weight loading path in TRT-LLM (inherited from MXFP4WeightTRTLLMGenFusedMoEMethod).
@@ -502,7 +502,7 @@ def run_moe_torch(
             break
         except Exception as e:
             if i == len(num_tokens_lists) - 1:
-                raise RuntimeError(f"dry run failed for {max_tokens} tokens: {e}")
+                raise RuntimeError(f"dry run failed for {max_tokens} tokens: {e}") from e
             else:
                 continue
 
