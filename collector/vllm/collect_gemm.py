@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-__compat__ = "vllm>=0.11.0"
+__compat__ = "vllm>=0.14.0"
 
 import os
 
@@ -21,6 +21,28 @@ from collector.vllm.utils import setup_distributed, with_exit_stack
 
 FP8_BLOCK_SHAPE = (128, 128)
 
+# NVFP4 GEMM support (Blackwell SM100+).
+# Uses CompressedTensors W4A4 scheme -> auto-selects FLASHINFER_CUTLASS by default.
+_nvfp4_gemm_available = False
+try:
+    from vllm._custom_ops import scaled_fp4_quant as _scaled_fp4_quant
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+        CompressedTensorsConfig as _CompressedTensorsConfig,
+    )
+
+    _nvfp4_gemm_available = True
+except Exception:
+    pass
+
+_NVFP4_QUANT_ARGS = {
+    "num_bits": 4,
+    "type": "float",
+    "strategy": "tensor_group",
+    "group_size": 16,
+    "symmetric": True,
+    "dynamic": False,
+}
+
 
 def get_gemm_test_cases():
     sm = get_sm_version()
@@ -32,8 +54,8 @@ def get_gemm_test_cases():
     if sm >= 90:
         gemm_list += ["fp8_block"]
 
-    # if get_sm_version() >= 100:
-    #     gemm_list += ["nvfp4"]
+    if sm >= 100 and _nvfp4_gemm_available:
+        gemm_list += ["nvfp4"]
 
     test_cases = []
 
@@ -43,6 +65,8 @@ def get_gemm_test_cases():
         k = gemm_common_testcase.k
         for gemm_type in gemm_list:
             if gemm_type in ("nvfp4", "fp8_block") and (n < 128 or k < 128):
+                continue
+            if gemm_type == "nvfp4" and ((n % 16) != 0 or (k % 16) != 0):
                 continue
             if gemm_type == "fp8_block":
                 block_n, block_k = FP8_BLOCK_SHAPE
@@ -65,7 +89,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
 
     setup_distributed(device)
 
-    dtype = torch.float16
+    dtype = torch.bfloat16 if gemm_type == "nvfp4" else torch.float16
     torch.set_default_dtype(dtype)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
@@ -84,6 +108,22 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
             is_checkpoint_fp8_serialized=True,
             activation_scheme="dynamic",
             weight_block_size=list(FP8_BLOCK_SHAPE),
+        )
+    elif gemm_type == "nvfp4":
+        qc = _CompressedTensorsConfig.from_config(
+            {
+                "quant_type": "compressed-tensors",
+                "format": "nvfp4-pack-quantized",
+                "global_compression_ratio": 1.0,
+                "config_groups": {
+                    "group_0": {
+                        "weights": _NVFP4_QUANT_ARGS,
+                        "input_activations": _NVFP4_QUANT_ARGS,
+                        "targets": ["Linear"],
+                        "output_activations": None,
+                    }
+                },
+            }
         )
     else:
         qc = None
@@ -130,6 +170,27 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="cuda:0"):
                     maybe_post_process_fp8_weight_block(gemm)
                 except TypeError:
                     maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
+
+                # Dynamic activation scheme does not create input_scale;
+                # the forward path still reads it, so set it explicitly.
+                if not hasattr(gemm, "input_scale"):
+                    gemm.input_scale = None
+        elif gemm_type == "nvfp4":
+            with torch.no_grad():
+                weight_bf16 = torch.randn(n, k, dtype=torch.bfloat16, device=device)
+                w_gscale_val = float(weight_bf16.abs().max()) / 6.0
+                weight_fp4, weight_scale_fp8 = _scaled_fp4_quant(
+                    weight_bf16,
+                    torch.tensor(1.0 / w_gscale_val, dtype=torch.float32, device=device),
+                    is_sf_swizzled_layout=False,
+                )
+                in_gscale_val = float(x.abs().max()) / 6.0
+                gemm.weight_packed.data.copy_(weight_fp4)
+                gemm.weight_scale.data.copy_(weight_scale_fp8.to(torch.float8_e4m3fn))
+                # CT convention: global_scale parameters store 1/actual_scale.
+                gemm.weight_global_scale.data.fill_(1.0 / w_gscale_val)
+                gemm.input_global_scale.data.fill_(1.0 / in_gscale_val)
+            gemm.scheme.process_weights_after_loading(gemm)
 
         gemm.forward(x)  # dry run to init
 
