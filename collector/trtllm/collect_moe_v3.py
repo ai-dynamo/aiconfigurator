@@ -405,6 +405,40 @@ def run_moe_torch(
     )
     moe.to(torch.device(device))
 
+    # SM100 (Blackwell) DeepGEMM expects weight scales (SFB) in int32 UE8M0 format,
+    # but create_moe() initializes them as float32. TRT-LLM's post_load_weights()
+    # normally handles this conversion after loading real weights, but AIC uses
+    # random weights without calling load_weights() for fp8_block. We must do
+    # the conversion here to avoid cudaErrorIllegalAddress from TMA OOB access.
+    if moe_type == "fp8_block" and sm_version >= 100:
+        from torch import nn
+        from tensorrt_llm.quantization.utils.fp8_utils import transform_sf_into_required_layout
+
+        # Transform w3_w1 weight scales: float32 [G, N/128, K/128] -> int32 UE8M0 [G, N, sf_k_tma]
+        transformed_w3w1 = transform_sf_into_required_layout(
+            moe.quant_scales[0],
+            mn=moe.w3_w1_weight.shape[1],
+            k=moe.w3_w1_weight.shape[2],
+            recipe=(1, 128, 128),
+            num_groups=moe.w3_w1_weight.shape[0],
+            is_sfa=False,
+        )
+        moe.w3_w1_weight_scaling_factor = nn.Parameter(transformed_w3w1, requires_grad=False)
+        # Transform w2 weight scales
+        transformed_w2 = transform_sf_into_required_layout(
+            moe.quant_scales[1],
+            mn=moe.w2_weight.shape[1],
+            k=moe.w2_weight.shape[2],
+            recipe=(1, 128, 128),
+            num_groups=moe.w3_w1_weight.shape[0],
+            is_sfa=False,
+        )
+        moe.w2_weight_scaling_factor = nn.Parameter(transformed_w2, requires_grad=False)
+        # Rebuild quant_scales tuple with the transformed tensors
+        moe.quant_method.setup_quant_scales(moe)
+        if aic_debug == 1:
+            print(f"[SM100 fix] Converted weight scales to int32 UE8M0 format")
+
     # Both w4a16_mxfp4 and w4a8_mxfp4_mxfp8 use MXFP4 weights and share the same
     # weight loading path in TRT-LLM (inherited from MXFP4WeightTRTLLMGenFusedMoEMethod).
     # We must explicitly cast weights to MXFP4 format and call load_weights() so that
@@ -468,7 +502,7 @@ def run_moe_torch(
             break
         except Exception as e:
             if i == len(num_tokens_lists) - 1:
-                RuntimeError(f"dry run failed for {max_tokens} tokens: {e}")
+                raise RuntimeError(f"dry run failed for {max_tokens} tokens: {e}")
             else:
                 continue
 
@@ -518,6 +552,14 @@ def run_moe_torch(
                         continue
 
     del hidden_states_max_tokens, logits_max_tokens
+    if moe_type == "fp8_block":
+        try:
+            from tensorrt_llm._torch.modules.fused_moe.fused_moe_deepgemm import DeepGemmFusedMoE
+
+            DeepGemmFusedMoE.buffers.buffers.clear()
+        except (ImportError, AttributeError):
+            pass
+        torch.cuda.empty_cache()
 
     for num_tokens in num_tokens_lists:
         # gc_collect()
@@ -613,8 +655,15 @@ def run_moe_torch(
             del actual_logits_list
         else:
             del actual_logits
-
         del hidden_states
+        if moe_type == "fp8_block" and num_tokens != max_tokens:
+            try:
+                from tensorrt_llm._torch.modules.fused_moe.fused_moe_deepgemm import DeepGemmFusedMoE
+
+                DeepGemmFusedMoE.buffers.buffers.clear()
+            except (ImportError, AttributeError):
+                pass
+            torch.cuda.empty_cache()
 
     # Exit the worker process after completing MOE task to ensure complete resource cleanup
     # This forces OS to reclaim all GPU memory, CUDA context, and other resources
