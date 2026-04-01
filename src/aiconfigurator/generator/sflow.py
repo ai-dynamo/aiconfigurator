@@ -698,15 +698,6 @@ def _resolve_sflow_concurrency(bench: dict[str, Any]) -> int:
     resolved = _int(estimated, 0)
     if resolved > 0:
         return resolved
-
-    # Fall back to the explicit concurrency value (e.g. from input files)
-    concurrency = bench.get("concurrency")
-    if isinstance(concurrency, (list, tuple)):
-        concurrency = concurrency[0] if concurrency else None
-    resolved = _int(concurrency, 0)
-    if resolved > 0:
-        return resolved
-
     return 64
 
 
