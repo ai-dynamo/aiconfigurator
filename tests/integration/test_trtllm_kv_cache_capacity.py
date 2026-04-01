@@ -65,9 +65,10 @@ class TestKvCacheOomProperties:
           threshold at f=0.9 ≈ 78, at f=0.5 ≈ 43.
           bs=60: fits at f=0.9, OOM at f=0.5.
         """
+        isl, osl = 2048, 2048
         model, db, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
-        assert not backend._is_kv_cache_oom(model, db, 60, 2048, 2048, 0.9)
-        assert backend._is_kv_cache_oom(model, db, 60, 2048, 2048, 0.5)
+        assert not backend._is_kv_cache_oom(model, db, 60, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
+        assert backend._is_kv_cache_oom(model, db, 60, isl, osl, 0.5, max_seq_len=isl + osl + _BENCHMARK_SLACK)
 
     def test_longer_sequences_reduce_capacity(self):
         """Longer ISL+OSL means fewer concurrent sequences fit.
@@ -77,8 +78,8 @@ class TestKvCacheOomProperties:
           bs=100: fits for short seqs, OOM for long seqs.
         """
         model, db, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
-        assert not backend._is_kv_cache_oom(model, db, 100, 512, 512, 0.9)
-        assert backend._is_kv_cache_oom(model, db, 100, 4096, 4096, 0.9)
+        assert not backend._is_kv_cache_oom(model, db, 100, 512, 512, 0.9, max_seq_len=512 + 512 + _BENCHMARK_SLACK)
+        assert backend._is_kv_cache_oom(model, db, 100, 4096, 4096, 0.9, max_seq_len=4096 + 4096 + _BENCHMARK_SLACK)
 
     def test_tp_increases_capacity(self):
         """More TP shards reduce KV heads per GPU, increasing KV capacity.
@@ -87,10 +88,11 @@ class TestKvCacheOomProperties:
           tp=1 threshold ≈ 78, tp=2 threshold ≈ 215.
           bs=120: OOM at tp=1, fits at tp=2.
         """
+        isl, osl = 2048, 2048
         model_tp1, db, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
         model_tp2, _, _ = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=2)
-        assert backend._is_kv_cache_oom(model_tp1, db, 120, 2048, 2048, 0.9)
-        assert not backend._is_kv_cache_oom(model_tp2, db, 120, 2048, 2048, 0.9)
+        assert backend._is_kv_cache_oom(model_tp1, db, 120, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
+        assert not backend._is_kv_cache_oom(model_tp2, db, 120, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
 
     def test_larger_gpu_increases_capacity(self):
         """GB300 (277 GiB) fits more sequences than H100 (80 GiB).
@@ -99,34 +101,53 @@ class TestKvCacheOomProperties:
           h100 threshold ≈ 78, gb300 threshold ≈ 434.
           bs=200: OOM on h100, fits on gb300.
         """
+        isl, osl = 2048, 2048
         model_h100, db_h100, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
         model_gb300, db_gb300, _ = _load("gb300", "Qwen/Qwen3-32B-FP8", tp=1)
-        assert backend._is_kv_cache_oom(model_h100, db_h100, 200, 2048, 2048, 0.9)
-        assert not backend._is_kv_cache_oom(model_gb300, db_gb300, 200, 2048, 2048, 0.9)
+        assert backend._is_kv_cache_oom(
+            model_h100, db_h100, 200, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK
+        )
+        assert not backend._is_kv_cache_oom(
+            model_gb300, db_gb300, 200, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK
+        )
 
     def test_smaller_model_has_more_kv_capacity(self):
         """8B model has much more KV capacity than 32B on the same GPU.
 
-        h100_sxm / tp=1 / isl=osl=2048 / f=0.9:
-          32B threshold ≈ 78, 8B threshold ≈ 110.
-          bs=90: OOM for 32B, fits for 8B.
+        Both models use float16 KV cache to match benchmark conditions and ensure
+        a fair comparison (default KV quant mode differs between model families).
+
+        h100_sxm / tp=1 / isl=osl=2048 / f=0.9 / float16 KV:
+          32B threshold ≈ 30, 8B threshold ≈ 88.
+          bs=60: OOM for 32B, fits for 8B.
         """
-        model_8b, db, backend = _load("h100_sxm", "meta-llama/Meta-Llama-3.1-8B", tp=1)
-        model_32b, _, _ = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
-        assert backend._is_kv_cache_oom(model_32b, db, 90, 2048, 2048, 0.9)
-        assert not backend._is_kv_cache_oom(model_8b, db, 90, 2048, 2048, 0.9)
+        isl, osl = 2048, 2048
+        model_8b, db, backend = _load(
+            "h100_sxm", "meta-llama/Meta-Llama-3.1-8B", tp=1, kvcache_quant_mode=common.KVCacheQuantMode.float16
+        )
+        model_32b, _, _ = _load(
+            "h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1, kvcache_quant_mode=common.KVCacheQuantMode.float16
+        )
+        assert backend._is_kv_cache_oom(model_32b, db, 60, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
+        assert not backend._is_kv_cache_oom(model_8b, db, 60, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
 
     def test_deepseek_fits_on_gb300(self):
         """DeepSeek-V3 (MLA) fits on GB300 TP=4: bs=1 is not KV OOM, bs=10000 is."""
         model_ds, db, backend = _load("gb300", "deepseek-ai/DeepSeek-V3", tp=4, moe_ep_size=4)
-        assert not backend._is_kv_cache_oom(model_ds, db, 1, 2048, 2048, 0.9)
-        assert not backend._is_kv_cache_oom(model_ds, db, 1, 8192, 8192, 0.9)
-        assert backend._is_kv_cache_oom(model_ds, db, 10000, 2048, 2048, 0.9)
+        assert not backend._is_kv_cache_oom(
+            model_ds, db, 1, 2048, 2048, 0.9, max_seq_len=2048 + 2048 + _BENCHMARK_SLACK
+        )
+        assert not backend._is_kv_cache_oom(
+            model_ds, db, 1, 8192, 8192, 0.9, max_seq_len=8192 + 8192 + _BENCHMARK_SLACK
+        )
+        assert backend._is_kv_cache_oom(
+            model_ds, db, 10000, 2048, 2048, 0.9, max_seq_len=2048 + 2048 + _BENCHMARK_SLACK
+        )
 
     def test_model_too_large_is_regular_oom(self):
         """405B on single H100 (TP=1): model doesn't fit → _is_kv_cache_oom returns True for bs=1."""
         model, db, backend = _load("h100_sxm", "meta-llama/Meta-Llama-3.1-405B", tp=1)
-        assert backend._is_kv_cache_oom(model, db, 1, 1024, 1024, 0.9)
+        assert backend._is_kv_cache_oom(model, db, 1, 1024, 1024, 0.9, max_seq_len=1024 + 1024 + _BENCHMARK_SLACK)
 
 
 # ---------------------------------------------------------------------------

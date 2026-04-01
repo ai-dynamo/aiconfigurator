@@ -609,6 +609,7 @@ def cli_estimate(
     decode_num_workers: int | None = None,
     systems_paths: str | None = None,
     free_gpu_memory_fraction: float = 0.9,
+    max_seq_len: int | None = None,
 ) -> EstimateResult:
     """
     Estimate TTFT, TPOT, and power for a single model/system/config combination.
@@ -661,6 +662,9 @@ def cli_estimate(
         free_gpu_memory_fraction: Fraction of free GPU memory TRT-LLM allocates for
             KV cache (default 0.9). Used to check whether the requested batch_size
             exceeds KV cache capacity.
+        max_seq_len: The TRT-LLM ``--max_seq_len`` setting used at serving time.
+            Controls how many KV blocks TRT-LLM pre-allocates per sequence. Defaults
+            to ``isl + osl`` when ``None``.
 
     Returns:
         EstimateResult with ttft, tpot, power_w, mode, and the full raw result dict.
@@ -734,6 +738,7 @@ def cli_estimate(
             get_backend=get_backend,
             get_model=get_model,
             free_gpu_memory_fraction=free_gpu_memory_fraction,
+            max_seq_len=max_seq_len,
         )
     elif mode == "disagg":
         # Validate required disagg params
@@ -812,6 +817,7 @@ def _run_agg_estimate(
     get_backend,
     get_model,
     free_gpu_memory_fraction=0.9,
+    max_seq_len=None,
 ) -> EstimateResult:
     """Run aggregated (IFB) estimation."""
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -854,7 +860,23 @@ def _run_agg_estimate(
         raise RuntimeError("Estimation produced no results. The configuration may be invalid.")
 
     kv_warning = None
-    if backend._is_kv_cache_oom(model, database, batch_size, isl, osl, free_gpu_memory_fraction):
+    resolved_max_seq_len = max_seq_len
+    if resolved_max_seq_len is None:
+        resolved_max_seq_len = isl + osl
+        logger.warning(
+            "max_seq_len not provided for KV cache capacity check; defaulting to isl + osl = %d. "
+            "Pass max_seq_len explicitly to match your TRT-LLM --max_seq_len setting.",
+            resolved_max_seq_len,
+        )
+    if backend._is_kv_cache_oom(
+        model,
+        database,
+        batch_size,
+        isl,
+        osl,
+        free_gpu_memory_fraction,
+        max_seq_len=resolved_max_seq_len,
+    ):
         kv_warning = (
             f"Requested batch_size ({batch_size}) exceeds estimated KV cache capacity "
             f"(free_gpu_memory_fraction={free_gpu_memory_fraction}). "
