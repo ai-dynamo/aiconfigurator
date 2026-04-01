@@ -712,35 +712,41 @@ def run_mla(attention_backend, head_num, is_prefill, gpu_id, output_path=None):
         cleanup_distributed()
         torch.cuda.empty_cache()
 
-        model_runner = load_model_runner(
-            DEEPSEEK_MODEL_PATH,
-            attention_backend,
-            head_num,
-            test_layer=0,
-            dtype="auto",
-            device="cuda:0",
-            nsa_prefill_backend=nsa_prefill_backend,
-            nsa_decode_backend=nsa_decode_backend,
-        )
+        model_runner = None
+        try:
+            model_runner = load_model_runner(
+                DEEPSEEK_MODEL_PATH,
+                attention_backend,
+                head_num,
+                test_layer=0,
+                dtype="auto",
+                device="cuda:0",
+                nsa_prefill_backend=nsa_prefill_backend,
+                nsa_decode_backend=nsa_decode_backend,
+            )
 
-        run_attention_torch(
-            model_runner,
-            cases,
-            attention_backend,
-            head_num,
-            test_layer=0,
-            num_warmup=3,
-            num_iterations=10,
-            enable_profiler=False,
-            device="cuda:0",
-            output_path=output_path,
-            nsa_prefill_backend=nsa_prefill_backend,
-            nsa_decode_backend=nsa_decode_backend,
-        )
-
-        del model_runner
-        cleanup_distributed()
-        torch.cuda.empty_cache()
+            run_attention_torch(
+                model_runner,
+                cases,
+                attention_backend,
+                head_num,
+                test_layer=0,
+                num_warmup=3,
+                num_iterations=10,
+                enable_profiler=False,
+                device="cuda:0",
+                output_path=output_path,
+                nsa_prefill_backend=nsa_prefill_backend,
+                nsa_decode_backend=nsa_decode_backend,
+            )
+        except Exception as e:
+            backend_label = f"{attention_backend}(prefill={nsa_prefill_backend}, decode={nsa_decode_backend})"
+            print(f"Skipping unsupported {backend_label}: {e!s}")
+        finally:
+            if model_runner is not None:
+                del model_runner
+            cleanup_distributed()
+            torch.cuda.empty_cache()
 
 
 def _run_mla_subprocess(attention_backend, head_num, is_prefill, gpu_id):

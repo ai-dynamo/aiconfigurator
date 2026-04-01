@@ -47,7 +47,6 @@ def parse_log_file(log_path: str) -> list[dict]:
 
     # Find all configuration lines
     config_matches = list(re.finditer(config_pattern, content))
-    print(config_matches)
 
     for i, config_match in enumerate(config_matches):
         # Extract configuration fields
@@ -119,7 +118,6 @@ def parse_log_file(log_path: str) -> list[dict]:
             )
 
         results.append(result)
-    print(results)
 
     return results
 
