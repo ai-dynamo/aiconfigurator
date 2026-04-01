@@ -40,6 +40,19 @@ except Exception:
     _vllm_ops = None
     prepare_static_weights_for_trtllm_fp4_moe = None
 
+# MXFP4 support: uses vLLM's high-level FusedMoE module with Mxfp4Config.
+# This lets vLLM handle backend selection (FlashInfer/Triton/Marlin) and
+# weight swizzle internally, so one code path works on all GPUs.
+_mxfp4_available = False
+try:
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
+
+    _mxfp4_available = True
+except Exception:
+    pass
+
 from collector.common_test_cases import get_common_moe_test_cases
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
@@ -57,6 +70,10 @@ def get_moe_test_cases():
         moe_list += ["fp8_block"]
     if get_sm_version() >= 100:
         moe_list += ["nvfp4"]
+    if _mxfp4_available:
+        moe_list += ["w4a16_mxfp4"]
+
+    _gpt_oss_models = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
 
     test_cases = []
 
@@ -65,14 +82,20 @@ def get_moe_test_cases():
             continue
 
         model_name = common_moe_testcase.model_name
-        if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
-            continue
 
         # vllm does not support TP when EP is enabled.
         if common_moe_testcase.tp > 1 and common_moe_testcase.ep > 1:
             continue
 
         for moe_type in moe_list:
+            # GPT-OSS models only use mxfp4 quantization in production;
+            # skip them for other quant types.
+            if model_name in _gpt_oss_models and moe_type != "w4a16_mxfp4":
+                continue
+            # Conversely, mxfp4 is only collected for GPT-OSS models.
+            if moe_type == "w4a16_mxfp4" and model_name not in _gpt_oss_models:
+                continue
+
             # fp8_block requires hidden_size divisible by block group_size (128)
             if moe_type == "fp8_block" and (
                 common_moe_testcase.hidden_size % 128 != 0
@@ -89,6 +112,13 @@ def get_moe_test_cases():
                 common_moe_testcase.hidden_size % 512 != 0
                 or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 64 != 0
                 or common_moe_testcase.topk > 10
+            ):
+                continue
+
+            # w4a16_mxfp4 requires dimensions aligned to group_size (32)
+            if moe_type == "w4a16_mxfp4" and (
+                common_moe_testcase.hidden_size % 32 != 0
+                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 32 != 0
             ):
                 continue
 
@@ -165,6 +195,53 @@ def run_moe_torch(
         dtype=torch.float16,
         device=device,
     )
+
+    # MXFP4 path: uses vLLM's high-level FusedMoE module with Mxfp4Config.
+    # vLLM handles backend selection (FlashInfer/Triton/Marlin) and weight swizzle.
+    use_mxfp4 = moe_type == "w4a16_mxfp4"
+    moe_module = None
+
+    if use_mxfp4:
+        if not _mxfp4_available:
+            raise ImportError("MXFP4 MoE requires vllm >= 0.14.0 with Mxfp4Config support.")
+
+        mxfp4_quant_config = Mxfp4Config()
+
+        with set_current_vllm_config(VllmConfig()):
+            moe_module = FusedMoE(
+                num_experts=num_experts,
+                top_k=topk,
+                hidden_size=hidden_size,
+                intermediate_size=local_inter_size,
+                reduce_results=False,
+                renormalize=True,
+                quant_config=mxfp4_quant_config,
+                tp_size=moe_tp_size,
+                ep_size=moe_ep_size,
+                prefix="",
+                has_bias=True,  # GPT-OSS uses bias
+                activation="swigluoai",  # GPT-OSS activation
+            )
+        moe_module.to(device)
+        moe_module.eval()
+        moe_module.requires_grad_(False)
+
+        # Fill synthetic mxfp4 weights (uint8 packed, E2M1 format)
+        with torch.no_grad():
+            moe_module.w13_weight.data.random_(0, 255)
+            moe_module.w2_weight.data.random_(0, 255)
+            moe_module.w13_weight_scale.data.random_(0, 255)
+            moe_module.w2_weight_scale.data.random_(0, 255)
+            if hasattr(moe_module, "w13_bias"):
+                moe_module.w13_bias.data.normal_()
+            if hasattr(moe_module, "w2_bias"):
+                moe_module.w2_bias.data.normal_()
+
+        # Trigger backend selection + weight swizzle for current GPU
+        moe_module.quant_method.process_weights_after_loading(moe_module)
+
+        # Free float16 weights; not used for mxfp4.
+        del w1, w2
 
     # NVFP4 path: uses FlashInfer TRTLLM FP4 monolithic kernel (not fused_experts).
     use_nvfp4 = moe_type == "nvfp4"
@@ -267,7 +344,7 @@ def run_moe_torch(
             block_shape=block_shape,
         )
 
-    if dtype == torch.float8_e4m3fn:
+    if not use_mxfp4 and dtype == torch.float8_e4m3fn:
         w1 = w1.to(dtype)
         w2 = w2.to(dtype)
 
@@ -275,11 +352,27 @@ def run_moe_torch(
     for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
         print("num_tokens", num_tokens)
         print("topk", topk)
-        hidden_states = torch.randn([num_tokens, hidden_size]).half().to(device)
+        hs_dtype = torch.bfloat16 if use_mxfp4 else torch.float16
+        hidden_states = torch.randn([num_tokens, hidden_size], dtype=hs_dtype, device=device)
 
-        # Generate topk_weights and topk_ids
+        # Generate routing inputs.
+        # mxfp4 path uses FusedMoE.forward(hidden_states, router_logits) which does
+        # routing internally; other paths need pre-computed topk_weights/topk_ids.
         num_iter = 5 if distributed == "power_law" else 1
-        if distributed == "power_law":
+        if use_mxfp4:
+            # FusedMoE.forward() takes raw router logits (num_tokens, num_experts)
+            if distributed == "power_law":
+                actual_logits_list = [
+                    power_law_logits_v3(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha)
+                    .to(torch.bfloat16)
+                    .to(device)
+                    for _ in range(num_iter)
+                ]
+            elif distributed == "balanced":
+                actual_logits = balanced_logits(num_tokens, num_experts, topk).to(torch.bfloat16).to(device)
+            else:
+                raise ValueError(f"Unsupported distributed mode: {distributed}")
+        elif distributed == "power_law":
             topk_weights_list = []
             topk_ids_list = []
 
@@ -357,7 +450,14 @@ def run_moe_torch(
             )
 
         def run_single_iteration():
-            if use_nvfp4:
+            if use_mxfp4:
+                # FusedMoE.forward(hidden_states, router_logits) does routing internally.
+                if distributed == "power_law":
+                    for logits in actual_logits_list:
+                        moe_module.forward(hidden_states[: logits.shape[0]], logits[: logits.shape[0]])
+                else:
+                    moe_module.forward(hidden_states, actual_logits)
+            elif use_nvfp4:
                 if distributed == "power_law":
                     for tw, ti in zip(topk_weights_list, topk_ids_list):
                         _run_nvfp4_once(hidden_states[: tw.shape[0]], tw, ti)
@@ -414,7 +514,12 @@ def run_moe_torch(
 
         print(f"moe latency: {latency}")
 
-        source = "vllm_flashinfer_trtllm_moe_fp4" if use_nvfp4 else "vllm_fused_moe"
+        if use_mxfp4:
+            source = "vllm_mxfp4_moe"
+        elif use_nvfp4:
+            source = "vllm_flashinfer_trtllm_moe_fp4"
+        else:
+            source = "vllm_fused_moe"
 
         log_perf(
             item_list=[
