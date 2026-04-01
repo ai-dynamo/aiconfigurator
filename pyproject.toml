@@ -15,6 +15,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Intended Audience :: Information Technology",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -37,7 +38,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 
 dependencies = [
     "jinja2>=3.1.0",
@@ -104,7 +105,7 @@ exclude = ["tests", "docker", "collector", "systems"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py39"
 extend-exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
