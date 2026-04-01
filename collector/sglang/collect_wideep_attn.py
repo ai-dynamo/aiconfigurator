@@ -34,7 +34,7 @@ except ModuleNotFoundError:
 DEEPSEEK_MODEL_PATH = _get_deepseek_model_path()
 
 
-def _get_nsa_default_kv_cache_dtype(device_name: str) -> str:
+def _get_dsa_default_kv_cache_dtype(device_name: str) -> str:
     if "H" in device_name:
         return "float16"
     if "B" in device_name:
@@ -387,7 +387,7 @@ def run_attention_torch(
                 try:
                     collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     perf_name = (
-                        "wideep_context_nsa_perf.txt" if attention_backend == "nsa" else "wideep_context_mla_perf.txt"
+                        "wideep_context_dsa_perf.txt" if attention_backend == "nsa" else "wideep_context_mla_perf.txt"
                     )
                     perf_filename = (
                         os.path.join(collector_dir, perf_name)
@@ -399,8 +399,8 @@ def run_attention_torch(
                     kernel_source = attention_backend
                     kv_cache_dtype = "fp8"
                     if attention_backend == "nsa":
-                        kernel_source = f"nsa_{nsa_prefill_backend}"
-                        kv_cache_dtype = _get_nsa_default_kv_cache_dtype(device_name)
+                        kernel_source = f"dsa_{nsa_prefill_backend}"
+                        kv_cache_dtype = _get_dsa_default_kv_cache_dtype(device_name)
                     log_perf(
                         item_list=[
                             {
@@ -576,7 +576,7 @@ def run_attention_torch(
                 try:
                     collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     perf_name = (
-                        "wideep_generation_nsa_perf.txt"
+                        "wideep_generation_dsa_perf.txt"
                         if attention_backend == "nsa"
                         else "wideep_generation_mla_perf.txt"
                     )
@@ -590,8 +590,8 @@ def run_attention_torch(
                     kernel_source = attention_backend
                     kv_cache_dtype = "fp8"
                     if attention_backend == "nsa":
-                        kernel_source = f"nsa_{nsa_decode_backend}"
-                        kv_cache_dtype = _get_nsa_default_kv_cache_dtype(device_name)
+                        kernel_source = f"dsa_{nsa_decode_backend}"
+                        kv_cache_dtype = _get_dsa_default_kv_cache_dtype(device_name)
                     log_perf(
                         item_list=[
                             {
@@ -649,7 +649,7 @@ def get_wideep_mla_context_test_cases():
 
     if MODEL_VARIANT == "v3_2":
         backends = ["nsa"]
-        perf_filename = "wideep_context_nsa_perf.txt"
+        perf_filename = "wideep_context_dsa_perf.txt"
     else:
         # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
         backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
@@ -663,7 +663,7 @@ def get_wideep_mla_generation_test_cases():
 
     if MODEL_VARIANT == "v3_2":
         backends = ["nsa"]
-        perf_filename = "wideep_generation_nsa_perf.txt"
+        perf_filename = "wideep_generation_dsa_perf.txt"
     else:
         # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
         backends = ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
@@ -684,21 +684,21 @@ def run_mla(attention_backend, head_num, is_prefill, gpu_id, output_path=None):
     if is_prefill:
         all_cases = get_attention_prefill_test_cases()
         phase_name = "Context"
-        nsa_prefill_backends = ["flashmla_sparse"]
-        nsa_backends = nsa_prefill_backends if attention_backend == "nsa" else [None]
+        dsa_prefill_backends = ["flashmla_sparse"]
+        dsa_backends = dsa_prefill_backends if attention_backend == "nsa" else [None]
     else:
         all_cases = get_attention_decode_test_cases()
         phase_name = "Generation"
-        nsa_decode_backends = ["fa3"]
-        nsa_backends = nsa_decode_backends if attention_backend == "nsa" else [None]
+        dsa_decode_backends = ["fa3"]
+        dsa_backends = dsa_decode_backends if attention_backend == "nsa" else [None]
 
     cases = [tc for tc in all_cases if tc[2] == attention_backend and tc[3] == head_num]
 
-    for nsa_backend in nsa_backends:
+    for dsa_backend in dsa_backends:
         if attention_backend == "nsa":
-            backend_label = f"nsa_{nsa_backend}"
-            nsa_prefill_backend = nsa_backend if is_prefill else None
-            nsa_decode_backend = nsa_backend if not is_prefill else None
+            backend_label = f"dsa_{dsa_backend}"
+            nsa_prefill_backend = dsa_backend if is_prefill else None
+            nsa_decode_backend = dsa_backend if not is_prefill else None
         else:
             backend_label = attention_backend
             nsa_prefill_backend = None

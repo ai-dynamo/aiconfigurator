@@ -4291,12 +4291,12 @@ class PerfDatabase:
                     attn_data = self._wideep_generation_mla_data["flashinfer"]
                 elif attn_backend == "fa3":
                     attn_data = self._wideep_generation_mla_data["fa3"]
-                elif attention_backend == "nsa_flashmla_sparse":
-                    attn_data = self._wideep_generation_mla_data["nsa_flashmla_sparse"]
-                elif attention_backend == "nsa_flashmla_kv":
-                    attn_data = self._wideep_generation_mla_data["nsa_flashmla_kv"]
-                elif attention_backend == "nsa_fa3":
-                    attn_data = self._wideep_generation_mla_data["nsa_fa3"]
+                elif attention_backend == "dsa_flashmla_sparse":
+                    attn_data = self._wideep_generation_mla_data["dsa_flashmla_sparse"]
+                elif attention_backend == "dsa_flashmla_kv":
+                    attn_data = self._wideep_generation_mla_data["dsa_flashmla_kv"]
+                elif attention_backend == "dsa_fa3":
+                    attn_data = self._wideep_generation_mla_data["dsa_fa3"]
                 else:
                     raise ValueError(f"Unsupported attention backend: {attn_backend}")
                 # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
@@ -4424,10 +4424,10 @@ class PerfDatabase:
                     attn_data = self._wideep_context_mla_data["flashinfer"]
                 elif attn_backend == "fa3":
                     attn_data = self._wideep_context_mla_data["fa3"]
-                elif attention_backend == "nsa_flashmla_sparse":
-                    attn_data = self._wideep_context_mla_data["nsa_flashmla_sparse"]
-                elif attention_backend == "nsa_fa3":
-                    attn_data = self._wideep_context_mla_data["nsa_fa3"]
+                elif attention_backend == "dsa_flashmla_sparse":
+                    attn_data = self._wideep_context_mla_data["dsa_flashmla_sparse"]
+                elif attention_backend == "dsa_fa3":
+                    attn_data = self._wideep_context_mla_data["dsa_fa3"]
                 else:
                     raise ValueError(f"Unsupported attention backend: {attn_backend}")
 
