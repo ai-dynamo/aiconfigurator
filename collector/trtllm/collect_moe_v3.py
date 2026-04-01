@@ -412,7 +412,6 @@ def run_moe_torch(
     # the conversion here to avoid cudaErrorIllegalAddress from TMA OOB access.
     if moe_type == "fp8_block" and sm_version >= 100:
         from tensorrt_llm.quantization.utils.fp8_utils import transform_sf_into_required_layout
-        from torch import nn
 
         # Transform w3_w1 weight scales: float32 [G, N/128, K/128] -> int32 UE8M0 [G, N, sf_k_tma]
         transformed_w3w1 = transform_sf_into_required_layout(
@@ -423,17 +422,17 @@ def run_moe_torch(
             num_groups=moe.w3_w1_weight.shape[0],
             is_sfa=False,
         )
-        moe.w3_w1_weight_scaling_factor = nn.Parameter(transformed_w3w1, requires_grad=False)
+        moe.w3_w1_weight_scaling_factor = torch.nn.Parameter(transformed_w3w1, requires_grad=False)
         # Transform w2 weight scales
         transformed_w2 = transform_sf_into_required_layout(
             moe.quant_scales[1],
             mn=moe.w2_weight.shape[1],
             k=moe.w2_weight.shape[2],
             recipe=(1, 128, 128),
-            num_groups=moe.w3_w1_weight.shape[0],
+            num_groups=moe.w2_weight.shape[0],
             is_sfa=False,
         )
-        moe.w2_weight_scaling_factor = nn.Parameter(transformed_w2, requires_grad=False)
+        moe.w2_weight_scaling_factor = torch.nn.Parameter(transformed_w2, requires_grad=False)
         # Rebuild quant_scales tuple with the transformed tensors
         moe.quant_method.setup_quant_scales(moe)
         if aic_debug == 1:
