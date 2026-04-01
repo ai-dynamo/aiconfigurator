@@ -20,7 +20,7 @@ max_seq_len: {{ _max_seq_len }}
 
 kv_cache_config:
   enable_block_reuse: {{ kv_cache_config.enable_block_reuse | default(false) }}
-  free_gpu_memory_fraction: {{ kv_cache_config.free_gpu_memory_fraction | default(0.90) }}  # Fraction for KV‑cache
+  free_gpu_memory_fraction: {{ kv_cache_config.free_gpu_memory_fraction | default(0.80) }}  # Fraction for KV‑cache
   {% if kv_cache_config.tokens_per_block is defined %}
   tokens_per_block: {{ kv_cache_config.tokens_per_block }}
   {% endif %}
