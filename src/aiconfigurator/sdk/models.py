@@ -240,9 +240,9 @@ def get_model(
         )
         model.set_hybrid_config(extra_params)
     elif model_family == "MOE":
-        if backend_name == "sglang" and model_config.enable_wideep:
-            logger.debug(f"WideEP is enabled for MOE model {model_path} with backend {backend_name}")
-            model = SGLangWideEPMOEModel(
+        if backend_name == "sglang":
+            logger.debug(f"Using SGLangEPMOEModel for MOE model {model_path} with backend {backend_name}")
+            model = SGLangEPMOEModel(
                 topk,
                 num_experts,
                 moe_inter_size,
@@ -3102,11 +3102,12 @@ class WideEPDeepSeekModel(BaseModel):
         )
 
 
-class SGLangWideEPMOEModel(BaseModel):
+class SGLangEPMOEModel(BaseModel):
     """
-    SGLang WideEP model for MoE family models (e.g. Qwen3-235B).
-    Uses the same wideep/deepep perf tables and moe_backend="deepep_moe" as WideEPDeepSeekModel,
-    but with standard GQA attention (not MLA) following the MOEModel op graph.
+    SGLang EP model for MoE family models (e.g. Qwen3-235B).
+    Used for all SGLang MoE models regardless of enable_wideep setting.
+    Uses wideep/deepep perf tables and moe_backend from config,
+    with standard GQA attention (not MLA) following the MOEModel op graph.
     """
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
