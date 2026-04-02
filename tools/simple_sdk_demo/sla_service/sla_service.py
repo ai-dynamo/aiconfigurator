@@ -32,8 +32,8 @@ class PrettyJSONResponse(Response):
 
 
 app = FastAPI(
-    title="Dynamo AIConfigurator SLA API",
-    description="Dynamo AIConfigurator SLA API",
+    title="AIConfigurator SLA API",
+    description="AIConfigurator SLA API",
     default_response_class=PrettyJSONResponse,
 )
 

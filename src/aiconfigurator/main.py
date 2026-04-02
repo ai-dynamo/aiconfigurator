@@ -35,7 +35,7 @@ def _run_webapp(extra_args: list[str]) -> None:
     from aiconfigurator.webapp.main import configure_parser as configure_webapp_parser
     from aiconfigurator.webapp.main import main as webapp_main
 
-    webapp_parser = argparse.ArgumentParser(description="Dynamo AIConfigurator web interface")
+    webapp_parser = argparse.ArgumentParser(description="AIConfigurator web interface")
     configure_webapp_parser(webapp_parser)
     webapp_args = webapp_parser.parse_args(extra_args)
     webapp_main(webapp_args)
@@ -44,7 +44,7 @@ def _run_webapp(extra_args: list[str]) -> None:
 def _run_cli(extra_args: list[str]) -> None:
     if generator_cli_helper(extra_args):
         return
-    cli_parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for disaggregated serving deployment.")
+    cli_parser = argparse.ArgumentParser(description="AIConfigurator for disaggregated serving deployment.")
     configure_cli_parser(cli_parser)
     cli_args = cli_parser.parse_args(extra_args)
     cli_main(cli_args)
@@ -55,7 +55,7 @@ def _show_version(extra_args: list[str]) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Dynamo AIConfigurator for disaggregated serving deployment.")
+    parser = argparse.ArgumentParser(description="AIConfigurator for disaggregated serving deployment.")
     subparsers = parser.add_subparsers(dest="command", help="Command to run", required=True)
 
     # CLI subcommand

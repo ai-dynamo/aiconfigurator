@@ -98,7 +98,7 @@ def main(args):
         raise SystemExit(perf_database.build_no_databases_message())
 
     with gr.Blocks(
-        title="Dynamo aiconfigurator for Disaggregated Serving Deployment",
+        title="AIConfigurator for Disaggregated Serving Deployment",
         css="""
         .config-column {
             border-right: 5px solid #e0e0e0;
@@ -131,7 +131,7 @@ def main(args):
             gr.Markdown(
                 f"""
                 <div style="text-align: center;">
-                    <h1>Dynamo aiconfigurator for Disaggregated Serving Deployment</h1>
+                    <h1>AIConfigurator for Disaggregated Serving Deployment</h1>
                     <p style="font-size: 14px; margin-top: -10px;">
                         Version {aiconfigurator.__version__}
                     </p>
@@ -192,7 +192,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Dynamo aiconfigurator Web App")
+    parser = argparse.ArgumentParser(description="AIConfigurator Web App")
     configure_parser(parser)
     args = parser.parse_args()
     main(args)

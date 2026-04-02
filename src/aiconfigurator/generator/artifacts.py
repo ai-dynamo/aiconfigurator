@@ -32,6 +32,8 @@ class ArtifactWriter:
             return os.path.join(self.output_dir, artifact_name)
         if artifact_name == "k8s_bench.yaml":
             return os.path.join(self.output_dir, artifact_name)
+        if artifact_name == "llm-d-values.yaml":
+            return os.path.join(self.output_dir, artifact_name)
         if artifact_name.startswith("extra_engine_args_"):
             if not self._should_emit_engine_file(artifact_name):
                 return None

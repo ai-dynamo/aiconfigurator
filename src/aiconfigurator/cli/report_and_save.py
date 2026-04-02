@@ -289,7 +289,7 @@ def log_final_summary(
     # Consolidate and format results into a summary box for clear presentation
     summary_box = []
     summary_box.append("*" * 80)
-    summary_box.append("*{:^78}*".format(" Dynamo aiconfigurator Final Results "))
+    summary_box.append("*{:^78}*".format(" AIConfigurator Final Results "))
     summary_box.append("*" * 80)
 
     summary_box.append("  " + "-" * 76)
@@ -464,7 +464,6 @@ def save_results(
     save_dir: str,
     generated_backend_version: str | None = None,
     backend: str | None = None,
-    use_dynamo_generator: bool = False,
 ):
     """Save the results to a directory."""
 
@@ -674,6 +673,7 @@ def save_results(
                 )
             # case #3: no override is provided, use the default backend version mapping
             else:
+                deployment_target = getattr(args, "deployment_target", "dynamo-j2")
                 default_dynamo_version, default_backend_versions = get_default_dynamo_version_mapping()
                 if backend != "auto":
                     effective_generated_version = default_backend_versions.get(exp_task_config.backend_name)
@@ -689,17 +689,24 @@ def save_results(
                         f"({backend_name}){backend_version}"
                         for backend_name, backend_version in generated_backend_versions.items()
                     )
+
+                # Set version source based on deployment target
+                if deployment_target == "llm-d":
+                    version_source = "template defaults"
+                else:
+                    version_source = f"dynamo {default_dynamo_version}"
+
                 logger.warning(
                     "\n" + "=" * 80 + "\n"
                     "  🟢  IMPORTANT: Config Generation Version Not Specified\n" + "=" * 80 + "\n"
                     "  Experiment: %s\n"
                     "  --generated-config-version NOT provided\n"
-                    "  Defaulting to backend versions from dynamo %s: %s\n"
+                    "  Defaulting to backend version from %s: %s\n"
                     "\n"
                     "  Config formats differ across backend releases. If you are targeting\n"
                     "  a different version, please pass --generated-config-version explicitly!\n" + "=" * 80,
                     exp_name,
-                    default_dynamo_version,
+                    version_source,
                     backend_version_str,
                 )
 
@@ -739,12 +746,13 @@ def save_results(
                         yaml.safe_dump(cfg, f, sort_keys=False)
 
                     try:
+                        deployment_target = getattr(args, "deployment_target", "dynamo-j2")
                         generate_backend_artifacts(
                             params=cfg,
                             backend=row_task_config.backend_name,
                             backend_version=row_backend_version,
                             output_dir=top_config_dir,
-                            use_dynamo_generator=use_dynamo_generator,
+                            deployment_target=deployment_target,
                         )
                     except Exception as exc:
                         logger.warning(

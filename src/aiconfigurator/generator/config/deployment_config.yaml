@@ -191,3 +191,35 @@ inputs:
   - key: BenchConfig.ui
     required: false
     default: "'simple'"
+
+  # LlmdConfig - llm-d specific configuration
+  - key: LlmdConfig.vllm_image
+    required: false
+    default: "vllm/vllm-openai:latest"
+  - key: LlmdConfig.sglang_image
+    required: false
+    default: "lmsysorg/sglang:latest"
+  - key: LlmdConfig.model_cache_size
+    required: false
+    default: "100Gi"
+  - key: LlmdConfig.model_mount_path
+    required: false
+    default: "/model-cache"
+  - key: LlmdConfig.routing_proxy_enabled
+    required: false
+    default: true
+  - key: LlmdConfig.routing_proxy_image
+    required: false
+    default: "ghcr.io/llm-d/llm-d-routing-sidecar:latest"
+  - key: LlmdConfig.routing_connector
+    required: false
+    default: "nixlv2"
+  - key: LlmdConfig.log_level
+    required: false
+    default: "info"
+  - key: LlmdConfig.multinode
+    required: false
+    default: false
+  - key: LlmdConfig.monitoring_enabled
+    required: false
+    default: false

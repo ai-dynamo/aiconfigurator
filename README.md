@@ -76,8 +76,9 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
 - `--model` is an alias for `--model-path` in the CLI.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
+- Use `--deployment-target` to specify the deployment platform: `dynamo-j2` (default, Jinja2 templates), `dynamo-python` (Dynamo Python config modifiers), or `llm-d` (llm-d Helm values). Backends vllm and sglang support llm-d; trtllm is Dynamo-only.
 - Use `exp`, pass in exp.yaml by `--yaml-path` to customize your experiments and even a heterogenous one.
-- Use `--save-dir DIR` to generate framework configuration files for Dynamo.
+- Use `--save-dir DIR` to generate deployment configuration files (Dynamo K8s manifests or llm-d Helm values, depending on `--deployment-target`).
 - Use `--database-mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only). Please be careful, only `SILICON` mode's result is reproducible. Other modes are for research purpose
 - Use `--systems-paths` to override where system YAMLs and data are loaded from (comma-separated; `default` maps to the built-in systems path). First match wins for identical system/backend/version.
 - Use `-h` for more options and customization.
@@ -136,7 +137,7 @@ aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --sys
 
 ```text
 ********************************************************************************
-*                     Dynamo aiconfigurator Final Results                      *
+*                         AIConfigurator Final Results                         *
 ********************************************************************************
   ----------------------------------------------------------------------------
   Input Configuration & SLA Target:
@@ -235,13 +236,47 @@ We can use `exp` mode to compare multiple results, including disagg vs. agg, hom
 We've crafted several examples in `src/aiconfigurator/cli/exps/*.yaml`  
 For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).
 
+### Deploying to llm-d Platform
+
+AIConfigurator supports deploying to the llm-d platform using Helm values. Use `--deployment-target llm-d` with vLLM or SGLang backends:
+
+```bash
+# vLLM on llm-d
+aiconfigurator cli default \
+  --model-path Qwen/Qwen3-32B \
+  --total-gpus 32 \
+  --system h200_sxm \
+  --backend vllm \
+  --deployment-target llm-d \
+  --save-dir ./output
+
+# SGLang on llm-d
+aiconfigurator cli default \
+  --model-path Qwen/Qwen3-32B \
+  --total-gpus 32 \
+  --system h200_sxm \
+  --backend sglang \
+  --deployment-target llm-d \
+  --save-dir ./output
+```
+
+This generates `llm-d-values.yaml` files compatible with the llm-d-modelservice Helm chart. The generated Helm values include model artifacts, parallelism settings, and container configurations optimized for your workload.
+
+You can customize llm-d-specific settings using generator overrides:
+```bash
+--generator-set LlmdConfig.vllm_image=vllm/vllm-openai:v0.6.0 \
+--generator-set LlmdConfig.model_cache_size=200Gi \
+--generator-set LlmdConfig.routing_proxy_enabled=true
+```
+
 ### Generate Configurations for Dynamo and Reproduce the results
 
 Please refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details about deployment and reproduction especially about the benchmark methodology.
 
-To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save-dir`, the tool generates configuration files for deploying with Dynamo.
-This feature bridges the gap between configuration and Dynamo deployment.
-The folder structure looks like this:
+To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save-dir`, the tool generates configuration files for your chosen deployment target.
+The folder structure varies based on `--deployment-target`:
+
+**For Dynamo deployments** (`--deployment-target dynamo-j2` or `dynamo-python`):
 
 ```text
 results/QWEN3_32B_FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
@@ -274,6 +309,27 @@ results/QWEN3_32B_FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 │   ...
 └── pareto_frontier.png
 ```
+
+**For llm-d deployments** (`--deployment-target llm-d`):
+
+```text
+results/QWEN3_32B_h200_sxm_vllm_isl4000_osl1000_ttft1000_tpot20_904495
+├── disagg
+│   ├── best_config_topn.csv
+│   ├── config.yaml
+│   ├── pareto.csv
+│   ├── top1
+│   │   ├── disagg
+│   │   │   ├── decode_config.yaml
+│   │   │   ├── llm-d-values.yaml    # Helm values for llm-d-modelservice chart
+│   │   │   ├── node_0_run.sh
+│   │   │   └── prefill_config.yaml
+│   │   └── generator_config.yaml
+│   ...
+└── pareto_frontier.png
+```
+
+Note: llm-d deployments generate `llm-d-values.yaml` instead of `k8s_deploy.yaml` and `k8s_bench.yaml`.
 
 Use `--generator-config path/to/file.yaml` to load a YAML payload with `ServiceConfig`, `K8sConfig`, `DynConfig`, `WorkerConfig`, and `Workers.<role>` sections, or specify inline overrides with `--generator-set KEY=VALUE` (repeatable). Examples:
 

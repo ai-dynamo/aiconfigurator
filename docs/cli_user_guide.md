@@ -420,11 +420,24 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_90449
 │   ...
 └── pareto_frontier.png
 ```
-By default, we output top 5 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. `agg_config.yaml` and `node_0_run.sh` are the files you need to deploy with Dynamo. If you want to deploy using k8s, you can leverage `k8s_deploy.yaml`. For benchmarking, see the [Benchmark Artifacts](#benchmark-artifacts) section below. Refer to [deployment guide](dynamo_deployment_guide.md) for info about deployment.
+By default, we output the top 5 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. The generated files depend on your `--deployment-target`:
+- **Dynamo** (default): `k8s_deploy.yaml` for Kubernetes deployment, plus engine configs (`agg_config.yaml`, `prefill_config.yaml`, `decode_config.yaml`) and run scripts (`node_0_run.sh`)
+- **llm-d**: `llm-d-values.yaml` for Helm deployment with the llm-d-modelservice chart
+
+For benchmarking, see the [Benchmark Artifacts](#benchmark-artifacts) section below. Refer to [deployment guide](dynamo_deployment_guide.md) for Dynamo deployments or the [README llm-d section](../README.md#deploying-to-llm-d-platform) for llm-d deployments.
 
 `--save-dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated-config-version 1.0.0rc6` can give you the right result.
 
-**Generator Dynamo version**
+**Deployment Target Selection**
+
+Use `--deployment-target` to choose which orchestration platform to deploy to:
+- `dynamo-j2` (default): Generates Dynamo Kubernetes manifests using Jinja2 templates
+- `dynamo-python`: Generates Dynamo Kubernetes manifests using Dynamo's Python config modifiers (requires `dynamo` package)
+- `llm-d`: Generates Helm values for the llm-d-modelservice chart
+
+The backend (`--backend trtllm/vllm/sglang`) and deployment target are orthogonal choices. Note that TRT-LLM only supports Dynamo platforms, while vLLM and SGLang support all three options.
+
+**Generator Dynamo version** (applies to Dynamo deployments only)
 - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
 - If `--generator-dynamo-version` is not provided, the default is the first entry in `backend_version_matrix.yaml` (currently `1.0.0`).
 - If `--generated-config-version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the selected Dynamo version mapping.
@@ -478,7 +491,7 @@ aiconfigurator cli default \
 The summary will highlight the fastest configuration whose estimated request latency is ≤ 12,000 ms and will show the derived TTFT/TPOT pair that satisfied the constraint. The example output,
 ```
 ********************************************************************************
-*                     Dynamo aiconfigurator Final Results                      *
+*                         AIConfigurator Final Results                         *
 ********************************************************************************
   ----------------------------------------------------------------------------
   Input Configuration & SLA Target:
@@ -928,10 +941,17 @@ cd results/.../disagg/top1/
 bash run_0.sh
 ```
 
-For Kubernetes:
+For Kubernetes (Dynamo):
 
 ```bash
 kubectl apply -f results/.../disagg/top1/k8s_deploy.yaml
+```
+
+For llm-d (Helm):
+
+```bash
+helm install my-model llm-d/llm-d-modelservice \
+  --values results/.../disagg/top1/llm-d-values.yaml
 ```
 
 See the [Deployment Guide](dynamo_deployment_guide.md) for multi-node and K8s details.
