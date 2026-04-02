@@ -212,7 +212,7 @@ def run_moe_torch(
                 num_experts=num_experts,
                 top_k=topk,
                 hidden_size=hidden_size,
-                intermediate_size=local_inter_size,
+                intermediate_size=inter_size,
                 reduce_results=False,
                 renormalize=True,
                 quant_config=mxfp4_quant_config,
