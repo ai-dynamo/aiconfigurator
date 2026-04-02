@@ -819,7 +819,7 @@ def run_moe(
 # ============================================================================
 
 
-def get_wideep_moe_test_cases(total_experts=128):
+def get_wideep_moe_test_cases(total_experts=256):
     """Returns list of [num_experts, perf_filename] for MOE collection.
 
     Each num_experts value simulates a different EP size based on model's total experts.
