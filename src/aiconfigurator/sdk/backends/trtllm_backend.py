@@ -447,11 +447,14 @@ class TRTLLMBackend(BaseBackend):
         # during the loop, as b, ctx_tokens and system memory are monotonic, we can break the
         # inner loop when the system is oom.
         free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction", 1.0)
+        max_seq_len_kv = kwargs.get("max_seq_len") or (isl + osl)
         b_list = [
             b
             for b in b_list_default
             if b <= max_batch_size
-            and not self._is_kv_cache_oom(model, database, b, isl, osl, free_gpu_memory_fraction, max_seq_len=isl + osl)
+            and not self._is_kv_cache_oom(
+                model, database, b, isl, osl, free_gpu_memory_fraction, max_seq_len=max_seq_len_kv
+            )
         ]
         ctx_tokens_list = self._get_ctx_tokens_list_for_agg_sweep(isl, ctx_stride, enable_chunked_prefill)
 

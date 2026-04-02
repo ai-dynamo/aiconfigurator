@@ -29,6 +29,8 @@ def agg_pareto(
     model_config: config.ModelConfig,
     parallel_config_list: list[list[int]],
     enable_chunked_prefill: bool = False,
+    free_gpu_memory_fraction: float = 1.0,
+    max_seq_len: int | None = None,
 ) -> pd.DataFrame:
     """
     Find Pareto front for agg.
@@ -113,6 +115,8 @@ def agg_pareto(
                     max_batch_size=512,
                     ctx_stride=512,
                     enable_chunked_prefill=enable_chunked_prefill,
+                    free_gpu_memory_fraction=free_gpu_memory_fraction,
+                    max_seq_len=max_seq_len,
                 )
                 if not summary.check_oom():
                     all_configs_oom = False
