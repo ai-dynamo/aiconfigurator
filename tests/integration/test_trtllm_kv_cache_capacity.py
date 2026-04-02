@@ -162,7 +162,7 @@ class TestKvCacheOomProperties:
 # We call _is_kv_cache_oom with the same parameters and assert:
 #   - batch_size = bench_max_bs - tolerance → NOT KV OOM
 #   - batch_size = bench_max_bs + tolerance + 1 → IS KV OOM
-# tolerance = max(1, int(bench_max_bs * 0.035))  (±3.5% or ±1)
+# tolerance = max(1, int(bench_max_bs * KV_CACHE_MEMORY_TOLERANCE))
 # ---------------------------------------------------------------------------
 
 # fmt: off
@@ -268,7 +268,7 @@ def test_kv_oom_boundary(system, model_path, tp, isl, osl, frac, bench_max_bs):
     (max_seq_len=isl+osl+1000) and asserts:
       - batch_size = bench_max_bs - tol → NOT KV OOM
       - batch_size = bench_max_bs + tol + 1 → IS KV OOM
-    where tol = max(1, int(bench_max_bs * 0.035))  (±3.5% or ±1)
+    where tol = max(1, int(bench_max_bs * KV_CACHE_MEMORY_TOLERANCE))
 
     Uses float16 KV cache to match benchmark conditions.
     """
