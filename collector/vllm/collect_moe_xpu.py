@@ -49,7 +49,7 @@ def resolve_moe_activation(model_name: str) -> str:
         return "gelu"
     if "gpt-oss" in name:
         return "swigluoai"
-    
+
     return "silu"
 
 
