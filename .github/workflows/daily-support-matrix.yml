@@ -115,6 +115,7 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          signoff: true
           commit-message: "fix: update support matrix"
           title: "fix: update support matrix [${{ env.TARGET_BRANCH }}]"
           body-path: pr_body.md
