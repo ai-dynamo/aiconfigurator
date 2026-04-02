@@ -882,7 +882,6 @@ def _run_agg_estimate(
             f"(free_gpu_memory_fraction={free_gpu_memory_fraction}). "
             f"TRT-LLM will queue excess requests, causing significantly higher TTFT and inaccurate TPOT."
         )
-        logger.warning(kv_warning)
 
     return EstimateResult(
         ttft=result_dict["ttft"],

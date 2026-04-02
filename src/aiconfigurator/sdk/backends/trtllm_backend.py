@@ -643,17 +643,21 @@ class TRTLLMBackend(BaseBackend):
                 Defaults to KV_CACHE_MEMORY_TOLERANCE.
         """
         memory = self._get_memory_usage(model, database, 1, 1, isl, osl, num_tokens=2 * isl)
-        non_kv_gib = memory["total"] - memory["kvcache"]
-        gpu_capacity_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)
-        available_kv_gib = (gpu_capacity_gib - non_kv_gib) * free_gpu_memory_fraction
-        available_kv_gib *= 1 - KV_CACHE_MEMORY_RESERVED_FRACTION
+        non_kv_gib = memory["total"] - memory["kvcache"]  # weights + activations + nccl + others
+        gpu_capacity_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)  # total GPU capacity in GiB
+        available_kv_gib = (
+            gpu_capacity_gib - non_kv_gib
+        ) * free_gpu_memory_fraction  # available KV memory in GiB after subtracting non-KV memory
+        available_kv_gib *= 1 - KV_CACHE_MEMORY_RESERVED_FRACTION  # subtract reserved memory for internal overhead
         if available_kv_gib <= 0:
             return True
-        kvcache_per_token_gib = memory["kvcache"] / (isl + osl)
+        kvcache_per_token_gib = memory["kvcache"] / (isl + osl)  # KV cache per token
         if kvcache_per_token_gib <= 0:
             return False
         tokens_per_block = 32
-        total_blocks = int(available_kv_gib / (kvcache_per_token_gib * tokens_per_block))
-        blocks_per_seq = math.ceil(max_seq_len / tokens_per_block)
-        max_concurrent_seqs = total_blocks // blocks_per_seq
+        total_blocks = int(
+            available_kv_gib / (kvcache_per_token_gib * tokens_per_block)
+        )  # total blocks that can be cached (capacity)
+        blocks_per_seq = math.ceil(max_seq_len / tokens_per_block)  # total blocks per sequence
+        max_concurrent_seqs = total_blocks // blocks_per_seq  # max concurrent sequences that can be cached (capacity)
         return batch_size > int(max_concurrent_seqs * (1 - kv_cache_capacity_tolerance))

@@ -1395,7 +1395,7 @@ def _run_estimate_mode(args):
     print("=" * 60)
 
     if result.kv_cache_warning:
-        print(f"\n  WARNING: {result.kv_cache_warning}")
+        logger.warning(result.kv_cache_warning)
 
     if args.print_per_ops_latency and result.per_ops_data:
         _print_per_ops_latency(result.per_ops_data)
