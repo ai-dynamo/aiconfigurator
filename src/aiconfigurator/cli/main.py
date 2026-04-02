@@ -390,6 +390,14 @@ def _add_estimate_mode_arguments(parser):
         "Used to estimate max concurrent sequences and warn when batch_size "
         "exceeds KV cache capacity.",
     )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=None,
+        help="TRT-LLM --max_seq_len setting (default: isl + osl). "
+        "Controls how many KV blocks TRT-LLM pre-allocates per sequence. "
+        "Set this to match your actual deployment to get an accurate KV cache capacity warning.",
+    )
 
 
 def _add_support_mode_arguments(parser):
@@ -1325,6 +1333,7 @@ def _run_estimate_mode(args):
         moe_quant_mode=args.moe_quant_mode,
         comm_quant_mode=args.comm_quant_mode,
         free_gpu_memory_fraction=args.free_gpu_memory_fraction,
+        max_seq_len=args.max_seq_len,
     )
 
     if estimate_mode == "disagg":
