@@ -879,6 +879,9 @@ def _run_agg_estimate(
         max_seq_len=resolved_max_seq_len,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
     )
+    # _get_memory_usage inflates kvcache by 1/(frac*(1-reserved)*(1-tol)) when max_seq_len and
+    # free_gpu_memory_fraction < 1.0 are provided, so "total >= gpu_capacity" is mathematically
+    # equivalent to "actual_kvcache >= (gpu_capacity - non_kv) * frac * (1-reserved) * (1-tol)".
     if kv_memory["total"] >= database.system_spec["gpu"]["mem_capacity"] / (1 << 30):
         kv_warning = (
             f"Requested batch_size ({batch_size}) exceeds estimated KV cache capacity "
