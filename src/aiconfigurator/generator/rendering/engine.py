@@ -66,6 +66,9 @@ def _generate_k8s_via_dynamo(
         "image": k8s_cfg.get("k8s_image", ""),
         "namespace": k8s_cfg.get("k8s_namespace"),
     }
+    node_cfg = param_values.get("NodeConfig", {})
+    if node_cfg.get("num_gpus_per_node") is not None:
+        kwargs["num_gpus_per_node"] = int(node_cfg["num_gpus_per_node"])
 
     if mode == "disagg":
         kwargs.update(

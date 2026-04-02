@@ -298,6 +298,7 @@ def _build_agg_dgd_for_candidate(
             decode_cli_args=[],
             decode_replicas=1,
             decode_gpus=1,
+            num_gpus_per_node=num_gpus_per_node,
         )
     else:
         dgd = modifier.build_dgd_config(
@@ -310,6 +311,7 @@ def _build_agg_dgd_for_candidate(
             decode_cli_args=cli_args_list,
             decode_replicas=1,
             decode_gpus=gpus,
+            num_gpus_per_node=num_gpus_per_node,
         )
 
     # Apply PVC after build_dgd_config so we can pass the correct pvc_path
@@ -403,6 +405,7 @@ def enumerate_profiling_configs(
     sys_cfg = _get_system_config(system)
     if num_gpus_per_node is None:
         num_gpus_per_node = sys_cfg["gpus_per_node"]
+    assert num_gpus_per_node is not None
     vram_per_gpu = sys_cfg["vram_per_gpu"]
 
     is_moe = check_is_moe(model_path)
