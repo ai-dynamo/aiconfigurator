@@ -30,6 +30,29 @@ if torch.xpu.is_available():
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 
+def resolve_moe_activation(model_name: str) -> str:
+    """Resolve MoE activation by model name.
+
+    Priority:
+    1) explicit env override via AIC_COLLECTOR_MOE_ACTIVATION
+    2) model-family heuristic
+    3) default silu
+    """
+    env_activation = os.getenv("AIC_COLLECTOR_MOE_ACTIVATION")
+    if env_activation:
+        return env_activation.strip().lower()
+
+    name = model_name.lower()
+    if any(key in name for key in ["qwen", "mixtral", "deepseek", "llama"]):
+        return "silu"
+    if "gemma" in name:
+        return "gelu"
+    if "gpt-oss" in name:
+        return "swigluoai"
+    
+    return "silu"
+
+
 def get_moe_xpu_test_cases():
     # narrow down a bit for xpu
     num_tokens = [
@@ -90,6 +113,9 @@ def get_moe_xpu_test_cases():
     model_config_list = [
         [2048, 1408, 4, 60, "Qwen/Qwen1.5-MoE-A2.7B"],
         [2048, 768, 8, 128, "Qwen/Qwen3-30B-A3B"],
+        [8192, 5120, 1, 16, "meta-llama/Llama-4-Scout-17B-16E"],
+        [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B-Instruct-2507"],
+        [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
     ]
 
     test_cases: list[MoeCommonTestCase] = []
@@ -146,6 +172,8 @@ def get_moe_test_cases():
 
     # Quantization types supported by vLLM
     moe_list = ["float16"]
+    if hasattr(torch, "float8_e4m3fn"):
+        moe_list += ["fp8"]
 
     test_cases = []
 
@@ -178,6 +206,19 @@ def get_moe_test_cases():
     return test_cases
 
 
+def quantize_fp8_per_expert(weights: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    fp8_dtype = torch.float8_e4m3fn
+    fp8_info = torch.finfo(fp8_dtype)
+    fp32_weights = weights.to(torch.float32)
+
+    num_experts_local = weights.shape[0]
+    random_exponents = torch.randint(-3, 4, (num_experts_local,), device=weights.device)
+    scales = torch.pow(2.0, random_exponents.float())
+
+    qweights = (fp32_weights / scales.view(-1, 1, 1)).clamp(min=fp8_info.min, max=fp8_info.max).to(fp8_dtype)
+    return qweights, scales
+
+
 def run_moe_torch(
     moe_type,
     num_tokens_lists,
@@ -200,6 +241,8 @@ def run_moe_torch(
 
     # Configure quantization parameters
     quant_config = None
+    is_fp8 = moe_type == "fp8"
+    activation_name = resolve_moe_activation(model_name)
 
     # Calculate local number of experts
     local_inter_size = inter_size // moe_tp_size
@@ -211,23 +254,29 @@ def run_moe_torch(
         # that return only (local_num_experts, expert_map)
         local_num_experts, expert_map = expert_map_result  # type: ignore[misc]
 
-    # Create weight tensors
-    # w1: gate + up projection weights [num_experts, 2 * inter_size, hidden_size]
-    # w2: down projection weights [num_experts, hidden_size, inter_size]
+    # Always create tensors in xpu_fused_moe layout.
+    # w1: [num_experts, hidden_size, 2 * inter_size]
+    # w2:  [num_experts, inter_size, hidden_size]
     w1 = torch.randn(
         local_num_experts,
-        2 * local_inter_size,
         hidden_size,
+        2 * local_inter_size,
         dtype=torch.float16,
         device=device,
     )
     w2 = torch.randn(
         local_num_experts,
-        hidden_size,
         local_inter_size,
+        hidden_size,
         dtype=torch.float16,
         device=device,
     )
+
+    w13_scales = None
+    w2_scales = None
+    if is_fp8:
+        w1, w13_scales = quantize_fp8_per_expert(w1)
+        w2, w2_scales = quantize_fp8_per_expert(w2)
 
     # Performance testing for each token count
     for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
@@ -291,18 +340,19 @@ def run_moe_torch(
                     _ = xpu_fused_moe(
                         hidden_states=hidden_states[:local_num_tokens],
                         w13=w1,
-                        w13_scales=None,
+                        w13_scales=w13_scales,
                         w13_bias=None,
                         w2=w2,
-                        w2_scales=None,
+                        w2_scales=w2_scales,
                         w2_bias=None,
                         topk_weights=tw,
                         topk_ids=ti,
                         n_experts_per_token=topk,
-                        activation="silu",
+                        activation=activation_name,
                         num_experts=local_num_experts,
                         ep_rank=0,
                         ep_size=moe_ep_size,
+                        is_fp8=is_fp8,
                     )
             else:
                 _ = fused_experts(
