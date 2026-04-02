@@ -868,15 +868,18 @@ def _run_agg_estimate(
             "Pass max_seq_len explicitly to match your TRT-LLM --max_seq_len setting.",
             resolved_max_seq_len,
         )
-    if backend._is_kv_cache_oom(
+    kv_memory = backend._get_memory_usage(
         model,
         database,
         batch_size,
+        1,
         isl,
         osl,
-        free_gpu_memory_fraction,
+        num_tokens=2 * isl,
         max_seq_len=resolved_max_seq_len,
-    ):
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+    )
+    if kv_memory["total"] >= database.system_spec["gpu"]["mem_capacity"] / (1 << 30):
         kv_warning = (
             f"Requested batch_size ({batch_size}) exceeds estimated KV cache capacity "
             f"(free_gpu_memory_fraction={free_gpu_memory_fraction}). "

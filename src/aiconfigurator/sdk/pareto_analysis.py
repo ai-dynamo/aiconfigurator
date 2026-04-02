@@ -29,7 +29,7 @@ def agg_pareto(
     model_config: config.ModelConfig,
     parallel_config_list: list[list[int]],
     enable_chunked_prefill: bool = False,
-    free_gpu_memory_fraction: float = 1.0,
+    free_gpu_memory_fraction: float = 0.9,
     max_seq_len: int | None = None,
 ) -> pd.DataFrame:
     """

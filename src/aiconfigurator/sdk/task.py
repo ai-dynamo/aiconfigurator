@@ -63,7 +63,7 @@ class TaskContext:
     enable_wideep: bool
     enable_chunked_prefill: bool
     total_gpus: int | None
-    free_gpu_memory_fraction: float = 1.0
+    free_gpu_memory_fraction: float = 0.9
     max_seq_len: int | None = None
     profiles: list[str] = field(default_factory=list)
     yaml_patch: dict = field(default_factory=dict)
@@ -637,7 +637,7 @@ class TaskConfig:
         profiles: list[str] | None = None,
         yaml_config: dict | None = None,
         database_mode: str | None = None,
-        free_gpu_memory_fraction: float = 1.0,
+        free_gpu_memory_fraction: float = 0.9,
         max_seq_len: int | None = None,
     ) -> None:
         """
@@ -730,6 +730,8 @@ class TaskConfig:
         self.enable_wideep = enable_wideep
         self.enable_eplb = enable_eplb
         self.total_gpus = total_gpus
+        self.free_gpu_memory_fraction = free_gpu_memory_fraction
+        self.max_seq_len = max_seq_len
         self.yaml_mode = yaml_mode
         self.yaml_patch = yaml_patch
         self.profiles = list(effective_profiles)

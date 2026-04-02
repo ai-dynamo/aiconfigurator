@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import math
 from collections import defaultdict
 
 import numpy as np
@@ -395,6 +394,29 @@ class TRTLLMBackend(BaseBackend):
             # caching
             self._agg_cache[isl][osl][b][ctx_tokens] = summary
 
+        # KV OOM check (outside cache — depends on caller's kwargs, not cached).
+        # Inflate kvcache by 1/(frac*(1-reserved)*(1-tol)) so total >= gpu_capacity fires at
+        # KV budget exhaustion. Only applies when both max_seq_len and free_gpu_memory_fraction
+        # are provided; return a fresh OOM summary without polluting the cache.
+        max_seq_len_kv = kwargs.get("max_seq_len")
+        free_gpu_memory_fraction_kv = kwargs.get("free_gpu_memory_fraction", 0.9)
+        if max_seq_len_kv is not None and free_gpu_memory_fraction_kv < 1.0 and not summary.check_oom():
+            kv_memory = self._get_memory_usage(
+                model,
+                database,
+                b,
+                1,
+                isl,
+                osl,
+                num_tokens=2 * isl,
+                max_seq_len=max_seq_len_kv,
+                free_gpu_memory_fraction=free_gpu_memory_fraction_kv,
+            )
+            if kv_memory["total"] >= database.system_spec["gpu"]["mem_capacity"] / (1 << 30):
+                kv_oom_summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
+                kv_oom_summary.set_oom(True)
+                return kv_oom_summary
+
         return summary
 
     def find_best_agg_result_under_constraints(
@@ -446,16 +468,7 @@ class TRTLLMBackend(BaseBackend):
         # max(8192, 4*isl).
         # during the loop, as b, ctx_tokens and system memory are monotonic, we can break the
         # inner loop when the system is oom.
-        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction", 1.0)
-        max_seq_len_kv = kwargs.get("max_seq_len") or (isl + osl)
-        b_list = [
-            b
-            for b in b_list_default
-            if b <= max_batch_size
-            and not self._is_kv_cache_oom(
-                model, database, b, isl, osl, free_gpu_memory_fraction, max_seq_len=max_seq_len_kv
-            )
-        ]
+        b_list = [b for b in b_list_default if b <= max_batch_size]
         ctx_tokens_list = self._get_ctx_tokens_list_for_agg_sweep(isl, ctx_stride, enable_chunked_prefill)
 
         results_df = pd.DataFrame(columns=common.ColumnsAgg)
@@ -492,6 +505,8 @@ class TRTLLMBackend(BaseBackend):
                         seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
                     ),
                     ctx_tokens=ctx_tokens,
+                    max_seq_len=kwargs.get("max_seq_len"),
+                    free_gpu_memory_fraction=kwargs.get("free_gpu_memory_fraction", 0.9),
                 )
 
                 if summary.check_oom():
@@ -523,6 +538,8 @@ class TRTLLMBackend(BaseBackend):
         osl: int,
         num_tokens: int = 0,
         prefix: int = 0,
+        max_seq_len: int | None = None,
+        free_gpu_memory_fraction: float = 0.9,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
@@ -590,11 +607,15 @@ class TRTLLMBackend(BaseBackend):
             num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size
             kvcache_per_token = num_kv_heads_per_gpu * model._head_size * model._num_layers * 2
         # should not be divided by pp_size as you need to hold all kvcache for stages.
-        kvcache = (
-            (batch_size * isl + batch_size * beam_width * osl)
-            * model.config.kvcache_quant_mode.value.memory
-            * kvcache_per_token
-        )
+        seq_tokens = max_seq_len if max_seq_len is not None else isl + beam_width * osl
+        kvcache = batch_size * seq_tokens * model.config.kvcache_quant_mode.value.memory * kvcache_per_token
+        # When max_seq_len and free_gpu_memory_fraction are both provided, inflate kvcache to
+        # represent TRT-LLM's effective memory reservation. This makes memory["total"] >=
+        # gpu_capacity fire at KV budget exhaustion, so the existing OOM check catches it.
+        if max_seq_len is not None and free_gpu_memory_fraction < 1.0:
+            kvcache /= (
+                free_gpu_memory_fraction * (1 - KV_CACHE_MEMORY_RESERVED_FRACTION) * (1 - KV_CACHE_MEMORY_TOLERANCE)
+            )
         # if 'DEEPSEEK' in model.model_path or 'MOE' in model.model_path:
         #    kvcache = kvcache * model.config.attention_dp_size # this is incorrect. tp will
         #    duplicate the kvcache while attn_dp will not.
@@ -614,53 +635,3 @@ class TRTLLMBackend(BaseBackend):
             "nccl": nccl_mem / one_gib,
             "others": others_mem / one_gib,
         }
-
-    def _is_kv_cache_oom(
-        self,
-        model: BaseModel,
-        database: PerfDatabase,
-        batch_size: int,
-        isl: int,
-        osl: int,
-        free_gpu_memory_fraction: float = 0.9,
-        *,
-        max_seq_len: int,
-        kv_cache_capacity_tolerance: float = KV_CACHE_MEMORY_TOLERANCE,
-    ) -> bool:
-        """Return True if batch_size exceeds the KV cache capacity.
-
-        Uses TRT-LLM's block-based allocation model: KV cache is divided into
-        fixed-size blocks (tokens_per_block=32). Each sequence pre-allocates
-        ceil(max_seq_len / tokens_per_block) blocks regardless of actual usage.
-        max_seq_len must match the TRT-LLM --max_seq_len setting.
-
-        Uses fixed activation (num_tokens=2*isl, matching TRT-LLM's --max_num_tokens)
-        so activation memory does not scale with batch_size.
-
-        Args:
-            max_seq_len: The TRT-LLM --max_seq_len setting. Determines how many
-                blocks TRT-LLM pre-allocates per sequence. Must be provided explicitly.
-            kv_cache_capacity_tolerance: Lower-bound reduction applied to max concurrent
-                sequences, making the check conservative. Set to 0 in tests to validate
-                the raw formula against benchmark data.
-                Defaults to KV_CACHE_MEMORY_TOLERANCE.
-        """
-        memory = self._get_memory_usage(model, database, 1, 1, isl, osl, num_tokens=2 * isl)
-        non_kv_gib = memory["total"] - memory["kvcache"]  # weights + activations + nccl + others
-        gpu_capacity_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)  # total GPU capacity in GiB
-        available_kv_gib = (
-            gpu_capacity_gib - non_kv_gib
-        ) * free_gpu_memory_fraction  # available KV memory in GiB after subtracting non-KV memory
-        available_kv_gib *= 1 - KV_CACHE_MEMORY_RESERVED_FRACTION  # subtract reserved memory for internal overhead
-        if available_kv_gib <= 0:
-            return True
-        kvcache_per_token_gib = memory["kvcache"] / (isl + osl)  # KV cache per token
-        if kvcache_per_token_gib <= 0:
-            return False
-        tokens_per_block = 32
-        total_blocks = int(
-            available_kv_gib / (kvcache_per_token_gib * tokens_per_block)
-        )  # total blocks that can be cached (capacity)
-        blocks_per_seq = math.ceil(max_seq_len / tokens_per_block)  # total blocks per sequence
-        max_concurrent_seqs = total_blocks // blocks_per_seq  # max concurrent sequences that can be cached (capacity)
-        return batch_size > int(max_concurrent_seqs * (1 - kv_cache_capacity_tolerance))

@@ -4,12 +4,14 @@
 """
 Integration tests for KV cache oversubscription detection.
 
-_is_kv_cache_oom() returns True when batch_size exceeds the KV cache capacity
-(TRT-LLM will queue excess requests).  Returns False when the batch_size fits.
+The KV capacity check is embedded in _get_memory_usage() via the max_seq_len
+parameter.  When max_seq_len is provided:
+  kvcache = batch_size * max_seq_len * kvcache_per_token
+A batch_size exceeds KV capacity when memory["kvcache"] > available_kv_gib.
 
 Regular OOM (model doesn't fit at all) is a separate condition: the total
-memory check in run_agg catches it; _is_kv_cache_oom returns True for any
-batch_size in that case (no KV room exists).
+memory check in run_agg catches it; when available_kv_gib <= 0 the model
+doesn't fit and any batch_size is KV OOM.
 
 All tests use the real production pipeline with no mocks.
 """
@@ -18,7 +20,10 @@ import pytest
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends.factory import get_backend
-from aiconfigurator.sdk.backends.trtllm_backend import KV_CACHE_MEMORY_TOLERANCE
+from aiconfigurator.sdk.backends.trtllm_backend import (
+    KV_CACHE_MEMORY_RESERVED_FRACTION,
+    KV_CACHE_MEMORY_TOLERANCE,
+)
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
@@ -50,6 +55,40 @@ def _load(system, model_path, tp, kvcache_quant_mode=None, moe_ep_size=None):
     return model, database, backend
 
 
+def _is_kv_oom(
+    backend,
+    model,
+    database,
+    batch_size,
+    isl,
+    osl,
+    free_gpu_memory_fraction,
+    *,
+    max_seq_len,
+    kv_cache_capacity_tolerance=KV_CACHE_MEMORY_TOLERANCE,
+):
+    """KV OOM check using _get_memory_usage directly."""
+    base = backend._get_memory_usage(model, database, 1, 1, isl, osl, num_tokens=2 * isl, free_gpu_memory_fraction=1.0)
+    non_kv_gib = base["total"] - base["kvcache"]
+    gpu_capacity_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)
+    available_kv_gib = (gpu_capacity_gib - non_kv_gib) * free_gpu_memory_fraction
+    available_kv_gib *= 1 - KV_CACHE_MEMORY_RESERVED_FRACTION
+    if available_kv_gib <= 0:
+        return True
+    memory = backend._get_memory_usage(
+        model,
+        database,
+        batch_size,
+        1,
+        isl,
+        osl,
+        num_tokens=2 * isl,
+        max_seq_len=max_seq_len,
+        free_gpu_memory_fraction=1.0,
+    )
+    return memory["kvcache"] > available_kv_gib * (1 - kv_cache_capacity_tolerance)
+
+
 class TestKvCacheOomProperties:
     """Property-based sanity tests using real models and systems.
 
@@ -67,8 +106,8 @@ class TestKvCacheOomProperties:
         """
         isl, osl = 2048, 2048
         model, db, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
-        assert not backend._is_kv_cache_oom(model, db, 60, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
-        assert backend._is_kv_cache_oom(model, db, 60, isl, osl, 0.5, max_seq_len=isl + osl + _BENCHMARK_SLACK)
+        assert not _is_kv_oom(backend, model, db, 60, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
+        assert _is_kv_oom(backend, model, db, 60, isl, osl, 0.5, max_seq_len=isl + osl + _BENCHMARK_SLACK)
 
     def test_longer_sequences_reduce_capacity(self):
         """Longer ISL+OSL means fewer concurrent sequences fit.
@@ -78,8 +117,8 @@ class TestKvCacheOomProperties:
           bs=100: fits for short seqs, OOM for long seqs.
         """
         model, db, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
-        assert not backend._is_kv_cache_oom(model, db, 100, 512, 512, 0.9, max_seq_len=512 + 512 + _BENCHMARK_SLACK)
-        assert backend._is_kv_cache_oom(model, db, 100, 4096, 4096, 0.9, max_seq_len=4096 + 4096 + _BENCHMARK_SLACK)
+        assert not _is_kv_oom(backend, model, db, 100, 512, 512, 0.9, max_seq_len=512 + 512 + _BENCHMARK_SLACK)
+        assert _is_kv_oom(backend, model, db, 100, 4096, 4096, 0.9, max_seq_len=4096 + 4096 + _BENCHMARK_SLACK)
 
     def test_tp_increases_capacity(self):
         """More TP shards reduce KV heads per GPU, increasing KV capacity.
@@ -91,8 +130,8 @@ class TestKvCacheOomProperties:
         isl, osl = 2048, 2048
         model_tp1, db, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
         model_tp2, _, _ = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=2)
-        assert backend._is_kv_cache_oom(model_tp1, db, 120, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
-        assert not backend._is_kv_cache_oom(model_tp2, db, 120, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
+        assert _is_kv_oom(backend, model_tp1, db, 120, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
+        assert not _is_kv_oom(backend, model_tp2, db, 120, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
 
     def test_larger_gpu_increases_capacity(self):
         """GB300 (277 GiB) fits more sequences than H100 (80 GiB).
@@ -104,11 +143,9 @@ class TestKvCacheOomProperties:
         isl, osl = 2048, 2048
         model_h100, db_h100, backend = _load("h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1)
         model_gb300, db_gb300, _ = _load("gb300", "Qwen/Qwen3-32B-FP8", tp=1)
-        assert backend._is_kv_cache_oom(
-            model_h100, db_h100, 200, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK
-        )
-        assert not backend._is_kv_cache_oom(
-            model_gb300, db_gb300, 200, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK
+        assert _is_kv_oom(backend, model_h100, db_h100, 200, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
+        assert not _is_kv_oom(
+            backend, model_gb300, db_gb300, 200, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK
         )
 
     def test_smaller_model_has_more_kv_capacity(self):
@@ -128,26 +165,20 @@ class TestKvCacheOomProperties:
         model_32b, _, _ = _load(
             "h100_sxm", "Qwen/Qwen3-32B-FP8", tp=1, kvcache_quant_mode=common.KVCacheQuantMode.float16
         )
-        assert backend._is_kv_cache_oom(model_32b, db, 60, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
-        assert not backend._is_kv_cache_oom(model_8b, db, 60, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
+        assert _is_kv_oom(backend, model_32b, db, 60, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
+        assert not _is_kv_oom(backend, model_8b, db, 60, isl, osl, 0.9, max_seq_len=isl + osl + _BENCHMARK_SLACK)
 
     def test_deepseek_fits_on_gb300(self):
         """DeepSeek-V3 (MLA) fits on GB300 TP=4: bs=1 is not KV OOM, bs=10000 is."""
         model_ds, db, backend = _load("gb300", "deepseek-ai/DeepSeek-V3", tp=4, moe_ep_size=4)
-        assert not backend._is_kv_cache_oom(
-            model_ds, db, 1, 2048, 2048, 0.9, max_seq_len=2048 + 2048 + _BENCHMARK_SLACK
-        )
-        assert not backend._is_kv_cache_oom(
-            model_ds, db, 1, 8192, 8192, 0.9, max_seq_len=8192 + 8192 + _BENCHMARK_SLACK
-        )
-        assert backend._is_kv_cache_oom(
-            model_ds, db, 10000, 2048, 2048, 0.9, max_seq_len=2048 + 2048 + _BENCHMARK_SLACK
-        )
+        assert not _is_kv_oom(backend, model_ds, db, 1, 2048, 2048, 0.9, max_seq_len=2048 + 2048 + _BENCHMARK_SLACK)
+        assert not _is_kv_oom(backend, model_ds, db, 1, 8192, 8192, 0.9, max_seq_len=8192 + 8192 + _BENCHMARK_SLACK)
+        assert _is_kv_oom(backend, model_ds, db, 10000, 2048, 2048, 0.9, max_seq_len=2048 + 2048 + _BENCHMARK_SLACK)
 
     def test_model_too_large_is_regular_oom(self):
-        """405B on single H100 (TP=1): model doesn't fit → _is_kv_cache_oom returns True for bs=1."""
+        """405B on single H100 (TP=1): model doesn't fit → KV OOM returns True for bs=1."""
         model, db, backend = _load("h100_sxm", "meta-llama/Meta-Llama-3.1-405B", tp=1)
-        assert backend._is_kv_cache_oom(model, db, 1, 1024, 1024, 0.9, max_seq_len=1024 + 1024 + _BENCHMARK_SLACK)
+        assert _is_kv_oom(backend, model, db, 1, 1024, 1024, 0.9, max_seq_len=1024 + 1024 + _BENCHMARK_SLACK)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +190,7 @@ class TestKvCacheOomProperties:
 #   --free_gpu_memory_fraction FRAC
 #   KV cache dtype = float16 (TRT-LLM default)
 #
-# We call _is_kv_cache_oom with the same parameters and assert:
+# We call _is_kv_oom with the same parameters and assert:
 #   - batch_size = bench_max_bs - tolerance → NOT KV OOM
 #   - batch_size = bench_max_bs + tolerance + 1 → IS KV OOM
 # tolerance = max(1, int(bench_max_bs * KV_CACHE_MEMORY_TOLERANCE))
@@ -264,7 +295,7 @@ def _short_model(model_path):
 def test_kv_oom_boundary(system, model_path, tp, isl, osl, frac, bench_max_bs):
     """Validate KV OOM boundary against real TRT-LLM benchmark data.
 
-    Calls _is_kv_cache_oom with the same parameters used during benchmarking
+    Calls _is_kv_oom with the same parameters used during benchmarking
     (max_seq_len=isl+osl+1000) and asserts:
       - batch_size = bench_max_bs - tol → NOT KV OOM
       - batch_size = bench_max_bs + tol + 1 → IS KV OOM
@@ -283,7 +314,8 @@ def test_kv_oom_boundary(system, model_path, tp, isl, osl, frac, bench_max_bs):
     bs_below = bench_max_bs - tol
     bs_above = bench_max_bs + tol + 1
 
-    assert not backend._is_kv_cache_oom(
+    assert not _is_kv_oom(
+        backend,
         model,
         database,
         bs_below,
@@ -294,7 +326,8 @@ def test_kv_oom_boundary(system, model_path, tp, isl, osl, frac, bench_max_bs):
         kv_cache_capacity_tolerance=0,
     ), f"bs={bs_below} (bench={bench_max_bs}, tol={tol}) should NOT be KV OOM"
 
-    assert backend._is_kv_cache_oom(
+    assert _is_kv_oom(
+        backend,
         model,
         database,
         bs_above,
