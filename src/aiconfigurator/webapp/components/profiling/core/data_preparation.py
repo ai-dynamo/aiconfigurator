@@ -29,7 +29,7 @@ def _compute_parato(x, y):
         return [], []
 
     # Build point list and sort by x asc, then y desc so we prefer smaller x and larger y.
-    points = list(zip(x, y))
+    points = list(zip(x, y, strict=True))
     points.sort(key=lambda p: (p[0], -p[1]))
 
     # Single pass to keep only non-dominated points (minimize x, maximize y).
@@ -73,7 +73,7 @@ def prepare_prefill_table_data(
     """
     num_gpus_list, ttft_list, thpt_per_gpu_list = prefill_results
     rows = []
-    for num_gpus, ttft, thpt in zip(num_gpus_list, ttft_list, thpt_per_gpu_list):
+    for num_gpus, ttft, thpt in zip(num_gpus_list, ttft_list, thpt_per_gpu_list, strict=True):
         config_yaml = generate_config_yaml(
             model_path=model_path,
             system=system,
@@ -119,7 +119,7 @@ def prepare_decode_table_data(
         thpt_list = decode_result[2]
         batch_size_list = decode_result[3]
 
-        for itl, thpt, batch_size in zip(itl_list, thpt_list, batch_size_list):
+        for itl, thpt, batch_size in zip(itl_list, thpt_list, batch_size_list, strict=True):
             config_yaml = generate_config_yaml(
                 model_path=model_path,
                 system=system,
@@ -166,8 +166,8 @@ def prepare_cost_table_data(
     # Track which GPU configuration corresponds to each pareto point
     p_ttft, p_thpt = _compute_parato(ttft_list, thpt_list)
     p_gpus = []
-    for ttft_val, thpt_val in zip(p_ttft, p_thpt):
-        for i, (orig_ttft, orig_thpt, orig_gpus) in enumerate(zip(ttft_list, thpt_list, num_gpus_list)):
+    for ttft_val, thpt_val in zip(p_ttft, p_thpt, strict=True):
+        for i, (orig_ttft, orig_thpt, orig_gpus) in enumerate(zip(ttft_list, thpt_list, num_gpus_list, strict=True)):
             if abs(orig_ttft - ttft_val) < 0.001 and abs(orig_thpt - thpt_val) < 0.001:
                 p_gpus.append(orig_gpus)
                 break
@@ -183,8 +183,10 @@ def prepare_cost_table_data(
     d_itl, d_thpt = _compute_parato(_d_itl, _d_thpt)
     d_gpus = []
     d_batch_sizes = []
-    for itl_val, thpt_val in zip(d_itl, d_thpt):
-        for i, (orig_itl, orig_thpt, orig_gpus, orig_bs) in enumerate(zip(_d_itl, _d_thpt, _d_gpus, _d_batch_sizes)):
+    for itl_val, thpt_val in zip(d_itl, d_thpt, strict=True):
+        for i, (orig_itl, orig_thpt, orig_gpus, orig_bs) in enumerate(
+            zip(_d_itl, _d_thpt, _d_gpus, _d_batch_sizes, strict=True)
+        ):
             if abs(orig_itl - itl_val) < 0.001 and abs(orig_thpt - thpt_val) < 0.001:
                 d_gpus.append(orig_gpus)
                 d_batch_sizes.append(orig_bs)
@@ -197,7 +199,7 @@ def prepare_cost_table_data(
     d_thpt = np.array(d_thpt)
 
     table_data = []
-    for p_idx, (_p_ttft, _p_thpt) in enumerate(zip(p_ttft, p_thpt)):
+    for p_idx, (_p_ttft, _p_thpt) in enumerate(zip(p_ttft, p_thpt, strict=True)):
         tokens_per_user_array = 1000 / d_itl
 
         # Calculate GPU hours (frontend will handle cost conversion if needed)

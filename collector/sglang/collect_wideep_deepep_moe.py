@@ -570,7 +570,7 @@ def benchmark_moe_layer_decode(
             tensor_idx = [0]
 
             def kernel_func():
-                for masked_m_clone, expected_m_val in zip(masked_m_clones, expected_m_list):
+                for masked_m_clone, expected_m_val in zip(masked_m_clones, expected_m_list, strict=True):
                     idx = tensor_idx[0] % num_tensor_sets
                     tensor_idx[0] += 1
                     dispatch_output = DeepEPLLDispatchOutput(

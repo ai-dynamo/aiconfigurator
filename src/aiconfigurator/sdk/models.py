@@ -4000,7 +4000,7 @@ class HybridMoEModel(BaseModel):
             )
         if n != self._num_layers:
             raise ValueError(f"HybridMoEConfig pattern length ({n}) does not match num_layers ({self._num_layers})")
-        for i, (a, m) in enumerate(zip(cfg.attn_layer_pattern, cfg.moe_layer_freq)):
+        for i, (a, m) in enumerate(zip(cfg.attn_layer_pattern, cfg.moe_layer_freq, strict=True)):
             if a not in (0, 1) or m not in (0, 1):
                 raise ValueError(f"HybridMoEConfig layer {i} has invalid values: attn={a}, moe={m} (expected 0 or 1)")
         self._hybrid_config = cfg
@@ -4011,7 +4011,7 @@ class HybridMoEModel(BaseModel):
         """Count layers per type: global_moe, swa_moe, swa_dense, global_dense."""
         cfg = self._hybrid_config
         counts: dict[str, int] = {"global_moe": 0, "swa_moe": 0, "swa_dense": 0, "global_dense": 0}
-        for attn, moe in zip(cfg.attn_layer_pattern, cfg.moe_layer_freq):
+        for attn, moe in zip(cfg.attn_layer_pattern, cfg.moe_layer_freq, strict=True):
             if attn == 1 and moe == 1:
                 counts["global_moe"] += 1
             elif attn == 0 and moe == 1:

@@ -277,7 +277,7 @@ def run_moe_torch(
 
         def run_single_iteration():
             if distributed == "power_law":
-                for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list)):
+                for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list, strict=True)):
                     local_num_tokens = tw.shape[0]
                     # args check https://github.com/vllm-project/vllm-xpu-kernels/blob/main/tests/fused_moe/test_fused_moe.py
                     # DEBUG

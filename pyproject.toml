@@ -38,7 +38,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 dependencies = [
     "jinja2>=3.1.0",
@@ -105,7 +105,7 @@ exclude = ["tests", "docker", "collector", "systems"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py39"
+target-version = "py310"
 extend-exclude = ["*.ipynb"]
 
 [tool.ruff.lint]

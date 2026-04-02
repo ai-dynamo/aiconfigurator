@@ -52,7 +52,9 @@ def serialize_profiling_data(
                                 "tableIdx": idx,
                                 "gpuLabel": f"{gpu} GPU{'s' if gpu > 1 else ''}",
                             }
-                            for idx, (gpu, ttft, thpt) in enumerate(zip(num_gpus_list, ttft_list, thpt_per_gpu_list))
+                            for idx, (gpu, ttft, thpt) in enumerate(
+                                zip(num_gpus_list, ttft_list, thpt_per_gpu_list, strict=True)
+                            )
                         ],
                         "backgroundColor": PLOTLY_COLORS[0],
                         "borderColor": PLOTLY_COLORS[0],
@@ -119,7 +121,7 @@ def serialize_profiling_data(
             "label": f"{num_gpus} GPU{'s' if num_gpus > 1 else ''}",
             "data": [
                 {"x": itl, "y": thpt, "tableIdx": table_idx + i}
-                for i, (itl, thpt) in enumerate(zip(itl_list, thpt_per_gpu_list))
+                for i, (itl, thpt) in enumerate(zip(itl_list, thpt_per_gpu_list, strict=True))
             ],
             "backgroundColor": color,
             "borderColor": color,

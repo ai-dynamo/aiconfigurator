@@ -411,7 +411,7 @@ def _create_context_kv_inputs(batch_spec: BatchSpec, kv_lora_rank: int, qk_rope_
     """
     kv_c_contexts = []
     k_pe_contexts = []
-    for seq_len, query_len in zip(batch_spec.seq_lens, batch_spec.query_lens):
+    for seq_len, query_len in zip(batch_spec.seq_lens, batch_spec.query_lens, strict=True):
         context_len = max(0, int(seq_len) - int(query_len))
         kv_c_contexts.append(torch.randn(context_len, kv_lora_rank, dtype=torch.bfloat16, device=device))
         k_pe_contexts.append(torch.randn(context_len, 1, qk_rope_head_dim, dtype=torch.bfloat16, device=device))

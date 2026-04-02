@@ -10,8 +10,8 @@ import logging
 import math
 import os
 from collections import UserDict, defaultdict
-from collections.abc import Iterable
-from typing import Callable, Optional
+from collections.abc import Callable, Iterable
+from typing import Optional
 
 import numpy as np
 import yaml
