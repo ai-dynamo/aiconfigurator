@@ -5411,10 +5411,31 @@ class PerfDatabase:
                 conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
                 read_bytes = x * conv_channels * (d_conv + 1) * 2
                 write_bytes = x * conv_channels * 2
-            elif kernel_source in ("chunk_gated_delta_rule", "fused_sigmoid_gating_delta_rule_update"):
-                state_size = num_k_heads * head_k_dim * head_v_dim
-                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 4 * batch_size
-                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 4 * batch_size
+            elif kernel_source == "chunk_gated_delta_rule":
+                # GDN chunked scan (context phase).
+                # State shape: [num_v_heads, head_k_dim, head_v_dim], stored as FP16 in global memory.
+                # Intermediate h_chunks [B, NT, H, K, V] are written by chunk_delta_h and read by
+                # chunk_o via global memory (separate kernel launches). Allocated via k.new_empty()
+                # (no dtype override), so matches input dtype: FP16/BF16 → 2 bytes.
+                chunk_size = 64  # flash-linear-attention default for chunk_gated_delta_rule
+                state_size = num_v_heads * head_k_dim * head_v_dim
+                num_chunks = (seq_len // chunk_size) if seq_len else 0
+                h_chunks_bytes = num_chunks * state_size * 2 * batch_size
+                read_bytes = (
+                    x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
+                    + state_size * 2 * batch_size
+                    + h_chunks_bytes  # chunk_o reads h_chunks from global memory
+                )
+                write_bytes = (
+                    x * num_v_heads * head_v_dim * 2
+                    + state_size * 2 * batch_size
+                    + h_chunks_bytes  # chunk_delta_h writes h_chunks to global memory
+                )
+            elif kernel_source == "fused_sigmoid_gating_delta_rule_update":
+                # GDN single-step decode. State stored as FP16 in global memory.
+                state_size = num_v_heads * head_k_dim * head_v_dim
+                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * batch_size
+                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * batch_size
             else:
                 read_bytes = x * d_model * 2
                 write_bytes = x * d_model * 2
