@@ -410,10 +410,22 @@ def enumerate_profiling_configs(
 
     is_moe = check_is_moe(model_path)
     backend_enum = common.BackendName(backend)
+    model_weight_bytes = _estimate_model_weight_bytes(model_path)
 
-    # Auto-enable wideEP for all MoE models
+    # Auto-enable wideEP for MoE models that are large relative to the node.
+    # Small MoE models (node VRAM >= 2x model weight) fit comfortably on a
+    # single node and do not benefit from the multi-node wideEP search ladder.
     if is_moe:
-        enable_wideep = True
+        node_vram_bytes = num_gpus_per_node * vram_per_gpu
+        if node_vram_bytes < 2 * model_weight_bytes:
+            enable_wideep = True
+        else:
+            logger.info(
+                "Skipping wideEP for %s: node VRAM (%.1f GiB) >= 2x model weight (%.1f GiB)",
+                model_path,
+                node_vram_bytes / (1024**3),
+                model_weight_bytes / (1024**3),
+            )
 
     # GQA+MoE models (e.g. Qwen3Moe) also allow pure TP; MLA+MoE (e.g. DeepSeek) do not
     allow_moe_pure_tp = False
@@ -442,7 +454,6 @@ def enumerate_profiling_configs(
     # ------------------------------------------------------------------
     # 2. Memory-based minimum GPUs per engine
     # ------------------------------------------------------------------
-    model_weight_bytes = _estimate_model_weight_bytes(model_path)
     min_gpus = _calculate_min_tp(
         model_weight_bytes=model_weight_bytes,
         vram_per_gpu=vram_per_gpu,
