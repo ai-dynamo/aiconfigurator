@@ -36,7 +36,10 @@ Usage:
 import argparse
 import gc
 import math
+import os
+import tempfile
 import traceback
+from pathlib import Path
 
 import torch
 from vllm.config import set_current_vllm_config
@@ -65,6 +68,44 @@ from collector.vllm.utils import (
 
 if "glm_moe_dsa" not in _CONFIG_REGISTRY:
     _CONFIG_REGISTRY["glm_moe_dsa"] = "DeepseekV3Config"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Local model config resolution — avoid HuggingFace Hub downloads
+# ═══════════════════════════════════════════════════════════════════════
+
+# Pre-cached HF configs live in src/aiconfigurator/model_configs/ as
+# "<org>--<model>_config.json".  vLLM's ModelConfig accepts a local
+# directory containing config.json, so we create a temp dir with a
+# symlink when the cached file exists.
+_MODEL_CONFIGS_DIR = Path(__file__).resolve().parents[2] / "src" / "aiconfigurator" / "model_configs"
+
+# Cache of model_name -> temp dir path (created once per process).
+_local_config_cache: dict[str, str] = {}
+
+
+def _resolve_model_path(model_name: str) -> str:
+    """Return a local directory path for *model_name* if a cached config exists, else return model_name as-is."""
+    if model_name in _local_config_cache:
+        return _local_config_cache[model_name]
+
+    config_file = _MODEL_CONFIGS_DIR / f"{model_name.replace('/', '--')}_config.json"
+    if not config_file.exists():
+        return model_name
+
+    # Create a temp directory with config.json so vLLM's ModelConfig
+    # loads from disk instead of downloading from HuggingFace Hub.
+    tmp_dir = tempfile.mkdtemp(prefix=f"aic_model_{model_name.replace('/', '_')}_")
+    os.symlink(config_file, os.path.join(tmp_dir, "config.json"))
+
+    # Also symlink hf_quant_config.json if present (used by quantized models).
+    quant_file = _MODEL_CONFIGS_DIR / f"{model_name.replace('/', '--')}_hf_quant_config.json"
+    if quant_file.exists():
+        os.symlink(quant_file, os.path.join(tmp_dir, "hf_quant_config.json"))
+
+    _local_config_cache[model_name] = tmp_dir
+    return tmp_dir
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Supported Models — model_path → attention type
@@ -263,7 +304,7 @@ def _create_attention_module(
     """
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 
-    model_name = model_path
+    local_model_path = _resolve_model_path(model_path)
 
     block_size = 64
     max_model_len = max(max_seq_len + 1, 4096)
@@ -279,7 +320,7 @@ def _create_attention_module(
     is_dsa = attn_type == "dsa"
 
     vllm_config = create_vllm_config(
-        model_name=model_name,
+        model_name=local_model_path,
         max_model_len=max_model_len,
         block_size=block_size,
         num_gpu_blocks=num_kv_cache_blocks,
