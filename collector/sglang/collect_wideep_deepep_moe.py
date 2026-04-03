@@ -710,10 +710,9 @@ def run_moe(
         original_model_config = ModelConfig.from_server_args(server_args)
         original_hf_config = original_model_config.hf_config
         model_hidden_size = original_hf_config.hidden_size
-        model_inter_size = getattr(original_hf_config, 'moe_intermediate_size', 2048)
-        model_total_experts = (
-            getattr(original_hf_config, 'n_routed_experts', None)
-            or getattr(original_hf_config, 'num_experts', 256)
+        model_inter_size = getattr(original_hf_config, "moe_intermediate_size", 2048)
+        model_total_experts = getattr(original_hf_config, "n_routed_experts", None) or getattr(
+            original_hf_config, "num_experts", 256
         )
         rank_print(
             f"Original model config: hidden_size={model_hidden_size}, "
@@ -722,23 +721,25 @@ def run_moe(
 
         # Now apply override to load model with reduced experts
         # Support both DeepSeek-V3 (n_routed_experts) and Qwen3 (num_experts)
-        server_args.json_model_override_args = json.dumps({
-            "num_hidden_layers": 4,
-            "n_routed_experts": num_experts,
-            "num_experts": num_experts,
-        })
+        server_args.json_model_override_args = json.dumps(
+            {
+                "num_hidden_layers": 4,
+                "n_routed_experts": num_experts,
+                "num_experts": num_experts,
+            }
+        )
 
         model_runner = load_model_with_dummy_weights(server_args, port_args, tp_rank)
 
         moe_layer = model_runner.model.model.layers[test_layer].mlp
         # Supports DeepSeek-V3 and Qwen3 MoE
-        if hasattr(moe_layer, 'config') and hasattr(moe_layer.config, 'n_routed_experts'):
+        if hasattr(moe_layer, "config") and hasattr(moe_layer.config, "n_routed_experts"):
             # DeepSeek-V3 style
             actual_num_experts = moe_layer.config.n_routed_experts
-        elif hasattr(moe_layer, 'experts') and hasattr(moe_layer.experts, 'num_experts'):
+        elif hasattr(moe_layer, "experts") and hasattr(moe_layer.experts, "num_experts"):
             # Qwen3 MoE style - from experts submodule
             actual_num_experts = moe_layer.experts.num_experts
-        elif hasattr(moe_layer, 'num_experts'):
+        elif hasattr(moe_layer, "num_experts"):
             # Direct attribute (deepep mode)
             actual_num_experts = moe_layer.num_experts
         else:
@@ -868,6 +869,7 @@ def get_wideep_moe_test_cases(total_experts=256):
         n //= 2
     return test_cases
 
+
 def run_moe_benchmark(num_experts, gpu_id, output_path=None):
     """Run MOE benchmark - called in subprocess with CUDA_VISIBLE_DEVICES set.
 
@@ -908,7 +910,7 @@ def run_moe_benchmark(num_experts, gpu_id, output_path=None):
     # Get total experts from model config to calculate simulated EP size
     model_config = ModelConfig.from_server_args(server_args)
     hf_config = model_config.hf_config
-    total_experts = getattr(hf_config, 'n_routed_experts', None) or getattr(hf_config, 'num_experts', 256)
+    total_experts = getattr(hf_config, "n_routed_experts", None) or getattr(hf_config, "num_experts", 256)
 
     simulated_ep_size = total_experts // num_experts * server_args.ep_size
     print(f"\n{'=' * 60}")
