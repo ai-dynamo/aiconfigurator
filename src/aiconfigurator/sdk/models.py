@@ -3156,7 +3156,6 @@ class SGLangEPMOEModel(BaseModel):
         moe_tp_size = self.config.moe_tp_size
         moe_ep_size = self.config.moe_ep_size
         attention_dp_size = self.config.attention_dp_size
-        pp_size = self.config.pp_size
         num_kv_heads_per_gpu = self._num_kv_heads_per_gpu
         gemm_quant_mode = self.config.gemm_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode

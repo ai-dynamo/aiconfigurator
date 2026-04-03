@@ -11,8 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk import models
+from aiconfigurator.sdk import common, config, models
 from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 

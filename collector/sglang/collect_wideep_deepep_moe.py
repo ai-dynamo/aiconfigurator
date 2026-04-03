@@ -711,8 +711,14 @@ def run_moe(
         original_hf_config = original_model_config.hf_config
         model_hidden_size = original_hf_config.hidden_size
         model_inter_size = getattr(original_hf_config, 'moe_intermediate_size', 2048)
-        model_total_experts = getattr(original_hf_config, 'n_routed_experts', None) or getattr(original_hf_config, 'num_experts', 256)
-        rank_print(f"Original model config: hidden_size={model_hidden_size}, inter_size={model_inter_size}, total_experts={model_total_experts}")
+        model_total_experts = (
+            getattr(original_hf_config, 'n_routed_experts', None)
+            or getattr(original_hf_config, 'num_experts', 256)
+        )
+        rank_print(
+            f"Original model config: hidden_size={model_hidden_size}, "
+            f"inter_size={model_inter_size}, total_experts={model_total_experts}"
+        )
 
         # Now apply override to load model with reduced experts
         # Support both DeepSeek-V3 (n_routed_experts) and Qwen3 (num_experts)
@@ -746,7 +752,10 @@ def run_moe(
         # Calculate simulated EP size: total_experts / num_local_experts
         num_local_experts = actual_num_experts  # With ep_size=1, all experts are local
         simulated_ep_size = model_total_experts // num_local_experts
-        rank_print(f"Simulating EP size: {simulated_ep_size} (num_local_experts={num_local_experts}, total_experts={model_total_experts})")
+        rank_print(
+            f"Simulating EP size: {simulated_ep_size} "
+            f"(num_local_experts={num_local_experts}, total_experts={model_total_experts})"
+        )
 
         prefill_test_cases = get_moe_prefill_test_cases(simulated_ep_size)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
@@ -903,7 +912,10 @@ def run_moe_benchmark(num_experts, gpu_id, output_path=None):
 
     simulated_ep_size = total_experts // num_experts * server_args.ep_size
     print(f"\n{'=' * 60}")
-    print(f"MOE Benchmark: num_experts={num_experts}, EP_size={simulated_ep_size}, total_experts={total_experts}, GPU={gpu_id}")
+    print(
+        f"MOE Benchmark: num_experts={num_experts}, EP_size={simulated_ep_size}, "
+        f"total_experts={total_experts}, GPU={gpu_id}"
+    )
     print(f"{'=' * 60}")
 
     # Run the actual benchmark
