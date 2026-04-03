@@ -5292,49 +5292,50 @@ class PerfDatabase:
         """
         mamba2_data: dict = getattr(self, "_mamba2_data", {})
 
-        def _sol_fallback() -> PerformanceResult:
-            # SOL estimate for this kernel only (conv1d or ssm)
+        def get_sol() -> tuple[float, float, float]:
             d_inner = nheads * head_dim
             conv_dim = d_inner + 2 * n_groups * d_state
             x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
                 conv_read_bytes = x * conv_dim * (d_conv + 1) * 2
                 conv_write_bytes = x * conv_dim * 2
-                return self.query_mem_op(conv_read_bytes + conv_write_bytes)
+                total_bytes = conv_read_bytes + conv_write_bytes
             else:
                 ssm_read_bytes = x * (d_inner + n_groups * d_state * 2 + nheads) * 2
                 ssm_write_bytes = x * d_inner * 2
-                return self.query_mem_op(ssm_read_bytes + ssm_write_bytes)
+                total_bytes = ssm_read_bytes + ssm_write_bytes
+            sol_mem = total_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
+            return sol_mem, 0, sol_mem
 
         if not mamba2_data:
-            return _sol_fallback()
+            return PerformanceResult(get_sol()[0], energy=0.0)
 
         model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
         try:
             by_phase = mamba2_data[kernel_source]
         except KeyError:
-            return _sol_fallback()
+            return PerformanceResult(get_sol()[0], energy=0.0)
         try:
             by_key = by_phase[phase]
         except KeyError:
-            return _sol_fallback()
+            return PerformanceResult(get_sol()[0], energy=0.0)
         if model_key not in by_key:
             # Nearest config by d_model
             keys_with_d_model = [k for k in by_key if k[0] == d_model]
             if keys_with_d_model:
                 model_key = keys_with_d_model[0]
             else:
-                return _sol_fallback()
+                return PerformanceResult(get_sol()[0], energy=0.0)
 
         table = by_key[model_key]
 
         if phase == "context":
             if seq_len is None or seq_len <= 0:
-                return _sol_fallback()
+                return PerformanceResult(get_sol()[0], energy=0.0)
             try:
                 result = self._interp_2d_linear(batch_size, seq_len, table)
             except (KeyError, ValueError):
-                return _sol_fallback()
+                return PerformanceResult(get_sol()[0], energy=0.0)
             return PerformanceResult(
                 latency=result["latency"],
                 energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
@@ -5345,7 +5346,7 @@ class PerfDatabase:
                     batch_size, list(table.keys()), inner_only=False
                 )
             except (KeyError, ValueError):
-                return _sol_fallback()
+                return PerformanceResult(get_sol()[0], energy=0.0)
 
             # Ensure we pass entry dicts {latency, power, energy}; handle legacy nested batch_size -> seq_len -> entry
             def _mamba2_gen_entry(val):
@@ -5360,7 +5361,7 @@ class PerfDatabase:
             y_left = _mamba2_gen_entry(table[batch_left])
             y_right = _mamba2_gen_entry(table[batch_right])
             if y_left is None or y_right is None:
-                return _sol_fallback()
+                return PerformanceResult(get_sol()[0], energy=0.0)
             result = self._interp_1d(
                 [batch_left, batch_right],
                 [y_left, y_right],
@@ -5404,52 +5405,51 @@ class PerfDatabase:
         """
         gdn_data: dict = getattr(self, "_gdn_data", {})
 
-        def _sol_fallback() -> PerformanceResult:
+        def get_sol() -> tuple[float, float, float]:
             x = (batch_size * seq_len) if phase == "context" and seq_len else batch_size
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
-                # Conv1D: reads (q+k+v) channels * d_conv weights + input, writes output
                 conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
                 read_bytes = x * conv_channels * (d_conv + 1) * 2
                 write_bytes = x * conv_channels * 2
             elif kernel_source in ("chunk_gated_delta_rule", "fused_sigmoid_gating_delta_rule_update"):
-                # GDN recurrence: reads q, k, v, beta, A state; writes updated state + output
-                state_size = num_k_heads * head_k_dim * head_v_dim  # per-head outer-product state
+                state_size = num_k_heads * head_k_dim * head_v_dim
                 read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 4 * batch_size
                 write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 4 * batch_size
             else:
                 read_bytes = x * d_model * 2
                 write_bytes = x * d_model * 2
-            return self.query_mem_op(read_bytes + write_bytes)
+            sol_mem = (read_bytes + write_bytes) / self.system_spec["gpu"]["mem_bw"] * 1000
+            return sol_mem, 0, sol_mem
 
         if not gdn_data:
-            return _sol_fallback()
+            return PerformanceResult(get_sol()[0], energy=0.0)
 
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
         try:
             by_phase = gdn_data[kernel_source]
         except KeyError:
-            return _sol_fallback()
+            return PerformanceResult(get_sol()[0], energy=0.0)
         try:
             by_key = by_phase[phase]
         except KeyError:
-            return _sol_fallback()
+            return PerformanceResult(get_sol()[0], energy=0.0)
         if model_key not in by_key:
             # Nearest config by d_model, then num_v_heads as secondary discriminator
             keys_same_d_model = [k for k in by_key if k[0] == d_model]
             if keys_same_d_model:
                 model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
             else:
-                return _sol_fallback()
+                return PerformanceResult(get_sol()[0], energy=0.0)
 
         table = by_key[model_key]
 
         if phase == "context":
             if seq_len is None or seq_len <= 0:
-                return _sol_fallback()
+                return PerformanceResult(get_sol()[0], energy=0.0)
             try:
                 result = self._interp_2d_linear(batch_size, seq_len, table)
             except (KeyError, ValueError):
-                return _sol_fallback()
+                return PerformanceResult(get_sol()[0], energy=0.0)
             return PerformanceResult(
                 latency=result["latency"],
                 energy=result.get("energy", result.get("power", 0.0) * result["latency"]),
@@ -5460,7 +5460,7 @@ class PerfDatabase:
                     batch_size, list(table.keys()), inner_only=False
                 )
             except (KeyError, ValueError):
-                return _sol_fallback()
+                return PerformanceResult(get_sol()[0], energy=0.0)
 
             def _gdn_gen_entry(val):
                 if isinstance(val, dict) and "latency" in val:
@@ -5474,7 +5474,7 @@ class PerfDatabase:
             y_left = _gdn_gen_entry(table[batch_left])
             y_right = _gdn_gen_entry(table[batch_right])
             if y_left is None or y_right is None:
-                return _sol_fallback()
+                return PerformanceResult(get_sol()[0], energy=0.0)
             result = self._interp_1d(
                 [batch_left, batch_right],
                 [y_left, y_right],
