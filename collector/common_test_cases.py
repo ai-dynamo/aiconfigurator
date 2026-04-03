@@ -32,6 +32,7 @@ _WIDEEP_MOE_MODEL_NAMES: set[str] = {
     "deepseek-ai/DeepSeek-V3.2",
     "zai-org/GLM-5",
     "MiniMaxAI/MiniMax-M2.5",
+    "nvidia/MiniMax-M2.5-NVFP4",
     "moonshotai/Kimi-K2-Instruct",
 }
 
@@ -55,6 +56,7 @@ _MOE_MODEL_CONFIGS: list[list] = [
     [6144, 2560, 8, 160, "Qwen/Qwen3-Coder-480B-A35B-Instruct"],  # qwen3-moe, 480b-a35b
     [7168, 2048, 8, 384, "moonshotai/Kimi-K2-Instruct"],  # kimi k2, k2.5
     [3072, 1536, 8, 256, "MiniMaxAI/MiniMax-M2.5"],  # minimax m2.5
+    [3072, 1536, 8, 256, "nvidia/MiniMax-M2.5-NVFP4"],  # minimax m2.5 nvfp4
     [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
     [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
     [2688, 1856, 6, 128, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"],  # nemotron-3 nano (uses relu2, non-gated)
