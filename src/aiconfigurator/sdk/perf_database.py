@@ -4503,9 +4503,9 @@ class PerfDatabase:
 
                 self._custom_allreduce_data.raise_if_not_loaded()
 
-                comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)][
-                    "AUTO"
-                ]  # use AUTO for allreduce strategy
+                comm_dict = self._custom_allreduce_data[quant_mode][
+                    min(tp_size, self.system_spec["node"]["num_gpus_per_node"])
+                ]["AUTO"]  # use AUTO for allreduce strategy
                 size_left, size_right = self._nearest_1d_point_helper(size, list(comm_dict.keys()), inner_only=False)
                 result = self._interp_1d([size_left, size_right], [comm_dict[size_left], comm_dict[size_right]], size)
 
