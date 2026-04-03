@@ -260,6 +260,15 @@ def setup_vllm_distributed(world_size, rank, use_slurm):
             # vllm 0.14.0
             from vllm.utils.network_utils import get_open_port
 
+        # vLLM >= 0.14.0 requires set_current_vllm_config() context for
+        # initialize_model_parallel() (https://github.com/vllm-project/vllm/pull/31747).
+        try:
+            from vllm.config import VllmConfig as _vllm_config_cls  # noqa: N813
+            from vllm.config import set_current_vllm_config as _set_vllm_config
+        except ImportError:
+            _vllm_config_cls = None  # type: ignore[assignment, misc]
+            _set_vllm_config = None  # type: ignore[assignment]
+
         vllm_mods = {
             "tensor_model_parallel_all_reduce": tensor_model_parallel_all_reduce,
             "init_distributed_environment": init_distributed_environment,
@@ -316,7 +325,13 @@ def setup_vllm_distributed(world_size, rank, use_slurm):
             raise
 
     # Initialize model parallel groups
-    vllm_mods["initialize_model_parallel"](tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1)
+    # vLLM >= 0.14.0 requires set_current_vllm_config() context.
+    init_mp = vllm_mods["initialize_model_parallel"]
+    if _set_vllm_config is not None:
+        with _set_vllm_config(_vllm_config_cls()):
+            init_mp(tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1)
+    else:
+        init_mp(tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1)
 
     return vllm_mods, local_rank
 
