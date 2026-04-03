@@ -530,6 +530,10 @@ def pick_optimization_type(
         "pareto_frontier_df": pd.DataFrame(),
     }
 
+    valid_types = {"throughput", "latency"}
+    if optimization_type not in valid_types:
+        raise ValueError(f"Invalid optimization_type={optimization_type!r}; expected one of {valid_types}")
+
     if pareto_df is None or pareto_df.empty:
         return empty_result
 

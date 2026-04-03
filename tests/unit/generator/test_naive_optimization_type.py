@@ -88,7 +88,8 @@ class TestResolveParallelization:
         assert result["moe_tensor_parallel_size"] == 8
         assert result["data_parallel_size"] == 1
 
-    def test_deepseek_v2_recognized_as_mla_moe(self):
+    def test_deepseek_v3_variant_recognized_as_mla_moe(self):
+        """DeepseekV32ForCausalLM is a V3-family architecture."""
         result = _resolve_parallelization(
             architecture="DeepseekV32ForCausalLM",
             is_moe=True,
