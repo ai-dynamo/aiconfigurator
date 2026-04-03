@@ -32,6 +32,7 @@ PR_MODELS: list[str] = [
     "nvidia/DeepSeek-V3.1-NVFP4",
     "meta-llama/Meta-Llama-3.1-8B",
     "MiniMaxAI/MiniMax-M2.5",
+    "nvidia/MiniMax-M2.5-NVFP4",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "Qwen/Qwen3-235B-A22B",
     "openai/gpt-oss-20b",

@@ -278,6 +278,7 @@ DefaultHFModels = {
     "Qwen/Qwen3-32B-FP8-Static-PerTensor",
     # MiniMax Models
     "MiniMaxAI/MiniMax-M2.5",
+    "nvidia/MiniMax-M2.5-NVFP4",
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
