@@ -27,6 +27,7 @@ from vllm.config import (
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
+    set_current_vllm_config,
 )
 
 try:
@@ -597,7 +598,10 @@ def setup_distributed(device):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
     init_distributed_environment()
-    ensure_model_parallel_initialized(1, 1)
+    # vLLM >= 0.14.0 requires set_current_vllm_config() context for
+    # initialize_model_parallel() (https://github.com/vllm-project/vllm/pull/31747).
+    with set_current_vllm_config(VllmConfig()):
+        ensure_model_parallel_initialized(1, 1)
 
 
 def with_exit_stack(func):

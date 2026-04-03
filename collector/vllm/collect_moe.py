@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-__compat__ = "vllm>=0.11.0"
+__compat__ = "vllm>=0.14.0"
 
 import os
 
@@ -24,10 +24,16 @@ except Exception:
     except Exception:
         per_block_cast_to_fp8 = None  # type: ignore[assignment]
 
+# vLLM >= 0.14.0 raises AssertionError in get_current_vllm_config() when called
+# outside a set_current_vllm_config() context (https://github.com/vllm-project/vllm/pull/31747).
+# vLLM's custom ops (e.g. _vllm_ops.scaled_fp4_quant) requires vllm config to decide how to dispatch.
+from vllm.config import VllmConfig, set_current_vllm_config
+
 # NVFP4 support: requires Blackwell (SM>=100) and FlashInfer TRTLLM FP4 kernel.
 trtllm_fp4_block_scale_routed_moe = None
 _vllm_ops = None
 prepare_static_weights_for_trtllm_fp4_moe = None
+_nvfp4_available = False
 try:
     from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe  # type: ignore[assignment]
     from vllm import _custom_ops as _vllm_ops  # type: ignore[assignment]
@@ -35,6 +41,7 @@ try:
         prepare_static_weights_for_trtllm_fp4_moe,  # type: ignore[assignment]
     )
 
+    _nvfp4_available = True
 except Exception:
     trtllm_fp4_block_scale_routed_moe = None
     _vllm_ops = None
@@ -45,7 +52,6 @@ except Exception:
 # weight swizzle internally, so one code path works on all GPUs.
 _mxfp4_available = False
 try:
-    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 
@@ -68,7 +74,7 @@ def get_moe_test_cases():
         moe_list += ["fp8"]
     if get_sm_version() >= 90 and per_block_cast_to_fp8 is not None:
         moe_list += ["fp8_block"]
-    if get_sm_version() >= 100:
+    if get_sm_version() >= 100 and _nvfp4_available:
         moe_list += ["nvfp4"]
     if _mxfp4_available:
         moe_list += ["w4a16_mxfp4"]
@@ -217,6 +223,7 @@ def run_moe_torch(
                 renormalize=True,
                 quant_config=mxfp4_quant_config,
                 tp_size=moe_tp_size,
+                dp_size=1,
                 ep_size=moe_ep_size,
                 prefix="",
                 has_bias=True,  # GPT-OSS uses bias
@@ -259,9 +266,9 @@ def run_moe_torch(
         ]
         if _missing:
             raise ImportError(
-                f"NVFP4 MoE requires flashinfer and vllm FP4 support, but the following "
+                f"NVFP4 MoE requires flashinfer and vllm >= 0.14.0 with FP4 support, but the following "
                 f"could not be imported: {', '.join(_missing)}. "
-                f"Install a compatible flashinfer build and ensure vllm >= 0.11 with FP4 support."
+                f"Install a compatible flashinfer build and ensure vllm >= 0.14.0 with FP4 support."
             )
 
         # Raw packed FP4 weights and block scales
@@ -287,6 +294,7 @@ def run_moe_torch(
             hidden_size=hidden_size,
             intermediate_size=local_inter_size,
             num_experts=local_num_experts,
+            is_gated_activation=True,
         )
         del w1_raw, w2_raw, w1_scale_raw, w2_scale_raw
 
@@ -505,7 +513,8 @@ def run_moe_torch(
             return results["latency_ms"] / num_iter, results["power_stats"]
 
         try:
-            latency, power_stats = run_iterations()
+            with set_current_vllm_config(VllmConfig()):
+                latency, power_stats = run_iterations()
         except torch.OutOfMemoryError:
             # If OOM, check if we had at least one successful run.
             if num_tokens_idx > 0:
