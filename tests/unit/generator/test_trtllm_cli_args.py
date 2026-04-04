@@ -35,7 +35,6 @@ def cli_args_template():
 
 @pytest.mark.unit
 class TestCliArgsTemplate:
-
     def test_emits_all_direct_flags(self, cli_args_template):
         """All direct argparser flags are present when their values are set."""
         rendered = cli_args_template.render(

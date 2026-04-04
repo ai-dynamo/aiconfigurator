@@ -47,8 +47,15 @@ class TestYamlToDynamicFlags:
         pairs = dict(zip(flags[::2], flags[1::2]))
 
         # DEFAULT_SKIP_KEYS must be absent
-        for key in ("backend", "tensor_parallel_size", "pipeline_parallel_size",
-                     "enable_attention_dp", "max_batch_size", "max_num_tokens", "max_seq_len"):
+        for key in (
+            "backend",
+            "tensor_parallel_size",
+            "pipeline_parallel_size",
+            "enable_attention_dp",
+            "max_batch_size",
+            "max_num_tokens",
+            "max_seq_len",
+        ):
             assert f"--trtllm.{key}" not in pairs
 
         # DEFAULT_SKIP_NESTED_KEYS must be absent
@@ -71,7 +78,7 @@ class TestYamlToDynamicFlags:
     def test_none_and_empty_values_skipped(self):
         """None and empty-string values produce no flags."""
         yaml_content = (
-            "trust_remote_code:\n"       # YAML null
+            "trust_remote_code:\n"  # YAML null
             "skip_tokenizer_init: ''\n"  # empty string
             "enable_chunked_prefill: true\n"
         )
@@ -80,12 +87,7 @@ class TestYamlToDynamicFlags:
 
     def test_custom_skip_keys(self):
         """Callers can override the skip lists."""
-        yaml_content = (
-            "group:\n"
-            "  keep_me: 1\n"
-            "  skip_me: 2\n"
-            "skip_top: 42\n"
-        )
+        yaml_content = "group:\n  keep_me: 1\n  skip_me: 2\nskip_top: 42\n"
         flags = yaml_to_dynamic_flags(
             yaml_content,
             skip_keys={"skip_top"},

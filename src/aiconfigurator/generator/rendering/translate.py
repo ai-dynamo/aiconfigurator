@@ -18,21 +18,25 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # Top-level YAML keys that already have direct CLI flag equivalents in cli_args.j2.
-DEFAULT_SKIP_KEYS: frozenset[str] = frozenset({
-    "backend",
-    "tensor_parallel_size",
-    "pipeline_parallel_size",
-    "moe_expert_parallel_size",
-    "enable_attention_dp",
-    "max_batch_size",
-    "max_num_tokens",
-    "max_seq_len",
-})
+DEFAULT_SKIP_KEYS: frozenset[str] = frozenset(
+    {
+        "backend",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "moe_expert_parallel_size",
+        "enable_attention_dp",
+        "max_batch_size",
+        "max_num_tokens",
+        "max_seq_len",
+    }
+)
 
 # Nested keys (as tuples of path components) that already have direct CLI flags.
-DEFAULT_SKIP_NESTED_KEYS: frozenset[tuple[str, ...]] = frozenset({
-    ("kv_cache_config", "free_gpu_memory_fraction"),
-})
+DEFAULT_SKIP_NESTED_KEYS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("kv_cache_config", "free_gpu_memory_fraction"),
+    }
+)
 
 
 def _format_value(value: Any) -> str:

@@ -94,9 +94,7 @@ class TestExtraEngineArgsMode:
 
     def test_k8s_deploy_uses_extra_engine_args_file(self):
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False)
         k8s = artifacts["k8s_deploy.yaml"]
         args_block = _extract_args_block(k8s)
 
@@ -106,9 +104,7 @@ class TestExtraEngineArgsMode:
 
     def test_k8s_deploy_no_redundant_cli_flags(self):
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False)
         args_block = _extract_args_block(artifacts["k8s_deploy.yaml"])
 
         assert "--tensor-parallel-size" not in args_block
@@ -119,9 +115,7 @@ class TestExtraEngineArgsMode:
 
     def test_extra_engine_args_yaml_embedded(self):
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False)
         k8s = artifacts["k8s_deploy.yaml"]
 
         assert "tensor_parallel_size:" in k8s
@@ -130,9 +124,7 @@ class TestExtraEngineArgsMode:
 
     def test_extra_engine_args_artifact_generated(self):
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False)
         assert "extra_engine_args_agg.yaml" in artifacts
         engine_yaml = yaml.safe_load(artifacts["extra_engine_args_agg.yaml"])
         assert engine_yaml["tensor_parallel_size"] == 1
@@ -167,9 +159,7 @@ class TestExtraEngineArgsMode:
                 },
             },
         )
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False)
         k8s = artifacts["k8s_deploy.yaml"]
 
         assert "extra_engine_args_prefill.yaml" in artifacts
@@ -199,9 +189,7 @@ class TestProfilerCliArgsMode:
 
     def test_cli_args_artifact_has_direct_flags_only(self):
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False)
         cli = artifacts["cli_args_agg"]
         args = shlex.split(cli)
 
@@ -225,9 +213,7 @@ class TestDynamoGeneratorPath:
     @_requires_dynamo
     def test_agg_k8s_deploy_has_worker_args(self):
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True)
         assert "k8s_deploy.yaml" in artifacts
         dgd = yaml.safe_load(artifacts["k8s_deploy.yaml"])
 
@@ -244,9 +230,7 @@ class TestDynamoGeneratorPath:
     @_requires_dynamo
     def test_agg_k8s_deploy_replicas_and_gpu(self):
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True)
         dgd = yaml.safe_load(artifacts["k8s_deploy.yaml"])
         services = dgd["spec"]["services"]
         worker = next(v for k, v in services.items() if k != "Frontend")
@@ -284,9 +268,7 @@ class TestDynamoGeneratorPath:
                 },
             },
         )
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True)
         dgd = yaml.safe_load(artifacts["k8s_deploy.yaml"])
         services = dgd["spec"]["services"]
         worker_names = [k for k in services if k != "Frontend"]
@@ -297,9 +279,7 @@ class TestDynamoGeneratorPath:
         """Even with use_dynamo_generator=True, extra_engine_args artifacts
         should still be rendered (they are always produced)."""
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True)
         assert "extra_engine_args_agg.yaml" in artifacts
         assert "cli_args_agg" in artifacts
 
@@ -314,17 +294,13 @@ class TestOtherBackendsUnaffected:
 
     def test_vllm_k8s_deploy_has_cli_args(self):
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "vllm", use_dynamo_generator=False
-        )
+        artifacts = render_backend_templates(params, "vllm", use_dynamo_generator=False)
         assert "extra_engine_args_agg.yaml" not in artifacts
         assert "cli_args_agg" in artifacts
 
     def test_sglang_k8s_deploy_has_cli_args(self):
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "sglang", use_dynamo_generator=False
-        )
+        artifacts = render_backend_templates(params, "sglang", use_dynamo_generator=False)
         assert "extra_engine_args_agg.yaml" not in artifacts
         assert "cli_args_agg" in artifacts
 
@@ -341,9 +317,7 @@ class TestDynamicFlagsMode:
         """Agg mode: --trtllm.* flags present, direct flags present, no duplication,
         no --override-engine-args, extra_engine_args YAML still generated."""
         params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True)
         cli = artifacts.get("cli_args_agg", "")
 
         # --trtllm.* engine params present
@@ -399,9 +373,7 @@ class TestDynamicFlagsMode:
                 },
             },
         )
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
+        artifacts = render_backend_templates(params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True)
         for role in ("prefill", "decode"):
             cli = artifacts.get(f"cli_args_{role}", "")
             assert "--trtllm." in cli, f"{role} worker missing --trtllm.* flags"
