@@ -44,7 +44,7 @@ class TestYamlToDynamicFlags:
             "print_iter_log: false\n"
         )
         flags = yaml_to_dynamic_flags(yaml_content)
-        pairs = dict(zip(flags[::2], flags[1::2]))
+        pairs = dict(zip(flags[::2], flags[1::2], strict=True))
 
         # DEFAULT_SKIP_KEYS must be absent
         for key in (
