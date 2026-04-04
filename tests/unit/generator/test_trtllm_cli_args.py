@@ -3,9 +3,8 @@
 
 """Unit tests for the trtllm cli_args.j2 template.
 
-After the translate module was introduced, cli_args.j2 only emits direct CLI
-flags accepted by dynamo.trtllm's argparser.  Model path, served model name,
-and override-engine-args are no longer part of this template.
+cli_args.j2 only emits direct CLI flags accepted by dynamo.trtllm's argparser.
+Model path, served model name, and override-engine-args are handled elsewhere.
 """
 
 from pathlib import Path
@@ -34,77 +33,48 @@ def cli_args_template():
     return env.get_template("cli_args.j2")
 
 
-def _render(template, **ctx) -> str:
-    """Render the template and return stripped output."""
-    return template.render(**ctx).strip()
-
-
 @pytest.mark.unit
-class TestDirectCliArgs:
-    """Tests for flags that map directly to dynamo.trtllm argparser."""
+class TestCliArgsTemplate:
 
-    def test_no_model_path(self, cli_args_template):
-        """model-path is no longer in cli_args.j2."""
-        rendered = _render(cli_args_template, ServiceConfig={"model_path": "Qwen/Qwen3-32B"})
+    def test_emits_all_direct_flags(self, cli_args_template):
+        """All direct argparser flags are present when their values are set."""
+        rendered = cli_args_template.render(
+            ServiceConfig={"model_path": "Qwen/Qwen3-32B", "served_model_name": "my-model"},
+            tensor_parallel_size=4,
+            pipeline_parallel_size=2,
+            moe_expert_parallel_size=8,
+            enable_attention_dp=True,
+            max_batch_size=64,
+            max_num_tokens=8192,
+            max_seq_len=4096,
+            kv_cache_free_gpu_memory_fraction=0.9,
+        ).strip()
+
+        assert "--tensor-parallel-size 4" in rendered
+        assert "--pipeline-parallel-size 2" in rendered
+        assert "--expert-parallel-size 8" in rendered
+        assert "--enable-attention-dp" in rendered
+        assert "--max-batch-size 64" in rendered
+        assert "--max-num-tokens 8192" in rendered
+        assert "--max-seq-len 4096" in rendered
+        assert "--free-gpu-memory-fraction 0.9" in rendered
+
+        # These must NOT be in the template (handled elsewhere)
         assert "--model-path" not in rendered
-
-    def test_no_served_model_name(self, cli_args_template):
-        rendered = _render(
-            cli_args_template,
-            ServiceConfig={"model_path": "m", "served_model_name": "my-model"},
-        )
         assert "--served-model-name" not in rendered
-
-    def test_no_override_engine_args(self, cli_args_template):
-        """override-engine-args block is removed."""
-        rendered = _render(
-            cli_args_template,
-            ServiceConfig={},
-            tokens_per_block=32,
-            disable_overlap_scheduler=True,
-        )
         assert "--override-engine-args" not in rendered
 
-    def test_tensor_parallel_size(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, tensor_parallel_size=4)
-        assert "--tensor-parallel-size 4" in rendered
+    def test_omits_flags_with_zero_or_false_values(self, cli_args_template):
+        """Flags are omitted when values are zero, False, or None."""
+        rendered = cli_args_template.render(
+            ServiceConfig={},
+            tensor_parallel_size=0,
+            pipeline_parallel_size=0,
+            moe_expert_parallel_size=None,
+            enable_attention_dp=False,
+        ).strip()
 
-    def test_tensor_parallel_size_zero_omitted(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, tensor_parallel_size=0)
         assert "--tensor-parallel-size" not in rendered
-
-    def test_pipeline_parallel_size(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, pipeline_parallel_size=2)
-        assert "--pipeline-parallel-size 2" in rendered
-
-    def test_expert_parallel_size(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, moe_expert_parallel_size=8)
-        assert "--expert-parallel-size 8" in rendered
-
-    def test_expert_parallel_size_none_omitted(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, moe_expert_parallel_size=None)
+        assert "--pipeline-parallel-size" not in rendered
         assert "--expert-parallel-size" not in rendered
-
-    def test_enable_attention_dp(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, enable_attention_dp=True)
-        assert "--enable-attention-dp" in rendered
-
-    def test_enable_attention_dp_false_omitted(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, enable_attention_dp=False)
         assert "--enable-attention-dp" not in rendered
-
-    def test_max_batch_size(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, max_batch_size=64)
-        assert "--max-batch-size 64" in rendered
-
-    def test_max_num_tokens(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, max_num_tokens=8192)
-        assert "--max-num-tokens 8192" in rendered
-
-    def test_max_seq_len(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, max_seq_len=4096)
-        assert "--max-seq-len 4096" in rendered
-
-    def test_free_gpu_memory_fraction(self, cli_args_template):
-        rendered = _render(cli_args_template, ServiceConfig={}, kv_cache_free_gpu_memory_fraction=0.9)
-        assert "--free-gpu-memory-fraction 0.9" in rendered

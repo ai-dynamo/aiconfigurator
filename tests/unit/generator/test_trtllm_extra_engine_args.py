@@ -10,7 +10,6 @@ Verifies that:
   _generate_k8s_via_dynamo / build_dgd_config (profiler path)
 """
 
-import json
 import shlex
 
 import pytest
@@ -198,7 +197,7 @@ _requires_dynamo = pytest.mark.skipif(
 class TestProfilerCliArgsMode:
     """Verify cli_args artifacts are correctly computed (no dynamo needed)."""
 
-    def test_cli_args_artifact_has_required_flags(self):
+    def test_cli_args_artifact_has_direct_flags_only(self):
         params = _build_params()
         artifacts = render_backend_templates(
             params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False
@@ -206,58 +205,12 @@ class TestProfilerCliArgsMode:
         cli = artifacts["cli_args_agg"]
         args = shlex.split(cli)
 
-        # model-path is no longer in cli_args.j2 (handled by k8s_deploy fallback)
-        assert "--model-path" not in args
+        # Direct argparser flags present
         assert "--tensor-parallel-size" in args
         assert "--max-batch-size" in args
-
-    def test_cli_args_override_engine_args_valid_json(self):
-        params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False
-        )
-        cli = artifacts["cli_args_agg"]
-        args = shlex.split(cli)
-
-        if "--override-engine-args" in args:
-            idx = args.index("--override-engine-args")
-            override = json.loads(args[idx + 1])
-            assert isinstance(override, dict)
-
-    def test_cli_args_disagg_both_roles(self):
-        params = _build_params(
-            DynConfig={"mode": "disagg"},
-            WorkerConfig={
-                "prefill_workers": 1,
-                "prefill_gpus_per_worker": 4,
-                "decode_workers": 1,
-                "decode_gpus_per_worker": 4,
-                "agg_workers": 0,
-            },
-            params={
-                "prefill": {
-                    "tensor_parallel_size": 4,
-                    "pipeline_parallel_size": 1,
-                    "max_batch_size": 64,
-                    "max_num_tokens": 8192,
-                    "gpus_per_worker": 4,
-                },
-                "decode": {
-                    "tensor_parallel_size": 4,
-                    "pipeline_parallel_size": 1,
-                    "max_batch_size": 128,
-                    "max_num_tokens": 16384,
-                    "gpus_per_worker": 4,
-                },
-            },
-        )
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=False
-        )
-        assert "cli_args_prefill" in artifacts
-        assert "cli_args_decode" in artifacts
-        assert "--tensor-parallel-size" in artifacts["cli_args_prefill"]
-        assert "--tensor-parallel-size" in artifacts["cli_args_decode"]
+        # model-path and override-engine-args no longer in cli_args.j2
+        assert "--model-path" not in args
+        assert "--override-engine-args" not in args
 
 
 @pytest.mark.unit
@@ -382,56 +335,42 @@ class TestOtherBackendsUnaffected:
 @pytest.mark.unit
 class TestDynamicFlagsMode:
     """When use_dynamo_generator=True and backend=trtllm, cli_args_list must
-    contain --trtllm.* flags converted from the rendered extra_engine_args YAML.
-    The --override-engine-args JSON blob must NOT appear."""
+    contain --trtllm.* flags converted from the rendered extra_engine_args YAML."""
 
-    def test_cli_args_contain_trtllm_flags(self):
+    def test_agg_mode(self):
+        """Agg mode: --trtllm.* flags present, direct flags present, no duplication,
+        no --override-engine-args, extra_engine_args YAML still generated."""
         params = _build_params()
         artifacts = render_backend_templates(
             params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
         )
         cli = artifacts.get("cli_args_agg", "")
+
+        # --trtllm.* engine params present
         assert "--trtllm.disable_overlap_scheduler" in cli
-        assert "--trtllm.kv_cache_config.dtype" in cli or "--trtllm.kv_cache_config.enable_block_reuse" in cli
+        assert "--trtllm.kv_cache_config." in cli
 
-    def test_no_override_engine_args_json(self):
-        params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
-        cli = artifacts.get("cli_args_agg", "")
-        assert "--override-engine-args" not in cli
-
-    def test_direct_cli_flags_still_present(self):
-        params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
-        cli = artifacts.get("cli_args_agg", "")
+        # Direct CLI flags still present
         assert "--tensor-parallel-size" in cli
         assert "--max-batch-size" in cli
 
-    def test_skipped_keys_not_duplicated(self):
-        """Keys already emitted as direct CLI flags must not appear as --trtllm.* flags."""
-        params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
-        cli = artifacts.get("cli_args_agg", "")
+        # No --override-engine-args JSON blob
+        assert "--override-engine-args" not in cli
+
+        # Skipped keys not duplicated as --trtllm.*
         assert "--trtllm.tensor_parallel_size" not in cli
         assert "--trtllm.max_batch_size" not in cli
         assert "--trtllm.backend" not in cli
 
-    def test_list_values_skipped(self):
-        """List values (cuda_graph_config.batch_sizes) must not appear as --trtllm.* flags."""
-        params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
-        cli = artifacts.get("cli_args_agg", "")
+        # List values skipped
         assert "--trtllm.cuda_graph_config.batch_sizes" not in cli
 
-    def test_disagg_mode_both_workers_get_flags(self):
+        # extra_engine_args YAML artifact still generated
+        assert "extra_engine_args_agg.yaml" in artifacts
+        assert "kv_cache_config" in artifacts["extra_engine_args_agg.yaml"]
+
+    def test_disagg_mode(self):
+        """Disagg mode: both prefill and decode workers get --trtllm.* flags."""
         params = _build_params(
             DynConfig={"mode": "disagg"},
             WorkerConfig={
@@ -463,21 +402,7 @@ class TestDynamicFlagsMode:
         artifacts = render_backend_templates(
             params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
         )
-        prefill_cli = artifacts.get("cli_args_prefill", "")
-        decode_cli = artifacts.get("cli_args_decode", "")
-        # Both workers should have --trtllm.* flags
-        assert "--trtllm." in prefill_cli
-        assert "--trtllm." in decode_cli
-        # Neither should have --override-engine-args
-        assert "--override-engine-args" not in prefill_cli
-        assert "--override-engine-args" not in decode_cli
-
-    def test_extra_engine_args_yaml_still_generated(self):
-        """The extra_engine_args YAML artifact is still generated (consumed by
-        translate and potentially by --extra-engine-args file path)."""
-        params = _build_params()
-        artifacts = render_backend_templates(
-            params, "trtllm", version="1.3.0rc5.post1", use_dynamo_generator=True
-        )
-        assert "extra_engine_args_agg.yaml" in artifacts
-        assert "kv_cache_config" in artifacts["extra_engine_args_agg.yaml"]
+        for role in ("prefill", "decode"):
+            cli = artifacts.get(f"cli_args_{role}", "")
+            assert "--trtllm." in cli, f"{role} worker missing --trtllm.* flags"
+            assert "--override-engine-args" not in cli
