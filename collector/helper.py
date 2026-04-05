@@ -256,7 +256,13 @@ def benchmark_with_power(
                 logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
                 del g
                 g = None
-                torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
+                torch.cuda.empty_cache()
+                # A CUDA error during graph capture leaves the global RNG
+                # generator's offset tracker in "capture" mode.  Reseeding
+                # is the only reliable way to reset it; without this every
+                # subsequent RNG op (normal_, uniform_, …) on this worker
+                # hits "Offset increment outside graph capture".
+                torch.cuda.manual_seed(torch.cuda.initial_seed())
                 use_graph = False
             else:
                 # Standard behavior: re-raise exception
