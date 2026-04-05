@@ -554,6 +554,7 @@ class PerfDataFilename(Enum):
 
     gemm = "gemm_perf.txt"
     nccl = "nccl_perf.txt"
+    oneccl = "oneccl_perf.txt"
     generation_attention = "generation_attention_perf.txt"
     context_attention = "context_attention_perf.txt"
     context_mla = "context_mla_perf.txt"

@@ -240,7 +240,8 @@ def main():
             backend_version = parts[3]
 
             # data/<system>/nccl/<nccl_version>/nccl_perf.txt
-            if backend == "nccl":
+            # data/<system>/oneccl/<oneccl_version>/oneccl_perf.txt
+            if backend in ("nccl", "oneccl"):
                 # Ignore for now
                 continue
 

@@ -4,6 +4,7 @@
 
 # Default backend
 all_reduce_backend="trtllm"
+all_reduce_backend_set=false
 device="cuda"
 measure_power=false
 power_test_duration=1.0
@@ -13,6 +14,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --all_reduce_backend)
             all_reduce_backend="$2"
+            all_reduce_backend_set=true
             if [[ "$all_reduce_backend" != "trtllm" && "$all_reduce_backend" != "vllm" && "$all_reduce_backend" != "sglang" ]]; then
                 echo "Error: --all_reduce_backend must be 'trtllm', 'vllm', or 'sglang'"
                 echo "Usage: $0 [OPTIONS]"
@@ -62,6 +64,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Default to vllm backend for XPU if not explicitly set
+if [[ "$device" == "xpu" && "$all_reduce_backend_set" == "false" ]]; then
+    all_reduce_backend="vllm"
+fi
+
 echo "Running benchmarks with all_reduce_backend: $all_reduce_backend"
 if [[ "$measure_power" == "true" ]]; then
     echo "Power monitoring: ENABLED (duration: ${power_test_duration}s)"
@@ -108,8 +115,22 @@ if [[ "$device" == "cuda" ]]; then
             done
         done
     done
+elif [[ "$device" == "xpu" ]]; then
+    # Note: alltoall hangs on oneCCL SYCL/GPU backend and is excluded.
+    # vLLM XPU uses allgather+reduce_scatter (AgRs) for MoE, not alltoall.
+    oneccl_ops=("all_gather" "reduce_scatter" "all_reduce")
+    dtypes=("half" "int8")
+
+    for n in "${gpu_count_list[@]}"; do
+        for op in "${oneccl_ops[@]}"; do
+            for dtype in "${dtypes[@]}"; do
+                echo "Running oneCCL $op benchmark with $n GPUs, dtype=$dtype"
+                python3 "$SCRIPT_DIR/collect_oneccl_xpu.py" -n "$n" -O "$op" --dtype "$dtype"
+            done
+        done
+    done
 else
-    echo "Skipping NCCL benchmarks because device is $device"
+    echo "Skipping NCCL/oneCCL benchmarks because device is $device"
 fi
 
 echo "Running AllReduce Benchmarks with $all_reduce_backend backend..."

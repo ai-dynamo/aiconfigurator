@@ -2121,6 +2121,12 @@ class PerfDatabase:
             "nccl",
             self.system_spec["misc"]["nccl_version"],
         )
+        oneccl_version = self.system_spec.get("misc", {}).get("oneccl_version")
+        oneccl_data_dir = (
+            os.path.join(systems_root, self.system_spec["data_dir"], "oneccl", oneccl_version)
+            if oneccl_version
+            else None
+        )
 
         def _load_op_data(op_filename_enum: PerfDataFilename) -> LoadedOpData | tuple[LoadedOpData, ...]:
             func_map = {
@@ -2130,6 +2136,7 @@ class PerfDatabase:
                 PerfDataFilename.moe: load_moe_data,
                 PerfDataFilename.custom_allreduce: load_custom_allreduce_data,
                 PerfDataFilename.nccl: load_nccl_data,
+                PerfDataFilename.oneccl: load_nccl_data,
                 PerfDataFilename.context_mla: load_context_mla_data,
                 PerfDataFilename.generation_mla: load_generation_mla_data,
                 PerfDataFilename.mla_bmm: load_mla_bmm_data,
@@ -2151,6 +2158,8 @@ class PerfDatabase:
             perf_data_dir = data_dir
             if op_filename_enum == PerfDataFilename.nccl:
                 perf_data_dir = nccl_data_dir
+            elif op_filename_enum == PerfDataFilename.oneccl:
+                perf_data_dir = oneccl_data_dir if oneccl_data_dir else data_dir
 
             data_filepath = os.path.join(perf_data_dir, op_filename_enum.value)
             data_dict: Optional[dict] = func_map[op_filename_enum](data_filepath)
@@ -2174,6 +2183,7 @@ class PerfDatabase:
         # Comm ops
         self._custom_allreduce_data = _load_op_data(PerfDataFilename.custom_allreduce)
         self._nccl_data = _load_op_data(PerfDataFilename.nccl)
+        self._oneccl_data = _load_op_data(PerfDataFilename.oneccl) if oneccl_data_dir else None
 
         # More model-specific ops
         self._context_mla_data = _load_op_data(PerfDataFilename.context_mla)
@@ -4719,10 +4729,14 @@ class PerfDatabase:
                 if num_gpus == 1:
                     return PerformanceResult(0.0, energy=0.0)
 
-                self._nccl_data.raise_if_not_loaded()
+                # Use oneCCL data as fallback when NCCL data is not available (e.g. XPU systems)
+                nccl_source = self._nccl_data
+                if not nccl_source.loaded and self._oneccl_data is not None and self._oneccl_data.loaded:
+                    nccl_source = self._oneccl_data
+                nccl_source.raise_if_not_loaded()
 
-                max_num_gpus = max(self._nccl_data[dtype][operation].keys())
-                nccl_dict = self._nccl_data[dtype][operation][min(num_gpus, max_num_gpus)]
+                max_num_gpus = max(nccl_source[dtype][operation].keys())
+                nccl_dict = nccl_source[dtype][operation][min(num_gpus, max_num_gpus)]
                 size_left, size_right = self._nearest_1d_point_helper(
                     message_size,
                     list(nccl_dict.keys()),
