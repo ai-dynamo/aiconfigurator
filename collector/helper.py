@@ -241,6 +241,7 @@ def benchmark_with_power(
     # ═══════════════════════════════════════════════════════════════════
     # CUDA Graph Capture with Optional Fallback
     # ═══════════════════════════════════════════════════════════════════
+    g = None
     if torch.cuda.is_available():
         use_graph = True
         g = torch.cuda.CUDAGraph()
@@ -253,6 +254,8 @@ def benchmark_with_power(
         except Exception as e:
             if allow_graph_fail:
                 logging.getLogger(__name__).warning(f"CUDA graph capture failed: {e}. Falling back to eager execution.")
+                del g
+                g = None
                 torch.cuda.empty_cache()  # CRITICAL: Clean up partial allocations
                 use_graph = False
             else:
@@ -334,6 +337,15 @@ def benchmark_with_power(
 
     # Calculate latency
     latency_ms = start_event.elapsed_time(end_event) / actual_num_runs / repeat_n
+
+    # Destroy the CUDA graph before yielding so the next task on this worker
+    # starts with a clean CUDA RNG state.  Without this, the graph's internal
+    # RNG-offset bookkeeping stays alive until GC collects the generator frame,
+    # and any RNG op (e.g. param.normal_() during weight init) in the next task
+    # hits "Offset increment outside graph capture encountered unexpectedly".
+    if g is not None:
+        del g
+        g = None
 
     # Return results
     yield {
