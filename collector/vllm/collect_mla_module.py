@@ -35,7 +35,11 @@ Usage:
 
 import argparse
 import gc
+import hashlib
+import logging
 import math
+import os
+import tempfile
 import traceback
 
 import torch
@@ -75,6 +79,46 @@ SUPPORTED_MODELS: dict[str, str] = {
     "deepseek-ai/DeepSeek-V3.2": "dsa",
     "zai-org/GLM-5": "dsa",
 }
+
+# ═══════════════════════════════════════════════════════════════════════
+# HF Config Cache — download once per model, reuse from local disk
+# ═══════════════════════════════════════════════════════════════════════
+
+_hf_config_cache: dict[str, str] = {}  # model_name → local directory path
+
+_HF_CACHE_BASE = os.path.join(tempfile.gettempdir(), "aiconfigurator_hf_config_cache")
+
+
+def _get_cached_hf_config_path(model_name: str, trust_remote_code: bool = True) -> str:
+    """Return a local directory containing the HF config for *model_name*.
+
+    On the first call for a given model (per worker process), downloads
+    the config via ``AutoConfig.from_pretrained()`` and saves it to a
+    shared temp directory.  Subsequent calls return the cached path
+    immediately, avoiding redundant HuggingFace API requests that would
+    otherwise trigger rate-limiting actions when many workers run in parallel.
+    """
+    if model_name in _hf_config_cache:
+        return _hf_config_cache[model_name]
+
+    # Deterministic subdir so concurrent workers can share the download.
+    safe_name = hashlib.sha256(model_name.encode()).hexdigest()[:16]
+    cache_dir = os.path.join(_HF_CACHE_BASE, safe_name)
+    config_file = os.path.join(cache_dir, "config.json")
+
+    if os.path.isfile(config_file):
+        _hf_config_cache[model_name] = cache_dir
+        return cache_dir
+
+    from transformers import AutoConfig
+
+    log = logging.getLogger(__name__)
+    log.info("Downloading HF config for %s (will be cached at %s)", model_name, cache_dir)
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    os.makedirs(cache_dir, exist_ok=True)
+    config.save_pretrained(cache_dir)
+    _hf_config_cache[model_name] = cache_dir
+    return cache_dir
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -265,6 +309,11 @@ def _create_attention_module(
 
     model_name = model_path
 
+    # Cache the HF config locally so that repeated create_vllm_config()
+    # calls (across many benchmark points in the same worker) load from
+    # disk instead of hitting the HuggingFace API every time.
+    hf_config_path = _get_cached_hf_config_path(model_name, trust_remote_code=True)
+
     block_size = 64
     max_model_len = max(max_seq_len + 1, 4096)
     num_kv_cache_blocks = max(
@@ -287,6 +336,7 @@ def _create_attention_module(
         max_num_batched_tokens=max(max_batch_size * max_seq_len, 131072) if is_context else max_batch_size,
         use_fp8_kv_cache=use_fp8_kv_cache,
         trust_remote_code=True,
+        hf_config_path=hf_config_path,
     )
 
     # Override quant_config to control linear-layer GEMM precision.

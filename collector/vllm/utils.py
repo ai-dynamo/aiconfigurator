@@ -250,6 +250,7 @@ def create_vllm_config(
     hf_config_override: dict | None = None,
     use_fp8_kv_cache: bool = False,
     trust_remote_code: bool = False,
+    hf_config_path: str | None = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
@@ -260,6 +261,7 @@ def create_vllm_config(
         dtype=dtype,
         seed=0,
         max_model_len=max_model_len,
+        hf_config_path=hf_config_path,
     )
 
     cache_config = CacheConfig(
