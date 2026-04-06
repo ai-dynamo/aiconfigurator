@@ -280,6 +280,50 @@ def cleanup_distributed():
         expert_location._global_expert_location_metadata = None
 
 
+def _patch_nsa_rope_contiguity(model_runner):
+    """Workaround for sglang rope contiguity bugs on Blackwell (SM>=100).
+
+    The NSA Indexer's _get_k_bf16 calls torch.split on q/k, producing
+    non-contiguous views.  The JIT RoPE kernel rejects these:
+      - <=0.5.9  rope.cuh:498 check_cuda_contiguous  (q/k assertion)
+      - >=0.5.10 rope.cuh:299 TensorMatcher verify    (positions stride check)
+
+    We monkey-patch rotary_emb.forward on each NSA Indexer layer to call
+    .contiguous() on positions, q, and k before the kernel.
+    """
+    if get_sm_version() < 100:
+        return
+
+    for layer in model_runner.model.model.layers:
+        attn = getattr(layer, "self_attn", None)
+        if attn is None:
+            continue
+        indexer = getattr(attn, "indexer", None)
+        if indexer is None:
+            continue
+        # MultiPlatformOp wraps the actual module
+        actual = getattr(indexer, "_module", indexer)
+        rotary_emb = getattr(actual, "rotary_emb", None)
+        if rotary_emb is None:
+            continue
+
+        original_forward = rotary_emb.forward
+
+        def _make_contiguous_forward(orig):
+            def _forward(positions, query, key, fused_set_kv_buffer_arg=None):
+                return orig(
+                    positions.contiguous(),
+                    query.contiguous(),
+                    key.contiguous() if key is not None else key,
+                    fused_set_kv_buffer_arg,
+                )
+
+            return _forward
+
+        rotary_emb.forward = _make_contiguous_forward(original_forward)
+        print(f"Patched rope contiguity for layer {layer}")
+
+
 def load_model_runner(
     model_path: str,
     head_num: int,
@@ -340,6 +384,12 @@ def load_model_runner(
         kv_cache_dtype=sglang_kv_dtype,
     )
 
+    # Disable fp8 weight quantization.  sglang auto-enables fp8 for DeepSeek
+    # models on SM>=100, but the quantization path crashes on GLM-5 weights
+    # (channel_quant_to_tensor_quant .view(-1) on non-contiguous tensor).
+    # We only need attention kernel perf with dummy weights, not quantised MoE.
+    server_args.quantization = None
+
     server_args.attention_backend = attention_backend
     print(f"Using attention backend: {attention_backend}, kv_cache_dtype: {sglang_kv_dtype}, gpu_id: {gpu_id}")
 
@@ -369,6 +419,8 @@ def load_model_runner(
         nccl_port=nccl_port,
         server_args=server_args,
     )
+
+    _patch_nsa_rope_contiguity(model_runner)
 
     return model_runner
 
