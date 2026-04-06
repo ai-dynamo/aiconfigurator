@@ -4375,7 +4375,15 @@ class Qwen35Model(BaseModel):
         super().__init__(*args)
         cfg: common.Qwen35Config = self.extra_params
         assert isinstance(cfg, common.Qwen35Config), "Qwen35Model requires Qwen35Config extra_params"
-        assert self._nextn == 0, "Qwen35Model does not support mtp"
+
+        self._mtp_scale_factor = (
+            1.0
+            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
+            * (self._nextn + self._num_layers)
+            / self._num_layers
+            if self._nextn > 0
+            else 1.0
+        )
 
         if cfg.num_experts > 0:
             assert (
@@ -4624,14 +4632,16 @@ class Qwen35Model(BaseModel):
         gdn_in_proj_out = (nk * hk + nk * hk + nv * hv + nv * hv + nk * hk) // tp
         gdn_out_proj_in = nv * hv // tp
 
+        sf = self._mtp_scale_factor
+
         self.generation_ops = [
-            ops.Embedding("generation_embedding", 1, self._vocab_size // tp, h, 0.3),
-            ops.CustomAllReduce("generation_embedding_ar", 1, h, tp),
+            ops.Embedding("generation_embedding", 1 * sf, self._vocab_size // tp, h, 0.3),
+            ops.CustomAllReduce("generation_embedding_ar", 1 * sf, h, tp),
         ]
 
         # --- linear_attention (GDN) layers ---
         if counts["linear"] > 0:
-            c = counts["linear"]
+            c = counts["linear"] * sf
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_gdn_norm", c, 2 * h, 2 * h, 0.8),
@@ -4672,7 +4682,7 @@ class Qwen35Model(BaseModel):
 
         # --- full_attention (GQA) layers ---
         if counts["full"] > 0:
-            c = counts["full"]
+            c = counts["full"] * sf
             qkv_out = n_q_per_tp * self._head_size + n_kv_per_tp * self._head_size * 2
             self.generation_ops.extend(
                 [
@@ -4700,8 +4710,8 @@ class Qwen35Model(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.GEMM("generation_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
-                ops.P2P("generation_p2p", pp - 1, h, pp),
+                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]
         )
 

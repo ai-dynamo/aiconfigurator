@@ -8,6 +8,7 @@ Tests that verify:
 1. context_p2p is NOT scaled by mtp_scale_factor (bug fix verification)
 2. generation_p2p IS scaled by mtp_scale_factor
 3. MTP scale factor calculation for non-DeepSeek models
+4. Qwen3.5 MTP support (hybrid GDN + full_attention architecture)
 """
 
 import pytest
@@ -196,4 +197,91 @@ class TestMTPScaling:
         # Context ops should have the same _scale_factor regardless of nextn
         assert ctx_op_zero._scale_factor == ctx_op_mtp._scale_factor, (
             "Context ops should NOT be scaled by mtp_scale_factor"
+        )
+
+    def test_qwen35_model_supports_mtp(self):
+        """
+        Test that Qwen35Model accepts nextn > 0 without assertion error.
+        """
+        try:
+            model_config = self._create_model_config(nextn=1)
+            model = models.get_model("Qwen/Qwen3.5-27B", model_config, "trtllm")
+
+            assert model is not None
+            assert model.config.nextn == 1
+            assert hasattr(model, "_mtp_scale_factor")
+            assert model._mtp_scale_factor != 1.0, "mtp_scale_factor should differ from 1.0 when nextn > 0"
+        except (FileNotFoundError, KeyError, ValueError, TypeError, HuggingFaceDownloadError) as e:
+            pytest.skip(f"Qwen3.5 model test skipped due to missing config: {e}")
+
+    def test_qwen35_generation_ops_scaled_by_mtp(self):
+        """
+        Test that Qwen35Model generation ops are scaled by mtp_scale_factor
+        for both GDN and full_attention layer types.
+        """
+        model_config_zero = self._create_model_config(nextn=0)
+        model_zero = models.get_model("Qwen/Qwen3.5-27B", model_config_zero, "trtllm")
+
+        model_config_mtp = self._create_model_config(nextn=1)
+        model_mtp = models.get_model("Qwen/Qwen3.5-27B", model_config_mtp, "trtllm")
+
+        # GDN ops should be scaled
+        gdn_zero = next(
+            (op for op in model_zero.generation_ops if hasattr(op, "_name") and "gdn_in_proj" in op._name), None
+        )
+        gdn_mtp = next(
+            (op for op in model_mtp.generation_ops if hasattr(op, "_name") and "gdn_in_proj" in op._name), None
+        )
+        assert gdn_zero is not None and gdn_mtp is not None, "Should find GDN ops in generation_ops"
+        assert gdn_zero._scale_factor != gdn_mtp._scale_factor, (
+            "GDN generation ops should be scaled differently when MTP is enabled"
+        )
+
+        # Full attention ops should be scaled
+        attn_zero = next(
+            (op for op in model_zero.generation_ops if hasattr(op, "_name") and "qkv_gemm" in op._name), None
+        )
+        attn_mtp = next(
+            (op for op in model_mtp.generation_ops if hasattr(op, "_name") and "qkv_gemm" in op._name), None
+        )
+        assert attn_zero is not None and attn_mtp is not None, "Should find full attention ops in generation_ops"
+        assert attn_zero._scale_factor != attn_mtp._scale_factor, (
+            "Full attention generation ops should be scaled differently when MTP is enabled"
+        )
+
+    def test_qwen35_context_ops_not_scaled_by_mtp(self):
+        """
+        Test that Qwen35Model context ops are NOT scaled by mtp_scale_factor.
+        """
+        try:
+            model_config_zero = self._create_model_config(nextn=0)
+            model_zero = models.get_model("Qwen/Qwen3.5-27B", model_config_zero, "trtllm")
+
+            model_config_mtp = self._create_model_config(nextn=1)
+            model_mtp = models.get_model("Qwen/Qwen3.5-27B", model_config_mtp, "trtllm")
+        except (FileNotFoundError, KeyError, ValueError, TypeError, HuggingFaceDownloadError) as e:
+            pytest.skip(f"Qwen3.5 model test skipped due to missing config: {e}")
+
+        # GDN context ops should NOT be scaled
+        ctx_gdn_zero = next(
+            (op for op in model_zero.context_ops if hasattr(op, "_name") and "gdn_in_proj" in op._name), None
+        )
+        ctx_gdn_mtp = next(
+            (op for op in model_mtp.context_ops if hasattr(op, "_name") and "gdn_in_proj" in op._name), None
+        )
+        assert ctx_gdn_zero is not None and ctx_gdn_mtp is not None, "Should find GDN ops in context_ops"
+        assert ctx_gdn_zero._scale_factor == ctx_gdn_mtp._scale_factor, (
+            "Context GDN ops should NOT be scaled by mtp_scale_factor"
+        )
+
+        # Full attention context ops should NOT be scaled
+        ctx_attn_zero = next(
+            (op for op in model_zero.context_ops if hasattr(op, "_name") and "qkv_gemm" in op._name), None
+        )
+        ctx_attn_mtp = next(
+            (op for op in model_mtp.context_ops if hasattr(op, "_name") and "qkv_gemm" in op._name), None
+        )
+        assert ctx_attn_zero is not None and ctx_attn_mtp is not None, "Should find full attention ops in context_ops"
+        assert ctx_attn_zero._scale_factor == ctx_attn_mtp._scale_factor, (
+            "Context full attention ops should NOT be scaled by mtp_scale_factor"
         )

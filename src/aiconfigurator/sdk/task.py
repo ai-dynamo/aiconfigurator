@@ -339,8 +339,8 @@ class TaskConfigFactory:
 
     @staticmethod
     def _base_common_layer(ctx: TaskContext) -> dict:
-        # DeepSeek models natively support MTP with nextn=1; other models default to 0
-        nextn = 1 if ctx.model_family in {"DEEPSEEK", "DEEPSEEKV32"} else 0
+        # DeepSeek and Qwen3.5 models natively support MTP with nextn=1; other models default to 0
+        nextn = 1 if ctx.model_family in {"DEEPSEEK", "DEEPSEEKV32", "QWEN35"} else 0
         return {
             "serving_mode": ctx.serving_mode,
             "model_path": ctx.model_path,
