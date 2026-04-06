@@ -7,18 +7,16 @@ __compat__ = "sglang>=0.5.9"
 GDN (Gated DeltaNet) Collector for AIConfigurator — SGLang backend.
 
 SGLang ships its own vendored Triton FLA implementation for GDN ops in
-Qwen3.5 linear_attention layers. Unlike vLLM (which uses FlashInfer on
-SM90+ / GB200), SGLang always dispatches through its Triton FLA copy at
-``sglang.srt.layers.attention.fla``. Profiling the SGLang-bundled kernels
+Qwen3.5 linear_attention layers. Profiling the SGLang-bundled kernels
 ensures the collected data reflects SGLang's actual runtime performance.
 
 Context (prefill) phase:
     - causal_conv1d_fn: Causal 1D convolution over key channels
-    - chunk_gated_delta_rule: GDN chunked scan (Q, K, V, beta)
+    - chunk_gated_delta_rule: GDN chunked scan (Q, K, V, g, beta)
 
 Generation (decode) phase:
     - causal_conv1d_update: Single-step conv state update
-    - fused_sigmoid_gating_delta_rule_update: Single-step GDN recurrence
+    - fused_recurrent_gated_delta_rule: Single-step GDN recurrence
 
 The in_proj and out_proj GEMMs are standard linear layers modeled by the
 existing GEMM infrastructure. This collector focuses on the unique GDN ops.
@@ -40,10 +38,9 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # Keep these imports to satisfy static analysis.
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
     from sglang.srt.layers.attention.fla.chunk import chunk_gated_delta_rule
-    from sglang.srt.layers.attention.fla.recurrent import fused_sigmoid_gating_delta_rule_update
+    from sglang.srt.layers.attention.fla.fused_recurrent import fused_recurrent_gated_delta_rule
 
 import torch
 
@@ -150,7 +147,7 @@ def run_gdn_context_benchmark(
 
     Benchmarks:
     1. causal_conv1d_fn  — Conv1D over key channels
-    2. chunk_gated_delta_rule — GDN scan (Q, K, V, beta) via SGLang's vendored FLA
+    2. chunk_gated_delta_rule — GDN scan (Q, K, V, g, beta) via SGLang's vendored FLA
     """
     device = torch.device(device)
     torch.cuda.set_device(device)
@@ -199,12 +196,12 @@ def run_gdn_context_benchmark(
                 }
 
                 if aic_cached_inputs:
-                    # Cached mode: same inputs every iteration
                     k_input = torch.randn(batch_size, conv_channels, seq_len, dtype=dtype, device=device)
                     q = torch.randn(batch_size, seq_len, num_k_heads, head_k_dim, dtype=dtype, device=device)
                     k = torch.randn(batch_size, seq_len, num_k_heads, head_k_dim, dtype=dtype, device=device)
                     v = torch.randn(batch_size, seq_len, num_v_heads, head_v_dim, dtype=dtype, device=device)
-                    beta = torch.sigmoid(torch.randn(batch_size, seq_len, num_k_heads, dtype=dtype, device=device))
+                    g = torch.logsigmoid(torch.randn(batch_size, seq_len, num_v_heads, dtype=dtype, device=device))
+                    beta = torch.sigmoid(torch.randn(batch_size, seq_len, num_v_heads, dtype=dtype, device=device))
 
                     # --- Benchmark causal_conv1d_fn ---
                     torch.cuda.synchronize()
@@ -235,11 +232,11 @@ def run_gdn_context_benchmark(
 
                     # --- Benchmark chunk_gated_delta_rule ---
                     torch.cuda.synchronize()
-                    chunk_gated_delta_rule(q, k, v, beta)
+                    chunk_gated_delta_rule(q, k, v, g, beta)
                     torch.cuda.synchronize()
 
-                    def run_gdn_scan(_q=q, _k=k, _v=v, _beta=beta):
-                        chunk_gated_delta_rule(_q, _k, _v, _beta)
+                    def run_gdn_scan(_q=q, _k=k, _v=v, _g=g, _beta=beta):
+                        chunk_gated_delta_rule(_q, _k, _v, _g, _beta)
 
                     with benchmark_with_power(
                         device=device,
@@ -261,20 +258,21 @@ def run_gdn_context_benchmark(
                         )
 
                 else:
-                    # Randomized mode: pre-generate pool of inputs
                     input_pool = _make_input_pool(
                         {
                             "k_input": (batch_size, conv_channels, seq_len),
                             "q": (batch_size, seq_len, num_k_heads, head_k_dim),
                             "k": (batch_size, seq_len, num_k_heads, head_k_dim),
                             "v": (batch_size, seq_len, num_v_heads, head_v_dim),
-                            "beta": (batch_size, seq_len, num_k_heads),
+                            "g": (batch_size, seq_len, num_v_heads),
+                            "beta": (batch_size, seq_len, num_v_heads),
                         },
                         total_iters,
                         dtype,
                         device,
                     )
                     for i in range(total_iters):
+                        input_pool["g"][i] = torch.logsigmoid(input_pool["g"][i])
                         input_pool["beta"][i] = torch.sigmoid(input_pool["beta"][i])
 
                     # --- Benchmark causal_conv1d_fn ---
@@ -315,7 +313,11 @@ def run_gdn_context_benchmark(
                     # --- Benchmark chunk_gated_delta_rule ---
                     torch.cuda.synchronize()
                     chunk_gated_delta_rule(
-                        input_pool["q"][0], input_pool["k"][0], input_pool["v"][0], input_pool["beta"][0]
+                        input_pool["q"][0],
+                        input_pool["k"][0],
+                        input_pool["v"][0],
+                        input_pool["g"][0],
+                        input_pool["beta"][0],
                     )
                     torch.cuda.synchronize()
 
@@ -324,7 +326,13 @@ def run_gdn_context_benchmark(
                     def run_gdn_scan(_pool=input_pool, _idx=gdn_iter_idx):
                         idx = _idx[0] % total_iters
                         _idx[0] += 1
-                        chunk_gated_delta_rule(_pool["q"][idx], _pool["k"][idx], _pool["v"][idx], _pool["beta"][idx])
+                        chunk_gated_delta_rule(
+                            _pool["q"][idx],
+                            _pool["k"][idx],
+                            _pool["v"][idx],
+                            _pool["g"][idx],
+                            _pool["beta"][idx],
+                        )
 
                     with benchmark_with_power(
                         device=device,
@@ -347,7 +355,7 @@ def run_gdn_context_benchmark(
 
                 # Cleanup
                 if aic_cached_inputs:
-                    del k_input, q, k, v, beta, conv_state
+                    del k_input, q, k, v, g, beta, conv_state
                 else:
                     del input_pool, conv_state
                 gc.collect()
@@ -376,7 +384,7 @@ def run_gdn_generation_benchmark(
 
     Benchmarks:
     1. causal_conv1d_update  — Single-step conv state update
-    2. fused_sigmoid_gating_delta_rule_update — Single-step GDN recurrence
+    2. fused_recurrent_gated_delta_rule — Single-step GDN recurrence
     """
     device = torch.device(device)
     torch.cuda.set_device(device)
@@ -404,10 +412,9 @@ def run_gdn_generation_benchmark(
             num_runs = 10
             total_iters = num_warmups + num_runs
 
-            # Conv state: (batch, channels, d_conv - 1)
             conv_state = torch.randn(batch_size, conv_channels, d_conv - 1, dtype=dtype, device=device)
-            # GDN state: (batch, num_k_heads, head_k_dim, head_v_dim)
-            gdn_state = torch.randn(batch_size, num_k_heads, head_k_dim, head_v_dim, dtype=torch.float32, device=device)
+            # SGLang GDN state layout: [batch, num_v_heads, head_v_dim, head_k_dim]
+            gdn_state = torch.randn(batch_size, num_v_heads, head_v_dim, head_k_dim, dtype=dtype, device=device)
 
             common_log_data = {
                 "phase": "generation",
@@ -424,12 +431,12 @@ def run_gdn_generation_benchmark(
             }
 
             if aic_cached_inputs:
-                # Cached mode: same inputs every iteration
                 k_input = torch.randn(batch_size, conv_channels, dtype=dtype, device=device)
-                q = torch.randn(batch_size, num_k_heads, head_k_dim, dtype=dtype, device=device)
-                k = torch.randn(batch_size, num_k_heads, head_k_dim, dtype=dtype, device=device)
-                v = torch.randn(batch_size, num_v_heads, head_v_dim, dtype=dtype, device=device)
-                beta = torch.sigmoid(torch.randn(batch_size, num_k_heads, dtype=dtype, device=device))
+                q = torch.randn(batch_size, 1, num_k_heads, head_k_dim, dtype=dtype, device=device)
+                k = torch.randn(batch_size, 1, num_k_heads, head_k_dim, dtype=dtype, device=device)
+                v = torch.randn(batch_size, 1, num_v_heads, head_v_dim, dtype=dtype, device=device)
+                g = torch.logsigmoid(torch.randn(batch_size, 1, num_v_heads, dtype=dtype, device=device))
+                beta = torch.sigmoid(torch.randn(batch_size, 1, num_v_heads, dtype=dtype, device=device))
 
                 # --- Benchmark causal_conv1d_update ---
                 torch.cuda.synchronize()
@@ -458,13 +465,29 @@ def run_gdn_generation_benchmark(
                         power_stats=results["power_stats"],
                     )
 
-                # --- Benchmark fused_sigmoid_gating_delta_rule_update ---
+                # --- Benchmark fused_recurrent_gated_delta_rule ---
                 torch.cuda.synchronize()
-                fused_sigmoid_gating_delta_rule_update(q, k, v, beta, gdn_state)
+                fused_recurrent_gated_delta_rule(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    initial_state=gdn_state,
+                    output_final_state=True,
+                )
                 torch.cuda.synchronize()
 
-                def run_gdn_update(_q=q, _k=k, _v=v, _beta=beta, _state=gdn_state):
-                    fused_sigmoid_gating_delta_rule_update(_q, _k, _v, _beta, _state)
+                def run_gdn_update(_q=q, _k=k, _v=v, _g=g, _beta=beta, _state=gdn_state):
+                    fused_recurrent_gated_delta_rule(
+                        _q,
+                        _k,
+                        _v,
+                        _g,
+                        _beta,
+                        initial_state=_state,
+                        output_final_state=True,
+                    )
 
                 with benchmark_with_power(
                     device=device,
@@ -480,26 +503,27 @@ def run_gdn_generation_benchmark(
                         version=sglang_version,
                         device_name=torch.cuda.get_device_name(device),
                         op_name="gdn",
-                        kernel_source="fused_sigmoid_gating_delta_rule_update",
+                        kernel_source="fused_recurrent_gated_delta_rule",
                         perf_filename=perf_filename,
                         power_stats=results["power_stats"],
                     )
 
             else:
-                # Randomized mode: pre-generate pool of inputs
                 input_pool = _make_input_pool(
                     {
                         "k_input": (batch_size, conv_channels),
-                        "q": (batch_size, num_k_heads, head_k_dim),
-                        "k": (batch_size, num_k_heads, head_k_dim),
-                        "v": (batch_size, num_v_heads, head_v_dim),
-                        "beta": (batch_size, num_k_heads),
+                        "q": (batch_size, 1, num_k_heads, head_k_dim),
+                        "k": (batch_size, 1, num_k_heads, head_k_dim),
+                        "v": (batch_size, 1, num_v_heads, head_v_dim),
+                        "g": (batch_size, 1, num_v_heads),
+                        "beta": (batch_size, 1, num_v_heads),
                     },
                     total_iters,
                     dtype,
                     device,
                 )
                 for i in range(total_iters):
+                    input_pool["g"][i] = torch.logsigmoid(input_pool["g"][i])
                     input_pool["beta"][i] = torch.sigmoid(input_pool["beta"][i])
 
                 # --- Benchmark causal_conv1d_update ---
@@ -533,10 +557,16 @@ def run_gdn_generation_benchmark(
                         power_stats=results["power_stats"],
                     )
 
-                # --- Benchmark fused_sigmoid_gating_delta_rule_update ---
+                # --- Benchmark fused_recurrent_gated_delta_rule ---
                 torch.cuda.synchronize()
-                fused_sigmoid_gating_delta_rule_update(
-                    input_pool["q"][0], input_pool["k"][0], input_pool["v"][0], input_pool["beta"][0], gdn_state
+                fused_recurrent_gated_delta_rule(
+                    input_pool["q"][0],
+                    input_pool["k"][0],
+                    input_pool["v"][0],
+                    input_pool["g"][0],
+                    input_pool["beta"][0],
+                    initial_state=gdn_state,
+                    output_final_state=True,
                 )
                 torch.cuda.synchronize()
 
@@ -545,8 +575,14 @@ def run_gdn_generation_benchmark(
                 def run_gdn_update(_pool=input_pool, _state=gdn_state, _idx=gdn_iter_idx):
                     idx = _idx[0] % total_iters
                     _idx[0] += 1
-                    fused_sigmoid_gating_delta_rule_update(
-                        _pool["q"][idx], _pool["k"][idx], _pool["v"][idx], _pool["beta"][idx], _state
+                    fused_recurrent_gated_delta_rule(
+                        _pool["q"][idx],
+                        _pool["k"][idx],
+                        _pool["v"][idx],
+                        _pool["g"][idx],
+                        _pool["beta"][idx],
+                        initial_state=_state,
+                        output_final_state=True,
                     )
 
                 with benchmark_with_power(
@@ -563,14 +599,14 @@ def run_gdn_generation_benchmark(
                         version=sglang_version,
                         device_name=torch.cuda.get_device_name(device),
                         op_name="gdn",
-                        kernel_source="fused_sigmoid_gating_delta_rule_update",
+                        kernel_source="fused_recurrent_gated_delta_rule",
                         perf_filename=perf_filename,
                         power_stats=results["power_stats"],
                     )
 
             # Cleanup
             if aic_cached_inputs:
-                del k_input, q, k, v, beta, conv_state, gdn_state
+                del k_input, q, k, v, g, beta, conv_state, gdn_state
             else:
                 del input_pool, conv_state, gdn_state
             gc.collect()
@@ -612,14 +648,11 @@ def run_gdn_torch(
         import sglang
         from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 
-        # Prefer SGLang's vendored FLA Triton copy for accurate profiling;
-        # fall back to standalone fla package if the internal path has moved.
         try:
             from sglang.srt.layers.attention.fla.chunk import chunk_gated_delta_rule
-            from sglang.srt.layers.attention.fla.recurrent import fused_sigmoid_gating_delta_rule_update
+            from sglang.srt.layers.attention.fla.fused_recurrent import fused_recurrent_gated_delta_rule
         except ImportError:
-            from fla.ops.gated_delta_rule import chunk_gated_delta_rule
-            from fla.ops.gated_delta_rule.recurrent import fused_sigmoid_gating_delta_rule_update
+            from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
     sglang_version = sglang.__version__
 
@@ -628,7 +661,7 @@ def run_gdn_torch(
             "causal_conv1d_fn": causal_conv1d_fn,
             "causal_conv1d_update": causal_conv1d_update,
             "chunk_gated_delta_rule": chunk_gated_delta_rule,
-            "fused_sigmoid_gating_delta_rule_update": fused_sigmoid_gating_delta_rule_update,
+            "fused_recurrent_gated_delta_rule": fused_recurrent_gated_delta_rule,
         }
     )
 
