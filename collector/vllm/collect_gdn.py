@@ -197,7 +197,7 @@ def run_gdn_context_benchmark(
                 conv_state = torch.randn(batch_size, conv_channels, d_conv - 1, dtype=dtype, device=device)
 
                 if aic_cached_inputs:
-                    k_input = torch.randn(batch_size, conv_channels, seq_len, dtype=dtype, device=device)
+                    k_input = torch.randn(conv_channels, batch_size * seq_len, dtype=dtype, device=device)
                     q = torch.randn(batch_size, seq_len, num_k_heads, head_k_dim, dtype=dtype, device=device)
                     k = torch.randn(batch_size, seq_len, num_k_heads, head_k_dim, dtype=dtype, device=device)
                     v = torch.randn(batch_size, seq_len, num_v_heads, head_v_dim, dtype=dtype, device=device)
@@ -205,14 +205,39 @@ def run_gdn_context_benchmark(
                         torch.randn(batch_size, seq_len, num_v_heads, dtype=dtype, device=device)
                     )
                     beta = torch.sigmoid(torch.randn(batch_size, seq_len, num_v_heads, dtype=dtype, device=device))
+                    query_start_loc = torch.arange(
+                        0, batch_size * seq_len + 1, seq_len, dtype=torch.int32, device=device
+                    )
+                    cache_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
+                    has_initial_state = torch.ones(batch_size, dtype=torch.bool, device=device)
 
                     # --- Benchmark causal_conv1d_fn ---
                     torch.cuda.synchronize()
-                    causal_conv1d_fn(k_input, conv_weight, conv_bias, activation="silu", conv_states=conv_state)
+                    causal_conv1d_fn(
+                        k_input,
+                        conv_weight,
+                        conv_bias,
+                        conv_state,
+                        query_start_loc,
+                        cache_indices=cache_indices,
+                        has_initial_state=has_initial_state,
+                        activation="silu",
+                    )
                     torch.cuda.synchronize()
 
-                    def run_conv1d(_k=k_input, _cs=conv_state):
-                        causal_conv1d_fn(_k, conv_weight, conv_bias, activation="silu", conv_states=_cs)
+                    def run_conv1d(
+                        _k=k_input, _cs=conv_state, _qsl=query_start_loc, _ci=cache_indices, _hi=has_initial_state
+                    ):
+                        causal_conv1d_fn(
+                            _k,
+                            conv_weight,
+                            conv_bias,
+                            _cs,
+                            _qsl,
+                            cache_indices=_ci,
+                            has_initial_state=_hi,
+                            activation="silu",
+                        )
 
                     with benchmark_with_power(
                         device=device,
@@ -263,7 +288,7 @@ def run_gdn_context_benchmark(
                 else:
                     input_pool = _make_input_pool(
                         {
-                            "k_input": (batch_size, conv_channels, seq_len),
+                            "k_input": (conv_channels, batch_size * seq_len),
                             "q": (batch_size, seq_len, num_k_heads, head_k_dim),
                             "k": (batch_size, seq_len, num_k_heads, head_k_dim),
                             "v": (batch_size, seq_len, num_v_heads, head_v_dim),
@@ -277,21 +302,47 @@ def run_gdn_context_benchmark(
                     for i in range(total_iters):
                         input_pool["g"][i] = torch.nn.functional.logsigmoid(input_pool["g"][i])
                         input_pool["beta"][i] = torch.sigmoid(input_pool["beta"][i])
+                    query_start_loc = torch.arange(
+                        0, batch_size * seq_len + 1, seq_len, dtype=torch.int32, device=device
+                    )
+                    cache_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
+                    has_initial_state = torch.ones(batch_size, dtype=torch.bool, device=device)
 
                     # --- Benchmark causal_conv1d_fn ---
                     torch.cuda.synchronize()
                     causal_conv1d_fn(
-                        input_pool["k_input"][0], conv_weight, conv_bias, activation="silu", conv_states=conv_state
+                        input_pool["k_input"][0],
+                        conv_weight,
+                        conv_bias,
+                        conv_state,
+                        query_start_loc,
+                        cache_indices=cache_indices,
+                        has_initial_state=has_initial_state,
+                        activation="silu",
                     )
                     torch.cuda.synchronize()
 
                     conv1d_iter_idx = [0]
 
-                    def run_conv1d(_pool=input_pool, _cs=conv_state, _idx=conv1d_iter_idx):
+                    def run_conv1d(
+                        _pool=input_pool,
+                        _cs=conv_state,
+                        _idx=conv1d_iter_idx,
+                        _qsl=query_start_loc,
+                        _ci=cache_indices,
+                        _hi=has_initial_state,
+                    ):
                         idx = _idx[0] % total_iters
                         _idx[0] += 1
                         causal_conv1d_fn(
-                            _pool["k_input"][idx], conv_weight, conv_bias, activation="silu", conv_states=_cs
+                            _pool["k_input"][idx],
+                            conv_weight,
+                            conv_bias,
+                            _cs,
+                            _qsl,
+                            cache_indices=_ci,
+                            has_initial_state=_hi,
+                            activation="silu",
                         )
 
                     with benchmark_with_power(
@@ -441,14 +492,29 @@ def run_gdn_generation_benchmark(
                 v = torch.randn(batch_size, 1, num_v_heads, head_v_dim, dtype=dtype, device=device)
                 g = torch.nn.functional.logsigmoid(torch.randn(batch_size, 1, num_v_heads, dtype=dtype, device=device))
                 beta = torch.sigmoid(torch.randn(batch_size, 1, num_v_heads, dtype=dtype, device=device))
+                conv_state_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
 
                 # --- Benchmark causal_conv1d_update ---
                 torch.cuda.synchronize()
-                causal_conv1d_update(k_input, conv_state, conv_weight, conv_bias, activation="silu")
+                causal_conv1d_update(
+                    k_input,
+                    conv_state,
+                    conv_weight,
+                    conv_bias,
+                    activation="silu",
+                    conv_state_indices=conv_state_indices,
+                )
                 torch.cuda.synchronize()
 
-                def run_conv1d_update(_k=k_input, _cs=conv_state):
-                    causal_conv1d_update(_k, _cs, conv_weight, conv_bias, activation="silu")
+                def run_conv1d_update(_k=k_input, _cs=conv_state, _csi=conv_state_indices):
+                    causal_conv1d_update(
+                        _k,
+                        _cs,
+                        conv_weight,
+                        conv_bias,
+                        activation="silu",
+                        conv_state_indices=_csi,
+                    )
 
                 with benchmark_with_power(
                     device=device,
@@ -530,17 +596,33 @@ def run_gdn_generation_benchmark(
                     input_pool["g"][i] = torch.nn.functional.logsigmoid(input_pool["g"][i])
                     input_pool["beta"][i] = torch.sigmoid(input_pool["beta"][i])
 
+                conv_state_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
+
                 # --- Benchmark causal_conv1d_update ---
                 torch.cuda.synchronize()
-                causal_conv1d_update(input_pool["k_input"][0], conv_state, conv_weight, conv_bias, activation="silu")
+                causal_conv1d_update(
+                    input_pool["k_input"][0],
+                    conv_state,
+                    conv_weight,
+                    conv_bias,
+                    activation="silu",
+                    conv_state_indices=conv_state_indices,
+                )
                 torch.cuda.synchronize()
 
                 conv1d_iter_idx = [0]
 
-                def run_conv1d_update(_pool=input_pool, _cs=conv_state, _idx=conv1d_iter_idx):
+                def run_conv1d_update(_pool=input_pool, _cs=conv_state, _idx=conv1d_iter_idx, _csi=conv_state_indices):
                     idx = _idx[0] % total_iters
                     _idx[0] += 1
-                    causal_conv1d_update(_pool["k_input"][idx], _cs, conv_weight, conv_bias, activation="silu")
+                    causal_conv1d_update(
+                        _pool["k_input"][idx],
+                        _cs,
+                        conv_weight,
+                        conv_bias,
+                        activation="silu",
+                        conv_state_indices=_csi,
+                    )
 
                 with benchmark_with_power(
                     device=device,
