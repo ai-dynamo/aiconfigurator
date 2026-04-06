@@ -142,8 +142,18 @@ def run_gemm(exit_stack, gemm_type, m, n, k, perf_filename, device="xpu:0"):
             return_bias=True,
             disable_tp=True,
         )
-        # TODO, to evaluate random weights impact
-        gemm.to(torch.device(device))
+        # vLLM >=0.16 creates quantized layers on meta device;
+        # use to_empty() then fill with random data.
+        try:
+            gemm.to(torch.device(device))
+        except NotImplementedError:
+            gemm = gemm.to_empty(device=torch.device(device))
+            with torch.no_grad():
+                for param in gemm.parameters():
+                    if param.dtype.is_floating_point:
+                        param.normal_()
+                    else:
+                        param.zero_()
 
         if gemm_type == "fp8" and hasattr(gemm, "weight"):
             # Use process_weights_after_loading() to quantize the weights after creation

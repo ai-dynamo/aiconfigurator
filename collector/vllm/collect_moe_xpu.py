@@ -8,7 +8,6 @@ import os
 
 import torch
 import torch.nn.functional as F
-from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.version import __version__ as vllm_version
 
@@ -54,7 +53,6 @@ def resolve_moe_activation(model_name: str) -> str:
 
 
 def get_moe_xpu_test_cases():
-    # narrow down a bit for xpu
     num_tokens = [
         1,
         2,
@@ -84,24 +82,16 @@ def get_moe_xpu_test_cases():
         12288,
         16384,
     ]
-    tp_list = [
-        1,
-        2,
-        4,
-        8,
-    ]
-    ep_list = [
-        1,
-        2,
-        4,
-        8,
-    ]
-    num_gpu_list = [
-        1,
-        2,
-        4,
-        8,
-    ]
+    tp_list = [1, 2, 4, 8, 16, 32]
+    ep_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    num_gpu_list = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+
+    # previous commit's smaller configs for non-GPT-OSS models
+    tp_list_small = [1, 2, 4, 8]
+    ep_list_small = [1, 2, 4, 8]
+    num_gpu_list_small = [1, 2, 4, 8]
+
+    gpt_oss_model_names = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
 
     token_distributions = [
         ("balanced", 0.0),
@@ -116,53 +106,63 @@ def get_moe_xpu_test_cases():
         [8192, 5120, 1, 16, "meta-llama/Llama-4-Scout-17B-16E"],
         [4096, 1536, 8, 128, "Qwen/Qwen3-235B-A22B-Instruct-2507"],
         [2880, 2880, 4, 128, "openai/gpt-oss-120b"],
+        [2880, 2880, 4, 32, "openai/gpt-oss-20b"],
     ]
 
     test_cases: list[MoeCommonTestCase] = []
 
-    for (
-        num_gpu,  # starting from fewer gpus. workaround for potential buffer bug in moe impl.
-        model_config,
-        tp,
-        ep,
-        (token_distribution, power_law_alpha),
-    ) in itertools.product(
-        num_gpu_list,
-        model_config_list,
-        tp_list,
-        ep_list,
-        token_distributions,
-    ):
+    for model_config in model_config_list:
         hs, inter_s, topk, num_experts, model_name = model_config
 
-        # Qwen3-30B-A3B: exclude tp >= 8 as they are not used for actual deployments
-        if model_name == "Qwen/Qwen3-30B-A3B" and tp >= 8:
-            continue
+        # Use large configs for GPT-OSS models, small configs for commit's models
+        if model_name in gpt_oss_model_names:
+            cur_tp_list = tp_list
+            cur_ep_list = ep_list
+            cur_num_gpu_list = num_gpu_list
+        else:
+            cur_tp_list = tp_list_small
+            cur_ep_list = ep_list_small
+            cur_num_gpu_list = num_gpu_list_small
 
-        if tp * ep != num_gpu:
-            continue
-        if ep > num_experts:
-            continue
-        if num_experts % ep != 0:
-            continue
-        # we need to ensure inter_s can be divided by tp.
-        if inter_s % tp != 0:
-            continue
+        for (
+            num_gpu,
+            tp,
+            ep,
+            (token_distribution, power_law_alpha),
+        ) in itertools.product(
+            cur_num_gpu_list,
+            cur_tp_list,
+            cur_ep_list,
+            token_distributions,
+        ):
+            # Qwen3-30B-A3B: exclude tp >= 8 as they are not used for actual deployments
+            if model_name == "Qwen/Qwen3-30B-A3B" and tp >= 8:
+                continue
 
-        test_cases.append(
-            MoeCommonTestCase(
-                num_tokens_list=num_tokens,
-                hidden_size=hs,
-                inter_size=inter_s,
-                topk=topk,
-                num_experts=num_experts,
-                tp=tp,
-                ep=ep,
-                model_name=model_name,
-                token_expert_distribution=token_distribution,
-                power_law_alpha=power_law_alpha,
+            if tp * ep != num_gpu:
+                continue
+            if ep > num_experts:
+                continue
+            if num_experts % ep != 0:
+                continue
+            # we need to ensure inter_s can be divided by tp.
+            if inter_s % tp != 0:
+                continue
+
+            test_cases.append(
+                MoeCommonTestCase(
+                    num_tokens_list=num_tokens,
+                    hidden_size=hs,
+                    inter_size=inter_s,
+                    topk=topk,
+                    num_experts=num_experts,
+                    tp=tp,
+                    ep=ep,
+                    model_name=model_name,
+                    token_expert_distribution=token_distribution,
+                    power_law_alpha=power_law_alpha,
+                )
             )
-        )
 
     return test_cases
 
@@ -174,6 +174,9 @@ def get_moe_test_cases():
     moe_list = ["float16"]
     if hasattr(torch, "float8_e4m3fn"):
         moe_list += ["fp8"]
+    moe_list += ["w4a16_mxfp4"]
+
+    gpt_oss_models = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
 
     test_cases = []
 
@@ -181,11 +184,21 @@ def get_moe_test_cases():
         if common_moe_testcase.token_expert_distribution != "power_law":
             continue
 
+        model_name = common_moe_testcase.model_name
+
         # vllm does not support TP when EP is enabled.
         if common_moe_testcase.tp > 1 and common_moe_testcase.ep > 1:
             continue
 
         for moe_type in moe_list:
+            # GPT-OSS models only use mxfp4 quantization in production;
+            # skip them for other quant types.
+            if model_name in gpt_oss_models and moe_type != "w4a16_mxfp4":
+                continue
+            # Conversely, mxfp4 is only collected for GPT-OSS models.
+            if moe_type == "w4a16_mxfp4" and model_name not in gpt_oss_models:
+                continue
+
             test_cases.append(
                 [
                     moe_type,
@@ -237,10 +250,8 @@ def run_moe_torch(
     """Run vLLM MoE performance benchmarking"""
     get_device_module().set_device(device)
     torch.set_default_device(device)
-    # print(f"moe_ep_size: {moe_ep_size}, moe_tp_size: {moe_tp_size}")
 
-    # Configure quantization parameters
-    quant_config = None
+    use_mxfp4 = moe_type == "w4a16_mxfp4"
     is_fp8 = moe_type == "fp8"
     activation_name = resolve_moe_activation(model_name)
 
@@ -254,35 +265,47 @@ def run_moe_torch(
         # that return only (local_num_experts, expert_map)
         local_num_experts, expert_map = expert_map_result  # type: ignore[misc]
 
-    # Always create tensors in xpu_fused_moe layout.
-    # w1: [num_experts, hidden_size, 2 * inter_size]
-    # w2:  [num_experts, inter_size, hidden_size]
-    w1 = torch.randn(
-        local_num_experts,
-        hidden_size,
-        2 * local_inter_size,
-        dtype=torch.float16,
-        device=device,
-    )
-    w2 = torch.randn(
-        local_num_experts,
-        local_inter_size,
-        hidden_size,
-        dtype=torch.float16,
-        device=device,
-    )
+    if use_mxfp4:
+        if aic_debug:
+            print(f"Using xpu_fused_moe (is_mxfp4=True) for {model_name}")
+        w1, w2, w13_scales, w2_scales, w13_bias, w2_bias, local_num_experts, padded_hidden = create_mxfp4_weights_xpu(
+            num_experts, hidden_size, inter_size, moe_tp_size, moe_ep_size, device
+        )
+    else:
+        padded_hidden = hidden_size
+        w13_scales = w2_scales = None
+        w13_bias = w2_bias = None
 
-    w13_scales = None
-    w2_scales = None
-    if is_fp8:
-        w1, w13_scales = quantize_fp8_per_expert(w1)
-        w2, w2_scales = quantize_fp8_per_expert(w2)
+        # Create weight tensors in xpu_fused_moe layout
+        # w1: [num_experts, 2 * inter_size, hidden_size]
+        # w2: [num_experts, hidden_size, inter_size]
+        w1 = torch.randn(
+            local_num_experts,
+            2 * local_inter_size,
+            hidden_size,
+            dtype=torch.float16,
+            device=device,
+        )
+        w2 = torch.randn(
+            local_num_experts,
+            hidden_size,
+            local_inter_size,
+            dtype=torch.float16,
+            device=device,
+        )
+
+        if is_fp8:
+            w1, w13_scales = quantize_fp8_per_expert(w1)
+            w2, w2_scales = quantize_fp8_per_expert(w2)
 
     # Performance testing for each token count
     for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
         print("num_tokens", num_tokens)
         print("topk", topk)
-        hidden_states = torch.randn([num_tokens, hidden_size]).half().to(device)
+
+        # bfloat16 + padded hidden for mxfp4; float16 + original hidden otherwise
+        hs_dtype = torch.bfloat16 if use_mxfp4 else torch.float16
+        hidden_states = torch.randn([num_tokens, padded_hidden], dtype=hs_dtype, device=device)
 
         # Generate topk_weights and topk_ids
         num_iter = 5 if distributed == "power_law" else 1
@@ -302,10 +325,11 @@ def run_moe_torch(
                     .half()
                     .to(device)
                 )
-                # xpu current topk weights must be fp32
-                logits = logits.to(torch.float32)
+                if not use_mxfp4:
+                    # non-mxfp4 path: xpu topk weights must be fp32
+                    logits = logits.to(torch.float32)
                 weights, ids = torch.topk(logits, topk, dim=-1)
-                topk_weights_list.append(F.softmax(weights, dim=-1))
+                topk_weights_list.append(F.softmax(weights, dim=-1).float())
                 topk_ids_list.append(ids)
 
             print("actual num_tokens: ", [topk_ids.shape[0] for topk_ids in topk_ids_list])
@@ -313,7 +337,7 @@ def run_moe_torch(
         elif distributed == "balanced":
             actual_logits = balanced_logits(num_tokens, num_experts, topk).half().to(device)
             topk_weights, topk_ids = torch.topk(actual_logits, topk, dim=-1)
-            topk_weights = F.softmax(topk_weights, dim=-1)
+            topk_weights = F.softmax(topk_weights, dim=-1).float()
 
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
@@ -328,44 +352,71 @@ def run_moe_torch(
             if distributed == "power_law":
                 for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list, strict=True)):
                     local_num_tokens = tw.shape[0]
-                    # args check https://github.com/vllm-project/vllm-xpu-kernels/blob/main/tests/fused_moe/test_fused_moe.py
-                    # DEBUG
-                    # print("hidden_states slice shape:", hidden_states[:local_num_tokens].shape,
-                    #     "w13 shape:", w1.shape,
-                    #     "w2 shape:", w2.shape,
-                    #     "topk_weights (tw) shape:", tw.shape,
-                    #     "topk_ids (ti) shape:", ti.shape,
-                    #     "n_experts_per_token (topk):", topk,
-                    #     "num_experts (local_num_experts):", local_num_experts,)
+                    if use_mxfp4:
+                        _ = xpu_fused_moe(
+                            hidden_states=hidden_states[:local_num_tokens],
+                            w13=w1,
+                            w13_scales=w13_scales,
+                            w13_bias=w13_bias,
+                            w2=w2,
+                            w2_scales=w2_scales,
+                            w2_bias=w2_bias,
+                            topk_weights=tw,
+                            topk_ids=ti,
+                            n_experts_per_token=topk,
+                            activation=activation_name,
+                            num_experts=local_num_experts,
+                            is_mxfp4=True,
+                        )
+                    else:
+                        _ = xpu_fused_moe(
+                            hidden_states=hidden_states[:local_num_tokens],
+                            w13=w1,
+                            w13_scales=w13_scales,
+                            w13_bias=None,
+                            w2=w2,
+                            w2_scales=w2_scales,
+                            w2_bias=None,
+                            topk_weights=tw,
+                            topk_ids=ti,
+                            n_experts_per_token=topk,
+                            activation=activation_name,
+                            num_experts=local_num_experts,
+                            is_fp8=is_fp8,
+                        )
+            else:
+                if use_mxfp4:
                     _ = xpu_fused_moe(
-                        hidden_states=hidden_states[:local_num_tokens],
+                        hidden_states=hidden_states,
+                        w13=w1,
+                        w13_scales=w13_scales,
+                        w13_bias=w13_bias,
+                        w2=w2,
+                        w2_scales=w2_scales,
+                        w2_bias=w2_bias,
+                        topk_weights=topk_weights,
+                        topk_ids=topk_ids,
+                        n_experts_per_token=topk,
+                        activation=activation_name,
+                        num_experts=local_num_experts,
+                        is_mxfp4=True,
+                    )
+                else:
+                    _ = xpu_fused_moe(
+                        hidden_states=hidden_states,
                         w13=w1,
                         w13_scales=w13_scales,
                         w13_bias=None,
                         w2=w2,
                         w2_scales=w2_scales,
                         w2_bias=None,
-                        topk_weights=tw,
-                        topk_ids=ti,
+                        topk_weights=topk_weights,
+                        topk_ids=topk_ids,
                         n_experts_per_token=topk,
                         activation=activation_name,
                         num_experts=local_num_experts,
-                        ep_rank=0,
-                        ep_size=moe_ep_size,
                         is_fp8=is_fp8,
                     )
-            else:
-                _ = fused_experts(
-                    hidden_states,
-                    w1,
-                    w2,
-                    topk_weights,
-                    topk_ids,
-                    inplace=True,
-                    quant_config=quant_config,
-                    global_num_experts=num_experts,
-                    expert_map=expert_map,
-                )
 
         def run_iterations():
             # Use benchmark_with_power context manager
@@ -391,7 +442,7 @@ def run_moe_torch(
 
         print(f"moe latency: {latency}")
 
-        source = "vllm_fused_moe"
+        source = "vllm_xpu_moe_mxfp4" if use_mxfp4 else "vllm_xpu_moe"
 
         log_perf(
             item_list=[
@@ -416,6 +467,61 @@ def run_moe_torch(
             perf_filename=perf_filename,
             power_stats=power_stats,
         )
+
+
+def round_up(x: int, y: int) -> int:
+    """Round up x to the nearest multiple of y."""
+    return ((x + y - 1) // y) * y
+
+
+def create_mxfp4_weights_xpu(
+    num_experts,
+    hidden_size,
+    inter_size,
+    moe_tp_size,
+    moe_ep_size,
+    device,
+):
+    """
+    Create fake MXFP4 weights for XPU benchmarking.
+
+    On XPU, weights stay in raw uint8 format (no Marlin repacking).
+    xpu_fused_moe handles the MXFP4 dequantisation internally.
+    Padding: hidden_size -> round_up(128), inter_size -> round_up(128).
+    """
+    mxfp4_block = 32
+    local_inter_size = inter_size // moe_tp_size
+
+    padded_inter = round_up(local_inter_size, 128)
+    padded_hidden = round_up(hidden_size, 128)
+
+    # Determine local number of experts for EP
+    expert_map_result = determine_expert_map(moe_ep_size, 0, num_experts)
+    if isinstance(expert_map_result, tuple) and len(expert_map_result) == 3:
+        local_num_experts, expert_map, _ = expert_map_result
+    else:
+        local_num_experts, expert_map = expert_map_result
+
+    # w13 = fused gate_up_proj: [local_experts, 2*inter, hidden//2] (packed uint8)
+    w13 = torch.randint(
+        0, 255, (local_num_experts, 2 * padded_inter, padded_hidden // 2), dtype=torch.uint8, device=device
+    )
+    # w2 = down_proj: [local_experts, hidden, inter//2] (packed uint8)
+    w2 = torch.randint(0, 255, (local_num_experts, padded_hidden, padded_inter // 2), dtype=torch.uint8, device=device)
+
+    # Scales: [local_experts, n_dim, k_dim // mxfp4_block]
+    w13_scales = torch.randint(
+        1, 255, (local_num_experts, 2 * padded_inter, padded_hidden // mxfp4_block), dtype=torch.uint8, device=device
+    )
+    w2_scales = torch.randint(
+        1, 255, (local_num_experts, padded_hidden, padded_inter // mxfp4_block), dtype=torch.uint8, device=device
+    )
+
+    # Biases (GPT-OSS uses biased SwiGLU)
+    w13_bias = torch.randn(local_num_experts, 2 * padded_inter, dtype=torch.bfloat16, device=device)
+    w2_bias = torch.randn(local_num_experts, padded_hidden, dtype=torch.bfloat16, device=device)
+
+    return w13, w2, w13_scales, w2_scales, w13_bias, w2_bias, local_num_experts, padded_hidden
 
 
 if __name__ == "__main__":

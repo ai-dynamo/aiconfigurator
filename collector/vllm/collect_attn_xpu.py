@@ -76,6 +76,7 @@ def run_attention_torch(
     use_fp8_kv_cache,
     is_context_phase,
     perf_filename,
+    window_size=0,
     device="xpu:0",
 ):
     get_device_module().set_device(device)
@@ -176,6 +177,7 @@ def run_attention_torch(
     except AttributeError:
         current_platform.seed_everything(42)
 
+    hf_override = {"sliding_window": window_size} if window_size > 0 else None
     vllm_config = create_vllm_config(
         model_name=model,
         max_model_len=max(batch_spec.seq_lens),
@@ -183,6 +185,7 @@ def run_attention_torch(
         num_gpu_blocks=8192,
         max_num_seqs=batch_size,
         use_fp8_kv_cache=use_fp8_kv_cache,
+        hf_config_override=hf_override,
     )
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache)
@@ -272,7 +275,7 @@ def run_attention_torch(
             # Return mock parameters for a single layer
             return {
                 layer_name: PerLayerParameters(
-                    window_left=-1,  # No sliding window
+                    window_left=window_size - 1 if window_size > 0 else -1,
                     logits_soft_cap=0.0,  # No soft cap
                     sm_scale=1.0 / (head_dim**0.5),  # Standard scale
                 )
@@ -376,6 +379,7 @@ def run_attention_torch(
                 "beam_width": 1,
                 "attn_dtype": dtype_str,
                 "kv_cache_dtype": kv_cache_dtype_str,
+                "window_size": window_size,
                 "step": step,
                 "latency": latency,
             }
@@ -427,6 +431,12 @@ def get_context_attention_test_cases(if_unit_test=False):
     # kv cache dtype fp8 to be supported
     kv_cache_dtype_list = [False, True]
 
+    head_dim_list = [128, 64]
+    # window_size=0 means full attention; window_size=128 for GPT-OSS SWA layers
+    window_size_list = [0, 128]
+    # XPU paged flash attention kernel supports GQA ratio up to 16
+    max_gqa_ratio = 16
+
     # DEBUG
     # print(f"b_list: {b_list}, s_list: {s_list}, n_list: {n_list}, n_kv_list: {n_kv_list}")
     for n in sorted(n_list, reverse=True):
@@ -436,31 +446,37 @@ def get_context_attention_test_cases(if_unit_test=False):
                     if n_kv != 0 and (n_kv > n or n % n_kv != 0):
                         continue
                     num_kv_heads = n_kv if n_kv != 0 else n
-                    # Only keep self-attention case
-                    # if n != num_kv_heads:
-                    #    continue
+                    # XPU paged flash attention only supports GQA ratio <= 16
+                    if n // num_kv_heads > max_gqa_ratio:
+                        continue
                     if num_kv_heads == n:
                         if b * s > 65536 or b > 128:
                             continue
                     else:
                         if b * s > 131072:
                             continue
-                    if b * s * num_kv_heads * 128 * 2 >= 2147483647:
-                        continue
+                    for head_dim in head_dim_list:
+                        if b * s * num_kv_heads * head_dim * 2 >= 2147483647:
+                            continue
 
-                    for is_fp8_kv_cache in kv_cache_dtype_list:
-                        test_cases.append(
-                            [
-                                b,
-                                s,
-                                n,
-                                num_kv_heads,
-                                128,
-                                is_fp8_kv_cache,
-                                True,
-                                "context_attention_perf.txt",
-                            ]
-                        )
+                        for window_size in window_size_list:
+                            # Skip SWA for head_dim=128 (no models use it)
+                            if window_size > 0 and head_dim == 128:
+                                continue
+                            for is_fp8_kv_cache in kv_cache_dtype_list:
+                                test_cases.append(
+                                    [
+                                        b,
+                                        s,
+                                        n,
+                                        num_kv_heads,
+                                        head_dim,
+                                        is_fp8_kv_cache,
+                                        True,
+                                        "context_attention_perf.txt",
+                                        window_size,
+                                    ]
+                                )
 
     return test_cases
 
@@ -495,6 +511,8 @@ def get_generation_attention_test_cases():
 
     # kv cache dtype fp8 to be supported
     kv_cache_dtype_list = [False, True]
+    # XPU paged flash attention kernel supports GQA ratio up to 16
+    max_gqa_ratio = 16
 
     max_bsn = 8192 * 1024
     for n in sorted(n_list, reverse=True):
@@ -523,20 +541,29 @@ def get_generation_attention_test_cases():
             for n_kv in n_kv_list:
                 if n_kv > n or n % n_kv != 0:
                     continue
+                # XPU paged flash attention only supports GQA ratio <= 16
+                if n // n_kv > max_gqa_ratio:
+                    continue
                 for s in target_s_list:
-                    for is_fp8_kv_cache in kv_cache_dtype_list:
-                        test_cases.append(
-                            [
-                                b,
-                                s,
-                                n,
-                                n_kv,
-                                128,
-                                is_fp8_kv_cache,
-                                False,
-                                "generation_attention_perf.txt",
-                            ]
-                        )
+                    for head_dim in [128, 64]:
+                        for window_size in [0, 128]:
+                            # Skip SWA for head_dim=128 (no models use it)
+                            if window_size > 0 and head_dim == 128:
+                                continue
+                            for is_fp8_kv_cache in kv_cache_dtype_list:
+                                test_cases.append(
+                                    [
+                                        b,
+                                        s,
+                                        n,
+                                        n_kv,
+                                        head_dim,
+                                        is_fp8_kv_cache,
+                                        False,
+                                        "generation_attention_perf.txt",
+                                        window_size,
+                                    ]
+                                )
     return test_cases
 
 
