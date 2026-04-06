@@ -201,7 +201,9 @@ def run_gdn_context_benchmark(
                     q = torch.randn(batch_size, seq_len, num_k_heads, head_k_dim, dtype=dtype, device=device)
                     k = torch.randn(batch_size, seq_len, num_k_heads, head_k_dim, dtype=dtype, device=device)
                     v = torch.randn(batch_size, seq_len, num_v_heads, head_v_dim, dtype=dtype, device=device)
-                    g = torch.logsigmoid(torch.randn(batch_size, seq_len, num_v_heads, dtype=dtype, device=device))
+                    g = torch.nn.functional.logsigmoid(
+                        torch.randn(batch_size, seq_len, num_v_heads, dtype=dtype, device=device)
+                    )
                     beta = torch.sigmoid(torch.randn(batch_size, seq_len, num_v_heads, dtype=dtype, device=device))
 
                     # --- Benchmark causal_conv1d_fn ---
@@ -273,7 +275,7 @@ def run_gdn_context_benchmark(
                         device,
                     )
                     for i in range(total_iters):
-                        input_pool["g"][i] = torch.logsigmoid(input_pool["g"][i])
+                        input_pool["g"][i] = torch.nn.functional.logsigmoid(input_pool["g"][i])
                         input_pool["beta"][i] = torch.sigmoid(input_pool["beta"][i])
 
                     # --- Benchmark causal_conv1d_fn ---
@@ -436,7 +438,7 @@ def run_gdn_generation_benchmark(
                 q = torch.randn(batch_size, 1, num_k_heads, head_k_dim, dtype=dtype, device=device)
                 k = torch.randn(batch_size, 1, num_k_heads, head_k_dim, dtype=dtype, device=device)
                 v = torch.randn(batch_size, 1, num_v_heads, head_v_dim, dtype=dtype, device=device)
-                g = torch.logsigmoid(torch.randn(batch_size, 1, num_v_heads, dtype=dtype, device=device))
+                g = torch.nn.functional.logsigmoid(torch.randn(batch_size, 1, num_v_heads, dtype=dtype, device=device))
                 beta = torch.sigmoid(torch.randn(batch_size, 1, num_v_heads, dtype=dtype, device=device))
 
                 # --- Benchmark causal_conv1d_update ---
@@ -524,7 +526,7 @@ def run_gdn_generation_benchmark(
                     device,
                 )
                 for i in range(total_iters):
-                    input_pool["g"][i] = torch.logsigmoid(input_pool["g"][i])
+                    input_pool["g"][i] = torch.nn.functional.logsigmoid(input_pool["g"][i])
                     input_pool["beta"][i] = torch.sigmoid(input_pool["beta"][i])
 
                 # --- Benchmark causal_conv1d_update ---
