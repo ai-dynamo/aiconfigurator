@@ -27,6 +27,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import traceback
 from importlib.metadata import version as get_version
 
@@ -56,12 +57,71 @@ MODEL_ARCHITECTURE: dict[str, str] = {
     "zai-org/GLM-5": "GlmMoeDsaForCausalLM",
 }
 
+# Native num_attention_heads per model — used to filter TP-sim head counts
+# and to always override correctly when head_num != native.
+MODEL_NATIVE_HEADS: dict[str, int] = {
+    "deepseek-ai/DeepSeek-V3": 128,
+    "deepseek-ai/DeepSeek-V3.2": 128,
+    "zai-org/GLM-5": 64,
+}
+
 # Perf-database-compatible dtype strings → SGLang ServerArgs kv_cache_dtype values.
 # The perf DB uses enum names like "fp8"; SGLang uses "fp8_e4m3".
 SGLANG_KV_DTYPE: dict[str, str] = {
     "bfloat16": "bfloat16",
     "fp8": "fp8_e4m3",
 }
+
+# AIC's cached HuggingFace model configs — avoids HF downloads in CI.
+_MODEL_CONFIG_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "src",
+    "aiconfigurator",
+    "model_configs",
+)
+
+
+def _resolve_local_model_path(model_id: str) -> str:
+    """Resolve a HuggingFace model ID to a local config directory.
+
+    Uses AIC's cached model configs from src/aiconfigurator/model_configs/
+    so that the collection pipeline never needs HuggingFace network access.
+    The function patches model_type and architectures for sglang AutoConfig
+    compatibility and strips auto_map to prevent any remote code download.
+
+    SGLang's AutoConfig.from_pretrained() doesn't recognize "deepseek_v32" or
+    "glm_moe_dsa" model types.  The workaround (matching sglang's own
+    _load_deepseek_v32_model approach) is to present these as "deepseek_v3".
+    DSA-specific fields (index_topk, index_head_dim, etc.) are preserved in
+    the config and sglang uses those for DSA detection via is_deepseek_nsa().
+
+    Falls back to the original HF model ID if local config is not found.
+    """
+    config_file = os.path.join(_MODEL_CONFIG_DIR, f"{model_id.replace('/', '--')}_config.json")
+    if not os.path.exists(config_file):
+        return model_id
+
+    with open(config_file) as f:
+        config = json.load(f)
+
+    # Normalise model_type so sglang's AutoConfig recognises it.
+    if config.get("model_type") in ("deepseek_v32", "glm_moe_dsa"):
+        config["architectures"] = ["DeepseekV3ForCausalLM"]
+        config["model_type"] = "deepseek_v3"
+
+    # Strip auto_map to prevent transformers from attempting to download
+    # custom config/model classes from HuggingFace when trust_remote_code=True.
+    config.pop("auto_map", None)
+
+    tmp_dir = os.path.join(
+        tempfile.gettempdir(),
+        f"aic_sglang_config_{model_id.replace('/', '_')}_{os.getpid()}",
+    )
+    os.makedirs(tmp_dir, exist_ok=True)
+    with open(os.path.join(tmp_dir, "config.json"), "w") as f:
+        json.dump(config, f)
+
+    return tmp_dir
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -112,7 +172,7 @@ def _get_backends(attn_type: str):
 # Test Case Generation
 # ═══════════════════════════════════════════════════════════════════════
 
-# Sweep ranges — match the existing collect_wideep_attn.py
+# Sweep ranges — aligned with vllm/trtllm collect_mla_module.py
 _BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 _SEQ_LENGTHS = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 _HEAD_NUMS = [128, 64, 32, 16]
@@ -172,8 +232,11 @@ def _build_module_test_cases(attn_type: str, mode: str):
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
     cases = []
     for model_path in model_paths:
+        native_heads = MODEL_NATIVE_HEADS.get(model_path, 128)
         for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(mode):
             for num_heads in _HEAD_NUMS:
+                if num_heads > native_heads:
+                    continue  # Skip invalid TP-sim configs
                 cases.append([0, 0, num_heads, kv_dtype, compute_dtype, gemm_type, base_fname, model_path, attn_type])
     return cases
 
@@ -260,8 +323,12 @@ def load_model_runner(
     # Map perf-DB dtype to SGLang-native dtype
     sglang_kv_dtype = SGLANG_KV_DTYPE.get(kv_cache_dtype, kv_cache_dtype)
 
+    # Use AIC's local model configs to avoid HF downloads.  Also patches
+    # model_type for sglang compatibility (glm_moe_dsa → deepseek_v3).
+    local_model_path = _resolve_local_model_path(model_path)
+
     server_args = ServerArgs(
-        model_path=model_path,
+        model_path=local_model_path,
         dtype="auto",
         device="cuda",
         load_format=load_format,
@@ -269,6 +336,7 @@ def load_model_runner(
         trust_remote_code=True,
         mem_fraction_static=0.5,
         disable_radix_cache=True,
+        disable_cuda_graph=True,
         kv_cache_dtype=sglang_kv_dtype,
     )
 
@@ -276,9 +344,11 @@ def load_model_runner(
     print(f"Using attention backend: {attention_backend}, kv_cache_dtype: {sglang_kv_dtype}, gpu_id: {gpu_id}")
 
     if num_layers > 0 and load_format == "dummy":
-        override_args = {"num_hidden_layers": num_layers}
-        if head_num != 128:
-            override_args["num_attention_heads"] = head_num
+        override_args = {
+            "num_hidden_layers": num_layers,
+            "num_attention_heads": head_num,
+            "num_key_value_heads": head_num,
+        }
         server_args.json_model_override_args = json.dumps(override_args)
 
     _set_envs_and_config(server_args)
@@ -895,8 +965,10 @@ def run_mla_module_worker(
     )
     print(f"{'=' * 60}")
 
-    # Extract output directory from perf_filename (collect.py may provide a full path)
-    output_path = os.path.dirname(perf_filename) or None
+    # Resolve output directory for perf data files.  When collect.py provides
+    # a bare filename (e.g. "dsa_context_module_perf.txt"), write to CWD so
+    # the perf files land next to vllm's output — matching artifact collection.
+    output_path = os.path.dirname(perf_filename) or os.getcwd()
 
     _run_mla_subprocess(
         attn_type=attn_type,

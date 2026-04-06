@@ -168,8 +168,8 @@ class TestBuildModuleTestCases:
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
-        # 2 DSA models x 2 precision combos (SM=90) x 4 head_nums = 16
-        assert len(cases) == 2 * 2 * 4
+        # DSV3.2: 2 dtypes x 4 heads = 8, GLM-5: 2 dtypes x 3 heads (64 native, skip 128) = 6 -> 14
+        assert len(cases) == 8 + 6
 
     def test_placeholder_seq_batch(self):
         """seq_len and batch_size are placeholders (0) — subprocess sweeps internally."""
