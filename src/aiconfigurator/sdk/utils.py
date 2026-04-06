@@ -160,8 +160,10 @@ def enumerate_parallel_config(
                                         not enable_wideep and moe_ep > 1
                                     ):  # wideep only has ep
                                         continue
-                                elif backend == common.BackendName.vllm:
-                                    pass  # TODO
+                                elif backend == common.BackendName.vllm and dp > 1 and moe_tp > 1:
+                                    # vLLM can't set moe_tp independently from tp;
+                                    # dp>1 with moe_tp>1 requires unsupported heterogeneous parallelism.
+                                    continue
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
             else:
                 if tp * pp in num_gpu_list:
