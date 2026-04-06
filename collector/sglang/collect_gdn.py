@@ -38,9 +38,9 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
     from sglang.srt.layers.attention.fla.chunk import chunk_gated_delta_rule
     from sglang.srt.layers.attention.fla.fused_recurrent import fused_recurrent_gated_delta_rule
+    from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 
 import torch
 
@@ -646,13 +646,9 @@ def run_gdn_torch(
         contextlib.redirect_stderr(_devnull_file),
     ):
         import sglang
-        from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-
-        try:
-            from sglang.srt.layers.attention.fla.chunk import chunk_gated_delta_rule
-            from sglang.srt.layers.attention.fla.fused_recurrent import fused_recurrent_gated_delta_rule
-        except ImportError:
-            from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+        from sglang.srt.layers.attention.fla.chunk import chunk_gated_delta_rule
+        from sglang.srt.layers.attention.fla.fused_recurrent import fused_recurrent_gated_delta_rule
+        from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 
     sglang_version = sglang.__version__
 

@@ -40,11 +40,11 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
     from vllm.model_executor.layers.fla.ops import (
         chunk_gated_delta_rule,
         fused_recurrent_gated_delta_rule,
     )
+    from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 
 import torch
 
@@ -647,11 +647,11 @@ def run_gdn_torch(
         contextlib.redirect_stderr(_devnull_file),
     ):
         import vllm
-        from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
         from vllm.model_executor.layers.fla.ops import (
             chunk_gated_delta_rule,
             fused_recurrent_gated_delta_rule,
         )
+        from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 
     from vllm.version import __version__ as vllm_version_str
 
