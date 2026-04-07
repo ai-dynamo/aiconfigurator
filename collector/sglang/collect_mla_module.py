@@ -537,10 +537,11 @@ def run_attention_torch(
         log_kv_dtype = "fp8"
         log_gemm_type = "fp8_block"
     else:
-        # DSA: normalize bfloat16 → float16 for perf_database compatibility
-        log_mla_dtype = "float16" if compute_dtype == "bfloat16" else compute_dtype
-        log_kv_dtype = "float16" if kv_cache_dtype == "bfloat16" else kv_cache_dtype
-        log_gemm_type = "float16" if gemm_type == "bfloat16" else gemm_type
+        # DSA: log raw dtypes; perf_database._normalize_dtype_key() handles
+        # the bfloat16 → float16 mapping on the consumer side.
+        log_mla_dtype = compute_dtype
+        log_kv_dtype = kv_cache_dtype
+        log_gemm_type = gemm_type
 
     # QKV latent dimensions for AttentionInputs
     q_lora_rank = getattr(attention_module, "q_lora_rank", 1536) or 1536
