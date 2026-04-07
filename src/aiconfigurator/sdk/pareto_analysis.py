@@ -4,12 +4,14 @@
 import copy
 import logging
 import math
+import re
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotext
 
+from aiconfigurator.logging_utils import use_plain_cli_output
 from aiconfigurator.sdk import config
 from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.common import ColumnsAgg
@@ -461,6 +463,12 @@ def draw_pareto_to_string(
 
     try:
         buf = plotext.build()
+        # Remove ANSI if plain output is needed.
+        # https://stackoverflow.com/questions/14693701/how-can-i-remove-the-ansi-escape-sequences-from-a-string-in-python
+        if use_plain_cli_output():
+            print("removed ANSI", use_plain_cli_output())
+            ansi_escape_8bit = re.compile(r"(?:\x1B[@-Z\\-_]|[\x80-\x9A\x9C-\x9F]|(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~])")
+            buf = ansi_escape_8bit.sub("", buf)
     except Exception:
         logger.exception("failed to build plotext")
         buf = ""

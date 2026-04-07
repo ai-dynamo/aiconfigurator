@@ -8,6 +8,48 @@ import os
 import sys
 
 
+def _stdout_env_suggests_plain() -> bool:
+    """True when NO_COLOR or non-TTY stdout indicates avoiding ANSI."""
+    if os.environ.get("NO_COLOR", "").strip() != "":
+        return True
+    try:
+        return not sys.stdout.isatty()
+    except (AttributeError, OSError, ValueError):
+        return True
+
+
+def use_plain_cli_output() -> bool:
+    """Return True if human-oriented output should avoid ANSI.
+
+    True when the root logger was configured with setup_logging and
+    no_color=True (--no-color), or when NO_COLOR is set, or when stdout
+    is not a TTY.
+
+    .. NO_COLOR: https://no-color.org/
+    """
+    # Check if the root logger was configured with setup_logging and no_color=True
+    for handler in logging.getLogger().handlers:
+        fmt = getattr(handler, "formatter", None)
+        if isinstance(fmt, ColoredFormatter) and fmt.force_no_color:
+            return True
+
+    return _stdout_env_suggests_plain()
+
+
+def _cli_bold(text: str) -> str:
+    """Wrap *text* in bold SGR when use_plain_cli_output is false."""
+    if use_plain_cli_output():
+        return text
+    return f"\033[1m{text}\033[0m"
+
+
+def _cli_underline(text: str) -> str:
+    """Wrap *text* in underline SGR when use_plain_cli_output is false."""
+    if use_plain_cli_output():
+        return text
+    return f"\033[4m{text}\033[0m"
+
+
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to log output.
 
@@ -32,10 +74,10 @@ class ColoredFormatter(logging.Formatter):
     CYAN = "\033[96m"
     RESET = "\033[0m"
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, force_no_color: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
-        # Check if colors should be disabled (e.g., when output is redirected)
-        self.use_colors = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+        self.force_no_color = force_no_color
+        self.use_colors = not force_no_color and not _stdout_env_suggests_plain()
 
     def format(self, record):
         # Get the base formatted message
@@ -79,7 +121,15 @@ class ColoredFormatter(logging.Formatter):
         return level_part
 
 
-def setup_logging(level=logging.INFO):
+def setup_logging(level=logging.INFO, *, no_color: bool = False):
+    """Configure root logging to stdout.
+
+    Args:
+        level: Minimum log level for the root logger.
+        no_color: If True (CLI --no-color), disable ANSI in log lines and treat all
+            CLI summaries as plain; see use_plain_cli_output. TTY and NO_COLOR
+            are combined inside ColoredFormatter and use_plain_cli_output.
+    """
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
@@ -91,6 +141,7 @@ def setup_logging(level=logging.INFO):
     formatter = ColoredFormatter(
         "%(asctime)s [aiconfigurator] [%(levelname).1s] [%(filename)s:%(lineno)d] %(message)s",
         datefmt="%H:%M:%S",
+        force_no_color=no_color,
     )
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)

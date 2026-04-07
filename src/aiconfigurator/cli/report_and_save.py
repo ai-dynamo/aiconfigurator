@@ -18,6 +18,7 @@ from aiconfigurator.generator.api import (
     resolve_backend_version_for_dynamo,
 )
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
+from aiconfigurator.logging_utils import _cli_bold, _cli_underline
 from aiconfigurator.sdk import pareto_analysis
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
 from aiconfigurator.sdk.task import TaskConfig
@@ -111,7 +112,7 @@ def _plot_worker_setup_table(
         field_names = [
             "Rank",
             "backend",
-            "\033[1mtokens/s/gpu\033[0m",
+            _cli_bold("tokens/s/gpu"),
             "tokens/s/user",
             "req/s",
             "TTFT",
@@ -135,29 +136,41 @@ def _plot_worker_setup_table(
         for i, row in enumerate(top_configs.to_dict("records")):
             if is_moe:
                 p_parallel = (
-                    f"tp\033[4m{row['(p)tp']}\033[0mpp\033[4m{row['(p)pp']}\033[0m"
-                    f"dp\033[4m{row['(p)dp']}\033[0metp{row['(p)moe_tp']}ep{row['(p)moe_ep']}"
+                    f"tp{_cli_underline(str(row['(p)tp']))}"
+                    f"pp{_cli_underline(str(row['(p)pp']))}"
+                    f"dp{_cli_underline(str(row['(p)dp']))}"
+                    f"etp{row['(p)moe_tp']}ep{row['(p)moe_ep']}"
                 )
                 d_parallel = (
-                    f"tp\033[4m{row['(d)tp']}\033[0mpp\033[4m{row['(d)pp']}\033[0m"
-                    f"dp\033[4m{row['(d)dp']}\033[0metp{row['(d)moe_tp']}ep{row['(d)moe_ep']}"
+                    f"tp{_cli_underline(str(row['(d)tp']))}"
+                    f"pp{_cli_underline(str(row['(d)pp']))}"
+                    f"dp{_cli_underline(str(row['(d)dp']))}"
+                    f"etp{row['(d)moe_tp']}ep{row['(d)moe_ep']}"
                 )
                 p_gpus_worker = (
                     f"{row['(p)pp'] * row['(p)tp'] * row['(p)dp']} "
-                    f"(=\033[4m{row['(p)tp']}\033[0mx\033[4m{row['(p)pp']}\033[0mx\033[4m{row['(p)dp']}\033[0m)"
+                    f"(={_cli_underline(str(row['(p)tp']))}x"
+                    f"{_cli_underline(str(row['(p)pp']))}x"
+                    f"{_cli_underline(str(row['(p)dp']))})"
                 )
                 d_gpus_worker = (
                     f"{row['(d)pp'] * row['(d)tp'] * row['(d)dp']} "
-                    f"(=\033[4m{row['(d)tp']}\033[0mx\033[4m{row['(d)pp']}\033[0mx\033[4m{row['(d)dp']}\033[0m)"
+                    f"(={_cli_underline(str(row['(d)tp']))}x"
+                    f"{_cli_underline(str(row['(d)pp']))}x"
+                    f"{_cli_underline(str(row['(d)dp']))})"
                 )
             else:
-                p_parallel = f"tp\033[4m{row['(p)tp']}\033[0mpp\033[4m{row['(p)pp']}\033[0m"
-                d_parallel = f"tp\033[4m{row['(d)tp']}\033[0mpp\033[4m{row['(d)pp']}\033[0m"
+                p_parallel = f"tp{_cli_underline(str(row['(p)tp']))}pp{_cli_underline(str(row['(p)pp']))}"
+                d_parallel = f"tp{_cli_underline(str(row['(d)tp']))}pp{_cli_underline(str(row['(d)pp']))}"
                 p_gpus_worker = (
-                    f"{row['(p)pp'] * row['(p)tp']} (=\033[4m{row['(p)tp']}\033[0mx\033[4m{row['(p)pp']}\033[0m)"
+                    f"{row['(p)pp'] * row['(p)tp']} "
+                    f"(={_cli_underline(str(row['(p)tp']))}x"
+                    f"{_cli_underline(str(row['(p)pp']))})"
                 )
                 d_gpus_worker = (
-                    f"{row['(d)pp'] * row['(d)tp']} (=\033[4m{row['(d)tp']}\033[0mx\033[4m{row['(d)pp']}\033[0m)"
+                    f"{row['(d)pp'] * row['(d)tp']} "
+                    f"(={_cli_underline(str(row['(d)tp']))}x"
+                    f"{_cli_underline(str(row['(d)pp']))})"
                 )
             row_data = [
                 i + 1,
@@ -165,7 +178,7 @@ def _plot_worker_setup_table(
             ]
             row_data.extend(
                 [
-                    f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
+                    _cli_bold(f"{row['tokens/s/gpu_cluster']:.2f}"),
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['cluster_request_rate']:.2f}",
                     f"{row['ttft']:.2f}",
@@ -195,7 +208,7 @@ def _plot_worker_setup_table(
         field_names = [
             "Rank",
             "backend",
-            "\033[1mtokens/s/gpu\033[0m",
+            _cli_bold("tokens/s/gpu"),
             "tokens/s/user",
             "req/s",
             "TTFT",
@@ -214,18 +227,24 @@ def _plot_worker_setup_table(
         for i, row in enumerate(top_configs.to_dict("records")):
             if is_moe:
                 parallel = (
-                    f"tp\033[4m{row['tp']}\033[0mpp\033[4m{row['pp']}\033[0m"
-                    f"dp\033[4m{row['dp']}\033[0metp{row['moe_tp']}ep{row['moe_ep']}"
+                    f"tp{_cli_underline(str(row['tp']))}"
+                    f"pp{_cli_underline(str(row['pp']))}"
+                    f"dp{_cli_underline(str(row['dp']))}"
+                    f"etp{row['moe_tp']}ep{row['moe_ep']}"
                 )
                 gpus_worker = (
                     f"{row['pp'] * row['tp'] * row['dp']} "
-                    f"(=\033[4m{row['tp']}\033[0mx\033[4m{row['pp']}\033[0mx\033[4m{row['dp']}\033[0m)"
+                    f"(={_cli_underline(str(row['tp']))}x"
+                    f"{_cli_underline(str(row['pp']))}x"
+                    f"{_cli_underline(str(row['dp']))})"
                 )
             else:
-                parallel = f"tp\033[4m{row['tp']}\033[0mpp\033[4m{row['pp']}\033[0m"
+                parallel = f"tp{_cli_underline(str(row['tp']))}pp{_cli_underline(str(row['pp']))}"
                 gpus_worker = (
-                    f"{row['pp'] * row['tp']} (=\033[4m{row['tp']}\033[0mx\033[4m{row['pp']}"
-                    f"\033[0mx\033[4m{row['dp']}\033[0m)"
+                    f"{row['pp'] * row['tp']} "
+                    f"(={_cli_underline(str(row['tp']))}x"
+                    f"{_cli_underline(str(row['pp']))}x"
+                    f"{_cli_underline(str(row['dp']))})"
                 )
             row_data = [
                 i + 1,
@@ -233,7 +252,7 @@ def _plot_worker_setup_table(
             ]
             row_data.extend(
                 [
-                    f"\033[1m{row['tokens/s/gpu_cluster']:.2f}\033[0m",
+                    _cli_bold(f"{row['tokens/s/gpu_cluster']:.2f}"),
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['cluster_request_rate']:.2f}",
                     f"{row['ttft']:.2f}",
@@ -315,7 +334,7 @@ def log_final_summary(
                     if pct < 100.0:
                         line += f" -- WARNING: only {pct:.1f}% of target load can be served"
                 summary_box.append(line)
-        summary_box.append(f"    Best Experiment Chosen: \033[1m{chosen_exp}\033[0m")
+        summary_box.append(f"    Best Experiment Chosen: {_cli_bold(chosen_exp)}")
     elif mode == "default":
         agg_value = best_throughputs.get("agg", 0.0)
         disagg_value = best_throughputs.get("disagg", 0.0)
@@ -327,15 +346,13 @@ def log_final_summary(
             benefit_ratio = 0.0
         else:
             benefit_ratio = 0.0  # handle case where both are 0
-        summary_box.append(
-            f"    Best Experiment Chosen: \033[1m{chosen_exp} at "
-            f"{best_throughputs[chosen_exp]:.2f} tokens/s/gpu "
-            f"(disagg {benefit_ratio:.2f}x better)\033[0m"
+        bold_msg = _cli_bold(
+            f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu (disagg {benefit_ratio:.2f}x better)"
         )
+        summary_box.append(f"    Best Experiment Chosen: {bold_msg}")
     else:
-        summary_box.append(
-            f"    Best Experiment Chosen: \033[1m{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu\033[0m"
-        )
+        bold_msg = _cli_bold(f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu")
+        summary_box.append(f"    Best Experiment Chosen: {bold_msg}")
 
     summary_box.append("  " + "-" * 76)
 
@@ -401,7 +418,7 @@ def log_final_summary(
     )
     summary_box.append(
         "               gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; "
-        "tp * pp for dense models (underlined \033[4mnumbers\033[0m are the actual values in math)"
+        f"tp * pp for dense models (underlined {_cli_underline('numbers')} are the actual values in math)"
     )
 
     # Check if power data is available before plotting tables

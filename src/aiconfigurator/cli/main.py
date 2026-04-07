@@ -49,6 +49,12 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
             "Example: default,/opt/aic/systems,/data/aic/systems."
         ),
     )
+    common_parser.add_argument(
+        "--no-color",
+        dest="no_color",
+        action="store_true",
+        help="Disable ANSI colors in output.",
+    )
     add_generator_override_arguments(common_parser)
     return common_parser
 
@@ -1392,7 +1398,10 @@ def _run_estimate_mode(args):
 
 
 def main(args):
-    setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
+    setup_logging(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        no_color=getattr(args, "no_color", False),
+    )
 
     # Handle support mode early — it doesn't need systems_paths or top_n
     if args.mode == "support":
