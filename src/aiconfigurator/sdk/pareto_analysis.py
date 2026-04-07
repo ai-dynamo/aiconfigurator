@@ -275,6 +275,8 @@ def disagg_pareto(
     logger.debug(f"decode_num_worker_list: {decode_num_worker_list}, decode_max_num_worker: {decode_max_num_worker}")
     decode_num_worker_list = get_working_list(decode_num_worker_list, decode_max_num_worker)
 
+    max_prefill_gpus = kwargs.get("max_prefill_gpus")
+    max_decode_gpus = kwargs.get("max_decode_gpus")
     require_same_tp = kwargs.get("require_same_tp", False)
     autoscale = kwargs.get("autoscale", False)
     target_tpot = kwargs.get("target_tpot")
@@ -291,6 +293,8 @@ def disagg_pareto(
         decode_max_num_tokens=decode_max_num_tokens,
         decode_num_worker_list=decode_num_worker_list,
         num_gpu_list=num_gpu_list,
+        max_prefill_gpus=max_prefill_gpus,
+        max_decode_gpus=max_decode_gpus,
         require_same_tp=require_same_tp,
         autoscale=autoscale,
         target_tpot=target_tpot,

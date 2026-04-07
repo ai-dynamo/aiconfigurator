@@ -482,6 +482,8 @@ class TaskConfigFactory:
             "max_gpu_per_replica": 128,
             "max_prefill_worker": 32,
             "max_decode_worker": 32,
+            "max_prefill_gpus": None,
+            "max_decode_gpus": None,
         }
 
         if ctx.enable_wideep:
@@ -1354,6 +1356,8 @@ class TaskRunner:
             max_num_gpu=task_config.replica_config.max_gpu_per_replica,
             prefill_max_num_worker=task_config.replica_config.max_prefill_worker,
             decode_max_num_worker=task_config.replica_config.max_decode_worker,
+            max_prefill_gpus=task_config.replica_config.get("max_prefill_gpus"),
+            max_decode_gpus=task_config.replica_config.get("max_decode_gpus"),
             prefill_max_num_tokens=task_config.advanced_tuning_config.prefill_max_batch_size
             * task_config.runtime_config.isl,
             decode_max_num_tokens=task_config.advanced_tuning_config.decode_max_batch_size,
