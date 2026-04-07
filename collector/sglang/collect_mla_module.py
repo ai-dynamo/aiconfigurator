@@ -384,7 +384,6 @@ def load_model_runner(
         mem_fraction_static=0.5,
         disable_radix_cache=True,
         disable_cuda_graph=True,
-        enable_piecewise_cuda_graph=False,
         kv_cache_dtype=sglang_kv_dtype,
     )
 
@@ -393,6 +392,11 @@ def load_model_runner(
     # (channel_quant_to_tensor_quant .view(-1) on non-contiguous tensor).
     # We only need attention kernel perf with dummy weights, not quantised MoE.
     server_args.quantization = None
+
+    # Disable piecewise CUDA graph — its warmup compile OOMs on large models
+    # (e.g. 64 GiB allocation with fp8 + 128 heads on H200).
+    # Not a ServerArgs constructor param; set post-init like collect_attn.py.
+    server_args.enable_piecewise_cuda_graph = False
 
     server_args.attention_backend = attention_backend
     print(f"Using attention backend: {attention_backend}, kv_cache_dtype: {sglang_kv_dtype}, gpu_id: {gpu_id}")
