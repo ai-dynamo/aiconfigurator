@@ -168,6 +168,23 @@ def _get_backends(attn_type: str):
             return "flashinfer"
 
 
+def _get_mla_backend_list() -> list[str]:
+    """Return all MLA backends to sweep, matching old collect_wideep_attn.py.
+
+    The old collector benchmarked multiple backends per GPU architecture:
+      SM >= 100: ["flashinfer", "trtllm_mla"]
+      SM >= 90:  ["flashinfer", "fa3"]
+      SM < 90:   ["flashinfer"]
+    """
+    sm = get_sm_version()
+    if sm >= 100:
+        return ["flashinfer", "trtllm_mla"]
+    elif sm >= 90:
+        return ["flashinfer", "fa3"]
+    else:
+        return ["flashinfer"]
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Test Case Generation
 # ═══════════════════════════════════════════════════════════════════════
@@ -241,14 +258,55 @@ def _build_module_test_cases(attn_type: str, mode: str):
     return cases
 
 
-def get_mla_context_module_test_cases():
-    """collect.py entrypoint for MLA context module collection."""
-    return _build_module_test_cases(attn_type="mla", mode="context")
+def _build_wideep_mla_test_cases(mode: str):
+    """Build test cases for wideep MLA collection (backward-compatible).
+
+    Output format: [seq_len, batch_size, num_heads, kv_cache_dtype,
+                    compute_dtype, gemm_type, perf_filename, model_path,
+                    attn_type, attention_backend]
+
+    Matches the old collect_wideep_attn.py behavior:
+    - Single precision combo (bfloat16 run, logged as fp8_block/fp8)
+    - Sweeps multiple attention backends per SM version
+    - Only DeepSeek-V3 (the MLA model), not V3.2/GLM-5 (DSA models)
+    """
+    phase = "context" if mode == "context" else "generation"
+    base_fname = f"wideep_{phase}_mla_perf.txt"
+    model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == "mla"]
+    backends = _get_mla_backend_list()
+    cases = []
+    for model_path in model_paths:
+        native_heads = MODEL_NATIVE_HEADS.get(model_path, 128)
+        for backend in backends:
+            for num_heads in _HEAD_NUMS:
+                if num_heads > native_heads:
+                    continue
+                # Single precision: run with bfloat16, log as fp8_block/fp8
+                cases.append(
+                    [
+                        0,
+                        0,
+                        num_heads,
+                        "bfloat16",
+                        "bfloat16",
+                        "bfloat16",
+                        base_fname,
+                        model_path,
+                        "mla",
+                        backend,
+                    ]
+                )
+    return cases
 
 
-def get_mla_generation_module_test_cases():
-    """collect.py entrypoint for MLA generation module collection."""
-    return _build_module_test_cases(attn_type="mla", mode="generation")
+def get_wideep_mla_context_test_cases():
+    """collect.py entrypoint for wideep MLA context collection."""
+    return _build_wideep_mla_test_cases(mode="context")
+
+
+def get_wideep_mla_generation_test_cases():
+    """collect.py entrypoint for wideep MLA generation collection."""
+    return _build_wideep_mla_test_cases(mode="generation")
 
 
 def get_dsa_context_module_test_cases():
@@ -468,10 +526,21 @@ def run_attention_torch(
     version = get_version("sglang")
     device_name = torch.cuda.get_device_name(device)
 
-    # Normalize dtypes for log_perf — perf_database maps bfloat16 → float16
-    log_mla_dtype = "float16" if compute_dtype == "bfloat16" else compute_dtype
-    log_kv_dtype = "float16" if kv_cache_dtype == "bfloat16" else kv_cache_dtype
-    log_gemm_type = "float16" if gemm_type == "bfloat16" else gemm_type
+    # Wideep MLA backward-compatibility: the old collect_wideep_attn.py logged
+    # mla_dtype="fp8_block", kv_cache_dtype="fp8" for all runs, used the raw
+    # backend name as kernel_source, and different op_name / filename patterns.
+    # perf_database loaders (load_wideep_*_mla_data) expect these conventions.
+    is_wideep_mla = attn_type == "mla"
+
+    if is_wideep_mla:
+        log_mla_dtype = "fp8_block"
+        log_kv_dtype = "fp8"
+        log_gemm_type = "fp8_block"
+    else:
+        # DSA: normalize bfloat16 → float16 for perf_database compatibility
+        log_mla_dtype = "float16" if compute_dtype == "bfloat16" else compute_dtype
+        log_kv_dtype = "float16" if kv_cache_dtype == "bfloat16" else kv_cache_dtype
+        log_gemm_type = "float16" if gemm_type == "bfloat16" else gemm_type
 
     # QKV latent dimensions for AttentionInputs
     q_lora_rank = getattr(attention_module, "q_lora_rank", 1536) or 1536
@@ -556,6 +625,7 @@ def _run_prefill(
     log_gemm_type: str,
 ):
     """Run prefill (context) benchmark for a single (batch_size, seq_length) point."""
+    is_wideep_mla = attn_type == "mla"
     from sglang.srt.layers.communicator import AttentionInputs, get_attn_tp_context
     from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
@@ -649,9 +719,17 @@ def _run_prefill(
 
         avg_time_ms = np.mean(cuda_times)
 
-        # Log perf — schema aligned with vllm/trtllm
+        # Log perf — wideep MLA uses old filename/op_name/kernel_source conventions
         try:
-            perf_filename = _resolve_perf_path(output_path, f"{attn_type}_context_module_perf.txt")
+            if is_wideep_mla:
+                perf_fname = "wideep_context_mla_perf.txt"
+                op_name = "mla_context"
+                kernel_source = backend_name
+            else:
+                perf_fname = f"{attn_type}_context_module_perf.txt"
+                op_name = f"{attn_type}_context_module"
+                kernel_source = f"{attn_type}_{backend_name}"
+            perf_filename = _resolve_perf_path(output_path, perf_fname)
             log_perf(
                 item_list=[
                     {
@@ -671,8 +749,8 @@ def _run_prefill(
                 framework="SGLang",
                 version=version,
                 device_name=device_name,
-                op_name=f"{attn_type}_context_module",
-                kernel_source=f"{attn_type}_{backend_name}",
+                op_name=op_name,
+                kernel_source=kernel_source,
                 perf_filename=perf_filename,
             )
         except Exception as e:
@@ -728,6 +806,7 @@ def _run_decode(
     log_gemm_type: str,
 ):
     """Run decode (generation) benchmark for a single (batch_size, kv_cache_length) point."""
+    is_wideep_mla = attn_type == "mla"
     from sglang.srt.layers.communicator import AttentionInputs, get_attn_tp_context
     from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
@@ -816,9 +895,24 @@ def _run_decode(
         avg_time_ms = results["latency_ms"]
         power_stats = results["power_stats"]
 
-        # Log perf — generation uses isl=1, step=seq_len (matches vllm convention)
+        # Log perf — wideep MLA uses isl=seq_len, step=0 (old convention).
+        # DSA uses isl=1, step=seq_len (matches vllm convention).
+        # The wideep generation loader computes s = isl + step, so both
+        # conventions yield the same effective key when step=0 → s=seq_len.
         try:
-            perf_filename = _resolve_perf_path(output_path, f"{attn_type}_generation_module_perf.txt")
+            if is_wideep_mla:
+                perf_fname = "wideep_generation_mla_perf.txt"
+                op_name = "mla_generation"
+                kernel_source = backend_name
+                log_isl = seq_length
+                log_step = 0
+            else:
+                perf_fname = f"{attn_type}_generation_module_perf.txt"
+                op_name = f"{attn_type}_generation_module"
+                kernel_source = f"{attn_type}_{backend_name}"
+                log_isl = 1
+                log_step = seq_length
+            perf_filename = _resolve_perf_path(output_path, perf_fname)
             log_perf(
                 item_list=[
                     {
@@ -829,17 +923,17 @@ def _run_decode(
                         "gemm_type": log_gemm_type,
                         "num_heads": head_num,
                         "batch_size": batch_size,
-                        "isl": 1,
+                        "isl": log_isl,
                         "tp_size": 1,
-                        "step": seq_length,
+                        "step": log_step,
                         "latency": f"{avg_time_ms:.4f}",
                     }
                 ],
                 framework="SGLang",
                 version=version,
                 device_name=device_name,
-                op_name=f"{attn_type}_generation_module",
-                kernel_source=f"{attn_type}_{backend_name}",
+                op_name=op_name,
+                kernel_source=kernel_source,
                 perf_filename=perf_filename,
                 power_stats=power_stats,
             )
@@ -893,6 +987,7 @@ def run_mla_module(
     is_prefill: bool,
     gpu_id: int,
     output_path: str | None = None,
+    attention_backend: str | None = None,
 ):
     """Run MLA/DSA module benchmark — called inside a subprocess.
 
@@ -902,7 +997,8 @@ def run_mla_module(
     device = f"cuda:{gpu_id}"
     torch.cuda.set_device(device)
 
-    attention_backend = _get_backends(attn_type)
+    if attention_backend is None:
+        attention_backend = _get_backends(attn_type)
 
     if is_prefill:
         all_cases = get_context_test_cases(attn_type)
@@ -971,6 +1067,7 @@ def _run_mla_subprocess(
     is_prefill: bool,
     gpu_id: int,
     output_path: str | None = None,
+    attention_backend: str | None = None,
 ):
     """Run MLA/DSA benchmark in a subprocess with CUDA_VISIBLE_DEVICES isolation."""
     env = os.environ.copy()
@@ -978,11 +1075,12 @@ def _run_mla_subprocess(
 
     phase = "context" if is_prefill else "generation"
     output_repr = f'"{output_path}"' if output_path else "None"
+    backend_repr = f'"{attention_backend}"' if attention_backend else "None"
     code = (
         f'import sys; sys.path.insert(0, "{os.path.dirname(os.path.abspath(__file__))}")\n'
         f"from collect_mla_module import run_mla_module\n"
         f'run_mla_module("{attn_type}", {head_num}, "{model_path}", '
-        f'"{kv_cache_dtype}", "{compute_dtype}", "{gemm_type}", {is_prefill}, 0, {output_repr})\n'
+        f'"{kv_cache_dtype}", "{compute_dtype}", "{gemm_type}", {is_prefill}, 0, {output_repr}, {backend_repr})\n'
     )
 
     proc = subprocess.Popen(
@@ -1015,6 +1113,7 @@ def run_mla_module_worker(
     perf_filename: str,
     model_path: str,
     attn_type: str,
+    attention_backend: str | None = None,
     device: str = "cuda:0",
 ):
     """Worker-compatible positional wrapper used by collector/collect.py.
@@ -1023,6 +1122,10 @@ def run_mla_module_worker(
     (attn_type, num_heads, precision, model) combo in a subprocess.
     The seq_len and batch_size args from the individual test case are
     ignored here because the subprocess sweeps all combos internally.
+
+    For wideep MLA test cases, attention_backend is the 10th positional
+    element specifying which backend to benchmark (e.g. "flashinfer", "fa3").
+    For DSA test cases, it defaults to None and _get_backends() is used.
     """
     device_str = str(device) if not isinstance(device, str) else device
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
@@ -1032,7 +1135,8 @@ def run_mla_module_worker(
     print(
         f"{attn_type.upper()} Module {'Context' if is_prefill else 'Generation'}: "
         f"model={model_path}, heads={num_heads}, kv={kv_cache_dtype}, "
-        f"compute={compute_dtype}, gemm={gemm_type}, GPU={gpu_id}"
+        f"compute={compute_dtype}, gemm={gemm_type}, "
+        f"backend={attention_backend or 'auto'}, GPU={gpu_id}"
     )
     print(f"{'=' * 60}")
 
@@ -1051,6 +1155,7 @@ def run_mla_module_worker(
         is_prefill=is_prefill,
         gpu_id=gpu_id,
         output_path=output_path,
+        attention_backend=attention_backend,
     )
 
 

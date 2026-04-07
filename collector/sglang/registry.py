@@ -60,15 +60,15 @@ REGISTRY: list[OpEntry] = [
         run_func="run_attention_torch",
     ),
     OpEntry(
-        op="mla_context_module",
+        op="wideep_mla_context",
         module="collector.sglang.collect_mla_module",
-        get_func="get_mla_context_module_test_cases",
+        get_func="get_wideep_mla_context_test_cases",
         run_func="run_mla_module_worker",
     ),
     OpEntry(
-        op="mla_generation_module",
+        op="wideep_mla_generation",
         module="collector.sglang.collect_mla_module",
-        get_func="get_mla_generation_module_test_cases",
+        get_func="get_wideep_mla_generation_test_cases",
         run_func="run_mla_module_worker",
     ),
     OpEntry(

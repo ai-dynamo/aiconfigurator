@@ -181,10 +181,17 @@ class TestBuildModuleTestCases:
 
 
 class TestEntryPoints:
-    def test_mla_context_returns_list(self):
+    def test_wideep_mla_context_returns_list(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
-            cases = mod.get_mla_context_module_test_cases()
+            cases = mod.get_wideep_mla_context_test_cases()
+        assert isinstance(cases, list)
+        assert len(cases) > 0
+
+    def test_wideep_mla_generation_returns_list(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            cases = mod.get_wideep_mla_generation_test_cases()
         assert isinstance(cases, list)
         assert len(cases) > 0
 
@@ -194,3 +201,69 @@ class TestEntryPoints:
             cases = mod.get_dsa_generation_module_test_cases()
         assert isinstance(cases, list)
         assert len(cases) > 0
+
+
+class TestGetMlaBackendList:
+    def test_hopper(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            assert mod._get_mla_backend_list() == ["flashinfer", "fa3"]
+
+    def test_blackwell(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=100):
+            assert mod._get_mla_backend_list() == ["flashinfer", "trtllm_mla"]
+
+    def test_older(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=80):
+            assert mod._get_mla_backend_list() == ["flashinfer"]
+
+
+class TestBuildWideepMlaTestCases:
+    def test_format_length_10(self):
+        """Each wideep MLA test case has 10 elements (9 + attention_backend)."""
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            for case in mod._build_wideep_mla_test_cases("context"):
+                assert len(case) == 10
+                assert case[8] == "mla"
+
+    def test_context_filename(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            cases = mod._build_wideep_mla_test_cases("context")
+        fnames = {c[6] for c in cases}
+        assert fnames == {"wideep_context_mla_perf.txt"}
+
+    def test_generation_filename(self):
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            cases = mod._build_wideep_mla_test_cases("generation")
+        fnames = {c[6] for c in cases}
+        assert fnames == {"wideep_generation_mla_perf.txt"}
+
+    def test_only_mla_models(self):
+        """Wideep MLA only includes MLA-type models (DeepSeek-V3), not DSA."""
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            cases = mod._build_wideep_mla_test_cases("context")
+        model_paths = {c[7] for c in cases}
+        assert model_paths == {"deepseek-ai/DeepSeek-V3"}
+
+    def test_sweeps_backends(self):
+        """Hopper should sweep flashinfer and fa3 backends."""
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            cases = mod._build_wideep_mla_test_cases("context")
+        backends = {c[9] for c in cases}
+        assert backends == {"flashinfer", "fa3"}
+
+    def test_single_precision_bfloat16(self):
+        """All wideep MLA cases use bfloat16 precision (logged as fp8_block/fp8)."""
+        mod = _import_module()
+        with patch.object(mod, "get_sm_version", return_value=90):
+            for case in mod._build_wideep_mla_test_cases("context"):
+                assert case[3] == "bfloat16"  # kv_cache_dtype
+                assert case[4] == "bfloat16"  # compute_dtype
+                assert case[5] == "bfloat16"  # gemm_type
