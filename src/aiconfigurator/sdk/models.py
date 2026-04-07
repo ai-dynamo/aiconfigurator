@@ -975,7 +975,7 @@ class MOEModel(BaseModel):
 
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
+                ops.Embedding("context_embedding", 1, self._vocab_size // tp_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
                     "context_qkv_gemm",
@@ -1006,19 +1006,18 @@ class MOEModel(BaseModel):
             ]
         )
 
-        # router, only take it into account when num_experts >= 128
-        if self._num_experts >= 128:
-            self.context_ops.extend(
-                [
-                    ops.GEMM(
-                        "context_router_gemm",
-                        self._num_layers,
-                        self._num_experts,
-                        h,
-                        common.GEMMQuantMode.float16,
-                    )
-                ]
-            )
+        # router gemm: hidden_size -> num_experts
+        self.context_ops.extend(
+            [
+                ops.GEMM(
+                    "context_router_gemm",
+                    self._num_layers,
+                    self._num_experts,
+                    h,
+                    common.GEMMQuantMode.float16,
+                )
+            ]
+        )
 
         # dispatch tokens to experts, moe calc and get tokens back
         self.context_ops.extend(
@@ -1065,7 +1064,7 @@ class MOEModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
+                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size // tp_size, h, 0.3),
                 ops.ElementWise("generation_add_norm_1", self._num_layers * self._mtp_scale_factor, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
                     "generation_qkv_gemm",
@@ -1095,19 +1094,18 @@ class MOEModel(BaseModel):
             ]
         )
 
-        # router, only take it into account when num_experts >= 128
-        if self._num_experts >= 128:
-            self.generation_ops.extend(
-                [
-                    ops.GEMM(
-                        "generation_router_gemm",
-                        self._num_layers * self._mtp_scale_factor,
-                        self._num_experts,
-                        h,
-                        common.GEMMQuantMode.float16,
-                    )
-                ]
-            )
+        # router gemm: hidden_size -> num_experts
+        self.generation_ops.extend(
+            [
+                ops.GEMM(
+                    "generation_router_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    self._num_experts,
+                    h,
+                    common.GEMMQuantMode.float16,
+                )
+            ]
+        )
 
         # dispatch tokens to experts, moe calc and get tokens back
         self.generation_ops.extend(
@@ -1164,11 +1162,12 @@ class MOEModel(BaseModel):
             ]
         )
 
-        # # # when tp_size=0, the comm part will be 0
-        # self.context_ops.append(ops.CustomAllReduce('context_ar_1', self._num_layers, h, tp_size))
-        # self.context_ops.append(ops.CustomAllReduce('context_ar_2', self._num_layers, h, tp_size))
-        # self.generation_ops.append(ops.CustomAllReduce('generation_ar_1', self._num_layers, h, tp_size))
-        # self.generation_ops.append(ops.CustomAllReduce('generation_ar_2', self._num_layers, h, tp_size))
+        # All-reduce after embedding: needed when tp > 1
+        # Embedding shards vocab across TP ranks and all-reduces
+        self.context_ops.append(ops.CustomAllReduce("context_embedding_ar", 1, h, tp_size))
+        self.generation_ops.append(
+            ops.CustomAllReduce("generation_embedding_ar", 1 * self._mtp_scale_factor, h, tp_size)
+        )
 
         # pp
         pp_scale_factor = pp_size - 1
