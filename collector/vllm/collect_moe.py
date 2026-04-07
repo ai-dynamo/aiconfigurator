@@ -84,9 +84,6 @@ def get_moe_test_cases():
     test_cases = []
 
     for common_moe_testcase in get_common_moe_test_cases():
-        if common_moe_testcase.token_expert_distribution != "power_law":
-            continue
-
         model_name = common_moe_testcase.model_name
 
         # vllm does not support TP when EP is enabled.
