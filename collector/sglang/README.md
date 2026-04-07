@@ -63,7 +63,7 @@ python collect.py --backend sglang
 python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generation
 
 # Run MLA/DSA module operators
-python collect.py --backend sglang --ops mla_context_module mla_generation_module \
+python collect.py --backend sglang --ops wideep_mla_context wideep_mla_generation \
     dsa_context_module dsa_generation_module
 
 # Mixed: kernel-level + module-level (all run in parallel across GPUs)
@@ -82,8 +82,8 @@ python collect.py --backend sglang --ops mla_bmm_gen_pre dsa_context_module
 | Kernel | `moe` | MOE operator |
 | Kernel | `attention_context` | Standard Attention prefill |
 | Kernel | `attention_generation` | Standard Attention decode |
-| Module | `mla_context_module` | MLA module prefill (DeepSeek-V3) |
-| Module | `mla_generation_module` | MLA module decode (DeepSeek-V3) |
+| Module | `wideep_mla_context` | MLA module prefill (DeepSeek-V3) |
+| Module | `wideep_mla_generation` | MLA module decode (DeepSeek-V3) |
 | Module | `dsa_context_module` | DSA module prefill (DeepSeek-V3.2, GLM-5) |
 | Module | `dsa_generation_module` | DSA module decode (DeepSeek-V3.2, GLM-5) |
 | Wideep | `wideep_moe` | Wideep MOE |
@@ -122,7 +122,7 @@ SGLANG_LOAD_FORMAT=dummy SGLANG_TEST_NUM_LAYERS=2 \
 
 #### Framework Mode
 ```bash
-python collect.py --backend sglang --ops mla_context_module mla_generation_module dsa_context_module dsa_generation_module
+python collect.py --backend sglang --ops wideep_mla_context wideep_mla_generation dsa_context_module dsa_generation_module
 ```
 
 #### Environment Variables
@@ -140,8 +140,8 @@ The script automatically tests the following configuration combinations:
 
 ### Output
 Results are saved to:
-- `mla_context_module_perf.txt` / `dsa_context_module_perf.txt`: Prefill phase performance data
-- `mla_generation_module_perf.txt` / `dsa_generation_module_perf.txt`: Decode phase performance data
+- `wideep_context_mla_perf.txt` / `dsa_context_module_perf.txt`: Prefill phase performance data
+- `wideep_generation_mla_perf.txt` / `dsa_generation_module_perf.txt`: Decode phase performance data
 
 Output format:
 ```csv
