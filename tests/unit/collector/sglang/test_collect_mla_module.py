@@ -155,13 +155,14 @@ class TestBuildModuleTestCases:
         model_paths = {c[7] for c in cases}
         assert model_paths == {"deepseek-ai/DeepSeek-V3"}
 
-    def test_format_length_9(self):
-        """Each built test case has 9 elements (7 + model_path + attn_type)."""
+    def test_format_length_10(self):
+        """Each built test case has 10 elements (7 + model_path + attn_type + backend)."""
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=90):
             for case in mod._build_module_test_cases("dsa", "generation"):
-                assert len(case) == 9
+                assert len(case) == 10
                 assert case[8] == "dsa"
+                assert case[9] is None  # DSA backend resolved at runtime
 
     def test_deduplication(self):
         """One entry per (model, precision_combo, head_num) — not per (batch, seq)."""

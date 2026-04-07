@@ -239,11 +239,16 @@ def _build_module_test_cases(attn_type: str, mode: str):
     """Build one test case per unique (num_heads, precision, model) group.
 
     Output format: [seq_len, batch_size, num_heads, kv_cache_dtype,
-                    compute_dtype, gemm_type, perf_filename, model_path, attn_type]
+                    compute_dtype, gemm_type, perf_filename, model_path,
+                    attn_type, attention_backend]
 
     Each test case triggers a subprocess that sweeps all (batch_size, seq_len)
     combinations internally, so we only need one entry per group — not one per
     individual point. seq_len and batch_size are set to 0 as placeholders.
+
+    attention_backend is None for DSA (resolved at runtime by _get_backends()).
+    All test cases are 10 elements so that collect.py's ``func(*task, device)``
+    maps positional args correctly to run_mla_module_worker().
     """
     base_fname = f"{attn_type}_{mode}_module_perf.txt"
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
@@ -254,7 +259,20 @@ def _build_module_test_cases(attn_type: str, mode: str):
             for num_heads in _HEAD_NUMS:
                 if num_heads > native_heads:
                     continue  # Skip invalid TP-sim configs
-                cases.append([0, 0, num_heads, kv_dtype, compute_dtype, gemm_type, base_fname, model_path, attn_type])
+                cases.append(
+                    [
+                        0,
+                        0,
+                        num_heads,
+                        kv_dtype,
+                        compute_dtype,
+                        gemm_type,
+                        base_fname,
+                        model_path,
+                        attn_type,
+                        None,
+                    ]
+                )
     return cases
 
 
@@ -684,7 +702,7 @@ def _run_prefill(
             dtype=torch.bfloat16,
             device="cuda",
         )
-        positions = torch.arange(seq_length, device="cuda").unsqueeze(0).expand(batch_size, -1).flatten()
+        positions = torch.arange(seq_length, device="cuda").unsqueeze(0).expand(batch_size, -1).contiguous().flatten()
         zero_allocator = BumpAllocator(buffer_size=256, dtype=torch.float32, device="cuda")
 
         attn_inputs = AttentionInputs(hidden_states, forward_batch, dummy_qkv_latent_func)
