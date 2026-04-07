@@ -283,16 +283,27 @@ def run_moe_torch(
         )
 
         # Shuffle weights and scales for TRTLLM kernel layout
-        w1_shuf, w1_scale_shuf, w2_shuf, w2_scale_shuf = prepare_static_weights_for_trtllm_fp4_moe(
-            w1_raw,
-            w2_raw,
-            w1_scale_raw,
-            w2_scale_raw,
-            hidden_size=hidden_size,
-            intermediate_size=local_inter_size,
-            num_experts=local_num_experts,
-            is_gated_activation=True,
-        )
+        if vllm_version > "0.16.0":
+            w1_shuf, w1_scale_shuf, w2_shuf, w2_scale_shuf = prepare_static_weights_for_trtllm_fp4_moe(
+                w1_raw,
+                w2_raw,
+                w1_scale_raw,
+                w2_scale_raw,
+                hidden_size=hidden_size,
+                intermediate_size=local_inter_size,
+                num_experts=local_num_experts,
+                is_gated_activation=True,
+            )
+        else:
+            w1_shuf, w1_scale_shuf, w2_shuf, w2_scale_shuf = prepare_static_weights_for_trtllm_fp4_moe(
+                w1_raw,
+                w2_raw,
+                w1_scale_raw,
+                w2_scale_raw,
+                hidden_size=hidden_size,
+                intermediate_size=local_inter_size,
+                num_experts=local_num_experts,
+            )
         del w1_raw, w2_raw, w1_scale_raw, w2_scale_raw
 
         # Per-expert scales
