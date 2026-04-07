@@ -169,16 +169,18 @@ def _get_backends(attn_type: str):
 
 
 def _get_mla_backend_list() -> list[str]:
-    """Return all MLA backends to sweep, matching old collect_wideep_attn.py.
+    """Return all MLA backends to sweep for wideep MLA collection.
 
-    The old collector benchmarked multiple backends per GPU architecture:
-      SM >= 100: ["flashinfer", "trtllm_mla"]
+    Per-architecture backends:
+      SM >= 100: ["trtllm_mla"]  — flashinfer MLA is not supported on Blackwell;
+                  sglang auto-promotes to trtllm_mla and then fails kv_cache_dtype
+                  validation.  Existing B200 perf data contains only trtllm_mla.
       SM >= 90:  ["flashinfer", "fa3"]
       SM < 90:   ["flashinfer"]
     """
     sm = get_sm_version()
     if sm >= 100:
-        return ["flashinfer", "trtllm_mla"]
+        return ["trtllm_mla"]
     elif sm >= 90:
         return ["flashinfer", "fa3"]
     else:

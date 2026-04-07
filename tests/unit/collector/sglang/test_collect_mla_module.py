@@ -213,7 +213,7 @@ class TestGetMlaBackendList:
     def test_blackwell(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=100):
-            assert mod._get_mla_backend_list() == ["flashinfer", "trtllm_mla"]
+            assert mod._get_mla_backend_list() == ["trtllm_mla"]
 
     def test_older(self):
         mod = _import_module()
