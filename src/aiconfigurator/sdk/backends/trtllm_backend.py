@@ -447,6 +447,8 @@ class TRTLLMBackend(BaseBackend):
         max_batch_size = kwargs.get("max_batch_size", 512)
         ctx_stride = kwargs.get("ctx_stride", 512)
         enable_chunked_prefill = kwargs.get("enable_chunked_prefill", False)
+        max_seq_len = kwargs.get("max_seq_len", isl + osl)
+        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction", 0.9)
 
         # when b is larger than 1024, the result is not good as the data collection is not enough
         # to cover this.
@@ -505,8 +507,8 @@ class TRTLLMBackend(BaseBackend):
                         seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
                     ),
                     ctx_tokens=ctx_tokens,
-                    max_seq_len=kwargs.get("max_seq_len"),
-                    free_gpu_memory_fraction=kwargs.get("free_gpu_memory_fraction", 0.9),
+                    max_seq_len=max_seq_len,
+                    free_gpu_memory_fraction=free_gpu_memory_fraction,
                 )
 
                 if summary.check_oom():
