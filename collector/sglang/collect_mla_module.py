@@ -364,8 +364,11 @@ def load_model_runner(
     num_layers = int(os.environ.get("SGLANG_TEST_NUM_LAYERS", "2"))
     load_format = os.environ.get("SGLANG_LOAD_FORMAT", "dummy")
 
-    # Map perf-DB dtype to SGLang-native dtype
+    # Map perf-DB dtype to SGLang-native dtype.
+    # trtllm_mla accepts "bf16" but rejects "bfloat16" in its validation.
     sglang_kv_dtype = SGLANG_KV_DTYPE.get(kv_cache_dtype, kv_cache_dtype)
+    if attention_backend == "trtllm_mla" and sglang_kv_dtype == "bfloat16":
+        sglang_kv_dtype = "bf16"
 
     # Use AIC's local model configs to avoid HF downloads.  Also patches
     # model_type for sglang compatibility (glm_moe_dsa → deepseek_v3).
@@ -381,6 +384,7 @@ def load_model_runner(
         mem_fraction_static=0.5,
         disable_radix_cache=True,
         disable_cuda_graph=True,
+        enable_piecewise_cuda_graph=False,
         kv_cache_dtype=sglang_kv_dtype,
     )
 
@@ -676,13 +680,17 @@ def _run_prefill(
             f"std: {np.std(cuda_times):.3f})"
         )
 
-    except torch.cuda.OutOfMemoryError:
+    except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
         return
     except Exception as e:
         traceback.print_exc()
         error_str = str(e).lower()
+        if "out of memory" in error_str:
+            print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
+            torch.cuda.empty_cache()
+            return
         if "cuda" in error_str and "illegal" in error_str:
             print("  CUDA illegal access detected — stopping to prevent cascading failures")
             raise
@@ -836,13 +844,17 @@ def _run_decode(
 
         print(f"  Decode: {avg_time_ms:.3f} ms")
 
-    except torch.cuda.OutOfMemoryError:
+    except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):
         print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
         torch.cuda.empty_cache()
         return
     except Exception as e:
         traceback.print_exc()
         error_str = str(e).lower()
+        if "out of memory" in error_str:
+            print(f"  OOM: b={batch_size}, s={seq_length} — skipping")
+            torch.cuda.empty_cache()
+            return
         if "cuda" in error_str and "illegal" in error_str:
             print("  CUDA illegal access detected — stopping to prevent cascading failures")
             raise
@@ -966,7 +978,7 @@ def _run_mla_subprocess(
         f'import sys; sys.path.insert(0, "{os.path.dirname(os.path.abspath(__file__))}")\n'
         f"from collect_mla_module import run_mla_module\n"
         f'run_mla_module("{attn_type}", {head_num}, "{model_path}", '
-        f'"{kv_cache_dtype}", "{compute_dtype}", "{gemm_type}", {is_prefill}, {gpu_id}, {output_repr})\n'
+        f'"{kv_cache_dtype}", "{compute_dtype}", "{gemm_type}", {is_prefill}, 0, {output_repr})\n'
     )
 
     proc = subprocess.Popen(
