@@ -883,7 +883,8 @@ def run_mla_module(
     Sets up the model runner for the given configuration and runs all
     (batch_size, seq_length) combos for the specified phase.
     """
-    torch.cuda.set_device("cuda:0")
+    device = f"cuda:{gpu_id}"
+    torch.cuda.set_device(device)
 
     attention_backend = _get_backends(attn_type)
 
@@ -894,9 +895,11 @@ def run_mla_module(
         all_cases = get_generation_test_cases(attn_type)
         phase_name = "Generation"
 
-    # Filter to matching precision combo
+    # Filter to matching precision combo.
+    # Test case format: [seq_len, batch_size, num_heads, kv_dtype, compute_dtype, gemm_type, ...]
+    # run_attention_torch expects: (batch_size, seq_length, is_prefill)
     cases = [
-        (tc[0], tc[1], is_prefill)
+        (tc[1], tc[0], is_prefill)
         for tc in all_cases
         if tc[3] == kv_cache_dtype and tc[4] == compute_dtype and tc[5] == gemm_type and tc[2] == head_num
     ]
@@ -918,7 +921,7 @@ def run_mla_module(
             head_num=head_num,
             kv_cache_dtype=kv_cache_dtype,
             attention_backend=attention_backend,
-            device="cuda:0",
+            device=device,
         )
 
         run_attention_torch(
@@ -928,7 +931,7 @@ def run_mla_module(
             test_layer=0,
             num_warmup=3,
             num_iterations=10,
-            device="cuda:0",
+            device=device,
             output_path=output_path,
             attn_type=attn_type,
             model_path=model_path,
@@ -1074,7 +1077,8 @@ def main():
             print(f"Model: {model_path}  |  Attention: {attn_type.upper()}  |  Mode: {args.mode}")
             print(f"{'=' * 60}")
 
-            head_nums = [args.num_heads] if args.num_heads else _HEAD_NUMS
+            native_heads = MODEL_NATIVE_HEADS.get(model_path, 128)
+            head_nums = [args.num_heads] if args.num_heads else [h for h in _HEAD_NUMS if h <= native_heads]
 
             for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(args.mode):
                 if args.kv_cache_dtype and kv_dtype != args.kv_cache_dtype:
@@ -1082,6 +1086,7 @@ def main():
 
                 for head_num in head_nums:
                     is_prefill = args.mode == "context"
+                    gpu_id = int(args.device.split(":")[-1]) if ":" in args.device else 0
                     try:
                         run_mla_module(
                             attn_type=attn_type,
@@ -1091,7 +1096,7 @@ def main():
                             compute_dtype=compute_dtype,
                             gemm_type=gemm_type,
                             is_prefill=is_prefill,
-                            gpu_id=0,
+                            gpu_id=gpu_id,
                             output_path=args.output_path,
                         )
                     except Exception as e:

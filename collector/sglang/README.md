@@ -66,31 +66,29 @@ python collect.py --backend sglang --ops wideep_mlp_context wideep_mlp_generatio
 python collect.py --backend sglang --ops mla_context_module mla_generation_module \
     dsa_context_module dsa_generation_module
 
-# Mixed: non-wideep + wideep (all run in parallel across GPUs)
-python collect.py --backend sglang --ops mla_bmm_gen_pre wideep_mlp_context
+# Mixed: kernel-level + module-level (all run in parallel across GPUs)
+python collect.py --backend sglang --ops mla_bmm_gen_pre dsa_context_module
 ```
 
 **All available operators (when no `--ops` specified):**
 
 | Category | Operator | Description |
 |----------|----------|-------------|
-| Non-wideep | `gemm` | GEMM matrix multiplication |
-| Non-wideep | `mla_context` | MLA prefill phase |
-| Non-wideep | `mla_generation` | MLA decode phase |
-| Non-wideep | `mla_bmm_gen_pre` | MLA BMM gen pre |
-| Non-wideep | `mla_bmm_gen_post` | MLA BMM gen post |
-| Non-wideep | `moe` | MOE operator |
-| Non-wideep | `attention_context` | Standard Attention prefill |
-| Non-wideep | `attention_generation` | Standard Attention decode |
-| Module | `mla_context_module` | MLA module prefill |
-| Module | `mla_generation_module` | MLA module decode |
-| Module | `dsa_context_module` | DSA module prefill |
-| Module | `dsa_generation_module` | DSA module decode |
-| Wideep | `wideep_mlp_context` | Wideep MLP prefill |
-| Wideep | `wideep_mlp_generation` | Wideep MLP decode |
+| Kernel | `gemm` | GEMM matrix multiplication |
+| Kernel | `mla_context` | MLA prefill phase |
+| Kernel | `mla_generation` | MLA decode phase |
+| Kernel | `mla_bmm_gen_pre` | MLA BMM gen pre |
+| Kernel | `mla_bmm_gen_post` | MLA BMM gen post |
+| Kernel | `moe` | MOE operator |
+| Kernel | `attention_context` | Standard Attention prefill |
+| Kernel | `attention_generation` | Standard Attention decode |
+| Module | `mla_context_module` | MLA module prefill (DeepSeek-V3) |
+| Module | `mla_generation_module` | MLA module decode (DeepSeek-V3) |
+| Module | `dsa_context_module` | DSA module prefill (DeepSeek-V3.2, GLM-5) |
+| Module | `dsa_generation_module` | DSA module decode (DeepSeek-V3.2, GLM-5) |
 | Wideep | `wideep_moe` | Wideep MOE |
 
-**Note:** Both non-wideep and wideep operators run in parallel across multiple GPUs. Wideep operators use subprocess-based GPU isolation (via `CUDA_VISIBLE_DEVICES`) to prevent NCCL/distributed initialization conflicts while maintaining parallel execution.
+**Note:** All operators run in parallel across multiple GPUs. Module-level operators use subprocess-based GPU isolation (via `CUDA_VISIBLE_DEVICES`) to prevent NCCL/distributed initialization conflicts.
 
 ## General Configuration
 
@@ -146,7 +144,7 @@ Results are saved to:
 - `mla_generation_module_perf.txt` / `dsa_generation_module_perf.txt`: Decode phase performance data
 
 Output format:
-```
+```csv
 framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency
 ```
 
