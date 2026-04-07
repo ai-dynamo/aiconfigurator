@@ -466,7 +466,6 @@ def draw_pareto_to_string(
         # Remove ANSI if plain output is needed.
         # https://stackoverflow.com/questions/14693701/how-can-i-remove-the-ansi-escape-sequences-from-a-string-in-python
         if use_plain_cli_output():
-            print("removed ANSI", use_plain_cli_output())
             ansi_escape_8bit = re.compile(r"(?:\x1B[@-Z\\-_]|[\x80-\x9A\x9C-\x9F]|(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~])")
             buf = ansi_escape_8bit.sub("", buf)
     except Exception:
