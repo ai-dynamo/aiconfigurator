@@ -3028,7 +3028,14 @@ class PerfDatabase:
             # y_direction
             for y in target_y_list:
                 if y not in data_dict[x]:
-                    y_left, y_right = self._nearest_1d_point_helper(y, list(data_dict[x].keys()), False)
+                    y_keys = list(data_dict[x].keys())
+                    if len(y_keys) < 2:
+                        logger.warning(
+                            f"Skipping y-direction interpolation for x={x}: "
+                            f"only {len(y_keys)} y-value(s), need at least 2"
+                        )
+                        break
+                    y_left, y_right = self._nearest_1d_point_helper(y, y_keys, False)
                     # Check if both left and right boundaries exist
                     if y_left not in data_dict[x] or y_right not in data_dict[x]:
                         logger.warning(
@@ -3081,9 +3088,15 @@ class PerfDatabase:
                         else:
                             data_dict[x][y][z] = value
 
+        x_keys = list(data_dict.keys())
         for x in target_x_list:
             if x not in data_dict:
-                x_left, x_right = self._nearest_1d_point_helper(x, list(data_dict.keys()), False)
+                if len(x_keys) < 2:
+                    logger.warning(
+                        f"Skipping x-direction interpolation: only {len(x_keys)} x-value(s), need at least 2"
+                    )
+                    break
+                x_left, x_right = self._nearest_1d_point_helper(x, x_keys, False)
                 # Check if both left and right boundaries exist
                 if x_left not in data_dict or x_right not in data_dict:
                     logger.warning(
