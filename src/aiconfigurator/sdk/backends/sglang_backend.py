@@ -474,7 +474,7 @@ class SGLANGBackend(BaseBackend):
                     ctx_tokens=ctx_tokens,
                 )
 
-                if summary.check_oom():
+                if summary.check_oom() or summary.check_kv_cache_oom():
                     break  # larger ctx tokens will cause oom
                 all_oom = False
                 result_dict = summary.get_result_dict()

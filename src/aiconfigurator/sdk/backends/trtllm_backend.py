@@ -25,6 +25,9 @@ KV_CACHE_MEMORY_RESERVED_FRACTION: float = 0.015
 # Used as the %-based tolerance band in KV cache capacity tests.
 KV_CACHE_MEMORY_TOLERANCE: float = 0.02
 
+# Default fraction of free GPU memory that TRT-LLM allocates for KV cache.
+TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION: float = 0.9
+
 
 class TRTLLMBackend(BaseBackend):
     """
@@ -334,6 +337,10 @@ class TRTLLMBackend(BaseBackend):
             moe = model.config.moe_quant_mode.name
             comm = model.config.comm_quant_mode.name
             mem = memory["total"]
+            max_seq_len_kv = kwargs.get("max_seq_len")
+            free_gpu_memory_fraction_kv = kwargs.get(
+                "free_gpu_memory_fraction", TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
+            )
 
             result_dict = {
                 "model": model.model_path,
@@ -378,7 +385,32 @@ class TRTLLMBackend(BaseBackend):
             }
             result = pd.DataFrame([result_dict], columns=common.ColumnsAgg).round(3)
             summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
-            summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])
+
+            # KV cache budget check: compute a separate memory dict with max_seq_len
+            # so set_memory_and_check_oom can check both absolute OOM and KV budget.
+            # num_tokens=2*isl matches the --max_num_tokens used in TRT-LLM benchmarks,
+            # which determines peak activation memory allocation.
+            kv_memory = None
+            if max_seq_len_kv is not None and free_gpu_memory_fraction_kv < 1.0:
+                kv_memory = self._get_memory_usage(
+                    model,
+                    database,
+                    b,
+                    1,
+                    isl,
+                    osl,
+                    num_tokens=2 * isl,
+                    max_seq_len=max_seq_len_kv,
+                )
+
+            summary.set_memory_and_check_oom(
+                memory,
+                database.system_spec["gpu"]["mem_capacity"],
+                kv_memory_dict=kv_memory,
+                free_gpu_memory_fraction=free_gpu_memory_fraction_kv,
+                kv_cache_reserved_fraction=KV_CACHE_MEMORY_RESERVED_FRACTION,
+                kv_cache_tolerance=KV_CACHE_MEMORY_TOLERANCE,
+            )
             summary.set_summary_df(result)
             summary.set_result_dict(result_dict)
 
@@ -393,29 +425,6 @@ class TRTLLMBackend(BaseBackend):
 
             # caching
             self._agg_cache[isl][osl][b][ctx_tokens] = summary
-
-        # KV OOM check (outside cache — depends on caller's kwargs, not cached).
-        # Inflate kvcache by 1/(frac*(1-reserved)*(1-tol)) so total >= gpu_capacity fires at
-        # KV budget exhaustion. Only applies when both max_seq_len and free_gpu_memory_fraction
-        # are provided; return a fresh OOM summary without polluting the cache.
-        max_seq_len_kv = kwargs.get("max_seq_len")
-        free_gpu_memory_fraction_kv = kwargs.get("free_gpu_memory_fraction", 0.9)
-        if max_seq_len_kv is not None and free_gpu_memory_fraction_kv < 1.0 and not summary.check_oom():
-            kv_memory = self._get_memory_usage(
-                model,
-                database,
-                b,
-                1,
-                isl,
-                osl,
-                num_tokens=2 * isl,
-                max_seq_len=max_seq_len_kv,
-                free_gpu_memory_fraction=free_gpu_memory_fraction_kv,
-            )
-            if kv_memory["total"] >= database.system_spec["gpu"]["mem_capacity"] / (1 << 30):
-                kv_oom_summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
-                kv_oom_summary.set_oom(True)
-                return kv_oom_summary
 
         return summary
 
@@ -448,7 +457,7 @@ class TRTLLMBackend(BaseBackend):
         ctx_stride = kwargs.get("ctx_stride", 512)
         enable_chunked_prefill = kwargs.get("enable_chunked_prefill", False)
         max_seq_len = kwargs.get("max_seq_len", isl + osl)
-        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction", 0.9)
+        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction", TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION)
 
         # when b is larger than 1024, the result is not good as the data collection is not enough
         # to cover this.
@@ -511,7 +520,7 @@ class TRTLLMBackend(BaseBackend):
                     free_gpu_memory_fraction=free_gpu_memory_fraction,
                 )
 
-                if summary.check_oom():
+                if summary.check_oom() or summary.check_kv_cache_oom():
                     break  # larger ctx tokens will cause oom
                 all_oom = False
                 result_dict = summary.get_result_dict()
@@ -541,7 +550,6 @@ class TRTLLMBackend(BaseBackend):
         num_tokens: int = 0,
         prefix: int = 0,
         max_seq_len: int | None = None,
-        free_gpu_memory_fraction: float = 0.9,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
@@ -611,13 +619,6 @@ class TRTLLMBackend(BaseBackend):
         # should not be divided by pp_size as you need to hold all kvcache for stages.
         seq_tokens = max_seq_len if max_seq_len is not None else isl + beam_width * osl
         kvcache = batch_size * seq_tokens * model.config.kvcache_quant_mode.value.memory * kvcache_per_token
-        # When max_seq_len and free_gpu_memory_fraction are both provided, inflate kvcache to
-        # represent TRT-LLM's effective memory reservation. This makes memory["total"] >=
-        # gpu_capacity fire at KV budget exhaustion, so the existing OOM check catches it.
-        if max_seq_len is not None and free_gpu_memory_fraction < 1.0:
-            kvcache /= (
-                free_gpu_memory_fraction * (1 - KV_CACHE_MEMORY_RESERVED_FRACTION) * (1 - KV_CACHE_MEMORY_TOLERANCE)
-            )
         # if 'DEEPSEEK' in model.model_path or 'MOE' in model.model_path:
         #    kvcache = kvcache * model.config.attention_dp_size # this is incorrect. tp will
         #    duplicate the kvcache while attn_dp will not.

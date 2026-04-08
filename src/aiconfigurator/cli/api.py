@@ -23,6 +23,10 @@ from aiconfigurator.cli.main import (
     build_experiment_task_configs,
 )
 from aiconfigurator.cli.report_and_save import save_results
+from aiconfigurator.sdk.backends.trtllm_backend import (
+    KV_CACHE_MEMORY_RESERVED_FRACTION,
+    KV_CACHE_MEMORY_TOLERANCE,
+)
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task import (
     DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
@@ -877,12 +881,15 @@ def _run_agg_estimate(
         osl,
         num_tokens=2 * isl,
         max_seq_len=resolved_max_seq_len,
-        free_gpu_memory_fraction=free_gpu_memory_fraction,
     )
-    # _get_memory_usage inflates kvcache by 1/(frac*(1-reserved)*(1-tol)) when max_seq_len and
-    # free_gpu_memory_fraction < 1.0 are provided, so "total >= gpu_capacity" is mathematically
-    # equivalent to "actual_kvcache >= (gpu_capacity - non_kv) * frac * (1-reserved) * (1-tol)".
-    if kv_memory["total"] >= database.system_spec["gpu"]["mem_capacity"] / (1 << 30):
+    summary._check_and_set_kv_cache_oom(
+        kv_memory,
+        database.system_spec["gpu"]["mem_capacity"],
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        kv_cache_reserved_fraction=KV_CACHE_MEMORY_RESERVED_FRACTION,
+        kv_cache_tolerance=KV_CACHE_MEMORY_TOLERANCE,
+    )
+    if summary.check_kv_cache_oom():
         kv_warning = (
             f"Requested batch_size ({batch_size}) exceeds estimated KV cache capacity "
             f"(free_gpu_memory_fraction={free_gpu_memory_fraction}). "

@@ -24,7 +24,8 @@ from aiconfigurator.sdk.backends.trtllm_backend import (
     KV_CACHE_MEMORY_RESERVED_FRACTION,
     KV_CACHE_MEMORY_TOLERANCE,
 )
-from aiconfigurator.sdk.config import ModelConfig
+from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
+from aiconfigurator.sdk.inference_summary import InferenceSummary
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
 
@@ -67,15 +68,13 @@ def _is_kv_oom(
     max_seq_len,
     kv_cache_capacity_tolerance=KV_CACHE_MEMORY_TOLERANCE,
 ):
-    """KV OOM check using _get_memory_usage directly."""
-    base = backend._get_memory_usage(model, database, 1, 1, isl, osl, num_tokens=2 * isl, free_gpu_memory_fraction=1.0)
-    non_kv_gib = base["total"] - base["kvcache"]
-    gpu_capacity_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)
-    available_kv_gib = (gpu_capacity_gib - non_kv_gib) * free_gpu_memory_fraction
-    available_kv_gib *= 1 - KV_CACHE_MEMORY_RESERVED_FRACTION
-    if available_kv_gib <= 0:
+    """KV OOM check using InferenceSummary."""
+    summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
+    base_memory = backend._get_memory_usage(model, database, 1, 1, isl, osl, num_tokens=2 * isl)
+    summary.set_memory_and_check_oom(base_memory, database.system_spec["gpu"]["mem_capacity"])
+    if summary.check_oom():
         return True
-    memory = backend._get_memory_usage(
+    kv_memory = backend._get_memory_usage(
         model,
         database,
         batch_size,
@@ -84,9 +83,15 @@ def _is_kv_oom(
         osl,
         num_tokens=2 * isl,
         max_seq_len=max_seq_len,
-        free_gpu_memory_fraction=1.0,
     )
-    return memory["kvcache"] > available_kv_gib * (1 - kv_cache_capacity_tolerance)
+    summary._check_and_set_kv_cache_oom(
+        kv_memory,
+        database.system_spec["gpu"]["mem_capacity"],
+        free_gpu_memory_fraction,
+        KV_CACHE_MEMORY_RESERVED_FRACTION,
+        kv_cache_capacity_tolerance,
+    )
+    return summary.check_kv_cache_oom()
 
 
 class TestKvCacheOomProperties:
