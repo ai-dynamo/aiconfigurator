@@ -23,10 +23,6 @@ from aiconfigurator.cli.main import (
     build_experiment_task_configs,
 )
 from aiconfigurator.cli.report_and_save import save_results
-from aiconfigurator.sdk.backends.trtllm_backend import (
-    KV_CACHE_MEMORY_RESERVED_FRACTION,
-    KV_CACHE_MEMORY_TOLERANCE,
-)
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task import (
     DEFAULT_DECODE_LATENCY_CORRECTION_SCALE,
@@ -849,7 +845,12 @@ def _run_agg_estimate(
     database = load_database(system_name)
     backend = get_backend(backend_name)
     session = InferenceSession(model, database, backend)
-    summary = session.run_agg(runtime_config, ctx_tokens=ctx_tokens)
+    summary = session.run_agg(
+        runtime_config,
+        ctx_tokens=ctx_tokens,
+        max_seq_len=max_seq_len if max_seq_len is not None else isl + osl,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+    )
 
     if summary.check_oom():
         raise RuntimeError(
@@ -864,36 +865,11 @@ def _run_agg_estimate(
         raise RuntimeError("Estimation produced no results. The configuration may be invalid.")
 
     kv_warning = None
-    resolved_max_seq_len = max_seq_len
-    if resolved_max_seq_len is None:
-        resolved_max_seq_len = isl + osl
-        logger.warning(
-            "max_seq_len not provided for KV cache capacity check; defaulting to isl + osl = %d. "
-            "Pass max_seq_len explicitly to match your TRT-LLM --max_seq_len setting.",
-            resolved_max_seq_len,
-        )
-    kv_memory = backend._get_memory_usage(
-        model,
-        database,
-        batch_size,
-        1,
-        isl,
-        osl,
-        num_tokens=2 * isl,
-        max_seq_len=resolved_max_seq_len,
-    )
-    summary._check_and_set_kv_cache_oom(
-        kv_memory,
-        database.system_spec["gpu"]["mem_capacity"],
-        free_gpu_memory_fraction=free_gpu_memory_fraction,
-        kv_cache_reserved_fraction=KV_CACHE_MEMORY_RESERVED_FRACTION,
-        kv_cache_tolerance=KV_CACHE_MEMORY_TOLERANCE,
-    )
     if summary.check_kv_cache_oom():
         kv_warning = (
             f"Requested batch_size ({batch_size}) exceeds estimated KV cache capacity "
             f"(free_gpu_memory_fraction={free_gpu_memory_fraction}). "
-            f"TRT-LLM will queue excess requests, causing significantly higher TTFT and inaccurate TPOT."
+            "The serving runtime will queue excess requests, causing significantly higher TTFT and inaccurate TPOT."
         )
 
     return EstimateResult(
