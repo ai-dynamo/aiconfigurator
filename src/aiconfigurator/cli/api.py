@@ -612,7 +612,7 @@ def cli_estimate(
     decode_batch_size: int | None = None,
     decode_num_workers: int | None = None,
     systems_paths: str | None = None,
-    free_gpu_memory_fraction: float = 0.9,
+    free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
 ) -> EstimateResult:
     """
@@ -664,7 +664,7 @@ def cli_estimate(
         decode_num_workers: Number of decode workers (disagg). Required when mode='disagg'.
         systems_paths: Comma-separated systems search paths. Use 'default' for built-in.
         free_gpu_memory_fraction: Fraction of free GPU memory TRT-LLM allocates for
-            KV cache (default 0.9). Used to check whether the requested batch_size
+            KV cache (default 0.9 for TRTLLM, 1.0 for other backends). Used to check whether the requested batch_size
             exceeds KV cache capacity.
         max_seq_len: The TRT-LLM ``--max_seq_len`` setting used at serving time.
             Controls how many KV blocks TRT-LLM pre-allocates per sequence. Defaults
@@ -820,7 +820,7 @@ def _run_agg_estimate(
     load_database,
     get_backend,
     get_model,
-    free_gpu_memory_fraction=0.9,
+    free_gpu_memory_fraction=None,
     max_seq_len=None,
 ) -> EstimateResult:
     """Run aggregated (IFB) estimation."""

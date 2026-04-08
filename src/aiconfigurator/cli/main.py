@@ -630,7 +630,7 @@ def build_default_task_configs(
     nextn: int = 0,
     nextn_accept_rates: list[float] | None = None,
     enable_chunked_prefill: bool = False,
-    free_gpu_memory_fraction: float = 0.9,
+    free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
 ) -> dict[str, TaskConfig]:
     """Build agg and disagg task configs for default mode comparison.

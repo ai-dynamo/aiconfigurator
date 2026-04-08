@@ -81,22 +81,22 @@ class InferenceSummary:
         memory_dict: dict,
         mem_capacity: int,
         kv_memory_dict: dict | None = None,
-        free_gpu_memory_fraction: float = 1.0,
+        free_gpu_memory_fraction: float | None = None,
         kv_cache_reserved_fraction: float = 0.0,
         kv_cache_tolerance: float = 0.0,
     ) -> None:
         """
         Set memory and check oom.
 
-        When *kv_memory_dict* and a *free_gpu_memory_fraction* < 1.0 are
-        provided, also performs the KV cache budget check.  If
-        *kv_memory_dict* is ``None`` but *free_gpu_memory_fraction* < 1.0,
-        *memory_dict* itself is used for the KV check.
+        When *free_gpu_memory_fraction* is not ``None`` and < 1.0, also
+        performs the KV cache budget check.  *kv_memory_dict* supplies a
+        separate memory dict for that check (e.g. computed with
+        ``max_seq_len``); when ``None``, *memory_dict* itself is used.
         """
         self._memory = memory_dict
         self._is_oom = self._memory["total"] >= (mem_capacity / (1 << 30))
         self._is_kv_cache_oom = False
-        if free_gpu_memory_fraction < 1.0:
+        if free_gpu_memory_fraction is not None and free_gpu_memory_fraction < 1.0:
             kv_dict = kv_memory_dict if kv_memory_dict is not None else memory_dict
             self._check_and_set_kv_cache_oom(
                 kv_dict,
@@ -110,7 +110,7 @@ class InferenceSummary:
         self,
         kv_memory_dict: dict,
         mem_capacity: int,
-        free_gpu_memory_fraction: float,
+        free_gpu_memory_fraction: float | None,
         kv_cache_reserved_fraction: float,
         kv_cache_tolerance: float,
     ) -> None:
@@ -121,7 +121,7 @@ class InferenceSummary:
         ``kv > (capacity - non_kv) * frac * (1-res) * (1-tol)``.
         """
         self._is_kv_cache_oom = False
-        if self._is_oom or free_gpu_memory_fraction >= 1.0:
+        if self._is_oom or free_gpu_memory_fraction is None or free_gpu_memory_fraction >= 1.0:
             return
         mem_cap_gib = mem_capacity / (1 << 30)
         kv_gib = kv_memory_dict.get("kvcache", 0.0)

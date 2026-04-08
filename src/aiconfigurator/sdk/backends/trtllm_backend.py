@@ -338,9 +338,9 @@ class TRTLLMBackend(BaseBackend):
             comm = model.config.comm_quant_mode.name
             mem = memory["total"]
             max_seq_len_kv = kwargs.get("max_seq_len")
-            free_gpu_memory_fraction_kv = kwargs.get(
-                "free_gpu_memory_fraction", TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
-            )
+            free_gpu_memory_fraction_kv = kwargs.get("free_gpu_memory_fraction")
+            if free_gpu_memory_fraction_kv is None:
+                free_gpu_memory_fraction_kv = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
 
             result_dict = {
                 "model": model.model_path,
@@ -457,7 +457,9 @@ class TRTLLMBackend(BaseBackend):
         ctx_stride = kwargs.get("ctx_stride", 512)
         enable_chunked_prefill = kwargs.get("enable_chunked_prefill", False)
         max_seq_len = kwargs.get("max_seq_len", isl + osl)
-        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction", TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION)
+        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction")
+        if free_gpu_memory_fraction is None:
+            free_gpu_memory_fraction = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
 
         # when b is larger than 1024, the result is not good as the data collection is not enough
         # to cover this.
