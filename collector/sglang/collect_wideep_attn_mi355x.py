@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Compatible with SGLang 0.5.9 and ROCm 7.0 (HIP). On ROCm, only triton attention backend is used.
+__compat__ = "sglang>=0.5.5"
+
 import json
 import os
 from importlib.metadata import version as get_version
@@ -24,23 +26,68 @@ from sglang.srt.utils import BumpAllocator, is_hip, suppress_other_loggers
 from torch.profiler import ProfilerActivity, profile, record_function
 
 try:
-    from helper import _get_deepseek_model_path, benchmark_with_power, get_sm_version, log_perf
+    from helper import benchmark_with_power, log_perf
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import _get_deepseek_model_path, benchmark_with_power, get_sm_version, log_perf
+    from helper import benchmark_with_power, log_perf
+
+
+def _get_deepseek_model_path():
+    """Get DeepSeek model path, downloading config files from HuggingFace if needed.
+
+    If DEEPSEEK_MODEL_PATH is set, use that path.
+    Otherwise, download only the necessary config files from HuggingFace.
+    This allows running the collector without downloading the full model weights.
+    """
+    env_path = os.environ.get("DEEPSEEK_MODEL_PATH")
+    if env_path:
+        return env_path
+
+    # Download config files from HuggingFace (no model weights needed)
+    try:
+        from huggingface_hub import hf_hub_download
+
+        repo_id = "deepseek-ai/DeepSeek-V3"
+        config_files = [
+            "config.json",
+            "configuration_deepseek.py",
+            "tokenizer_config.json",
+            "tokenizer.json",
+        ]
+
+        snapshot_dir = None
+        for filename in config_files:
+            try:
+                path = hf_hub_download(repo_id=repo_id, filename=filename)
+                if snapshot_dir is None:
+                    snapshot_dir = os.path.dirname(path)
+            except Exception as e:
+                print(f"Warning: Failed to download {filename}: {e}")
+
+        if snapshot_dir:
+            print(f"Using DeepSeek-V3 config from HuggingFace cache: {snapshot_dir}")
+            return snapshot_dir
+    except ImportError:
+        print("Warning: huggingface_hub not installed, cannot auto-download config")
+    except Exception as e:
+        print(f"Warning: Failed to download DeepSeek-V3 config: {e}")
+
+    # Fallback to default path
+    return "/deepseek-v3"
+
 
 DEEPSEEK_MODEL_PATH = _get_deepseek_model_path()
 
 
 def _get_attention_backends():
-    """Attention backends: ROCm (HIP) uses aiter; CUDA uses flashinfer + fa3 or trtllm_mla on SM100+."""
+    """Attention backends: on ROCm 7.0 (HIP) only triton is supported; on CUDA use flashinfer and fa3."""
     if is_hip():
-        return ["aiter"]  # todo: support triton backend
-    # FA3 only supports SM80-90; use trtllm_mla on Blackwell (SM100+)
-    return ["flashinfer", "trtllm_mla"] if get_sm_version() >= 100 else ["flashinfer", "fa3"]
+        return ["aiter"] # todo: support triton backend
+        # return ["aiter"] #"triton"
+    return ["flashinfer", "fa3"]
 
 
 def _accelerator_name():
