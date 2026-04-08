@@ -241,10 +241,7 @@ def _plot_worker_setup_table(
             else:
                 parallel = f"tp{_cli_underline(str(row['tp']))}pp{_cli_underline(str(row['pp']))}"
                 gpus_worker = (
-                    f"{row['pp'] * row['tp']} "
-                    f"(={_cli_underline(str(row['tp']))}x"
-                    f"{_cli_underline(str(row['pp']))}x"
-                    f"{_cli_underline(str(row['dp']))})"
+                    f"{row['pp'] * row['tp']} (={_cli_underline(str(row['tp']))}x{_cli_underline(str(row['pp']))}"
                 )
             row_data = [
                 i + 1,

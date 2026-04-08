@@ -31,8 +31,22 @@ logger = logging.getLogger(__name__)
 
 def _build_common_cli_parser() -> argparse.ArgumentParser:
     common_parser = argparse.ArgumentParser(add_help=False)
-    common_parser.add_argument("--save-dir", type=str, default=None, help="Directory to save the results.")
     common_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
+    common_parser.add_argument(
+        "--no-color",
+        dest="no_color",
+        action="store_true",
+        help="Disable ANSI colors in output.",
+    )
+    # TODO: maybe move --systems-path here?
+    return common_parser
+
+
+def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
+    # TODO: some arguments might be unused in some modes.
+    # Example: --top-n not used for generate mode.
+    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser.add_argument("--save-dir", type=str, default=None, help="Directory to save the results.")
     common_parser.add_argument(
         "--top-n",
         type=int,
@@ -48,12 +62,6 @@ def _build_common_cli_parser() -> argparse.ArgumentParser:
             "Systems search paths (comma-separated). Use 'default' for the built-in systems path. "
             "Example: default,/opt/aic/systems,/data/aic/systems."
         ),
-    )
-    common_parser.add_argument(
-        "--no-color",
-        dest="no_color",
-        action="store_true",
-        help="Disable ANSI colors in output.",
     )
     add_generator_override_arguments(common_parser)
     return common_parser
@@ -449,11 +457,12 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
 
 def configure_parser(parser):
     common_cli_parser = _build_common_cli_parser()
+    common_cli_experiments_parser = _build_common_cli_experiments_parser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
     default_parser = subparsers.add_parser(
         "default",
-        parents=[common_cli_parser],
+        parents=[common_cli_parser, common_cli_experiments_parser],
         help="Run the default agg vs disagg comparison.",
         description="Run the default agg vs disagg comparison.",
         epilog=_USAGE_EXAMPLES,
@@ -470,7 +479,7 @@ def configure_parser(parser):
 
     experiments_parser = subparsers.add_parser(
         "exp",
-        parents=[common_cli_parser],
+        parents=[common_cli_parser, common_cli_experiments_parser],
         help=help_text,
         description=description,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -480,7 +489,7 @@ def configure_parser(parser):
     # Generate mode - naive config without sweeping
     generate_parser = subparsers.add_parser(
         "generate",
-        parents=[common_cli_parser],
+        parents=[common_cli_parser, common_cli_experiments_parser],
         help="Generate naive agg config without SLA optimization (no sweeping).",
         description=(
             "Generate a working agg configuration without running the parameter sweep. "
@@ -493,7 +502,7 @@ def configure_parser(parser):
     # Estimate mode - single-point performance estimation
     estimate_parser = subparsers.add_parser(
         "estimate",
-        parents=[common_cli_parser],
+        parents=[common_cli_parser, common_cli_experiments_parser],
         help="Estimate TTFT, TPOT, and power for a single model/system/config.",
         description=(
             "Run a single-point performance estimation to predict TTFT (time to first token), "
@@ -506,12 +515,12 @@ def configure_parser(parser):
     # Support mode - support matrix check
     support_parser = subparsers.add_parser(
         "support",
+        parents=[common_cli_parser],
         help="(Optional) Check if AIC supports the model/hardware combo for (agg, disagg).",
         description="Optional pre-flight check to verify support for a specific model and system "
         "combination using the support matrix. You can skip this and run 'cli default' directly. "
         "Use --system all for a consolidated matrix view across all systems and backends.",
     )
-    support_parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
     _add_support_mode_arguments(support_parser)
 
 

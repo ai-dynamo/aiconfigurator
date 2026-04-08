@@ -10,7 +10,10 @@ import sys
 
 def _stdout_env_suggests_plain() -> bool:
     """True when NO_COLOR or non-TTY stdout indicates avoiding ANSI."""
-    if os.environ.get("NO_COLOR", "").strip() != "":
+    if "NO_COLOR" in os.environ:
+        return True
+    # Hack to support --no-color arg before argparse.parse_args() is completed.
+    if "--no-color" in sys.argv:
         return True
     try:
         return not sys.stdout.isatty()
