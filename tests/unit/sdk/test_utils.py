@@ -685,12 +685,13 @@ class TestEnumerateParallelConfigSGLangMoE:
             tp_list=[1, 2, 4, 8],
             pp_list=[1],
             dp_list=[1, 2, 4, 8, 16, 32],
-            moe_tp_list=[1],
+            moe_tp_list=[1, 2, 4, 8],
             moe_ep_list=[8, 16, 32],
             is_moe=True,
             backend=common.BackendName.sglang,
             enable_wideep=True,
         )
+        assert len(configs) > 0, "Should generate at least one config"
         # All configs should have moe_tp == 1 (EP-only for wideep)
         for c in configs:
             assert c[3] == 1, f"WideEP config should have moe_tp=1, got {c}"

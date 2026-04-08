@@ -308,14 +308,14 @@ class TestGetModelMOESGLangDispatch:
         assert isinstance(model, models.SGLangEPMOEModel)
 
     def test_sglang_moe_no_wideep_returns_sglang_ep_moe_model(self):
-        """Test that get_model returns SGLangEPMOEModel for MOE + SGLang (without wideep)."""
+        """Test that get_model returns SGLangEPMOEModel for MOE + SGLang (without wideep, EP-enabled)."""
         model_config = config.ModelConfig(
             tp_size=2,
             pp_size=1,
             gemm_quant_mode=common.GEMMQuantMode.float16,
             kvcache_quant_mode=common.KVCacheQuantMode.float16,
-            moe_tp_size=2,
-            moe_ep_size=1,
+            moe_tp_size=1,
+            moe_ep_size=2,
             attention_dp_size=1,
             enable_wideep=False,
         )
