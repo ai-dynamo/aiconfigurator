@@ -28,6 +28,10 @@ KV_CACHE_MEMORY_TOLERANCE: float = 0.02
 # Default fraction of free GPU memory that TRT-LLM allocates for KV cache.
 TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION: float = 0.9
 
+# Default max_num_tokens for TRT-LLM engine builds (BuildConfig.max_num_tokens).
+# Determines activation memory pre-allocated at engine build time.
+TRTLLM_DEFAULT_MAX_NUM_TOKENS: int = 8192
+
 
 class TRTLLMBackend(BaseBackend):
     """
@@ -341,6 +345,9 @@ class TRTLLMBackend(BaseBackend):
             free_gpu_memory_fraction_kv = kwargs.get("free_gpu_memory_fraction")
             if free_gpu_memory_fraction_kv is None:
                 free_gpu_memory_fraction_kv = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
+            max_num_tokens_kv = kwargs.get("max_num_tokens")
+            if max_num_tokens_kv is None:
+                max_num_tokens_kv = TRTLLM_DEFAULT_MAX_NUM_TOKENS
 
             result_dict = {
                 "model": model.model_path,
@@ -388,8 +395,8 @@ class TRTLLMBackend(BaseBackend):
 
             # KV cache budget check: compute a separate memory dict with max_seq_len
             # so set_memory_and_check_oom can check both absolute OOM and KV budget.
-            # num_tokens=2*isl matches the --max_num_tokens used in TRT-LLM benchmarks,
-            # which determines peak activation memory allocation.
+            # max_num_tokens_kv determines the activation memory TRT-LLM pre-allocates
+            # at engine build time (see BuildConfig.max_num_tokens, default 8192).
             kv_memory = None
             if max_seq_len_kv is not None and free_gpu_memory_fraction_kv < 1.0:
                 kv_memory = self._get_memory_usage(
@@ -399,7 +406,7 @@ class TRTLLMBackend(BaseBackend):
                     1,
                     isl,
                     osl,
-                    num_tokens=2 * isl,
+                    num_tokens=max_num_tokens_kv,
                     max_seq_len=max_seq_len_kv,
                 )
 
