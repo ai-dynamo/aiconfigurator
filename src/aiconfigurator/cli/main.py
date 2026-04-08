@@ -3,7 +3,6 @@
 
 import argparse
 import copy
-import json
 import logging
 import os
 import sys
@@ -24,7 +23,7 @@ from aiconfigurator.generator.api import (
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
-from aiconfigurator.sdk.utils import get_model_config_from_model_path
+from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -475,7 +474,7 @@ def configure_parser(parser):
     example_yaml_path = os.path.join(os.path.dirname(__file__), "example.yaml")
     with open(example_yaml_path) as f:
         example_yaml = yaml.safe_load(f)
-    description = help_text + "\n\nExample:\n" + json.dumps(example_yaml, indent=2)
+    description = help_text + "\n\nExample:\n\n" + yaml.dump(example_yaml, indent=2, Dumper=ListFlowDumper)
 
     experiments_parser = subparsers.add_parser(
         "exp",

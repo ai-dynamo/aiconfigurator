@@ -17,7 +17,7 @@ from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
 from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
-from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import ListFlowDumper, enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -1010,29 +1010,6 @@ class TaskConfig:
             printable["config"] = config_section
 
         final_dict = {self.task_name: printable}
-
-        class ListFlowDumper(yaml.SafeDumper):
-            """
-            Dumper that will print dict items on new lines, but lists on one line.
-            Example:
-                decode_worker_config:
-                    backend_name: trtllm
-                    backend_version: 1.2.0rc5
-                    dp_list: [1]
-                    num_gpu_per_worker: [1, 2, 4, 8]
-            """
-
-            pass
-
-        def represent_list_flow(dumper, data):
-            return dumper.represent_sequence(
-                "tag:yaml.org,2002:seq",
-                data,
-                flow_style=True,  # force inline style
-            )
-
-        ListFlowDumper.add_representer(list, represent_list_flow)
-
         return yaml.dump(final_dict, Dumper=ListFlowDumper)
 
     def _convert_worker_config_to_enum(self, worker_config: dict | DefaultMunch) -> None:

@@ -11,6 +11,8 @@ import urllib.request
 from functools import cache
 from pathlib import Path
 
+import yaml
+
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.common import (
     ARCHITECTURE_TO_MODEL_FAMILY,
@@ -896,3 +898,28 @@ def get_model_config_from_model_path(model_path: str) -> dict:
     )
     parsed["raw_config"] = raw_config
     return parsed
+
+
+class ListFlowDumper(yaml.SafeDumper):
+    """
+    Dumper that will print dict items on new lines, but lists on one line.
+    Example:
+        decode_worker_config:
+            backend_name: trtllm
+            backend_version: 1.2.0rc5
+            dp_list: [1]
+            num_gpu_per_worker: [1, 2, 4, 8]
+    """
+
+    pass
+
+
+def represent_list_flow(dumper, data):
+    return dumper.represent_sequence(
+        "tag:yaml.org,2002:seq",
+        data,
+        flow_style=True,  # force inline style
+    )
+
+
+ListFlowDumper.add_representer(list, represent_list_flow)
