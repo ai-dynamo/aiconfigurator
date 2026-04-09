@@ -102,7 +102,7 @@ class TestKvCacheOomProperties:
 
     Batch sizes are chosen relative to known benchmark thresholds so that
     each assertion is expected to be stable across formula changes within
-    the validated ±3.5% accuracy range.
+    the validated ±2% accuracy range.
     """
 
     def test_fraction_reduces_capacity(self):
