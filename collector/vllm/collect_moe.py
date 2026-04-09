@@ -59,8 +59,26 @@ try:
 except Exception:
     pass
 
+import contextlib
+
 from collector.common_test_cases import get_common_moe_test_cases
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
+
+
+def _forward_context(vllm_config):
+    """Return a set_forward_context() context manager if available (vLLM >= 0.17.0).
+
+    vLLM 0.17.0's FusedMoE.forward_native() calls get_forward_context(),
+    which asserts that the forward context has been set.  Wrap the benchmark
+    loop with this to satisfy the assertion.
+    """
+    try:
+        from vllm.forward_context import set_forward_context
+
+        return set_forward_context({}, vllm_config)
+    except ImportError:
+        return contextlib.nullcontext()
+
 
 aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
@@ -201,8 +219,16 @@ def run_moe_torch(
 
     # MXFP4 path: uses vLLM's high-level FusedMoE module with Mxfp4Config.
     # vLLM handles backend selection (FlashInfer/Triton/Marlin) and weight swizzle.
+    #
+    # We keep a reference to the VllmConfig used during construction because
+    # vLLM 0.17.0's MoERunner (vllm-project/vllm#32344) calls
+    # get_forward_context() → get_layer_from_name() during forward, which
+    # looks up the module in static_forward_context.  FusedMoE registers
+    # itself there during __init__, so we must pass the *same* config to
+    # set_forward_context() at benchmark time.
     use_mxfp4 = moe_type == "w4a16_mxfp4"
     moe_module = None
+    mxfp4_vllm_cfg = None
 
     if use_mxfp4:
         if not _mxfp4_available:
@@ -210,7 +236,20 @@ def run_moe_torch(
 
         mxfp4_quant_config = Mxfp4Config()
 
-        with set_current_vllm_config(VllmConfig()):
+        # pcp_size=1: vLLM >= 0.17.0 added prefill context parallel to
+        # FusedMoE (vllm-project/vllm#32344); without it, __init__ calls
+        # get_pcp_group() which requires distributed init.
+        _pcp_kwargs = {}
+        try:
+            import inspect
+
+            if "pcp_size" in inspect.signature(FusedMoE.__init__).parameters:
+                _pcp_kwargs["pcp_size"] = 1
+        except Exception:
+            pass
+
+        mxfp4_vllm_cfg = VllmConfig()
+        with set_current_vllm_config(mxfp4_vllm_cfg):
             moe_module = FusedMoE(
                 num_experts=num_experts,
                 top_k=topk,
@@ -225,6 +264,7 @@ def run_moe_torch(
                 prefix="",
                 has_bias=True,  # GPT-OSS uses bias
                 activation="swigluoai",  # GPT-OSS activation
+                **_pcp_kwargs,
             )
         moe_module.to(device)
         moe_module.eval()
@@ -521,7 +561,8 @@ def run_moe_torch(
             return results["latency_ms"] / num_iter, results["power_stats"]
 
         try:
-            with set_current_vllm_config(VllmConfig()):
+            vllm_cfg = mxfp4_vllm_cfg if use_mxfp4 else VllmConfig()
+            with set_current_vllm_config(vllm_cfg), _forward_context(vllm_cfg):
                 latency, power_stats = run_iterations()
         except torch.OutOfMemoryError:
             # If OOM, check if we had at least one successful run.
