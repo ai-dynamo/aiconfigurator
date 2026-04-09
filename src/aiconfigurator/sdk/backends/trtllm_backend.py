@@ -76,6 +76,8 @@ class TRTLLMBackend(BaseBackend):
         free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction")
         if free_gpu_memory_fraction is None:
             free_gpu_memory_fraction = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
+        # max_num_tokens controls activation memory (batch-level budget, BuildConfig.max_num_tokens).
+        # This is distinct from max_seq_len, which controls per-slot KV cache pre-allocation.
         max_num_tokens = kwargs.get("max_num_tokens")
         if max_num_tokens is None:
             max_num_tokens = TRTLLM_DEFAULT_MAX_NUM_TOKENS
@@ -469,9 +471,11 @@ class TRTLLMBackend(BaseBackend):
         max_batch_size = kwargs.get("max_batch_size", 512)
         ctx_stride = kwargs.get("ctx_stride", 512)
         enable_chunked_prefill = kwargs.get("enable_chunked_prefill", False)
+        # max_seq_len controls per-slot KV cache pre-allocation (isl+osl is the natural workload bound).
+        # This is distinct from max_num_tokens, which controls batch-level activation memory.
         max_seq_len = kwargs.get("max_seq_len")
         if max_seq_len is None:
-            max_seq_len = TRTLLM_DEFAULT_MAX_NUM_TOKENS
+            max_seq_len = isl + osl
         free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction")
         if free_gpu_memory_fraction is None:
             free_gpu_memory_fraction = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
