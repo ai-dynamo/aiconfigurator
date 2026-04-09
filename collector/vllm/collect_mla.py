@@ -66,47 +66,58 @@ def run_attention_torch(
         # set a reasonable minimum
         8192,
     )
-    try:
-        # Let vllm choose the backend.
-        # defautl for vllm 0.11.0
-        backend = current_platform.get_attn_backend_cls(
-            None,
-            head_dim,
-            dtype,
-            kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-            block_size=block_size,
-            use_v1=True,
-            use_mla=True,
-            has_sink=False,
-            use_sparse=False,
-        )
-    except TypeError:
+    # vLLM >= 0.17.0 calls get_current_vllm_config() during backend validation,
+    # so we need a temporary config context for backend selection.
+    _temp_config = create_vllm_config(
+        model_name=model,
+        max_model_len=input_len,
+        block_size=block_size,
+        num_gpu_blocks=num_kv_cache_blocks,
+        max_num_seqs=batch_size,
+        use_fp8_kv_cache=use_fp8_kv_cache,
+    )
+    with set_current_vllm_config(_temp_config):
         try:
-            # in the case of vllm 0.12.0 use_v1 is removed
+            # Let vllm choose the backend.
+            # defautl for vllm 0.11.0
             backend = current_platform.get_attn_backend_cls(
                 None,
                 head_dim,
                 dtype,
                 kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
                 block_size=block_size,
+                use_v1=True,
                 use_mla=True,
                 has_sink=False,
                 use_sparse=False,
             )
         except TypeError:
-            # vllm 0.14.0
-            from vllm.v1.attention.selector import AttentionSelectorConfig
+            try:
+                # in the case of vllm 0.12.0 use_v1 is removed
+                backend = current_platform.get_attn_backend_cls(
+                    None,
+                    head_dim,
+                    dtype,
+                    kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                    block_size=block_size,
+                    use_mla=True,
+                    has_sink=False,
+                    use_sparse=False,
+                )
+            except TypeError:
+                # vllm 0.14.0+
+                from vllm.v1.attention.selector import AttentionSelectorConfig
 
-            attn_selector_config = AttentionSelectorConfig(
-                head_size=head_dim,
-                dtype=dtype,
-                kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
-                block_size=block_size,
-                use_mla=True,
-                has_sink=False,
-                use_sparse=False,
-            )
-            backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
+                attn_selector_config = AttentionSelectorConfig(
+                    head_size=head_dim,
+                    dtype=dtype,
+                    kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
+                    block_size=block_size,
+                    use_mla=True,
+                    has_sink=False,
+                    use_sparse=False,
+                )
+                backend = current_platform.get_attn_backend_cls(None, attn_selector_config)
 
     if _Backend is not None:
         backend_name = _Backend[resolve_obj_by_qualname(backend).get_name()]
