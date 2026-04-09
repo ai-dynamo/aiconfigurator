@@ -71,12 +71,8 @@ class TRTLLMBackend(BaseBackend):
 
         # Resolve KV cache parameters from kwargs (TRTLLM defaults apply).
         max_seq_len = kwargs.get("max_seq_len")
-        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction")
-        if free_gpu_memory_fraction is None:
-            free_gpu_memory_fraction = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
-        max_num_tokens = kwargs.get("max_num_tokens")
-        if max_num_tokens is None:
-            max_num_tokens = TRTLLM_DEFAULT_MAX_NUM_TOKENS
+        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction", TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION)
+        max_num_tokens = kwargs.get("max_num_tokens", TRTLLM_DEFAULT_MAX_NUM_TOKENS)
 
         try:
             summary = self._agg_cache[isl][osl][b][ctx_tokens][max_seq_len][max_num_tokens][free_gpu_memory_fraction]
@@ -468,9 +464,7 @@ class TRTLLMBackend(BaseBackend):
         ctx_stride = kwargs.get("ctx_stride", 512)
         enable_chunked_prefill = kwargs.get("enable_chunked_prefill", False)
         max_seq_len = kwargs.get("max_seq_len", isl + osl)
-        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction")
-        if free_gpu_memory_fraction is None:
-            free_gpu_memory_fraction = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
+        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction", TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION)
 
         # when b is larger than 1024, the result is not good as the data collection is not enough
         # to cover this.
