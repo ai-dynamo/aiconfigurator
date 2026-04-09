@@ -72,7 +72,11 @@ class TRTLLMBackend(BaseBackend):
         # Resolve KV cache parameters from kwargs (TRTLLM defaults apply).
         # Use `if x is None` instead of kwargs.get default so that an explicit
         # None passed by the Python API still falls back to the constant.
+        # max_seq_len must be resolved before the cache lookup to avoid None and
+        # isl+osl landing in separate cache buckets for identical configurations.
         max_seq_len = kwargs.get("max_seq_len")
+        if max_seq_len is None:
+            max_seq_len = isl + osl
         free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction")
         if free_gpu_memory_fraction is None:
             free_gpu_memory_fraction = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
