@@ -35,6 +35,7 @@ Usage:
 
 import argparse
 import gc
+import json
 import math
 import os
 import tempfile
@@ -97,6 +98,21 @@ def _resolve_model_path(model_name: str) -> str:
     # loads from disk instead of downloading from HuggingFace Hub.
     tmp_dir = tempfile.mkdtemp(prefix=f"aic_model_{model_name.replace('/', '_')}_")
     os.symlink(config_file, os.path.join(tmp_dir, "config.json"))
+    # Strip auto_map if present.  Some models (e.g. DeepSeek-V3) ship
+    # config.json with auto_map pointing to a custom Python config class
+    # (configuration_deepseek.py).  HuggingFace's AutoConfig.from_pretrained()
+    # — called by vLLM's ModelConfig — unconditionally tries to import that
+    # module from the model directory before falling back to built-in support.
+    # Since our temp dir only has config.json (no .py files), the import
+    # fails.  Stripping auto_map is safe because vLLM natively supports
+    # these architectures and only needs the JSON fields.
+    with open(config_file) as f:
+        config_data = json.load(f)
+    if "auto_map" in config_data:
+        config_data.pop("auto_map")
+        os.remove(os.path.join(tmp_dir, "config.json"))
+        with open(os.path.join(tmp_dir, "config.json"), "w") as f:
+            json.dump(config_data, f)
 
     # Also symlink hf_quant_config.json if present (used by quantized models).
     quant_file = _MODEL_CONFIGS_DIR / f"{model_name.replace('/', '--')}_hf_quant_config.json"
@@ -398,20 +414,34 @@ def _create_attention_module(
     attn_module.eval()
     attn_module.requires_grad_(False)
 
-    # Initialize with random weights.
-    # FP8 weights → zero (safe dummy value).
-    # Scale params → 1.0 (avoid NaN during process_weights_after_loading).
-    # Everything else → small normal.
+    # Deterministic weight init — vLLM 0.17.0 DSA modules leave CUDA graph
+    # RNG offset tracking active after construction, causing
+    # "Offset increment outside graph capture" on any RNG call (normal_,
+    # uniform_, randn, randint).  This is likely caused by the FlashInfer
+    # sparse MLA backend (vllm-project/vllm#33451) or DSA CUDA graph
+    # support (vllm-project/vllm#34457); vllm-project/vllm#34552 also notes
+    # DSA "has issues with cudagraphs" on Blackwell.  enforce_eager=True and
+    # torch.cuda.manual_seed() do not clear the state — the corruption
+    # originates inside module construction, not from VllmConfig.
+    #
+    # Using fill_() is safe because we benchmark kernel latency, which
+    # depends on tensor shapes and dtypes, not data values.  The dummy
+    # weights are overwritten by process_weights_after_loading() anyway
+    # (which creates W_UK_T/W_UV).
+    #
+    # FP8 weights → zero (safe dummy).
+    # Scale buffers → 0.5 (process_weights_after_loading asserts k_scale > 0).
+    # Everything else → small constant.
     with torch.no_grad():
-        for name, param in attn_module.named_parameters():
-            if param.is_meta:
+        for name, tensor in list(attn_module.named_parameters()) + list(attn_module.named_buffers()):
+            if tensor.is_meta:
                 continue
-            if param.dtype in (torch.float8_e4m3fn, torch.float8_e5m2, torch.uint8):
-                param.data.zero_()
-            elif param.dtype == torch.float32 and "scale" in name:
-                param.data.fill_(1.0)
+            if tensor.dtype in (torch.float8_e4m3fn, torch.float8_e5m2, torch.uint8):
+                tensor.data.zero_()
+            elif tensor.dtype == torch.float32 and "scale" in name:
+                tensor.data.fill_(0.5)
             else:
-                param.normal_(mean=0.0, std=0.02)
+                tensor.data.fill_(0.01)
 
     return attn_module, vllm_config
 
@@ -429,6 +459,17 @@ def _process_module_weights(attn_module, vllm_config, device):
 
     with set_current_vllm_config(vllm_config):
         # 1. Process quantized linear layers (FP8 weight conversion).
+        #    Before calling process_weights_after_loading(), ensure any
+        #    KV cache scale parameters (k_scale, v_scale, q_scale, prob_scale)
+        #    are positive.  vLLM initialises them to -1.0 as a sentinel and
+        #    asserts k_scale > 0.0 when FP8 KV cache is active.  With dummy
+        #    weights no checkpoint sets them, so we must do it here.
+        for _, module in attn_module.named_modules():
+            for attr in ("k_scale", "v_scale", "q_scale", "prob_scale"):
+                t = getattr(module, attr, None)
+                if isinstance(t, torch.Tensor) and t.numel() == 1 and t.item() <= 0:
+                    t.data.fill_(1.0)
+
         for _, module in attn_module.named_modules():
             quant_method = getattr(module, "quant_method", None)
             if isinstance(quant_method, QuantizeMethodBase):
@@ -454,8 +495,8 @@ def _create_context_kv_inputs(batch_spec: BatchSpec, kv_lora_rank: int, qk_rope_
     k_pe_contexts = []
     for seq_len, query_len in zip(batch_spec.seq_lens, batch_spec.query_lens, strict=True):
         context_len = max(0, int(seq_len) - int(query_len))
-        kv_c_contexts.append(torch.randn(context_len, kv_lora_rank, dtype=torch.bfloat16, device=device))
-        k_pe_contexts.append(torch.randn(context_len, 1, qk_rope_head_dim, dtype=torch.bfloat16, device=device))
+        kv_c_contexts.append(torch.full((context_len, kv_lora_rank), 0.01, dtype=torch.bfloat16, device=device))
+        k_pe_contexts.append(torch.full((context_len, 1, qk_rope_head_dim), 0.01, dtype=torch.bfloat16, device=device))
     return kv_c_contexts, k_pe_contexts
 
 
@@ -480,8 +521,8 @@ def _populate_indexer_kv_cache(
         block_indices = token_offsets // block_size
         intra_block_offsets = token_offsets % block_size
         block_ids = block_table[i, block_indices]
-        random_cache = torch.randint(0, 256, (context_len, entry_dim), dtype=torch.uint8, device=device)
-        indexer_kv_cache[block_ids, intra_block_offsets, :] = random_cache
+        dummy_cache = torch.full((context_len, entry_dim), 42, dtype=torch.uint8, device=device)
+        indexer_kv_cache[block_ids, intra_block_offsets, :] = dummy_cache
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -767,9 +808,9 @@ def run_mla_module(
             dtype=torch.long,
         )
 
-    hidden_states = torch.randn(
-        num_tokens,
-        hidden_size,
+    hidden_states = torch.full(
+        (num_tokens, hidden_size),
+        0.01,
         dtype=torch.bfloat16,
         device=device,
     )
