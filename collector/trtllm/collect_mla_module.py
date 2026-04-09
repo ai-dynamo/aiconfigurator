@@ -64,7 +64,11 @@ from tensorrt_llm._torch.pyexecutor.model_loader import initialize_dummy_weights
 from tensorrt_llm._torch.utils import AuxStreamType, get_model_extra_attrs, model_extra_attrs
 from tensorrt_llm._utils import torch_dtype_to_binding
 from tensorrt_llm.bindings import DataType
-from tensorrt_llm.bindings.executor import KvCacheConfig
+
+try:
+    from tensorrt_llm.llmapi.llm_args import KvCacheConfig
+except ImportError:
+    from tensorrt_llm.bindings.executor import KvCacheConfig
 from tensorrt_llm.bindings.internal.batch_manager import CacheType
 from tensorrt_llm.functional import AllReduceStrategy
 from tensorrt_llm.mapping import Mapping
