@@ -75,13 +75,8 @@ def _is_kv_oom(
     max_num_tokens,
     kv_cache_capacity_tolerance=KV_CACHE_MEMORY_TOLERANCE,
 ):
-    """KV OOM check using InferenceSummary."""
-    summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
-    base_memory = backend._get_memory_usage(model, database, 1, 1, isl, osl, num_tokens=max_num_tokens)
-    summary.set_memory_and_check_oom(base_memory, database.system_spec["gpu"]["mem_capacity"])
-    if summary.check_oom():
-        return True
-    kv_memory = backend._get_memory_usage(
+    """KV OOM check using InferenceSummary with a single unified memory dict."""
+    memory = backend._get_memory_usage(
         model,
         database,
         batch_size,
@@ -91,14 +86,15 @@ def _is_kv_oom(
         num_tokens=max_num_tokens,
         max_seq_len=max_seq_len,
     )
-    summary._check_and_set_kv_cache_oom(
-        kv_memory,
+    summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
+    summary.set_memory_and_check_oom(
+        memory,
         database.system_spec["gpu"]["mem_capacity"],
-        free_gpu_memory_fraction,
-        KV_CACHE_MEMORY_RESERVED_FRACTION,
-        kv_cache_capacity_tolerance,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        kv_cache_reserved_fraction=KV_CACHE_MEMORY_RESERVED_FRACTION,
+        kv_cache_tolerance=kv_cache_capacity_tolerance,
     )
-    return summary.check_kv_cache_oom()
+    return summary.check_oom() or summary.check_kv_cache_oom()
 
 
 class TestKvCacheOomProperties:

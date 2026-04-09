@@ -42,7 +42,15 @@ class TRTLLMBackend(BaseBackend):
         self,
     ):
         super().__init__()
-        self._agg_cache = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+        # Cache key: [isl][osl][batch_size][ctx_tokens]
+        #            [max_seq_len][max_num_tokens][free_gpu_memory_fraction]
+        self._agg_cache = defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(
+                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
+                )
+            )
+        )
         self.name = common.BackendName.trtllm
 
     def run_agg(
@@ -61,8 +69,17 @@ class TRTLLMBackend(BaseBackend):
         assert ctx_tokens is not None, "ctx_tokens is required"
         balance_score = isl * b / ctx_tokens / osl
 
+        # Resolve KV cache parameters from kwargs (TRTLLM defaults apply).
+        max_seq_len = kwargs.get("max_seq_len")
+        free_gpu_memory_fraction = kwargs.get("free_gpu_memory_fraction")
+        if free_gpu_memory_fraction is None:
+            free_gpu_memory_fraction = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
+        max_num_tokens = kwargs.get("max_num_tokens")
+        if max_num_tokens is None:
+            max_num_tokens = TRTLLM_DEFAULT_MAX_NUM_TOKENS
+
         try:
-            summary = self._agg_cache[isl][osl][b][ctx_tokens]
+            summary = self._agg_cache[isl][osl][b][ctx_tokens][max_seq_len][max_num_tokens][free_gpu_memory_fraction]
         except KeyError:
             # we would like to calculate num_mix_steps and num_genonly_steps based on
             # isl, osl, b, ctx_tokens within osl steps, need to finish all the ctx tokens
@@ -321,7 +338,20 @@ class TRTLLMBackend(BaseBackend):
                 num_tokens = num_gen_requests + ctx_tokens
             else:
                 num_tokens = ctx_tokens
-            memory = self._get_memory_usage(model, database, b, 1, isl, osl, num_tokens, prefix=prefix)
+
+            # Compute memory reflecting what TRT-LLM actually allocates:
+            # activations sized by max_num_tokens, kvcache sized by max_seq_len.
+            memory = self._get_memory_usage(
+                model,
+                database,
+                b,
+                1,
+                isl,
+                osl,
+                num_tokens=max_num_tokens,
+                prefix=prefix,
+                max_seq_len=max_seq_len,
+            )
             tp = model.config.tp_size
             pp = model.config.pp_size
             dp = model.config.attention_dp_size
@@ -341,13 +371,6 @@ class TRTLLMBackend(BaseBackend):
             moe = model.config.moe_quant_mode.name
             comm = model.config.comm_quant_mode.name
             mem = memory["total"]
-            max_seq_len_kv = kwargs.get("max_seq_len")
-            free_gpu_memory_fraction_kv = kwargs.get("free_gpu_memory_fraction")
-            if free_gpu_memory_fraction_kv is None:
-                free_gpu_memory_fraction_kv = TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
-            max_num_tokens_kv = kwargs.get("max_num_tokens")
-            if max_num_tokens_kv is None:
-                max_num_tokens_kv = TRTLLM_DEFAULT_MAX_NUM_TOKENS
 
             result_dict = {
                 "model": model.model_path,
@@ -392,29 +415,10 @@ class TRTLLMBackend(BaseBackend):
             }
             result = pd.DataFrame([result_dict], columns=common.ColumnsAgg).round(3)
             summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
-
-            # KV cache budget check: compute a separate memory dict with max_seq_len
-            # so set_memory_and_check_oom can check both absolute OOM and KV budget.
-            # max_num_tokens_kv determines the activation memory TRT-LLM pre-allocates
-            # at engine build time (see BuildConfig.max_num_tokens, default 8192).
-            kv_memory = None
-            if max_seq_len_kv is not None and free_gpu_memory_fraction_kv < 1.0:
-                kv_memory = self._get_memory_usage(
-                    model,
-                    database,
-                    b,
-                    1,
-                    isl,
-                    osl,
-                    num_tokens=max_num_tokens_kv,
-                    max_seq_len=max_seq_len_kv,
-                )
-
             summary.set_memory_and_check_oom(
                 memory,
                 database.system_spec["gpu"]["mem_capacity"],
-                kv_memory_dict=kv_memory,
-                free_gpu_memory_fraction=free_gpu_memory_fraction_kv,
+                free_gpu_memory_fraction=free_gpu_memory_fraction,
                 kv_cache_reserved_fraction=KV_CACHE_MEMORY_RESERVED_FRACTION,
                 kv_cache_tolerance=KV_CACHE_MEMORY_TOLERANCE,
             )
@@ -431,7 +435,7 @@ class TRTLLMBackend(BaseBackend):
             summary.set_per_ops_data(per_ops_data)
 
             # caching
-            self._agg_cache[isl][osl][b][ctx_tokens] = summary
+            self._agg_cache[isl][osl][b][ctx_tokens][max_seq_len][max_num_tokens][free_gpu_memory_fraction] = summary
 
         return summary
 
