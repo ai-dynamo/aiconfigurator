@@ -97,7 +97,7 @@ class InferenceSummary:
         self._memory = memory_dict
         self._is_oom = self._memory["total"] >= (mem_capacity / (1 << 30))
         self._is_kv_cache_oom = False
-        if free_gpu_memory_fraction is not None and free_gpu_memory_fraction < 1.0:
+        if free_gpu_memory_fraction is not None:
             self._check_and_set_kv_cache_oom(
                 mem_capacity,
                 free_gpu_memory_fraction,
