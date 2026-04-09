@@ -207,6 +207,16 @@ def run_attention_torch(
         kv_cache_dtype="fp8" if use_fp8_kv_cache else None,
     )
 
+    # Build metadata
+    layer_names = ["placeholder"]
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
+
+    builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
+    attn_metadata = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common_attn_metadata,
+    )
+
     # Create mock kv_b_proj using the same weights as reference implementation
     from vllm.model_executor.layers.linear import ColumnParallelLinear
 
@@ -214,14 +224,10 @@ def run_attention_torch(
         input_size=kv_lora_rank, output_size=num_heads * (qk_nope_head_dim + v_head_dim), bias=False
     ).to(device=device, dtype=dtype)
 
-    # Instantiate impl BEFORE the builder.  vLLM 0.17.0's builder __init__
-    # calls get_per_layer_parameters() → get_layers_from_vllm_config() which
-    # looks up layer_name in static_forward_context, checks isinstance against
-    # AttentionLayerBase, then reads .impl.  We must register a wrapper first.
+    # Instantiate implementation
     sliding_window = vllm_config.model_config.get_sliding_window()
     scale = 1.0 / (head_dim**0.5)
 
-    exit_stack.enter_context(set_current_vllm_config(vllm_config))
     impl = impl_cls(
         num_heads=num_heads,
         head_size=head_dim,
@@ -240,36 +246,6 @@ def run_attention_torch(
         qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
         v_head_dim=v_head_dim,
         kv_b_proj=mock_kv_b_proj,
-    )
-
-    # Register impl in static_forward_context wrapped in an AttentionLayerBase
-    # so the builder's get_per_layer_parameters() isinstance check passes.
-    attn_layer_name = "model.layers.0.self_attn.attn"
-    try:
-        from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-
-        class _ImplWrapper(AttentionLayerBase):
-            def __init__(self, impl):
-                self.impl = impl
-
-            def get_attn_backend(self):
-                raise NotImplementedError
-
-            def get_kv_cache_spec(self):
-                raise NotImplementedError
-
-        fwd_ctx = vllm_config.compilation_config.static_forward_context
-        if attn_layer_name not in fwd_ctx:
-            fwd_ctx[attn_layer_name] = _ImplWrapper(impl)
-    except (ImportError, AttributeError):
-        pass  # older vLLM without AttentionLayerBase
-
-    # Build metadata
-    layer_names = [attn_layer_name]
-    builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-    attn_metadata = builder.build(
-        common_prefix_len=0,
-        common_attn_metadata=common_attn_metadata,
     )
 
     # Process weights to create W_UK_T and W_UV attributes needed by MLA
