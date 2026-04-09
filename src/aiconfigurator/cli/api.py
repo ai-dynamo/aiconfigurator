@@ -140,6 +140,8 @@ def cli_default(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
+    free_gpu_memory_fraction: float | None = None,
+    max_seq_len: int | None = None,
     top_n: int = 5,
     save_dir: str | None = None,
     generator_set: list[str] | None = None,
@@ -169,6 +171,11 @@ def cli_default(
         request_latency: Optional end-to-end request latency target (ms).
             Enables request-latency optimization mode.
         prefix: Prefix cache length. Default is 0.
+        free_gpu_memory_fraction: Fraction of free GPU memory allocated for KV cache
+            (default ``None``, meaning the backend default is used). Must be > 0 and <= 1.
+            Used to filter batch sizes that would exceed KV cache capacity.
+        max_seq_len: TRT-LLM ``--max_seq_len`` setting. Controls how many KV blocks are
+            pre-allocated per sequence. Defaults to ``isl + osl`` when ``None``.
         top_n: Number of top configurations to return for each mode (agg/disagg). Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
         generator_set: List of inline generator overrides in KEY=VALUE format (e.g.,
@@ -227,6 +234,8 @@ def cli_default(
         tpot=tpot,
         request_latency=request_latency,
         prefix=prefix,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        max_seq_len=max_seq_len,
     )
 
     result = _execute_and_wrap_result(task_configs, mode="default", top_n=top_n)
