@@ -5,30 +5,70 @@ __compat__ = "sglang>=0.5.5"
 
 import os
 import random
+import sys
 
 import pkg_resources
 import torch
 import torch.nn.functional as F
 from common_test_cases import get_gemm_common_test_cases
-from sgl_kernel import (
-    fp8_scaled_mm,
-    sgl_per_token_quant_fp8,
-)
 
+# Check if running on ROCm/AMD
+IS_ROCM = hasattr(torch.version, 'hip') and torch.version.hip is not None
+
+# Add aiter to path for ROCm (must be done before import)
+if IS_ROCM and "/sgl-workspace/aiter" not in sys.path:
+    sys.path.insert(0, "/sgl-workspace/aiter")
+
+# Import sgl_kernel
+# Note: On ROCm, sgl_kernel module exists but FP8 ops are not compiled/registered
+try:
+    import sgl_kernel
+    # Check if FP8 ops are actually available (they're not on ROCm currently)
+    import torch
+    has_fp8_ops = hasattr(torch.ops.sgl_kernel, 'sgl_per_token_quant_fp8')
+
+    if has_fp8_ops:
+        # Access functions from the module directly
+        fp8_scaled_mm = sgl_kernel.fp8_scaled_mm
+        sgl_per_token_quant_fp8 = sgl_kernel.sgl_per_token_quant_fp8
+        HAS_SGL_KERNEL = True
+    else:
+        HAS_SGL_KERNEL = False
+        if IS_ROCM:
+            print("Info: sgl_kernel FP8 ops not available on ROCm (expected)")
+        else:
+            print("Warning: sgl_kernel FP8 ops not registered")
+except (ImportError, AttributeError) as e:
+    HAS_SGL_KERNEL = False
+    print(f"Warning: sgl_kernel not available: {e}")
+
+# FlashInfer FP4 (NVIDIA-only)
 try:
     from flashinfer import fp4_quantize as flashinfer_fp4_quantize
     from flashinfer import mm_fp4 as flashinfer_mm_fp4
     from flashinfer import shuffle_matrix_sf_a as flashinfer_shuffle_sf_a
 
-    HAS_FLASHINFER_FP4 = True
+    HAS_FLASHINFER_FP4 = True and not IS_ROCM
 except ImportError:
     HAS_FLASHINFER_FP4 = False
 
-from sglang.srt.layers.deep_gemm_wrapper import (
-    DEEPGEMM_SCALE_UE8M0,
-    gemm_nt_f8f8bf16,
-)
-from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
+# DeepGEMM (NVIDIA-only, requires TMA)
+try:
+    from sglang.srt.layers.deep_gemm_wrapper import (
+        DEEPGEMM_SCALE_UE8M0,
+        gemm_nt_f8f8bf16,
+    )
+    from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
+    HAS_DEEPGEMM = True and not IS_ROCM
+except ImportError:
+    HAS_DEEPGEMM = False
+
+# Aiter FP8 (AMD ROCm) - path already added above if ROCm
+try:
+    from aiter.ops.gemm_op_a8w8 import gemm_a8w8_blockscale
+    HAS_AITER_FP8 = IS_ROCM  # Only use on ROCm
+except (ImportError, ModuleNotFoundError):
+    HAS_AITER_FP8 = False
 
 from helper import benchmark_with_power, get_sm_version, log_perf
 
@@ -37,25 +77,83 @@ from helper import benchmark_with_power, get_sm_version, log_perf
 os.environ.setdefault("SGLANG_JIT_DEEPGEMM_PRECOMPILE", "0")
 
 
+def get_compute_capability():
+    """Get GPU compute capability (SM version for NVIDIA, GCN arch for AMD)"""
+    if IS_ROCM:
+        # For ROCm/AMD GPUs
+        try:
+            device_name = torch.cuda.get_device_name(0)
+            # MI355X -> gfx950, MI300X -> gfx942, MI250/MI210 -> gfx90a, MI100 -> gfx908
+            if "MI355" in device_name:
+                return "gfx950"
+            if "MI300" in device_name or "MI3" in device_name:
+                return "gfx942"
+            elif "MI250" in device_name or "MI210" in device_name:
+                return "gfx90a"
+            elif "MI100" in device_name:
+                return "gfx908"
+            else:
+                return "gfx90a"  # Default to CDNA2
+        except Exception:
+            return "gfx90a"
+    else:
+        # NVIDIA: use SM version
+        return get_sm_version()
+
+
 def get_gemm_test_cases():
     test_cases = []
 
-    sm_version = get_sm_version()
-    if sm_version < 89:
-        gemm_list = ["float16"]
-    elif sm_version < 90:
-        # SM89 (L40S) and earlier don't have TMA - skip fp8_block
-        gemm_list = ["float16", "fp8"]
-    elif sm_version < 100:
-        # Hopper supports fp8_block
-        # fp8_block (DeepGEMM) requires SM90+ for TMA support
-        gemm_list = ["fp8_block", "float16", "fp8"]
-    elif sm_version < 110:
-        # SM100/SM103 (B100/B200 datacenter Blackwell): fp8_block + nvfp4
-        gemm_list = ["fp8_block", "float16", "fp8", "nvfp4"]
+    if IS_ROCM:
+        # ROCm/AMD configuration
+        arch = get_compute_capability()
+        if arch in ["gfx942", "gfx90a"]:  # MI300X, MI250, MI210
+            # Support float16 and fp8
+            gemm_list = []
+            if HAS_AITER_FP8:
+                gemm_list.append("fp8_block")  # AMD's aiter fp8 blockscale
+            gemm_list.append("float16")
+            if HAS_SGL_KERNEL:
+                gemm_list.append("fp8")
+        else:
+            # Older AMD GPUs: only float16
+            gemm_list = ["float16"]
     else:
-        # SM120+ (RTX PRO 6000 Blackwell workstation): no DeepGEMM recipe for fp8_block
-        gemm_list = ["float16", "fp8", "nvfp4"]
+        # NVIDIA configuration
+        sm_version = get_compute_capability()
+        if sm_version < 89:
+            gemm_list = ["float16"]
+        elif sm_version < 90:
+            # SM89 (L40S) and earlier don't have TMA - skip fp8_block
+            gemm_list = ["float16"]
+            if HAS_SGL_KERNEL:
+                gemm_list.append("fp8")
+        elif sm_version < 100:
+            # Hopper supports fp8_block
+            # fp8_block (DeepGEMM) requires SM90+ for TMA support
+            gemm_list = []
+            if HAS_DEEPGEMM:
+                gemm_list.append("fp8_block")
+            gemm_list.append("float16")
+            if HAS_SGL_KERNEL:
+                gemm_list.append("fp8")
+        elif sm_version < 110:
+            # SM100/SM103 (B100/B200 datacenter Blackwell): fp8_block + nvfp4
+            gemm_list = []
+            if HAS_DEEPGEMM:
+                gemm_list.append("fp8_block")
+            gemm_list.append("float16")
+            if HAS_SGL_KERNEL:
+                gemm_list.append("fp8")
+            if HAS_FLASHINFER_FP4:
+                gemm_list.append("nvfp4")
+        else:
+            # SM120+ (RTX PRO 6000 Blackwell workstation): no DeepGEMM recipe for fp8_block
+            gemm_list = ["float16"]
+            if HAS_SGL_KERNEL:
+                gemm_list.append("fp8")
+            if HAS_FLASHINFER_FP4:
+                gemm_list.append("nvfp4")
 
     for gemm_common_testcase in get_gemm_common_test_cases():
         x = gemm_common_testcase.x
@@ -90,10 +188,12 @@ def fp8_gemm_deepgemm(
     k: int,
 ):
     """
-    DeepGEMM implementation of FP8 GEMM
+    DeepGEMM implementation of FP8 GEMM (NVIDIA-only)
     It maps to a specific commit for each SGLang release.
     Check the commit tag in sglang/sgl-kernel/CMakeLists.txt, repo-deepgemm
     """
+    if not HAS_DEEPGEMM:
+        raise RuntimeError("DeepGEMM is not available on this platform")
 
     # Run DeepGEMM kernel
     gemm_nt_f8f8bf16((x_fp8, x_scale), (y_fp8, y_scale), out)
@@ -184,20 +284,44 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
             a_bf16 = torch.randn(M, K, dtype=dtype, device=device)
             b_fp32 = (torch.rand(N, K, device=device) - 0.5) * 2 * fp8_info.max
             b_fp8 = b_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn)
-            scale_b = torch.randn(scale_shape(b_fp8.shape, (128, 128)), device=device, dtype=torch.float32)
-            out = torch.empty((M, N), device=device, dtype=dtype)
 
-            def gemm_op():
-                a_fp8, scale_a = sglang_per_token_group_quant_fp8(
-                    a_bf16,
-                    group_size=128,
-                    column_major_scales=True,
-                    scale_tma_aligned=True,
-                    scale_ue8m0=DEEPGEMM_SCALE_UE8M0,
-                )
-                return fp8_gemm_deepgemm(a_fp8, scale_a, b_fp8, scale_b, out, M, N, K)
+            block_size = 128
+            import math
+            scale_m = math.ceil(M / block_size)
+            scale_n = math.ceil(N / block_size)
+            scale_k = math.ceil(K / block_size)
 
-            return gemm_op
+            if HAS_AITER_FP8:
+                # AMD aiter implementation
+                # Aiter uses scale shapes: (scale_m, scale_k) for activation, (scale_n, scale_k) for weight
+                scale_a = torch.ones(scale_m, scale_k, device=device, dtype=torch.float32)
+                scale_b = torch.ones(scale_n, scale_k, device=device, dtype=torch.float32)
+
+                # Quantize activation
+                a_fp8 = (a_bf16 / 10.0).to(torch.float8_e4m3fn)
+
+                def gemm_op():
+                    return gemm_a8w8_blockscale(a_fp8, b_fp8, scale_a, scale_b, dtype)
+
+                return gemm_op
+            elif HAS_DEEPGEMM:
+                # NVIDIA DeepGEMM implementation
+                scale_b = torch.randn(scale_shape(b_fp8.shape, (128, 128)), device=device, dtype=torch.float32)
+                out = torch.empty((M, N), device=device, dtype=dtype)
+
+                def gemm_op():
+                    a_fp8, scale_a = sglang_per_token_group_quant_fp8(
+                        a_bf16,
+                        group_size=128,
+                        column_major_scales=True,
+                        scale_tma_aligned=True,
+                        scale_ue8m0=DEEPGEMM_SCALE_UE8M0,
+                    )
+                    return fp8_gemm_deepgemm(a_fp8, scale_a, b_fp8, scale_b, out, M, N, K)
+
+                return gemm_op
+            else:
+                return None
 
         elif gemm_type == "fp8":
             fp8_info = torch.finfo(torch.float8_e4m3fn)
@@ -239,8 +363,13 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
             op()
 
     # Use benchmark_with_power context manager
+    # NVTX/ROCtx profiling (works on both NVIDIA and ROCm)
     nvtx_tag = f"{gemm_type}_m{M}_n{N}_k{K}"
-    torch.cuda.nvtx.range_push(nvtx_tag)
+    try:
+        torch.cuda.nvtx.range_push(nvtx_tag)
+        use_nvtx = True
+    except Exception:
+        use_nvtx = False
 
     with benchmark_with_power(
         device=device,
@@ -251,7 +380,20 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
     ) as results:
         pass
 
-    torch.cuda.nvtx.range_pop()
+    if use_nvtx:
+        torch.cuda.nvtx.range_pop()
+
+    # Determine kernel source based on gemm type and platform
+    if gemm_type == "float16":
+        kernel_source = "rocblas" if IS_ROCM else "cublas"
+    elif gemm_type == "fp8":
+        kernel_source = "sgl_kernel"
+    elif gemm_type == "fp8_block":
+        kernel_source = "aiter" if IS_ROCM else "deepgemm"
+    elif gemm_type == "nvfp4":
+        kernel_source = "flashinfer"
+    else:
+        kernel_source = "unknown"
 
     log_perf(
         item_list=[
@@ -261,7 +403,7 @@ def run_gemm(gemm_type, batch_size, N, K, perf_filename, device):  # noqa: N803
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name="gemm",
-        kernel_source="sglang",
+        kernel_source=kernel_source,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )

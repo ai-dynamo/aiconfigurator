@@ -1,13 +1,46 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ROCm/HIP: uses torch.bmm (bf16) only; FP8 + sgl_kernel bmm_fp8 is CUDA-oriented and skipped on HIP.
+import os
+
 import pkg_resources
 import torch
-from sgl_kernel import bmm_fp8
-from sglang.srt.layers.quantization.fp8_kernel import (
-    per_tensor_quant_mla_fp8,
-)
+
+try:
+    from sglang.srt.utils import is_hip
+except ImportError:
+
+    def is_hip():
+        return False
+
+try:
+    from sgl_kernel import bmm_fp8
+except ImportError:
+    bmm_fp8 = None  # type: ignore[misc, assignment]
+
+try:
+    from sglang.srt.layers.quantization.fp8_kernel import (
+        per_tensor_quant_mla_fp8,
+    )
+except ImportError:
+    per_tensor_quant_mla_fp8 = None  # type: ignore[misc, assignment]
 
 from helper import benchmark_with_power, log_perf
+
+_is_hip = is_hip()
+
+
+def _fp8_bmm_available() -> bool:
+    return bmm_fp8 is not None and per_tensor_quant_mla_fp8 is not None
+
+
+def _mla_bmm_dtypes_for_backend() -> list:
+    """float16 path uses torch.bmm; fp8 needs sgl_kernel + FP8 quant (typically CUDA-only)."""
+    if _is_hip:
+        return ["float16"]
+    if not _fp8_bmm_available():
+        return ["float16"]
+    return ["float16", "fp8"]
 
 
 def get_mla_gen_pre_test_cases():
@@ -40,7 +73,7 @@ def get_mla_gen_pre_test_cases():
         8192,
     ]
     num_heads = [128, 64, 32, 16, 8, 4, 2, 1]
-    dtype_list = ["float16", "fp8"]
+    dtype_list = _mla_bmm_dtypes_for_backend()
     for num_tokens in gen_num_tokens:
         for num_head in num_heads:
             for dtype in dtype_list:
@@ -81,7 +114,7 @@ def get_mla_gen_post_test_cases():
         20480,
     ]
     num_heads = [128, 64, 32, 16, 8, 4, 2, 1]
-    dtype_list = ["float16", "fp8"]
+    dtype_list = _mla_bmm_dtypes_for_backend()
     for num_tokens in ctx_num_tokens:
         for num_head in num_heads:
             for dtype in dtype_list:
@@ -94,6 +127,11 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
     torch.set_default_device(device)
 
     assert dtype == "fp8" or dtype == "float16", "only support fp8 and float16"
+    if dtype == "fp8":
+        if _is_hip:
+            raise ValueError("mla_bmm FP8 on ROCm/HIP is not supported; use float16")
+        if not _fp8_bmm_available():
+            raise ValueError("mla_bmm FP8 requires sgl_kernel.bmm_fp8 and per_tensor_quant_mla_fp8")
 
     qk_nope_head_dim = 128
     kv_lora_rank = 512
@@ -129,6 +167,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
         num_warmups=num_warmups,
         num_runs=num_runs,
         repeat_n=1,
+        allow_graph_fail=_is_hip,
     ) as results:
         pass
 
@@ -143,7 +182,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_fi
         ],
         framework="SGLang",
         version=pkg_resources.get_distribution("sglang").version,
-        device_name=torch.cuda.get_device_name(device),
+        device_name=torch.cuda.get_device_name(torch.device(device).index or 0),
         op_name="mla_gen_pre",
         kernel_source="default",
         perf_filename=perf_filename,
@@ -156,6 +195,11 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
     torch.set_default_device(device)
 
     assert dtype == "float16" or dtype == "fp8", "only support fp8 and float16"
+    if dtype == "fp8":
+        if _is_hip:
+            raise ValueError("mla_bmm FP8 on ROCm/HIP is not supported; use float16")
+        if not _fp8_bmm_available():
+            raise ValueError("mla_bmm FP8 requires sgl_kernel.bmm_fp8 and per_tensor_quant_mla_fp8")
 
     qk_nope_head_dim = 128
     kv_lora_rank = 512
@@ -213,6 +257,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
         num_warmups=num_warmups,
         num_runs=num_runs,
         repeat_n=1,
+        allow_graph_fail=_is_hip,
     ) as results:
         pass
 
@@ -227,7 +272,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_f
         ],
         framework="SGLang",
         version=pkg_resources.get_distribution("sglang").version,
-        device_name=torch.cuda.get_device_name(device),
+        device_name=torch.cuda.get_device_name(torch.device(device).index or 0),
         op_name="mla_gen_post",
         kernel_source="default",
         perf_filename=perf_filename,

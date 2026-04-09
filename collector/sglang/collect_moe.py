@@ -54,15 +54,20 @@ _is_hip = is_hip()
 
 
 def get_moe_test_cases():
-    # fp8_block MOE requires SM90+ due to shared memory requirements
-    # L40S (SM89) has 100KB shared memory, fp8_block kernel needs ~144KB
-    sm_version = get_sm_version()
-    if sm_version < 90:
+    # FP8/nvfp4 MOE requires SM90+ and CUDA (not ROCm)
+    if _is_hip:
+        # ROCm: only float16 supported (fp8_block/nvfp4 require CUDA-specific kernels)
         moe_list = ["float16"]
-    elif sm_version < 100:
-        moe_list = ["float16", "fp8_block"]
     else:
-        moe_list = ["float16", "fp8_block", "nvfp4"]
+        # fp8_block MOE requires SM90+ due to shared memory requirements
+        # L40S (SM89) has 100KB shared memory, fp8_block kernel needs ~144KB
+        sm_version = get_sm_version()
+        if sm_version < 90:
+            moe_list = ["float16"]
+        elif sm_version < 100:
+            moe_list = ["float16", "fp8_block"]
+        else:
+            moe_list = ["float16", "fp8_block", "nvfp4"]
 
     test_cases = []
 
@@ -295,6 +300,7 @@ def benchmark_config(
         num_warmups=5,
         num_runs=num_iters,
         repeat_n=1,
+        allow_graph_fail=_is_hip,
     ) as results:
         pass
 

@@ -3,9 +3,25 @@
 import json
 import logging
 import os
+import sys
 
 import numpy as np
 import torch
+
+try:
+    from sglang.srt.utils import is_hip
+except ImportError:
+
+    def is_hip():
+        return False
+
+
+_is_hip = is_hip()
+
+# Add aiter to path for ROCm (must be done before import)
+if _is_hip and "/sgl-workspace/aiter" not in sys.path:
+    sys.path.insert(0, "/sgl-workspace/aiter")
+
 import torch.distributed as dist
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.entrypoints.engine import _set_envs_and_config
@@ -23,14 +39,24 @@ from sglang.srt.utils import (
     suppress_other_loggers,
 )
 
-try:
-    from helper import _get_deepseek_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
-except ModuleNotFoundError:
-    import os
-    import sys
+# ROCm: import aiter fused_moe for direct kernel benchmarking
+if _is_hip:
+    try:
+        from aiter import ActivationType, QuantType
+        from aiter.fused_moe import fused_moe as aiter_fused_moe
+        from sglang.srt.layers.quantization.fp8_kernel import fp8_dtype as _fp8_dtype
 
+        HAS_AITER_MOE = True
+    except ImportError:
+        HAS_AITER_MOE = False
+else:
+    HAS_AITER_MOE = False
+
+try:
+    from helper import _get_deepseek_model_path, benchmark_with_power, log_perf, power_law_deepep_decode, power_law_deepep_prefill
+except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import _get_deepseek_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
+    from helper import _get_deepseek_model_path, benchmark_with_power, log_perf, power_law_deepep_decode, power_law_deepep_prefill
 from importlib.metadata import version as get_version
 
 DEEPSEEK_MODEL_PATH = _get_deepseek_model_path()
@@ -95,6 +121,321 @@ def get_moe_decode_test_cases():
                 }
             )
     return test_cases
+
+
+# ============================================================================
+# ROCm/aiter: benchmark aiter fused_moe kernel directly (no DeepEP/Mori needed)
+# ============================================================================
+
+
+def _benchmark_moe_aiter(
+    num_experts,
+    simulated_ep_size,
+    prefill_test_cases,
+    decode_test_cases,
+    num_warmup,
+    num_iterations,
+    device,
+    output_path=None,
+):
+    """Benchmark aiter fused_moe kernel directly on ROCm.
+
+    Bypasses DeepEP/Mori dispatcher (which require multi-GPU) and calls
+    aiter.fused_moe.fused_moe directly with synthetic weights. This
+    benchmarks the same kernel that MoriEPMoE.forward uses in production.
+    """
+    assert HAS_AITER_MOE, "aiter fused_moe not available"
+
+    # DeepSeek-V3 config
+    hidden_size = 7168
+    inter_size = 2048
+    topk = 8
+    num_local_experts = num_experts
+
+    # Pad hidden_size to 128 alignment (already aligned for DSv3)
+    hidden_padded = hidden_size
+    if hidden_padded % 128 != 0:
+        hidden_padded += 128 - (hidden_padded % 128)
+
+    # Create synthetic fp8 weights matching DeepSeek-V3 MoE config
+    w13 = torch.randn(
+        num_local_experts, 2 * inter_size, hidden_padded, dtype=torch.bfloat16, device=device
+    ).to(_fp8_dtype)
+    w2 = torch.randn(
+        num_local_experts, hidden_padded, inter_size, dtype=torch.bfloat16, device=device
+    ).to(_fp8_dtype)
+    w13_scale = torch.ones(
+        num_local_experts, 2 * inter_size // 128, hidden_padded // 128, dtype=torch.float32, device=device
+    )
+    w2_scale = torch.ones(
+        num_local_experts, hidden_padded // 128, inter_size // 128, dtype=torch.float32, device=device
+    )
+
+    # expert_mask: length = total experts (256), mark only local experts as valid
+    # This simulates rank 0 owning the first num_local_experts experts.
+    # topk_ids must use GLOBAL expert IDs; the kernel remaps to local via cumsum.
+    total_experts = 256
+    expert_mask = torch.zeros(total_experts, dtype=torch.int32, device=device)
+    expert_mask[:num_local_experts] = 1  # rank 0 owns experts 0..num_local_experts-1
+
+    version = get_version("sglang")
+    device_name = torch.cuda.get_device_name(device)
+    collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # ---- Prefill benchmark ----
+    for case in prefill_test_cases:
+        try:
+            if isinstance(case, dict):
+                num_token = case["num_tokens"]
+                distributed = case.get("distributed", "uniform")
+                power_law_alpha = case.get("power_law_alpha", 0.8) if distributed == "power_law" else None
+            else:
+                num_token = int(case)
+                distributed = "uniform"
+                power_law_alpha = None
+
+            num_tokens_total = int(num_token * simulated_ep_size)
+
+            if distributed == "uniform":
+                # Generate topk_ids as global expert IDs for rank 0's local experts
+                topk_ids = torch.randint(0, num_local_experts, (num_tokens_total, topk), dtype=torch.int32, device=device)
+                topk_weights = torch.softmax(torch.randn(num_tokens_total, topk, device=device), dim=-1)
+                sample_list = [(topk_ids, topk_weights)]
+            elif distributed == "power_law":
+                # Generate power-law distribution among local experts directly.
+                # power_law_deepep_prefill uses -1 for non-local experts which can cause
+                # OOB in the moe_sorting C kernel, so we generate the distribution ourselves.
+                from helper import sample_power_law
+
+                sample_list = []
+                for _ in range(5):
+                    # Power-law token counts across local experts
+                    tpe = sample_power_law(num_local_experts, power_law_alpha or 0.8, 1, num_tokens_total * 0.8)
+                    tpe = (tpe / tpe.sum() * num_tokens_total * topk).round().to(torch.int64)
+                    tpe = tpe.clamp(max=num_tokens_total)
+                    # Adjust sum to match target
+                    target = num_tokens_total * topk
+                    diff = target - tpe.sum().item()
+                    if diff > 0:
+                        for i in range(int(diff)):
+                            idx = i % num_local_experts
+                            if tpe[idx] < num_tokens_total:
+                                tpe[idx] += 1
+                    elif diff < 0:
+                        for i in range(int(-diff)):
+                            idx = i % num_local_experts
+                            if tpe[idx] > 0:
+                                tpe[idx] -= 1
+                    # Build topk_ids from the distribution
+                    expert_list = []
+                    for eid in range(num_local_experts):
+                        expert_list.extend([eid] * int(tpe[eid].item()))
+                    # Pad or truncate to exact size
+                    while len(expert_list) < num_tokens_total * topk:
+                        expert_list.append(0)
+                    expert_list = expert_list[: num_tokens_total * topk]
+                    ids_flat = torch.tensor(expert_list, dtype=torch.int32, device=device)
+                    ids_flat = ids_flat[torch.randperm(len(ids_flat), device=device)]
+                    topk_ids_s = ids_flat.view(num_tokens_total, topk)
+                    topk_weights_s = torch.softmax(
+                        torch.randn(num_tokens_total, topk, device=device), dim=-1
+                    )
+                    sample_list.append((topk_ids_s, topk_weights_s))
+            else:
+                raise ValueError(f"Unsupported distributed mode: {distributed}")
+
+            hidden = torch.randn(num_tokens_total, hidden_padded, dtype=torch.bfloat16, device=device)
+
+            outside_loop_count = max(1, len(sample_list))
+
+            def kernel_func():
+                for ids, wts in sample_list:
+                    aiter_fused_moe(
+                        hidden_states=hidden,
+                        w1=w13,
+                        w2=w2,
+                        w1_scale=w13_scale,
+                        w2_scale=w2_scale,
+                        topk_weight=wts,
+                        topk_ids=ids,
+                        quant_type=QuantType.per_128x128,
+                        activation=ActivationType.Silu,
+                        expert_mask=expert_mask,
+                    )
+
+            with benchmark_with_power(
+                device=device,
+                kernel_func=kernel_func,
+                num_warmups=num_warmup,
+                num_runs=num_iterations,
+                repeat_n=1,
+                allow_graph_fail=True,
+            ) as results:
+                pass
+
+            avg_latency_ms = results["latency_ms"] / outside_loop_count
+            power_stats = results["power_stats"]
+            distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
+
+            perf_filename = (
+                os.path.join(collector_dir, "wideep_context_moe_perf.txt")
+                if output_path is None
+                else os.path.join(output_path, "wideep_context_moe_perf.txt")
+            )
+            log_perf(
+                item_list=[
+                    {
+                        "moe_dtype": "fp8_block",
+                        "num_tokens": num_tokens_total,
+                        "hidden_size": hidden_size,
+                        "inter_size": inter_size,
+                        "topk": topk,
+                        "num_experts": 256,
+                        "moe_tp_size": 1,
+                        "moe_ep_size": simulated_ep_size,
+                        "distribution": distribution_str,
+                        "latency": avg_latency_ms,
+                    }
+                ],
+                framework="SGLang",
+                version=version,
+                device_name=device_name,
+                op_name="moe_context",
+                kernel_source="aiter_fused_moe",
+                perf_filename=perf_filename,
+                power_stats=power_stats,
+            )
+            print(f"  Prefill tokens={num_tokens_total} dist={distribution_str}: {avg_latency_ms:.3f}ms")
+
+        except Exception as e:
+            print(f"  Prefill case failed: {e}, skipping...")
+            error_str = str(e).lower()
+            if ("cuda" in error_str or "hip" in error_str) and "illegal" in error_str:
+                print("  GPU illegal access detected - stopping prefill benchmark")
+                break
+            continue
+
+    # ---- Decode benchmark ----
+    for case in decode_test_cases:
+        try:
+            num_token = case["num_tokens"]
+            distributed = case["distributed"]
+            power_law_alpha = case.get("power_law_alpha", 0.8) if distributed == "power_law" else None
+
+            num_tokens_total = num_token * simulated_ep_size
+
+            if distributed == "uniform":
+                topk_ids = torch.randint(0, num_local_experts, (num_tokens_total, topk), dtype=torch.int32, device=device)
+                topk_weights = torch.softmax(torch.randn(num_tokens_total, topk, device=device), dim=-1)
+                sample_list = [(topk_ids, topk_weights)]
+            elif distributed == "power_law":
+                from helper import sample_power_law
+
+                sample_list = []
+                for _ in range(5):
+                    tpe = sample_power_law(num_local_experts, power_law_alpha or 0.8, 1, num_tokens_total * 0.8)
+                    tpe = (tpe / tpe.sum() * num_tokens_total * topk).round().to(torch.int64)
+                    tpe = tpe.clamp(max=num_tokens_total)
+                    target = num_tokens_total * topk
+                    diff = target - tpe.sum().item()
+                    if diff > 0:
+                        for i in range(int(diff)):
+                            idx = i % num_local_experts
+                            if tpe[idx] < num_tokens_total:
+                                tpe[idx] += 1
+                    elif diff < 0:
+                        for i in range(int(-diff)):
+                            idx = i % num_local_experts
+                            if tpe[idx] > 0:
+                                tpe[idx] -= 1
+                    expert_list = []
+                    for eid in range(num_local_experts):
+                        expert_list.extend([eid] * int(tpe[eid].item()))
+                    while len(expert_list) < num_tokens_total * topk:
+                        expert_list.append(0)
+                    expert_list = expert_list[: num_tokens_total * topk]
+                    ids_flat = torch.tensor(expert_list, dtype=torch.int32, device=device)
+                    ids_flat = ids_flat[torch.randperm(len(ids_flat), device=device)]
+                    topk_ids_s = ids_flat.view(num_tokens_total, topk)
+                    topk_weights_s = torch.softmax(
+                        torch.randn(num_tokens_total, topk, device=device), dim=-1
+                    )
+                    sample_list.append((topk_ids_s, topk_weights_s))
+            else:
+                raise ValueError(f"Unsupported distributed mode: {distributed}")
+
+            hidden = torch.randn(num_tokens_total, hidden_padded, dtype=torch.bfloat16, device=device)
+
+            outside_loop_count = max(1, len(sample_list))
+
+            def kernel_func():
+                for ids, wts in sample_list:
+                    aiter_fused_moe(
+                        hidden_states=hidden,
+                        w1=w13,
+                        w2=w2,
+                        w1_scale=w13_scale,
+                        w2_scale=w2_scale,
+                        topk_weight=wts,
+                        topk_ids=ids,
+                        quant_type=QuantType.per_128x128,
+                        activation=ActivationType.Silu,
+                        expert_mask=expert_mask,
+                    )
+
+            with benchmark_with_power(
+                device=device,
+                kernel_func=kernel_func,
+                num_warmups=num_warmup,
+                num_runs=num_iterations,
+                repeat_n=1,
+                allow_graph_fail=True,
+            ) as results:
+                pass
+
+            avg_latency_ms = results["latency_ms"] / outside_loop_count
+            power_stats = results["power_stats"]
+            distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
+
+            perf_filename = (
+                os.path.join(collector_dir, "wideep_generation_moe_perf.txt")
+                if output_path is None
+                else os.path.join(output_path, "wideep_generation_moe_perf.txt")
+            )
+            log_perf(
+                item_list=[
+                    {
+                        "moe_dtype": "fp8_block",
+                        "num_tokens": num_tokens_total,
+                        "hidden_size": hidden_size,
+                        "inter_size": inter_size,
+                        "topk": topk,
+                        "num_experts": 256,
+                        "moe_tp_size": 1,
+                        "moe_ep_size": simulated_ep_size,
+                        "distribution": distribution_str,
+                        "latency": avg_latency_ms,
+                    }
+                ],
+                framework="SGLang",
+                version=version,
+                device_name=device_name,
+                op_name="moe_generation",
+                kernel_source="aiter_fused_moe",
+                perf_filename=perf_filename,
+                power_stats=power_stats,
+            )
+            print(f"  Decode tokens={num_tokens_total} dist={distribution_str}: {avg_latency_ms:.3f}ms")
+
+        except Exception as e:
+            print(f"  Decode case failed: {e}, skipping...")
+            error_str = str(e).lower()
+            if ("cuda" in error_str or "hip" in error_str) and "illegal" in error_str:
+                print("  GPU illegal access detected - stopping decode benchmark")
+                break
+            continue
+
+    torch.cuda.empty_cache()
 
 
 def load_model_with_dummy_weights(server_args, port_args, tp_rank):
@@ -793,47 +1134,65 @@ def get_wideep_moe_test_cases():
 
 
 def run_moe_benchmark(num_experts, gpu_id, output_path=None):
-    """Run MOE benchmark - called in subprocess with CUDA_VISIBLE_DEVICES set.
+    """Run MOE benchmark - called in subprocess with GPU isolation.
 
     This function contains all the initialization logic that must happen
-    after CUDA_VISIBLE_DEVICES is set.
+    after CUDA/HIP_VISIBLE_DEVICES is set.
     """
-    # In subprocess, always use cuda:0 since CUDA_VISIBLE_DEVICES isolates the GPU
+    # In subprocess, always use cuda:0 since VISIBLE_DEVICES isolates the GPU
     torch.cuda.set_device("cuda:0")
 
-    server_port = 30000 + gpu_id * 100
-    server_args = ServerArgs(
-        model_path=DEEPSEEK_MODEL_PATH,
-        dtype="auto",
-        device="cuda",
-        load_format="dummy",
-        tp_size=1,
-        trust_remote_code=True,
-        mem_fraction_static=0.3,
-        moe_a2a_backend="deepep",
-        moe_runner_backend="deep_gemm",
-        deepep_mode="auto",
-        ep_size=1,
-        node_rank=0,
-        host="localhost",
-        port=server_port,
-        cuda_graph_max_bs=4,
-        disable_cuda_graph=True,
-    )
-
-    logging.basicConfig(level=getattr(logging, server_args.log_level.upper()), format="%(message)s")
-    _set_envs_and_config(server_args)
-
-    # PortArgs.init_new() must be called in subprocess for proper isolation
-    port_args = PortArgs.init_new(server_args)
-
-    simulated_ep_size = 256 // num_experts * server_args.ep_size
+    simulated_ep_size = 256 // num_experts
     print(f"\n{'=' * 60}")
     print(f"MOE Benchmark: num_experts={num_experts}, EP_size={simulated_ep_size}, GPU={gpu_id}")
     print(f"{'=' * 60}")
 
-    # Run the actual benchmark
-    run_moe(server_args, port_args, 3, 10, 3, num_experts, 0, output_path)
+    if _is_hip and HAS_AITER_MOE:
+        # ROCm: benchmark aiter fused_moe kernel directly (no DeepEP/Mori needed)
+        prefill_test_cases = get_moe_prefill_test_cases(simulated_ep_size)
+        decode_test_cases = get_moe_decode_test_cases()
+        print(f"Prefill cases: {len(prefill_test_cases)}, Decode cases: {len(decode_test_cases)}")
+
+        _benchmark_moe_aiter(
+            num_experts=num_experts,
+            simulated_ep_size=simulated_ep_size,
+            prefill_test_cases=prefill_test_cases,
+            decode_test_cases=decode_test_cases,
+            num_warmup=3,
+            num_iterations=10,
+            device="cuda:0",
+            output_path=output_path,
+        )
+    else:
+        # CUDA: use full model loading with DeepEP
+        server_port = 30000 + gpu_id * 100
+        server_args = ServerArgs(
+            model_path=DEEPSEEK_MODEL_PATH,
+            dtype="auto",
+            device="cuda",
+            load_format="dummy",
+            tp_size=1,
+            trust_remote_code=True,
+            mem_fraction_static=0.3,
+            moe_a2a_backend="deepep",
+            moe_runner_backend="deep_gemm",
+            deepep_mode="auto",
+            ep_size=1,
+            node_rank=0,
+            host="localhost",
+            port=server_port,
+            cuda_graph_max_bs=4,
+            disable_cuda_graph=True,
+        )
+
+        logging.basicConfig(level=getattr(logging, server_args.log_level.upper()), format="%(message)s")
+        _set_envs_and_config(server_args)
+
+        # PortArgs.init_new() must be called in subprocess for proper isolation
+        port_args = PortArgs.init_new(server_args)
+
+        # Run the actual benchmark
+        run_moe(server_args, port_args, 3, 10, 3, num_experts, 0, output_path)
 
     torch.cuda.empty_cache()
     print(f"Completed num_experts={num_experts} (EP size {simulated_ep_size})")
@@ -845,7 +1204,7 @@ def _run_moe_subprocess(num_experts, gpu_id, output_path=None):
     import sys
 
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env["HIP_VISIBLE_DEVICES" if _is_hip else "CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     code = f'''
 import sys
@@ -862,17 +1221,25 @@ run_moe_benchmark({num_experts}, {gpu_id}, {output_path!r})
         cwd=os.path.dirname(os.path.abspath(__file__)),
     )
 
+    # Timeout scales with simulated EP size: more experts per GPU = fewer test cases = faster
+    # num_experts=1 (EP=256) has the most tokens per case; num_experts=128 (EP=2) the fewest
+    simulated_ep_size = 256 // num_experts
+    timeout_sec = max(600, 1800 if simulated_ep_size >= 32 else 900)
+
     try:
-        stdout, _ = proc.communicate(timeout=600)  # 10 min timeout per MOE config
+        stdout, _ = proc.communicate(timeout=timeout_sec)
         if stdout:
             print(stdout.decode("utf-8", errors="replace"))
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-        print(f"MOE subprocess timed out for num_experts={num_experts}")
+        print(f"MOE subprocess timed out for num_experts={num_experts} (timeout={timeout_sec}s)")
 
     if proc.returncode != 0:
-        raise RuntimeError(f"MOE subprocess failed with exit code {proc.returncode}")
+        print(f"WARNING: MOE subprocess failed with exit code {proc.returncode} "
+              f"(num_experts={num_experts}), continuing...")
+        return False
+    return True
 
 
 def run_wideep_moe(num_experts, perf_filename, device="cuda:0"):

@@ -3,6 +3,7 @@
 
 __compat__ = "sglang>=0.5.5"
 
+import logging
 import math
 import os
 from typing import NamedTuple
@@ -11,6 +12,20 @@ import pkg_resources
 import sglang.srt.layers.dp_attention as dp_attention
 import torch
 from sglang.srt.configs.model_config import AttentionArch
+
+import sys
+
+try:
+    from sglang.srt.utils import is_hip
+except ImportError:
+    def is_hip():
+        return False
+
+_is_hip = is_hip()
+
+# Add aiter to path for ROCm (must be done before import)
+if _is_hip and "/sgl-workspace/aiter" not in sys.path:
+    sys.path.insert(0, "/sgl-workspace/aiter")
 
 # Initialize DP attention variables globally for FlashInfer backend compatibility
 dp_attention.get_attention_tp_size = lambda: 1
@@ -30,12 +45,49 @@ dp_attention._ATTN_DP_RANK = 0
 dp_attention._LOCAL_ATTN_DP_SIZE = 1
 dp_attention._LOCAL_ATTN_DP_RANK = 0
 
-from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
+# Platform-specific attention backend imports
+if _is_hip:
+    # ROCm: aiter backend; FlashAttention/TRTLLM not available
+    try:
+        from sglang.srt.layers.attention.aiter_backend import AiterAttnBackend
+        HAS_AITER_BACKEND = True
+    except ImportError:
+        HAS_AITER_BACKEND = False
+        print("Warning: aiter backend not available on ROCm")
+    # Patch aiter backend's dp_attention reference
+    try:
+        import sglang.srt.layers.attention.aiter_backend
+        sglang.srt.layers.attention.aiter_backend.get_attention_tp_size = lambda: 1
+    except Exception:
+        pass
+else:
+    from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
+
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import MHATokenToKVPool, ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 
-from helper import benchmark_with_power, get_sm_version, log_perf
+from helper import benchmark_with_power, log_perf
+
+if not _is_hip:
+    from helper import get_sm_version
+
+
+def _get_effective_sm_version():
+    """Return SM version, or 80 on ROCm to skip FP8/TRTLLM paths."""
+    if _is_hip:
+        return 80
+    return get_sm_version()
+
+
+def _create_non_trtllm_attn_backend(model_runner):
+    """Create attention backend for non-TRTLLM platforms (ROCm/older CUDA).
+    On ROCm, uses AiterAttnBackend; on CUDA, uses FlashAttentionBackend."""
+    if _is_hip:
+        if not HAS_AITER_BACKEND:
+            raise RuntimeError("aiter backend required for ROCm but not available")
+        return AiterAttnBackend(model_runner), "aiter"
+    return FlashAttentionBackend(model_runner), "flash_attention"
 
 DISABLE_BACKWARD = os.getenv("FLASH_ATTENTION_DISABLE_BACKWARD", "FALSE") == "TRUE"
 
@@ -60,6 +112,13 @@ class MockModelConfig:
         self.is_multimodal = False
         self.hidden_size = num_attention_heads * head_dim
         self.is_local_attention_model = False
+        self.is_hybrid = False
+        self.attention_chunk_size = None
+        self.is_hybrid_swa = False
+        self.swa_attention_layer_ids = []
+        self.full_attention_layer_ids = []
+        self.rope_scaling = None
+        self.rope_theta = 10000
 
         class MockHFConfig:
             def __init__(self):
@@ -92,6 +151,14 @@ class MockServerArgs:
         self.triton_attention_split_tile_size = None
         self.disable_cuda_graph = False
         self.chunked_prefill_size = -1
+        # Required by AiterAttnBackend
+        self.prefill_attention_backend = "aiter" if _is_hip else "fa3"
+        self.decode_attention_backend = "aiter" if _is_hip else "fa3"
+        self.device = "cuda"
+        self.speculative_attention_mode = "prefill"
+        self.disable_chunked_prefix_cache = True
+        self.disaggregation_mode = None
+        self.flashinfer_mla_disable_ragged = False
 
 
 class MockModelRunner:
@@ -128,6 +195,8 @@ class MockModelRunner:
         self.gpu_id = 0
         self.hybrid_gdn_config = None
         self.kimi_linear_config = None
+        # Required by AiterAttnBackend (MHA, not MLA)
+        self.use_mla_backend = False
 
 
 def create_req_to_token_pool(batch_size, total_len, page_size, torch_device, device_str):
@@ -153,8 +222,8 @@ def get_context_attention_test_cases():
     n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
     n_kv_list = [0, 1, 2, 4, 8]
 
-    # FP8 attention requires SM90+ (Hopper)
-    sm_version = get_sm_version()
+    # FP8 attention requires SM90+ (Hopper); always skipped on ROCm
+    sm_version = _get_effective_sm_version()
     skip_fp8 = sm_version < 90
 
     for n in sorted(n_list, reverse=True):
@@ -188,8 +257,8 @@ def get_context_attention_test_cases():
 def get_generation_attention_test_cases():
     test_cases = []
 
-    # FP8 attention requires SM90+ (Hopper)
-    sm_version = get_sm_version()
+    # FP8 attention requires SM90+ (Hopper); always skipped on ROCm
+    sm_version = _get_effective_sm_version()
     skip_fp8 = sm_version < 90
 
     # generation
@@ -328,8 +397,11 @@ def run_attention_torch(
     )
     model_runner.token_to_kv_pool = kv_pool
 
-    sm_version = get_sm_version()
-    if sm_version >= 110:
+    sm_version = _get_effective_sm_version()
+    if _is_hip:
+        # ROCm: use aiter backend
+        attn_backend, attn_backend_name = _create_non_trtllm_attn_backend(model_runner)
+    elif sm_version >= 110:
         # SM120+ (workstation Blackwell): TRTLLM prefill (TllmGenFmhaRunner) is unsupported;
         # FA3 is not compiled for SM120. Use Triton JIT-compiled backend instead.
         from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
@@ -491,6 +563,7 @@ def run_attention_torch(
         num_warmups=warmup,
         num_runs=20,
         repeat_n=1,
+        allow_graph_fail=_is_hip,
     ) as results:
         pass
 

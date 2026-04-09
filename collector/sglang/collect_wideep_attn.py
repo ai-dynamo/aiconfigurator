@@ -487,6 +487,7 @@ def run_attention_torch(
                     num_warmups=num_warmup,
                     num_runs=num_iterations,
                     repeat_n=1,
+                    allow_graph_fail=is_hip(),
                 ) as results:
                     pass
 
@@ -653,7 +654,7 @@ def _run_mla_subprocess(attention_backend, head_num, is_prefill, gpu_id):
     import sys
 
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env["HIP_VISIBLE_DEVICES" if is_hip() else "CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     phase = "context" if is_prefill else "generation"
     code = f'''
@@ -680,7 +681,10 @@ run_mla("{attention_backend}", {head_num}, {is_prefill}, {gpu_id}, None)
         proc.wait()
 
     if proc.returncode != 0:
-        raise RuntimeError(f"MLA {phase} subprocess failed with exit code {proc.returncode}")
+        print(f"WARNING: MLA {phase} subprocess failed with exit code {proc.returncode} "
+              f"(backend={attention_backend}, head_num={head_num}), continuing...")
+        return False
+    return True
 
 
 def run_wideep_mla_context(attention_backend, head_num, perf_filename, device="cuda:0"):
