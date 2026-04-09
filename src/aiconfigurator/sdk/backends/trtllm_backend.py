@@ -458,6 +458,11 @@ class TRTLLMBackend(BaseBackend):
             ctx_stride: the stride of ctx tokens to test, it will impact the time to run the test.
             enable_chunked_prefill: whether to enable chunked prefill, it will impact the time to
                 run the test while have little impact on the result. Default off.
+            free_gpu_memory_fraction: fraction of free GPU memory allocated for KV cache.
+                When set, batch sizes that would exceed KV cache capacity are filtered out.
+                Defaults to ``TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION`` (0.9).
+            max_seq_len: per-slot KV cache pre-allocation budget (tokens per sequence).
+                Defaults to ``isl + osl`` when not provided.
 
         Returns:
             A summary of the best agg result under constraints.

@@ -91,8 +91,8 @@ class InferenceSummary:
         (e.g. kvcache computed with ``max_seq_len``, activations with
         ``max_num_tokens``).
 
-        When *free_gpu_memory_fraction* is not ``None`` and < 1.0, also
-        performs the KV cache budget check using the same *memory_dict*.
+        When *free_gpu_memory_fraction* is not ``None``, also performs the
+        KV cache budget check using the same *memory_dict*.
         """
         self._memory = memory_dict
         self._is_oom = self._memory["total"] >= (mem_capacity / (1 << 30))

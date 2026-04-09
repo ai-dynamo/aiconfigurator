@@ -875,9 +875,10 @@ def _run_agg_estimate(
 
     kv_warning = None
     if summary.check_kv_cache_oom():
+        frac_str = str(free_gpu_memory_fraction) if free_gpu_memory_fraction is not None else "backend default"
         kv_warning = (
             f"Requested batch_size ({batch_size}) exceeds estimated KV cache capacity "
-            f"(free_gpu_memory_fraction={free_gpu_memory_fraction}). "
+            f"(free_gpu_memory_fraction={frac_str}). "
             "The serving runtime will queue excess requests, causing significantly higher TTFT and inaccurate TPOT."
         )
 

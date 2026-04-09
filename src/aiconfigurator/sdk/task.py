@@ -1161,8 +1161,8 @@ class TaskRunner:
 
         logger.info("Task %s: Running agg pareto", task_config.task_name)
         enable_chunked_prefill = getattr(task_config, "enable_chunked_prefill", False)
-        free_gpu_memory_fraction = getattr(task_config, "free_gpu_memory_fraction", 1.0)
-        max_seq_len = getattr(task_config, "max_seq_len", None)
+        free_gpu_memory_fraction = task_config.free_gpu_memory_fraction
+        max_seq_len = task_config.max_seq_len
         result_df = pa.agg_pareto(
             model_path=task_config.model_path,
             runtime_config=runtime_config,
