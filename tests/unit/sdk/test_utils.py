@@ -715,3 +715,24 @@ class TestEnumerateParallelConfigSGLangMoE:
         has_ep_gt_1 = any(c[4] > 1 for c in configs)
         assert has_pure_tp, "Should include pure TP configs (moe_ep=1, moe_tp>1)"
         assert has_ep_gt_1, "Should include configs with moe_ep > 1"
+
+    def test_sglang_deepep_intranode_excludes_moe_tp_gt_1(self):
+        """SGLang + moe_backend=deepep_moe + enable_wideep=False excludes moe_tp > 1."""
+        configs = enumerate_parallel_config(
+            num_gpu_list=[1, 2, 4, 8],
+            tp_list=[1, 2, 4, 8],
+            pp_list=[1],
+            dp_list=[1, 2, 4, 8],
+            moe_tp_list=[1, 2, 4, 8],
+            moe_ep_list=[1, 2, 4, 8],
+            is_moe=True,
+            backend=common.BackendName.sglang,
+            enable_wideep=False,
+            moe_backend="deepep_moe",
+        )
+        assert len(configs) > 0, "Should generate at least one config"
+        for c in configs:
+            assert c[3] == 1, f"DeepEP config should have moe_tp=1, got {c}"
+        # Should still include ep > 1 configs
+        moe_ep_values = [c[4] for c in configs]
+        assert any(ep > 1 for ep in moe_ep_values), "Should include configs with moe_ep > 1"

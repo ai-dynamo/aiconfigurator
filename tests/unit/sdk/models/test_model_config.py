@@ -289,10 +289,13 @@ class TestMOEModelFP8BlockQuantizationValidation:
 
 
 class TestGetModelMOESGLangDispatch:
-    """Test get_model() dispatch logic for MOE family with SGLang backend."""
+    """Test get_model() dispatch logic for MOE family with SGLang backend.
 
-    def test_sglang_moe_returns_sglang_ep_moe_model(self):
-        """Test that get_model returns SGLangEPMOEModel for MOE + SGLang (with wideep)."""
+    Dispatch keys on moe_backend (communication path), not enable_wideep (scale intent).
+    """
+
+    def test_sglang_moe_deepep_returns_sglang_ep_moe_model(self):
+        """DeepEP backend (inter-node, enable_wideep=True) → SGLangEPMOEModel."""
         model_config = config.ModelConfig(
             tp_size=1,
             pp_size=1,
@@ -307,8 +310,24 @@ class TestGetModelMOESGLangDispatch:
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
         assert isinstance(model, models.SGLangEPMOEModel)
 
-    def test_sglang_moe_no_wideep_returns_sglang_ep_moe_model(self):
-        """Test that get_model returns SGLangEPMOEModel for MOE + SGLang (without wideep, EP-enabled)."""
+    def test_sglang_moe_deepep_intranode_returns_sglang_ep_moe_model(self):
+        """DeepEP intra-node (enable_wideep=False, moe_backend=deepep_moe) → SGLangEPMOEModel."""
+        model_config = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.float16,
+            kvcache_quant_mode=common.KVCacheQuantMode.float16,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            attention_dp_size=4,
+            enable_wideep=False,
+            moe_backend="deepep_moe",
+        )
+        model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
+        assert isinstance(model, models.SGLangEPMOEModel)
+
+    def test_sglang_moe_no_deepep_returns_moe_model(self):
+        """Standard comm (no moe_backend) → MOEModel."""
         model_config = config.ModelConfig(
             tp_size=2,
             pp_size=1,
@@ -320,10 +339,11 @@ class TestGetModelMOESGLangDispatch:
             enable_wideep=False,
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
-        assert isinstance(model, models.SGLangEPMOEModel)
+        assert isinstance(model, models.MOEModel)
+        assert not isinstance(model, models.SGLangEPMOEModel)
 
     def test_trtllm_moe_returns_moe_model(self):
-        """Test that get_model returns MOEModel (not SGLangEPMOEModel) for MOE + trtllm + enable_wideep=True."""
+        """trtllm always → MOEModel (moe_backend irrelevant for non-sglang)."""
         model_config = config.ModelConfig(
             tp_size=2,
             pp_size=1,

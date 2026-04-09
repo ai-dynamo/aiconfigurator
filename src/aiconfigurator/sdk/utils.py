@@ -108,6 +108,7 @@ def enumerate_parallel_config(
     is_moe: bool = False,
     backend: common.BackendName = common.BackendName.trtllm,
     enable_wideep: bool = False,
+    moe_backend: str | None = None,
     real_silicon_sweep: bool = False,
     min_num_gpus: int | None = None,
     max_num_gpus: int | None = None,
@@ -158,8 +159,8 @@ def enumerate_parallel_config(
                                     continue
                                 # sglang
                                 elif backend == common.BackendName.sglang:
-                                    if enable_wideep and moe_tp > 1:  # wideep only has ep
-                                        continue
+                                    if (enable_wideep or moe_backend == "deepep_moe") and moe_tp > 1:
+                                        continue  # DeepEP forces ep_size=tp_size, moe_tp must be 1
                                 elif backend == common.BackendName.vllm:
                                     pass  # TODO
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])

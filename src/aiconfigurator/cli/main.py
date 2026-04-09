@@ -22,6 +22,7 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
@@ -749,6 +750,11 @@ def build_default_task_configs(
         "enable_wideep": enable_wideep,
     }
 
+    # Auto-set moe_backend for SGLang wideep, matching webapp behavior
+    # (webapp/events/event_fn.py sets moe_backend="deepep_moe" when enable_wideep + sglang)
+    if enable_wideep:
+        common_kwargs["moe_backend"] = "deepep_moe"
+
     # Create yaml_config to pass nextn and nextn_accept_rates if specified
     yaml_config = None
     if nextn > 0:
@@ -760,6 +766,7 @@ def build_default_task_configs(
         }
 
     task_configs: dict[str, TaskConfig] = {}
+    is_moe_model = check_is_moe(model_path)
 
     for backend_name in backends_to_sweep:
         # Create agg task for this backend
@@ -770,6 +777,14 @@ def build_default_task_configs(
         agg_task = TaskConfig(serving_mode="agg", **agg_kwargs)
         exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
         task_configs[exp_name] = agg_task
+
+        # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
+        if backend_name == "sglang" and not enable_wideep and is_moe_model:
+            deepep_kwargs = dict(agg_kwargs)
+            deepep_kwargs["moe_backend"] = "deepep_moe"
+            deepep_task = TaskConfig(serving_mode="agg", **deepep_kwargs)
+            deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
+            task_configs[deepep_name] = deepep_task
 
         if total_gpus < 2:
             logger.warning("Skipping disagg since it requires at least 2 GPUs.")
@@ -784,6 +799,14 @@ def build_default_task_configs(
         disagg_task = TaskConfig(serving_mode="disagg", **disagg_kwargs)
         exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
         task_configs[exp_name] = disagg_task
+
+        # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
+        if backend_name == "sglang" and not enable_wideep and is_moe_model:
+            deepep_disagg_kwargs = dict(disagg_kwargs)
+            deepep_disagg_kwargs["moe_backend"] = "deepep_moe"
+            deepep_disagg_task = TaskConfig(serving_mode="disagg", **deepep_disagg_kwargs)
+            deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
+            task_configs[deepep_name] = deepep_disagg_task
 
     return task_configs
 

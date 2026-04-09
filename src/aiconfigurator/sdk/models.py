@@ -240,8 +240,8 @@ def get_model(
         )
         model.set_hybrid_config(extra_params)
     elif model_family == "MOE":
-        if backend_name == "sglang":
-            logger.debug(f"Using SGLangEPMOEModel for MOE model {model_path} with backend {backend_name}")
+        if backend_name == "sglang" and model_config.moe_backend == "deepep_moe":
+            logger.debug(f"Using SGLangEPMOEModel (deepep) for MOE model {model_path} with backend {backend_name}")
             model = SGLangEPMOEModel(
                 topk,
                 num_experts,
@@ -280,8 +280,8 @@ def get_model(
                 extra_params,
             )
     elif model_family == "DEEPSEEK":
-        if backend_name == "sglang" and model_config.enable_wideep:
-            logger.debug(f"WideEP is enabled for model {model_path} with backend {backend_name}")
+        if backend_name == "sglang" and model_config.moe_backend == "deepep_moe":
+            logger.debug(f"DeepEP MoE backend enabled for model {model_path} with backend {backend_name}")
             model = WideEPDeepSeekModel(
                 topk,
                 num_experts,
@@ -3104,10 +3104,10 @@ class WideEPDeepSeekModel(BaseModel):
 
 class SGLangEPMOEModel(BaseModel):
     """
-    SGLang EP model for MoE family models (e.g. Qwen3-235B).
-    Used for all SGLang MoE models regardless of enable_wideep setting.
-    Uses wideep/deepep perf tables and moe_backend from config,
-    with standard GQA attention (not MLA) following the MOEModel op graph.
+    SGLang DeepEP model for MoE family models (e.g. Qwen3-235B).
+    Used when moe_backend="deepep_moe" (both intra-node and inter-node DeepEP).
+    Models fused all-to-all dispatch+compute with no post-dispatch ops.
+    Uses wideep/deepep perf tables for MoE kernel latency.
     """
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
