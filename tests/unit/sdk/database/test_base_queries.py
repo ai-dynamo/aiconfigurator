@@ -47,6 +47,7 @@ def test_query_gemm_empirical_mode(stub_perf_db):
 
 
 def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, monkeypatch):
+    """Exact GEMM hits should bypass both 1D and 3D interpolation."""
     quant_mode = common.GEMMQuantMode.float16
     m, n, k = 16, 128, 128
 
@@ -66,6 +67,7 @@ def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, mo
 
 
 def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, monkeypatch):
+    """GEMM lookup should use 1D interpolation on m when n and k match."""
     quant_mode = common.GEMMQuantMode.float16
     m, n, k = 12, 128, 128
     calls = {}
@@ -91,6 +93,7 @@ def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, 
 
 
 def test_query_gemm_fast_paths_support_legacy_scalar_leaves(comprehensive_perf_db, monkeypatch):
+    """Fast GEMM paths should support legacy scalar-leaf tables."""
     quant_mode = common.GEMMQuantMode.float16
     comprehensive_perf_db._gemm_data[quant_mode] = {
         8: {128: {128: 0.5}},

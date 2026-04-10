@@ -3604,6 +3604,7 @@ class PerfDatabase:
             # SILICON or HYBRID mode - use database
             def get_silicon():
                 def _to_performance_result(result):
+                    """Normalize GEMM table entries into a PerformanceResult."""
                     if isinstance(result, dict):
                         return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
                     return PerformanceResult(result, energy=0.0)
