@@ -37,7 +37,7 @@ REGISTRY: list[OpEntry] = [
         run_func="run_moe_torch",
         versions=(
             VersionRoute("0.17.0", "collector.vllm.collect_moe_v2"),
-            VersionRoute("0.0.0", "collector.vllm.collect_moe"),
+            VersionRoute("0.0.0", "collector.vllm.collect_moe_v1"),
         ),
     ),
     OpEntry(
@@ -58,7 +58,7 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mla_module_worker",
         versions=(
             VersionRoute("0.17.0", "collector.vllm.collect_mla_module_v2"),
-            VersionRoute("0.0.0", "collector.vllm.collect_mla_module"),
+            VersionRoute("0.0.0", "collector.vllm.collect_mla_module_v1"),
         ),
     ),
     OpEntry(
@@ -67,7 +67,7 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mla_module_worker",
         versions=(
             VersionRoute("0.17.0", "collector.vllm.collect_mla_module_v2"),
-            VersionRoute("0.0.0", "collector.vllm.collect_mla_module"),
+            VersionRoute("0.0.0", "collector.vllm.collect_mla_module_v1"),
         ),
     ),
     OpEntry(
@@ -76,7 +76,7 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mla_module_worker",
         versions=(
             VersionRoute("0.17.0", "collector.vllm.collect_mla_module_v2"),
-            VersionRoute("0.0.0", "collector.vllm.collect_mla_module"),
+            VersionRoute("0.0.0", "collector.vllm.collect_mla_module_v1"),
         ),
     ),
     OpEntry(
@@ -85,7 +85,7 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mla_module_worker",
         versions=(
             VersionRoute("0.17.0", "collector.vllm.collect_mla_module_v2"),
-            VersionRoute("0.0.0", "collector.vllm.collect_mla_module"),
+            VersionRoute("0.0.0", "collector.vllm.collect_mla_module_v1"),
         ),
     ),
     OpEntry(
