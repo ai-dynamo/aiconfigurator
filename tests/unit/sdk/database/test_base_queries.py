@@ -90,6 +90,22 @@ def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, 
     assert calls["value"] == m
 
 
+def test_query_gemm_fast_paths_support_legacy_scalar_leaves(comprehensive_perf_db, monkeypatch):
+    quant_mode = common.GEMMQuantMode.float16
+    comprehensive_perf_db._gemm_data[quant_mode] = {
+        8: {128: {128: 0.5}},
+        16: {128: {128: 0.9}},
+    }
+
+    exact = comprehensive_perf_db.query_gemm(8, 128, 128, quant_mode, database_mode=common.DatabaseMode.SILICON)
+    interp = comprehensive_perf_db.query_gemm(12, 128, 128, quant_mode, database_mode=common.DatabaseMode.SILICON)
+
+    assert math.isclose(float(exact), 0.5)
+    assert math.isclose(float(interp), 0.7)
+    assert exact.energy == 0.0
+    assert interp.energy == 0.0
+
+
 def test_query_trtllm_alltoall_normalizes_fp8_block_lookup(stub_perf_db):
     """
     fp8_block reuses the fp8 TRT-LLM alltoall perf tables.
