@@ -3612,7 +3612,20 @@ class PerfDatabase:
                         f"quant_mode='{quant_mode.name}'. "
                         f"Supported gemm modes: {supported}"
                     )
-                result = self._interp_3d(m, n, k, self._gemm_data[table_quant_mode], "cubic")
+
+                gemm_data = self._gemm_data[table_quant_mode]
+
+                if m in gemm_data and n in gemm_data[m] and k in gemm_data[m][n]:
+                    result = gemm_data[m][n][k]
+                    return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+
+                m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
+                if len(m_values) >= 2:
+                    m_left, m_right = self._nearest_1d_point_helper(m, m_values, inner_only=False)
+                    result = self._interp_1d([m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m)
+                    return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+
+                result = self._interp_3d(m, n, k, gemm_data, "cubic")
                 # Result is dict: {"latency": ..., "power": ..., "energy": ...}
                 return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
 
