@@ -739,3 +739,141 @@ class TestEnumerateParallelConfigSGLangMoE:
         # Should still include ep > 1 configs
         moe_ep_values = [c[4] for c in configs]
         assert any(ep > 1 for ep in moe_ep_values), "Should include configs with moe_ep > 1"
+
+
+# ── Qwen3VL config parsing constants ──────────────────────────────────────────
+
+_QWEN3VL_ARCH = "Qwen3VLForConditionalGeneration"
+
+# Minimal Qwen3VL config matching the actual downloaded structure
+_QWEN3VL_HF_CONFIG = {
+    "architectures": [_QWEN3VL_ARCH],
+    "image_token_id": 151655,
+    "model_type": "qwen3_vl",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 151643,
+        "dtype": "bfloat16",
+        "eos_token_id": 151645,
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 5120,
+        "initializer_range": 0.02,
+        "intermediate_size": 25600,
+        "max_position_embeddings": 262144,
+        "model_type": "qwen3_vl_text",
+        "num_attention_heads": 64,
+        "num_hidden_layers": 64,
+        "num_key_value_heads": 8,
+        "rms_norm_eps": 1e-06,
+        "rope_theta": 5000000,
+        "use_cache": True,
+        "vocab_size": 151936,
+    },
+    "tie_word_embeddings": False,
+    "vision_config": {
+        "depth": 27,
+        "hidden_size": 1152,
+        "num_heads": 16,
+        "intermediate_size": 4304,
+        "patch_size": 16,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+        "out_hidden_size": 5120,
+    },
+}
+
+
+class TestQwen3VLConfigParsing:
+    """Test that _parse_hf_config_json correctly unwraps text_config for Qwen3VL."""
+
+    def test_architecture_preserved(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["architecture"] == _QWEN3VL_ARCH
+
+    def test_llm_layers_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["layers"] == 64
+
+    def test_llm_hidden_size_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["hidden_size"] == 5120
+
+    def test_llm_attention_heads_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["n"] == 64
+
+    def test_llm_kv_heads_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["n_kv"] == 8
+
+    def test_llm_head_dim_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["d"] == 128
+
+    def test_llm_inter_size_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["inter_size"] == 25600
+
+    def test_llm_vocab_from_text_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["vocab"] == 151936
+
+    def test_not_moe(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["topk"] == 0
+        assert result["num_experts"] == 0
+
+
+class TestQwen3VLVisionEncoderParsing:
+    """Test that vision_config is captured before text_config unwrap and parsed correctly."""
+
+    def test_extra_params_is_vision_encoder_config(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert isinstance(result["extra_params"], common.VisionEncoderConfig)
+
+    def test_vision_encoder_depth(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].depth == 27
+
+    def test_vision_encoder_hidden_size(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].hidden_size == 1152
+
+    def test_vision_encoder_num_heads(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].num_heads == 16
+
+    def test_vision_encoder_intermediate_size(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].intermediate_size == 4304
+
+    def test_vision_encoder_patch_size(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].patch_size == 16
+
+    def test_vision_encoder_temporal_patch_size(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].temporal_patch_size == 2
+
+    def test_vision_encoder_spatial_merge_size(self):
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].spatial_merge_size == 2
+
+    def test_vision_encoder_out_hidden_size_matches_llm(self):
+        """out_hidden_size must equal LLM hidden_size for the projection to be valid."""
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"].out_hidden_size == result["hidden_size"]
+
+    def test_vision_config_not_lost_after_text_config_unwrap(self):
+        """Regression: vision_config must be captured before the text_config overwrite."""
+        result = _parse_hf_config_json(_QWEN3VL_HF_CONFIG)
+        assert result["extra_params"] is not None
+
+    def test_missing_vision_config_does_not_raise(self):
+        """If vision_config is absent, extra_params should be None, not an error."""
+        cfg = {**_QWEN3VL_HF_CONFIG}
+        cfg.pop("vision_config")
+        result = _parse_hf_config_json(cfg)
+        assert result["extra_params"] is None

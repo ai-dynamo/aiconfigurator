@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from aiconfigurator.sdk import common, config, models
-from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
+from aiconfigurator.sdk.models import LLAMAModel, Qwen3VLModel, check_is_moe, get_model, get_model_family
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
@@ -357,3 +357,159 @@ class TestGetModelMOESGLangDispatch:
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "trtllm")
         assert isinstance(model, models.MOEModel)
         assert not isinstance(model, models.SGLangEPMOEModel)
+
+
+# ── Qwen3VL constants ──────────────────────────────────────────────────────────
+
+_QWEN3VL_ARCH = "Qwen3VLForConditionalGeneration"
+_VL_MODELS = [
+    "Qwen/Qwen3-VL-32B-Instruct",
+    "Qwen/Qwen3-VL-32B-Thinking",
+]
+
+
+class TestQwen3VLRegistration:
+    """Test that Qwen3VL architecture is correctly registered in common.py."""
+
+    def test_architecture_in_model_family_map(self):
+        assert _QWEN3VL_ARCH in common.ARCHITECTURE_TO_MODEL_FAMILY
+
+    def test_architecture_maps_to_llama_family(self):
+        assert common.ARCHITECTURE_TO_MODEL_FAMILY[_QWEN3VL_ARCH] == "LLAMA"
+
+    def test_architecture_in_multimodal_text_config_key(self):
+        assert _QWEN3VL_ARCH in common.MULTIMODAL_TEXT_CONFIG_KEY
+
+    def test_multimodal_text_config_key_is_text_config(self):
+        assert common.MULTIMODAL_TEXT_CONFIG_KEY[_QWEN3VL_ARCH] == "text_config"
+
+    @pytest.mark.parametrize("model_id", _VL_MODELS)
+    def test_model_ids_in_default_hf_models(self, model_id):
+        assert model_id in common.DefaultHFModels
+
+
+class TestQwen3VLPredownloadedConfig:
+    """Test get_model_config_from_model_path using the cached config.json files."""
+
+    @pytest.mark.parametrize("model_id", _VL_MODELS)
+    def test_config_loads_without_error(self, model_id):
+        result = get_model_config_from_model_path(model_id)
+        assert isinstance(result, dict)
+
+    @pytest.mark.parametrize("model_id", _VL_MODELS)
+    def test_config_has_correct_architecture(self, model_id):
+        result = get_model_config_from_model_path(model_id)
+        assert result["architecture"] == _QWEN3VL_ARCH
+
+    @pytest.mark.parametrize("model_id", _VL_MODELS)
+    def test_config_has_correct_llm_params(self, model_id):
+        result = get_model_config_from_model_path(model_id)
+        assert result["layers"] == 64
+        assert result["hidden_size"] == 5120
+        assert result["n"] == 64
+        assert result["n_kv"] == 8
+        assert result["d"] == 128
+
+    @pytest.mark.parametrize("model_id", _VL_MODELS)
+    def test_extra_params_is_vision_encoder_config(self, model_id):
+        result = get_model_config_from_model_path(model_id)
+        assert isinstance(result["extra_params"], common.VisionEncoderConfig)
+
+    @pytest.mark.parametrize("model_id", _VL_MODELS)
+    def test_vision_encoder_params_from_downloaded_config(self, model_id):
+        result = get_model_config_from_model_path(model_id)
+        enc = result["extra_params"]
+        assert enc.depth == 27
+        assert enc.hidden_size == 1152
+        assert enc.patch_size == 16
+        assert enc.spatial_merge_size == 2
+        assert enc.out_hidden_size == result["hidden_size"]
+
+    @pytest.mark.parametrize("model_id", _VL_MODELS)
+    def test_both_variants_have_identical_architecture(self, model_id):
+        """Instruct and Thinking are fine-tunes of the same base — configs must match."""
+        result = get_model_config_from_model_path(model_id)
+        assert result["layers"] == 64
+        assert result["vocab"] == 151936
+
+
+class TestQwen3VLModel:
+    """Test Qwen3VLModel class and get_model() factory for VL architecture."""
+
+    @pytest.fixture
+    def model_config(self):
+        return config.ModelConfig()
+
+    @pytest.fixture
+    def vl_model(self, model_config):
+        return get_model("Qwen/Qwen3-VL-32B-Instruct", model_config, "trtllm")
+
+    def test_base_model_has_encoder_ops(self, model_config):
+        """encoder_ops must be present on all models, not just VL ones."""
+        model = get_model("Qwen/Qwen3-32B", model_config, "trtllm")
+        assert hasattr(model, "encoder_ops")
+        assert isinstance(model.encoder_ops, list)
+
+    def test_non_vl_llama_has_empty_encoder_ops(self, model_config):
+        model = get_model("Qwen/Qwen3-32B", model_config, "trtllm")
+        assert len(model.encoder_ops) == 0
+
+    def test_get_model_returns_qwen3vl_instance(self, vl_model):
+        assert isinstance(vl_model, Qwen3VLModel)
+
+    def test_get_model_vl_is_subclass_of_llama(self, vl_model):
+        assert isinstance(vl_model, LLAMAModel)
+
+    def test_vl_model_has_encoder_ops_populated(self, vl_model):
+        assert len(vl_model.encoder_ops) > 0
+
+    def test_vl_model_has_context_ops_populated(self, vl_model):
+        """LLM context ops must still be present from LLAMAModel parent."""
+        assert len(vl_model.context_ops) > 0
+
+    def test_vl_model_has_generation_ops_populated(self, vl_model):
+        """LLM generation ops must still be present from LLAMAModel parent."""
+        assert len(vl_model.generation_ops) > 0
+
+    def test_encoder_op_names(self, vl_model):
+        """All expected encoder op names must be present."""
+        names = [op._name for op in vl_model.encoder_ops]
+        assert "encoder_qkv_gemm" in names
+        assert "encoder_attention" in names
+        assert "encoder_proj_gemm" in names
+        assert "encoder_ffn1_gemm" in names
+        assert "encoder_ffn2_gemm" in names
+        assert "encoder_merger_fc1" in names
+        assert "encoder_merger_act" in names
+        assert "encoder_merger_fc2" in names
+
+    def test_encoder_op_names_do_not_overlap_with_llm(self, vl_model):
+        """Encoder op names must be distinct from LLM context op names."""
+        encoder_names = {op._name for op in vl_model.encoder_ops}
+        context_names = {op._name for op in vl_model.context_ops}
+        assert encoder_names.isdisjoint(context_names)
+
+    def test_vl_model_has_encoder_config_attribute(self, vl_model):
+        """encoder_config must be stored on the model for use in _run_encoder."""
+        assert hasattr(vl_model, "encoder_config")
+
+    def test_vl_encoder_config_is_vision_encoder_config(self, vl_model):
+        assert isinstance(vl_model.encoder_config, common.VisionEncoderConfig)
+
+    def test_vl_encoder_config_depth(self, vl_model):
+        assert vl_model.encoder_config.depth == 27
+
+    def test_vl_encoder_config_patch_size(self, vl_model):
+        assert vl_model.encoder_config.patch_size == 16
+
+    def test_vl_encoder_config_spatial_merge_size(self, vl_model):
+        assert vl_model.encoder_config.spatial_merge_size == 2
+
+    def test_vl_encoder_config_out_hidden_size_matches_llm(self, vl_model):
+        """out_hidden_size must equal LLM hidden_size for the projection to work."""
+        assert vl_model.encoder_config.out_hidden_size == 5120
+
+    @pytest.mark.parametrize("model_id", _VL_MODELS)
+    def test_both_vl_variants_return_qwen3vl_model(self, model_id, model_config):
+        model = get_model(model_id, model_config, "trtllm")
+        assert isinstance(model, Qwen3VLModel)

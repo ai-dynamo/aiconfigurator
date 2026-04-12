@@ -1368,6 +1368,9 @@ class TaskRunner:
                 "sizes will be filtered out. "
             )
 
+        encoder_database = None
+        encoder_backend_name = None
+
         logger.info("Task %s: Running disagg pareto", task_config.task_name)
         result_df = pa.disagg_pareto(
             model_path=task_config.model_path,
@@ -1400,6 +1403,8 @@ class TaskRunner:
             require_same_tp=require_same_tp,
             autoscale=autoscale,
             target_tpot=task_config.runtime_config.tpot if autoscale else None,
+            encoder_database=encoder_database,
+            encoder_backend_name=encoder_backend_name,
         )
         return {"pareto_df": result_df}
 

@@ -295,7 +295,7 @@ def get_context_attention_test_cases():
     ]
     n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64, 96]
     n_kv_list = [0, 1, 2, 4, 8]
-    head_dim = [64, 128]
+    head_dim = [64, 72, 128]
 
     for h in head_dim:
         for n in sorted(n_list, reverse=True):
@@ -510,7 +510,7 @@ def get_generation_attention_test_cases():
     n_list = [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 64]
     n_list_xqa = [1, 2, 4, 8, 16, 32, 64, 96, 128]
     n_kv_list = [1, 2, 4, 8]
-    head_dim = [64, 128]
+    head_dim = [64, 72, 128]
 
     # MHA
     max_bsn = 8192 * 1024  # 2*1024*1024*1024/128/2 INT32MAX/128/2

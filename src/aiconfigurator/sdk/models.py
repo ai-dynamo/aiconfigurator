@@ -204,6 +204,41 @@ def get_model(
             model_config,
             extra_params,
         )
+    elif architecture == "Qwen3VLForConditionalGeneration" and model_family == "LLAMA":
+        model = Qwen3VLModel(
+            model_path,
+            model_family,
+            architecture,
+            layers,
+            n,
+            n_kv,
+            d,
+            hidden,
+            inter,
+            vocab,
+            context,
+            model_config,
+            encoder_config=extra_params,
+        )
+    elif architecture == "Qwen3VLMoeForConditionalGeneration" and model_family == "MOE":
+        model = Qwen3VLMoEModel(
+            topk,
+            num_experts,
+            moe_inter_size,
+            model_path,
+            model_family,
+            architecture,
+            layers,
+            n,
+            n_kv,
+            d,
+            hidden,
+            inter,
+            vocab,
+            context,
+            model_config,
+            encoder_config=extra_params,
+        )
     elif model_family == "LLAMA":
         model = LLAMAModel(
             model_path,
@@ -546,6 +581,7 @@ class BaseModel:
         self._use_qk_norm = bool(extra_params.get("use_qk_norm", False)) if isinstance(extra_params, dict) else False
         self.context_ops = []
         self.generation_ops = []
+        self.encoder_ops = [] 
 
         # internal only
         self._num_layers = num_layers
@@ -900,6 +936,126 @@ class LLAMAModel(BaseModel):
         self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
 
 
+class Qwen3VLModel(LLAMAModel):
+    """
+    Qwen3-VL series. Extends LLAMAModel with a ViT vision encoder.
+
+    The LLM backbone (text_config) is identical to Qwen3 and reuses all
+    LLAMAModel context/generation ops. The vision encoder (vision_config)
+    runs before the LLM prefill phase and is represented as encoder_ops.
+
+    ViT ops run in float16 regardless of LLM quantization. TP is applied
+    to the ViT heads and FFN in the same way as the LLM backbone.
+    """
+
+    def __init__(self, *args, encoder_config: common.VisionEncoderConfig) -> None:
+        super().__init__(*args)
+
+        if encoder_config is None:
+            return
+        self.encoder_config = encoder_config 
+
+        tp_size = self.config.tp_size
+        depth = encoder_config.depth
+        h_vit = encoder_config.hidden_size
+        n_vit = encoder_config.num_heads
+        inter_vit = encoder_config.intermediate_size
+        h_llm = encoder_config.out_hidden_size
+        head_size_vit = h_vit // n_vit  # 1152 // 16 = 72
+        n_mergers = 1 + len(encoder_config.deepstack_visual_indexes)
+
+        if tp_size > 1:
+            if n_vit % tp_size != 0:
+                raise ValueError(f"ViT num_heads ({n_vit}) must be divisible by tp_size ({tp_size})")
+            if inter_vit % tp_size != 0:
+                raise ValueError(f"ViT intermediate_size ({inter_vit}) must be divisible by tp_size ({tp_size})")
+
+        # ViT always runs in float16 regardless of LLM quantization settings
+        vit_gemm_mode = common.GEMMQuantMode.float16
+        vit_fmha_mode = common.FMHAQuantMode.float16
+        vit_kvcache_mode = common.KVCacheQuantMode.float16
+
+        self.encoder_ops.extend(
+            [
+                ops.ElementWise("encoder_add_norm_1", depth, 2 * h_vit, 2 * h_vit, 0.8),
+                ops.GEMM(
+                    "encoder_qkv_gemm",
+                    depth,
+                    3 * n_vit * head_size_vit // tp_size,
+                    h_vit,
+                    vit_gemm_mode,
+                ),
+                ops.ContextAttention(
+                    "encoder_attention",
+                    depth,
+                    n_vit // tp_size,
+                    n_vit // tp_size,  # ViT has no GQA: n_kv == n
+                    vit_kvcache_mode,
+                    vit_fmha_mode,
+                    head_size=head_size_vit,
+                ),
+                ops.GEMM(
+                    "encoder_proj_gemm",
+                    depth,
+                    h_vit,
+                    n_vit * head_size_vit // tp_size,
+                    vit_gemm_mode,
+                    low_precision_input=True,
+                ),
+                ops.CustomAllReduce("encoder_ar_1", depth, h_vit, tp_size),
+                ops.ElementWise("encoder_add_norm_2", depth, 2 * h_vit, 2 * h_vit, 0.8),
+                ops.GEMM(
+                    "encoder_ffn1_gemm",
+                    depth,
+                    inter_vit // tp_size,
+                    h_vit,
+                    vit_gemm_mode,
+                ),
+                ops.ElementWise(
+                    "encoder_act",
+                    depth,
+                    inter_vit // tp_size,
+                    inter_vit // tp_size,
+                    0.8,
+                ),
+                ops.GEMM(
+                    "encoder_ffn2_gemm",
+                    depth,
+                    h_vit,
+                    inter_vit // tp_size,
+                    vit_gemm_mode,
+                    low_precision_input=True,
+                ),
+                ops.CustomAllReduce("encoder_ar_2", depth, h_vit, tp_size),
+                # PatchMerger MLP: runs n_mergers times (1 final + deepstack instances)
+                # Each merger: Linear(4*h_vit→4*h_vit) + GELU + Linear(4*h_vit→h_llm)
+                # Operates on post-merge tokens (spatial_merge_size² patches fused per token)
+                ops.GEMM(
+                    "encoder_merger_fc1",
+                    n_mergers,
+                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    h_vit * encoder_config.spatial_merge_size ** 2,
+                    vit_gemm_mode,
+                ),
+                ops.ElementWise(
+                    "encoder_merger_act",
+                    n_mergers,
+                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    0.8,
+                ),
+                ops.GEMM(
+                    "encoder_merger_fc2",
+                    n_mergers,
+                    h_llm,
+                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    vit_gemm_mode,
+                ),
+                ops.CustomAllReduce("encoder_merger_ar", n_mergers, h_llm, tp_size),
+            ]
+        )
+
+
 # mostly for mixtral models
 class MOEModel(BaseModel):
     """
@@ -1222,6 +1378,118 @@ class MOEModel(BaseModel):
                 f"(moe_intermediate_size={self._moe_inter_size} / moe_tp_size={self.config.moe_tp_size}) "
                 f"% weight_block_size={weight_block_size} != 0. "
             )
+
+
+class Qwen3VLMoEModel(MOEModel):
+    """
+    Qwen3-VL MoE variants (30B-A3B, 235B-A22B). Extends MOEModel with a ViT
+    vision encoder identical to Qwen3VLModel. The LLM backbone uses sparse MoE
+    FFN while the ViT encoder is a standard dense transformer.
+    """
+
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int,
+                 *args, encoder_config: common.VisionEncoderConfig) -> None:
+        super().__init__(topk, num_experts, moe_inter_size, *args)
+
+        if encoder_config is None:
+            return
+        self.encoder_config = encoder_config
+
+        tp_size = self.config.tp_size
+        depth = encoder_config.depth
+        h_vit = encoder_config.hidden_size
+        n_vit = encoder_config.num_heads
+        inter_vit = encoder_config.intermediate_size
+        h_llm = encoder_config.out_hidden_size
+        head_size_vit = h_vit // n_vit
+        n_mergers = 1 + len(encoder_config.deepstack_visual_indexes)
+
+        if tp_size > 1:
+            if n_vit % tp_size != 0:
+                raise ValueError(f"ViT num_heads ({n_vit}) must be divisible by tp_size ({tp_size})")
+            if inter_vit % tp_size != 0:
+                raise ValueError(f"ViT intermediate_size ({inter_vit}) must be divisible by tp_size ({tp_size})")
+
+        vit_gemm_mode = common.GEMMQuantMode.float16
+        vit_fmha_mode = common.FMHAQuantMode.float16
+        vit_kvcache_mode = common.KVCacheQuantMode.float16
+
+        self.encoder_ops.extend(
+            [
+                ops.ElementWise("encoder_add_norm_1", depth, 2 * h_vit, 2 * h_vit, 0.8),
+                ops.GEMM(
+                    "encoder_qkv_gemm",
+                    depth,
+                    3 * n_vit * head_size_vit // tp_size,
+                    h_vit,
+                    vit_gemm_mode,
+                ),
+                ops.ContextAttention(
+                    "encoder_attention",
+                    depth,
+                    n_vit // tp_size,
+                    n_vit // tp_size,
+                    vit_kvcache_mode,
+                    vit_fmha_mode,
+                    head_size=head_size_vit,
+                ),
+                ops.GEMM(
+                    "encoder_proj_gemm",
+                    depth,
+                    h_vit,
+                    n_vit * head_size_vit // tp_size,
+                    vit_gemm_mode,
+                    low_precision_input=True,
+                ),
+                ops.CustomAllReduce("encoder_ar_1", depth, h_vit, tp_size),
+                ops.ElementWise("encoder_add_norm_2", depth, 2 * h_vit, 2 * h_vit, 0.8),
+                ops.GEMM(
+                    "encoder_ffn1_gemm",
+                    depth,
+                    inter_vit // tp_size,
+                    h_vit,
+                    vit_gemm_mode,
+                ),
+                ops.ElementWise(
+                    "encoder_act",
+                    depth,
+                    inter_vit // tp_size,
+                    inter_vit // tp_size,
+                    0.8,
+                ),
+                ops.GEMM(
+                    "encoder_ffn2_gemm",
+                    depth,
+                    h_vit,
+                    inter_vit // tp_size,
+                    vit_gemm_mode,
+                    low_precision_input=True,
+                ),
+                ops.CustomAllReduce("encoder_ar_2", depth, h_vit, tp_size),
+                ops.GEMM(
+                    "encoder_merger_fc1",
+                    n_mergers,
+                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    h_vit * encoder_config.spatial_merge_size ** 2,
+                    vit_gemm_mode,
+                ),
+                ops.ElementWise(
+                    "encoder_merger_act",
+                    n_mergers,
+                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    0.8,
+                ),
+                ops.GEMM(
+                    "encoder_merger_fc2",
+                    n_mergers,
+                    h_llm,
+                    (h_vit * encoder_config.spatial_merge_size ** 2) // tp_size,
+                    vit_gemm_mode,
+                ),
+                ops.CustomAllReduce("encoder_merger_ar", n_mergers, h_llm, tp_size),
+            ]
+        )
 
 
 class DeepSeekModel(BaseModel):

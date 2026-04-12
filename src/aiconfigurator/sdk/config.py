@@ -54,3 +54,7 @@ class RuntimeConfig:
     seq_imbalance_correction_scale: float = 1.0
     # Separate correction scale for generation/decoding stage (do NOT reuse ctx scale).
     gen_seq_imbalance_correction_scale: float = 1.0
+    image_height: int = 0
+    image_width: int = 0
+    num_images_per_request: int = 1
+    num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set

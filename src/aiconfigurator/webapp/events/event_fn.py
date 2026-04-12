@@ -228,15 +228,17 @@ class EventFn:
         stderr_text = stderr_buffer.getvalue()
         if is_error:
             return (
-                gr.update(value=""),
                 gr.update(value="ERROR!!!"),
+                gr.update(value=""),
+                gr.update(value=""),
                 gr.update(value=""),
                 gr.update(value=record_df),
                 gr.update(value=stdout_text + stderr_text + traceback_log),
             )
         else:
-            perf_info, mem_info, context_info, generation_info = summary.get_static_info()
+            perf_info, mem_info, encoder_info, context_info, generation_info = summary.get_static_info()
             summary_string = f"```\n{perf_info + mem_info}\n```"
+            encoder_breakdown_string = f"```\n{encoder_info}\n```"
             context_breakdown_string = f"```\n{context_info}\n```"
             generation_breakdown_string = f"```\n{generation_info}\n```"
             new_record_df = summary.get_summary_df()
@@ -248,6 +250,7 @@ class EventFn:
             # need to update the textbox (breakdown) as well the table to be downloaded
             return (
                 gr.update(value=summary_string),
+                gr.update(value=encoder_breakdown_string),
                 gr.update(value=context_breakdown_string),
                 gr.update(value=generation_breakdown_string),
                 gr.update(value=updated_record_df),

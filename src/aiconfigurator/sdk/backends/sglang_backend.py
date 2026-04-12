@@ -521,6 +521,9 @@ class SGLANGBackend(BaseBackend):
         # Count weights on a single GPU
         weights /= model.config.pp_size
 
+        for op in model.encoder_ops:
+            weights += op.get_weights()
+
         h = model._num_heads * model._head_size
         if num_tokens == 0:
             num_tokens = (isl - prefix) * batch_size
