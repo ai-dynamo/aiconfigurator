@@ -115,3 +115,7 @@ class RuntimeConfig:
     # Optional experimental static-latency backend. "python" preserves existing behavior;
     # "rust" routes static step estimates through the Rust FPM estimator.
     engine_step_backend: str | None = None
+    image_height: int = 0
+    image_width: int = 0
+    num_images_per_request: int = 1
+    num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set

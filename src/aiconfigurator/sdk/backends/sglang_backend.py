@@ -582,6 +582,9 @@ class SGLANGBackend(BaseBackend):
         # Count weights on a single GPU
         weights /= model.config.pp_size
 
+        for op in model.encoder_ops:
+            weights += op.get_weights()
+
         h = model._num_heads * model._head_size
         # MoE block-scale workspace is routed-token payload, so its feature
         # width is the residual hidden size. For most models this equals
