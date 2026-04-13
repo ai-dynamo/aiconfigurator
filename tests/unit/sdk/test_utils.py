@@ -713,8 +713,11 @@ class TestEnumerateParallelConfigSGLangMoE:
         has_pure_tp = any(c[4] == 1 and c[3] > 1 for c in configs)
         # Should include configs with moe_ep > 1
         has_ep_gt_1 = any(c[4] > 1 for c in configs)
+        # Should include truly mixed configs (both moe_tp > 1 and moe_ep > 1)
+        has_mixed = any(c[3] > 1 and c[4] > 1 for c in configs)
         assert has_pure_tp, "Should include pure TP configs (moe_ep=1, moe_tp>1)"
         assert has_ep_gt_1, "Should include configs with moe_ep > 1"
+        assert has_mixed, "Should include mixed configs with both moe_tp > 1 and moe_ep > 1"
 
     def test_sglang_deepep_intranode_excludes_moe_tp_gt_1(self):
         """SGLang + moe_backend=deepep_moe + enable_wideep=False excludes moe_tp > 1."""

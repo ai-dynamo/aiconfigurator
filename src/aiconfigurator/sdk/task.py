@@ -934,7 +934,8 @@ class TaskConfig:
             _supported_or_raise("gemm", gemm_mode)
 
             moe_mode = _to_name(_get_cfg_value(wc, "moe_quant_mode"))
-            if self.backend_name == "sglang" and moe_backend == "deepep_moe":
+            wc_moe_backend = getattr(wc, "moe_backend", None) or moe_backend
+            if self.backend_name == "sglang" and wc_moe_backend == "deepep_moe":
                 if validate_context:
                     _supported_or_raise("wideep_context_moe", moe_mode)
                 if validate_generation:

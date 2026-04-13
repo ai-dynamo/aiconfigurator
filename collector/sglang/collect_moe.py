@@ -404,8 +404,18 @@ def run_moe_torch(
     # With EP, each GPU processes only its local experts
     num_local_experts = num_experts // moe_ep_size
 
+    # For EP > 1, filter tokens to rank-local workload so the benchmark
+    # measures per-rank latency instead of the full-batch latency.
+    if moe_ep_size > 1:
+        _, rank0_info = power_law_logits_v3(
+            num_tokens, num_experts, topk, moe_ep_size, power_law_alpha, return_rank0_info=True
+        )
+        rank_num_tokens = rank0_info["rank0_num_tokens"]
+    else:
+        rank_num_tokens = num_tokens
+
     latency, power_stats = benchmark(
-        num_tokens,
+        rank_num_tokens,
         num_local_experts,
         2 * inter_size // moe_tp_size,
         hidden_size,
