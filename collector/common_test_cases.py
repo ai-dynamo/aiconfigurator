@@ -65,6 +65,7 @@ _MOE_MODEL_CONFIGS: list[list] = [
         512,
         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     ],  # nemotron-3 super (uses relu2, non-gated)
+    [4096, 1024, 10, 512, "Qwen/Qwen3.5-397B-A17B"],  # qwen3.5-moe, 397b-a17b
 ]
 
 # MLA: [num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, model_name]
