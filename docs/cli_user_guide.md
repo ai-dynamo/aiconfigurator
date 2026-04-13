@@ -5,6 +5,28 @@ As mentioned in root Readme, CLI supports five modes: `default`, `exp`, `generat
 Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
 For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.
 
+## Defaults and Implicit Behavior
+
+When using `default` mode, several parameters have default values that affect
+which configurations are considered feasible. These defaults are applied when
+the corresponding flag is not specified:
+
+| Parameter | Default | Flag | Effect |
+|-----------|---------|------|--------|
+| ISL (Input Sequence Length) | 4000 | `--isl` | Assumed input prompt length |
+| OSL (Output Sequence Length) | 1000 | `--osl` | Assumed output generation length |
+| TTFT (Time to First Token) | 2000 ms | `--ttft` | Max acceptable time to first token |
+| TPOT (Time per Output Token) | 30 ms | `--tpot` | Max acceptable time per output token |
+| Backend | trtllm | `--backend` | Inference backend used for estimation |
+| Prefix Cache Length | 0 | `--prefix` | Prefix cache length for KV reuse |
+| Database Mode | SILICON | `--database-mode` | Source of performance data |
+
+> **Important:** The TTFT and TPOT defaults act as **SLA filters** — configurations
+> that exceed these thresholds are excluded from results. If you see fewer
+> results than expected, consider relaxing these values or setting them
+> explicitly. When defaults are used, a warning is printed at the start of the
+> run so you can verify what values are in effect.
+
 ### Generate mode (Quick Start)
 This mode generates a working configuration without running the full parameter sweep. It's useful when you want a quick deployment config without SLA optimization.
 
@@ -228,6 +250,10 @@ aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --sys
 # Use SGLang (dense and MoE models, currently being evaluated)
 aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --backend sglang
 ```
+
+Use `--backend auto` to sweep across all supported backends and compare results side by side.
+Both agg and disagg results are merged across backends and the globally optimal configuration
+is selected. This is useful for finding the best backend without running separate commands.
 
 The command will create two experiments for the given problem, one is `agg` and another one is `disagg`. Compare them to find the better one and estimates the perf gain.
 
@@ -554,6 +580,25 @@ exp_hybrid:
 ```
 
 Hybrid mode is a quick solution to support new models without modeling the operation and collecting the data. However, please be careful, only `SILICON` mode's result is reproducible. Other modes are for research purpose
+
+#### Speculative Decoding (`--nextn`, `--nextn-accept-rates`)
+
+These flags enable MTP (Multi-Token Prediction) speculative decoding in the
+configuration search:
+
+- `--nextn N` — Number of draft tokens. When > 0, the sweep includes
+  speculative decoding configurations. Requires the model to support MTP.
+  Default: 0 (disabled).
+- `--nextn-accept-rates RATES` — Comma-separated list of 5 floats representing
+  the acceptance probability of each draft token position. Only the first
+  `--nextn` values are used. Default: `0.85,0.3,0,0,0`.
+
+Example:
+```bash
+aiconfigurator cli default \
+  --model Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm \
+  --nextn 2 --nextn-accept-rates 0.9,0.4,0,0,0
+```
 
 
 **Python API equivalent:**

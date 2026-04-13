@@ -128,7 +128,10 @@ def _add_default_mode_arguments(parser):
         choices=[backend.value for backend in common.BackendName] + ["auto"],
         type=str,
         default=common.BackendName.trtllm.value,
-        help="Backend name. Use 'auto' to sweep across all backends (trtllm, vllm, sglang) and compare results.",
+        help="Backend name. Use a specific backend (trtllm, vllm, sglang) or 'auto' to sweep "
+        "across all supported backends for the given system and compare results side by side. "
+        "When 'auto' is used, both agg and disagg results are merged across backends and the "
+        "globally optimal configuration is selected. Default: trtllm.",
     )
     parser.add_argument(
         "--backend-version",
@@ -148,10 +151,22 @@ def _add_default_mode_arguments(parser):
         "for models released after the last silicon data collection. "
         "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
     )
-    parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
-    parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
-    parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms.")
-    parser.add_argument("--tpot", type=float, default=30.0, help="Time per output token in ms.")
+    parser.add_argument("--isl", type=int, default=4000, help="Input sequence length. Default: 4000.")
+    parser.add_argument("--osl", type=int, default=1000, help="Output sequence length. Default: 1000.")
+    parser.add_argument(
+        "--ttft",
+        type=float,
+        default=2000.0,
+        help="Time to first token SLA target in ms. Configurations exceeding this value are "
+        "filtered out. Default: 2000.0.",
+    )
+    parser.add_argument(
+        "--tpot",
+        type=float,
+        default=30.0,
+        help="Time per output token SLA target in ms. Configurations exceeding this value are "
+        "filtered out. Default: 30.0.",
+    )
     parser.add_argument(
         "--request-latency",
         type=float,
@@ -163,14 +178,18 @@ def _add_default_mode_arguments(parser):
         "--nextn",
         type=int,
         default=0,
-        help="Number of draft tokens for MTP (Multi-Token Prediction) speculative decoding. Default is 0 (disabled).",
+        help="Number of draft tokens for MTP (Multi-Token Prediction) speculative decoding. "
+        "When set > 0, enables speculative decoding in the configuration search. "
+        "Requires the model to support MTP. Default: 0 (disabled).",
     )
     parser.add_argument(
         "--nextn-accept-rates",
         type=str,
         default="0.85,0.3,0,0,0",
-        help="Acceptance rates for MTP draft tokens. Comma-separated list of 5 floats. "
-        "Default is '0.85,0.3,0,0,0' meaning 1st token has 85%% acceptance, 2nd has 30%%, rest are 0.",
+        help="Comma-separated acceptance rates for MTP draft tokens (5 values). "
+        "Each value is the acceptance probability of the i-th draft token; only the first "
+        "--nextn values are used. Example: '0.85,0.3,0,0,0' means the 1st draft token has "
+        "85%% acceptance, 2nd has 30%%, rest unused. Default: '0.85,0.3,0,0,0'.",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -1509,6 +1528,28 @@ def main(args):
         return
 
     if args.mode == "default":
+        # Warn when SLA/workload parameters are implicitly defaulted
+        _default_params = {"isl": 4000, "osl": 1000, "ttft": 2000.0, "tpot": 30.0}
+        _implicit = [
+            f"{k.upper()}={getattr(args, k)}"
+            for k, v in _default_params.items()
+            if f"--{k}" not in sys.argv and getattr(args, k) == v
+        ]
+        if _implicit:
+            logger.warning(
+                "Using default SLA/workload parameters: %s. "
+                "These act as filters — configurations exceeding these thresholds are excluded. "
+                "Set them explicitly (e.g. --ttft, --tpot, --isl, --osl) to avoid unexpected filtering.",
+                ", ".join(_implicit),
+            )
+        logger.info(
+            "Effective parameters: ISL=%d, OSL=%d, TTFT=%.1fms, TPOT=%.1fms, backend=%s",
+            args.isl,
+            args.osl,
+            args.ttft,
+            args.tpot,
+            args.backend,
+        )
         task_configs = build_default_task_configs(
             model_path=args.model_path,
             total_gpus=args.total_gpus,
