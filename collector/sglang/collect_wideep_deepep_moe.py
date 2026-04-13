@@ -201,7 +201,7 @@ def benchmark_moe_layer_prefill(
             )
 
             num_tokens_iter = hidden_states_per_token_iter.shape[0]
-            topk = 8
+            topk = moe_layer.topk.topk_config.top_k
             topk_idx_iter = torch.full((num_tokens_iter, topk), -1, device=device, dtype=torch.int32)
             topk_weights_iter = torch.zeros((num_tokens_iter, topk), device=device, dtype=torch.float32)
 
@@ -349,7 +349,7 @@ def benchmark_moe_layer_prefill(
                                 "num_tokens": num_tokens_log,
                                 "hidden_size": model_hidden_size,
                                 "inter_size": model_inter_size,
-                                "topk": 8,
+                                "topk": topk,
                                 "num_experts": model_total_experts,
                                 "moe_tp_size": moe_tp_size,
                                 "moe_ep_size": moe_ep_size,
@@ -632,7 +632,7 @@ def benchmark_moe_layer_decode(
                                 "num_tokens": num_tokens_log,
                                 "hidden_size": model_hidden_size,
                                 "inter_size": model_inter_size,
-                                "topk": 8,
+                                "topk": top_k,
                                 "num_experts": model_total_experts,
                                 "moe_tp_size": moe_tp_size,
                                 "moe_ep_size": moe_ep_size,

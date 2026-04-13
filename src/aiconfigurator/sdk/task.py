@@ -724,6 +724,11 @@ class TaskConfig:
             effective_profiles = list(dict.fromkeys([*effective_profiles, *yaml_profiles]))
             yaml_patch = yaml_config.get("config", yaml_config)
 
+        # Normalize: enable_wideep implies deepep_moe backend.
+        # The CLI already does this, but SDK callers may not.
+        if enable_wideep and moe_backend is None:
+            moe_backend = "deepep_moe"
+
         ctx = TaskContext(
             serving_mode=serving_mode,
             model_path=model_path,
