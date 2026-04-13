@@ -706,6 +706,46 @@ def balanced_logits(num_tokens, num_experts, topk):
     return router_logits
 
 
+def _sample_dirichlet_multinomial(pi_np, concentration, num_tokens, topk):
+    """Sample one expert token distribution via Dirichlet-Multinomial.
+
+    Each call produces a distribution that can differ significantly from pi,
+    but E[result] is proportional to pi.  The ``concentration`` parameter
+    controls inter-iteration variance: smaller = more volatile, larger = more
+    stable.
+
+    Args:
+        pi_np: Normalized probability vector (numpy, shape [num_experts]).
+        concentration: Dirichlet concentration parameter.
+        num_tokens: Number of tokens.
+        topk: Experts selected per token.
+
+    Returns:
+        numpy float64 array of shape [num_experts] with token counts.
+    """
+    num_experts = len(pi_np)
+    target_sum = num_tokens * topk
+    alpha_dir = concentration * np.maximum(pi_np, 1e-10)
+    p_i = np.random.dirichlet(alpha_dir)
+    tokens_i = np.random.multinomial(target_sum, p_i).astype(np.float64)
+
+    # Clamp: each expert at most num_tokens
+    overflow = np.clip(tokens_i - num_tokens, 0, None).sum()
+    tokens_i = np.clip(tokens_i, 0, num_tokens)
+    if overflow > 0:
+        idx_asc = np.argsort(tokens_i)
+        remaining = int(overflow)
+        j = 0
+        while remaining > 0:
+            ei = idx_asc[j % num_experts]
+            if tokens_i[ei] < num_tokens:
+                tokens_i[ei] += 1
+                remaining -= 1
+            j += 1
+
+    return tokens_i
+
+
 def sample_power_law(size, alpha, xmin, xmax):
     """Sample from a power law distribution using inverse CDF method.
 
@@ -971,59 +1011,35 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
 
     # Sample initial distribution
     if num_tokens * topk > num_experts:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
+        raw_distribution = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
     else:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
+        raw_distribution = sample_power_law(num_experts, alpha, 0.01, 2)
 
     target_sum = num_tokens * topk
-    original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
-    target_distribution = original_distribution * target_sum
-    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
+    probs = raw_distribution / raw_distribution.sum()
+
+    # Use multinomial sampling instead of round to preserve power law shape
+    # when target_sum << num_experts (round would collapse everything to 0/1)
+    samples = torch.multinomial(probs, num_samples=target_sum, replacement=True)
+    num_tokens_per_expert = torch.zeros(num_experts, dtype=torch.int64)
+    for idx in samples:
+        num_tokens_per_expert[idx] += 1
 
     # Clamp to upper bound: each expert can be selected at most num_tokens times
-    # (since each token can select an expert at most once)
     upper_bound = num_tokens
     overflow = (num_tokens_per_expert - upper_bound).clamp(min=0).sum().item()
-    num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
-
-    # Redistribute overflow to experts that haven't reached the bound
     if overflow > 0:
+        num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
+        # Redistribute overflow to experts that haven't reached the bound
         sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-        for i in range(int(overflow)):
-            # Find an expert that hasn't reached the bound
-            for j in range(len(sorted_indices)):
-                expert_idx = sorted_indices[-(j + 1)]  # Start from smallest
-                if num_tokens_per_expert[expert_idx] < upper_bound:
-                    num_tokens_per_expert[expert_idx] += 1
-                    break
-
-    # Adjust to match exact target sum (respecting upper bound)
-    current_sum = num_tokens_per_expert.sum().item()
-    delta = target_sum - current_sum
-    if delta != 0:
-        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-        if delta > 0:
-            # Add to experts that haven't reached the bound
-            added = 0
-            for i in range(int(delta) * len(sorted_indices)):  # Extra iterations for safety
-                if added >= delta:
-                    break
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]  # Start from smallest
-                if num_tokens_per_expert[expert_idx] < upper_bound:
-                    num_tokens_per_expert[expert_idx] += 1
-                    added += 1
-        else:
-            for i in range(-delta):
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
-                if num_tokens_per_expert[expert_idx] > 0:
-                    num_tokens_per_expert[expert_idx] -= 1
-                else:
-                    num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -= 1
-
-    # Validate distribution
-    if len(num_tokens_per_expert) > 1:
-        sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
-        assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
+        remaining = int(overflow)
+        for i in range(remaining * len(sorted_indices)):
+            if remaining <= 0:
+                break
+            expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
+            if num_tokens_per_expert[expert_idx] < upper_bound:
+                num_tokens_per_expert[expert_idx] += 1
+                remaining -= 1
 
     # Find EP rank with max load and swap to rank 0
     with torch.no_grad():
@@ -1054,11 +1070,107 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
     aic_debug = int(os.getenv("AIC_DEBUG", "0"))
     if aic_debug >= 1:
         print("num_tokens_per_expert", num_tokens_per_expert, num_tokens_per_expert.sum().item())
+        ep_group_size = num_experts // ep
+        rank0_tokens = num_tokens_per_expert[:ep_group_size]
+        print(f"rank0 experts token counts (total {rank0_tokens.sum().item()}):")
+        for i, t in enumerate(rank0_tokens):
+            print(f"  expert[{i}]: {t.item()}")
 
     # Generate expert assignments (vectorized)
     h_selected_experts = _assign_experts_from_counts(num_tokens_per_expert, num_tokens, topk)
 
     return num_tokens_per_expert, h_selected_experts
+
+
+def _sample_expert_token_distribution(num_tokens, num_experts, topk, alpha, base_profile=None, noise_sigma=0.0):
+    """Sample a power-law expert token distribution without EPLB.
+
+    Generates a token-to-expert distribution following a power law, ensuring:
+    - Total selections = num_tokens * topk
+    - Each expert is selected at most num_tokens times (no duplicate per token)
+
+    When ``base_profile`` is provided with ``noise_sigma > 0``, the distribution
+    is derived by applying log-normal noise to the base profile instead of
+    sampling a completely new power-law.  This models the real-world scenario
+    where expert popularity is mostly stable across batches with some variation.
+
+    Args:
+        num_tokens: Number of tokens
+        num_experts: Total number of experts
+        topk: Number of experts per token
+        alpha: Power law exponent (used only when base_profile is None)
+        base_profile: Optional [num_experts] float tensor/array of baseline
+                      expert popularity. When given, ``alpha`` is ignored.
+        noise_sigma: Standard deviation of log-normal noise applied to
+                     base_profile.  0 = no noise (exact base_profile).
+                     Only used when base_profile is not None.
+
+    Returns:
+        num_tokens_per_expert: [num_experts] int64 tensor of token counts per expert
+    """
+    import torch
+
+    if base_profile is not None:
+        bp = base_profile.cpu().numpy() if hasattr(base_profile, "cpu") else np.asarray(base_profile)
+        if noise_sigma > 0:
+            noise = np.random.lognormal(0, noise_sigma, num_experts)
+            raw = torch.from_numpy(bp * noise)
+        else:
+            raw = torch.from_numpy(bp.copy())
+        raw = raw.float().clamp(min=0)
+    elif num_tokens * topk > num_experts:
+        raw = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
+    else:
+        raw = sample_power_law(num_experts, alpha, 0.01, 2)
+
+    target_sum = num_tokens * topk
+    original_distribution = raw / raw.sum()
+    target_distribution = original_distribution * target_sum
+    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
+
+    upper_bound = num_tokens
+    overflow = (num_tokens_per_expert - upper_bound).clamp(min=0).sum().item()
+    num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
+
+    if overflow > 0:
+        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
+        for i in range(int(overflow)):
+            for j in range(len(sorted_indices)):
+                expert_idx = sorted_indices[-(j + 1)]
+                if num_tokens_per_expert[expert_idx] < upper_bound:
+                    num_tokens_per_expert[expert_idx] += 1
+                    break
+
+    current_sum = num_tokens_per_expert.sum().item()
+    delta = target_sum - current_sum
+    if delta != 0:
+        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
+        if delta > 0:
+            added = 0
+            for i in range(int(delta) * len(sorted_indices)):
+                if added >= delta:
+                    break
+                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
+                if num_tokens_per_expert[expert_idx] < upper_bound:
+                    num_tokens_per_expert[expert_idx] += 1
+                    added += 1
+        else:
+            for i in range(-delta):
+                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
+                if num_tokens_per_expert[expert_idx] > 0:
+                    num_tokens_per_expert[expert_idx] -= 1
+                else:
+                    num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -= 1
+
+    if len(num_tokens_per_expert) > 1:
+        sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
+        assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
+
+    assert num_tokens_per_expert.max().item() <= num_tokens, (
+        f"Expert token count {num_tokens_per_expert.max().item()} exceeds num_tokens {num_tokens}"
+    )
+
+    return num_tokens_per_expert
 
 
 def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep, alpha, num_slots=None):
@@ -1088,68 +1200,8 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
     if num_slots is None:
         num_slots = num_experts
 
-    num_slots // ep
-
-    # Step 1: Sample initial power law distribution for experts
-    if num_tokens * topk > num_experts:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
-    else:
-        num_tokens_per_expert = sample_power_law(num_experts, alpha, 0.01, 2)
-
+    num_tokens_per_expert = _sample_expert_token_distribution(num_tokens, num_experts, topk, alpha)
     target_sum = num_tokens * topk
-    original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
-    target_distribution = original_distribution * target_sum
-    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
-
-    # Clamp to upper bound: each expert can be selected at most num_tokens times
-    # (since each token can select an expert at most once)
-    upper_bound = num_tokens
-    overflow = (num_tokens_per_expert - upper_bound).clamp(min=0).sum().item()
-    num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
-
-    # Redistribute overflow to experts that haven't reached the bound
-    if overflow > 0:
-        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-        for i in range(int(overflow)):
-            # Find an expert that hasn't reached the bound
-            for j in range(len(sorted_indices)):
-                expert_idx = sorted_indices[-(j + 1)]  # Start from smallest
-                if num_tokens_per_expert[expert_idx] < upper_bound:
-                    num_tokens_per_expert[expert_idx] += 1
-                    break
-
-    # Adjust to match exact target sum (respecting upper bound)
-    current_sum = num_tokens_per_expert.sum().item()
-    delta = target_sum - current_sum
-    if delta != 0:
-        sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-        if delta > 0:
-            # Add to experts that haven't reached the bound
-            added = 0
-            for i in range(int(delta) * len(sorted_indices)):  # Extra iterations for safety
-                if added >= delta:
-                    break
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]  # Start from smallest
-                if num_tokens_per_expert[expert_idx] < upper_bound:
-                    num_tokens_per_expert[expert_idx] += 1
-                    added += 1
-        else:
-            for i in range(-delta):
-                expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]
-                if num_tokens_per_expert[expert_idx] > 0:
-                    num_tokens_per_expert[expert_idx] -= 1
-                else:
-                    num_tokens_per_expert[torch.argmax(num_tokens_per_expert)] -= 1
-
-    # Validate distribution
-    if len(num_tokens_per_expert) > 1:
-        sorted_tokens = torch.sort(num_tokens_per_expert, descending=True)[0]
-        assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
-
-    # Verify upper bound constraint
-    assert num_tokens_per_expert.max().item() <= num_tokens, (
-        f"Expert token count {num_tokens_per_expert.max().item()} exceeds num_tokens {num_tokens}"
-    )
 
     # Step 2: EPLB - Replication + Placement
     expert_tokens_np = num_tokens_per_expert.cpu().numpy()
@@ -1222,8 +1274,200 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
     return num_tokens_per_slot, h_selected_slots
 
 
+def _generate_power_law_distribution_with_ema_eplb(
+    num_tokens,
+    num_experts,
+    topk,
+    ep,
+    alpha,
+    num_slots=None,
+    ema_warmup_steps=10,
+    ema_decay_factor=0.95,
+    ema_noise_sigma=0.3,
+    dirichlet_concentration=0,
+    return_ema_trace=False,
+):
+    """Generate power law distribution with EMA-simulated EPLB.
+
+    Simulates TRT-LLM's EMA-based EPLB:
+    1. Generate warmup distributions and accumulate EMA
+    2. Compute EPLB from the EMA (before seeing fresh distribution)
+    3. Sample one fresh distribution and route through EMA-based placement
+    4. Determine actual slowest rank from fresh routing (not EMA estimate)
+
+    Two noise models are supported:
+
+    - **Dirichlet-Multinomial** (``dirichlet_concentration > 0``): Each iteration
+      samples ``p ~ Dir(concentration * π)`` then ``tokens ~ Multinomial(N, p)``.
+      Expert rankings can change between iterations; concentration controls
+      inter-iteration variance.  This is the recommended mode.
+
+    - **Lognormal** (legacy, ``dirichlet_concentration == 0``): Each iteration
+      applies ``base_profile * lognormal(0, sigma)`` noise.  Expert rankings are
+      largely preserved.  Retained for backward compatibility.
+
+    Args:
+        num_tokens: Number of tokens
+        num_experts: Total number of experts
+        topk: Number of experts per token
+        ep: Expert parallelism size
+        alpha: Power law exponent
+        num_slots: Total slots (default: num_experts)
+        ema_warmup_steps: Number of samples used to warm up EMA
+        ema_decay_factor: EMA decay factor (matches TRT-LLM default 0.95)
+        ema_noise_sigma: Log-normal noise sigma (legacy mode only)
+        dirichlet_concentration: Dirichlet concentration parameter.
+            >0 enables Dirichlet-Multinomial mode (recommended).
+            0 falls back to legacy lognormal mode.
+
+    Returns:
+        (num_tokens_per_slot, h_selected_slots)
+        When return_ema_trace=True: (num_tokens_per_slot, h_selected_slots, ema_trace)
+    """
+    import torch
+
+    if num_slots is None:
+        num_slots = num_experts
+
+    use_dirichlet = dirichlet_concentration > 0
+
+    if use_dirichlet:
+        # Build normalized power-law probability vector π
+        raw = sample_power_law(num_experts, alpha, 1, num_tokens * 0.8)
+        pi_np = raw.numpy().astype(np.float64)
+        pi_np = pi_np / pi_np.sum()
+    else:
+        # Legacy: generate base_profile for lognormal noise
+        base_profile = _sample_expert_token_distribution(num_tokens, num_experts, topk, alpha)
+
+    # Phase 1: EMA warmup (EMA does NOT see the fresh distribution)
+    ema_load_factor = np.zeros(num_experts, dtype=np.float64)
+    ema_trace_steps = [] if return_ema_trace else None
+    for _step in range(ema_warmup_steps):
+        if use_dirichlet:
+            dist_np = _sample_dirichlet_multinomial(pi_np, dirichlet_concentration, num_tokens, topk)
+        else:
+            dist_t = _sample_expert_token_distribution(
+                num_tokens, num_experts, topk, alpha, base_profile=base_profile, noise_sigma=ema_noise_sigma
+            )
+            dist_np = dist_t.cpu().numpy().astype(np.float64)
+        ema_load_factor = ema_load_factor * ema_decay_factor + dist_np
+        if ema_trace_steps is not None:
+            ema_trace_steps.append(
+                {
+                    "step": _step,
+                    "sample_dist": dist_np.copy(),
+                    "ema_load_factor": ema_load_factor.copy(),
+                }
+            )
+
+    # Phase 2: Compute EPLB from EMA (BEFORE seeing fresh)
+    eplb_result = compute_eplb(ema_load_factor, num_experts, ep, num_slots)
+
+    rank_slots = eplb_result["rank_slots"]
+    slot_to_expert = eplb_result["slot_to_expert"]
+    expert_replica_count = eplb_result["expert_replica_count"]
+
+    # Phase 3: Sample one fresh distribution (EMA has NOT seen this)
+    if use_dirichlet:
+        fresh_np = _sample_dirichlet_multinomial(pi_np, dirichlet_concentration, num_tokens, topk)
+        fresh_expert_tokens = torch.from_numpy(fresh_np)
+    else:
+        fresh_expert_tokens = _sample_expert_token_distribution(
+            num_tokens, num_experts, topk, alpha, base_profile=base_profile, noise_sigma=ema_noise_sigma
+        )
+        fresh_np = fresh_expert_tokens.cpu().numpy().astype(np.float64)
+    target_sum = num_tokens * topk
+
+    # Phase 4: Route fresh distribution through EMA-based placement
+    slot_tokens_fresh = np.zeros(num_slots, dtype=np.float64)
+    for slot_id in range(num_slots):
+        expert_id = slot_to_expert[slot_id]
+        replica_count = expert_replica_count[expert_id]
+        slot_tokens_fresh[slot_id] = fresh_np[expert_id] / replica_count
+
+    # Determine ACTUAL slowest rank from fresh routing (not EMA estimate)
+    fresh_tokens_per_rank = []
+    for rank_id in range(ep):
+        rank_load = sum(slot_tokens_fresh[s] for s in rank_slots[rank_id])
+        fresh_tokens_per_rank.append(rank_load)
+    slowest_rank = int(np.argmax(fresh_tokens_per_rank))
+
+    # Remap: put actual slowest rank's slots into rank 0 position
+    new_slot_tokens = torch.zeros(num_slots, dtype=torch.float64)
+    new_slot_to_expert = [0] * num_slots
+    new_slot_idx = 0
+
+    for orig_slot in rank_slots[slowest_rank]:
+        new_slot_tokens[new_slot_idx] = slot_tokens_fresh[orig_slot]
+        new_slot_to_expert[new_slot_idx] = slot_to_expert[orig_slot]
+        new_slot_idx += 1
+
+    for rank_id in range(ep):
+        if rank_id == slowest_rank:
+            continue
+        for orig_slot in rank_slots[rank_id]:
+            new_slot_tokens[new_slot_idx] = slot_tokens_fresh[orig_slot]
+            new_slot_to_expert[new_slot_idx] = slot_to_expert[orig_slot]
+            new_slot_idx += 1
+
+    # Convert to int preserving exact sum
+    floored = torch.floor(new_slot_tokens).to(torch.int64)
+    remainder = target_sum - floored.sum().item()
+
+    if remainder > 0:
+        fractional_parts = new_slot_tokens - floored.float()
+        top_indices = torch.argsort(fractional_parts, descending=True)[:remainder]
+        floored[top_indices] += 1
+
+    num_tokens_per_slot = floored
+
+    aic_debug = int(os.getenv("AIC_DEBUG", "0"))
+    if aic_debug >= 1:
+        mode = f"Dirichlet(conc={dirichlet_concentration})" if use_dirichlet else f"Lognormal(σ={ema_noise_sigma})"
+        print(f"EMA-EPLB [{mode}]: warmup={ema_warmup_steps}, decay={ema_decay_factor}")
+        print(f"EMA-EPLB: num_experts={num_experts}, num_slots={num_slots}, redundant={num_slots - num_experts}")
+        print(
+            f"EMA-EPLB: slowest_rank={slowest_rank} (actual), fresh_tokens_per_rank={[f'{x:.0f}' for x in fresh_tokens_per_rank[:4]]}..."
+        )
+        print(f"EMA-EPLB: expert_replica_count (top 5)={expert_replica_count[:5]}")
+        print("EMA-EPLB: num_tokens_per_slot", num_tokens_per_slot[:10], "...", num_tokens_per_slot.sum().item())
+
+    expected_total = num_tokens * topk
+    actual_total = int(num_tokens_per_slot.sum().item())
+    if actual_total != expected_total:
+        raise ValueError(
+            f"EMA-EPLB slot assignment count mismatch: expected {expected_total}, got {actual_total}. "
+            f"num_tokens={num_tokens}, topk={topk}, num_slots={num_slots}"
+        )
+
+    h_selected_slots = _assign_experts_from_counts(num_tokens_per_slot, num_tokens, topk)
+
+    if return_ema_trace:
+        ema_trace = {
+            "base_profile": pi_np.copy() if use_dirichlet else base_profile.cpu().numpy().copy(),
+            "steps": ema_trace_steps,
+            "fresh_sample": fresh_np.copy(),
+            "ema_final": ema_load_factor.copy(),
+        }
+        return num_tokens_per_slot, h_selected_slots, ema_trace
+
+    return num_tokens_per_slot, h_selected_slots
+
+
 def power_law_logits_v3(
-    num_tokens, num_experts, topk, ep, alpha, use_eplb=False, num_slots=None, return_rank0_info=False
+    num_tokens,
+    num_experts,
+    topk,
+    ep,
+    alpha,
+    use_eplb=False,
+    num_slots=None,
+    return_rank0_info=False,
+    ema_warmup_steps=0,
+    ema_decay_factor=0.95,
+    ema_noise_sigma=0.3,
+    dirichlet_concentration=0,
 ):
     """Generate power law distributed router logits for MoE.
 
@@ -1241,6 +1485,16 @@ def power_law_logits_v3(
         return_rank0_info: If True, also return rank0 token indices and logits for WideEP simulation.
                            In WideEP, DP size = EP size, each DP rank has num_tokens/ep tokens.
                            This returns tokens that would be routed to EP rank 0.
+        ema_warmup_steps: Number of power-law samples to warm up EMA before EPLB.
+                          0 = disabled (original exact-distribution behaviour).
+                          Only used when use_eplb=True.
+        ema_decay_factor: EMA decay factor, matching TRT-LLM default (0.95).
+                          Only used when use_eplb=True and ema_warmup_steps > 0.
+        ema_noise_sigma: Log-normal noise sigma for expert popularity perturbation.
+                         Legacy mode, used when dirichlet_concentration == 0.
+        dirichlet_concentration: Dirichlet concentration parameter.
+                         >0 enables Dirichlet-Multinomial noise model (recommended).
+                         0 falls back to legacy lognormal mode.
 
     Returns:
         If return_rank0_info=False:
@@ -1255,11 +1509,24 @@ def power_law_logits_v3(
     import torch.nn.functional as F
 
     if use_eplb:
-        # Use EPLB for load balanced distribution (with optional redundant experts)
         actual_num_slots = num_slots if num_slots is not None else num_experts
-        num_tokens_per_slot, h_selected_slots = _generate_power_law_distribution_with_eplb(
-            num_tokens, num_experts, topk, ep, alpha, num_slots=actual_num_slots
-        )
+        if ema_warmup_steps > 0:
+            num_tokens_per_slot, h_selected_slots = _generate_power_law_distribution_with_ema_eplb(
+                num_tokens,
+                num_experts,
+                topk,
+                ep,
+                alpha,
+                num_slots=actual_num_slots,
+                ema_warmup_steps=ema_warmup_steps,
+                ema_decay_factor=ema_decay_factor,
+                ema_noise_sigma=ema_noise_sigma,
+                dirichlet_concentration=dirichlet_concentration,
+            )
+        else:
+            num_tokens_per_slot, h_selected_slots = _generate_power_law_distribution_with_eplb(
+                num_tokens, num_experts, topk, ep, alpha, num_slots=actual_num_slots
+            )
         # Convert to router logits via one-hot encoding and softmax
         expert_map = F.one_hot(h_selected_slots.long(), num_classes=actual_num_slots).sum(1)
         router_logits = F.softmax(expert_map.bfloat16(), dim=1)

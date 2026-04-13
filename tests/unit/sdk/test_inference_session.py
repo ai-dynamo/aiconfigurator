@@ -121,7 +121,7 @@ def _build_mock_backend():
 def _patch_get_model(monkeypatch):
     """Replace ``models.get_model`` so no real model files are needed."""
 
-    def _fake_get_model(model_path, model_config, backend_name):
+    def _fake_get_model(model_path, model_config, backend_name, sm_version=0):
         m = MagicMock()
         m._tp = model_config.tp_size
         m._pp = model_config.pp_size

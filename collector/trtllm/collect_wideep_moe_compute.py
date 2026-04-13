@@ -69,6 +69,11 @@ aic_debug = int(os.getenv("AIC_MOE_DEBUG", "0"))
 # AIC_ACCURATE_WIDEEP_SIM=0: Simple mode - all tokens directly
 aic_accurate_wideep_sim = os.getenv("AIC_ACCURATE_WIDEEP_SIM", "1") == "1"
 
+aic_eplb_ema_warmup_steps = int(os.getenv("AIC_EPLB_EMA_WARMUP_STEPS", "0"))
+aic_eplb_ema_decay_factor = float(os.getenv("AIC_EPLB_EMA_DECAY_FACTOR", "0.95"))
+aic_eplb_ema_noise_sigma = float(os.getenv("AIC_EPLB_EMA_NOISE_SIGMA", "0.3"))
+aic_dirichlet_concentration = int(os.getenv("AIC_DIRICHLET_CONCENTRATION", "0"))
+
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wideep_moe_compute_tuned_cache_path")
 
 
@@ -176,7 +181,13 @@ class WideEPMoEComputeSimulator(nn.Module):
         self.ep_rank = 0
         self.cluster_size = 1
         self.cluster_rank = 0
-        self.tune_max_num_tokens = 8192
+        # Matches real WideEPMoE: fused_moe_wide_ep.py L108-111
+        topk = (
+            routing_method.top_k
+            if hasattr(routing_method, "top_k")
+            else getattr(routing_method, "experts_per_token", 1)
+        )
+        self.tune_max_num_tokens = 16384 * self.num_slots // max(topk, 1)
 
         # Swiglu parameters (None for standard Swiglu activation)
         # WideEPMoE does not support swiglu_alpha/beta/limit
@@ -519,6 +530,127 @@ class WideEPMoEComputeSimulator(nn.Module):
 
         return output
 
+    def forward_moe_as_alltoall(
+        self,
+        x_padded: torch.Tensor,
+        padded_slots: torch.Tensor,
+        padded_scales: torch.Tensor,
+        tuner_num_tokens: int,
+        do_finalize: bool = True,
+        x_padded_sf: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Execute MoE computation on PRE-BUILT padded tensors (AlltoAll post-state).
+
+        All tensor allocation and padding must be done BEFORE this call
+        (via _build_alltoall_equivalent_inputs). This method only does
+        quantization + kernel invocation, so it is safe on the benchmark hot path.
+
+        Args:
+            x_padded: [padded_total, hidden_size] already-padded hidden states
+            padded_slots: [padded_total, topk] already-padded GLOBAL slot IDs,
+                          padding rows filled with num_slots (invalid)
+            padded_scales: [padded_total, topk] already-padded routing weights
+            tuner_num_tokens: total real tokens across all ranks (for AutoTuner)
+            do_finalize: Whether to fuse the finalize step
+            x_padded_sf: Pre-computed NVFP4 scale factors (None for non-NVFP4)
+        """
+        topk = padded_slots.shape[1]
+
+        x = x_padded
+        x_sf = x_padded_sf
+        if self.has_fp8_qdq:
+            x, _ = torch.ops.tensorrt_llm.static_quantize_e4m3_per_tensor(x, self.fc31_input_dequant)
+        elif self.has_nvfp4:
+            x_row = x.shape[0]
+            x, x_sf = torch.ops.trtllm.fp4_quantize(
+                x, self.fc31_input_scale, self.scaling_vector_size, sfUseUE8M0=False, isSfSwizzledLayout=False
+            )
+            x_sf = x_sf.view((x_row, -1))
+        elif self.has_deepseek_fp8_block_scales:
+            pass
+
+        output_dtype = torch.bfloat16
+        output = self.moe_op.run_moe(
+            module=self,
+            input=x,
+            token_selected_slots=padded_slots,
+            token_final_scales=padded_scales,
+            w3_w1_weight=self.w3_w1_weight,
+            w3_w1_bias=None,
+            w2_weight=self.w2_weight,
+            w2_bias=None,
+            output_dtype=output_dtype,
+            quant_scales=self.quant_scales,
+            use_all_to_all=True,
+            input_sf=x_sf,
+            swizzled_input_sf=False,
+            min_latency_mode=False,
+            use_fused_finalize=do_finalize,
+            tuner_num_tokens=tuner_num_tokens,
+            tuner_top_k=topk,
+        )
+
+        if isinstance(output, (list, tuple)):
+            output = output[0]
+
+        return output
+
+
+def _build_alltoall_equivalent_inputs(
+    rank0_selected_slots: torch.Tensor,
+    token_final_scales: torch.Tensor,
+    rank0_hidden: torch.Tensor,
+    total_num_tokens: int,
+    ep_size: int,
+    num_slots: int,
+    hidden_size: int,
+    topk: int,
+    device: torch.device,
+):
+    """
+    Pre-build padded tensors that simulate AlltoAll dispatch output.
+
+    In real WideEP (NVLink TwoSided), after AlltoAll dispatch:
+    - x is padded to [all_rank_max_num_tokens * ep_size, hidden_size]
+    - Token slot IDs remain as GLOBAL slot IDs (the C++ MoE kernel uses
+      ep_size/ep_rank to determine locality internally)
+    - memset_expert_ids only sets PADDING tokens' slot IDs to num_slots (invalid)
+    - Real tokens retain their original global slot assignments
+
+    All memory allocation is done here so the benchmark hot path is allocation-free.
+
+    Args:
+        rank0_selected_slots: [rank0_num_tokens, topk] with GLOBAL slot IDs
+        token_final_scales: [rank0_num_tokens, topk] routing weights
+        rank0_hidden: [rank0_num_tokens, hidden_size] hidden states (CPU or GPU)
+        total_num_tokens: total tokens across all ranks
+        ep_size: expert parallelism size
+        num_slots: total number of slots (global)
+        hidden_size: hidden dimension
+        topk: top-k experts per token
+        device: target CUDA device
+
+    Returns:
+        (x_padded, padded_slots, padded_scales, tuner_num_tokens)
+        All tensors are on device and ready for forward_moe_as_alltoall.
+    """
+    rank0_num_tokens = rank0_hidden.shape[0]
+
+    all_rank_max_num_tokens = total_num_tokens // ep_size if total_num_tokens >= ep_size else 1
+    padded_total = all_rank_max_num_tokens * ep_size
+
+    x_padded = torch.zeros([padded_total, hidden_size], dtype=torch.bfloat16, device=device)
+    x_padded[:rank0_num_tokens] = rank0_hidden.bfloat16().to(device)
+
+    padded_slots = torch.full([padded_total, topk], num_slots, dtype=torch.int32, device=device)
+    padded_slots[:rank0_num_tokens] = rank0_selected_slots.to(torch.int32).to(device)
+
+    padded_scales = torch.zeros([padded_total, topk], dtype=torch.float32, device=device)
+    padded_scales[:rank0_num_tokens] = token_final_scales.to(torch.float32).to(device)
+
+    return x_padded, padded_slots, padded_scales, total_num_tokens
+
 
 # =============================================================================
 # Test Cases Generation
@@ -742,10 +874,33 @@ def run_wideep_moe_compute(
     for i in range(len(num_tokens_lists)):
         max_tokens = num_tokens_lists[-i - 1]
         try:
-            hidden_states_max_tokens = torch.randn([max_tokens, hidden_size], device="cpu").bfloat16().to(device)
-            # Use num_slots for routing (EPLB routes to slots, not experts)
-            logits_max_tokens = balanced_logits(max_tokens, num_slots, topk).to(router_logits_dtype).to(device)
-            moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
+            if accurate_wideep_simulation:
+                # Dry run using AlltoAll-equivalent forward path
+                dp_max = max_tokens // moe_ep_size if max_tokens >= moe_ep_size else 1
+                slots_per_rank = num_slots // moe_ep_size
+                dr_x, dr_slots, dr_scales, dr_tuner = _build_alltoall_equivalent_inputs(
+                    rank0_selected_slots=torch.randint(0, slots_per_rank, [dp_max, topk]),
+                    token_final_scales=torch.ones([dp_max, topk]) / topk,
+                    rank0_hidden=torch.randn([dp_max, hidden_size]).bfloat16(),
+                    total_num_tokens=max_tokens,
+                    ep_size=moe_ep_size,
+                    num_slots=num_slots,
+                    hidden_size=hidden_size,
+                    topk=topk,
+                    device=device,
+                )
+                moe.forward_moe_as_alltoall(
+                    dr_x,
+                    dr_slots,
+                    dr_scales,
+                    tuner_num_tokens=dr_tuner,
+                    do_finalize=not min_latency_mode,
+                )
+                del dr_x, dr_slots, dr_scales
+            else:
+                hidden_states_max_tokens = torch.randn([max_tokens, hidden_size], device="cpu").bfloat16().to(device)
+                logits_max_tokens = balanced_logits(max_tokens, num_slots, topk).to(router_logits_dtype).to(device)
+                moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
             torch.cuda.synchronize()
             print(f"[dry run] Successfully dry run for {max_tokens} tokens")
             break
@@ -786,19 +941,43 @@ def run_wideep_moe_compute(
                 continue
             else:
                 try:
-                    with torch.inference_mode(), autotune(cache_path=cache_path):
-                        moe.forward(
-                            hidden_states_max_tokens[:max_tokens_for_tuning],
-                            logits_max_tokens[:max_tokens_for_tuning],
-                            do_finalize=not min_latency_mode,
+                    if accurate_wideep_simulation:
+                        dp_tune = max_tokens_for_tuning // moe_ep_size if max_tokens_for_tuning >= moe_ep_size else 1
+                        t_x, t_slots, t_scales, t_tuner = _build_alltoall_equivalent_inputs(
+                            rank0_selected_slots=torch.randint(0, num_slots // moe_ep_size, [dp_tune, topk]),
+                            token_final_scales=torch.ones([dp_tune, topk]) / topk,
+                            rank0_hidden=torch.randn([dp_tune, hidden_size]).bfloat16(),
+                            total_num_tokens=max_tokens_for_tuning,
+                            ep_size=moe_ep_size,
+                            num_slots=num_slots,
+                            hidden_size=hidden_size,
+                            topk=topk,
+                            device=device,
                         )
+                        with torch.inference_mode(), autotune(cache_path=cache_path):
+                            moe.forward_moe_as_alltoall(
+                                t_x,
+                                t_slots,
+                                t_scales,
+                                tuner_num_tokens=t_tuner,
+                                do_finalize=not min_latency_mode,
+                            )
+                        del t_x, t_slots, t_scales
+                    else:
+                        with torch.inference_mode(), autotune(cache_path=cache_path):
+                            moe.forward(
+                                hidden_states_max_tokens[:max_tokens_for_tuning],
+                                logits_max_tokens[:max_tokens_for_tuning],
+                                do_finalize=not min_latency_mode,
+                            )
                     torch.cuda.synchronize()
                     break  # Tuning succeeded, exit loop
                 except Exception as e:
                     print(f"tune failed for {max_tokens_for_tuning} tokens: {e}, fallback to smaller tokens")
                     continue
 
-    del hidden_states_max_tokens, logits_max_tokens
+    if not accurate_wideep_simulation:
+        del hidden_states_max_tokens, logits_max_tokens
 
     # =========================================================================
     # Benchmark each token count
@@ -807,7 +986,7 @@ def run_wideep_moe_compute(
         if num_tokens > max_tokens:
             continue
 
-        num_iter = 5 if distributed == "power_law" else 1
+        num_iter = 20 if distributed == "power_law" else 1
 
         # In WideEP, DP size = EP size, each DP rank has num_tokens/ep_size tokens
         dp_num_tokens = num_tokens if num_tokens < moe_ep_size else num_tokens // moe_ep_size
@@ -818,52 +997,69 @@ def run_wideep_moe_compute(
 
         if accurate_wideep_simulation:
             # =====================================================================
-            # ACCURATE MODE: Simulates real WideEP scenario
-            # - Router uses dp_num_tokens (single DP rank)
-            # - MoE uses only tokens routed to EP rank 0
+            # ACCURATE MODE: Simulates real WideEP AlltoAll dispatch post-state
+            # - Constructs padded inputs matching AlltoAll dispatch output
+            # - Uses use_all_to_all=True for correct kernel path
+            # - AutoTuner sees the same input shape as real inference
             # =====================================================================
             if distributed == "power_law":
-                # Generate ONE distribution to get rank0 info with EPLB slot assignments
-                _, rank0_info = power_law_logits_v3(
-                    num_tokens,
-                    num_experts,
-                    topk,
-                    moe_ep_size,
-                    power_law_alpha,
-                    use_eplb=use_eplb,
-                    num_slots=num_slots,
-                    return_rank0_info=True,
-                )
-                rank0_num_tokens = rank0_info["rank0_num_tokens"]
-                rank0_total_selections = rank0_info["rank0_total_selections"]
-                rank0_logits = rank0_info["rank0_logits"].to(router_logits_dtype).to(device)
+                # Generate num_iter INDEPENDENT distribution samples to reduce
+                # multinomial sampling variance. Each sample calls power_law_logits_v3
+                # separately, producing different rank0 token distributions.
+                # Padded tensor shapes are identical across samples (determined by
+                # total_num_tokens / ep_size), so CUDA Graph capture is safe.
+                rank0_data_list = []
+                total_selections_list = []
+                for _sample_idx in range(num_iter):
+                    _, rank0_info = power_law_logits_v3(
+                        num_tokens,
+                        num_experts,
+                        topk,
+                        moe_ep_size,
+                        power_law_alpha,
+                        use_eplb=use_eplb,
+                        num_slots=num_slots,
+                        return_rank0_info=True,
+                        ema_warmup_steps=aic_eplb_ema_warmup_steps,
+                        ema_decay_factor=aic_eplb_ema_decay_factor,
+                        ema_noise_sigma=aic_eplb_ema_noise_sigma,
+                        dirichlet_concentration=aic_dirichlet_concentration,
+                    )
+                    rank0_num_tokens = rank0_info["rank0_num_tokens"]
+                    rank0_total_selections = rank0_info["rank0_total_selections"]
+                    rank0_logits = rank0_info["rank0_logits"].to(router_logits_dtype).to(device)
 
-                # Use EPLB's actual slot assignments (the TRUE distribution after load balancing)
-                rank0_selected_slots = rank0_info["rank0_selected_slots"].to(torch.int32).to(device)
-                # Compute scales from logits using EPLB's slot assignments
-                gathered_logits = torch.gather(rank0_logits, 1, rank0_selected_slots.long())
-                token_final_scales = torch.softmax(gathered_logits, dim=1).to(torch.float32)
+                    rank0_selected_slots_global = rank0_info["rank0_selected_slots"]
+                    gathered_logits = torch.gather(rank0_logits, 1, rank0_selected_slots_global.long().to(device))
+                    token_final_scales = torch.softmax(gathered_logits, dim=1).to(torch.float32)
 
-                # Create hidden states for rank0 tokens
-                rank0_hidden = torch.randn([rank0_num_tokens, hidden_size]).bfloat16().to(torch.device(device))
+                    rank0_hidden = torch.randn([rank0_num_tokens, hidden_size]).bfloat16()
 
-                # Create dummy router logits for DP rank (length = num_tokens / ep_size)
-                # This simulates the router computation on a single DP rank
-                # Random logits for router computation (just need correct shape, not actual distribution)
-                dummy_router_logits = torch.randn([dp_num_tokens, num_slots]).to(router_logits_dtype).to(device)
+                    x_pad, s_pad, sc_pad, tuner_nt = _build_alltoall_equivalent_inputs(
+                        rank0_selected_slots=rank0_selected_slots_global,
+                        token_final_scales=token_final_scales,
+                        rank0_hidden=rank0_hidden,
+                        total_num_tokens=num_tokens,
+                        ep_size=moe_ep_size,
+                        num_slots=num_slots,
+                        hidden_size=hidden_size,
+                        topk=topk,
+                        device=device,
+                    )
 
-                # Store data for forward_router_only + forward_moe_only
-                rank0_data_list = [
-                    {
-                        "hidden": rank0_hidden,
-                        "token_selected_slots": rank0_selected_slots,
-                        "token_final_scales": token_final_scales,
-                        "num_tokens": rank0_num_tokens,
-                        "router_logits": dummy_router_logits,  # for router computation
-                    }
-                    for _ in range(num_iter)
-                ]
-                total_selections_list = [rank0_total_selections] * num_iter
+                    dummy_router_logits = torch.randn([dp_num_tokens, num_slots]).to(router_logits_dtype).to(device)
+
+                    rank0_data_list.append(
+                        {
+                            "x_padded": x_pad,
+                            "padded_slots": s_pad,
+                            "padded_scales": sc_pad,
+                            "tuner_num_tokens": tuner_nt,
+                            "num_tokens": rank0_num_tokens,
+                            "router_logits": dummy_router_logits,
+                        }
+                    )
+                    total_selections_list.append(rank0_total_selections)
 
                 avg_rank0_tokens = sum(d["num_tokens"] for d in rank0_data_list) / len(rank0_data_list)
                 avg_rank0_selections = sum(total_selections_list) / len(total_selections_list)
@@ -875,8 +1071,19 @@ def run_wideep_moe_compute(
                     f"rank0_selections={avg_rank0_selections:.0f}, ep={moe_ep_size} {eplb_str}"
                 )
             else:  # balanced
-                hidden_states = torch.randn([dp_num_tokens, hidden_size], device="cpu").bfloat16().to(device)
-                actual_logits = balanced_logits(dp_num_tokens, num_slots, topk).to(router_logits_dtype).to(device)
+                # Pre-build padded tensors for balanced distribution
+                slots_per_rank = num_slots // moe_ep_size
+                bal_x, bal_slots, bal_scales, bal_tuner = _build_alltoall_equivalent_inputs(
+                    rank0_selected_slots=torch.randint(0, slots_per_rank, [dp_num_tokens, topk]),
+                    token_final_scales=torch.ones([dp_num_tokens, topk]) / topk,
+                    rank0_hidden=torch.randn([dp_num_tokens, hidden_size]).bfloat16(),
+                    total_num_tokens=num_tokens,
+                    ep_size=moe_ep_size,
+                    num_slots=num_slots,
+                    hidden_size=hidden_size,
+                    topk=topk,
+                    device=device,
+                )
                 actual_dp_tokens = dp_num_tokens
                 actual_rank0_tokens = dp_num_tokens
                 print(f"[accurate] balanced: total={num_tokens}, dp={dp_num_tokens}, ep={moe_ep_size}")
@@ -897,6 +1104,10 @@ def run_wideep_moe_compute(
                         power_law_alpha,
                         use_eplb=use_eplb,
                         num_slots=num_slots,
+                        ema_warmup_steps=aic_eplb_ema_warmup_steps,
+                        ema_decay_factor=aic_eplb_ema_decay_factor,
+                        ema_noise_sigma=aic_eplb_ema_noise_sigma,
+                        dirichlet_concentration=aic_dirichlet_concentration,
                     )
                     .to(router_logits_dtype)
                     .to(device)
@@ -922,14 +1133,21 @@ def run_wideep_moe_compute(
                 if distributed == "power_law":
                     for data in rank0_data_list:
                         moe_ref.forward_router_only(data["router_logits"])
-                        moe_ref.forward_moe_only(
-                            data["hidden"],
-                            data["token_selected_slots"],
-                            data["token_final_scales"],
+                        moe_ref.forward_moe_as_alltoall(
+                            data["x_padded"],
+                            data["padded_slots"],
+                            data["padded_scales"],
+                            tuner_num_tokens=data["tuner_num_tokens"],
                             do_finalize=not min_latency_mode,
                         )
                 else:
-                    moe_ref.forward(hidden_states, actual_logits, do_finalize=not min_latency_mode)
+                    moe_ref.forward_moe_as_alltoall(
+                        bal_x,
+                        bal_slots,
+                        bal_scales,
+                        tuner_num_tokens=bal_tuner,
+                        do_finalize=not min_latency_mode,
+                    )
             else:
                 if distributed == "power_law":
                     for logits in actual_logits_list:
@@ -1016,7 +1234,7 @@ def run_wideep_moe_compute(
             if distributed == "power_law":
                 del rank0_data_list
             else:
-                del actual_logits, hidden_states
+                del bal_x, bal_slots, bal_scales
         else:
             if distributed == "power_law":
                 del actual_logits_list, hidden_states
