@@ -922,3 +922,61 @@ def represent_list_flow(dumper, data):
 
 
 ListFlowDumper.add_representer(list, represent_list_flow)
+
+
+# ---------------------------------------------------------------------------
+# Plain-text helpers (cat -v safe output)
+# ---------------------------------------------------------------------------
+
+_ANSI_ESCAPE_RE = re.compile(r"(?:\x1B[@-Z\\-_]|[\x80-\x9A\x9C-\x9F]|(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~])")
+
+# Compact mapping of Unicode characters emitted by plotext to ASCII.
+# Only the characters actually produced by plotext's "clear" theme are
+# included: box-drawing frame (U+2500 range), block/quadrant elements
+# used for sub-cell plotting, the bullet marker, and braille dots.
+_UNICODE_TO_ASCII = str.maketrans(
+    {
+        # Box-drawing (frame)
+        "\u2500": "-",
+        "\u2502": "|",
+        "\u250c": "+",
+        "\u2510": "+",
+        "\u2514": "+",
+        "\u2518": "+",
+        "\u251c": "+",
+        "\u2524": "+",
+        "\u252c": "+",
+        "\u2534": "+",
+        "\u253c": "+",
+        # Block elements
+        "\u2580": "-",
+        "\u2581": "_",
+        "\u2584": "_",
+        "\u2588": "#",
+        "\u258c": "|",
+        "\u2590": "|",
+        # Quadrant block elements
+        "\u2596": ".",
+        "\u2597": ".",
+        "\u2598": "'",
+        "\u2599": "|",
+        "\u259a": ":",
+        "\u259b": "|",
+        "\u259c": "|",
+        "\u259d": "'",
+        "\u259e": "/",
+        "\u259f": "|",
+        # Marker / bullet
+        "\u2022": "*",
+    }
+)
+
+
+def strip_unicode_to_ascii(text: str) -> str:
+    """Strip ANSI escapes and replace Unicode graphics with ASCII.
+
+    Intended for piped / redirected CLI output so that tools like
+    ``cat -v`` render clean text instead of M-bM-^T... mojibake.
+    """
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    return text.translate(_UNICODE_TO_ASCII)

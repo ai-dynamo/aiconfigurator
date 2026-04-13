@@ -4,7 +4,6 @@
 import copy
 import logging
 import math
-import re
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,7 +17,7 @@ from aiconfigurator.sdk.common import ColumnsAgg
 from aiconfigurator.sdk.inference_session import DisaggInferenceSession, InferenceSession
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, strip_unicode_to_ascii
 
 logger = logging.getLogger(__name__)
 
@@ -480,11 +479,10 @@ def draw_pareto_to_string(
 
     try:
         buf = plotext.build()
-        # Remove ANSI if plain output is needed.
-        # https://stackoverflow.com/questions/14693701/how-can-i-remove-the-ansi-escape-sequences-from-a-string-in-python
+        # Strip ANSI escapes and Unicode box-drawing / block characters
+        # so piped output (e.g. `| cat -v`) is readable pure ASCII.
         if use_plain_cli_output():
-            ansi_escape_8bit = re.compile(r"(?:\x1B[@-Z\\-_]|[\x80-\x9A\x9C-\x9F]|(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~])")
-            buf = ansi_escape_8bit.sub("", buf)
+            buf = strip_unicode_to_ascii(buf)
     except Exception:
         logger.exception("failed to build plotext")
         buf = ""
