@@ -683,13 +683,12 @@ def benchmark_vllm_allreduce(
 
         size *= ratio
 
-    # Synchronize all ranks before cleanup
+    # Skip barrier + destroy_model_parallel — they can deadlock when
+    # vLLM's internal NCCL communicators (pynccl / custom_all_reduce)
+    # have pending async ops that ncclCommDestroy blocks on.
+    # torchrun manages process lifecycle; let it handle cleanup.
     get_device_module().synchronize()
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-
-    # Cleanup vLLM distributed environment
-    vllm_mods["destroy_model_parallel"]()
+    os._exit(0)
 
 
 def benchmark_sglang_allreduce(
@@ -916,13 +915,10 @@ def benchmark_sglang_allreduce(
 
         size *= ratio
 
-    # Synchronize all ranks before cleanup
+    # Skip barrier + destroy_model_parallel — same deadlock risk as vLLM
+    # path. torchrun manages process lifecycle.
     torch.cuda.synchronize()
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-
-    # Cleanup SGLang distributed environment
-    sglang_mods["destroy_model_parallel"]()
+    os._exit(0)
 
 
 def allreduce_benchmark(
