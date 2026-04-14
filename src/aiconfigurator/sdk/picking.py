@@ -20,7 +20,7 @@ Three picking modes are supported:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -485,7 +485,7 @@ def pick_autoscale(
 
 def pick_optimization_type(
     pareto_df: pd.DataFrame,
-    optimization_type: str,
+    optimization_type: Literal["throughput", "latency"],
     total_gpus: int,
     serving_mode: str,
     top_n: int = 5,

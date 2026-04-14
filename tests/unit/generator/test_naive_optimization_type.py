@@ -255,3 +255,21 @@ class TestBuildNaiveOptimizationType:
             agg = result["params"]["agg"]
             assert agg["tensor_parallel_size"] >= 1
             assert agg["gpus_per_worker"] >= 1
+
+    @patch(
+        "aiconfigurator.generator.naive._estimate_model_weight_bytes",
+        return_value=300 * 1024**3,
+    )
+    @patch(
+        "aiconfigurator.generator.naive._get_system_config",
+        return_value={"gpus_per_node": 8, "vram_per_gpu": 141 * 1024**3},
+    )
+    def test_model_too_large_for_one_gpu_selects_higher_tp(self, _sys, _est):
+        result = build_naive_generator_params(
+            model_name="test/model",
+            total_gpus=8,
+            system_name="h200_sxm",
+            backend_name="vllm",
+        )
+        agg = result["params"]["agg"]
+        assert agg["gpus_per_worker"] > 1

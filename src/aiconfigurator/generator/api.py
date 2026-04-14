@@ -628,15 +628,18 @@ def generate_naive_config(
         )
     logger.info("Using backend version: %s", backend_version)
 
+    params_dict = generator_params.get("params", {})
+    agg_or_prefill_params = params_dict.get("agg") or params_dict.get("prefill") or params_dict.get("decode") or {}
+    tp = agg_or_prefill_params.get("tensor_parallel_size", 1)
+    pp = agg_or_prefill_params.get("pipeline_parallel_size", 1)
+    gpus_per_worker = agg_or_prefill_params.get("gpus_per_worker", tp * pp)
+
     # Prepare output directory if provided
     actual_output_dir = None
     if output_dir:
         import random
 
         model_name_safe = model_path.replace("/", "_")
-        first_params = generator_params["params"].get("agg") or generator_params["params"].get("prefill", {})
-        tp = first_params.get("tensor_parallel_size", 1)
-        pp = first_params.get("pipeline_parallel_size", 1)
         result_dir = os.path.join(
             output_dir,
             f"{model_name_safe}_naive_tp{tp}_pp{pp}_{random.randint(0, 999999):06d}",
@@ -672,10 +675,6 @@ def generate_naive_config(
     logger.info("Generated %d artifacts", len(artifacts))
 
     # Build result metadata
-    first_params = generator_params["params"].get("agg") or generator_params["params"].get("prefill", {})
-    tp = first_params.get("tensor_parallel_size", 1)
-    pp = first_params.get("pipeline_parallel_size", 1)
-    gpus_per_worker = first_params.get("gpus_per_worker", tp * pp)
     replicas = total_gpus // gpus_per_worker
     gpus_used = gpus_per_worker * replicas
 
