@@ -14,7 +14,7 @@ import yaml
 from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.models import _apply_model_quant_defaults, check_is_moe, get_model_family
+from aiconfigurator.sdk.models import _apply_model_quant_defaults, _apply_model_quant_defaults_xpu, check_is_moe, get_model_family
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
 from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
 from aiconfigurator.sdk.utils import ListFlowDumper, enumerate_parallel_config, get_model_config_from_model_path
@@ -293,6 +293,11 @@ class TaskConfigFactory:
                     _deep_merge(config_dict, promoted)
                     applied_layers.append("gptoss-blackwell-mxfp8")
 
+        _xpu_systems = ("b60",)
+        if ctx.system_name in _xpu_systems:
+            _deep_merge(config_dict, {"worker_config": {"gemm_quant_mode": "bfloat16"}})
+            applied_layers.append("xpu-bfloat16-gemm")
+
         for profile in ctx.profiles:
             layers = cls.PROFILE_REGISTRY.get(profile)
             if not layers:
@@ -567,6 +572,13 @@ _quants = {
         "moe_quant_mode": "float16",
         "kvcache_quant_mode": "float16",
         "fmha_quant_mode": "float16",
+        "comm_quant_mode": "half",
+    },
+    "bfloat16": {
+        "gemm_quant_mode": "bfloat16",
+        "moe_quant_mode": "bfloat16",
+        "kvcache_quant_mode": "bfloat16",
+        "fmha_quant_mode": "bfloat16",
         "comm_quant_mode": "half",
     },
     "nvfp4": {
@@ -856,13 +868,23 @@ class TaskConfig:
                 comm_quant_mode=_get_cfg_value(worker_cfg, "comm_quant_mode"),
             )
             # TODO: _apply_model_quant_defaults is only called here. Maybe these two functions should be merged.
-            _apply_model_quant_defaults(
-                model_config,
-                model_raw_config or {},
-                model_architecture,
-                self.backend_name,
-                worker_name,
-            )
+            if worker_cfg.system_name in ["b60"]:
+                _apply_model_quant_defaults_xpu(
+                    model_config,
+                    model_raw_config or {},
+                    model_architecture,
+                    self.backend_name,
+                    worker_name,
+                )
+
+            else:
+                _apply_model_quant_defaults(
+                    model_config,
+                    model_raw_config or {},
+                    model_architecture,
+                    self.backend_name,
+                    worker_name,
+                )
 
             # Apply inferred quant modes to worker config.
             quant_modes = {

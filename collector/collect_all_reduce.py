@@ -982,7 +982,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend", "-b", choices=["trtllm", "vllm", "sglang"], default="trtllm", help="AllReduce backend to benchmark"
     )
-    parser.add_argument("--dtype", "-t", default="float16")
+    parser.add_argument("--dtype", "-t", default="bfloat16" if torch.xpu.is_available() else "float16")
     parser.add_argument(
         "--range",
         "-r",

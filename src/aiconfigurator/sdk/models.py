@@ -8,6 +8,8 @@ import logging
 from functools import cache
 from typing import Optional
 
+import torch
+
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.utils import _load_model_config_from_model_path, get_model_config_from_model_path
@@ -156,6 +158,48 @@ def _apply_model_quant_defaults(
             model_config.comm_quant_mode,
         )
 
+def _apply_model_quant_defaults_xpu(
+    model_config: config.ModelConfig,
+    raw_config: dict,
+    architecture: str,
+    backend_name: str,
+    worker_name: Optional[str] = None,
+) -> None:
+    # Clone original model_config to track if any modifications were made
+    original_config = dataclasses.replace(model_config)
+
+    inferred = _infer_quant_modes_from_raw_config(raw_config)
+    applied: list[str] = []
+    for key, value in inferred.items():
+        if getattr(model_config, key, None) is None:
+            setattr(model_config, key, value)
+            applied.append(f"{key}={value.name}")
+
+    if model_config.gemm_quant_mode is None:
+        model_config.gemm_quant_mode = common.GEMMQuantMode.bfloat16
+    if model_config.moe_quant_mode is None:
+        model_config.moe_quant_mode = common.MoEQuantMode.bfloat16
+    if model_config.kvcache_quant_mode is None:
+        model_config.kvcache_quant_mode = common.KVCacheQuantMode.bfloat16
+    if model_config.fmha_quant_mode is None:
+        model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
+    if model_config.comm_quant_mode is None:
+        model_config.comm_quant_mode = common.CommQuantMode.half
+
+    if applied:
+        logger.debug("Using model-provided quantization defaults: %s", ", ".join(applied))
+
+    # Only log if model_config was modified
+    if original_config != model_config:
+        logger.info(
+            "Resolved quant modes for %s: gemm=%s moe=%s kvcache=%s fmha=%s comm=%s",
+            worker_name or architecture,
+            model_config.gemm_quant_mode,
+            model_config.moe_quant_mode,
+            model_config.kvcache_quant_mode,
+            model_config.fmha_quant_mode,
+            model_config.comm_quant_mode,
+        )
 
 def get_model(
     model_path: str,
@@ -552,6 +596,18 @@ class BaseModel:
         self._nextn = model_config.nextn
         self._nextn_accept_rates = model_config.nextn_accept_rates
 
+    def get_default_logits_quant_mode(self) -> common.GEMMQuantMode:
+        """
+        Get default logits quantization mode based on hardware capabilities.
+        """
+        return common.GEMMQuantMode.bfloat16 if torch.xpu.is_available() else common.GEMMQuantMode.float16
+
+    def get_default_router_gemm_quant_mode(self) -> common.GEMMQuantMode:
+        """
+        Get default router GEMM quantization mode based on hardware capabilities.
+        """
+        return common.GEMMQuantMode.bfloat16 if torch.xpu.is_available() else common.GEMMQuantMode.float16
+
 
 class GPTModel(BaseModel):
     """
@@ -629,7 +685,7 @@ class GPTModel(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 ),
             ]
         )
@@ -688,7 +744,7 @@ class GPTModel(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 ),
             ]
         )
@@ -793,7 +849,7 @@ class LLAMAModel(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 ),
             ]
         )
@@ -854,7 +910,7 @@ class LLAMAModel(BaseModel):
                     1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 ),
             ]
         )
@@ -1014,7 +1070,7 @@ class MOEModel(BaseModel):
                     self._num_layers,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_router_gemm_quant_mode(),
                 )
             ]
         )
@@ -1102,7 +1158,7 @@ class MOEModel(BaseModel):
                     self._num_layers * self._mtp_scale_factor,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_router_gemm_quant_mode(),
                 )
             ]
         )
@@ -1157,7 +1213,7 @@ class MOEModel(BaseModel):
                     1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 )
             ]
         )
@@ -1337,7 +1393,7 @@ class DeepSeekModel(BaseModel):
                     self._num_layers,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_router_gemm_quant_mode(),
                 )
             ]
         )
@@ -1404,7 +1460,7 @@ class DeepSeekModel(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 )
             ]
         )
@@ -1506,7 +1562,7 @@ class DeepSeekModel(BaseModel):
                 self._num_layers * self._mtp_scale_factor,
                 self._num_experts,
                 h,
-                common.GEMMQuantMode.float16,
+                self.get_default_router_gemm_quant_mode(),
             ),
             ops.MoEDispatch(
                 "generation_moe_pre_dispatch",
@@ -1558,7 +1614,7 @@ class DeepSeekModel(BaseModel):
                     1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 )
             ]
         )
@@ -1662,7 +1718,7 @@ class DeepSeekV32Model(BaseModel):
                     self._num_layers,
                     self._num_experts,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_router_gemm_quant_mode(),
                 ),
                 ops.MoEDispatch(
                     "context_moe_pre_dispatch",
@@ -1706,7 +1762,7 @@ class DeepSeekV32Model(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 ),
             ]
         )
@@ -1769,7 +1825,7 @@ class DeepSeekV32Model(BaseModel):
                 self._num_layers * self._mtp_scale_factor,
                 self._num_experts,
                 h,
-                common.GEMMQuantMode.float16,
+                self.get_default_router_gemm_quant_mode(),
             ),
             ops.MoEDispatch(
                 "generation_moe_pre_dispatch",
@@ -1818,7 +1874,7 @@ class DeepSeekV32Model(BaseModel):
                 1 * self._mtp_scale_factor,
                 self._vocab_size // tp_size,
                 h,
-                common.GEMMQuantMode.float16,
+                self.get_default_logits_quant_mode(),
             )
         )
 
@@ -1991,7 +2047,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 ),
             ]
         )
@@ -2564,7 +2620,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 )
             ]
         )
@@ -2772,7 +2828,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     1 * self._mtp_scale_factor,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 )
             ]
         )
@@ -3241,7 +3297,7 @@ class NemotronNas(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 )
             )
 
@@ -3360,7 +3416,7 @@ class NemotronNas(BaseModel):
                     1,
                     self._vocab_size // tp_size,
                     h,
-                    common.GEMMQuantMode.float16,
+                    self.get_default_logits_quant_mode(),
                 )
             )
 
@@ -3680,7 +3736,7 @@ class NemotronHModel(BaseModel):
                 1,
                 self._vocab_size // tp_size,
                 h,
-                common.GEMMQuantMode.float16,
+                self.get_default_logits_quant_mode(),
             )
         )
 
@@ -3939,7 +3995,7 @@ class NemotronHModel(BaseModel):
                 1,
                 self._vocab_size // tp_size,
                 h,
-                common.GEMMQuantMode.float16,
+                self.get_default_logits_quant_mode(),
             )
         )
 
@@ -4075,7 +4131,7 @@ class HybridMoEModel(BaseModel):
     ) -> list:
         """Return the three MoE FFN ops (pre-dispatch, compute, post-dispatch)."""
         router_ops = (
-            [ops.GEMM(f"{prefix}_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.float16)]
+            [ops.GEMM(f"{prefix}_router_gemm", count, self._num_experts, h, self.get_default_router_gemm_quant_mode())]
             if self._num_experts >= 128
             else []
         )
@@ -4233,7 +4289,7 @@ class HybridMoEModel(BaseModel):
 
         self.context_ops.extend(
             [
-                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, self.get_default_logits_quant_mode()),
                 ops.P2P("context_p2p", pp - 1, h, pp),
             ]
         )
@@ -4369,7 +4425,7 @@ class HybridMoEModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, self.get_default_logits_quant_mode()),
                 ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]
         )
@@ -4530,7 +4586,7 @@ class Qwen35Model(BaseModel):
 
         self.context_ops.extend(
             [
-                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, self.get_default_logits_quant_mode()),
                 ops.P2P("context_p2p", pp - 1, h, pp),
             ]
         )
@@ -4543,7 +4599,7 @@ class Qwen35Model(BaseModel):
         if cfg.num_experts > 0:
             if cfg.num_experts >= 128:
                 ops_list.append(
-                    ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.float16)
+                    ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, self.get_default_router_gemm_quant_mode())
                 )
             ops_list.extend(
                 [
@@ -4727,7 +4783,7 @@ class Qwen35Model(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.float16),
+                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, self.get_default_logits_quant_mode()),
                 ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]
         )
@@ -4740,7 +4796,7 @@ class Qwen35Model(BaseModel):
         if cfg.num_experts > 0:
             if cfg.num_experts >= 128:
                 ops_list.append(
-                    ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.float16)
+                    ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, self.get_default_router_gemm_quant_mode())
                 )
             ops_list.extend(
                 [

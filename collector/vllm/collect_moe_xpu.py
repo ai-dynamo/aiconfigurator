@@ -171,7 +171,7 @@ def get_moe_test_cases():
     """Generate MoE test cases"""
 
     # Quantization types supported by vLLM
-    moe_list = ["float16"]
+    moe_list = ["bfloat16"]
     if hasattr(torch, "float8_e4m3fn"):
         moe_list += ["fp8"]
     moe_list += ["w4a16_mxfp4"]
@@ -283,14 +283,14 @@ def run_moe_torch(
             local_num_experts,
             2 * local_inter_size,
             hidden_size,
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
         w2 = torch.randn(
             local_num_experts,
             hidden_size,
             local_inter_size,
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device=device,
         )
 
@@ -298,13 +298,15 @@ def run_moe_torch(
             w1, w13_scales = quantize_fp8_per_expert(w1)
             w2, w2_scales = quantize_fp8_per_expert(w2)
 
+    w1.data = w1.transpose(-1, -2).contiguous()
+    w2.data = w2.transpose(-1, -2).contiguous()
+
     # Performance testing for each token count
     for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
         print("num_tokens", num_tokens)
         print("topk", topk)
 
-        # bfloat16 + padded hidden for mxfp4; float16 + original hidden otherwise
-        hs_dtype = torch.bfloat16 if use_mxfp4 else torch.float16
+        hs_dtype = torch.bfloat16
         hidden_states = torch.randn([num_tokens, padded_hidden], dtype=hs_dtype, device=device)
 
         # Generate topk_weights and topk_ids
