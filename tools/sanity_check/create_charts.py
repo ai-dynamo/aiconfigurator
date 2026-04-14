@@ -15,8 +15,8 @@ import sys
 import textwrap
 from collections import defaultdict
 
-from aiconfigurator.sdk.perf_database import get_database
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.perf_database import get_database
 
 # Disable interactive backend
 os.environ["MPLBACKEND"] = "agg"
