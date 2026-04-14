@@ -840,9 +840,8 @@ def run_wideep_moe_compute(
 
                 # Use EPLB's actual slot assignments (the TRUE distribution after load balancing)
                 rank0_selected_slots = rank0_info["rank0_selected_slots"].to(torch.int32).to(device)
-                # Compute scales from logits using EPLB's slot assignments
-                gathered_logits = torch.gather(rank0_logits, 1, rank0_selected_slots.long())
-                token_final_scales = torch.softmax(gathered_logits, dim=1).to(torch.float32)
+                # rank0_logits already contains the global routing probabilities.
+                token_final_scales = torch.gather(rank0_logits, 1, rank0_selected_slots.long()).to(torch.float32)
 
                 # Create hidden states for rank0 tokens
                 rank0_hidden = torch.randn([rank0_num_tokens, hidden_size]).bfloat16().to(torch.device(device))
