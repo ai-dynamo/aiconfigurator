@@ -46,6 +46,69 @@ def test_query_gemm_empirical_mode(stub_perf_db):
     )
 
 
+def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, monkeypatch):
+    """Exact GEMM hits should bypass both 1D and 3D interpolation."""
+    quant_mode = common.GEMMQuantMode.float16
+    m, n, k = 16, 128, 128
+
+    def _fail_interp_3d(*args, **kwargs):
+        raise AssertionError("_interp_3d should not be used for exact GEMM matches")
+
+    def _fail_interp_1d(*args, **kwargs):
+        raise AssertionError("_interp_1d should not be used for exact GEMM matches")
+
+    monkeypatch.setattr(comprehensive_perf_db, "_interp_3d", _fail_interp_3d)
+    monkeypatch.setattr(comprehensive_perf_db, "_interp_1d", _fail_interp_1d)
+
+    observed = comprehensive_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SILICON)
+    expected = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
+
+    assert math.isclose(float(observed), expected)
+
+
+def test_query_gemm_interpolates_only_on_m_when_nk_match(comprehensive_perf_db, monkeypatch):
+    """GEMM lookup should use 1D interpolation on m when n and k match."""
+    quant_mode = common.GEMMQuantMode.float16
+    m, n, k = 12, 128, 128
+    calls = {}
+
+    def _fail_interp_3d(*args, **kwargs):
+        raise AssertionError("_interp_3d should not be used when n/k match and only m needs interpolation")
+
+    def _spy_interp_1d(x, y, value):
+        calls["x"] = x
+        calls["y"] = y
+        calls["value"] = value
+        return {"latency": 0.1 + value * 0.001 + n * 0.0001 + k * 0.00001, "power": 0.0, "energy": 0.0}
+
+    monkeypatch.setattr(comprehensive_perf_db, "_interp_3d", _fail_interp_3d)
+    monkeypatch.setattr(comprehensive_perf_db, "_interp_1d", _spy_interp_1d)
+
+    observed = comprehensive_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SILICON)
+    expected = 0.1 + m * 0.001 + n * 0.0001 + k * 0.00001
+
+    assert math.isclose(float(observed), expected)
+    assert calls["x"] == [8, 16]
+    assert calls["value"] == m
+
+
+def test_query_gemm_fast_paths_support_legacy_scalar_leaves(comprehensive_perf_db, monkeypatch):
+    """Fast GEMM paths should support legacy scalar-leaf tables."""
+    quant_mode = common.GEMMQuantMode.float16
+    comprehensive_perf_db._gemm_data[quant_mode] = {
+        8: {128: {128: 0.5}},
+        16: {128: {128: 0.9}},
+    }
+
+    exact = comprehensive_perf_db.query_gemm(8, 128, 128, quant_mode, database_mode=common.DatabaseMode.SILICON)
+    interp = comprehensive_perf_db.query_gemm(12, 128, 128, quant_mode, database_mode=common.DatabaseMode.SILICON)
+
+    assert math.isclose(float(exact), 0.5)
+    assert math.isclose(float(interp), 0.7)
+    assert exact.energy == 0.0
+    assert interp.energy == 0.0
+
+
 def test_query_trtllm_alltoall_normalizes_fp8_block_lookup(stub_perf_db):
     """
     fp8_block reuses the fp8 TRT-LLM alltoall perf tables.

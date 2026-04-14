@@ -303,3 +303,166 @@ class TestRateMatchingDegradationFactors:
         tsg_1 = df_1["tokens/s/gpu"].iloc[0]
         tsg_05 = df_05["tokens/s/gpu"].iloc[0]
         assert tsg_1 > tsg_05, f"factor=1.0 should yield higher tokens/s/gpu ({tsg_1}) than factor=0.5 ({tsg_05})"
+
+
+def _run_hetero(
+    sess: DisaggInferenceSession,
+    runtime_config: RuntimeConfig,
+    model_config: ModelConfig,
+    prefill_cfgs: list[tuple[int, int, int, int, int]],
+    decode_cfgs: list[tuple[int, int, int, int, int]],
+    max_prefill_gpus: int | None = None,
+    max_decode_gpus: int | None = None,
+) -> InferenceSummary | None:
+    """Similar as _run but accepts max_prefill_gpus / max_decode_gpus."""
+    return sess.find_best_disagg_result_under_constraints(
+        model_path="test-model",
+        runtime_config=runtime_config,
+        prefill_model_config=model_config,
+        prefill_parallel_config_list=prefill_cfgs,
+        prefill_max_num_tokens=4000,
+        prefill_num_worker_list=[1, 2, 4],
+        decode_model_config=model_config,
+        decode_parallel_config_list=decode_cfgs,
+        decode_max_num_tokens=512,
+        decode_num_worker_list=[1, 2, 4],
+        num_gpu_list=None,
+        max_prefill_gpus=max_prefill_gpus,
+        max_decode_gpus=max_decode_gpus,
+        require_same_tp=False,
+    )
+
+
+class TestHeteroDisaggGPUBudget:
+    """Verify max_prefill_gpus / max_decode_gpus filtering in _match_workers."""
+
+    def test_none_defaults_no_filtering(self, disagg_session, runtime_config, model_config):
+        """When both are None (default), behaviour is unchanged — results are returned."""
+        result = _run_hetero(
+            disagg_session,
+            runtime_config,
+            model_config,
+            prefill_cfgs=[(2, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1)],
+            max_prefill_gpus=None,
+            max_decode_gpus=None,
+        )
+        assert result is not None
+        df = result.get_summary_df()
+        assert df is not None and not df.empty
+
+    def test_symmetric_budget_allows_valid_configs(self, disagg_session, runtime_config, model_config):
+        """Symmetric pools large enough to fit workers produce results."""
+        # tp=2 → 2 GPUs per worker. Budget of 8 per pool allows up to 4 workers each.
+        result = _run_hetero(
+            disagg_session,
+            runtime_config,
+            model_config,
+            prefill_cfgs=[(2, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1)],
+            max_prefill_gpus=8,
+            max_decode_gpus=8,
+        )
+        assert result is not None
+        df = result.get_summary_df()
+        assert df is not None and not df.empty
+
+    def test_tight_prefill_budget_limits_prefill_workers(self, disagg_session, runtime_config, model_config):
+        """A small prefill budget should still produce results with fewer prefill workers."""
+        # tp=2 → 2 GPUs per worker. Prefill budget of 2 → only 1 prefill worker fits.
+        result = _run_hetero(
+            disagg_session,
+            runtime_config,
+            model_config,
+            prefill_cfgs=[(2, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1)],
+            max_prefill_gpus=2,
+            max_decode_gpus=8,
+        )
+        assert result is not None
+        df = result.get_summary_df()
+        assert df is not None and not df.empty
+        # All results must respect: prefill_gpus * prefill_workers <= 2
+        for _, row in df.iterrows():
+            prefill_gpus = row["(p)tp"] * row["(p)pp"] * row["(p)dp"]
+            assert prefill_gpus * row["(p)workers"] <= 2, (
+                f"Prefill GPU usage {prefill_gpus * row['(p)workers']} exceeds budget 2"
+            )
+
+    def test_tight_decode_budget_limits_decode_workers(self, disagg_session, runtime_config, model_config):
+        """A small decode budget should still produce results with fewer decode workers."""
+        # tp=2 → 2 GPUs per worker. Decode budget of 2 → only 1 decode worker fits.
+        result = _run_hetero(
+            disagg_session,
+            runtime_config,
+            model_config,
+            prefill_cfgs=[(2, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1)],
+            max_prefill_gpus=8,
+            max_decode_gpus=2,
+        )
+        assert result is not None
+        df = result.get_summary_df()
+        assert df is not None and not df.empty
+        for _, row in df.iterrows():
+            decode_gpus = row["(d)tp"] * row["(d)pp"] * row["(d)dp"]
+            assert decode_gpus * row["(d)workers"] <= 2, (
+                f"Decode GPU usage {decode_gpus * row['(d)workers']} exceeds budget 2"
+            )
+
+    def test_budget_too_small_returns_empty(self, disagg_session, runtime_config, model_config):
+        """When neither pool can fit even 1 worker, result is empty."""
+        # tp=2 → needs 2 GPUs, but budget is 1 per pool
+        result = _run_hetero(
+            disagg_session,
+            runtime_config,
+            model_config,
+            prefill_cfgs=[(2, 1, 1, 1, 1)],
+            decode_cfgs=[(2, 1, 1, 1, 1)],
+            max_prefill_gpus=1,
+            max_decode_gpus=1,
+        )
+        assert result is not None
+        df = result.get_summary_df()
+        assert df is None or df.empty
+
+    def test_asymmetric_pools_allow_valid_combo(self, disagg_session, runtime_config, model_config):
+        """Asymmetric pools: 4 prefill GPUs + 12 decode GPUs with tp=4 workers."""
+        # tp=4 → 4 GPUs per worker. Prefill budget 4 → 1 worker, decode budget 12 → up to 3 workers.
+        result = _run_hetero(
+            disagg_session,
+            runtime_config,
+            model_config,
+            prefill_cfgs=[(4, 1, 1, 1, 1)],
+            decode_cfgs=[(4, 1, 1, 1, 1)],
+            max_prefill_gpus=4,
+            max_decode_gpus=12,
+        )
+        assert result is not None
+        df = result.get_summary_df()
+        assert df is not None and not df.empty
+        for _, row in df.iterrows():
+            prefill_gpus = row["(p)tp"] * row["(p)pp"] * row["(p)dp"]
+            decode_gpus = row["(d)tp"] * row["(d)pp"] * row["(d)dp"]
+            assert prefill_gpus * row["(p)workers"] <= 4
+            assert decode_gpus * row["(d)workers"] <= 12
+
+    @pytest.mark.parametrize(
+        "prefill_budget,decode_budget",
+        [(0, 8), (8, 0), (0, 0), (-1, 8), (8, -2)],
+        ids=["zero_prefill", "zero_decode", "both_zero", "neg_prefill", "neg_decode"],
+    )
+    def test_zero_or_negative_budget_raises(
+        self, disagg_session, runtime_config, model_config, prefill_budget, decode_budget
+    ):
+        """Setting max_prefill_gpus or max_decode_gpus to 0 or negative raises ValueError."""
+        with pytest.raises(ValueError, match="must be a positive integer"):
+            _run_hetero(
+                disagg_session,
+                runtime_config,
+                model_config,
+                prefill_cfgs=[(2, 1, 1, 1, 1)],
+                decode_cfgs=[(2, 1, 1, 1, 1)],
+                max_prefill_gpus=prefill_budget,
+                max_decode_gpus=decode_budget,
+            )

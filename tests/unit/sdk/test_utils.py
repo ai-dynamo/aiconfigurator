@@ -15,6 +15,7 @@ from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import HybridMoEModel
 from aiconfigurator.sdk.utils import (
     _parse_hf_config_json,
+    enumerate_parallel_config,
     enumerate_ttft_tpot_constraints,
     get_model_config_from_model_path,
 )
@@ -653,3 +654,88 @@ class TestEnumerateTTFTTPOTConstraints:
         derived_pair = next((pair for pair in constraints if pair[0] == pytest.approx(expected_ttft)), None)
         assert derived_pair is not None
         assert derived_pair[1] == pytest.approx((1000 - 950) / (50 - 1))
+
+
+class TestEnumerateParallelConfigSGLangMoE:
+    """Test enumerate_parallel_config for SGLang MoE scenarios."""
+
+    def test_sglang_non_wideep_moe_includes_moe_ep_gt_1(self):
+        """Test that SGLang + enable_wideep=False includes configs with moe_ep > 1."""
+        configs = enumerate_parallel_config(
+            num_gpu_list=[1, 2, 4, 8],
+            tp_list=[1, 2, 4, 8],
+            pp_list=[1],
+            dp_list=[1, 2, 4, 8],
+            moe_tp_list=[1, 2, 4, 8],
+            moe_ep_list=[1, 2, 4, 8],
+            is_moe=True,
+            backend=common.BackendName.sglang,
+            enable_wideep=False,
+        )
+        assert len(configs) > 0, "Should generate at least one config"
+        moe_ep_values = [c[4] for c in configs]
+        assert any(ep > 1 for ep in moe_ep_values), (
+            f"Should include at least one config with moe_ep > 1, got moe_ep values: {set(moe_ep_values)}"
+        )
+
+    def test_sglang_wideep_moe_excludes_moe_tp_gt_1(self):
+        """Test that SGLang + enable_wideep=True excludes configs with moe_tp > 1."""
+        configs = enumerate_parallel_config(
+            num_gpu_list=[8, 16, 32],
+            tp_list=[1, 2, 4, 8],
+            pp_list=[1],
+            dp_list=[1, 2, 4, 8, 16, 32],
+            moe_tp_list=[1, 2, 4, 8],
+            moe_ep_list=[8, 16, 32],
+            is_moe=True,
+            backend=common.BackendName.sglang,
+            enable_wideep=True,
+        )
+        assert len(configs) > 0, "Should generate at least one config"
+        # All configs should have moe_tp == 1 (EP-only for wideep)
+        for c in configs:
+            assert c[3] == 1, f"WideEP config should have moe_tp=1, got {c}"
+
+    def test_sglang_non_wideep_moe_allows_mixed_tp_ep(self):
+        """Test that SGLang + enable_wideep=False allows configs with both moe_tp > 1 and moe_ep > 1."""
+        configs = enumerate_parallel_config(
+            num_gpu_list=[1, 2, 4, 8],
+            tp_list=[1, 2, 4, 8],
+            pp_list=[1],
+            dp_list=[1, 2, 4, 8],
+            moe_tp_list=[1, 2, 4, 8],
+            moe_ep_list=[1, 2, 4, 8],
+            is_moe=True,
+            backend=common.BackendName.sglang,
+            enable_wideep=False,
+        )
+        # Should include configs with moe_ep == 1 (pure TP)
+        has_pure_tp = any(c[4] == 1 and c[3] > 1 for c in configs)
+        # Should include configs with moe_ep > 1
+        has_ep_gt_1 = any(c[4] > 1 for c in configs)
+        # Should include truly mixed configs (both moe_tp > 1 and moe_ep > 1)
+        has_mixed = any(c[3] > 1 and c[4] > 1 for c in configs)
+        assert has_pure_tp, "Should include pure TP configs (moe_ep=1, moe_tp>1)"
+        assert has_ep_gt_1, "Should include configs with moe_ep > 1"
+        assert has_mixed, "Should include mixed configs with both moe_tp > 1 and moe_ep > 1"
+
+    def test_sglang_deepep_intranode_excludes_moe_tp_gt_1(self):
+        """SGLang + moe_backend=deepep_moe + enable_wideep=False excludes moe_tp > 1."""
+        configs = enumerate_parallel_config(
+            num_gpu_list=[1, 2, 4, 8],
+            tp_list=[1, 2, 4, 8],
+            pp_list=[1],
+            dp_list=[1, 2, 4, 8],
+            moe_tp_list=[1, 2, 4, 8],
+            moe_ep_list=[1, 2, 4, 8],
+            is_moe=True,
+            backend=common.BackendName.sglang,
+            enable_wideep=False,
+            moe_backend="deepep_moe",
+        )
+        assert len(configs) > 0, "Should generate at least one config"
+        for c in configs:
+            assert c[3] == 1, f"DeepEP config should have moe_tp=1, got {c}"
+        # Should still include ep > 1 configs
+        moe_ep_values = [c[4] for c in configs]
+        assert any(ep > 1 for ep in moe_ep_values), "Should include configs with moe_ep > 1"

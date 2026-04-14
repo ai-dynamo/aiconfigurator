@@ -151,3 +151,23 @@ def test_log_final_summary(caplog, use_ansi):
     )
     assert (_ESC in text) == use_ansi
     assert "tokens/s/gpu" in text
+
+
+def test_draw_pareto_plain_output_is_pure_ascii():
+    """Ensure piped Pareto chart output is pure ASCII (no mojibake under `cat -v`).
+
+    Prior to this fix, plotext's Unicode box-drawing characters (U+2500-U+257F)
+    and block elements (U+2580-U+259F) appeared as M-bM-^T... sequences when
+    piped through `cat -v`, breaking CI logs and scripted post-processing.
+    """
+    setup_logging(no_color=True)
+    df = pd.DataFrame({"tokens/s/user": [1.0, 2.0, 3.0], "tokens/s/gpu_cluster": [10.0, 40.0, 90.0]})
+    out = draw_pareto_to_string(
+        "cat-v test",
+        [{"df": df, "label": "series"}],
+    )
+    non_ascii = [c for c in out if ord(c) > 127]
+    assert non_ascii == [], (
+        f"Plain output contains non-ASCII characters that would break `cat -v`: "
+        f"{[f'U+{ord(c):04X}' for c in set(non_ascii)]}"
+    )

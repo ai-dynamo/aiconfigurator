@@ -70,11 +70,6 @@ def get_moe_test_cases():
         if common_moe_testcase.token_expert_distribution != "power_law":
             continue
 
-        # Skip EP > 1 test cases - this collector only supports single-GPU MOE (ep_size=1)
-        # For EP > 1 (multi-GPU expert parallelism), use collect_wideep_deepep_moe.py instead
-        if common_moe_testcase.ep != 1:
-            continue
-
         model_name = common_moe_testcase.model_name
         if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
             continue
@@ -398,17 +393,30 @@ def run_moe_torch(
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
-    assert moe_ep_size == 1, "only support moe ep size = 1"
     assert moe_type in [
         "fp8_block",
         "float16",
         "nvfp4",
     ], "only support moe type = fp8_block, float16 or nvfp4"
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
+    assert num_experts % moe_ep_size == 0, "num_experts must be divisible by moe_ep_size"
+
+    # With EP, each GPU processes only its local experts
+    num_local_experts = num_experts // moe_ep_size
+
+    # For EP > 1, filter tokens to rank-local workload so the benchmark
+    # measures per-rank latency instead of the full-batch latency.
+    if moe_ep_size > 1:
+        _, rank0_info = power_law_logits_v3(
+            num_tokens, num_experts, topk, moe_ep_size, power_law_alpha, return_rank0_info=True
+        )
+        rank_num_tokens = rank0_info["rank0_num_tokens"]
+    else:
+        rank_num_tokens = num_tokens
 
     latency, power_stats = benchmark(
-        num_tokens,
-        num_experts,
+        rank_num_tokens,
+        num_local_experts,
         2 * inter_size // moe_tp_size,
         hidden_size,
         topk,

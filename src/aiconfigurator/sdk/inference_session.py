@@ -497,6 +497,8 @@ class DisaggInferenceSession:
         decode_max_num_tokens: int,
         decode_num_worker_list: list[int],
         num_gpu_list: list[int] | None,
+        max_prefill_gpus: int | None = None,
+        max_decode_gpus: int | None = None,
         require_same_tp: bool = False,
         autoscale: bool = False,
         target_tpot: float | None = None,
@@ -532,6 +534,11 @@ class DisaggInferenceSession:
                 possible disagg config and perf that matches SLA.
         """
 
+        if max_prefill_gpus is not None and max_prefill_gpus <= 0:
+            raise ValueError(f"max_prefill_gpus must be a positive integer, got {max_prefill_gpus}")
+        if max_decode_gpus is not None and max_decode_gpus <= 0:
+            raise ValueError(f"max_decode_gpus must be a positive integer, got {max_decode_gpus}")
+
         # minor perf optimization: convert num_gpu_list to a set to speed up lookup
         num_gpu_set = set[int](num_gpu_list) if num_gpu_list else set()
 
@@ -557,6 +564,13 @@ class DisaggInferenceSession:
                     # if num_gpu_set is not empty, we only consider the gpus that are in the set
                     if len(num_gpu_set) > 0 and num_gpu not in num_gpu_set:
                         continue
+
+                    # per-pool GPU budget for hetero disagg
+                    if max_prefill_gpus is not None and max_decode_gpus is not None:
+                        if prefill_gpus * prefill_num_worker > max_prefill_gpus:
+                            continue
+                        if decode_gpus * decode_num_worker > max_decode_gpus:
+                            continue
 
                     prefill_throughput_corrected = (
                         prefill_throughput * prefill_num_worker * rate_matching_prefill_degradation_factor

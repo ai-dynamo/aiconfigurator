@@ -1428,6 +1428,58 @@ def _get_deepseek_model_path():
     return "/deepseek-v3"
 
 
+def _get_moe_model_path():
+    """Get MoE model path, supporting multiple MoE models (DeepSeek, Qwen3, etc.).
+
+    Checks environment variables in priority order:
+    1. MOE_MODEL_PATH - generic, for any MoE model
+    2. DEEPSEEK_MODEL_PATH - backward compatibility for DeepSeek models
+    Otherwise, download only the necessary config files from HuggingFace.
+    This allows running the collector without downloading the full model weights.
+    """
+    # Try MOE_MODEL_PATH first (generic)
+    env_path = os.environ.get("MOE_MODEL_PATH")
+    if env_path:
+        return env_path
+
+    # Backward compatibility: try DEEPSEEK_MODEL_PATH
+    env_path = os.environ.get("DEEPSEEK_MODEL_PATH")
+    if env_path:
+        return env_path
+
+    # Download config files from HuggingFace (no model weights needed)
+    try:
+        from huggingface_hub import hf_hub_download
+
+        repo_id = "deepseek-ai/DeepSeek-V3"
+        config_files = [
+            "config.json",
+            "configuration_deepseek.py",
+            "tokenizer_config.json",
+            "tokenizer.json",
+        ]
+
+        snapshot_dir = None
+        for filename in config_files:
+            try:
+                path = hf_hub_download(repo_id=repo_id, filename=filename)
+                if snapshot_dir is None:
+                    snapshot_dir = os.path.dirname(path)
+            except Exception as e:
+                print(f"Warning: Failed to download {filename}: {e}")
+
+        if snapshot_dir:
+            print(f"Using DeepSeek-V3 config from HuggingFace cache: {snapshot_dir}")
+            return snapshot_dir
+    except ImportError:
+        print("Warning: huggingface_hub not installed, cannot auto-download config")
+    except Exception as e:
+        print(f"Warning: Failed to download DeepSeek-V3 config: {e}")
+
+    # Fallback to default path
+    return "/deepseek-v3"
+
+
 @functools.lru_cache(maxsize=1)
 def get_device_module():
     import torch

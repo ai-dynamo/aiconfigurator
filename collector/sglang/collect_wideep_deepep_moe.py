@@ -24,16 +24,16 @@ from sglang.srt.utils import (
 )
 
 try:
-    from helper import _get_deepseek_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
+    from helper import _get_moe_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
 except ModuleNotFoundError:
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import _get_deepseek_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
+    from helper import _get_moe_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
 from importlib.metadata import version as get_version
 
-DEEPSEEK_MODEL_PATH = _get_deepseek_model_path()
+MOE_MODEL_PATH = _get_moe_model_path()
 
 
 def get_moe_prefill_test_cases(rank):
@@ -151,12 +151,18 @@ def benchmark_moe_layer_prefill(
     num_local_experts,
     simulated_ep_size,
     output_path,
+    model_hidden_size,
+    model_inter_size,
+    model_total_experts,
 ):
     """Benchmark MoE layer in prefill phase
 
     Args:
-        num_local_experts: Number of experts on this GPU (= model's n_routed_experts)
-        simulated_ep_size: The EP size being simulated (= 256 / num_local_experts)
+        num_local_experts: Number of experts on this GPU (= model's n_routed_experts or num_experts)
+        simulated_ep_size: The EP size being simulated (= total_experts / num_local_experts)
+        model_hidden_size: Model's hidden_size from config
+        model_inter_size: Model's moe_intermediate_size from config
+        model_total_experts: Total number of experts in the model (256 for DeepSeek-V3, 128 for Qwen3)
     """
 
     for case in prefill_test_cases:
@@ -195,12 +201,12 @@ def benchmark_moe_layer_prefill(
             )
 
             num_tokens_iter = hidden_states_per_token_iter.shape[0]
-            topk = 8
+            topk = moe_layer.topk.topk_config.top_k
             topk_idx_iter = torch.full((num_tokens_iter, topk), -1, device=device, dtype=torch.int32)
             topk_weights_iter = torch.zeros((num_tokens_iter, topk), device=device, dtype=torch.float32)
 
             if distributed == "uniform":
-                tokens_per_local_expert = int(num_token * topk * simulated_ep_size // 256)
+                tokens_per_local_expert = int(num_token * topk * simulated_ep_size // model_total_experts)
                 rank_print(f"tokens_per_local_expert: {tokens_per_local_expert}")
                 if tokens_per_local_expert <= 0:
                     continue
@@ -341,10 +347,10 @@ def benchmark_moe_layer_prefill(
                             {
                                 "moe_dtype": "fp8_block",
                                 "num_tokens": num_tokens_log,
-                                "hidden_size": 7168,
-                                "inter_size": 2048,
-                                "topk": 8,
-                                "num_experts": 256,
+                                "hidden_size": model_hidden_size,
+                                "inter_size": model_inter_size,
+                                "topk": topk,
+                                "num_experts": model_total_experts,
                                 "moe_tp_size": moe_tp_size,
                                 "moe_ep_size": moe_ep_size,
                                 "distribution": distribution_str,
@@ -405,12 +411,18 @@ def benchmark_moe_layer_decode(
     num_local_experts,
     simulated_ep_size,
     output_path=None,
+    model_hidden_size=7168,
+    model_inter_size=2048,
+    model_total_experts=256,
 ):
     """Benchmark MoE layer in decode phase
 
     Args:
-        num_local_experts: Number of experts on this GPU (= model's n_routed_experts)
-        simulated_ep_size: The EP size being simulated (= 256 / num_local_experts)
+        num_local_experts: Number of experts on this GPU (= model's n_routed_experts or num_experts)
+        simulated_ep_size: The EP size being simulated (= total_experts / num_local_experts)
+        model_hidden_size: Model's hidden_size from config
+        model_inter_size: Model's moe_intermediate_size from config
+        model_total_experts: Total number of experts in the model (256 for DeepSeek-V3, 128 for Qwen3)
     """
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
@@ -471,8 +483,8 @@ def benchmark_moe_layer_decode(
                     for _ in range(5)
                 ]
             elif distributed == "uniform":
-                # Total experts is 256, simulated_ep_size = 256 / num_local_experts
-                base_tokens_per_expert = int(num_token * top_k) * simulated_ep_size // 256
+                # Total experts = model_total_experts, simulated_ep_size = model_total_experts / num_local_experts
+                base_tokens_per_expert = int(num_token * top_k) * simulated_ep_size // model_total_experts
                 if base_tokens_per_expert == 0:
                     # Each expert that receives tokens gets exactly 1 token
                     # Number of experts with tokens on this card = total_calls / simulated_ep_size
@@ -618,10 +630,10 @@ def benchmark_moe_layer_decode(
                             {
                                 "moe_dtype": "fp8_block",
                                 "num_tokens": num_tokens_log,
-                                "hidden_size": 7168,
-                                "inter_size": 2048,
-                                "topk": 8,
-                                "num_experts": 256,
+                                "hidden_size": model_hidden_size,
+                                "inter_size": model_inter_size,
+                                "topk": top_k,
+                                "num_experts": model_total_experts,
                                 "moe_tp_size": moe_tp_size,
                                 "moe_ep_size": moe_ep_size,
                                 "distribution": distribution_str,
@@ -692,22 +704,59 @@ def run_moe(
         rank_print(f"Testing with {num_experts} experts")
         rank_print(f"{'=' * 50}")
 
+        # Get ORIGINAL model config BEFORE applying override
+        # This is needed to get the true total_experts count
         original_json_override = server_args.json_model_override_args
-        server_args.json_model_override_args = json.dumps({"num_hidden_layers": 4, "n_routed_experts": num_experts})
+        original_model_config = ModelConfig.from_server_args(server_args)
+        original_hf_config = original_model_config.hf_config
+        model_hidden_size = original_hf_config.hidden_size
+        model_inter_size = getattr(original_hf_config, "moe_intermediate_size", 2048)
+        model_total_experts = getattr(original_hf_config, "n_routed_experts", None) or getattr(
+            original_hf_config, "num_experts", 256
+        )
+        rank_print(
+            f"Original model config: hidden_size={model_hidden_size}, "
+            f"inter_size={model_inter_size}, total_experts={model_total_experts}"
+        )
+
+        # Now apply override to load model with reduced experts
+        # Support both DeepSeek-V3 (n_routed_experts) and Qwen3 (num_experts)
+        server_args.json_model_override_args = json.dumps(
+            {
+                "num_hidden_layers": 4,
+                "n_routed_experts": num_experts,
+                "num_experts": num_experts,
+            }
+        )
 
         model_runner = load_model_with_dummy_weights(server_args, port_args, tp_rank)
 
         moe_layer = model_runner.model.model.layers[test_layer].mlp
-        actual_num_experts = moe_layer.config.n_routed_experts
+        # Supports DeepSeek-V3 and Qwen3 MoE
+        if hasattr(moe_layer, "config") and hasattr(moe_layer.config, "n_routed_experts"):
+            # DeepSeek-V3 style
+            actual_num_experts = moe_layer.config.n_routed_experts
+        elif hasattr(moe_layer, "experts") and hasattr(moe_layer.experts, "num_experts"):
+            # Qwen3 MoE style - from experts submodule
+            actual_num_experts = moe_layer.experts.num_experts
+        elif hasattr(moe_layer, "num_experts"):
+            # Direct attribute (deepep mode)
+            actual_num_experts = moe_layer.num_experts
+        else:
+            # Fall back to model_config
+            actual_num_experts = model_runner.model_config.hf_config.num_experts
 
-        rank_print(f"Loaded model with {actual_num_experts} experts")
+        rank_print(f"Loaded model with {actual_num_experts} local experts (simulating {model_total_experts} total)")
 
         server_args.json_model_override_args = original_json_override
 
-        # Calculate simulated EP size: 256 total experts / num_local_experts
+        # Calculate simulated EP size: total_experts / num_local_experts
         num_local_experts = actual_num_experts  # With ep_size=1, all experts are local
-        simulated_ep_size = 256 // num_local_experts
-        rank_print(f"Simulating EP size: {simulated_ep_size} (num_local_experts={num_local_experts})")
+        simulated_ep_size = model_total_experts // num_local_experts
+        rank_print(
+            f"Simulating EP size: {simulated_ep_size} "
+            f"(num_local_experts={num_local_experts}, total_experts={model_total_experts})"
+        )
 
         prefill_test_cases = get_moe_prefill_test_cases(simulated_ep_size)
         rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
@@ -729,6 +778,9 @@ def run_moe(
             num_local_experts,
             simulated_ep_size,
             output_path,
+            model_hidden_size=model_hidden_size,
+            model_inter_size=model_inter_size,
+            model_total_experts=model_total_experts,
         )
 
         decode_test_cases = get_moe_decode_test_cases()
@@ -750,6 +802,9 @@ def run_moe(
             num_local_experts,
             simulated_ep_size,
             output_path=output_path,
+            model_hidden_size=model_hidden_size,
+            model_inter_size=model_inter_size,
+            model_total_experts=model_total_experts,
         )
 
         del model_runner, moe_layer
@@ -774,10 +829,13 @@ def run_moe(
 # ============================================================================
 
 
-def get_wideep_moe_test_cases():
+def get_wideep_moe_test_cases(total_experts=256):
     """Returns list of [num_experts, perf_filename] for MOE collection.
 
-    Each num_experts value simulates a different EP size:
+    Each num_experts value simulates a different EP size based on model's total experts.
+    Starts from EP=2 (half experts per GPU) to focus on wideep multi-GPU scenarios.
+
+    For DeepSeek-V3 (256 experts):
     - num_experts=128 → EP=2
     - num_experts=64 → EP=4
     - num_experts=32 → EP=8
@@ -787,9 +845,29 @@ def get_wideep_moe_test_cases():
     - num_experts=2 → EP=128
     - num_experts=1 → EP=256
 
-    Formula: simulated_ep_size = 256 / num_experts
+    For Qwen3-235B (128 experts):
+    - num_experts=64 → EP=2
+    - num_experts=32 → EP=4
+    - num_experts=16 → EP=8
+    - num_experts=8 → EP=16
+    - num_experts=4 → EP=32
+    - num_experts=2 → EP=64
+    - num_experts=1 → EP=128
+
+    Formula: simulated_ep_size = total_experts / num_experts
+
+    Args:
+        total_experts: Total number of experts in the model (256 for DeepSeek-V3, 128 for Qwen3)
     """
-    return [[n, "wideep_moe_perf.txt"] for n in [128, 64, 32, 16, 8, 4, 2, 1]]
+    # Generate test cases based on total_experts
+    # num_experts must be a power of 2 and <= total_experts
+    # Start from EP=2 (total_experts // 2) to avoid single-GPU OOM and focus on wideep scenarios
+    test_cases = []
+    n = total_experts // 2  # Start from EP=2
+    while n >= 1:
+        test_cases.append([n, "wideep_moe_perf.txt"])
+        n //= 2
+    return test_cases
 
 
 def run_moe_benchmark(num_experts, gpu_id, output_path=None):
@@ -797,13 +875,15 @@ def run_moe_benchmark(num_experts, gpu_id, output_path=None):
 
     This function contains all the initialization logic that must happen
     after CUDA_VISIBLE_DEVICES is set.
+
+    Supports both DeepSeek-V3 and Qwen3 MoE models.
     """
     # In subprocess, always use cuda:0 since CUDA_VISIBLE_DEVICES isolates the GPU
     torch.cuda.set_device("cuda:0")
 
     server_port = 30000 + gpu_id * 100
     server_args = ServerArgs(
-        model_path=DEEPSEEK_MODEL_PATH,
+        model_path=MOE_MODEL_PATH,
         dtype="auto",
         device="cuda",
         load_format="dummy",
@@ -827,9 +907,17 @@ def run_moe_benchmark(num_experts, gpu_id, output_path=None):
     # PortArgs.init_new() must be called in subprocess for proper isolation
     port_args = PortArgs.init_new(server_args)
 
-    simulated_ep_size = 256 // num_experts * server_args.ep_size
+    # Get total experts from model config to calculate simulated EP size
+    model_config = ModelConfig.from_server_args(server_args)
+    hf_config = model_config.hf_config
+    total_experts = getattr(hf_config, "n_routed_experts", None) or getattr(hf_config, "num_experts", 256)
+
+    simulated_ep_size = total_experts // num_experts * server_args.ep_size
     print(f"\n{'=' * 60}")
-    print(f"MOE Benchmark: num_experts={num_experts}, EP_size={simulated_ep_size}, GPU={gpu_id}")
+    print(
+        f"MOE Benchmark: num_experts={num_experts}, EP_size={simulated_ep_size}, "
+        f"total_experts={total_experts}, GPU={gpu_id}"
+    )
     print(f"{'=' * 60}")
 
     # Run the actual benchmark
@@ -879,13 +967,13 @@ def run_wideep_moe(num_experts, perf_filename, device="cuda:0"):
     """Run wideep DeepEP MOE benchmark.
 
     Compatible with collect.py framework - uses subprocess for GPU isolation.
+    Supports both DeepSeek-V3 (256 experts) and Qwen3 (128 experts) models.
     """
     device_str = str(device) if not isinstance(device, str) else device
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
 
-    simulated_ep_size = 256 // num_experts
     print("\n" + "=" * 60)
-    print(f"MOE: num_experts={num_experts} (EP size {simulated_ep_size}), GPU={gpu_id}")
+    print(f"MOE: num_experts={num_experts}, GPU={gpu_id}")
     print("=" * 60)
 
     _run_moe_subprocess(num_experts, gpu_id, None)
@@ -898,7 +986,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-path", default=None, help="Output directory for perf files")
     args = parser.parse_args()
 
-    print(f"Model path: {DEEPSEEK_MODEL_PATH}")
+    print(f"Model path: {MOE_MODEL_PATH}")
 
     # Run all MOE test cases
     for test_case in get_wideep_moe_test_cases():

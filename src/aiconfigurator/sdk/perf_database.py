@@ -3603,6 +3603,12 @@ class PerfDatabase:
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
+                def _to_performance_result(result):
+                    """Normalize GEMM table entries into a PerformanceResult."""
+                    if isinstance(result, dict):
+                        return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+                    return PerformanceResult(result, energy=0.0)
+
                 self._gemm_data.raise_if_not_loaded()
                 if table_quant_mode not in self._gemm_data:
                     supported = sorted([k.name for k in self._gemm_data])
@@ -3612,9 +3618,21 @@ class PerfDatabase:
                         f"quant_mode='{quant_mode.name}'. "
                         f"Supported gemm modes: {supported}"
                     )
-                result = self._interp_3d(m, n, k, self._gemm_data[table_quant_mode], "cubic")
-                # Result is dict: {"latency": ..., "power": ..., "energy": ...}
-                return PerformanceResult(result["latency"], energy=result.get("energy", 0.0))
+
+                gemm_data = self._gemm_data[table_quant_mode]
+
+                if m in gemm_data and n in gemm_data[m] and k in gemm_data[m][n]:
+                    result = gemm_data[m][n][k]
+                    return _to_performance_result(result)
+
+                m_values = sorted(m_key for m_key in gemm_data if n in gemm_data[m_key] and k in gemm_data[m_key][n])
+                if len(m_values) >= 2:
+                    m_left, m_right = self._nearest_1d_point_helper(m, m_values, inner_only=False)
+                    result = self._interp_1d([m_left, m_right], [gemm_data[m_left][n][k], gemm_data[m_right][n][k]], m)
+                    return _to_performance_result(result)
+
+                result = self._interp_3d(m, n, k, gemm_data, "cubic")
+                return _to_performance_result(result)
 
             return self._query_silicon_or_hybrid(
                 get_silicon=get_silicon,

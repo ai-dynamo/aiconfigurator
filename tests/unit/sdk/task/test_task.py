@@ -563,7 +563,7 @@ def test_sglang_moe_configs():
     assert prefill_cfg2.tp_list == [1, 2, 4, 8], f"Expected [1, 2, 4, 8], got {prefill_cfg2.tp_list}"
     assert prefill_cfg2.dp_list == [1, 2, 4, 8], f"Expected [1, 2, 4, 8], got {prefill_cfg2.dp_list}"
     assert prefill_cfg2.moe_tp_list == [1, 2, 4, 8], f"Expected [1, 2, 4, 8], got {prefill_cfg2.moe_tp_list}"
-    assert prefill_cfg2.moe_ep_list == [1], f"Expected [1], got {prefill_cfg2.moe_ep_list}"
+    assert prefill_cfg2.moe_ep_list == [1, 2, 4, 8], f"Expected [1, 2, 4, 8], got {prefill_cfg2.moe_ep_list}"
 
     # Verify decode config
     assert decode_cfg2.num_gpu_per_worker == [1, 2, 4, 8], (
@@ -572,7 +572,7 @@ def test_sglang_moe_configs():
     assert decode_cfg2.tp_list == [1, 2, 4, 8], f"Expected [1, 2, 4, 8], got {decode_cfg2.tp_list}"
     assert decode_cfg2.dp_list == [1, 2, 4, 8], f"Expected [1, 2, 4, 8], got {decode_cfg2.dp_list}"
     assert decode_cfg2.moe_tp_list == [1, 2, 4, 8], f"Expected [1, 2, 4, 8], got {decode_cfg2.moe_tp_list}"
-    assert decode_cfg2.moe_ep_list == [1], f"Expected [1], got {decode_cfg2.moe_ep_list}"
+    assert decode_cfg2.moe_ep_list == [1, 2, 4, 8], f"Expected [1, 2, 4, 8], got {decode_cfg2.moe_ep_list}"
 
     # Test 3: trtllm + MoE + wideep (should use previous logic)
     # task_trtllm_wideep = TaskConfig(
