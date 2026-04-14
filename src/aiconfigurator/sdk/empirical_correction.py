@@ -150,7 +150,7 @@ class EmpiricalCorrectionResolver:
 
         def _assert_numeric(value, context: str):
             if isinstance(value, bool) or not isinstance(value, Real):
-                raise ValueError(f"Expression value for {context} must be numeric, got {type(value).__name__}")
+                raise TypeError(f"Expression value for {context} must be numeric, got {type(value).__name__}")
             return float(value)
 
         def _eval_node(node: ast.AST) -> float:
@@ -178,7 +178,7 @@ class EmpiricalCorrectionResolver:
                 return _UNARY_OPS[op_type](_eval_node(node.operand))
             if isinstance(node, ast.Call):
                 if not isinstance(node.func, ast.Name):
-                    raise ValueError("Only direct function calls are allowed in empirical corrections")
+                    raise TypeError("Only direct function calls are allowed in empirical corrections")
                 func_name = node.func.id
                 func = _ALLOWED_FUNCS.get(func_name)
                 if func is None:
@@ -226,7 +226,8 @@ class EmpiricalCorrectionResolver:
                 # Any override parsing/evaluation failure should be non-fatal; we always
                 # fall back to the backend default expression to keep estimation running.
                 logger.warning(
-                    "Failed to evaluate override empirical correction '%s' (%s): %s. Falling back to default expression: %s",
+                    "Failed to evaluate override empirical correction '%s' (%s): %s. "
+                    "Falling back to default expression: %s",
                     name,
                     override_expr,
                     exc,
