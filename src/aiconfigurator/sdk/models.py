@@ -158,6 +158,7 @@ def _apply_model_quant_defaults(
             model_config.comm_quant_mode,
         )
 
+
 def _apply_model_quant_defaults_xpu(
     model_config: config.ModelConfig,
     raw_config: dict,
@@ -200,6 +201,7 @@ def _apply_model_quant_defaults_xpu(
             model_config.fmha_quant_mode,
             model_config.comm_quant_mode,
         )
+
 
 def get_model(
     model_path: str,
@@ -4759,7 +4761,9 @@ class HybridMoEModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, self.get_default_logits_quant_mode()),
+                ops.GEMM(
+                    "generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, self.get_default_logits_quant_mode()
+                ),
                 ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]
         )
@@ -4933,7 +4937,9 @@ class Qwen35Model(BaseModel):
         if cfg.num_experts > 0:
             if cfg.num_experts >= 128:
                 ops_list.append(
-                    ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, self.get_default_router_gemm_quant_mode())
+                    ops.GEMM(
+                        f"{prefix}_router_gemm", count, cfg.num_experts, h, self.get_default_router_gemm_quant_mode()
+                    )
                 )
             ops_list.extend(
                 [
@@ -5117,7 +5123,9 @@ class Qwen35Model(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, self.get_default_logits_quant_mode()),
+                ops.GEMM(
+                    "generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, self.get_default_logits_quant_mode()
+                ),
                 ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]
         )
@@ -5130,7 +5138,9 @@ class Qwen35Model(BaseModel):
         if cfg.num_experts > 0:
             if cfg.num_experts >= 128:
                 ops_list.append(
-                    ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, self.get_default_router_gemm_quant_mode())
+                    ops.GEMM(
+                        f"{prefix}_router_gemm", count, cfg.num_experts, h, self.get_default_router_gemm_quant_mode()
+                    )
                 )
             ops_list.extend(
                 [

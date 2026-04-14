@@ -14,7 +14,12 @@ import yaml
 from munch import DefaultMunch, Munch
 
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.models import _apply_model_quant_defaults, _apply_model_quant_defaults_xpu, check_is_moe, get_model_family
+from aiconfigurator.sdk.models import (
+    _apply_model_quant_defaults,
+    _apply_model_quant_defaults_xpu,
+    check_is_moe,
+    get_model_family,
+)
 from aiconfigurator.sdk.pareto_analysis import get_pareto_front
 from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
 from aiconfigurator.sdk.utils import ListFlowDumper, enumerate_parallel_config, get_model_config_from_model_path

@@ -6,6 +6,7 @@ __compat__ = "vllm>=0.11.0"
 import os
 
 import torch
+
 import vllm
 
 try:
