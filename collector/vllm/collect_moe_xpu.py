@@ -298,8 +298,6 @@ def run_moe_torch(
             w1, w13_scales = quantize_fp8_per_expert(w1)
             w2, w2_scales = quantize_fp8_per_expert(w2)
 
-    w1.data = w1.transpose(-1, -2).contiguous()
-    w2.data = w2.transpose(-1, -2).contiguous()
 
     # Performance testing for each token count
     for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
