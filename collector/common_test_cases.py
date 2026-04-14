@@ -381,6 +381,61 @@ def get_generation_mla_common_test_cases():
     return _get_mla_common_test_cases(is_context=False)
 
 
+# MLA BMM — shared dimensions used by sglang, trtllm, and vllm mla_bmm collectors.
+# The only per-framework variable is dtype_list (fp8 support varies by framework/SM).
+
+_MLA_BMM_GEN_PRE_NUM_TOKENS: list[int] = [
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    48,
+    64,
+    80,
+    96,
+    128,
+    160,
+    192,
+    256,
+    320,
+    384,
+    512,
+    768,
+    1024,
+    1536,
+    2048,
+    3072,
+    4096,
+    6144,
+    8192,
+]
+
+_MLA_BMM_GEN_POST_NUM_TOKENS: list[int] = _MLA_BMM_GEN_PRE_NUM_TOKENS + [12288, 16384, 20480]
+
+_MLA_BMM_NUM_HEADS: list[int] = [128, 64, 32, 16, 8, 4, 2, 1]
+
+
+def _build_mla_bmm_test_cases(num_tokens_list: list[int], dtype_list: list[str]) -> list[list]:
+    test_cases = []
+    for num_tokens in num_tokens_list:
+        for num_heads in _MLA_BMM_NUM_HEADS:
+            for dtype in dtype_list:
+                test_cases.append([num_tokens, num_heads, dtype, 2, 10, "mla_bmm_perf.txt"])
+    return test_cases
+
+
+def build_mla_gen_pre_test_cases(dtype_list: list[str]) -> list[list]:
+    """Build mla_gen_pre test cases. Pass the dtypes supported by the calling framework."""
+    return _build_mla_bmm_test_cases(_MLA_BMM_GEN_PRE_NUM_TOKENS, dtype_list)
+
+
+def build_mla_gen_post_test_cases(dtype_list: list[str]) -> list[list]:
+    """Build mla_gen_post test cases. Pass the dtypes supported by the calling framework."""
+    return _build_mla_bmm_test_cases(_MLA_BMM_GEN_POST_NUM_TOKENS, dtype_list)
+
+
 # =============================================================================
 # Mamba2 SSM Test Cases
 # =============================================================================

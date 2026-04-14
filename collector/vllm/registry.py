@@ -94,6 +94,18 @@ REGISTRY: list[OpEntry] = [
         get_func="get_gdn_test_cases",
         run_func="run_gdn_torch",
     ),
+    OpEntry(
+        op="mla_gen_pre",
+        module="collector.vllm.collect_mla_bmm",
+        get_func="get_mla_gen_pre_test_cases",
+        run_func="run_mla_gen_pre",
+    ),
+    OpEntry(
+        op="mla_gen_post",
+        module="collector.vllm.collect_mla_bmm",
+        get_func="get_mla_gen_post_test_cases",
+        run_func="run_mla_gen_post",
+    ),
 ]
 
 REGISTRY_XPU: list[OpEntry] = [

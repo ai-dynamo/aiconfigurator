@@ -7,86 +7,21 @@ from sglang.srt.layers.quantization.fp8_kernel import (
     per_tensor_quant_mla_fp8,
 )
 
+from collector.common_test_cases import (
+    build_mla_gen_post_test_cases,
+    build_mla_gen_pre_test_cases,
+)
 from helper import benchmark_with_power, log_perf
+
+_DTYPE_LIST = ["float16", "fp8"]
 
 
 def get_mla_gen_pre_test_cases():
-    test_cases = []
-    gen_num_tokens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-    ]
-    num_heads = [128, 64, 32, 16, 8, 4, 2, 1]
-    dtype_list = ["float16", "fp8"]
-    for num_tokens in gen_num_tokens:
-        for num_head in num_heads:
-            for dtype in dtype_list:
-                test_cases.append([num_tokens, num_head, dtype, 2, 10, "mla_bmm_perf.txt"])
-    return test_cases
+    return build_mla_gen_pre_test_cases(_DTYPE_LIST)
 
 
 def get_mla_gen_post_test_cases():
-    test_cases = []
-    ctx_num_tokens = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        256,
-        320,
-        384,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        3072,
-        4096,
-        6144,
-        8192,
-        12288,
-        16384,
-        20480,
-    ]
-    num_heads = [128, 64, 32, 16, 8, 4, 2, 1]
-    dtype_list = ["float16", "fp8"]
-    for num_tokens in ctx_num_tokens:
-        for num_head in num_heads:
-            for dtype in dtype_list:
-                test_cases.append([num_tokens, num_head, dtype, 2, 10, "mla_bmm_perf.txt"])
-    return test_cases
+    return build_mla_gen_post_test_cases(_DTYPE_LIST)
 
 
 def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, perf_filename, device="cuda:0"):
