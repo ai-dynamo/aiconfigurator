@@ -336,6 +336,14 @@ SupportedSystems = {
     "b60",
 }
 
+XPU_SYSTEMS = {"b60"}
+
+
+def system_name_to_device(system_name: str | None) -> str:
+    """Map a system name to the corresponding device type."""
+    return "xpu" if system_name is not None and str(system_name).lower() in XPU_SYSTEMS else "cuda"
+
+
 """
 Model family for model definition
 """

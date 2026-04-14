@@ -400,7 +400,9 @@ def load_custom_allreduce_data(custom_allreduce_file):
         # kernel_source patterns: "vLLM_custom_graph", "SGLang_CustomAllReduce_graph", etc.
         # backend patterns: "vllm_graph", "sglang_graph", etc.
         # For b60 xpu, we force eager custom allreduce data for now
-        if (kernel_source.endswith("_eager") or backend.endswith("_eager")) and "b60" not in custom_allreduce_file:
+        if (kernel_source.endswith("_eager") or backend.endswith("_eager")) and not any(
+            xpu_system in custom_allreduce_file for xpu_system in common.XPU_SYSTEMS
+        ):
             continue  # Skip eager mode, use graph mode only
 
         dtype, tp_size, message_size, latency = (

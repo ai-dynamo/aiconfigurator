@@ -313,8 +313,7 @@ class TaskConfigFactory:
                     _deep_merge(config_dict, promoted)
                     applied_layers.append("gptoss-blackwell-mxfp8")
 
-        _xpu_systems = ("b60",)
-        if ctx.system_name in _xpu_systems:
+        if ctx.system_name in common.XPU_SYSTEMS:
             _deep_merge(config_dict, {"worker_config": {"gemm_quant_mode": "bfloat16"}})
             applied_layers.append("xpu-bfloat16-gemm")
 
@@ -908,7 +907,7 @@ class TaskConfig:
                 comm_quant_mode=_get_cfg_value(worker_cfg, "comm_quant_mode"),
             )
             # TODO: _apply_model_quant_defaults is only called here. Maybe these two functions should be merged.
-            if worker_cfg.system_name in ["b60"]:
+            if worker_cfg.system_name in common.XPU_SYSTEMS:
                 _apply_model_quant_defaults_xpu(
                     model_config,
                     model_raw_config or {},
@@ -1179,6 +1178,7 @@ class TaskRunner:
             moe_backend=task_config.moe_backend,  # sglang wideep only
             attention_backend=task_config.worker_config.attention_backend or task_config.attention_backend,
             enable_wideep=task_config.enable_wideep,
+            device=common.system_name_to_device(task_config.worker_config.system_name),
         )
         try:
             from aiconfigurator.sdk import pareto_analysis as pa
@@ -1289,6 +1289,7 @@ class TaskRunner:
             attention_backend=prefill_attention_backend,
             enable_wideep=prefill_enable_wideep,
             enable_eplb=prefill_enable_eplb,
+            device=common.system_name_to_device(task_config.prefill_worker_config.system_name),
         )
 
         try:
@@ -1351,6 +1352,7 @@ class TaskRunner:
             attention_backend=decode_attention_backend,
             enable_wideep=decode_enable_wideep,
             enable_eplb=decode_enable_eplb,
+            device=common.system_name_to_device(task_config.decode_worker_config.system_name),
         )
 
         try:

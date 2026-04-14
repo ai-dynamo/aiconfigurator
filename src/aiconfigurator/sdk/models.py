@@ -8,8 +8,6 @@ import logging
 from functools import cache
 from typing import Optional
 
-import torch
-
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.utils import _load_model_config_from_model_path, get_model_config_from_model_path
@@ -622,13 +620,13 @@ class BaseModel:
         """
         Get default logits quantization mode based on hardware capabilities.
         """
-        return common.GEMMQuantMode.bfloat16 if torch.xpu.is_available() else common.GEMMQuantMode.float16
+        return common.GEMMQuantMode.bfloat16 if self.config.device == "xpu" else common.GEMMQuantMode.float16
 
     def get_default_router_gemm_quant_mode(self) -> common.GEMMQuantMode:
         """
         Get default router GEMM quantization mode based on hardware capabilities.
         """
-        return common.GEMMQuantMode.bfloat16 if torch.xpu.is_available() else common.GEMMQuantMode.float16
+        return common.GEMMQuantMode.bfloat16 if self.config.device == "xpu" else common.GEMMQuantMode.float16
 
 
 class GPTModel(BaseModel):

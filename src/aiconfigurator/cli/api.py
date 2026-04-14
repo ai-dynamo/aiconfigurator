@@ -543,6 +543,7 @@ def _resolve_moe_parallelism(
 
 
 def _build_model_config(
+    system_name: str | None,
     tp_size: int,
     pp_size: int,
     attention_dp_size: int,
@@ -561,6 +562,7 @@ def _build_model_config(
         GEMMQuantMode,
         KVCacheQuantMode,
         MoEQuantMode,
+        system_name_to_device,
     )
     from aiconfigurator.sdk.config import ModelConfig
 
@@ -570,6 +572,7 @@ def _build_model_config(
         attention_dp_size=attention_dp_size,
         moe_tp_size=moe_tp_size,
         moe_ep_size=moe_ep_size,
+        device=system_name_to_device(system_name),
         gemm_quant_mode=GEMMQuantMode[gemm_quant_mode] if gemm_quant_mode else None,
         kvcache_quant_mode=KVCacheQuantMode[kvcache_quant_mode] if kvcache_quant_mode else None,
         fmha_quant_mode=FMHAQuantMode[fmha_quant_mode] if fmha_quant_mode else None,
@@ -837,6 +840,7 @@ def _run_agg_estimate(
     )
 
     model_config = _build_model_config(
+        system_name,
         tp_size,
         pp_size,
         attention_dp_size,
@@ -956,6 +960,7 @@ def _run_disagg_estimate(
     )
 
     prefill_model_config = _build_model_config(
+        system_name,
         prefill_tp_size,
         prefill_pp_size,
         prefill_attention_dp_size,
@@ -968,6 +973,7 @@ def _run_disagg_estimate(
         comm_quant_mode,
     )
     decode_model_config = _build_model_config(
+        decode_system_name,
         decode_tp_size,
         decode_pp_size,
         decode_attention_dp_size,
