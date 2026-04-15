@@ -5401,7 +5401,7 @@ class PerfDatabase:
                             num_experts,
                             moe_tp_size,
                             moe_ep_size,
-                            quant_mode,
+                            silicon_quant_mode,
                             workload_distribution,
                         )
                     num_left, num_right = self._nearest_1d_point_helper(
@@ -5445,10 +5445,17 @@ class PerfDatabase:
                             moe_dict = self._moe_low_latency_data[silicon_quant_mode][used_workload_distribution][topk][
                                 num_experts
                             ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                            if not moe_dict:
+                                # Shape not present in low-latency table (nested defaultdict returned
+                                # an empty dict instead of raising KeyError). Fall back to regular data.
+                                raise KeyError(
+                                    f"No low-latency data for nvfp4 shape "
+                                    f"[{hidden_size}, {inter_size}, {topk}, {num_experts}]"
+                                )
                             logger.debug(
-                                f"trying to find low latency data for moe {quant_mode} "
+                                f"Using low-latency kernel for nvfp4 moe "
                                 f"{workload_distribution} {topk} {num_experts} {hidden_size} "
-                                f"{inter_size} {moe_tp_size} {moe_ep_size} but failed."
+                                f"{inter_size} {moe_tp_size} {moe_ep_size}."
                             )
                         except:
                             used_workload_distribution = (
@@ -5479,7 +5486,7 @@ class PerfDatabase:
                             num_experts,
                             moe_tp_size,
                             moe_ep_size,
-                            quant_mode,
+                            silicon_quant_mode,
                             workload_distribution,
                         )
                     num_left, num_right = self._nearest_1d_point_helper(
@@ -5502,11 +5509,13 @@ class PerfDatabase:
                 elif self.backend == common.BackendName.vllm.value:
                     self._moe_data.raise_if_not_loaded()
                     used_workload_distribution = (
-                        workload_distribution if workload_distribution in self._moe_data[quant_mode] else "uniform"
+                        workload_distribution
+                        if workload_distribution in self._moe_data[silicon_quant_mode]
+                        else "uniform"
                     )
-                    moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
-                        inter_size
-                    ][moe_tp_size][moe_ep_size]
+                    moe_dict = self._moe_data[silicon_quant_mode][used_workload_distribution][topk][num_experts][
+                        hidden_size
+                    ][inter_size][moe_tp_size][moe_ep_size]
                     token_points = sorted(moe_dict.keys())
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
@@ -5518,7 +5527,7 @@ class PerfDatabase:
                             num_experts,
                             moe_tp_size,
                             moe_ep_size,
-                            quant_mode,
+                            silicon_quant_mode,
                             workload_distribution,
                         )
                     num_left, num_right = self._nearest_1d_point_helper(
