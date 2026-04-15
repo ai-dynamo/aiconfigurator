@@ -124,7 +124,16 @@ def generate_elem_counts(test_range, bytes_per_element):
     Returns:
         list of element counts
     """
-    min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
+    try:
+        min_size, max_size, ratio = [int(i) for i in test_range.split(",")]
+    except ValueError as exc:
+        raise ValueError("--range must be 'min_bytes,max_bytes,multiplicative_ratio' with integer values") from exc
+
+    if min_size <= 0 or max_size <= min_size:
+        raise ValueError("--range must satisfy 0 < min_bytes < max_bytes")
+    if ratio <= 1:
+        raise ValueError("--range multiplicative_ratio must be > 1")
+
     counts = []
     size = min_size
     while size < max_size:

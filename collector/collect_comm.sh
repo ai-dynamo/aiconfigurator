@@ -116,6 +116,10 @@ if [[ "$device" == "cuda" ]]; then
         done
     done
 elif [[ "$device" == "xpu" ]]; then
+    if [[ "$measure_power" == "true" ]]; then
+        echo "Error: --measure_power is not yet supported for oneCCL XPU benchmarks"
+        exit 1
+    fi
     # Note: alltoall hangs on oneCCL SYCL/GPU backend and is excluded.
     # vLLM XPU uses allgather+reduce_scatter (AgRs) for MoE, not alltoall.
     oneccl_ops=("all_gather" "reduce_scatter" "all_reduce")

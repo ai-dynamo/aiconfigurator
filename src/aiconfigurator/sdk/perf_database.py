@@ -2770,7 +2770,7 @@ class PerfDatabase:
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
                 "mla_bmm": [],
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
-                "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
+                "nccl": _enum_key_names(getattr(self, "_nccl_data", None) or getattr(self, "_oneccl_data", None)),
             }
 
     def is_inter_node(self, num_gpus: int) -> bool:
