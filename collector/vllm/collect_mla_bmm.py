@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-__compat__ = "vllm>=0.17.0"
+__compat__ = "vllm>=0.14.0"
 
 """
 MLA BMM collector for vLLM — benchmarks the two batch matrix multiplications
@@ -33,9 +33,12 @@ DeepSeek V3 / R1 dimensions:
   kv_lora_rank      L = 512
   v_head_dim        V = 128
 
-Reference: vllm/model_executor/layers/attention/mla_attention.py
-  MLAAttention.forward_impl (pre-bmm)
-  MLAAttention._v_up_proj   (post-bmm)
+Reference:
+  vllm>=0.17.0: vllm/model_executor/layers/attention/mla_attention.py
+    MLAAttention.forward_impl (pre-bmm), MLAAttention._v_up_proj (post-bmm)
+  vllm>=0.14.0: vllm/v1/attention/backends/mla/common.py
+    MLACommonImpl.forward (pre-bmm), MLACommonImpl._v_up_proj (post-bmm)
+  Weight layout is identical across versions.
 """
 
 import torch
