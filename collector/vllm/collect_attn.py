@@ -84,6 +84,35 @@ def run_attention_torch(
     model = os.path.join(os.path.dirname(__file__), "fake_hf_model")
     block_size = 64
 
+    if is_context_phase:
+        batch_spec = BatchSpec(
+            seq_lens=[input_len] * batch_size,
+            query_lens=[input_len] * batch_size,
+        )
+    else:
+        batch_spec = BatchSpec(
+            seq_lens=[input_len] * batch_size,
+            query_lens=[1] * batch_size,
+        )
+
+    try:
+        vllm.utils.torch_utils.set_random_seed(42)
+    except AttributeError:
+        current_platform.seed_everything(42)
+
+    vllm_config = create_vllm_config(
+        model_name=model,
+        max_model_len=max(batch_spec.seq_lens),
+        block_size=block_size,
+        num_gpu_blocks=8192,
+        max_num_seqs=batch_size,
+        use_fp8_kv_cache=use_fp8_kv_cache,
+    )
+
+    # vLLM >=0.19.0 requires an active config context for backend selection
+    # (get_attn_backend_cls internally calls get_current_vllm_config).
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
+
     # Let vLLM choose the backend. Handle multiple historical signatures:
     # newest: (... use_mm_prefix=..., use_v1=True/False defaulted to True)
     # mid:    (... use_mm_prefix omitted)
@@ -147,31 +176,6 @@ def run_attention_torch(
         backend_name = LegacyBackendEnum[backend_name_str]
     else:
         backend_name = backend_name_str
-
-    if is_context_phase:
-        batch_spec = BatchSpec(
-            seq_lens=[input_len] * batch_size,
-            query_lens=[input_len] * batch_size,
-        )
-    else:
-        batch_spec = BatchSpec(
-            seq_lens=[input_len] * batch_size,
-            query_lens=[1] * batch_size,
-        )
-
-    try:
-        vllm.utils.torch_utils.set_random_seed(42)
-    except AttributeError:
-        current_platform.seed_everything(42)
-
-    vllm_config = create_vllm_config(
-        model_name=model,
-        max_model_len=max(batch_spec.seq_lens),
-        block_size=block_size,
-        num_gpu_blocks=8192,
-        max_num_seqs=batch_size,
-        use_fp8_kv_cache=use_fp8_kv_cache,
-    )
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, use_fp8_kv_cache)
 
@@ -247,8 +251,6 @@ def run_attention_torch(
 
     builder_cls, impl_cls = get_attention_backend(actual_backend)
     layer_names = ["placeholder"]
-
-    exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
     # Mock flashinfer's get_per_layer_parameters if needed
     if backend_name_str == "FLASHINFER":
