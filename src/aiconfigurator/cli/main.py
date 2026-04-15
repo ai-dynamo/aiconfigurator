@@ -158,14 +158,24 @@ def _add_default_mode_arguments(parser):
         type=float,
         default=2000.0,
         help="Time to first token SLA target in ms. Configurations exceeding this value are "
-        "filtered out. Default: 2000.0.",
+        "filtered from the pareto and topN configs. (Default: 2000)",
     )
     parser.add_argument(
         "--tpot",
         type=float,
         default=30.0,
         help="Time per output token SLA target in ms. Configurations exceeding this value are "
-        "filtered out. Default: 30.0.",
+        "filtered from the topN configs. (Default: 30) \n"
+        "**Note: the pareto may still include configs exceeding the given tpot. "
+        "Pass --strict-sla to only keep configs that meet the given tpot constraint.**",
+    )
+    parser.add_argument(
+        "--strict-sla",
+        action="store_true",
+        default=False,
+        help="Filter the Pareto frontier and best configs to only SLA-compliant data points "
+        "(--ttft + --tpot, or --request-latency). Without this flag, the Pareto frontier "
+        "may include configs that exceed --tpot.",
     )
     parser.add_argument(
         "--request-latency",
@@ -1005,6 +1015,7 @@ def _execute_task_configs(
     target_request_rate: float | None = None,
     target_concurrency: float | None = None,
     max_total_gpus: int | None = None,
+    strict_sla: bool = False,
 ) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float], dict[str, dict[str, float]]]:
     """
     Execute task configs and return the chosen experiment, best configs, results, best
@@ -1019,6 +1030,8 @@ def _execute_task_configs(
         target_concurrency: If set, activates load-match picking (minimize
             GPUs for the given number of concurrent requests).
         max_total_gpus: Optional upper bound on total GPUs for load-match.
+        strict_sla: When True, enforce both TTFT and TPOT SLA constraints
+            during picking.
 
     Returns:
         tuple:
@@ -1095,6 +1108,7 @@ def _execute_task_configs(
             target_request_rate=target_request_rate,
             target_concurrency=target_concurrency,
             max_total_gpus=max_total_gpus,
+            strict_sla=strict_sla,
         )
         best_configs[name] = best_config_df
         best_throughputs[name] = best_throughput
@@ -1584,10 +1598,14 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
+    execute_kwargs: dict = {}
+    if getattr(args, "strict_sla", False):
+        execute_kwargs["strict_sla"] = True
     _, best_configs, pareto_fronts, _, _ = _execute_task_configs(
         task_configs,
         args.mode,
         top_n=args.top_n,
+        **execute_kwargs,
     )
 
     if args.save_dir:

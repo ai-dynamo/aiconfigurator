@@ -17,6 +17,7 @@ the corresponding flag is not specified:
 | OSL (Output Sequence Length) | 1000 | `--osl` | Assumed output generation length |
 | TTFT (Time to First Token) | 2000 ms | `--ttft` | Max acceptable time to first token |
 | TPOT (Time per Output Token) | 30 ms | `--tpot` | Max acceptable time per output token |
+| Strict SLA | off | `--strict-sla` | Pre-filter Pareto frontier to only SLA-compliant configs |
 | Backend | trtllm | `--backend` | Inference backend used for estimation |
 | Prefix Cache Length | 0 | `--prefix` | Prefix cache length for KV reuse |
 | Database Mode | SILICON | `--database-mode` | Source of performance data |
@@ -25,7 +26,9 @@ the corresponding flag is not specified:
 > that exceed these thresholds are excluded from results. If you see fewer
 > results than expected, consider relaxing these values or setting them
 > explicitly. When defaults are used, a warning is printed at the start of the
-> run so you can verify what values are in effect.
+> run so you can verify what values are in effect. By default, only the top-N
+> picking step filters on TPOT; pass `--strict-sla` to also pre-filter the
+> Pareto frontier (see [Strict SLA filtering](#strict-sla-filtering---strict-sla)).
 
 ### Generate mode (Quick Start)
 This mode generates a working configuration without running the full parameter sweep. It's useful when you want a quick deployment config without SLA optimization.
@@ -551,6 +554,41 @@ disagg Top Configurations: (Sorted by tokens/s/gpu)
 +------+--------------+---------------+--------+-----------------+--------------+-------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
 ********************************************************************************
 2025-12-01 23:36:41,892 - aiconfigurator.cli.main - INFO - All experiments completed in 1.92 seconds
+```
+
+#### Strict SLA filtering (`--strict-sla`)
+
+By default, the Pareto frontier includes all configurations regardless of whether they meet the `--tpot` (or `--request-latency`) constraint — only the final top-N picking step filters on TPOT. This means `pareto.csv` and the Pareto plot may show configurations that violate your SLA targets.
+
+Pass `--strict-sla` to pre-filter the Pareto frontier so that **only SLA-compliant configurations** are included. When this flag is active:
+
+- Configurations exceeding `--tpot` (or `--request-latency`) are removed *before* the Pareto frontier is computed.
+- The resulting `pareto.csv`, Pareto plot, and `best_config_topn` only contain configs that meet the SLA.
+- TTFT filtering is already enforced at sweep time by all backends, so `--strict-sla` only adds TPOT / request-latency pre-filtering.
+
+```bash
+aiconfigurator cli default \
+  --model-path Qwen/Qwen3-32B-FP8 \
+  --total-gpus 32 \
+  --system h200_sxm \
+  --tpot 15 \
+  --strict-sla
+```
+
+> **Note:** With `--strict-sla`, if no configuration meets the SLA targets, the Pareto frontier and best configs will be empty. Without the flag, the Pareto frontier preserves the full search space and you can still see which configs came closest to meeting the target.
+
+The Python API equivalent accepts a `strict_sla` keyword argument:
+
+```python
+from aiconfigurator.cli import cli_default
+
+result = cli_default(
+    model_path="Qwen/Qwen3-32B-FP8",
+    total_gpus=32,
+    system="h200_sxm",
+    tpot=15,
+    strict_sla=True,
+)
 ```
 
 #### Database Mode
