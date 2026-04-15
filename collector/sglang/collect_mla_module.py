@@ -474,7 +474,11 @@ def load_model_runner(
     # Disable piecewise CUDA graph — its warmup compile OOMs on large models
     # (e.g. 64 GiB allocation with fp8 + 128 heads on H200).
     # Not a ServerArgs constructor param; set post-init like collect_attn.py.
-    server_args.enable_piecewise_cuda_graph = False
+    # Field renamed in sglang 0.5.10: enable_piecewise_cuda_graph → disable_piecewise_cuda_graph.
+    if hasattr(server_args, "disable_piecewise_cuda_graph"):
+        server_args.disable_piecewise_cuda_graph = True  # sglang >=0.5.10
+    else:
+        server_args.enable_piecewise_cuda_graph = False  # sglang <=0.5.9
 
     server_args.attention_backend = attention_backend
     print(f"Using attention backend: {attention_backend}, kv_cache_dtype: {sglang_kv_dtype}, gpu_id: {gpu_id}")
