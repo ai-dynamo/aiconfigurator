@@ -72,11 +72,11 @@ def get_moe_test_cases():
     # L40S (SM89) has 100KB shared memory, fp8_block kernel needs ~144KB
     sm_version = get_sm_version()
     if sm_version < 90:
-        moe_list = ["float16"]
+        moe_list = ["float16", "int4_wo"]
     elif sm_version < 100:
-        moe_list = ["float16", "fp8_block"]
+        moe_list = ["float16", "fp8_block", "int4_wo"]
     else:
-        moe_list = ["float16", "fp8_block", "nvfp4"]
+        moe_list = ["float16", "fp8_block", "nvfp4", "int4_wo"]
 
     test_cases = []
 
@@ -99,6 +99,15 @@ def get_moe_test_cases():
 
             # nvfp4 fp4_quantize requires weight dims divisible by 16 after TP sharding
             if moe_type == "nvfp4" and (common_moe_testcase.inter_size // common_moe_testcase.tp) % 16 != 0:
+                continue
+
+            # int4_wo (W4A16): packed K dims must be divisible by group_size (128).
+            # w1 packed K = hidden_size // 2  → need hidden_size % 256 == 0
+            # w2 packed K = shard_inter // 4 = inter_size // (2*tp) → need (inter_size // tp) % 256 == 0
+            if moe_type == "int4_wo" and (
+                common_moe_testcase.hidden_size % 256 != 0
+                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 256 != 0
+            ):
                 continue
 
             test_cases.append(
@@ -142,6 +151,7 @@ def benchmark_config(
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_nvfp4: bool = False,
+    use_int4_w4a16: bool = False,
     block_shape: list[int] | None = None,
     num_iters: int = 10,
     distributed: str = "power_law",
@@ -240,6 +250,16 @@ def benchmark_config(
             w2 = torch.randint(
                 -127, 127, (num_experts, hidden_size, shard_intermediate_size // 2), dtype=torch.int8, device=device
             )
+        elif use_int4_w4a16:
+            # W4A16: 2 int4 values packed per int8 byte — K dimension halved.
+            # w1 shape: (E, N=shard_inter, K_packed=hidden//2)
+            # w2 shape: (E, N=hidden, K_packed=shard_inter//4)
+            w1 = torch.randint(
+                0, 127, (num_experts, shard_intermediate_size, hidden_size // 2), dtype=torch.int8, device=device
+            )
+            w2 = torch.randint(
+                0, 127, (num_experts, hidden_size, shard_intermediate_size // 4), dtype=torch.int8, device=device
+            )
         else:
             w1 = torch.randn(num_experts, shard_intermediate_size, hidden_size, dtype=init_dtype, device=device)
             w2 = torch.randn(num_experts, hidden_size, shard_intermediate_size // 2, dtype=init_dtype, device=device)
@@ -248,6 +268,20 @@ def benchmark_config(
         if use_int8_w8a16:
             w1_scale = torch.randn((num_experts, 2 * shard_intermediate_size), dtype=torch.float32, device=device)
             w2_scale = torch.randn((hidden_size, num_experts), dtype=torch.float32, device=device)
+        elif use_int4_w4a16:
+            # Per-group scales along K (group_size=128).
+            # Scale shape: (E, N, K_packed // group_size)
+            group_size = block_shape[1] if block_shape else 128
+            w1_scale = torch.randn(
+                (num_experts, shard_intermediate_size, (hidden_size // 2) // group_size),
+                dtype=torch.float32,
+                device=device,
+            )
+            w2_scale = torch.randn(
+                (num_experts, hidden_size, (shard_intermediate_size // 4) // group_size),
+                dtype=torch.float32,
+                device=device,
+            )
         elif use_fp8_w8a8 or use_int8_w8a8:
             if use_int8_w8a8 and block_shape is None:
                 w1_scale = torch.randn(num_experts, shard_intermediate_size, dtype=torch.float32, device=device)
@@ -304,6 +338,7 @@ def benchmark_config(
                     use_fp8_w8a8=use_fp8_w8a8,
                     use_int8_w8a8=use_int8_w8a8,
                     use_int8_w8a16=use_int8_w8a16,
+                    use_int4_w4a16=use_int4_w4a16,
                     w1_scale=w1_scale,
                     w2_scale=w2_scale,
                     a1_scale=a1_scale,
@@ -341,6 +376,7 @@ def benchmark(
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_nvfp4: bool = False,
+    use_int4_w4a16: bool = False,
     block_shape: list[int] | None = None,
     distributed: str = "power_law",
     power_law_alpha: float = 0,
@@ -365,6 +401,7 @@ def benchmark(
             use_int8_w8a8,
             use_int8_w8a16,
             use_nvfp4,
+            use_int4_w4a16,
             block_shape,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
@@ -375,6 +412,7 @@ def benchmark(
     dtype_str = get_config_dtype_str(
         dtype,
         use_int8_w8a16=use_int8_w8a16,
+        use_int4_w4a16=use_int4_w4a16,
         use_fp8_w8a8=use_fp8_w8a8,
     )
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
@@ -407,6 +445,7 @@ def benchmark(
         use_int8_w8a8,
         use_int8_w8a16,
         use_nvfp4,
+        use_int4_w4a16,
         block_shape,
         distributed=distributed,
         power_law_alpha=power_law_alpha,
@@ -482,11 +521,15 @@ def run_moe_torch(
         "fp8_block",
         "float16",
         "nvfp4",
-    ], "only support moe type = fp8_block, float16 or nvfp4"
+        "int4_wo",
+    ], "only support moe type = fp8_block, float16, nvfp4, or int4_wo"
     assert inter_size % moe_tp_size == 0, "inter_size % moe_tp_size must be 0"
     assert num_experts % moe_ep_size == 0, "num_experts must be divisible by moe_ep_size"
 
     num_local_experts = num_experts // moe_ep_size
+    use_int4_w4a16 = moe_type == "int4_wo"
+    # int4_wo uses block_shape=[0, group_size] for grouped scales (group_size=128)
+    int4_block_shape = [0, 128] if use_int4_w4a16 else None
 
     if moe_ep_size > 1 and distributed == "power_law":
         rank0_workloads = build_power_law_rank0_workloads(
@@ -511,7 +554,8 @@ def run_moe_torch(
             False,
             False,
             use_nvfp4=moe_type == "nvfp4",
-            block_shape=None,
+            use_int4_w4a16=use_int4_w4a16,
+            block_shape=int4_block_shape,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
             workloads=rank0_workloads,
@@ -528,7 +572,8 @@ def run_moe_torch(
             False,
             False,
             use_nvfp4=moe_type == "nvfp4",
-            block_shape=None,
+            use_int4_w4a16=use_int4_w4a16,
+            block_shape=int4_block_shape,
             distributed=distributed,
             power_law_alpha=power_law_alpha,
         )
