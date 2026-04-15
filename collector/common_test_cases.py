@@ -33,6 +33,7 @@ _WIDEEP_MOE_MODEL_NAMES: set[str] = {
     "zai-org/GLM-5",
     "MiniMaxAI/MiniMax-M2.5",
     "moonshotai/Kimi-K2-Instruct",
+    "moonshotai/Kimi-K2.5",
 }
 
 
@@ -70,6 +71,7 @@ _MOE_MODEL_CONFIGS: list[list] = [
 # MLA: [num_heads, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, model_name]
 _MLA_MODEL_CONFIGS: list[list] = [
     [128, 1536, 512, 128, 64, 128, "deepseek-ai/DeepSeek-V3"],
+    [64, 1536, 512, 128, 64, 128, "moonshotai/Kimi-K2.5"],  # kimi k2.5: same MLA dims as DSV3 except num_heads=64
 ]
 
 # MLA module: models from collect_mla_module.py's SUPPORTED_MODELS that are not
