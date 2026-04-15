@@ -780,13 +780,23 @@ def run_gdn_torch(
     else:
         raise ValueError(f"Unknown phase: {phase}")
 
-    # Exit worker process to ensure clean GPU state
-    import sys
-
-    sys.exit(EXIT_CODE_RESTART)
+    # Return EXIT_CODE_RESTART to signal that a process restart would be
+    # desirable for GPU memory cleanup.  collect.py's orchestrator previously
+    # relied on this function calling sys.exit(EXIT_CODE_RESTART) directly,
+    # which killed the worker process after each task so the OS reclaimed GPU
+    # memory before the next task started.  That also prevented the __main__
+    # for-loop from completing more than one case when run standalone.
+    #
+    # The sys.exit has been moved outside the loop in __main__ so that all
+    # test cases run in sequence.  When invoked via collect.py the worker
+    # process no longer restarts between GDN tasks; if GPU OOM is observed in
+    # that path, restoring per-task process recycling here would fix it.
+    return EXIT_CODE_RESTART
 
 
 if __name__ == "__main__":
+    import sys
+
     from vllm.version import __version__ as vllm_version
 
     print(f"GDN Collector - vLLM {vllm_version}")
@@ -797,6 +807,7 @@ if __name__ == "__main__":
     test_cases = get_gdn_test_cases()
     print(f"Total test cases: {len(test_cases)}")
 
+    last_exit_code = 0
     for i, test_case in enumerate(test_cases):
         (
             phase,
@@ -824,7 +835,7 @@ if __name__ == "__main__":
         else:
             print(f"  batch_sizes={batch_size_list}")
 
-        run_gdn_torch(
+        last_exit_code = run_gdn_torch(
             phase=phase,
             d_model=d_model,
             d_conv=d_conv,
@@ -837,3 +848,5 @@ if __name__ == "__main__":
             model_name=model_name,
             perf_filename=perf_filename,
         )
+
+    sys.exit(last_exit_code)
