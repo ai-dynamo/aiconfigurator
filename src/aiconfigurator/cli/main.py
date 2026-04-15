@@ -115,7 +115,7 @@ def _add_default_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,b300_sxm,gb200,a100_sxm,l40s,gb300.",
     )
     parser.add_argument(
         "--decode-system",
@@ -263,7 +263,7 @@ def _add_generate_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,b300_sxm,gb200,a100_sxm,l40s,gb300.",
     )
     parser.add_argument(
         "--backend",
@@ -296,7 +296,7 @@ def _add_estimate_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,b300_sxm,gb200,a100_sxm,l40s,gb300.",
     )
     parser.add_argument(
         "--decode-system",
@@ -482,7 +482,7 @@ def _add_support_mode_arguments(parser):
         type=str,
         required=True,
         help="System name (GPU type) or 'all' for a matrix view across every system. "
-        "Example: h200_sxm, h100_sxm, b200_sxm, gb200, a100_sxm, l40s, gb300.",
+        "Example: h200_sxm, h100_sxm, b200_sxm, b300_sxm, gb200, a100_sxm, l40s, gb300.",
     )
     parser.add_argument(
         "--backend",
