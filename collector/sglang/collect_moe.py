@@ -15,6 +15,9 @@ import torch
 if _server_args_module._global_server_args is None:
     _mock_server_args = MagicMock()
     _mock_server_args.enable_deterministic_inference = False
+    _mock_server_args.enable_fused_moe_sum_all_reduce = (
+        False  # sglang >=0.5.10; prevents fused all-reduce in single-GPU benchmarks
+    )
     _server_args_module._global_server_args = _mock_server_args
 
 from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_moe
