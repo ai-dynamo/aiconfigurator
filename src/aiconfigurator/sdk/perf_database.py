@@ -2749,12 +2749,6 @@ class PerfDatabase:
             gemm_modes = self.supported_quant_mode.get("gemm", []) or []
             if common.GEMMQuantMode.fp8.name in gemm_modes and common.GEMMQuantMode.fp8_static.name not in gemm_modes:
                 gemm_modes.append(common.GEMMQuantMode.fp8_static.name)
-            # `int4_wo` (compressed-tensors W4A16) has no dedicated silicon data.
-            # query_moe remaps it to float16 for the table lookup because the actual
-            # kernel is BF16 (weights are dequantized before the GEMM).
-            moe_modes = self.supported_quant_mode.get("moe", []) or []
-            if common.MoEQuantMode.int4_wo.name not in moe_modes:
-                moe_modes.append(common.MoEQuantMode.int4_wo.name)
         elif self.backend == "vllm":
             self.supported_quant_mode = {
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
@@ -2768,6 +2762,12 @@ class PerfDatabase:
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
             }
+        # `int4_wo` (compressed-tensors W4A16) has no dedicated silicon data.
+        # query_moe remaps it to float16 for the table lookup because the actual
+        # kernel is BF16 (weights are dequantized before the GEMM).
+        moe_modes = self.supported_quant_mode.get("moe", []) or []
+        if common.MoEQuantMode.int4_wo.name not in moe_modes:
+            moe_modes.append(common.MoEQuantMode.int4_wo.name)
 
     def is_inter_node(self, num_gpus: int) -> bool:
         """
