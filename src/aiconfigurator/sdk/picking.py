@@ -187,6 +187,7 @@ def pick_default(
     target_tpot: float | None = None,
     target_request_latency: float | None = None,
     top_n: int = 5,
+    strict_sla: bool = False,
 ) -> dict[str, Any]:
     """Pick configurations that maximize throughput for a fixed GPU budget.
 
@@ -202,6 +203,9 @@ def pick_default(
         target_request_latency: End-to-end request latency SLA in ms.  Takes
             precedence over ``target_tpot`` when set.
         top_n: Number of top configurations to return.
+        strict_sla: When ``True``, filter ``pareto_df`` to only SLA-compliant
+            data points (TPOT or request-latency) *before* the Pareto frontier
+            is computed.  TTFT is already enforced at sweep time by the backends.
 
     Returns:
         Dict with keys:
@@ -219,8 +223,20 @@ def pick_default(
     use_request_latency = target_request_latency is not None and target_request_latency > 0
 
     if pareto_df is not None and not pareto_df.empty:
+        pareto_df = pareto_df.copy()
+
+        # --strict-sla: drop data points that violate the user's TPOT (or
+        # request-latency) SLA *before* computing the Pareto frontier so that
+        # the frontier (and the plot / pareto.csv) only contains SLA-compliant
+        # configs.  TTFT filtering is already done at sweep time by all backends.
+        if strict_sla:
+            if use_request_latency:
+                if target_request_latency is not None and "request_latency" in pareto_df.columns:
+                    pareto_df = pareto_df[pareto_df["request_latency"] <= target_request_latency]
+            elif target_tpot is not None and "tpot" in pareto_df.columns:
+                pareto_df = pareto_df[pareto_df["tpot"] <= target_tpot]
+
         if total_gpus > 0:
-            pareto_df = pareto_df.copy()
             pareto_df["tokens/s/gpu_cluster"] = (
                 pareto_df["tokens/s/gpu"]
                 * (total_gpus // pareto_df["num_total_gpus"])
@@ -228,7 +244,6 @@ def pick_default(
                 / total_gpus
             )
         else:
-            pareto_df = pareto_df.copy()
             pareto_df["tokens/s/gpu_cluster"] = pareto_df["tokens/s/gpu"]
 
         x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"

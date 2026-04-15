@@ -21,6 +21,7 @@ def process_experiment_result(
     target_request_rate: float | None = None,
     target_concurrency: float | None = None,
     max_total_gpus: int | None = None,
+    strict_sla: bool = False,
 ) -> tuple:
     """
     Process the result of a single experiment.
@@ -38,6 +39,11 @@ def process_experiment_result(
         target_concurrency: If set, activates load-match picking (minimize
             GPUs for the given number of concurrent requests).
         max_total_gpus: Optional upper bound on total GPUs for load-match.
+        strict_sla: When ``True``, ``pareto_df`` is filtered to only
+            SLA-compliant data points (TPOT or request-latency) *before*
+            the Pareto frontier is computed.  TTFT is already enforced at
+            sweep time.  The resulting frontier, plot, and ``pareto.csv``
+            will only contain configs that meet the user's SLA targets.
 
     Returns:
         tuple:
@@ -80,6 +86,7 @@ def process_experiment_result(
             target_tpot=target_tpot,
             target_request_latency=target_request_latency,
             top_n=top_n,
+            strict_sla=strict_sla,
         )
 
     best_config_df = picking_result["best_config_df"]
