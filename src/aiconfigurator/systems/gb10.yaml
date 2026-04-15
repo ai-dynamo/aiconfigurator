@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Sources:
+#   https://www.nvidia.com/en-us/products/workstations/dgx-spark/
+#   https://docs.nvidia.com/dgx/dgx-spark/hardware.html
+#   https://forums.developer.nvidia.com/t/detailed-compute-performance-metrics-for-dgx-spark/351993
+#   https://learn.arm.com/learning-paths/laptops-and-desktops/dgx_spark_llamacpp/1_gb10_introduction/
+#
+# Notes:
+#   - SM 12.1 (sm_121) — consumer/edge Blackwell, distinct from datacenter SM 10.0
+#   - FP8 throughput equals FP16 (~213 TFLOPS) on SM12x; it does NOT double as on B200/H100
+#   - 128 GB LPDDR5X unified memory shared between Grace CPU and B10 GPU dies
+#   - Memory bandwidth (273 GB/s) is SoC-wide; CPU and GPU compete for this pool
+#   - NVLink-C2C connects Grace CPU to B10 GPU at 900 GB/s bidirectional (450 GB/s per direction)
+#   - Single GPU die per DGX Spark unit; no NVSwitch or multi-GPU intra-node fabric
+#   - FP16/FP8 figures are empirical (mmapeak); FP4 dense empirical; FP4 sparse is official NVIDIA figure
+
+data_dir: data/gb10 # relative to systems_dir
+
+gpu:
+  mem_bw: 273000000000 # 273 GB/s LPDDR5X (official datasheet)
+  mem_bw_empirical_scaling_factor: 0.8
+  mem_empirical_constant_latency: 0.000003 # 3us
+  mem_capacity: 128538451968 # 119.7 GiB usable to CUDA (128 GiB physical, OS/firmware reserves remainder)
+  float16_tc_flops: 213000000000000 # ~213 TFLOPS empirical (mmapeak); NVIDIA publishes only FP4 sparse
+  int8_tc_flops: 214000000000000 # ~214 TOPS empirical (mmapeak); equals FP8 on SM12x
+  fp8_tc_flops: 214000000000000 # ~214 TFLOPS empirical (mmapeak); does NOT double FP16 on SM12x
+  fp4_tc_flops: 427000000000000 # ~427 TFLOPS dense (mmapeak); 1 PFLOP with 2:4 structured sparsity (official)
+  power: 140 # Watt SoC TDP (external brick is 240W)
+  sm_version: 121 # Compute Capability 12.1 (sm_121)
+
+node:
+  num_gpus_per_node: 1 # Single GB10 superchip per DGX Spark unit
+  num_gpus_per_rack: 1 # No rack form factor; desktop unit
+  inter_rack_bw: 25000000000 # Byte/s — ConnectX-7 NIC, PCIe Gen5 x4 per port (~200 Gbps = 25 GB/s)
+  inter_node_bw: 25000000000 # Byte/s — same ConnectX-7 path for node-to-node
+  intra_node_bw: 450000000000 # Byte/s — NVLink-C2C unidirectional (900 GB/s bidirectional aggregate)
+  pcie_bw: 32000000000 # Byte/s, single direction — PCIe Gen 5 x4 to ConnectX-7
+  p2p_latency: 0.00001 # 10us
+
+misc:
+  nccl_mem:
+    1: 0
+  other_mem: 3758096384 # 3.5 GB headroom
+  nccl_version: '2.23'
