@@ -151,7 +151,7 @@ def _get_precision_combos(phase: str):
         nvfp4:     SM >= 100 (Blackwell)
 
       (compute_dtype, kv_cache_dtype) — attention compute + KV cache
-        context:    (bf16, bf16) always;  (fp8, fp8) SM >= 100
+        context:    (bf16, bf16) always;  (bf16, fp8) SM >= 90;  (fp8, fp8) SM >= 100
         generation: (bf16, bf16) always;  (bf16, fp8) SM >= 90
     """
     sm = get_sm_version()
@@ -164,6 +164,8 @@ def _get_precision_combos(phase: str):
 
     attn_combos = [("bfloat16", "bfloat16")]
     if phase == "context":
+        if sm >= 90:
+            attn_combos.append(("bfloat16", "fp8"))
         if sm >= 100:
             attn_combos.append(("fp8", "fp8"))
     else:
