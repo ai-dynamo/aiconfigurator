@@ -283,6 +283,8 @@ DefaultHFModels = {
     # DeepSeek V3/V3.1 Models
     "deepseek-ai/DeepSeek-V3",
     "nvidia/DeepSeek-V3.1-NVFP4",
+    # Kimi K2.5 Models
+    "moonshotai/Kimi-K2.5",
     # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
     "deepseek-ai/DeepSeek-V3.2",
     "zai-org/GLM-5",

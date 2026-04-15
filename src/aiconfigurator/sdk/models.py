@@ -10,7 +10,11 @@ from typing import Optional
 
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.utils import _load_model_config_from_model_path, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import (
+    _load_model_config_from_model_path,
+    get_model_config_from_model_path,
+    parse_compressed_tensors_quant,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +73,17 @@ def _infer_quant_modes_from_raw_config(raw_config: dict) -> dict[str, object]:
     elif quant_algo == "mxfp4":
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
         overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_mxfp4
+    elif quant_algo == "compressed-tensors":
+        # Parse the quantization_config to find which layer categories are quantized.
+        # Only set overrides for quantized categories; unset modes fall through to the
+        # global float16 default in _apply_model_quant_defaults.
+        quant_cfg = raw_config.get("quantization_config") or {}
+        base_algo, ignored = parse_compressed_tensors_quant(quant_cfg)
+        if base_algo:
+            if "attention" not in ignored:
+                overrides["gemm_quant_mode"] = getattr(common.GEMMQuantMode, base_algo)
+            if "routing_experts" not in ignored:
+                overrides["moe_quant_mode"] = getattr(common.MoEQuantMode, base_algo)
     elif quant_algo == "float16":
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.float16
         overrides["moe_quant_mode"] = common.MoEQuantMode.float16

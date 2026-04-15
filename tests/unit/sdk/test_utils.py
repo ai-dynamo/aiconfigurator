@@ -656,6 +656,165 @@ class TestEnumerateTTFTTPOTConstraints:
         assert derived_pair[1] == pytest.approx((1000 - 950) / (50 - 1))
 
 
+class TestParseCompressedTensorsQuant:
+    """Tests for parse_compressed_tensors_quant and its _categorize_ignore_pattern helper."""
+
+    @staticmethod
+    def _make_quant_config(num_bits: int, w_type: str, ignore: list | None = None) -> dict:
+        return {
+            "config_groups": {
+                "group_0": {
+                    "weights": {"num_bits": num_bits, "type": w_type},
+                    "input_activations": None,
+                    "output_activations": None,
+                    "targets": ["Linear"],
+                }
+            },
+            "ignore": ignore or [],
+            "quant_method": "compressed-tensors",
+        }
+
+    # --- input guards ---
+
+    def test_none_input(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        assert parse_compressed_tensors_quant(None) == (None, frozenset())
+
+    def test_non_dict_input(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        assert parse_compressed_tensors_quant("not-a-dict") == (None, frozenset())
+
+    def test_empty_config_groups(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        assert parse_compressed_tensors_quant({"config_groups": {}}) == (None, frozenset())
+
+    # --- base_algo detection ---
+
+    def test_int4_base_algo(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        algo, _ = parse_compressed_tensors_quant(self._make_quant_config(4, "int"))
+        assert algo == "int4_wo"
+
+    def test_int8_base_algo(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        algo, _ = parse_compressed_tensors_quant(self._make_quant_config(8, "int"))
+        assert algo == "int8_wo"
+
+    def test_fp8_base_algo(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        algo, _ = parse_compressed_tensors_quant(self._make_quant_config(8, "float"))
+        assert algo == "fp8"
+
+    # --- ignored_categories detection ---
+
+    def test_no_ignore_empty_set(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        _, ignored = parse_compressed_tensors_quant(self._make_quant_config(4, "int", ignore=[]))
+        assert ignored == frozenset()
+
+    def test_attention_pattern_detected(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        _, ignored = parse_compressed_tensors_quant(self._make_quant_config(4, "int", ignore=["re:.*self_attn.*"]))
+        assert "attention" in ignored
+
+    def test_routing_experts_pattern_detected(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        _, ignored = parse_compressed_tensors_quant(
+            self._make_quant_config(4, "int", ignore=["re:.*mlp\\.experts\\..*"])
+        )
+        assert "routing_experts" in ignored
+
+    def test_shared_experts_pattern_detected_not_routing(self):
+        """re:.*shared_experts.* must categorize as shared_experts, NOT routing_experts."""
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        _, ignored = parse_compressed_tensors_quant(self._make_quant_config(4, "int", ignore=["re:.*shared_experts.*"]))
+        assert "shared_experts" in ignored
+        assert "routing_experts" not in ignored
+
+    def test_dense_mlp_pattern_detected(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        _, ignored = parse_compressed_tensors_quant(
+            self._make_quant_config(4, "int", ignore=["re:.*mlp\\.(gate|up|gate_up|down)_proj.*"])
+        )
+        assert "dense_mlp" in ignored
+
+    def test_lm_head_pattern_detected(self):
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        _, ignored = parse_compressed_tensors_quant(self._make_quant_config(4, "int", ignore=["lm_head"]))
+        assert "lm_head" in ignored
+
+    # --- Kimi K2.5 end-to-end ---
+
+    def test_kimi_k25_actual_config(self):
+        """Kimi K2.5: attention + shared_experts + dense_mlp + lm_head all ignored.
+        Only routing experts are quantized → those four categories in ignored set."""
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        cfg = self._make_quant_config(
+            4,
+            "int",
+            ignore=[
+                "lm_head",
+                "re:.*self_attn.*",
+                "re:.*shared_experts.*",
+                "re:.*mlp\\.(gate|up|gate_up|down)_proj.*",
+            ],
+        )
+        base_algo, ignored = parse_compressed_tensors_quant(cfg)
+        assert base_algo == "int4_wo"
+        assert ignored == frozenset({"attention", "shared_experts", "dense_mlp", "lm_head"})
+        assert "routing_experts" not in ignored
+
+    # --- models.py mapping (end-to-end via _infer_quant_modes_from_raw_config) ---
+
+    def test_kimi_k25_maps_to_correct_sdk_modes(self):
+        """Kimi K2.5 compressed-tensors config → gemm=float16, moe=int4_wo."""
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
+
+        raw_config = {
+            "quant_algo": "compressed-tensors",
+            "quantization_config": self._make_quant_config(
+                4,
+                "int",
+                ignore=[
+                    "lm_head",
+                    "re:.*self_attn.*",
+                    "re:.*shared_experts.*",
+                    "re:.*mlp\\.(gate|up|gate_up|down)_proj.*",
+                ],
+            ),
+        }
+        overrides = _infer_quant_modes_from_raw_config(raw_config)
+        assert overrides.get("gemm_quant_mode") is None  # not set → falls back to float16
+        assert overrides.get("moe_quant_mode") == common.MoEQuantMode.int4_wo
+
+    def test_all_layers_quantized_maps_both_modes(self):
+        """No ignore list → both gemm and moe overrides are set."""
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
+
+        raw_config = {
+            "quant_algo": "compressed-tensors",
+            "quantization_config": self._make_quant_config(4, "int", ignore=[]),
+        }
+        overrides = _infer_quant_modes_from_raw_config(raw_config)
+        assert overrides.get("gemm_quant_mode") == common.GEMMQuantMode.int4_wo
+        assert overrides.get("moe_quant_mode") == common.MoEQuantMode.int4_wo
+
+
 class TestEnumerateParallelConfigSGLangMoE:
     """Test enumerate_parallel_config for SGLang MoE scenarios."""
 
