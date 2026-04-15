@@ -2958,6 +2958,8 @@ class PerfDatabase:
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
             }
+        else:
+            self.supported_quant_mode = {}
         # `int4_wo` (compressed-tensors W4A16) has no dedicated silicon data.
         # query_moe remaps it to float16 for the table lookup because the actual
         # kernel is BF16 (weights are dequantized before the GEMM).
