@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# https://resources.nvidia.com/en-us-blackwell-architecture/blackwell-ultra-datasheet
+
+data_dir: data/b300_sxm # relative to systems_dir
+gpu:
+  mem_bw: 7750000000000 # 7.75 TB/s (Total mem_bw: 62TB/s / 8 GPUs)
+  mem_bw_empirical_scaling_factor: 0.8 # some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_empirical_constant_latency: 0.000003 # 3us some nonofficial correction based on observations, you should try to modify based on your own observations
+  mem_capacity: 288400343040 # 275040MiB reported by nvidia-smi
+  float16_tc_flops: 2250000000000000 # 2250 TFLOPS (4.5 PFLOPS sparse / 2)
+  int8_tc_flops: 153500000000000 # 153.5 TFLOPS (307 TOPS sparse / 2)
+  fp8_tc_flops: 4500000000000000 # 4.5 PFLOPS (9 PFLOPS sparse / 2)
+  fp4_tc_flops: 14000000000000000 # 14 PFLOPS (18 PFLOPS sparse | 14 PFLOPS dense)
+  power: 1100  # Watt (configurable up to 1,100 W)
+  sm_version: 103
+
+node:
+  num_gpus_per_node: 8
+  inter_node_bw: 100000000000  # Byte/s per GPU, single direction, 1:1 CX8 XDR 800Gb/s per node
+  intra_node_bw: 900000000000  # Byte/s per gpu, single direction (1.8 TB/s NVLink bidir / 2)
+  pcie_bw: 128000000000  # Byte/s, single direction, PCIe Gen6 (256 GB/s bidir / 2)
+  p2p_latency: 0.00001  # 10us some nonofficial correction based on observations, you should try to modify based on your own observations
+
+misc:
+  nccl_mem: # some nonofficial correction based on observations, you should try to modify based on your own observations
+    1: 0
+    2: 358612992 # 342MB
+    4: 411041792 # 392MB
+    8: 411041792 # 392MB
+  other_mem: 3758096384 # increase from 551MB to 3.5GB for safer deployment, this will cover part of the inaccurate mem calc.
+  nccl_version: '2.27'

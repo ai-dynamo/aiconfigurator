@@ -289,7 +289,7 @@ class TaskConfigFactory:
         # for higher tensor core throughput. Profiles applied after this can override.
         # In disagg mode, prefill and decode may run on different hardware, so only
         # promote the workers that are actually on Blackwell.
-        _blackwell_systems = ("gb200", "gb300", "b200_sxm")
+        _blackwell_systems = ("gb200", "gb300", "b200_sxm", "b300_sxm")
         if ctx.backend_name == "trtllm" and ctx.model_path in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
             quant_override = {"moe_quant_mode": "w4a8_mxfp4_mxfp8"}
             if ctx.serving_mode == "agg":
