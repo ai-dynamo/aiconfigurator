@@ -976,7 +976,10 @@ def run_wideep_moe(num_experts, perf_filename, device="cuda:0"):
     print(f"MOE: num_experts={num_experts}, GPU={gpu_id}")
     print("=" * 60)
 
-    _run_moe_subprocess(num_experts, gpu_id, None)
+    # Resolve output_path from cwd so perf files land in the collector
+    # framework's result directory (consistent with collect_moe.py behavior).
+    output_path = os.getcwd()
+    _run_moe_subprocess(num_experts, gpu_id, output_path)
 
 
 if __name__ == "__main__":
