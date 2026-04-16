@@ -38,6 +38,9 @@ _nvfp4_available = False
 # scaled_fp4_quant dropped is_sf_swizzled_layout in some vLLM builds.
 # Probe the signature once at import time so _run_nvfp4_once doesn't branch per call.
 _scaled_fp4_quant_accepts_swizzled: bool = False
+# trtllm_fp4_block_scale_routed_moe dropped tile_tokens_dim in some flashinfer builds.
+# Probe once at import time to avoid TypeError at call time.
+_trtllm_moe_accepts_tile_tokens_dim: bool = False
 try:
     import inspect
 
@@ -50,6 +53,9 @@ try:
 
     _scaled_fp4_quant_accepts_swizzled = (
         "is_sf_swizzled_layout" in inspect.signature(_vllm_ops.scaled_fp4_quant).parameters
+    )
+    _trtllm_moe_accepts_tile_tokens_dim = (
+        "tile_tokens_dim" in inspect.signature(trtllm_fp4_block_scale_routed_moe).parameters
     )
     _nvfp4_available = True
 except Exception:
@@ -500,10 +506,6 @@ def run_moe_torch(
             scale_cols = hs.shape[1] // 16
             # Pack topk: (expert_id << 16) | bf16_weight_as_int16
             packed = (ti.to(torch.int32) << 16) | tw.to(torch.bfloat16).view(torch.int16).to(torch.int32)
-            # tile_tokens_dim: avg tokens per expert, rounded to next power-of-2,
-            # clamped to [8, 64]. Controls GEMM tiling in the FlashInfer kernel.
-            avg_tok = max(1, (num_tok * topk) // num_experts)
-            tile_tokens_dim = min(max(1 << (avg_tok - 1).bit_length(), 8), 64)
             trtllm_fp4_block_scale_routed_moe(
                 topk_ids=packed,
                 routing_bias=None,
@@ -531,7 +533,17 @@ def run_moe_torch(
                 routed_scaling_factor=None,
                 routing_method_type=1,  # Renormalize
                 do_finalize=True,
-                tile_tokens_dim=tile_tokens_dim,
+                # tile_tokens_dim: avg tokens per expert, rounded to next power-of-2,
+                # clamped to [8, 64]. Required by some flashinfer builds, rejected by others.
+                **(
+                    {
+                        "tile_tokens_dim": min(
+                            max(1 << (max(1, (num_tok * topk) // num_experts) - 1).bit_length(), 8), 64
+                        )
+                    }
+                    if _trtllm_moe_accepts_tile_tokens_dim
+                    else {}
+                ),
             )
 
         def run_single_iteration():
