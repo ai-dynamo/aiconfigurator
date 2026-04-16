@@ -5,7 +5,15 @@
 Naive generator parameter builder for quick configuration generation.
 
 This module provides utilities for building generator parameters using
-the smallest TP that fits the model in memory, with PP=1.
+the smallest parallelization that fits the model in memory.
+
+For dense models, this is pure TP (tensor parallelism).  For MoE models,
+the parallelization strategy depends on the model architecture and the
+optimization objective:
+
+- **Dense** (no MoE): TP
+- **MLA + MoE + throughput** (DeepSeek-V3 family): DEP
+- **All other sparse** (MLA + MoE + latency, GQA + MoE): TEP
 """
 
 import logging
@@ -16,6 +24,7 @@ from typing import Any
 import yaml
 
 from aiconfigurator.sdk import perf_database
+from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +35,60 @@ _DEFAULT_GPUS_PER_NODE = 8
 _DEFAULT_VRAM_BYTES = 141 * 1024 * 1024 * 1024  # 141 GiB (H200)
 _MEMORY_MULTIPLIER = 1.5  # Require 1.5x model weight to fit in VRAM
 _BYTES_PER_PARAM = 2  # FP16/BF16
+
+# MoE architecture sets — must stay in sync with
+# dynamo profiler's model_info.py (canonical source).
+_MLA_MOE_ARCHITECTURES = {"DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"}
+_MOE_ARCHITECTURES = _MLA_MOE_ARCHITECTURES | {
+    "Qwen3MoeForCausalLM",
+}
+
+
+def _resolve_parallelization(
+    architecture: str,
+    is_moe: bool,
+    num_gpus: int,
+    optimization_type: str | None = None,
+) -> dict[str, int]:
+    """Return parallelization params for a given model architecture.
+
+    The returned dict is suitable for merging into a worker params dict
+    and contains the keys consumed by the generator (``tensor_parallel_size``,
+    ``pipeline_parallel_size``, ``data_parallel_size``,
+    ``moe_tensor_parallel_size``, ``moe_expert_parallel_size``).
+
+    Rules (same for agg and disagg):
+    - **Dense**: TP = num_gpus
+    - **MLA + MoE + throughput** (DeepSeek-V3): DEP = num_gpus
+    - **All other sparse**: TEP = num_gpus
+    """
+    if not is_moe:
+        return {
+            "tensor_parallel_size": num_gpus,
+            "pipeline_parallel_size": 1,
+            "data_parallel_size": 1,
+            "moe_tensor_parallel_size": 1,
+            "moe_expert_parallel_size": 1,
+        }
+
+    # MLA + MoE + throughput → DEP
+    if architecture in _MLA_MOE_ARCHITECTURES and optimization_type == "throughput":
+        return {
+            "tensor_parallel_size": 1,
+            "pipeline_parallel_size": 1,
+            "data_parallel_size": num_gpus,
+            "moe_tensor_parallel_size": 1,
+            "moe_expert_parallel_size": num_gpus,
+        }
+
+    # All other sparse → TEP
+    return {
+        "tensor_parallel_size": 1,
+        "pipeline_parallel_size": 1,
+        "data_parallel_size": 1,
+        "moe_tensor_parallel_size": num_gpus,
+        "moe_expert_parallel_size": 1,
+    }
 
 
 def _sanitize_rfc1123(name: str) -> str:
@@ -212,33 +275,31 @@ def build_naive_generator_params(
     total_gpus: int,
     system_name: str,
     backend_name: str,
+    mode: str = "agg",
+    optimization_type: str | None = None,
 ) -> dict[str, Any]:
     """
     Build generator parameters for naive configuration generation.
 
-    Calculates the smallest TP size that fits the model in memory:
-    tp_size * VRAM_per_GPU > 1.5 * model_weight_size
+    Calculates the smallest parallelization that fits the model in memory
+    and selects the appropriate strategy (TP, TEP, or DEP) based on the
+    model architecture and optimization objective.
 
     Args:
         model_name: Name or HuggingFace ID of the model.
         total_gpus: Total number of GPUs available.
         system_name: Name of the system (e.g., 'h200_sxm', 'gb200').
         backend_name: Name of the backend (e.g., 'trtllm', 'sglang', 'vllm').
+        mode: Serving mode — ``"agg"`` (aggregated, single worker type) or
+            ``"disagg"`` (disaggregated, separate prefill/decode workers).
+        optimization_type: ``"throughput"`` or ``"latency"`` (or ``None``
+            for legacy callers). Influences parallelization for MoE models.
 
     Returns:
-        Dictionary containing generator parameters with the structure:
-        {
-            "service": {...},
-            "k8s": {...},
-            "params": {
-                "agg": {
-                    "tensor_parallel_size": int,
-                    "pipeline_parallel_size": int,
-                    "max_batch_size": int,
-                    ...
-                }
-            }
-        }
+        Dictionary containing generator parameters.  When ``mode="agg"``,
+        ``params.agg`` is populated.  When ``mode="disagg"``, both
+        ``params.prefill`` and ``params.decode`` are populated with
+        identical parallelization.
     """
     # Get system config (GPUs per node and VRAM)
     system_config = _get_system_config(system_name)
@@ -248,63 +309,148 @@ def build_naive_generator_params(
     # Estimate model weight size
     model_weight_bytes = _estimate_model_weight_bytes(model_name)
 
-    # Calculate minimum TP that fits the model
-    tensor_parallel_size = _calculate_min_tp(
+    # Calculate minimum GPU count that fits the model
+    min_gpus = _calculate_min_tp(
         model_weight_bytes=model_weight_bytes,
         vram_per_gpu=vram_per_gpu,
         gpus_per_node=gpus_per_node,
         total_gpus=total_gpus,
     )
-    pipeline_parallel_size = 1
+
+    # Detect model architecture for MoE-aware parallelization
+    architecture = ""
+    is_moe = False
+    try:
+        model_config = get_model_config_from_model_path(model_name)
+        architecture = model_config.get("architecture", "")
+        num_experts = model_config.get("num_experts", 0)
+        is_moe = bool(num_experts and num_experts > 1)
+    except Exception:
+        logger.warning(
+            "Could not detect model architecture for %s; assuming dense (TP-only).",
+            model_name,
+        )
+
+    # Resolve parallelization strategy
+    parallel = _resolve_parallelization(
+        architecture=architecture,
+        is_moe=is_moe,
+        num_gpus=min_gpus,
+        optimization_type=optimization_type,
+    )
+
+    strategy = "TP" if not is_moe else ("DEP" if parallel["data_parallel_size"] > 1 else "TEP")
+    logger.info(
+        "Naive config: model=%s, strategy=%s=%d, optimization_type=%s, mode=%s",
+        model_name,
+        strategy,
+        min_gpus,
+        optimization_type or "default",
+        mode,
+    )
 
     # Default max batch size - conservative value that works for most models
     max_batch_size = 128
 
     # Build the generator params structure
-    # Default SLA values for rule engine (used in max_num_tokens calculations)
     default_isl = 4000
     default_osl = 1000
 
-    # Calculate number of workers (replicas) and GPUs per worker
-    gpus_per_worker = tensor_parallel_size * pipeline_parallel_size
-    agg_workers = total_gpus // gpus_per_worker
+    # Worker params shared by all modes
+    worker_params = {
+        **parallel,
+        "max_batch_size": max_batch_size,
+        "gpus_per_worker": min_gpus,
+    }
 
     name_prefix = _sanitize_rfc1123(model_name)
 
-    params = {
-        "ServiceConfig": {
-            "model_name": model_name,
-            "served_model_name": model_name,
-            "model_path": model_name,
-            "include_frontend": True,
-        },
-        "K8sConfig": {
-            "system_name": system_name,
-            "name_prefix": name_prefix,
-        },
-        "params": {
-            "agg": {
-                "tensor_parallel_size": tensor_parallel_size,
-                "pipeline_parallel_size": pipeline_parallel_size,
-                "max_batch_size": max_batch_size,
-                "gpus_per_worker": gpus_per_worker,
-            }
-        },
-        "DynConfig": {
-            "mode": "agg",
-        },
-        "SlaConfig": {
-            "isl": default_isl,
-            "osl": default_osl,
-        },
-        "NodeConfig": {
-            "num_gpus_per_node": gpus_per_node,
-        },
-        "WorkerConfig": {
-            "agg_workers": agg_workers,
-            "agg_gpus_per_worker": gpus_per_worker,
-        },
-        "backend": backend_name,
-    }
+    if mode == "disagg":
+        # Disaggregated: separate prefill and decode workers with identical parallelization
+        if total_gpus < 2 * min_gpus:
+            logger.warning(
+                "Disaggregated mode requires at least %d GPUs (%d prefill + %d decode), "
+                "but only %d are available. Workers may overcommit GPU resources.",
+                2 * min_gpus,
+                min_gpus,
+                min_gpus,
+                total_gpus,
+            )
+        prefill_workers = 1
+        decode_workers = max(1, (total_gpus // min_gpus) - 1) if total_gpus > min_gpus else 1
+        params = {
+            "ServiceConfig": {
+                "model_name": model_name,
+                "served_model_name": model_name,
+                "model_path": model_name,
+                "include_frontend": True,
+            },
+            "K8sConfig": {
+                "system_name": system_name,
+                "name_prefix": name_prefix,
+            },
+            "params": {
+                # TODO: consider tuning prefill-specific defaults for
+                # max_batch_size and max_num_tokens separately from decode.
+                "prefill": dict(worker_params),
+                "decode": dict(worker_params),
+            },
+            "DynConfig": {
+                "mode": "disagg",
+            },
+            "SlaConfig": {
+                "isl": default_isl,
+                "osl": default_osl,
+            },
+            "NodeConfig": {
+                "num_gpus_per_node": gpus_per_node,
+            },
+            "WorkerConfig": {
+                "prefill_workers": prefill_workers,
+                "prefill_gpus_per_worker": min_gpus,
+                "decode_workers": decode_workers,
+                "decode_gpus_per_worker": min_gpus,
+            },
+            "ModelConfig": {
+                "is_moe": is_moe,
+            },
+            "backend": backend_name,
+        }
+    else:
+        # Aggregated: single worker type
+        agg_workers = total_gpus // min_gpus
+        params = {
+            "ServiceConfig": {
+                "model_name": model_name,
+                "served_model_name": model_name,
+                "model_path": model_name,
+                "include_frontend": True,
+            },
+            "K8sConfig": {
+                "system_name": system_name,
+                "name_prefix": name_prefix,
+            },
+            "params": {
+                "agg": dict(worker_params),
+            },
+            "DynConfig": {
+                "mode": "agg",
+            },
+            "SlaConfig": {
+                "isl": default_isl,
+                "osl": default_osl,
+            },
+            "NodeConfig": {
+                "num_gpus_per_node": gpus_per_node,
+            },
+            "WorkerConfig": {
+                "agg_workers": agg_workers,
+                "agg_gpus_per_worker": min_gpus,
+            },
+            "ModelConfig": {
+                "is_moe": is_moe,
+            },
+            "backend": backend_name,
+        }
 
     return params

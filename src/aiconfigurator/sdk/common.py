@@ -329,6 +329,7 @@ SupportedSystems = {
     "h100_sxm",
     "h200_sxm",
     "b200_sxm",
+    "b300_sxm",
     "gb200",
     "gb300",
     "a100_sxm",

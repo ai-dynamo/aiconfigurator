@@ -1,14 +1,4 @@
 {%- set args = [] -%}
-{%- set override_dict = {} -%}
-
-{#- Model configuration -#}
-{%- if ServiceConfig.model_path -%}
-  {%- set _ = args.append('--model-path "' + ServiceConfig.model_path + '"') -%}
-{%- endif -%}
-
-{%- if ServiceConfig.served_model_name -%}
-  {%- set _ = args.append('--served-model-name "' + ServiceConfig.served_model_name + '"') -%}
-{%- endif -%}
 
 {#- Direct CLI args: only flags accepted by dynamo.trtllm argparser -#}
 
@@ -42,47 +32,6 @@
 
 {%- if kv_cache_free_gpu_memory_fraction is defined -%}
   {%- set _ = args.append('--free-gpu-memory-fraction ' + kv_cache_free_gpu_memory_fraction|string) -%}
-{%- endif -%}
-
-{#- Engine configuration: parameters that go into --override-engine-args JSON -#}
-
-{%- if tokens_per_block is defined or (disable_prefix_cache is defined) or kv_cache_dtype is defined -%}
-  {%- set _ = override_dict.update({'kv_cache_config': {}}) -%}
-  {%- if tokens_per_block is defined -%}
-    {%- set _ = override_dict['kv_cache_config'].update({'tokens_per_block': tokens_per_block}) -%}
-  {%- endif -%}
-  {%- if disable_prefix_cache is defined -%}
-    {%- set _ = override_dict['kv_cache_config'].update({'enable_block_reuse': not disable_prefix_cache}) -%}
-  {%- endif -%}
-  {%- if kv_cache_dtype is defined -%}
-    {%- set _ = override_dict['kv_cache_config'].update({'dtype': kv_cache_dtype}) -%}
-  {%- endif -%}
-{%- endif -%}
-
-{%- if cache_transceiver_max_tokens_in_buffer is defined -%}
-  {%- set _ = override_dict.update({'cache_transceiver_config': {'max_tokens_in_buffer': cache_transceiver_max_tokens_in_buffer, 'backend': 'DEFAULT'}}) -%}
-{%- endif -%}
-
-{%- if disable_overlap_scheduler is defined -%}
-  {%- set _ = override_dict.update({'disable_overlap_scheduler': disable_overlap_scheduler}) -%}
-{%- endif -%}
-
-{%- if skip_tokenizer_init is defined -%}
-  {%- set _ = override_dict.update({'skip_tokenizer_init': skip_tokenizer_init}) -%}
-{%- endif -%}
-
-{%- if trust_remote_code is defined -%}
-  {%- set _ = override_dict.update({'trust_remote_code': trust_remote_code}) -%}
-{%- endif -%}
-
-{%- if enable_chunked_prefill is defined -%}
-  {%- set _ = override_dict.update({'enable_chunked_prefill': enable_chunked_prefill}) -%}
-{%- endif -%}
-
-{#- Emit --override-engine-args if we collected any engine config overrides -#}
-{%- if override_dict -%}
-  {%- set json_str = override_dict|tojson|replace('"', '\\"') -%}
-  {%- set _ = args.append('--override-engine-args "' + json_str + '"') -%}
 {%- endif -%}
 
 {#- Output the args -#}

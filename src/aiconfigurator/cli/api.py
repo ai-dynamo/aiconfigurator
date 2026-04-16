@@ -108,10 +108,11 @@ def _execute_and_wrap_result(
     task_configs: dict[str, TaskConfig],
     mode: str,
     top_n: int = 5,
+    strict_sla: bool = False,
 ) -> CLIResult:
     """Execute task configs using main.py's function and wrap result in CLIResult."""
     chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies = _execute_task_configs_internal(
-        task_configs, mode, top_n=top_n
+        task_configs, mode, top_n=top_n, strict_sla=strict_sla
     )
 
     return CLIResult(
@@ -140,6 +141,7 @@ def cli_default(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
+    strict_sla: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     top_n: int = 5,
@@ -171,6 +173,11 @@ def cli_default(
         request_latency: Optional end-to-end request latency target (ms).
             Enables request-latency optimization mode.
         prefix: Prefix cache length. Default is 0.
+        strict_sla: When True, ``pareto_df`` is filtered to only
+            SLA-compliant data points (TPOT or request-latency) *before*
+            the Pareto frontier is computed.  TTFT is already enforced at
+            sweep time.  Default is False (full Pareto frontier, TPOT-only
+            constraint at picking time).
         free_gpu_memory_fraction: Fraction of free GPU memory allocated for KV cache
             (default ``None``, meaning the backend default is used). Must be > 0 and <= 1.
             Used to filter batch sizes that would exceed KV cache capacity.
@@ -238,7 +245,7 @@ def cli_default(
         max_seq_len=max_seq_len,
     )
 
-    result = _execute_and_wrap_result(task_configs, mode="default", top_n=top_n)
+    result = _execute_and_wrap_result(task_configs, mode="default", top_n=top_n, strict_sla=strict_sla)
 
     if save_dir:
         # Create a mock args object for save_results compatibility

@@ -2,6 +2,13 @@ BenchConfig.estimated_concurrency = (BenchConfig.estimated_concurrency if BenchC
 agg_decode max_batch_size = (512 if (max_batch_size or 0) < 512 else (max_batch_size * 2))
 prefill max_batch_size = (max_batch_size if max_batch_size else 1)
 
+# Enforce vLLM MoE parallelism: vLLM uses unified TP for both attention and MoE,
+# so tensor_parallel_size must account for moe_tp × moe_ep.
+# Without this, MoE models get tp=1 and the full model is replicated per GPU, causing OOM.
+when ModelConfig.is_moe and (moe_tensor_parallel_size and moe_expert_parallel_size):
+    agg_prefill_decode tensor_parallel_size = (moe_tensor_parallel_size * moe_expert_parallel_size) // (data_parallel_size or 1)
+
+# GPUs per worker follow the same TP/PP/DP product
 agg_prefill_decode gpus_per_worker = (tensor_parallel_size or 1) * (pipeline_parallel_size or 1) * (data_parallel_size or 1)
 agg_prefill_decode enable_expert_parallel = ((moe_expert_parallel_size or 1) > 1)
 

@@ -338,6 +338,35 @@ def render_backend_templates(
             context["agg_cli_args_list"] = cli_list
             rendered_templates["cli_args_agg"] = cli
 
+    # ── Translate: append --trtllm.* dynamic flags from extra_engine_args ──
+    # When the profiler path is active (use_dynamo_generator=True) and the
+    # backend is trtllm, convert the rendered extra_engine_args YAML into
+    # --trtllm.<key>.<subkey> <value> flags and merge them into cli_args.
+    # Note: list-typed values (e.g. cuda_graph_config.batch_sizes) are skipped
+    # because dynamo's infer_type cannot round-trip lists; the engine uses its
+    # built-in defaults for those fields.
+    if use_dynamo_generator and backend == "trtllm":
+        from .translate import yaml_to_dynamic_flags
+
+        for worker in worker_plan:
+            yaml_key = f"extra_engine_args_{worker}.yaml"
+            yaml_content = rendered_templates.get(yaml_key, "")
+            if not yaml_content:
+                continue
+
+            dynamic_flags = yaml_to_dynamic_flags(yaml_content)
+
+            cli_key = f"{worker}_cli_args"
+            list_key = f"{worker}_cli_args_list"
+            tmpl_key = f"cli_args_{worker}"
+
+            existing_list = list(context.get(list_key) or [])
+            existing_list.extend(dynamic_flags)
+            context[list_key] = existing_list
+            cli_str = " ".join(shlex.quote(a) for a in existing_list)
+            context[cli_key] = cli_str
+            rendered_templates[tmpl_key] = cli_str
+
     # Compute GPU counts per worker using rule outputs (minimal fallback)
     pv_params = param_values.get("params", {})
     prefill_gpu = int(pv_params.get("prefill", {}).get("gpus_per_worker") or 1)
@@ -362,8 +391,18 @@ def render_backend_templates(
         k8s_aux = template_path / "k8s_deploy.yaml.j2"
         if k8s_aux.exists():
             try:
+                k8s_context = context
+                # For backends with extra_engine_args templates (trtllm),
+                # suppress cli_args_list so the k8s template uses the
+                # --extra-engine-args file approach instead of inlining
+                # all parameters as redundant CLI flags.
+                if has_engine_templates:
+                    k8s_context = dict(context)
+                    k8s_context["agg_cli_args_list"] = None
+                    k8s_context["prefill_cli_args_list"] = None
+                    k8s_context["decode_cli_args_list"] = None
                 tmpl = env.get_template("k8s_deploy.yaml.j2")
-                rendered = tmpl.render(**context)
+                rendered = tmpl.render(**k8s_context)
                 rendered_templates["k8s_deploy.yaml"] = rendered
             except Exception as e:
                 logger.warning(f"Failed to render template k8s_deploy.yaml.j2: {e}")

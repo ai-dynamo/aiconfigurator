@@ -29,6 +29,7 @@ Usage:
     python collect_all_reduce.py --range "128,1000000,2" --perf-filename "my_perf.txt"
 """
 
+import inspect
 import os
 import sys
 from argparse import ArgumentParser
@@ -38,6 +39,28 @@ import torch
 import torch.distributed as dist
 
 from helper import PowerMonitor, get_device_module, get_device_str, log_perf
+
+
+def _init_process_group_with_device_id(backend: str, init_method: str, world_size: int, rank: int, local_rank: int):
+    """Pre-initialize torch.distributed with explicit device_id.
+
+    Without device_id, PyTorch guesses the rank-to-GPU mapping which can hang
+    on multi-GPU nodes (e.g. B200 SXM 8-GPU) when nproc < total GPUs.
+    Calling this before vLLM/SGLang's own init_distributed_environment() is
+    safe because those functions check is_initialized() and skip the call.
+
+    Uses inspect to stay compatible with older PyTorch that lacks device_id.
+    """
+    sig = inspect.signature(dist.init_process_group)
+    params = {
+        "backend": backend,
+        "init_method": init_method,
+        "world_size": world_size,
+        "rank": rank,
+    }
+    if "device_id" in sig.parameters:
+        params["device_id"] = torch.device(f"cuda:{local_rank}")
+    dist.init_process_group(**params)
 
 
 def get_input_shape_and_comm_size(size, token_dim=4096):
@@ -313,6 +336,18 @@ def setup_vllm_distributed(world_size, rank, use_slurm):
                     backend="xccl",
                     init_method="env://",
                 )
+            else:
+                # Pre-initialize with explicit device_id to prevent hangs
+                # on multi-GPU nodes where PyTorch guesses wrong rank-to-GPU
+                # mapping. vLLM's init will skip init_process_group since
+                # is_initialized() is already True.
+                _init_process_group_with_device_id(
+                    backend="nccl",
+                    init_method=distributed_init_method,
+                    world_size=world_size,
+                    rank=rank,
+                    local_rank=local_rank,
+                )
             vllm_mods["init_distributed_environment"](
                 world_size=world_size,
                 rank=rank,
@@ -396,6 +431,15 @@ def setup_sglang_distributed(world_size, rank, use_slurm):
         print(f"  Local rank: {local_rank}")
 
         try:
+            # Pre-initialize with explicit device_id to prevent hangs
+            # on multi-GPU nodes (same fix as vLLM path above).
+            _init_process_group_with_device_id(
+                backend="nccl",
+                init_method=distributed_init_method,
+                world_size=world_size,
+                rank=rank,
+                local_rank=local_rank,
+            )
             sglang_mods["init_distributed_environment"](
                 world_size=world_size,
                 rank=rank,
@@ -639,13 +683,12 @@ def benchmark_vllm_allreduce(
 
         size *= ratio
 
-    # Synchronize all ranks before cleanup
+    # Skip barrier + destroy_model_parallel — they can deadlock when
+    # vLLM's internal NCCL communicators (pynccl / custom_all_reduce)
+    # have pending async ops that ncclCommDestroy blocks on.
+    # torchrun manages process lifecycle; let it handle cleanup.
     get_device_module().synchronize()
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-
-    # Cleanup vLLM distributed environment
-    vllm_mods["destroy_model_parallel"]()
+    os._exit(0)
 
 
 def benchmark_sglang_allreduce(
@@ -872,13 +915,10 @@ def benchmark_sglang_allreduce(
 
         size *= ratio
 
-    # Synchronize all ranks before cleanup
+    # Skip barrier + destroy_model_parallel — same deadlock risk as vLLM
+    # path. torchrun manages process lifecycle.
     torch.cuda.synchronize()
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-
-    # Cleanup SGLang distributed environment
-    sglang_mods["destroy_model_parallel"]()
+    os._exit(0)
 
 
 def allreduce_benchmark(

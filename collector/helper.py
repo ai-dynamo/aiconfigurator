@@ -1319,6 +1319,36 @@ def power_law_logits_v3(
         return router_logits
 
 
+def build_rank0_local_workload(rank0_info: dict) -> dict[str, object]:
+    """Convert global rank0 routing info into local-rank MoE inputs.
+
+    Keeps the original global top-k probabilities and masks out remote experts
+    so the returned tensors describe only the work executed by rank 0.
+    """
+    import torch
+
+    rank0_selected_slots = rank0_info["rank0_selected_slots"].to(torch.int64)
+    rank0_logits = rank0_info["rank0_logits"].to(torch.float32)
+    slots_per_rank = int(rank0_info["slots_per_rank"])
+
+    topk_weights = torch.gather(rank0_logits, 1, rank0_selected_slots.long()).to(torch.float32)
+
+    local_mask = rank0_selected_slots < slots_per_rank
+    topk_ids = rank0_selected_slots.to(torch.int32).clone()
+    topk_ids[~local_mask] = -1
+    topk_weights[~local_mask] = 0.0
+
+    local_ids = topk_ids[topk_ids >= 0]
+    masked_m = torch.bincount(local_ids, minlength=slots_per_rank).to(torch.int32)
+
+    return {
+        "num_tokens": int(rank0_info["rank0_num_tokens"]),
+        "topk_ids": topk_ids.contiguous(),
+        "topk_weights": topk_weights.contiguous(),
+        "masked_m": masked_m.contiguous(),
+    }
+
+
 def power_law_deepep_prefill(num_tokens, num_experts, topk, ep, alpha):
     """Generate power law distribution for DeepEP MoE prefill phase.
 

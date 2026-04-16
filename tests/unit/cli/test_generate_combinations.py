@@ -74,31 +74,44 @@ def test_cli_generate_combinations(
     with open(generator_config_path) as f:
         config = yaml.safe_load(f)
 
-    tp = config["params"]["agg"]["tensor_parallel_size"]
-    pp = config["params"]["agg"]["pipeline_parallel_size"]
+    agg = config["params"]["agg"]
+    tp = agg["tensor_parallel_size"]
+    pp = agg["pipeline_parallel_size"]
+    moe_tp = agg.get("moe_tensor_parallel_size", 1)
+    moe_ep = agg.get("moe_expert_parallel_size", 1)
+    dp = agg.get("data_parallel_size", 1)
 
-    # TP should be a power of 2
-    assert tp >= 1, f"TP should be at least 1, got {tp}"
-    assert tp & (tp - 1) == 0, f"TP should be a power of 2, got {tp}"
+    # Effective parallelism: the dominant axis that determines GPU count
+    effective_parallel = max(tp, moe_tp, dp * moe_ep)
 
-    # TP should not exceed gpus_per_node for the system
+    # effective_parallel should be a power of 2
+    assert effective_parallel >= 1, f"Effective parallelism should be at least 1, got {effective_parallel}"
+    assert effective_parallel & (effective_parallel - 1) == 0, (
+        f"Effective parallelism should be a power of 2, got {effective_parallel}"
+    )
+
+    # effective_parallel should not exceed gpus_per_node for the system
     max_tp = 4 if system == "gb200" else 8
-    assert tp <= max_tp, f"TP should be <= {max_tp} for {system}, got {tp}"
+    assert effective_parallel <= max_tp, (
+        f"Effective parallelism should be <= {max_tp} for {system}, got {effective_parallel}"
+    )
 
-    # Check expected TP constraints based on model size
+    # Check expected parallelism constraints based on model size
     if expected_min_tp == "max":
-        # Huge model should cap at max TP
-        assert tp == max_tp, f"{description}: expected TP={max_tp}, got {tp}"
+        # Huge model should cap at max parallelism
+        assert effective_parallel == max_tp, f"{description}: expected parallelism={max_tp}, got {effective_parallel}"
     elif expected_min_tp is not None:
-        # Large model should require TP >= expected_min_tp
-        assert tp >= expected_min_tp, f"{description}: expected TP >= {expected_min_tp}, got {tp}"
+        # Large model should require parallelism >= expected_min_tp
+        assert effective_parallel >= expected_min_tp, (
+            f"{description}: expected parallelism >= {expected_min_tp}, got {effective_parallel}"
+        )
 
     assert pp == 1, f"PP should be 1, got {pp}"
     assert config["backend"] == backend
 
     # Verify correct number of run scripts are generated (one per node)
     gpus_per_node = 4 if system == "gb200" else 8
-    gpus_per_worker = tp * pp
+    gpus_per_worker = agg["gpus_per_worker"]
     num_workers = 32 // gpus_per_worker  # total_gpus=32
     workers_per_node = gpus_per_node // gpus_per_worker
     expected_nodes = (num_workers + workers_per_node - 1) // workers_per_node  # ceil division

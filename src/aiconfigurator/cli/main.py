@@ -115,7 +115,7 @@ def _add_default_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,b300_sxm,gb200,a100_sxm,l40s,gb300.",
     )
     parser.add_argument(
         "--decode-system",
@@ -128,7 +128,10 @@ def _add_default_mode_arguments(parser):
         choices=[backend.value for backend in common.BackendName] + ["auto"],
         type=str,
         default=common.BackendName.trtllm.value,
-        help="Backend name. Use 'auto' to sweep across all backends (trtllm, vllm, sglang) and compare results.",
+        help="Backend name. Use a specific backend (trtllm, vllm, sglang) or 'auto' to sweep "
+        "across all supported backends for the given system and compare results side by side. "
+        "When 'auto' is used, both agg and disagg results are merged across backends and the "
+        "globally optimal configuration is selected. Default: trtllm.",
     )
     parser.add_argument(
         "--backend-version",
@@ -148,10 +151,32 @@ def _add_default_mode_arguments(parser):
         "for models released after the last silicon data collection. "
         "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
     )
-    parser.add_argument("--isl", type=int, default=4000, help="Input sequence length.")
-    parser.add_argument("--osl", type=int, default=1000, help="Output sequence length.")
-    parser.add_argument("--ttft", type=float, default=2000.0, help="Time to first token in ms.")
-    parser.add_argument("--tpot", type=float, default=30.0, help="Time per output token in ms.")
+    parser.add_argument("--isl", type=int, default=4000, help="Input sequence length. Default: 4000.")
+    parser.add_argument("--osl", type=int, default=1000, help="Output sequence length. Default: 1000.")
+    parser.add_argument(
+        "--ttft",
+        type=float,
+        default=2000.0,
+        help="Time to first token SLA target in ms. Configurations exceeding this value are "
+        "filtered from the pareto and topN configs. (Default: 2000)",
+    )
+    parser.add_argument(
+        "--tpot",
+        type=float,
+        default=30.0,
+        help="Time per output token SLA target in ms. Configurations exceeding this value are "
+        "filtered from the topN configs. (Default: 30) \n"
+        "**Note: the pareto may still include configs exceeding the given tpot. "
+        "Pass --strict-sla to only keep configs that meet the given tpot constraint.**",
+    )
+    parser.add_argument(
+        "--strict-sla",
+        action="store_true",
+        default=False,
+        help="Filter the Pareto frontier and best configs to only SLA-compliant data points "
+        "(--ttft + --tpot, or --request-latency). Without this flag, the Pareto frontier "
+        "may include configs that exceed --tpot.",
+    )
     parser.add_argument(
         "--request-latency",
         type=float,
@@ -163,14 +188,18 @@ def _add_default_mode_arguments(parser):
         "--nextn",
         type=int,
         default=0,
-        help="Number of draft tokens for MTP (Multi-Token Prediction) speculative decoding. Default is 0 (disabled).",
+        help="Number of draft tokens for MTP (Multi-Token Prediction) speculative decoding. "
+        "When set > 0, enables speculative decoding in the configuration search. "
+        "Requires the model to support MTP. Default: 0 (disabled).",
     )
     parser.add_argument(
         "--nextn-accept-rates",
         type=str,
         default="0.85,0.3,0,0,0",
-        help="Acceptance rates for MTP draft tokens. Comma-separated list of 5 floats. "
-        "Default is '0.85,0.3,0,0,0' meaning 1st token has 85%% acceptance, 2nd has 30%%, rest are 0.",
+        help="Comma-separated acceptance rates for MTP draft tokens (5 values). "
+        "Each value is the acceptance probability of the i-th draft token; only the first "
+        "--nextn values are used. Example: '0.85,0.3,0,0,0' means the 1st draft token has "
+        "85%% acceptance, 2nd has 30%%, rest unused. Default: '0.85,0.3,0,0,0'.",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -234,7 +263,7 @@ def _add_generate_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,b300_sxm,gb200,a100_sxm,l40s,gb300.",
     )
     parser.add_argument(
         "--backend",
@@ -267,7 +296,7 @@ def _add_estimate_mode_arguments(parser):
         "--system",
         type=str,
         required=True,
-        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,gb200,a100_sxm,l40s,gb300.",
+        help="System name (GPU type). Example: h200_sxm,h100_sxm,b200_sxm,b300_sxm,gb200,a100_sxm,l40s,gb300.",
     )
     parser.add_argument(
         "--decode-system",
@@ -453,7 +482,7 @@ def _add_support_mode_arguments(parser):
         type=str,
         required=True,
         help="System name (GPU type) or 'all' for a matrix view across every system. "
-        "Example: h200_sxm, h100_sxm, b200_sxm, gb200, a100_sxm, l40s, gb300.",
+        "Example: h200_sxm, h100_sxm, b200_sxm, b300_sxm, gb200, a100_sxm, l40s, gb300.",
     )
     parser.add_argument(
         "--backend",
@@ -986,6 +1015,7 @@ def _execute_task_configs(
     target_request_rate: float | None = None,
     target_concurrency: float | None = None,
     max_total_gpus: int | None = None,
+    strict_sla: bool = False,
 ) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float], dict[str, dict[str, float]]]:
     """
     Execute task configs and return the chosen experiment, best configs, results, best
@@ -1000,6 +1030,8 @@ def _execute_task_configs(
         target_concurrency: If set, activates load-match picking (minimize
             GPUs for the given number of concurrent requests).
         max_total_gpus: Optional upper bound on total GPUs for load-match.
+        strict_sla: When True, enforce both TTFT and TPOT SLA constraints
+            during picking.
 
     Returns:
         tuple:
@@ -1076,6 +1108,7 @@ def _execute_task_configs(
             target_request_rate=target_request_rate,
             target_concurrency=target_concurrency,
             max_total_gpus=max_total_gpus,
+            strict_sla=strict_sla,
         )
         best_configs[name] = best_config_df
         best_throughputs[name] = best_throughput
@@ -1130,6 +1163,7 @@ def _run_generate_mode(args):
     parallelism = result["parallelism"]
     tp = parallelism["tp"]
     pp = parallelism["pp"]
+    gpus_per_worker = parallelism.get("gpus_per_worker", tp * pp)
     replicas = parallelism["replicas"]
     gpus_used = parallelism["gpus_used"]
 
@@ -1142,7 +1176,7 @@ def _run_generate_mode(args):
     print(f"  Backend:         {args.backend} ({backend_version})")
     print(f"  Total GPUs:      {args.total_gpus} (using {gpus_used})")
     print(f"  Parallelism:     TP={tp}, PP={pp}")
-    print(f"  Replicas:        {replicas} (each using {tp * pp} GPUs)")
+    print(f"  Replicas:        {replicas} (each using {gpus_per_worker} GPUs)")
     print(f"  Max Batch Size:  {generator_params['params']['agg']['max_batch_size']}")
     print(f"  Output:          {output_dir}")
     print("=" * 60)
@@ -1509,6 +1543,28 @@ def main(args):
         return
 
     if args.mode == "default":
+        # Warn when SLA/workload parameters are implicitly defaulted
+        _default_params = {"isl": 4000, "osl": 1000, "ttft": 2000.0, "tpot": 30.0}
+        _implicit = [
+            f"{k.upper()}={getattr(args, k)}"
+            for k, v in _default_params.items()
+            if f"--{k}" not in sys.argv and getattr(args, k) == v
+        ]
+        if _implicit:
+            logger.warning(
+                "Using default SLA/workload parameters: %s. "
+                "These act as filters — configurations exceeding these thresholds are excluded. "
+                "Set them explicitly (e.g. --ttft, --tpot, --isl, --osl) to avoid unexpected filtering.",
+                ", ".join(_implicit),
+            )
+        logger.info(
+            "Effective parameters: ISL=%d, OSL=%d, TTFT=%.1fms, TPOT=%.1fms, backend=%s",
+            args.isl,
+            args.osl,
+            args.ttft,
+            args.tpot,
+            args.backend,
+        )
         task_configs = build_default_task_configs(
             model_path=args.model_path,
             total_gpus=args.total_gpus,
@@ -1542,10 +1598,14 @@ def main(args):
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
 
+    execute_kwargs: dict = {}
+    if getattr(args, "strict_sla", False):
+        execute_kwargs["strict_sla"] = True
     _, best_configs, pareto_fronts, _, _ = _execute_task_configs(
         task_configs,
         args.mode,
         top_n=args.top_n,
+        **execute_kwargs,
     )
 
     if args.save_dir:

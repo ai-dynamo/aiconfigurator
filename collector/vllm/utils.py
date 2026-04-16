@@ -262,11 +262,18 @@ def create_vllm_config(
         max_model_len=max_model_len,
     )
 
-    cache_config = CacheConfig(
-        block_size=block_size,
-        cache_dtype="fp8" if use_fp8_kv_cache else "auto",
-        swap_space=0,
-    )
+    try:
+        cache_config = CacheConfig(
+            block_size=block_size,
+            cache_dtype="fp8" if use_fp8_kv_cache else "auto",
+            swap_space=0,
+        )
+    except (TypeError, Exception):
+        # vLLM >=0.19.0 removed swap_space from CacheConfig
+        cache_config = CacheConfig(
+            block_size=block_size,
+            cache_dtype="fp8" if use_fp8_kv_cache else "auto",
+        )
     # Set cache blocks for testing
     #   (these may be set during initialization normally)
     cache_config.num_gpu_blocks = num_gpu_blocks
