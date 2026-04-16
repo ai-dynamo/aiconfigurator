@@ -34,13 +34,21 @@ trtllm_fp4_block_scale_routed_moe = None
 _vllm_ops = None
 prepare_static_weights_for_trtllm_fp4_moe = None
 _nvfp4_available = False
+# scaled_fp4_quant dropped is_sf_swizzled_layout in vLLM >= 0.16.0.
+# Probe the signature once at import time so _run_nvfp4_once doesn't branch per call.
+_scaled_fp4_quant_accepts_swizzled: bool = False
 try:
+    import inspect
+
     from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe  # type: ignore[assignment]
     from vllm import _custom_ops as _vllm_ops  # type: ignore[assignment]
     from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
         prepare_static_weights_for_trtllm_fp4_moe,  # type: ignore[assignment]
     )
 
+    _scaled_fp4_quant_accepts_swizzled = (
+        "is_sf_swizzled_layout" in inspect.signature(_vllm_ops.scaled_fp4_quant).parameters
+    )
     _nvfp4_available = True
 except Exception:
     trtllm_fp4_block_scale_routed_moe = None
@@ -426,12 +434,19 @@ def run_moe_torch(
 
         def _run_nvfp4_once(hs, tw, ti):
             """Run a single nvfp4 MoE iteration via FlashInfer TRTLLM FP4 kernel."""
-            # Quantize input to FP4
-            x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
-                hs.to(torch.bfloat16),
-                nvfp4_data["a1_gscale"][0:1],
-                is_sf_swizzled_layout=False,
-            )
+            # Quantize input to FP4.
+            # is_sf_swizzled_layout existed in vLLM < 0.16.0 and was removed afterward.
+            if _scaled_fp4_quant_accepts_swizzled:
+                x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
+                    hs.to(torch.bfloat16),
+                    nvfp4_data["a1_gscale"][0:1],
+                    is_sf_swizzled_layout=False,
+                )
+            else:
+                x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
+                    hs.to(torch.bfloat16),
+                    nvfp4_data["a1_gscale"][0:1],
+                )
             num_tok = x_fp4.shape[0]
             scale_cols = hs.shape[1] // 16
             # Pack topk: (expert_id << 16) | bf16_weight_as_int16

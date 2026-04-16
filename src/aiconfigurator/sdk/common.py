@@ -342,7 +342,18 @@ SupportedSystems = {
 """
 Model family for model definition
 """
-ModelFamily = {"GPT", "LLAMA", "MOE", "DEEPSEEK", "DEEPSEEKV32", "NEMOTRONNAS", "NEMOTRONH", "HYBRIDMOE", "QWEN35"}
+ModelFamily = {
+    "GPT",
+    "LLAMA",
+    "MOE",
+    "DEEPSEEK",
+    "DEEPSEEKV32",
+    "KIMIK25",
+    "NEMOTRONNAS",
+    "NEMOTRONH",
+    "HYBRIDMOE",
+    "QWEN35",
+}
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
     "Qwen2ForCausalLM": "LLAMA",
@@ -352,7 +363,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "DeepseekV3ForCausalLM": "DEEPSEEK",
     "DeepseekV32ForCausalLM": "DEEPSEEKV32",
     "GlmMoeDsaForCausalLM": "DEEPSEEKV32",
-    "KimiK25ForConditionalGeneration": "DEEPSEEK",
+    "KimiK25ForConditionalGeneration": "KIMIK25",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",
