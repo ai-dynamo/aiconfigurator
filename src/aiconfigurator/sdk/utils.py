@@ -574,6 +574,13 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
             f"sliding_window_size={extra_params.sliding_window_size}"
         )
+    elif architecture == "KimiK25ForConditionalGeneration":
+        # KIMI K2.5 wraps a DeepSeek-V3-style MLA text model. Store v_head_dim so
+        # DeepSeekModel can use the correct attention head size (128) for vLLM's
+        # standard-attention path, instead of the generic hidden_size // n_heads = 112.
+        extra_params = {
+            "v_head_dim": config.get("v_head_dim", 0),
+        }
     elif architecture in {"DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"}:
         # DeepSeek-V3.2 / GLM-5 share the DSA attention pattern but have different
         # projection/indexer dimensions, so keep these structural fields attached

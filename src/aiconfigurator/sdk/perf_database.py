@@ -2960,12 +2960,6 @@ class PerfDatabase:
             }
         else:
             self.supported_quant_mode = {}
-        # `int4_wo` (compressed-tensors W4A16) has no dedicated silicon data.
-        # query_moe remaps it to float16 for the table lookup because the actual
-        # kernel is BF16 (weights are dequantized before the GEMM).
-        moe_modes = self.supported_quant_mode.get("moe", []) or []
-        if common.MoEQuantMode.int4_wo.name not in moe_modes:
-            moe_modes.append(common.MoEQuantMode.int4_wo.name)
 
     def is_inter_node(self, num_gpus: int) -> bool:
         """
@@ -5362,16 +5356,6 @@ class PerfDatabase:
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
-                # int4_wo = weights-only INT4 (W4A16): weights are dequantized to BF16
-                # before the GEMM, so the actual kernel is identical to float16.
-                # Use float16 silicon data for the table lookup.
-                # NOTE: a true INT4 compute mode (W4A4) would use a separate enum value
-                # (e.g. w4a4) and must NOT be remapped here — it has different compute
-                # characteristics and requires its own collected silicon data.
-                silicon_quant_mode = (
-                    common.MoEQuantMode.float16 if quant_mode == common.MoEQuantMode.int4_wo else quant_mode
-                )
-
                 if self.backend == common.BackendName.sglang.value:
                     # deepep_moe is for sglang wideep only
                     # Apply num_tokens correction when eplb is enabled (only during prefill)
@@ -5387,9 +5371,9 @@ class PerfDatabase:
                     moe_data.raise_if_not_loaded()
 
                     used_workload_distribution = (
-                        workload_distribution if workload_distribution in moe_data[silicon_quant_mode] else "uniform"
+                        workload_distribution if workload_distribution in moe_data[quant_mode] else "uniform"
                     )
-                    moe_dict = moe_data[silicon_quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
+                    moe_dict = moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
                         inter_size
                     ][moe_tp_size][moe_ep_size]
                     token_points = sorted(moe_dict.keys())
@@ -5403,7 +5387,7 @@ class PerfDatabase:
                             num_experts,
                             moe_tp_size,
                             moe_ep_size,
-                            silicon_quant_mode,
+                            quant_mode,
                             workload_distribution,
                         )
                     num_left, num_right = self._nearest_1d_point_helper(
@@ -5441,10 +5425,10 @@ class PerfDatabase:
                         try:
                             used_workload_distribution = (
                                 workload_distribution
-                                if workload_distribution in self._moe_low_latency_data[silicon_quant_mode]
+                                if workload_distribution in self._moe_low_latency_data[quant_mode]
                                 else "uniform"
                             )
-                            moe_dict = self._moe_low_latency_data[silicon_quant_mode][used_workload_distribution][topk][
+                            moe_dict = self._moe_low_latency_data[quant_mode][used_workload_distribution][topk][
                                 num_experts
                             ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
                             if not moe_dict:
@@ -5462,19 +5446,17 @@ class PerfDatabase:
                         except:
                             used_workload_distribution = (
                                 workload_distribution
-                                if workload_distribution in self._moe_data[silicon_quant_mode]
+                                if workload_distribution in self._moe_data[quant_mode]
                                 else "uniform"
                             )
-                            moe_dict = self._moe_data[silicon_quant_mode][used_workload_distribution][topk][
-                                num_experts
-                            ][hidden_size][inter_size][moe_tp_size][moe_ep_size]
+                            moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
+                                hidden_size
+                            ][inter_size][moe_tp_size][moe_ep_size]
                     else:
                         used_workload_distribution = (
-                            workload_distribution
-                            if workload_distribution in self._moe_data[silicon_quant_mode]
-                            else "uniform"
+                            workload_distribution if workload_distribution in self._moe_data[quant_mode] else "uniform"
                         )
-                        moe_dict = self._moe_data[silicon_quant_mode][used_workload_distribution][topk][num_experts][
+                        moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][
                             hidden_size
                         ][inter_size][moe_tp_size][moe_ep_size]
                     token_points = sorted(moe_dict.keys())
@@ -5488,7 +5470,7 @@ class PerfDatabase:
                             num_experts,
                             moe_tp_size,
                             moe_ep_size,
-                            silicon_quant_mode,
+                            quant_mode,
                             workload_distribution,
                         )
                     num_left, num_right = self._nearest_1d_point_helper(
@@ -5511,13 +5493,11 @@ class PerfDatabase:
                 elif self.backend == common.BackendName.vllm.value:
                     self._moe_data.raise_if_not_loaded()
                     used_workload_distribution = (
-                        workload_distribution
-                        if workload_distribution in self._moe_data[silicon_quant_mode]
-                        else "uniform"
+                        workload_distribution if workload_distribution in self._moe_data[quant_mode] else "uniform"
                     )
-                    moe_dict = self._moe_data[silicon_quant_mode][used_workload_distribution][topk][num_experts][
-                        hidden_size
-                    ][inter_size][moe_tp_size][moe_ep_size]
+                    moe_dict = self._moe_data[quant_mode][used_workload_distribution][topk][num_experts][hidden_size][
+                        inter_size
+                    ][moe_tp_size][moe_ep_size]
                     token_points = sorted(moe_dict.keys())
                     if num_tokens > token_points[-1]:
                         return _estimate_overflow_with_last_token_util(
@@ -5529,7 +5509,7 @@ class PerfDatabase:
                             num_experts,
                             moe_tp_size,
                             moe_ep_size,
-                            silicon_quant_mode,
+                            quant_mode,
                             workload_distribution,
                         )
                     num_left, num_right = self._nearest_1d_point_helper(

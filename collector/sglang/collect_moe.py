@@ -266,16 +266,18 @@ def benchmark_config(
             w1_scale = torch.randn((num_experts, 2 * shard_intermediate_size), dtype=torch.float32, device=device)
             w2_scale = torch.randn((hidden_size, num_experts), dtype=torch.float32, device=device)
         elif use_int4_w4a16:
-            # Per-group scales along K (group_size=128).
-            # Scale shape: (E, N, K_packed // group_size)
+            # Per-group scales along K. The GPTQ kernel receives K = A.shape[1]
+            # (unpacked hidden size), so scale groups are hidden_size // group_size,
+            # NOT (hidden_size // 2) // group_size (the packed size).
+            # w2's K is shard_intermediate_size // 2 (post silu_and_mul, unpacked).
             group_size = block_shape[1] if block_shape else 128
             w1_scale = torch.randn(
-                (num_experts, shard_intermediate_size, (hidden_size // 2) // group_size),
+                (num_experts, shard_intermediate_size, hidden_size // group_size),
                 dtype=torch.float32,
                 device=device,
             )
             w2_scale = torch.randn(
-                (num_experts, hidden_size, (shard_intermediate_size // 4) // group_size),
+                (num_experts, hidden_size, (shard_intermediate_size // 2) // group_size),
                 dtype=torch.float32,
                 device=device,
             )
