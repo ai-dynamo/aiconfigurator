@@ -461,6 +461,10 @@ def run_moe_torch(
             scale_cols = hs.shape[1] // 16
             # Pack topk: (expert_id << 16) | bf16_weight_as_int16
             packed = (ti.to(torch.int32) << 16) | tw.to(torch.bfloat16).view(torch.int16).to(torch.int32)
+            # tile_tokens_dim: avg tokens per expert, rounded to next power-of-2,
+            # clamped to [8, 64]. Controls GEMM tiling in the FlashInfer kernel.
+            avg_tok = max(1, (num_tok * topk) // num_experts)
+            tile_tokens_dim = min(max(1 << (avg_tok - 1).bit_length(), 8), 64)
             trtllm_fp4_block_scale_routed_moe(
                 topk_ids=packed,
                 routing_bias=None,
@@ -488,6 +492,7 @@ def run_moe_torch(
                 routed_scaling_factor=None,
                 routing_method_type=1,  # Renormalize
                 do_finalize=True,
+                tile_tokens_dim=tile_tokens_dim,
             )
 
         def run_single_iteration():
