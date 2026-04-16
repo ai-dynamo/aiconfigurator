@@ -110,6 +110,7 @@ class MockModelRunner:
         self.token_to_kv_pool = None
         self.attn_backend = None
         self.server_args = MockServerArgs(page_size=page_size)
+        self.attn_cp_size = 1  # Context parallelism size; required by FlashAttentionBackend in sglang >=0.5.10
         self.is_draft_worker = False
         self.model_is_mrope = False
         self.sliding_window_size = None
