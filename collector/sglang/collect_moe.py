@@ -496,25 +496,40 @@ def benchmark(
     if use_nvfp4 or (use_int4_w4a16 and _HAS_MARLIN_MOE):
         # nvfp4 uses flashinfer cutedsl backend; int4_w4a16 uses Marlin CUDA
         # kernels — neither needs Triton tuning configs.
-        kernel_time, power_stats = benchmark_config(
-            None,
-            benchmark_num_tokens,
-            num_experts,
-            shard_intermediate_size,
-            hidden_size,
-            topk,
-            dtype,
-            use_fp8_w8a8,
-            use_int8_w8a8,
-            use_int8_w8a16,
-            use_nvfp4,
-            use_int4_w4a16,
-            block_shape,
-            distributed=distributed,
-            power_law_alpha=power_law_alpha,
-            workloads=workloads,
-        )
-        return kernel_time, power_stats
+        # Catch TypeError from CuteDSL can_implement() for unsupported configs
+        # that slip past the test-case-generation filter. TypeError is a
+        # pre-execution check — it does NOT corrupt the GPU CUDA context, so
+        # re-raising as RuntimeError lets the worker continue to the next task.
+        # Note: DSLCudaRuntimeError (actual kernel crash) is NOT caught here
+        # because the CUDA context is already poisoned by the time Python
+        # receives the exception. That case is handled by collect.py's worker
+        # fatal-error detection.
+        try:
+            kernel_time, power_stats = benchmark_config(
+                None,
+                benchmark_num_tokens,
+                num_experts,
+                shard_intermediate_size,
+                hidden_size,
+                topk,
+                dtype,
+                use_fp8_w8a8,
+                use_int8_w8a8,
+                use_int8_w8a16,
+                use_nvfp4,
+                use_int4_w4a16,
+                block_shape,
+                distributed=distributed,
+                power_law_alpha=power_law_alpha,
+                workloads=workloads,
+            )
+            return kernel_time, power_stats
+        except TypeError as e:
+            raise RuntimeError(
+                f"nvfp4 CuteDSL kernel does not support this config "
+                f"(num_experts={num_experts}, shard_intermediate_size={shard_intermediate_size}, "
+                f"hidden_size={hidden_size}): {e}"
+            ) from e
 
     dtype_str = get_config_dtype_str(
         dtype,
