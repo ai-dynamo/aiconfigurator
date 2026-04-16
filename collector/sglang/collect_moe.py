@@ -97,9 +97,15 @@ def get_moe_test_cases():
             ):
                 continue
 
-            # nvfp4 fp4_quantize requires weight dims divisible by 16 after TP sharding
-            if moe_type == "nvfp4" and (common_moe_testcase.inter_size // common_moe_testcase.tp) % 16 != 0:
-                continue
+            if moe_type == "nvfp4":
+                shard_k = common_moe_testcase.inter_size // common_moe_testcase.tp
+                # fp4_quantize requires weight dims divisible by 16 after TP sharding.
+                # CuteDSL grouped GEMM additionally requires 16-byte contiguous alignment:
+                # for fp4 (4-bit), that's 32 elements (16 * 8 // 4 = 32).
+                # See: flashinfer/cute_dsl/blockscaled_gemm.py
+                #   Sm100BlockScaledPersistentDenseGemmKernel.is_valid_tensor_alignment()
+                if shard_k % 32 != 0:
+                    continue
 
             test_cases.append(
                 [
