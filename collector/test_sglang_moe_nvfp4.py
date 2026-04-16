@@ -5,10 +5,8 @@
 Manual test for SGLang MoE collector.
 
 Tests:
-  1. nvfp4 - unsupported kernel config (Qwen3-235B, ep=32, tokens=48) raises an
-     exception that propagates out of run_moe_torch (to be caught by the outer loop).
-  2. nvfp4 - supported config (Mixtral-8x7B, ep=1, tokens=128) completes and writes
-     a row to the output file.
+  1. nvfp4 - Qwen3-235B, ep=32, tokens=48 completes and writes a row to the output file.
+  2. nvfp4 - Mixtral-8x7B, ep=1, tokens=128 completes and writes a row to the output file.
   3. float16 sanity-check — non-nvfp4 path still works.
   4. int4_wo (W4A16) - Mixtral-8x7B, ep=1, tokens=128 — scale shapes are correct
      and the kernel completes successfully.
@@ -56,16 +54,13 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — unsupported nvfp4 config raises exception (propagates to outer loop)
+# Test 1 — nvfp4 larger model (Qwen3-235B, ep=32, tokens=48)
 # ---------------------------------------------------------------------------
-section(
-    "Test 1: nvfp4 - Qwen3-235B ep=32 tokens=48 (unsupported tiling)\n"
-    "        Expected: exception raised and propagates out of run_moe_torch"
-)
+section("Test 1: nvfp4 - Qwen3-235B ep=32 tokens=48\n        Expected: run completes, row written to output file")
 
 if not _cutedsl_available:
     print(f"  {SKIP}: flashinfer CuteDSL not available on this build")
-    results.append(("T1 nvfp4 bad config raises", None, None))
+    results.append(("T1 nvfp4 Qwen3-235B", None, None))
 else:
     try:
         from sglang.collect_moe import run_moe_torch
@@ -80,20 +75,26 @@ else:
                 8,  # topk
                 128,  # num_experts
                 4,  # moe_tp_size
-                32,  # moe_ep_size  → local_num_experts = 4, unsupported tiling
+                32,  # moe_ep_size  → local_num_experts = 4
                 "Qwen/Qwen3-235B-A22B",
                 out_file,
                 "power_law",
                 1.01,
             )
 
-        # run_moe_torch returned without raising — this is unexpected.
-        print(f"  {FAIL}: expected an exception but run_moe_torch returned cleanly")
-        results.append(("T1 nvfp4 bad config raises", False, None))
+            row_written = os.path.exists(out_file) and os.path.getsize(out_file) > 0
+
+        if row_written:
+            print(f"  {PASS}: nvfp4 completed and output written")
+            results.append(("T1 nvfp4 Qwen3-235B", True, None))
+        else:
+            print(f"  {FAIL}: run returned but nothing was written to output")
+            results.append(("T1 nvfp4 Qwen3-235B", False, None))
 
     except Exception as exc:
-        print(f"  {PASS}: exception propagated as expected: {type(exc).__name__}: {exc}")
-        results.append(("T1 nvfp4 bad config raises", True, None))
+        print(f"  {FAIL}: {exc}")
+        traceback.print_exc()
+        results.append(("T1 nvfp4 Qwen3-235B", False, exc))
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +169,8 @@ try:
             1.01,
         )
 
-    row_written = os.path.exists(out_file) and os.path.getsize(out_file) > 0
+        row_written = os.path.exists(out_file) and os.path.getsize(out_file) > 0
+
     if row_written:
         print(f"  {PASS}: float16 completed and output written")
         results.append(("T3 float16 sanity", True, None))
@@ -207,7 +209,8 @@ try:
             1.01,
         )
 
-    row_written = os.path.exists(out_file) and os.path.getsize(out_file) > 0
+        row_written = os.path.exists(out_file) and os.path.getsize(out_file) > 0
+
     if row_written:
         print(f"  {PASS}: int4_wo completed and output written")
         results.append(("T4 int4_wo W4A16", True, None))
