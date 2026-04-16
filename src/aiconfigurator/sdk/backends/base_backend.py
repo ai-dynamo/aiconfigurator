@@ -205,6 +205,76 @@ class BaseBackend(ABC):
                 default is 1.0.
                 corrected latency = latency * latency_correction_scale
         """
+        def _run_encoder(batch_size: int) -> tuple[dict[str, float], dict[str, float], int]:
+            """
+            Run vision encoder phase (VL models only).
+
+            ViT transformer ops use pre-merge patch count: (H // patch_size)²
+            Only encoder_proj_to_llm_gemm uses post-merge token count: (H // stride)²
+            Returns img_ctx_tokens (post-merge × n_img) as effective ISL offset for
+            the LLM context and generation phases.
+
+            token count resolution order:
+                1. image_height + image_width (computed from VisionEncoderConfig patch/merge sizes)
+                2. num_image_tokens (explicit override, per image)
+                3. isl (fallback for text-only or unconfigured VL requests)
+
+            Returns:
+                tuple: (encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens)
+                        latency in ms, energy in W·ms, img_ctx_tokens is post-merge token count
+            """
+            encoder_latency_dict = defaultdict(float)
+            encoder_energy_wms_dict = defaultdict(float)
+
+            if not model.encoder_ops:
+                return encoder_latency_dict, encoder_energy_wms_dict, 0
+
+            enc_cfg = getattr(model, "encoder_config", None)
+            num_images = runtime_config.num_images_per_request
+
+            if runtime_config.image_height > 0 and runtime_config.image_width > 0 and enc_cfg is not None:
+                img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
+                tokens_per_image    = (runtime_config.image_height // img_stride) * (runtime_config.image_width // img_stride)
+                pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (runtime_config.image_width // enc_cfg.patch_size)
+            elif runtime_config.num_image_tokens > 0:
+                tokens_per_image    = runtime_config.num_image_tokens
+                pre_merge_per_image = runtime_config.num_image_tokens  # no merge info, use as-is
+            else:
+                tokens_per_image    = isl
+                pre_merge_per_image = isl
+
+            n_img_post = tokens_per_image * num_images    # post-merge: injected into LLM context
+            n_img_pre  = pre_merge_per_image * num_images  # pre-merge: processed by ViT transformer
+
+            for op in model.encoder_ops:
+                use_post   = "encoder_merger" in op._name
+                # ViT attention: each image is an independent varlen sequence.
+                # Model as batch_size*num_images sequences of pre_merge_per_image tokens
+                # rather than one concatenated sequence of n_img_pre tokens.
+                use_varlen = "encoder_attention" in op._name
+                n_img      = n_img_post if use_post else n_img_pre
+                eff_batch  = batch_size * num_images if use_varlen else batch_size
+                eff_s      = pre_merge_per_image     if use_varlen else n_img
+                x          = eff_batch * eff_s
+                result = op.query(
+                    database,
+                    x=x,
+                    batch_size=eff_batch,
+                    beam_width=1,
+                    s=eff_s,
+                    prefix=0,
+                    model_name=getattr(model, "model_name", ""),
+                )
+                encoder_latency_dict[op._name] += float(result)
+                encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
+
+            return encoder_latency_dict, encoder_energy_wms_dict, n_img_post
+
+        def _run_context(bs: int, effective_isl: int, pfx: int):
+            return self._run_context_phase(model, database, runtime_config, bs, effective_isl, pfx)
+
+        def _run_generation(bs: int, bw: int, effective_isl: int, eff_osl: int, strd: int):
+            return self._run_generation_phase(model, database, runtime_config, bs, bw, effective_isl, eff_osl, strd)
 
         summary = InferenceSummary(runtime_config)
         batch_size, beam_width, isl, osl, prefix = (
@@ -215,30 +285,55 @@ class BaseBackend(ABC):
             runtime_config.prefix,
         )
 
-        (
-            context_latency_dict,
-            context_energy_wms_dict,
-            generation_latency_dict,
-            generation_energy_wms_dict,
-        ) = self._run_static_breakdown(model, database, runtime_config, mode, stride, latency_correction_scale)
+        # Execute phases
+        encoder_latency_dict, encoder_energy_wms_dict = {}, {}
+        context_latency_dict, context_energy_wms_dict = {}, {}
+        generation_latency_dict, generation_energy_wms_dict = {}, {}
 
         if mode == "static_ctx":
-            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, 1, prefix=prefix)
+            encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens = _run_encoder(batch_size)
+            context_latency_dict, context_energy_wms_dict = _run_context(batch_size, isl + img_ctx_tokens, prefix)
+            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl + img_ctx_tokens, 1)
         elif mode == "static_gen":
+            _, _, img_ctx_tokens = _run_encoder(batch_size)
+            generation_latency_dict, generation_energy_wms_dict = _run_generation(
+                batch_size, beam_width, isl + img_ctx_tokens, osl, stride
+            )
             memory = self._get_memory_usage(
                 model,
                 database,
                 batch_size,
                 beam_width,
-                isl,
+                isl + img_ctx_tokens,
                 osl,
                 num_tokens=batch_size * beam_width,
                 prefix=prefix,
             )  # for gen only, all kvcache is needed.
         else:
-            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl, osl, prefix=prefix)
+            # "static": aggregated (all phases on same node)
+            encoder_latency_dict, encoder_energy_wms_dict, img_ctx_tokens = _run_encoder(batch_size)
+            context_latency_dict, context_energy_wms_dict = _run_context(batch_size, isl + img_ctx_tokens, prefix)
+            generation_latency_dict, generation_energy_wms_dict = _run_generation(
+                batch_size, beam_width, isl + img_ctx_tokens, osl, stride
+            )
+            memory = self._get_memory_usage(model, database, batch_size, beam_width, isl + img_ctx_tokens, osl)
+
+        if latency_correction_scale != 1.0:
+            logger.debug(f"latency_correction_scale: {latency_correction_scale} is applied")
+            for op in encoder_latency_dict:
+                encoder_latency_dict[op] *= latency_correction_scale
+                encoder_energy_wms_dict[op] *= latency_correction_scale  # Energy scales with latency!
+            for op in context_latency_dict:
+                context_latency_dict[op] *= latency_correction_scale
+                context_energy_wms_dict[op] *= latency_correction_scale  # Energy scales with latency!
+            for op in generation_latency_dict:
+                generation_latency_dict[op] *= latency_correction_scale
+                generation_energy_wms_dict[op] *= latency_correction_scale  # Energy scales with latency!
 
         # Calculate total latencies and energies (simple sums - decoupled!)
+        encoder_latency_ms = sum(encoder_latency_dict.values())  # milliseconds
+        encoder_energy_wms = sum(encoder_energy_wms_dict.values())  # watt-milliseconds
+
         context_latency_ms = sum(context_latency_dict.values())  # milliseconds
         context_energy_wms = sum(context_energy_wms_dict.values())  # watt-milliseconds
 
@@ -246,27 +341,29 @@ class BaseBackend(ABC):
         generation_energy_wms = sum(generation_energy_wms_dict.values())  # watt-milliseconds
 
         # Calculate average power (SIMPLIFIED - just divide! Single operation.)
+        encoder_power_avg = encoder_energy_wms / encoder_latency_ms if encoder_latency_ms > 0 else 0.0
         context_power_avg = context_energy_wms / context_latency_ms if context_latency_ms > 0 else 0.0
         generation_power_avg = generation_energy_wms / generation_latency_ms if generation_latency_ms > 0 else 0.0
 
         # E2E weighted average power (EVEN SIMPLER - natural weighted average!)
-        total_latency_ms = context_latency_ms + generation_latency_ms
-        total_energy_wms = context_energy_wms + generation_energy_wms
+        total_latency_ms = encoder_latency_ms + context_latency_ms + generation_latency_ms
+        total_energy_wms = encoder_energy_wms + context_energy_wms + generation_energy_wms
         e2e_power_avg = total_energy_wms / total_latency_ms if total_latency_ms > 0 else 0.0
 
         # For backward compatibility, keep old variable names
+        encoder_latency = encoder_latency_ms
         context_latency = context_latency_ms
         generation_latency = generation_latency_ms
 
         bs = batch_size
         global_bs = bs * model.config.attention_dp_size
         concurrency = global_bs
-        ttft = context_latency
+        ttft = encoder_latency + context_latency
         tpot = 0.0 if osl <= 1 else generation_latency / (osl - 1)
         num_generated_tokens = max(osl - 1, 0)
         request_latency = ttft + tpot * num_generated_tokens
         if request_latency == 0.0:
-            request_latency = context_latency + generation_latency
+            request_latency = encoder_latency + context_latency + generation_latency
         request_rate = 0.0
         seq_s = (
             0.0 if request_latency == 0.0 else global_bs / request_latency * 1000 * model.config.pp_size
@@ -309,6 +406,7 @@ class BaseBackend(ABC):
                 tokens_s_gpu,
                 tokens_s_user,
                 request_latency,
+                encoder_latency,
                 context_latency,
                 generation_latency,
                 num_total_gpus,
@@ -333,10 +431,13 @@ class BaseBackend(ABC):
 
         summary_df = pd.DataFrame(data, columns=common.ColumnsStatic).round(3)
 
+        summary.set_encoder_latency_dict(encoder_latency_dict)
         summary.set_context_latency_dict(context_latency_dict)
         summary.set_generation_latency_dict(generation_latency_dict)
+        summary.set_encoder_energy_wms_dict(encoder_energy_wms_dict)
         summary.set_context_energy_wms_dict(context_energy_wms_dict)  # UPDATED: explicit units
         summary.set_generation_energy_wms_dict(generation_energy_wms_dict)  # UPDATED: explicit units
+        summary.set_encoder_power_avg(encoder_power_avg)
         summary.set_context_power_avg(context_power_avg)
         summary.set_generation_power_avg(generation_power_avg)
         summary.set_e2e_power_avg(e2e_power_avg)

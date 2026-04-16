@@ -55,14 +55,17 @@ class InferenceSummary:
 
         # raw data dict
         self._memory = {}
+        self._encoder_latency_dict = {}   # ms
         self._context_latency_dict = {}  # ms
         self._generation_latency_dict = {}  # ms
+        self._encoder_energy_wms_dict = {}  # W·ms
         self._context_energy_wms_dict = {}  # RENAMED from _context_power_dict, W·ms
         self._generation_energy_wms_dict = {}  # RENAMED from _generation_power_dict, W·ms
         self._is_oom = None
         self._is_kv_cache_oom = False
 
         # NEW: Store computed power averages
+        self._encoder_power_avg = 0.0
         self._context_power_avg = 0.0
         self._generation_power_avg = 0.0
         self._e2e_power_avg = 0.0
@@ -140,6 +143,12 @@ class InferenceSummary:
         """
         self._is_oom = is_oom
 
+    def set_encoder_latency_dict(self, encoder_latency_dict: dict) -> None:
+        """
+        Set encoder latency dict.
+        """
+        self._encoder_latency_dict = encoder_latency_dict
+
     def set_context_latency_dict(self, context_latency_dict: dict) -> None:
         """
         Set context latency dict.
@@ -151,6 +160,12 @@ class InferenceSummary:
         Set generation latency dict.
         """
         self._generation_latency_dict = generation_latency_dict
+
+    def get_encoder_latency_dict(self) -> dict:
+        """
+        Get encoder latency dict.
+        """
+        return self._encoder_latency_dict
 
     def get_context_latency_dict(self) -> dict:
         """
@@ -165,6 +180,16 @@ class InferenceSummary:
         return self._generation_latency_dict
 
     # NEW: Energy dict accessors (explicit _wms naming for clarity)
+    def set_encoder_energy_wms_dict(self, energy_wms_dict: dict[str, float]) -> None:
+        """
+        Set encoder energy dict (units: W·ms).
+
+        Args:
+            energy_wms_dict: Dict of operation -> energy in watt-milliseconds (W·ms).
+                            Note: 1 W·ms = 1 millijoule (mJ).        
+        """
+        self._encoder_energy_wms_dict = energy_wms_dict
+
     def set_context_energy_wms_dict(self, energy_wms_dict: dict[str, float]) -> None:
         """
         Set context energy dict (units: W·ms).
@@ -184,6 +209,14 @@ class InferenceSummary:
         """
         self._generation_energy_wms_dict = energy_wms_dict
 
+    def get_encoder_energy_wms_dict(self) -> dict[str, float]:
+        """
+        Returns dict of operation -> energy in watt-milliseconds (W·ms).
+
+        Note: 1 W·ms = 1 millijoule (mJ). To convert to joules: divide by 1000.
+        """
+        return self._encoder_energy_wms_dict
+
     def get_context_energy_wms_dict(self) -> dict[str, float]:
         """
         Returns dict of operation -> energy in watt-milliseconds (W·ms).
@@ -199,6 +232,10 @@ class InferenceSummary:
         return self._generation_energy_wms_dict
 
     # Alias accessors (for less verbose code)
+    def get_encoder_energy_dict(self) -> dict[str, float]:
+        """Alias for get_encoder_energy_wms_dict() - returns energy in W·ms"""
+        return self._encoder_energy_wms_dict
+
     def get_context_energy_dict(self) -> dict[str, float]:
         """Alias for get_context_energy_wms_dict() - returns energy in W·ms"""
         return self._context_energy_wms_dict
@@ -208,6 +245,10 @@ class InferenceSummary:
         return self._generation_energy_wms_dict
 
     # NEW: Power average accessors
+    def set_encoder_power_avg(self, power_avg: float) -> None:
+        """Set encoder phase average power (watts)."""
+        self._encoder_power_avg = power_avg
+
     def set_context_power_avg(self, power_avg: float) -> None:
         """Set context phase average power (watts)."""
         self._context_power_avg = power_avg
@@ -219,6 +260,10 @@ class InferenceSummary:
     def set_e2e_power_avg(self, power_avg: float) -> None:
         """Set end-to-end average power (watts)."""
         self._e2e_power_avg = power_avg
+
+    def get_encoder_power_avg(self) -> float:
+        """Get encoder phase average power (watts)."""
+        return self._encoder_power_avg
 
     def get_context_power_avg(self) -> float:
         """Get context phase average power (watts)."""
@@ -243,13 +288,17 @@ class InferenceSummary:
             bool: True if latency with non-zero energy >= threshold * total latency
         """
         # Calculate total latency
-        total_latency = sum(self._context_latency_dict.values()) + sum(self._generation_latency_dict.values())
+        total_latency = sum(self._encoder_latency_dict.values()) + sum(self._context_latency_dict.values()) + sum(self._generation_latency_dict.values())
 
         if total_latency == 0:
             return False
 
         # Calculate latency from operations with non-zero energy
         latency_with_energy = 0.0
+        for op_name, latency in self._encoder_latency_dict.items():
+            if self._encoder_energy_wms_dict.get(op_name, 0.0) > 0:
+                latency_with_energy += latency
+
         for op_name, latency in self._context_latency_dict.items():
             if self._context_energy_wms_dict.get(op_name, 0.0) > 0:
                 latency_with_energy += latency
@@ -296,7 +345,7 @@ class InferenceSummary:
         """
         return self._memory
 
-    def get_static_info(self) -> tuple[str, str, str, str]:
+    def get_static_info(self) -> tuple[str, str, str, str, str]:
         """
         Get static info.
         """
@@ -312,6 +361,9 @@ class InferenceSummary:
                 breakdown_string += f"{op:<25}   {op_latency:>10.3f} ms {int(op_latency / latency * 100):>5}%\n"
             return latency, breakdown_string
 
+        encoder_latency, encoder_latency_string = get_latency_and_breakdown_percentage_string_helper(
+            self._encoder_latency_dict
+        )
         context_latency, context_latency_string = get_latency_and_breakdown_percentage_string_helper(
             self._context_latency_dict
         )
@@ -324,6 +376,8 @@ class InferenceSummary:
         # summary string for display
         perf_info = "Performance Summary:\n"
         perf_info += f"total latency        {(context_latency + generation_latency):>17.5f} ms\n"
+        if encoder_latency != 0:
+            perf_info += f"encoder latency:{encoder_latency:>19.5f} ms\n"
         perf_info += f"context latency (ttft):{context_latency:>16.5f} ms\n"
         if generation_latency != 0:
             perf_info += f"generation latency:{generation_latency:>19.5f} ms\n"
@@ -331,6 +385,7 @@ class InferenceSummary:
                 f"throughput {self._summary_df.loc[0, 'tokens/s']:.2f} tokens/s, tpot "
                 f"{self._summary_df.loc[0, 'tpot']:.3f} ms\n"
             )
+        encoder_info = "Encoder breakdown:\n" + encoder_latency_string if encoder_latency != 0 else ""
         context_info = "Context breakdown:\n" + context_latency_string
         generation_info = "Generation breakdown:\n" + generation_latency_string
 
@@ -338,7 +393,7 @@ class InferenceSummary:
         for item, memory_usage in self._memory.items():
             mem_info += f"{item:29} {memory_usage:>8.3f} GiB\n"
 
-        return perf_info, mem_info, context_info, generation_info
+        return perf_info, mem_info, encoder_info, context_info, generation_info
 
     def set_summary_df(self, summary_df: pd.DataFrame) -> None:
         """

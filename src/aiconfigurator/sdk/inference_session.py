@@ -180,6 +180,8 @@ class DisaggInferenceSession:
         prefill_backend: BaseBackend,
         decode_database: perf_database.PerfDatabase,
         decode_backend: BaseBackend,
+        encoder_database: perf_database.PerfDatabase | None = None,
+        encoder_backend: BaseBackend | None = None,
     ) -> None:
         """
         Initialize the DisaggInferenceSession
@@ -188,24 +190,31 @@ class DisaggInferenceSession:
         self._prefill_backend = prefill_backend
         self._decode_database = decode_database
         self._decode_backend = decode_backend
+        self._encoder_database = encoder_database
+        self._encoder_backend = encoder_backend
 
         # allow user to set correction scales for better alignment with real system
         # now the corection scales are used to correct the latency, not throughput,
         # corrected latency = latency * correction_scale
         self._prefill_latency_correction_scale = 1.0
         self._decode_latency_correction_scale = 1.0
+        self._encoder_latency_correction_scale = 1.0
 
         self._rate_matching_prefill_degradation_factor = _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR
         self._rate_matching_decode_degradation_factor = _RATE_MATCHING_DECODE_DEGRADATION_FACTOR
 
     def set_latency_correction_scales(
-        self, prefill_latency_correction_scale: float, decode_latency_correction_scale: float
+        self,
+        prefill_latency_correction_scale: float,
+        decode_latency_correction_scale: float,
+        encoder_latency_correction_scale: float = 1.0,
     ):
         """
         Set the correction scales for better alignment with real system
         """
         self._prefill_latency_correction_scale = prefill_latency_correction_scale
         self._decode_latency_correction_scale = decode_latency_correction_scale
+        self._encoder_latency_correction_scale = encoder_latency_correction_scale
 
     def set_rate_matching_degradation_factors(
         self,
@@ -304,12 +313,13 @@ class DisaggInferenceSession:
         )
 
         disagg_summary = InferenceSummary(runtime_config=runtime_config)
-        disagg_summary.set_summary_df(disagg_summary_df)
 
         prefill_oom = prefill_summary.check_oom()
         decode_oom = decode_summary.check_oom()
         if prefill_oom or decode_oom:
             disagg_summary.set_oom(True)
+
+        disagg_summary.set_summary_df(disagg_summary_df)
 
         # Carry per-op latency breakdowns from prefill/decode static runs
         per_ops_data = {}
@@ -815,6 +825,7 @@ class DisaggInferenceSession:
             return disagg_summary
 
         disagg_summary_df = disagg_summary_df.drop_duplicates(ignore_index=True)
+
         # set final disagg summary
         disagg_summary.set_summary_df(disagg_summary_df)
         return disagg_summary

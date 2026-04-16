@@ -38,6 +38,7 @@ class EventHandler:
             ],
             outputs=[
                 components["summary_box"],
+                components["encoder_breakdown_box"],
                 components["context_breakdown_box"],
                 components["generation_breakdown_box"],
                 components["record_df"],

@@ -413,40 +413,43 @@ def get_context_attention_test_cases(if_unit_test=False):
     if get_sm_version() > 86:
         kv_cache_dtype_list.append(True)
 
+    head_dim_list = [72, 128]
+
     # DEBUG
     # print(f"b_list: {b_list}, s_list: {s_list}, n_list: {n_list}, n_kv_list: {n_kv_list}")
-    for n in sorted(n_list, reverse=True):
-        for s in sorted(s_list, reverse=True):
-            for b in sorted(b_list, reverse=True):
-                for n_kv in n_kv_list:
-                    if n_kv != 0 and (n_kv > n or n % n_kv != 0):
-                        continue
-                    num_kv_heads = n_kv if n_kv != 0 else n
-                    # Only keep self-attention case
-                    # if n != num_kv_heads:
-                    #    continue
-                    if num_kv_heads == n:
-                        if b * s > 65536 or b > 128:
+    for h in head_dim_list:
+        for n in sorted(n_list, reverse=True):
+            for s in sorted(s_list, reverse=True):
+                for b in sorted(b_list, reverse=True):
+                    for n_kv in n_kv_list:
+                        if n_kv != 0 and (n_kv > n or n % n_kv != 0):
                             continue
-                    else:
-                        if b * s > 131072:
+                        num_kv_heads = n_kv if n_kv != 0 else n
+                        # Only keep self-attention case
+                        # if n != num_kv_heads:
+                        #    continue
+                        if num_kv_heads == n:
+                            if b * s > 65536 or b > 128:
+                                continue
+                        else:
+                            if b * s > 131072:
+                                continue
+                        if b * s * num_kv_heads * h * 2 >= 2147483647:
                             continue
-                    if b * s * num_kv_heads * 128 * 2 >= 2147483647:
-                        continue
 
-                    for is_fp8_kv_cache in kv_cache_dtype_list:
-                        test_cases.append(
-                            [
-                                b,
-                                s,
-                                n,
-                                num_kv_heads,
-                                128,
-                                is_fp8_kv_cache,
-                                True,
-                                "context_attention_perf.txt",
-                            ]
-                        )
+                        for is_fp8_kv_cache in kv_cache_dtype_list:
+                            test_cases.append(
+                                [
+                                    b,
+                                    s,
+                                    n,
+                                    num_kv_heads,
+                                    h,
+                                    is_fp8_kv_cache,
+                                    True,
+                                    "context_attention_perf.txt",
+                                ]
+                            )
 
     return test_cases
 
@@ -483,52 +486,55 @@ def get_generation_attention_test_cases():
     if get_sm_version() > 86:
         kv_cache_dtype_list.append(True)
 
+    head_dim_list = [72, 128]
+
     max_bsn = 8192 * 1024
-    for n in sorted(n_list, reverse=True):
-        b_s_dict = {}
-        s_b_dict = {}
-        for s in s_list:
-            max_b = max_bsn // s // n
-            for b in b_list:
-                if b > max_b:
-                    break
-                if s not in s_b_dict:
-                    s_b_dict[s] = {b}
-                else:
-                    s_b_dict[s].add(b)
-        for s, b_set in s_b_dict.items():
-            if len(b_set) < 4:
-                continue
-            for b in b_set:
-                if b not in b_s_dict:
-                    b_s_dict[b] = {s - 1}
-                b_s_dict[b].add(s - 1)
-        for b, s_list_limited in b_s_dict.items():
-            target_s_list = sorted(s_list_limited)
-            if b >= 256:
-                target_s_list = target_s_list[:-1]
-            for n_kv in n_kv_list:
-                if n_kv > n or n % n_kv != 0:
+    for h in head_dim_list:
+        for n in sorted(n_list, reverse=True):
+            b_s_dict = {}
+            s_b_dict = {}
+            for s in s_list:
+                max_b = max_bsn // s // n
+                for b in b_list:
+                    if b > max_b:
+                        break
+                    if s not in s_b_dict:
+                        s_b_dict[s] = {b}
+                    else:
+                        s_b_dict[s].add(b)
+            for s, b_set in s_b_dict.items():
+                if len(b_set) < 4:
                     continue
-                # On SM100 (Blackwell), vLLM uses FlashInfer which routes
-                # decode to trtllm_batch_decode_with_kv_cache. That kernel
-                # only supports GQA ratios up to 16.
-                if get_sm_version() >= 100 and n // n_kv > 16:
-                    continue
-                for s in target_s_list:
-                    for is_fp8_kv_cache in kv_cache_dtype_list:
-                        test_cases.append(
-                            [
-                                b,
-                                s,
-                                n,
-                                n_kv,
-                                128,
-                                is_fp8_kv_cache,
-                                False,
-                                "generation_attention_perf.txt",
-                            ]
-                        )
+                for b in b_set:
+                    if b not in b_s_dict:
+                        b_s_dict[b] = {s - 1}
+                    b_s_dict[b].add(s - 1)
+            for b, s_list_limited in b_s_dict.items():
+                target_s_list = sorted(s_list_limited)
+                if b >= 256:
+                    target_s_list = target_s_list[:-1]
+                for n_kv in n_kv_list:
+                    if n_kv > n or n % n_kv != 0:
+                        continue
+                    # On SM100 (Blackwell), vLLM uses FlashInfer which routes
+                    # decode to trtllm_batch_decode_with_kv_cache. That kernel
+                    # only supports GQA ratios up to 16.
+                    if get_sm_version() >= 100 and n // n_kv > 16:
+                        continue
+                    for s in target_s_list:
+                        for is_fp8_kv_cache in kv_cache_dtype_list:
+                            test_cases.append(
+                                [
+                                    b,
+                                    s,
+                                    n,
+                                    n_kv,
+                                    h,
+                                    is_fp8_kv_cache,
+                                    False,
+                                    "generation_attention_perf.txt",
+                                ]
+                            )
     return test_cases
 
 
