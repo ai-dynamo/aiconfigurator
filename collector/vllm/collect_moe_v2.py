@@ -33,19 +33,30 @@ from vllm.config import VllmConfig, set_current_vllm_config
 trtllm_fp4_block_scale_routed_moe = None
 _vllm_ops = None
 prepare_static_weights_for_trtllm_fp4_moe = None
+_flashinfer_fp4_quantize = None
 _nvfp4_available = False
+# scaled_fp4_quant dropped is_sf_swizzled_layout in some vLLM builds.
+# Probe the signature once at import time so _run_nvfp4_once doesn't branch per call.
+_scaled_fp4_quant_accepts_swizzled: bool = False
 try:
+    import inspect
+
+    from flashinfer import fp4_quantize as _flashinfer_fp4_quantize  # type: ignore[assignment]
     from flashinfer.fused_moe import trtllm_fp4_block_scale_routed_moe  # type: ignore[assignment]
     from vllm import _custom_ops as _vllm_ops  # type: ignore[assignment]
     from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
         prepare_static_weights_for_trtllm_fp4_moe,  # type: ignore[assignment]
     )
 
+    _scaled_fp4_quant_accepts_swizzled = (
+        "is_sf_swizzled_layout" in inspect.signature(_vllm_ops.scaled_fp4_quant).parameters
+    )
     _nvfp4_available = True
 except Exception:
     trtllm_fp4_block_scale_routed_moe = None
     _vllm_ops = None
     prepare_static_weights_for_trtllm_fp4_moe = None
+    _flashinfer_fp4_quantize = None
 
 # MXFP4 support: uses vLLM's high-level FusedMoE module with Mxfp4Config.
 # This lets vLLM handle backend selection (FlashInfer/Triton/Marlin) and
@@ -465,16 +476,34 @@ def run_moe_torch(
 
         def _run_nvfp4_once(hs, tw, ti):
             """Run a single nvfp4 MoE iteration via FlashInfer TRTLLM FP4 kernel."""
-            # Quantize input to FP4
-            x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
-                hs.to(torch.bfloat16),
-                nvfp4_data["a1_gscale"][0:1],
-                is_sf_swizzled_layout=False,
-            )
-            num_tok = x_fp4.shape[0]
+            num_tok = hs.shape[0]
+            # Quantize input to FP4 with linear (non-swizzled) scale layout so that
+            # x_scale can be reshaped to [M, K//16] for trtllm_fp4_block_scale_routed_moe.
+            #
+            # vLLM < 0.16.0: scaled_fp4_quant accepts is_sf_swizzled_layout=False directly.
+            # vLLM >= 0.16.0: the parameter was removed and the op returns swizzled layout
+            #   by default (tile-padded, incompatible shape). Fall back to flashinfer's
+            #   fp4_quantize which still supports is_sf_swizzled_layout=False.
+            if _scaled_fp4_quant_accepts_swizzled:
+                x_fp4, x_scale = _vllm_ops.scaled_fp4_quant(
+                    hs.to(torch.bfloat16),
+                    nvfp4_data["a1_gscale"][0:1],
+                    is_sf_swizzled_layout=False,
+                )
+            else:
+                per_tok_scale = nvfp4_data["a1_gscale"][0:1].view(1, 1).expand(num_tok, 1).contiguous()
+                x_fp4, x_scale = _flashinfer_fp4_quantize(
+                    hs.to(torch.bfloat16),
+                    per_tok_scale,
+                    is_sf_swizzled_layout=False,
+                )
             scale_cols = hs.shape[1] // 16
             # Pack topk: (expert_id << 16) | bf16_weight_as_int16
             packed = (ti.to(torch.int32) << 16) | tw.to(torch.bfloat16).view(torch.int16).to(torch.int32)
+            # tile_tokens_dim: avg tokens per expert, rounded to next power-of-2,
+            # clamped to [8, 64]. Controls GEMM tiling in the FlashInfer kernel.
+            avg_tok = max(1, (num_tok * topk) // num_experts)
+            tile_tokens_dim = min(max(1 << (avg_tok - 1).bit_length(), 8), 64)
             trtllm_fp4_block_scale_routed_moe(
                 topk_ids=packed,
                 routing_bias=None,
@@ -502,6 +531,7 @@ def run_moe_torch(
                 routed_scaling_factor=None,
                 routing_method_type=1,  # Renormalize
                 do_finalize=True,
+                tile_tokens_dim=tile_tokens_dim,
             )
 
         def run_single_iteration():
