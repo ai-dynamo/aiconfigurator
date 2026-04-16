@@ -41,18 +41,6 @@ REGISTRY: list[OpEntry] = [
         ),
     ),
     OpEntry(
-        op="mla_context",
-        module="collector.vllm.collect_mla",
-        get_func="get_context_mla_test_cases",
-        run_func="run_attention_torch",
-    ),
-    OpEntry(
-        op="mla_generation",
-        module="collector.vllm.collect_mla",
-        get_func="get_generation_mla_test_cases",
-        run_func="run_attention_torch",
-    ),
-    OpEntry(
         op="mla_context_module",
         get_func="get_mla_context_module_test_cases",
         run_func="run_mla_module_worker",

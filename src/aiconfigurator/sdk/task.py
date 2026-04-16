@@ -816,12 +816,6 @@ class TaskConfig:
         Check that the task can be run by AIC.
         """
 
-        # TODO: add more support matrix based validation
-        if self.backend_name == "vllm" and get_model_family(self.model_path) == "DEEPSEEK":
-            raise NotImplementedError(
-                "AIConfigurator does not yet support DeepSeek-V3/V3.1 family models for the VLLM backend."
-            )
-
         # fp8_static GEMM mode is currently TRTLLM-only.
         def _validate_fp8_static(worker_cfg: DefaultMunch, target: str) -> None:
             gemm_quant_mode = worker_cfg.get("gemm_quant_mode", None)

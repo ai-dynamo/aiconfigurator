@@ -161,8 +161,9 @@ def enumerate_parallel_config(
                                 elif backend == common.BackendName.sglang:
                                     if (enable_wideep or moe_backend == "deepep_moe") and moe_tp > 1:
                                         continue  # DeepEP forces ep_size=tp_size, moe_tp must be 1
-                                elif backend == common.BackendName.vllm:
-                                    pass  # TODO
+                                elif backend == common.BackendName.vllm:  # noqa: SIM102
+                                    if moe_tp > 1 and moe_ep > 1:
+                                        continue  # vllm does not support MoE TP and MoE EP simultaneously
                                 parallel_config_list.append([tp, pp, dp, moe_tp, moe_ep])
             else:
                 if tp * pp in num_gpu_list:

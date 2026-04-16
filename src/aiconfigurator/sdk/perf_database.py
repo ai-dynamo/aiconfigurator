@@ -1263,6 +1263,98 @@ def load_generation_dsa_module_data(dsa_file: str):
     return dsa_data
 
 
+def load_context_mla_module_data(mla_module_file: str):
+    """
+    Load context MLA module-level performance data.
+
+    CSV columns: framework, version, device, op_name, kernel_source, model,
+    architecture, mla_dtype, kv_cache_dtype, gemm_type, num_heads,
+    batch_size, isl, tp_size, step, latency [, power]
+
+    Dict structure (matches context_mla_data nesting):
+        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][s][b]
+    """
+    if not os.path.exists(mla_module_file):
+        logger.debug(f"MLA context module data file {mla_module_file} not found.")
+        return None
+
+    mla_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
+
+    with open(mla_module_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        num_heads = int(row["num_heads"])
+        b = int(row["batch_size"])
+        s = int(row["isl"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        fmha_mode = common.FMHAQuantMode[_normalize_dtype_key(row["mla_dtype"])]
+        kv_dtype = common.KVCacheQuantMode[_normalize_dtype_key(row["kv_cache_dtype"])]
+        gemm_mode = common.GEMMQuantMode[_normalize_dtype_key(row["gemm_type"])]
+
+        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return mla_data
+
+
+def load_generation_mla_module_data(mla_module_file: str):
+    """
+    Load generation MLA module-level performance data.
+
+    CSV columns: framework, version, device, op_name, kernel_source, model,
+    architecture, mla_dtype, kv_cache_dtype, gemm_type, num_heads,
+    batch_size, isl, tp_size, step, latency [, power]
+
+    Dict structure:
+        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
+    """
+    if not os.path.exists(mla_module_file):
+        logger.debug(f"MLA generation module data file {mla_module_file} not found.")
+        return None
+
+    mla_data = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
+    )
+
+    with open(mla_module_file, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    has_power = len(rows) > 0 and "power" in rows[0]
+
+    for row in rows:
+        num_heads = int(row["num_heads"])
+        b = int(row["batch_size"])
+        s = int(row["isl"]) + int(row["step"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0)) if has_power else 0.0
+        energy = power * latency
+
+        fmha_mode = common.FMHAQuantMode[_normalize_dtype_key(row["mla_dtype"])]
+        gemm_mode = common.GEMMQuantMode[_normalize_dtype_key(row["gemm_type"])]
+        kv_dtype = common.KVCacheQuantMode[_normalize_dtype_key(row["kv_cache_dtype"])]
+
+        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s] = {
+            "latency": latency,
+            "power": power,
+            "energy": energy,
+        }
+
+    return mla_data
+
+
 def load_mamba2_data(mamba2_file: str):
     """
     Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.txt.
@@ -2145,6 +2237,8 @@ class PerfDatabase:
                 PerfDataFilename.wideep_deepep_ll: load_wideep_deepep_ll_data,
                 PerfDataFilename.wideep_moe_compute: load_wideep_moe_compute_data,
                 PerfDataFilename.trtllm_alltoall: load_trtllm_alltoall_data,
+                PerfDataFilename.mla_context_module: load_context_mla_module_data,
+                PerfDataFilename.mla_generation_module: load_generation_mla_module_data,
                 PerfDataFilename.dsa_context_module: load_context_dsa_module_data,
                 PerfDataFilename.dsa_generation_module: load_generation_dsa_module_data,
             }
@@ -2179,6 +2273,8 @@ class PerfDatabase:
         self._context_mla_data = _load_op_data(PerfDataFilename.context_mla)
         self._generation_mla_data = _load_op_data(PerfDataFilename.generation_mla)
         self._mla_bmm_data = _load_op_data(PerfDataFilename.mla_bmm)
+        self._context_mla_module_data = _load_op_data(PerfDataFilename.mla_context_module)
+        self._generation_mla_module_data = _load_op_data(PerfDataFilename.mla_generation_module)
         self._mamba2_data = _load_op_data(PerfDataFilename.mamba2)
         self._gdn_data = _load_op_data(PerfDataFilename.gdn)
         self._compute_scale_data = _load_op_data(PerfDataFilename.compute_scale)
@@ -4286,6 +4382,190 @@ class PerfDatabase:
                 get_empirical=lambda: get_empirical(b, s, num_heads, kvcache_quant_mode),
                 database_mode=database_mode,
                 error_msg=f"Failed to query generation mla data for {b=}, {s=}, {num_heads=}, {kvcache_quant_mode=}",
+            )
+
+    @functools.lru_cache(maxsize=32768)
+    def query_context_mla_module(
+        self,
+        b: int,
+        s: int,
+        prefix: int,
+        num_heads: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """
+        Query context MLA module-level latency and energy.
+
+        This queries profiling data from the complete MLA context forward pass
+        captured as a single operation.
+
+        Args:
+            b: Batch size
+            s: Sequence length to be computed
+            prefix: Prefix cache length
+            num_heads: Number of attention heads (local, after TP split)
+            kvcache_quant_mode: KV cache quantization mode
+            fmha_quant_mode: FMHA quantization mode
+            gemm_quant_mode: GEMM quantization mode
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Raises:
+            PerfDataNotAvailableError: If module-level MLA context data is not available.
+        """
+
+        def get_sol(
+            b: int,
+            s: int,
+            prefix: int,
+            num_heads: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+            fmha_quant_mode: common.FMHAQuantMode,
+        ) -> tuple[float, float, float]:
+            # Reuse the same SOL model as query_context_mla
+            full_s = s + prefix
+            ops = b * num_heads * 2 / 2 * (192 + 128) * (full_s * full_s - prefix * prefix)
+            mem_bytes = b * num_heads * (kvcache_quant_mode.value.memory * full_s * (192 + 128) + 2 * s * (192 + 128))
+            sol_math = ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+
+        def get_empirical(
+            b: int,
+            s: int,
+            prefix: int,
+            num_heads: int,
+            kvcache_quant_mode: common.KVCacheQuantMode,
+            fmha_quant_mode: common.FMHAQuantMode,
+        ) -> float:
+            latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+            scale_factor = 0.6
+            return latency / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
+            return PerformanceResult(sol_latency, energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
+            return PerformanceResult(emp_latency, energy=0.0)
+        else:
+
+            def get_silicon():
+                self._context_mla_module_data.raise_if_not_loaded()
+                full_s = s + prefix
+                prefix_correction = (full_s * full_s - prefix * prefix) / (full_s * full_s)
+                mla_dict = self._context_mla_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
+                result = self._interp_3d(num_heads, full_s, b, mla_dict, "cubic")
+                latency = result["latency"] * prefix_correction
+                energy = result.get("energy", 0.0) * prefix_correction
+                return PerformanceResult(latency, energy=energy)
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode),
+                database_mode=database_mode,
+                error_msg=(
+                    f"Failed to query context MLA module data for {b=}, {s=}, {prefix=}, "
+                    f"{num_heads=}, {kvcache_quant_mode=}, {fmha_quant_mode=}, {gemm_quant_mode=}"
+                ),
+            )
+
+    @functools.lru_cache(maxsize=32768)
+    def query_generation_mla_module(
+        self,
+        b: int,
+        s: int,
+        num_heads: int,
+        kv_cache_dtype: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.float16,
+        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.float16,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """
+        Query generation MLA module-level latency and energy.
+
+        This queries profiling data from the complete MLA forward pass (including
+        BMM pre, attention, and BMM post) captured as a single operation.
+
+        Args:
+            b: Batch size (each generating 1 token)
+            s: KV cache length
+            num_heads: Number of attention heads (local, after TP split)
+            kv_cache_dtype: KV cache quantization mode
+            fmha_quant_mode: FMHA quantization mode
+            gemm_quant_mode: GEMM quantization mode for BMM operations
+            database_mode: Database mode (SILICON, EMPIRICAL, SOL, HYBRID)
+
+        Raises:
+            PerfDataNotAvailableError: If module-level MLA data is not available.
+        """
+
+        # Reuse the same SOL model as query_generation_mla — the module captures
+        # the same operations, just profiled together.
+        # For a proper SOL we'd also include BMM pre/post, but that's a refinement
+        # for later; the primary purpose here is SILICON mode with real data.
+        def get_sol(
+            b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode
+        ) -> tuple[float, float, float]:
+            if kv_cache_dtype == common.KVCacheQuantMode.fp8:
+                quant_mode_gen = common.FMHAQuantMode.fp8
+            else:
+                quant_mode_gen = common.FMHAQuantMode.float16
+            # MLA attention ops
+            attn_ops = 2 * b * num_heads * 1088 * s
+            mem_bytes = b * (num_heads * 1088 * 2 + (s - 1) * 576 * kv_cache_dtype.value.memory)
+            sol_math = attn_ops / self.system_spec["gpu"]["float16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            sol_mem = mem_bytes / self.system_spec["gpu"]["mem_bw"] * 1000
+            # Add BMM pre + post SOL (same as query_mla_bmm)
+            bmm_ops = 2 * 2 * b * num_heads * 128 * 512  # pre + post
+            bmm_mem = 2 * num_heads * (b * 640 + 128 * 512) * gemm_quant_mode.value.memory
+            bmm_math = bmm_ops / (self.system_spec["gpu"]["float16_tc_flops"] * gemm_quant_mode.value.compute) * 1000
+            bmm_mem_time = bmm_mem / self.system_spec["gpu"]["mem_bw"] * 1000
+            sol_math += bmm_math
+            sol_mem += bmm_mem_time
+            sol_time = max(sol_math, sol_mem)
+            return sol_time, sol_math, sol_mem
+
+        def get_empirical(b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode) -> float:
+            latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
+            scale_factor = 0.5
+            return latency / scale_factor
+
+        if database_mode is None:
+            database_mode = self._default_database_mode
+        if database_mode == common.DatabaseMode.SOL:
+            sol_latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
+            return PerformanceResult(sol_latency, energy=0.0)
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, num_heads, kv_cache_dtype)
+        elif database_mode == common.DatabaseMode.EMPIRICAL:
+            emp_latency = get_empirical(b, s, num_heads, kv_cache_dtype)
+            return PerformanceResult(emp_latency, energy=0.0)
+        else:
+
+            def get_silicon():
+                self._generation_mla_module_data.raise_if_not_loaded()
+                mla_dict = self._generation_mla_module_data[fmha_quant_mode][kv_cache_dtype][gemm_quant_mode]
+                result = self._interp_3d(num_heads, b, s, mla_dict, "cubic")
+                latency = result["latency"]
+                energy = result.get("energy", 0.0)
+                return PerformanceResult(latency, energy=energy)
+
+            return self._query_silicon_or_hybrid(
+                get_silicon=get_silicon,
+                get_empirical=lambda: get_empirical(b, s, num_heads, kv_cache_dtype),
+                database_mode=database_mode,
+                error_msg=(
+                    f"Failed to query generation MLA module data for {b=}, {s=}, "
+                    f"{num_heads=}, {kv_cache_dtype=}, {gemm_quant_mode=}"
+                ),
             )
 
     @functools.lru_cache(maxsize=32768)

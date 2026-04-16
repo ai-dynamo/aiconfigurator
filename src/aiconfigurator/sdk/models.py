@@ -1292,30 +1292,42 @@ class DeepSeekModel(BaseModel):
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
-                ops.GEMM(
-                    "context_q_b_proj_gemm",
-                    self._num_layers,
-                    24576 // tp_size,
-                    1536,
-                    gemm_quant_mode,
+                ops.FallbackOp(
+                    "context_mla_block",
+                    primary=ops.MLAModule(
+                        "context_mla_module",
+                        self._num_layers,
+                        True,
+                        128 // tp_size,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                        gemm_quant_mode,
+                    ),
+                    fallback=[
+                        ops.GEMM(
+                            "context_q_b_proj_gemm",
+                            self._num_layers,
+                            24576 // tp_size,
+                            1536,
+                            gemm_quant_mode,
+                        ),
+                        ops.GEMM(
+                            "context_kv_b_proj_gemm",
+                            self._num_layers,
+                            32768 // tp_size,
+                            512,
+                            gemm_quant_mode,
+                        ),
+                        ops.ContextMLA(
+                            "context_attention",
+                            self._num_layers,
+                            128 // tp_size,
+                            kvcache_quant_mode,
+                            fmha_quant_mode,
+                        ),
+                        ops.GEMM("context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode),
+                    ],
                 ),
-                ops.GEMM(
-                    "context_kv_b_proj_gemm",
-                    self._num_layers,
-                    32768 // tp_size,
-                    512,
-                    gemm_quant_mode,
-                ),  # agg ctx attn part
-                ops.ContextMLA(
-                    "context_attention",
-                    self._num_layers,
-                    128 // tp_size,
-                    kvcache_quant_mode,
-                    fmha_quant_mode,
-                ),  # agg ctx attn part
-                ops.GEMM(
-                    "context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode
-                ),  # agg ctx attn part
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
             ]
         )
@@ -1453,26 +1465,40 @@ class DeepSeekModel(BaseModel):
                     1536,
                     gemm_quant_mode,
                 ),
-                ops.MLABmm(
-                    "generation_bmm_pre",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._num_heads // tp_size,
-                    mla_bmm_quant_mode,
-                    if_pre=True,
-                ),  # agg gen attn part
-                ops.GenerationMLA(
-                    "generation_attention",
-                    self._num_layers * self._mtp_scale_factor,
-                    128 // tp_size,
-                    kvcache_quant_mode,
-                ),  # agg gen attn part
-                ops.MLABmm(
-                    "generation_bmm_post",
-                    self._num_layers * self._mtp_scale_factor,
-                    self._num_heads // tp_size,
-                    mla_bmm_quant_mode,
-                    if_pre=False,
-                ),  # agg gen attn part
+                ops.FallbackOp(
+                    "generation_mla_block",
+                    primary=ops.MLAModule(
+                        "generation_mla_module",
+                        self._num_layers * self._mtp_scale_factor,
+                        False,
+                        128 // tp_size,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                        gemm_quant_mode,
+                    ),
+                    fallback=[
+                        ops.MLABmm(
+                            "generation_bmm_pre",
+                            self._num_layers * self._mtp_scale_factor,
+                            self._num_heads // tp_size,
+                            mla_bmm_quant_mode,
+                            if_pre=True,
+                        ),
+                        ops.GenerationMLA(
+                            "generation_attention",
+                            self._num_layers * self._mtp_scale_factor,
+                            128 // tp_size,
+                            kvcache_quant_mode,
+                        ),
+                        ops.MLABmm(
+                            "generation_bmm_post",
+                            self._num_layers * self._mtp_scale_factor,
+                            self._num_heads // tp_size,
+                            mla_bmm_quant_mode,
+                            if_pre=False,
+                        ),
+                    ],
+                ),
                 ops.GEMM(
                     "generation_proj_gemm",
                     self._num_layers * self._mtp_scale_factor,
