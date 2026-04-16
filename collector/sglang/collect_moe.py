@@ -81,9 +81,6 @@ def get_moe_test_cases():
     test_cases = []
 
     for common_moe_testcase in get_common_moe_test_cases():
-        if common_moe_testcase.token_expert_distribution != "power_law":
-            continue
-
         model_name = common_moe_testcase.model_name
         if model_name in ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
             continue
@@ -421,28 +418,46 @@ class Rank0Workload(TypedDict):
     masked_m: torch.Tensor
 
 
-def build_power_law_rank0_workloads(
+def build_rank0_workloads(
     num_workloads: int,
     num_tokens: int,
     hidden_size: int,
     topk: int,
     num_experts: int,
     moe_ep_size: int,
-    power_law_alpha: float,
+    distributed: str,
+    power_law_alpha: float | None,
     dtype: torch.dtype,
     device: torch.device,
 ) -> list[Rank0Workload]:
     workloads: list[Rank0Workload] = []
+    experts_per_rank = num_experts // moe_ep_size
 
     for _ in range(num_workloads):
-        _, rank0_info = power_law_logits_v3(
-            num_tokens,
-            num_experts,
-            topk,
-            moe_ep_size,
-            power_law_alpha,
-            return_rank0_info=True,
-        )
+        if distributed == "power_law":
+            if power_law_alpha is None:
+                raise ValueError("power_law_alpha is required for power_law distribution")
+            _, rank0_info = power_law_logits_v3(
+                num_tokens,
+                num_experts,
+                topk,
+                moe_ep_size,
+                power_law_alpha,
+                return_rank0_info=True,
+            )
+        elif distributed == "balanced":
+            router_logits = balanced_logits(num_tokens, num_experts, topk).to(device=device, dtype=torch.float32)
+            rank0_selected_slots = torch.topk(router_logits, topk, dim=-1).indices.to(torch.int64)
+            rank0_token_mask = (rank0_selected_slots < experts_per_rank).any(dim=1)
+            rank0_info = {
+                "rank0_selected_slots": rank0_selected_slots[rank0_token_mask],
+                "rank0_logits": router_logits[rank0_token_mask],
+                "rank0_num_tokens": int(rank0_token_mask.sum().item()),
+                "slots_per_rank": experts_per_rank,
+            }
+        else:
+            raise ValueError(f"Unsupported distribution for rank0 workloads: {distributed}")
+
         rank0_local = build_rank0_local_workload(rank0_info)
         rank0_num_tokens = int(rank0_local["num_tokens"])
         workloads.append(
@@ -488,18 +503,22 @@ def run_moe_torch(
 
     num_local_experts = num_experts // moe_ep_size
 
-    if moe_ep_size > 1 and distributed == "power_law":
-        rank0_workloads = build_power_law_rank0_workloads(
+    rank0_workloads: list[Rank0Workload] | None = None
+    if moe_ep_size > 1 and distributed in ("power_law", "balanced"):
+        rank0_workloads = build_rank0_workloads(
             num_workloads=5,
             num_tokens=num_tokens,
             hidden_size=hidden_size,
             topk=topk,
             num_experts=num_experts,
             moe_ep_size=moe_ep_size,
-            power_law_alpha=power_law_alpha,
+            distributed=distributed,
+            power_law_alpha=power_law_alpha if distributed == "power_law" else None,
             dtype=torch.bfloat16,
             device=torch.device(device),
         )
+
+    if rank0_workloads is not None:
         latency, power_stats = benchmark(
             num_tokens,
             num_local_experts,
