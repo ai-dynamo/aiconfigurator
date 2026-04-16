@@ -739,3 +739,54 @@ class TestEnumerateParallelConfigSGLangMoE:
         # Should still include ep > 1 configs
         moe_ep_values = [c[4] for c in configs]
         assert any(ep > 1 for ep in moe_ep_values), "Should include configs with moe_ep > 1"
+
+
+class TestEnumerateParallelConfigVLLMMoE:
+    """Test enumerate_parallel_config for vLLM MoE scenarios."""
+
+    def test_vllm_excludes_simultaneous_moe_tp_and_ep(self):
+        """vLLM should never have both moe_tp > 1 and moe_ep > 1."""
+        configs = enumerate_parallel_config(
+            num_gpu_list=[1, 2, 4, 8],
+            tp_list=[1, 2, 4, 8],
+            pp_list=[1],
+            dp_list=[1, 2, 4, 8],
+            moe_tp_list=[1, 2, 4, 8],
+            moe_ep_list=[1, 2, 4, 8],
+            is_moe=True,
+            backend=common.BackendName.vllm,
+        )
+        assert len(configs) > 0, "Should generate at least one config"
+        for c in configs:
+            tp, pp, dp, moe_tp, moe_ep = c
+            assert not (moe_tp > 1 and moe_ep > 1), f"vLLM should not have both moe_tp > 1 and moe_ep > 1, got {c}"
+
+    def test_vllm_allows_pure_moe_tp(self):
+        """vLLM should allow configs with moe_tp > 1 and moe_ep == 1."""
+        configs = enumerate_parallel_config(
+            num_gpu_list=[1, 2, 4, 8],
+            tp_list=[1, 2, 4, 8],
+            pp_list=[1],
+            dp_list=[1, 2, 4, 8],
+            moe_tp_list=[1, 2, 4, 8],
+            moe_ep_list=[1, 2, 4, 8],
+            is_moe=True,
+            backend=common.BackendName.vllm,
+        )
+        has_pure_tp = any(c[3] > 1 and c[4] == 1 for c in configs)
+        assert has_pure_tp, "Should include pure MoE TP configs (moe_tp>1, moe_ep=1)"
+
+    def test_vllm_allows_pure_moe_ep(self):
+        """vLLM should allow configs with moe_tp == 1 and moe_ep > 1."""
+        configs = enumerate_parallel_config(
+            num_gpu_list=[1, 2, 4, 8],
+            tp_list=[1, 2, 4, 8],
+            pp_list=[1],
+            dp_list=[1, 2, 4, 8],
+            moe_tp_list=[1, 2, 4, 8],
+            moe_ep_list=[1, 2, 4, 8],
+            is_moe=True,
+            backend=common.BackendName.vllm,
+        )
+        has_pure_ep = any(c[3] == 1 and c[4] > 1 for c in configs)
+        assert has_pure_ep, "Should include pure MoE EP configs (moe_tp=1, moe_ep>1)"

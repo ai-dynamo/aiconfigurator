@@ -21,10 +21,12 @@ from aiconfigurator.sdk.perf_database import (
     get_systems_paths,
     load_context_attention_data,
     load_context_mla_data,
+    load_context_mla_module_data,
     load_custom_allreduce_data,
     load_gemm_data,
     load_generation_attention_data,
     load_generation_mla_data,
+    load_generation_mla_module_data,
     load_mla_bmm_data,
     load_moe_data,
     load_nccl_data,
@@ -755,3 +757,134 @@ def test_load_wideep_moe_compute_data(tmp_path):
     # Verify EPLB entry: power_law_1.01_eplb, num_slots=288
     result_eplb = data[kernel_source][qm]["power_law_1.01_eplb"][8][256][7168][2048][288][1][4][1]
     assert result_eplb["latency"] == pytest.approx(0.07909759879112244)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11) load_context_mla_module_data
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_load_context_mla_module_data_nonexistent(tmp_path):
+    """If the file does not exist, load_context_mla_module_data should return None."""
+    result = load_context_mla_module_data(str(tmp_path / "missing.txt"))
+    assert result is None
+
+
+def test_load_context_mla_module_data_basic(tmp_path):
+    """
+    Test loading context MLA module data.
+    Structure: data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][s][b]
+    """
+    csv_file = tmp_path / "mla_context_module_perf.txt"
+    headers = (
+        "framework,version,device,op_name,kernel_source,model,architecture,"
+        "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency\n"
+    )
+    row = (
+        "VLLM,0.17.0,NVIDIA B200,mla_context_module,default,deepseek-ai/DeepSeek-V3,"
+        "DeepseekV3ForCausalLM,float16,fp8,fp8_block,16,2,4000,1,0,1.5\n"
+    )
+    csv_file.write_text(headers + row)
+
+    data = load_context_mla_module_data(str(csv_file))
+
+    fmha = FMHAQuantMode.float16
+    kv = KVCacheQuantMode.fp8
+    gemm = GEMMQuantMode.fp8_block
+
+    assert fmha in data
+    assert kv in data[fmha]
+    assert gemm in data[fmha][kv]
+    assert 16 in data[fmha][kv][gemm]  # num_heads
+    assert 4000 in data[fmha][kv][gemm][16]  # s = isl (step=0)
+    assert 2 in data[fmha][kv][gemm][16][4000]  # b
+    assert data[fmha][kv][gemm][16][4000][2]["latency"] == pytest.approx(1.5)
+
+
+def test_load_context_mla_module_data_with_power(tmp_path):
+    """Test that power column is parsed when present."""
+    csv_file = tmp_path / "mla_context_module_perf.txt"
+    headers = (
+        "framework,version,device,op_name,kernel_source,model,architecture,"
+        "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency,power\n"
+    )
+    row = (
+        "VLLM,0.17.0,NVIDIA B200,mla_context_module,default,deepseek-ai/DeepSeek-V3,"
+        "DeepseekV3ForCausalLM,float16,float16,float16,128,1,1024,1,0,0.5,800.0\n"
+    )
+    csv_file.write_text(headers + row)
+
+    data = load_context_mla_module_data(str(csv_file))
+    entry = data[FMHAQuantMode.float16][KVCacheQuantMode.float16][GEMMQuantMode.float16][128][1024][1]
+    assert entry["latency"] == pytest.approx(0.5)
+    assert entry["power"] == pytest.approx(800.0)
+    assert entry["energy"] == pytest.approx(400.0)  # 800 * 0.5
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12) load_generation_mla_module_data
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_load_generation_mla_module_data_nonexistent(tmp_path):
+    """If the file does not exist, load_generation_mla_module_data should return None."""
+    result = load_generation_mla_module_data(str(tmp_path / "missing.txt"))
+    assert result is None
+
+
+def test_load_generation_mla_module_data_basic(tmp_path):
+    """
+    Test loading generation MLA module data.
+    Structure: data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
+    s = isl + step
+    """
+    csv_file = tmp_path / "mla_generation_module_perf.txt"
+    headers = (
+        "framework,version,device,op_name,kernel_source,model,architecture,"
+        "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency\n"
+    )
+    row = (
+        "VLLM,0.17.0,NVIDIA B200,mla_generation_module,default,deepseek-ai/DeepSeek-V3,"
+        "DeepseekV3ForCausalLM,float16,fp8,fp8_block,16,4,1,1,255,0.135\n"
+    )
+    csv_file.write_text(headers + row)
+
+    data = load_generation_mla_module_data(str(csv_file))
+
+    fmha = FMHAQuantMode.float16
+    kv = KVCacheQuantMode.fp8
+    gemm = GEMMQuantMode.fp8_block
+
+    assert fmha in data
+    assert kv in data[fmha]
+    assert gemm in data[fmha][kv]
+    assert 16 in data[fmha][kv][gemm]  # num_heads
+    assert 4 in data[fmha][kv][gemm][16]  # b
+    assert 256 in data[fmha][kv][gemm][16][4]  # s = isl(1) + step(255)
+    assert data[fmha][kv][gemm][16][4][256]["latency"] == pytest.approx(0.135)
+
+
+def test_load_generation_mla_module_data_multiple_quant_modes(tmp_path):
+    """Test that multiple quant mode combinations are loaded correctly."""
+    csv_file = tmp_path / "mla_generation_module_perf.txt"
+    headers = (
+        "framework,version,device,op_name,kernel_source,model,architecture,"
+        "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency\n"
+    )
+    rows = (
+        "VLLM,0.17.0,NVIDIA B200,mla_generation_module,default,m,A,"
+        "float16,float16,float16,128,1,1,1,256,0.13\n"
+        "VLLM,0.17.0,NVIDIA B200,mla_generation_module,default,m,A,"
+        "float16,fp8,fp8_block,128,1,1,1,256,0.10\n"
+    )
+    csv_file.write_text(headers + rows)
+
+    data = load_generation_mla_module_data(str(csv_file))
+
+    # float16/float16/float16 combo
+    entry1 = data[FMHAQuantMode.float16][KVCacheQuantMode.float16][GEMMQuantMode.float16][128][1][257]
+    assert entry1["latency"] == pytest.approx(0.13)
+
+    # float16/fp8/fp8_block combo
+    entry2 = data[FMHAQuantMode.float16][KVCacheQuantMode.fp8][GEMMQuantMode.fp8_block][128][1][257]
+    assert entry2["latency"] == pytest.approx(0.10)
