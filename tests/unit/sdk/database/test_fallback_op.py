@@ -7,8 +7,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations import FallbackOp, MLAModule, PerformanceResult
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
+
+
+def _make_mock_db():
+    """Create a mock database with _default_database_mode."""
+    db = MagicMock()
+    db._default_database_mode = common.DatabaseMode.SILICON
+    return db
+
 
 pytestmark = pytest.mark.unit
 
@@ -36,7 +45,7 @@ class TestFallbackOp:
 
     def test_primary_succeeds(self):
         """When primary succeeds, fallback ops are never called."""
-        mock_db = MagicMock()
+        mock_db = _make_mock_db()
         primary = _make_mock_op(10.0, 100.0)
         fallback_1 = _make_mock_op(5.0, 50.0)
         fallback_2 = _make_mock_op(3.0, 30.0)
@@ -52,7 +61,7 @@ class TestFallbackOp:
 
     def test_primary_fails_fallback_succeeds(self):
         """When primary raises PerfDataNotAvailableError, fallback ops are summed."""
-        mock_db = MagicMock()
+        mock_db = _make_mock_db()
         primary = _make_failing_op(PerfDataNotAvailableError)
         fallback_1 = _make_mock_op(5.0, 50.0)
         fallback_2 = _make_mock_op(3.0, 30.0)
@@ -65,7 +74,7 @@ class TestFallbackOp:
 
     def test_primary_fails_with_key_error(self):
         """FallbackOp catches KeyError from missing quant mode combinations."""
-        mock_db = MagicMock()
+        mock_db = _make_mock_db()
         primary = _make_failing_op(KeyError, "fp8_block")
         fallback_1 = _make_mock_op(7.0, 70.0)
 
@@ -77,7 +86,7 @@ class TestFallbackOp:
 
     def test_primary_fails_with_assertion_error(self):
         """FallbackOp catches AssertionError from empty interpolation data."""
-        mock_db = MagicMock()
+        mock_db = _make_mock_db()
         primary = _make_failing_op(AssertionError, "values is None or empty")
         fallback_1 = _make_mock_op(7.0, 70.0)
 
@@ -88,7 +97,7 @@ class TestFallbackOp:
 
     def test_both_fail_raises(self):
         """When primary fails and fallback also fails, the fallback error propagates."""
-        mock_db = MagicMock()
+        mock_db = _make_mock_db()
         primary = _make_failing_op(PerfDataNotAvailableError, "no module data")
         fallback_1 = _make_failing_op(PerfDataNotAvailableError, "no granular data")
 
@@ -98,13 +107,70 @@ class TestFallbackOp:
 
     def test_unexpected_error_not_caught(self):
         """Errors other than the expected types are not caught."""
-        mock_db = MagicMock()
+        mock_db = _make_mock_db()
         primary = _make_failing_op(ValueError, "unexpected")
         fallback_1 = _make_mock_op(5.0, 50.0)
 
         op = FallbackOp("test", primary=primary, fallback=[fallback_1])
         with pytest.raises(ValueError, match="unexpected"):
             op.query(mock_db, batch_size=4)
+
+    def test_primary_skipped_after_perf_data_not_available(self):
+        """Once primary fails with PerfDataNotAvailableError, it is skipped on subsequent calls."""
+        mock_db = _make_mock_db()
+        primary = _make_failing_op(PerfDataNotAvailableError)
+        fallback_1 = _make_mock_op(5.0, 50.0)
+
+        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
+        op.query(mock_db, batch_size=4)
+        op.query(mock_db, batch_size=8)
+        op.query(mock_db, batch_size=16)
+
+        # Primary should only be called once (the first attempt)
+        assert primary.query.call_count == 1
+        # Fallback should be called for all three queries
+        assert fallback_1.query.call_count == 3
+
+    def test_primary_retried_after_key_error(self):
+        """KeyError doesn't permanently disable primary — it may work for other params."""
+        mock_db = _make_mock_db()
+        primary = _make_failing_op(KeyError, "fp8_block")
+        fallback_1 = _make_mock_op(5.0, 50.0)
+
+        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
+        op.query(mock_db, batch_size=4)
+        op.query(mock_db, batch_size=8)
+
+        # Primary should be retried on each call
+        assert primary.query.call_count == 2
+
+    def test_primary_forces_silicon_mode(self):
+        """Primary is queried with SILICON mode even when database uses HYBRID."""
+        mock_db = _make_mock_db()
+        mock_db._default_database_mode = common.DatabaseMode.HYBRID
+
+        primary = _make_mock_op(10.0, 100.0)
+        fallback_1 = _make_mock_op(5.0, 50.0)
+
+        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
+        op.query(mock_db, batch_size=4)
+
+        # During primary query, database mode should have been SILICON
+        # After query, it should be restored to HYBRID
+        assert mock_db._default_database_mode == common.DatabaseMode.HYBRID
+
+    def test_database_mode_restored_after_primary_failure(self):
+        """Database mode is restored to original even when primary fails."""
+        mock_db = _make_mock_db()
+        mock_db._default_database_mode = common.DatabaseMode.HYBRID
+
+        primary = _make_failing_op(PerfDataNotAvailableError)
+        fallback_1 = _make_mock_op(5.0, 50.0)
+
+        op = FallbackOp("test", primary=primary, fallback=[fallback_1])
+        op.query(mock_db, batch_size=4)
+
+        assert mock_db._default_database_mode == common.DatabaseMode.HYBRID
 
     def test_get_weights_from_primary(self):
         """get_weights uses primary when it has nonzero weights."""
@@ -128,7 +194,7 @@ class TestFallbackOp:
         """The perf_database logger level is restored after primary failure."""
         import logging
 
-        mock_db = MagicMock()
+        mock_db = _make_mock_db()
         primary = _make_failing_op(PerfDataNotAvailableError)
         fallback_1 = _make_mock_op(5.0, 50.0)
 

@@ -1291,7 +1291,6 @@ class DeepSeekModel(BaseModel):
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
                 ops.FallbackOp(
                     "context_mla_block",
                     primary=ops.MLAModule(
@@ -1304,6 +1303,7 @@ class DeepSeekModel(BaseModel):
                         gemm_quant_mode,
                     ),
                     fallback=[
+                        ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
                         ops.GEMM(
                             "context_q_b_proj_gemm",
                             self._num_layers,
@@ -1451,20 +1451,6 @@ class DeepSeekModel(BaseModel):
                     2 * h,
                     0.8,
                 ),
-                ops.GEMM(
-                    "generation_downscale_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    2112,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.GEMM(
-                    "generation_q_b_proj_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    24576 // tp_size,
-                    1536,
-                    gemm_quant_mode,
-                ),
                 ops.FallbackOp(
                     "generation_mla_block",
                     primary=ops.MLAModule(
@@ -1477,6 +1463,20 @@ class DeepSeekModel(BaseModel):
                         gemm_quant_mode,
                     ),
                     fallback=[
+                        ops.GEMM(
+                            "generation_downscale_gemm",
+                            self._num_layers * self._mtp_scale_factor,
+                            2112,
+                            h,
+                            gemm_quant_mode,
+                        ),
+                        ops.GEMM(
+                            "generation_q_b_proj_gemm",
+                            self._num_layers * self._mtp_scale_factor,
+                            24576 // tp_size,
+                            1536,
+                            gemm_quant_mode,
+                        ),
                         ops.MLABmm(
                             "generation_bmm_pre",
                             self._num_layers * self._mtp_scale_factor,
@@ -1497,14 +1497,14 @@ class DeepSeekModel(BaseModel):
                             mla_bmm_quant_mode,
                             if_pre=False,
                         ),
+                        ops.GEMM(
+                            "generation_proj_gemm",
+                            self._num_layers * self._mtp_scale_factor,
+                            h,
+                            h // tp_size,
+                            gemm_quant_mode,
+                        ),
                     ],
-                ),
-                ops.GEMM(
-                    "generation_proj_gemm",
-                    self._num_layers * self._mtp_scale_factor,
-                    h,
-                    h // tp_size,
-                    gemm_quant_mode,
                 ),
                 ops.ElementWise(
                     "generation_add_norm_2",

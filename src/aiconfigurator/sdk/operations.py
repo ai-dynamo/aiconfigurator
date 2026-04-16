@@ -1691,6 +1691,13 @@ class FallbackOp(Operation):
     profiling data (single op) while others still have granular per-kernel data
     (multiple ops). The fallback is symmetric: either group can be primary.
 
+    The primary is always queried in SILICON mode so that HYBRID does not
+    silently swallow a miss with an empirical estimate — the fallback ops
+    (which have real data) should be preferred over an empirical guess.
+
+    Once the primary fails on the first call, it is skipped on all subsequent
+    calls to avoid redundant work.
+
     Latency = primary.query()  OR  sum(fallback[i].query())
     Energy  = same source as whichever succeeds
     Weights = sum of whichever group is used (primary or fallback)
@@ -1706,29 +1713,39 @@ class FallbackOp(Operation):
         super().__init__(name, 1.0)  # scale_factor handled by inner ops
         self._primary = primary
         self._fallback = fallback
+        self._primary_unavailable = False
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         import logging as _logging
 
         from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
-        # Suppress ERROR-level logs from perf_database during the primary attempt,
-        # since a failure here is expected and handled by the fallback path.
-        perf_db_logger = _logging.getLogger("aiconfigurator.sdk.perf_database")
-        prev_level = perf_db_logger.level
-        perf_db_logger.setLevel(_logging.CRITICAL)
-        try:
-            return self._primary.query(database, **kwargs)
-        except (PerfDataNotAvailableError, KeyError, AssertionError) as e:
-            logger.debug(
-                "FallbackOp '%s': primary op '%s' failed (%s: %s), using fallback ops",
-                self._name,
-                self._primary._name,
-                type(e).__name__,
-                e,
-            )
-        finally:
-            perf_db_logger.setLevel(prev_level)
+        if not self._primary_unavailable:
+            # Force SILICON mode on the primary so that HYBRID doesn't silently
+            # return an empirical estimate when module data is missing.
+            prev_mode = database._default_database_mode
+            database._default_database_mode = common.DatabaseMode.SILICON
+
+            # Suppress ERROR-level logs from perf_database during the primary
+            # attempt, since a failure here is expected and handled by fallback.
+            perf_db_logger = _logging.getLogger("aiconfigurator.sdk.perf_database")
+            prev_log_level = perf_db_logger.level
+            perf_db_logger.setLevel(_logging.CRITICAL)
+            try:
+                return self._primary.query(database, **kwargs)
+            except (PerfDataNotAvailableError, KeyError, AssertionError) as e:
+                if isinstance(e, PerfDataNotAvailableError):
+                    self._primary_unavailable = True
+                logger.debug(
+                    "FallbackOp '%s': primary op '%s' failed (%s: %s), using fallback ops",
+                    self._name,
+                    self._primary._name,
+                    type(e).__name__,
+                    e,
+                )
+            finally:
+                database._default_database_mode = prev_mode
+                perf_db_logger.setLevel(prev_log_level)
 
         total_latency = 0.0
         total_energy = 0.0
@@ -1741,9 +1758,10 @@ class FallbackOp(Operation):
     def get_weights(self, **kwargs):
         # Use primary weights if available, otherwise sum fallback weights.
         # In practice both should be equivalent since they model the same block.
-        primary_w = self._primary.get_weights(**kwargs)
-        if primary_w > 0:
-            return primary_w
+        if not self._primary_unavailable:
+            primary_w = self._primary.get_weights(**kwargs)
+            if primary_w > 0:
+                return primary_w
         return sum(op.get_weights(**kwargs) for op in self._fallback)
 
 

@@ -2709,6 +2709,70 @@ class PerfDatabase:
                     target_z_list=target_z_list,
                 )
 
+        # MLA module-level data extrapolation
+        # Dict structure: data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b]
+        if getattr(self, "_context_mla_module_data", None) is not None:
+            for fmha_mode in self._context_mla_module_data:
+                for kv_cache_dtype in self._context_mla_module_data[fmha_mode]:
+                    for gemm_mode in self._context_mla_module_data[fmha_mode][kv_cache_dtype]:
+                        data_dict = self._context_mla_module_data[fmha_mode][kv_cache_dtype][gemm_mode]
+                        num_heads_list = list(data_dict.keys())
+                        target_x_list = num_heads_list
+                        target_y_list = (
+                            [1, 16, 32, 64, 128, 256, 512, 1024, 2048]
+                            + [4096 + i * 2048 for i in range(14)]
+                            + [32768 + 16384 * i for i in range(6)]
+                            + [131072 + 32768 * i for i in range(12)]
+                            + [524288 + 65536 * i for i in range(9)]
+                        )
+                        target_z_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048]
+
+                        self._extrapolate_data_grid(
+                            data_dict=data_dict,
+                            target_x_list=target_x_list,
+                            target_y_list=target_y_list,
+                            target_z_list=target_z_list,
+                        )
+
+        # Dict structure: data[fmha_mode][kv_dtype][gemm_mode][num_heads][b][s]
+        if getattr(self, "_generation_mla_module_data", None) is not None:
+            for fmha_mode in self._generation_mla_module_data:
+                for kv_cache_dtype in self._generation_mla_module_data[fmha_mode]:
+                    for gemm_mode in self._generation_mla_module_data[fmha_mode][kv_cache_dtype]:
+                        data_dict = self._generation_mla_module_data[fmha_mode][kv_cache_dtype][gemm_mode]
+                        num_heads_list = list(data_dict.keys())
+                        target_x_list = num_heads_list
+                        target_y_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 1024, 2048, 8192]
+                        target_z_list = [
+                            1,
+                            2,
+                            4,
+                            8,
+                            16,
+                            32,
+                            64,
+                            128,
+                            256,
+                            512,
+                            1024,
+                            2048,
+                            4096,
+                            8192,
+                            16384,
+                            32768,
+                            65536,
+                            131072,
+                            262144,
+                            2097152 * 8,
+                        ]
+
+                        self._extrapolate_data_grid(
+                            data_dict=data_dict,
+                            target_x_list=target_x_list,
+                            target_y_list=target_y_list,
+                            target_z_list=target_z_list,
+                        )
+
         # DSA (DeepSeek Sparse Attention) data interpolation
         # Dict structure: data[fmha_mode][kv_dtype][gemm_mode][arch][num_heads][s][b]
         if getattr(self, "_context_dsa_module_data", None) is not None:
@@ -2798,6 +2862,33 @@ class PerfDatabase:
                 names.append(key.name if hasattr(key, "name") else str(key))
             return names
 
+        def _merge_key_names(*sources: dict | None) -> list[str]:
+            """Merge top-level Enum key names from multiple data sources."""
+            merged: set[str] = set()
+            for data in sources:
+                merged.update(_enum_key_names(data))
+            return sorted(merged)
+
+        def _generation_mla_kv_modes() -> list[str]:
+            """Collect kv_cache_dtype names for generation MLA from both sources.
+
+            Granular data is keyed [kv_cache]... so top-level keys are kv modes.
+            Module data is keyed [fmha][kv_cache][gemm]... so kv modes are
+            at the second level.
+            """
+            kv_modes: set[str] = set()
+            # Granular: top-level keys are kv_cache_dtype
+            granular = getattr(self, "_generation_mla_data", None)
+            if granular:
+                kv_modes.update(_enum_key_names(granular))
+            # Module: kv_cache_dtype is at the second level
+            module = getattr(self, "_generation_mla_module_data", None)
+            if module:
+                for fmha_mode in module:
+                    for kv_mode in module[fmha_mode]:
+                        kv_modes.add(kv_mode.name if hasattr(kv_mode, "name") else str(kv_mode))
+            return sorted(kv_modes)
+
         # For sglang backend, context_mla_data and generation_mla_data have kernel_source as first
         # level
         # We need to collect quant_modes from the nested structure
@@ -2816,8 +2907,11 @@ class PerfDatabase:
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
-                "context_mla": _enum_key_names(getattr(self, "_context_mla_data", None)),
-                "generation_mla": _enum_key_names(getattr(self, "_generation_mla_data", None)),
+                "context_mla": _merge_key_names(
+                    getattr(self, "_context_mla_data", None),
+                    getattr(self, "_context_mla_module_data", None),
+                ),
+                "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
                 "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
@@ -2833,8 +2927,11 @@ class PerfDatabase:
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
-                "context_mla": _enum_key_names(getattr(self, "_context_mla_data", None)),
-                "generation_mla": _enum_key_names(getattr(self, "_generation_mla_data", None)),
+                "context_mla": _merge_key_names(
+                    getattr(self, "_context_mla_data", None),
+                    getattr(self, "_context_mla_module_data", None),
+                ),
+                "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
                 "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
@@ -2850,11 +2947,14 @@ class PerfDatabase:
                 "gemm": _enum_key_names(getattr(self, "_gemm_data", None)),
                 "context_attention": _enum_key_names(getattr(self, "_context_attention_data", None)),
                 "generation_attention": _enum_key_names(getattr(self, "_generation_attention_data", None)),
-                "context_mla": [],
-                "generation_mla": [],
+                "context_mla": _merge_key_names(
+                    getattr(self, "_context_mla_data", None),
+                    getattr(self, "_context_mla_module_data", None),
+                ),
+                "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
-                "mla_bmm": [],
+                "mla_bmm": _enum_key_names(getattr(self, "_mla_bmm_data", None)),
                 "moe": _enum_key_names(getattr(self, "_moe_data", None)),
                 "nccl": _enum_key_names(getattr(self, "_nccl_data", None)),
             }
