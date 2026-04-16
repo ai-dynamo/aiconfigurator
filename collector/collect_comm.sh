@@ -7,6 +7,7 @@ all_reduce_backend="trtllm"
 device="cuda"
 measure_power=false
 power_test_duration=1.0
+skip_nccl=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -36,6 +37,10 @@ while [[ $# -gt 0 ]]; do
             power_test_duration="$2"
             shift 2
             ;;
+        --skip-nccl|--skip_nccl)
+            skip_nccl=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -44,6 +49,7 @@ while [[ $# -gt 0 ]]; do
             echo "                             Choices: trtllm, vllm, sglang"
             echo "  --measure_power            Enable power monitoring during execution"
             echo "  --power_test_duration      Minimum test duration for power measurement in seconds (default: 1.0)"
+            echo "  --skip-nccl               Skip NCCL benchmark collection"
             echo "  -h, --help                 Show this help message and exit"
             echo ""
             echo "Examples:"
@@ -51,6 +57,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --measure_power --power_test_duration 2.0"
             echo "  $0 --all_reduce_backend vllm --measure_power"
             echo "  $0 --all_reduce_backend sglang"
+            echo "  $0 --skip-nccl --all_reduce_backend sglang"
             exit 0
             ;;
         *)
@@ -67,6 +74,11 @@ if [[ "$measure_power" == "true" ]]; then
     echo "Power monitoring: ENABLED (duration: ${power_test_duration}s)"
 else
     echo "Power monitoring: DISABLED"
+fi
+if [[ "$skip_nccl" == "true" ]]; then
+    echo "NCCL benchmarks: SKIPPED"
+else
+    echo "NCCL benchmarks: ENABLED"
 fi
 echo "================================================"
 
@@ -92,7 +104,9 @@ else
 fi
 
 # NCCL
-if [[ "$device" == "cuda" ]]; then
+if [[ "$skip_nccl" == "true" ]]; then
+    echo "Skipping NCCL benchmarks (--skip-nccl enabled)"
+elif [[ "$device" == "cuda" ]]; then
     nccl_ops=("all_gather" "alltoall" "reduce_scatter" "all_reduce")
     dtypes=("half" "int8")
 
