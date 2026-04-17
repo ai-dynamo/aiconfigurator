@@ -446,21 +446,42 @@ def _patch_nsa_rope_contiguity(model_runner):
 
 def _install_diag_hooks():
     """Instrument the Blackwell fp8 NSA decode path for root-causing the B200
-    `Unsupported h_q`-like SIGABRT at reduced heads x fp8-KV x kv_len>=256.
+    illegal memory access at reduced heads x fp8-KV x kv_len>=256.
 
     Gated on ``AIC_DIAG_B200=1``. Temporary; revert when the collector-setup
     divergence is understood.
 
-    1. Forces ``CUDA_LAUNCH_BLOCKING=1`` so any illegal memory access reports
-       synchronously at the faulting kernel rather than at the next sync.
-    2. Monkey-patches ``deep_gemm.fp8_paged_mqa_logits`` (NSA indexer
+    v2 (2026-04-17): pipeline #1146 showed that ``CUDA_LAUNCH_BLOCKING=1``
+    masks the original race and produces "Offset increment outside graph
+    capture" at every decode probe instead, because blocking mode is
+    incompatible with CUDA graph capture. We drop that flag and instead
+    record the CUDA stream + graph-capture status at every wrapped call,
+    plus hook ``torch.cuda.CUDAGraph`` capture begin/end so we can see when
+    capture windows open and close relative to the kernel launches.
+
+    1. Monkey-patches ``deep_gemm.fp8_paged_mqa_logits`` (NSA indexer
        scoring) and ``flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla``
-       (B200 decode) to print input shapes + dtypes before each call.
+       (B200 decode) to print input shapes + dtypes + capture status
+       before each call.
+    2. Hooks ``torch.cuda.CUDAGraph.{__init__, capture_begin, capture_end}``
+       to print when capture windows open and close.
+    3. Leaves the illegal memory access timing-accurate so the original
+       crash point still reproduces.
     """
     if os.environ.get("AIC_DIAG_B200") != "1":
         return
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     os.environ["TORCH_USE_CUDA_DSA"] = "1"
+
+    def _capture_state_str():
+        try:
+            stream = torch.cuda.current_stream()
+            try:
+                cap = torch.cuda.is_current_stream_capturing()
+            except Exception:
+                cap = "?"
+            return f"stream_id={stream.stream_id} capturing={cap}"
+        except Exception as e:
+            return f"capture_state_err={e}"
 
     try:
         import deep_gemm
@@ -469,10 +490,11 @@ def _install_diag_hooks():
 
         def _diag_mqa(q_fp8, kv_cache_fp8, weights, seqlens_32, block_tables, schedule_metadata, max_seq_len, **kw):
             print(
-                f"[DIAG indexer] q_fp8={tuple(q_fp8.shape)}/{q_fp8.dtype} "
+                f"[DIAG indexer] {_capture_state_str()} "
+                f"q_fp8={tuple(q_fp8.shape)}/{q_fp8.dtype} "
                 f"kv={tuple(kv_cache_fp8.shape)}/{kv_cache_fp8.dtype} "
                 f"weights={tuple(weights.shape)}/{weights.dtype} "
-                f"seqlens={seqlens_32.tolist()} "
+                f"seqlens[:8]={seqlens_32.tolist()[:8]} "
                 f"block_tables={tuple(block_tables.shape)} "
                 f"max_seq_len={max_seq_len}",
                 flush=True,
@@ -496,11 +518,11 @@ def _install_diag_hooks():
             bt = kw.get("block_tables")
             sl = kw.get("seq_lens")
             print(
-                f"[DIAG trtllm_decode] "
+                f"[DIAG trtllm_decode] {_capture_state_str()} "
                 f"query={tuple(q.shape) if q is not None else None}/{q.dtype if q is not None else None} "
                 f"kv_cache={tuple(kv.shape) if kv is not None else None}/{kv.dtype if kv is not None else None} "
                 f"block_tables={tuple(bt.shape) if bt is not None else None} "
-                f"seq_lens={sl.tolist() if sl is not None else None} "
+                f"seq_lens[:8]={sl.tolist()[:8] if sl is not None else None} "
                 f"max_seq_len={kw.get('max_seq_len')} "
                 f"sparse_mla_top_k={kw.get('sparse_mla_top_k')}",
                 flush=True,
@@ -510,6 +532,29 @@ def _install_diag_hooks():
         fid.trtllm_batch_decode_with_kv_cache_mla = _diag_decode
     except Exception as e:
         print(f"[DIAG] failed to patch flashinfer trtllm_batch_decode: {e}", flush=True)
+
+    try:
+        _orig_init = torch.cuda.CUDAGraph.__init__
+        _orig_cb = torch.cuda.CUDAGraph.capture_begin
+        _orig_ce = torch.cuda.CUDAGraph.capture_end
+
+        def _diag_init(self, *a, **kw):
+            print(f"[DIAG cuda_graph.__init__] {_capture_state_str()}", flush=True)
+            return _orig_init(self, *a, **kw)
+
+        def _diag_cb(self, *a, **kw):
+            print(f"[DIAG cuda_graph.capture_begin] {_capture_state_str()}", flush=True)
+            return _orig_cb(self, *a, **kw)
+
+        def _diag_ce(self, *a, **kw):
+            print(f"[DIAG cuda_graph.capture_end] {_capture_state_str()}", flush=True)
+            return _orig_ce(self, *a, **kw)
+
+        torch.cuda.CUDAGraph.__init__ = _diag_init
+        torch.cuda.CUDAGraph.capture_begin = _diag_cb
+        torch.cuda.CUDAGraph.capture_end = _diag_ce
+    except Exception as e:
+        print(f"[DIAG] failed to patch torch.cuda.CUDAGraph: {e}", flush=True)
 
 
 def load_model_runner(
