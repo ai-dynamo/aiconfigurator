@@ -79,12 +79,16 @@ except Exception:
 _int4_wo_available = False
 _fused_marlin_moe_fn = None
 _gptq_marlin_moe_repack_fn = None
+_int4_wo_quant_type_id: int | None = None
 try:
     # gptq_marlin_moe_repack: try vllm._custom_ops first, then torch.ops.vllm
     import vllm._custom_ops as _vllm_custom_ops  # type: ignore[import]
     from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
         fused_marlin_moe as _fused_marlin_moe_fn,
     )
+    from vllm.scalar_type import scalar_types as _scalar_types  # type: ignore[import]
+
+    _int4_wo_quant_type_id = _scalar_types.uint4.id
 
     _gptq_marlin_moe_repack_fn = getattr(_vllm_custom_ops, "gptq_marlin_moe_repack", None)
     if _gptq_marlin_moe_repack_fn is None:
@@ -524,29 +528,19 @@ def run_moe_torch(
             num_runs = 1
 
         def _run_int4_wo_once(hs, tw, ti):
-            """Run a single int4_wo (W4A16) MoE iteration via vLLM Marlin GPTQ kernel.
-
-            fused_marlin_moe takes raw router logits (not topk_weights/topk_ids)
-            and computes topk internally.  Reconstruct a gating_output from the
-            pre-computed topk_weights/ids — non-selected entries are 0 so topk
-            still selects the same experts.
-            """
-            gating_output = torch.zeros(
-                hs.shape[0],
-                num_experts,
-                device=hs.device,
-                dtype=hs.dtype,
-            )
-            gating_output.scatter_(1, ti, tw)
+            """Run a single int4_wo (W4A16) MoE iteration via vLLM Marlin GPTQ kernel."""
             _fused_marlin_moe_fn(
                 hs,
                 w1_marlin,
                 w2_marlin,
+                None,  # bias1
+                None,  # bias2
                 w1_int4_scale,
                 w2_int4_scale,
-                gating_output,
-                topk,
-                renormalize=True,
+                None,  # gating_output (unused when topk_weights/ids provided)
+                tw,
+                ti,
+                _int4_wo_quant_type_id,
                 w1_zeros=None,
                 w2_zeros=None,
                 is_k_full=True,
