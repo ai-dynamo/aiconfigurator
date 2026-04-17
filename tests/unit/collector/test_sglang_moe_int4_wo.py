@@ -238,7 +238,7 @@ class TestBenchmarkMarlinPath:
         ):
             _mod.run_moe_torch(
                 "int4_wo",
-                [1],
+                1,
                 self._H,
                 self._I,
                 self._TOPK,
