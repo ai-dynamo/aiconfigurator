@@ -204,7 +204,7 @@ def _get_mla_backend_list() -> list[str]:
 # Sweep ranges — aligned with vllm/trtllm collect_mla_module.py
 _BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 _SEQ_LENGTHS = [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-_HEAD_NUMS = [128, 64, 32, 16]
+_HEAD_NUMS = [128, 64, 32, 16, 8]  # 8 covers GLM-5 (native 64) at tp=8
 
 
 def get_context_test_cases(attn_type: str):
