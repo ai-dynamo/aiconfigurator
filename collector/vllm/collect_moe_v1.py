@@ -73,13 +73,25 @@ except Exception:
 # int4_wo (W4A16) support: uses vLLM's Marlin GPTQ MoE kernel.
 # gptq_marlin_moe_repack converts GPTQ-packed int32 weights to Marlin tile layout;
 # fused_marlin_moe runs the fused gate+up+silu+down projection.
+#
+# In vLLM >= 0.14.0, both functions are Python-level — NOT registered torch ops.
+# We probe vllm._custom_ops first (0.14.x style), then fall back to torch.ops.vllm.
 _int4_wo_available = False
+_fused_marlin_moe_fn = None
+_gptq_marlin_moe_repack_fn = None
 try:
-    _int4_wo_available = (
-        hasattr(torch.ops, "vllm")
-        and hasattr(torch.ops.vllm, "gptq_marlin_moe_repack")
-        and hasattr(torch.ops.vllm, "fused_marlin_moe")
+    # gptq_marlin_moe_repack: try vllm._custom_ops first, then torch.ops.vllm
+    import vllm._custom_ops as _vllm_custom_ops  # type: ignore[import]
+    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        fused_marlin_moe as _fused_marlin_moe_fn,
     )
+
+    _gptq_marlin_moe_repack_fn = getattr(_vllm_custom_ops, "gptq_marlin_moe_repack", None)
+    if _gptq_marlin_moe_repack_fn is None:
+        _gptq_marlin_moe_repack_fn = getattr(getattr(torch.ops, "vllm", None), "gptq_marlin_moe_repack", None)
+
+    if _fused_marlin_moe_fn is not None and _gptq_marlin_moe_repack_fn is not None:
+        _int4_wo_available = True
 except Exception:
     pass
 
@@ -423,8 +435,8 @@ def run_moe_torch(
         )
         # Empty perm → no act-order permutation (symmetric GPTQ without reordering)
         empty_perm = torch.empty(0, dtype=torch.int32, device=device)
-        w1_marlin = torch.ops.vllm.gptq_marlin_moe_repack(w1_packed_q, empty_perm, hidden_size, 2 * local_inter_size, 4)
-        w2_marlin = torch.ops.vllm.gptq_marlin_moe_repack(w2_packed_q, empty_perm, local_inter_size, hidden_size, 4)
+        w1_marlin = _gptq_marlin_moe_repack_fn(w1_packed_q, empty_perm, hidden_size, 2 * local_inter_size, 4)
+        w2_marlin = _gptq_marlin_moe_repack_fn(w2_packed_q, empty_perm, local_inter_size, hidden_size, 4)
         del w1_packed_q, w2_packed_q
 
         # Per-group scales along K dimension: (E, K // group_size, N) float16
@@ -508,7 +520,7 @@ def run_moe_torch(
 
         def _run_int4_wo_once(hs, tw, ti):
             """Run a single int4_wo (W4A16) MoE iteration via vLLM Marlin GPTQ kernel."""
-            torch.ops.vllm.fused_marlin_moe(
+            _fused_marlin_moe_fn(
                 hs,
                 w1_marlin,
                 w2_marlin,
