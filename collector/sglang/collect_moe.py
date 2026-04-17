@@ -171,19 +171,21 @@ def benchmark_config(
         num_iters = len(workloads)
         num_tokens = max(workload["hidden_states"].shape[0] for workload in workloads)
 
-    # 1. Gating Output Generation (Common)
-    if workloads is not None:
-        gating_output = None
-    elif distributed == "uniform":
-        gating_output = torch.randn(num_iters, num_tokens, num_experts, dtype=torch.float32, device=device)
-    elif distributed == "balanced":
-        gating_output = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(num_iters)]
-    elif distributed == "power_law":
-        gating_output = [
-            power_law_logits_v3(num_tokens, num_experts, topk, 1, power_law_alpha).to(device) for _ in range(num_iters)
-        ]
-    else:
-        raise ValueError(f"Unsupported distributed mode: {distributed}")
+    # 1. Gating Output Generation (not needed for Marlin int4 path which builds its own)
+    if not (use_int4_w4a16 and _HAS_MARLIN_MOE):
+        if workloads is not None:
+            gating_output = None
+        elif distributed == "uniform":
+            gating_output = torch.randn(num_iters, num_tokens, num_experts, dtype=torch.float32, device=device)
+        elif distributed == "balanced":
+            gating_output = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(num_iters)]
+        elif distributed == "power_law":
+            gating_output = [
+                power_law_logits_v3(num_tokens, num_experts, topk, 1, power_law_alpha).to(device)
+                for _ in range(num_iters)
+            ]
+        else:
+            raise ValueError(f"Unsupported distributed mode: {distributed}")
 
     # 2. Setup based on Path
     if use_int4_w4a16 and _HAS_MARLIN_MOE:
