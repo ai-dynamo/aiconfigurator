@@ -830,6 +830,11 @@ def run_mla_module(
     try:
         with torch.inference_mode():
             attn_module.forward(positions, hidden_states, None)
+    except torch.cuda.OutOfMemoryError as e:
+        # Capacity limit, not a bug — skip so total_errors stays meaningful.
+        print(f"  Dry run OOM (skipping): {e}")
+        _cleanup()
+        return None
     except Exception as e:
         print(f"  Dry run failed: {e}")
         traceback.print_exc()
