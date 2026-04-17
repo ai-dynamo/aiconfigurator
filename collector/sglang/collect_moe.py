@@ -36,6 +36,17 @@ try:
 except ImportError:
     HAS_FLASHINFER_CUTE = False
 
+# Marlin int4 MoE kernel (W4A16) — much faster than the Triton GPTQ/AWQ path.
+_HAS_MARLIN_MOE = False
+try:
+    from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import fused_marlin_moe
+    from sglang.srt.layers.quantization.gptq import gptq_marlin_moe_repack
+    from sglang.srt.layers.quantization.marlin_utils import marlin_moe_permute_scales
+
+    _HAS_MARLIN_MOE = True
+except ImportError:
+    pass
+
 try:
     from common_test_cases import get_common_moe_test_cases
 
@@ -175,7 +186,95 @@ def benchmark_config(
         raise ValueError(f"Unsupported distributed mode: {distributed}")
 
     # 2. Setup based on Path
-    if use_nvfp4:
+    if use_int4_w4a16 and _HAS_MARLIN_MOE:
+        # Marlin int4 MoE path: repack GPTQ weights into Marlin tile layout
+        # and call fused_marlin_moe which uses optimized CUDA kernels.
+        num_bits = 4
+        pack_factor = 8  # 32-bit int packs 8 x int4
+        group_size = block_shape[1] if block_shape else 128
+
+        # GPTQ-packed weights: (E, K // pack_factor, N) as int32
+        w1_packed = torch.randint(
+            -(2**31),
+            2**31 - 1,
+            (num_experts, hidden_size // pack_factor, shard_intermediate_size),
+            dtype=torch.int32,
+            device=device,
+        )
+        w2_packed = torch.randint(
+            -(2**31),
+            2**31 - 1,
+            (num_experts, (shard_intermediate_size // 2) // pack_factor, hidden_size),
+            dtype=torch.int32,
+            device=device,
+        )
+        empty_perm = torch.empty((num_experts, 0), dtype=torch.int32, device=device)
+
+        # Repack to Marlin layout: (E, K // 16, N * (num_bits // 2))
+        w1_marlin = gptq_marlin_moe_repack(
+            w1_packed,
+            empty_perm,
+            hidden_size,
+            shard_intermediate_size,
+            num_bits,
+        )
+        w2_marlin = gptq_marlin_moe_repack(
+            w2_packed,
+            empty_perm,
+            shard_intermediate_size // 2,
+            hidden_size,
+            num_bits,
+        )
+        del w1_packed, w2_packed
+
+        # Per-group scales: (E, K // group_size, N) — then permute for Marlin
+        w1_scale = torch.randn(
+            (num_experts, hidden_size // group_size, shard_intermediate_size),
+            dtype=dtype,
+            device=device,
+        )
+        w2_scale = torch.randn(
+            (num_experts, (shard_intermediate_size // 2) // group_size, hidden_size),
+            dtype=dtype,
+            device=device,
+        )
+        w1_scale = marlin_moe_permute_scales(w1_scale, hidden_size, shard_intermediate_size, group_size)
+        w2_scale = marlin_moe_permute_scales(w2_scale, shard_intermediate_size // 2, hidden_size, group_size)
+
+        x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+
+        if distributed == "power_law":
+            gating_list = [
+                power_law_logits_v3(num_tokens, num_experts, topk, 1, power_law_alpha).to(device)
+                for _ in range(num_iters)
+            ]
+        elif distributed == "balanced":
+            gating_list = [balanced_logits(num_tokens, num_experts, topk).to(device) for _ in range(num_iters)]
+        else:
+            gating_list = [
+                torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device) for _ in range(num_iters)
+            ]
+
+        # Pre-compute topk for the first iteration
+        topk_output = select_experts(x, gating_list[0], TopKConfig(top_k=topk))
+
+        def run_op(i):
+            gating = gating_list[i % num_iters]
+            new_topk = select_experts(x, gating, TopKConfig(top_k=topk))
+            fused_marlin_moe(
+                x,
+                w1_marlin,
+                w2_marlin,
+                w1_scale,
+                w2_scale,
+                gating,
+                new_topk.topk_weights,
+                new_topk.topk_ids,
+                num_bits=num_bits,
+                is_k_full=True,
+            )
+
+    elif use_nvfp4:
         if not HAS_FLASHINFER_CUTE:
             raise ImportError("FlashInfer CuteDSL not available")
 
@@ -386,8 +485,9 @@ def benchmark(
         max(workload["hidden_states"].shape[0] for workload in workloads) if workloads is not None else num_tokens
     )
 
-    if use_nvfp4:
-        # nvfp4 uses flashinfer cutedsl backend, which doesn't need triton configs
+    if use_nvfp4 or (use_int4_w4a16 and _HAS_MARLIN_MOE):
+        # nvfp4 uses flashinfer cutedsl backend; int4_w4a16 uses Marlin CUDA
+        # kernels — neither needs Triton tuning configs.
         kernel_time, power_stats = benchmark_config(
             None,
             benchmark_num_tokens,
@@ -618,7 +718,13 @@ def run_moe_torch(
         version=pkg_resources.get_distribution("sglang").version,
         device_name=torch.cuda.get_device_name(device),
         op_name="moe",
-        kernel_source="sglang_flashinfer_cutedsl_moe" if moe_type == "nvfp4" else "sglang_fused_moe_triton",
+        kernel_source=(
+            "sglang_flashinfer_cutedsl_moe"
+            if moe_type == "nvfp4"
+            else "sglang_marlin_moe"
+            if moe_type == "int4_wo" and _HAS_MARLIN_MOE
+            else "sglang_fused_moe_triton"
+        ),
         perf_filename=perf_filename,
         power_stats=power_stats,
     )
