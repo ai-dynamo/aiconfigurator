@@ -131,10 +131,10 @@ def _apply_model_quant_defaults(
     ):
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
 
-    # DSA module (DeepSeek-V3.2 / GLM-5): TRT-LLM DSA perf tables only have float16 FMHA currently.
+    # DSA module (DeepSeek-V3.2 / GLM-5): DSA perf tables carry only float16 FMHA.
     if (
         architecture in ("DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM")
-        and backend_name == "trtllm"
+        and backend_name in ("trtllm", "sglang")
         and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
     ):
         model_config.fmha_quant_mode = common.FMHAQuantMode.float16
