@@ -554,6 +554,23 @@ def _create_kv_cache_and_metadata(
         batch_spec, block_size, torch.device(device), arange_block_indices=True
     )
 
+    # TRT-LLM Gen MLA (and cutlass_mla) require the page table's block
+    # dimension to be a multiple of ``128 / block_size``; for block_size=64
+    # that means at least two blocks even when a request only fills one.
+    # Short sequences (seq_len <= block_size) otherwise produce block_num=1
+    # and the kernel raises ``Expected block_num % (128 / block_size) == 0``.
+    # Pad with zero-indexed blocks (they are not read for absent tokens).
+    required_divisor = max(1, 128 // block_size)
+    current_block_num = common_attn_metadata.block_table_tensor.shape[1]
+    if current_block_num % required_divisor != 0:
+        padded_block_num = ((current_block_num + required_divisor - 1) // required_divisor) * required_divisor
+        padding = torch.zeros(
+            (common_attn_metadata.block_table_tensor.shape[0], padded_block_num - current_block_num),
+            dtype=common_attn_metadata.block_table_tensor.dtype,
+            device=common_attn_metadata.block_table_tensor.device,
+        )
+        common_attn_metadata.block_table_tensor = torch.cat([common_attn_metadata.block_table_tensor, padding], dim=1)
+
     # Select the correct dtype for cache.
     # DSA fp8 uses a custom 656-byte ``fp8_ds_mla`` cache format that
     # stores quantised NoPE + per-128-element scales + BF16 RoPE.
