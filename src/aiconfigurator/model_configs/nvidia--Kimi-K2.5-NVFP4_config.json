@@ -14,6 +14,104 @@
     "media_placeholder_token_id": 163605,
     "model_type": "kimi_k25",
     "pad_token_id": 163839,
+    "quantization_config": {
+        "config_groups": {
+            "group_0": {
+                "input_activations": {
+                    "dynamic": false,
+                    "num_bits": 4,
+                    "type": "float",
+                    "group_size": 16
+                },
+                "weights": {
+                    "dynamic": false,
+                    "num_bits": 4,
+                    "type": "float",
+                    "group_size": 16
+                },
+                "targets": [
+                    "Linear"
+                ]
+            }
+        },
+        "ignore": [
+            "language_model.lm_head",
+            "language_model.model.layers.0.self_attn*",
+            "language_model.model.layers.1.self_attn*",
+            "language_model.model.layers.10.self_attn*",
+            "language_model.model.layers.11.self_attn*",
+            "language_model.model.layers.12.self_attn*",
+            "language_model.model.layers.13.self_attn*",
+            "language_model.model.layers.14.self_attn*",
+            "language_model.model.layers.15.self_attn*",
+            "language_model.model.layers.16.self_attn*",
+            "language_model.model.layers.17.self_attn*",
+            "language_model.model.layers.18.self_attn*",
+            "language_model.model.layers.19.self_attn*",
+            "language_model.model.layers.2.self_attn*",
+            "language_model.model.layers.20.self_attn*",
+            "language_model.model.layers.21.self_attn*",
+            "language_model.model.layers.22.self_attn*",
+            "language_model.model.layers.23.self_attn*",
+            "language_model.model.layers.24.self_attn*",
+            "language_model.model.layers.25.self_attn*",
+            "language_model.model.layers.26.self_attn*",
+            "language_model.model.layers.27.self_attn*",
+            "language_model.model.layers.28.self_attn*",
+            "language_model.model.layers.29.self_attn*",
+            "language_model.model.layers.3.self_attn*",
+            "language_model.model.layers.30.self_attn*",
+            "language_model.model.layers.31.self_attn*",
+            "language_model.model.layers.32.self_attn*",
+            "language_model.model.layers.33.self_attn*",
+            "language_model.model.layers.34.self_attn*",
+            "language_model.model.layers.35.self_attn*",
+            "language_model.model.layers.36.self_attn*",
+            "language_model.model.layers.37.self_attn*",
+            "language_model.model.layers.38.self_attn*",
+            "language_model.model.layers.39.self_attn*",
+            "language_model.model.layers.4.self_attn*",
+            "language_model.model.layers.40.self_attn*",
+            "language_model.model.layers.41.self_attn*",
+            "language_model.model.layers.42.self_attn*",
+            "language_model.model.layers.43.self_attn*",
+            "language_model.model.layers.44.self_attn*",
+            "language_model.model.layers.45.self_attn*",
+            "language_model.model.layers.46.self_attn*",
+            "language_model.model.layers.47.self_attn*",
+            "language_model.model.layers.48.self_attn*",
+            "language_model.model.layers.49.self_attn*",
+            "language_model.model.layers.5.self_attn*",
+            "language_model.model.layers.50.self_attn*",
+            "language_model.model.layers.51.self_attn*",
+            "language_model.model.layers.52.self_attn*",
+            "language_model.model.layers.53.self_attn*",
+            "language_model.model.layers.54.self_attn*",
+            "language_model.model.layers.55.self_attn*",
+            "language_model.model.layers.56.self_attn*",
+            "language_model.model.layers.57.self_attn*",
+            "language_model.model.layers.58.self_attn*",
+            "language_model.model.layers.59.self_attn*",
+            "language_model.model.layers.6.self_attn*",
+            "language_model.model.layers.60.self_attn*",
+            "language_model.model.layers.7.self_attn*",
+            "language_model.model.layers.8.self_attn*",
+            "language_model.model.layers.9.self_attn*",
+            "mm_projector*",
+            "vision_tower*"
+        ],
+        "quant_algo": "NVFP4",
+        "kv_cache_scheme": {
+            "dynamic": false,
+            "num_bits": 8,
+            "type": "float"
+        },
+        "producer": {
+            "name": "modelopt",
+            "version": "0.41.0"
+        },
+        "quant_method": "modelopt"
+    },
     "text_config": {
         "_name_or_path": "",
         "add_cross_attention": false,
@@ -65,7 +163,7 @@
         "max_length": 20,
         "max_position_embeddings": 262144,
         "min_length": 0,
-        "model_type": "kimi_k2",
+        "model_type": "deepseek_v3",
         "moe_intermediate_size": 2048,
         "moe_layer_freq": 1,
         "n_group": 1,
@@ -92,39 +190,6 @@
         "q_lora_rank": 1536,
         "qk_nope_head_dim": 128,
         "qk_rope_head_dim": 64,
-        "quantization_config": {
-            "config_groups": {
-                "group_0": {
-                    "input_activations": null,
-                    "output_activations": null,
-                    "targets": [
-                        "Linear"
-                    ],
-                    "weights": {
-                        "actorder": null,
-                        "block_structure": null,
-                        "dynamic": false,
-                        "group_size": 32,
-                        "num_bits": 4,
-                        "observer": "minmax",
-                        "observer_kwargs": {},
-                        "strategy": "group",
-                        "symmetric": true,
-                        "type": "int"
-                    }
-                }
-            },
-            "format": "pack-quantized",
-            "ignore": [
-                "lm_head",
-                "re:.*self_attn.*",
-                "re:.*shared_experts.*",
-                "re:.*mlp\\.(gate|up|gate_up|down)_proj.*"
-            ],
-            "kv_cache_scheme": null,
-            "quant_method": "compressed-tensors",
-            "quantization_status": "compressed"
-        },
         "remove_invalid_values": false,
         "repetition_penalty": 1.0,
         "return_dict": true,
@@ -156,7 +221,6 @@
         "topk_group": 1,
         "topk_method": "noaux_tc",
         "torchscript": false,
-        "transformers_version": "4.56.2",
         "typical_p": 1.0,
         "use_bfloat16": false,
         "use_cache": true,
@@ -164,10 +228,10 @@
         "vocab_size": 163840
     },
     "tie_word_embeddings": false,
+    "transformers_version": "4.57.1",
     "use_unified_vision_chunk": true,
     "video_placeholder": "<|kimi_k25_video_placeholder|>",
     "vision_config": {
-        "_attn_implementation": "flash_attention_2",
         "init_pos_emb_height": 64,
         "init_pos_emb_time": 4,
         "init_pos_emb_width": 64,
@@ -178,6 +242,7 @@
         "merge_type": "sd2_tpool",
         "mm_hidden_size": 1152,
         "mm_projector_type": "patchmerger",
+        "model_type": "",
         "patch_size": 14,
         "pos_emb_type": "divided_fixed",
         "projector_hidden_act": "gelu",
