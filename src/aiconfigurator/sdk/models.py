@@ -1548,27 +1548,27 @@ class DeepSeekModel(BaseModel):
                             ]
                             if self._backend_name == "vllm"
                             else [
-                        ops.MLABmm(
-                            "generation_bmm_pre",
-                            self._num_layers * self._mtp_scale_factor,
-                            self._num_heads // tp_size,
-                            mla_bmm_quant_mode,
-                            if_pre=True,
-                        ),
-                        ops.GenerationMLA(
-                            "generation_attention",
-                            self._num_layers * self._mtp_scale_factor,
-                            128 // tp_size,
-                            kvcache_quant_mode,
-                        ),
-                        ops.MLABmm(
-                            "generation_bmm_post",
-                            self._num_layers * self._mtp_scale_factor,
-                            self._num_heads // tp_size,
-                            mla_bmm_quant_mode,
-                            if_pre=False,
-                        ),
-                            ],
+                                ops.MLABmm(
+                                    "generation_bmm_pre",
+                                    self._num_layers * self._mtp_scale_factor,
+                                    self._num_heads // tp_size,
+                                    mla_bmm_quant_mode,
+                                    if_pre=True,
+                                ),
+                                ops.GenerationMLA(
+                                    "generation_attention",
+                                    self._num_layers * self._mtp_scale_factor,
+                                    128 // tp_size,
+                                    kvcache_quant_mode,
+                                ),
+                                ops.MLABmm(
+                                    "generation_bmm_post",
+                                    self._num_layers * self._mtp_scale_factor,
+                                    self._num_heads // tp_size,
+                                    mla_bmm_quant_mode,
+                                    if_pre=False,
+                                ),
+                            ]
                         ),
                         ops.GEMM(
                             "generation_proj_gemm",

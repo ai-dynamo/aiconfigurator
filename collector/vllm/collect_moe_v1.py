@@ -70,6 +70,19 @@ try:
 except Exception:
     pass
 
+# int4_wo (W4A16) support: uses vLLM's Marlin GPTQ MoE kernel.
+# gptq_marlin_moe_repack converts GPTQ-packed int32 weights to Marlin tile layout;
+# fused_marlin_moe runs the fused gate+up+silu+down projection.
+_int4_wo_available = False
+try:
+    _int4_wo_available = (
+        hasattr(torch.ops, "vllm")
+        and hasattr(torch.ops.vllm, "gptq_marlin_moe_repack")
+        and hasattr(torch.ops.vllm, "fused_marlin_moe")
+    )
+except Exception:
+    pass
+
 from collector.common_test_cases import get_common_moe_test_cases
 from collector.helper import balanced_logits, benchmark_with_power, get_sm_version, log_perf, power_law_logits_v3
 
@@ -89,6 +102,8 @@ def get_moe_test_cases():
         moe_list += ["nvfp4"]
     if _mxfp4_available:
         moe_list += ["w4a16_mxfp4"]
+    if _int4_wo_available:
+        moe_list += ["int4_wo"]
 
     _gpt_oss_models = {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
 
@@ -133,6 +148,14 @@ def get_moe_test_cases():
             if moe_type == "w4a16_mxfp4" and (
                 common_moe_testcase.hidden_size % 32 != 0
                 or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 32 != 0
+            ):
+                continue
+
+            # int4_wo (W4A16): Marlin kernel requires K and N divisible by group_size (128).
+            # K=hidden_size for w1; K=inter_size//tp (local) for w2.
+            if moe_type == "int4_wo" and (
+                common_moe_testcase.hidden_size % 128 != 0
+                or (common_moe_testcase.inter_size // common_moe_testcase.tp) % 128 != 0
             ):
                 continue
 
@@ -371,7 +394,55 @@ def run_moe_torch(
             block_shape=block_shape,
         )
 
-    if not use_mxfp4 and dtype == torch.float8_e4m3fn:
+    # int4_wo (W4A16) path: uses vLLM's Marlin GPTQ MoE kernel.
+    # Weights are GPTQ-packed (8 int4 per int32) then repacked to Marlin tile layout.
+    # w1: K=hidden, N=2*inter (gate+up)  →  packed (E, hidden, 2*inter//8) int32
+    # w2: K=inter (after silu_and_mul),  →  packed (E, inter, hidden//8) int32
+    #     N=hidden (down proj)
+    # Scales are per-group along K: (E, K//group_size, N) float16
+    use_int4_wo = moe_type == "int4_wo"
+    w1_marlin = w2_marlin = w1_int4_scale = w2_int4_scale = None
+
+    if use_int4_wo:
+        group_size = 128
+        pack_factor = 8  # 32-bit integer packs 8 x int4
+
+        w1_packed_q = torch.randint(
+            -(2**31),
+            2**31 - 1,
+            (local_num_experts, hidden_size, 2 * local_inter_size // pack_factor),
+            dtype=torch.int32,
+            device=device,
+        )
+        w2_packed_q = torch.randint(
+            -(2**31),
+            2**31 - 1,
+            (local_num_experts, local_inter_size, hidden_size // pack_factor),
+            dtype=torch.int32,
+            device=device,
+        )
+        # Empty perm → no act-order permutation (symmetric GPTQ without reordering)
+        empty_perm = torch.empty(0, dtype=torch.int32, device=device)
+        w1_marlin = torch.ops.vllm.gptq_marlin_moe_repack(w1_packed_q, empty_perm, hidden_size, 2 * local_inter_size, 4)
+        w2_marlin = torch.ops.vllm.gptq_marlin_moe_repack(w2_packed_q, empty_perm, local_inter_size, hidden_size, 4)
+        del w1_packed_q, w2_packed_q
+
+        # Per-group scales along K dimension: (E, K // group_size, N) float16
+        w1_int4_scale = torch.randn(
+            (local_num_experts, hidden_size // group_size, 2 * local_inter_size),
+            dtype=torch.float16,
+            device=device,
+        )
+        w2_int4_scale = torch.randn(
+            (local_num_experts, local_inter_size // group_size, hidden_size),
+            dtype=torch.float16,
+            device=device,
+        )
+
+        # Free the float16 placeholder weights; not used for int4_wo.
+        del w1, w2
+
+    if not use_mxfp4 and not use_int4_wo and dtype == torch.float8_e4m3fn:
         w1 = w1.to(dtype)
         w2 = w2.to(dtype)
 
@@ -434,6 +505,22 @@ def run_moe_torch(
         if distributed == "power_law":
             num_warmups = 1
             num_runs = 1
+
+        def _run_int4_wo_once(hs, tw, ti):
+            """Run a single int4_wo (W4A16) MoE iteration via vLLM Marlin GPTQ kernel."""
+            torch.ops.vllm.fused_marlin_moe(
+                hs,
+                w1_marlin,
+                w2_marlin,
+                w1_int4_scale,
+                w2_int4_scale,
+                tw,
+                ti,
+                w1_zeros=None,
+                w2_zeros=None,
+                num_bits=4,
+                is_k_full=True,
+            )
 
         def _run_nvfp4_once(hs, tw, ti):
             """Run a single nvfp4 MoE iteration via FlashInfer TRTLLM FP4 kernel."""
@@ -509,6 +596,12 @@ def run_moe_torch(
                         _run_nvfp4_once(hidden_states[: tw.shape[0]], tw, ti)
                 else:
                     _run_nvfp4_once(hidden_states, topk_weights, topk_ids)
+            elif use_int4_wo:
+                if distributed == "power_law":
+                    for tw, ti in zip(topk_weights_list, topk_ids_list, strict=True):
+                        _run_int4_wo_once(hidden_states[: tw.shape[0]], tw, ti)
+                else:
+                    _run_int4_wo_once(hidden_states, topk_weights, topk_ids)
             elif distributed == "power_law":
                 for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list, strict=True)):
                     local_num_tokens = tw.shape[0]
@@ -565,6 +658,8 @@ def run_moe_torch(
             source = "vllm_mxfp4_moe"
         elif use_nvfp4:
             source = "vllm_flashinfer_trtllm_moe_fp4"
+        elif use_int4_wo:
+            source = "vllm_marlin_moe"
         else:
             source = "vllm_fused_moe"
 
