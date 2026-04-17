@@ -45,6 +45,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_mla_context_module_test_cases",
         run_func="run_mla_module_worker",
         versions=(
+            VersionRoute("0.19.0", "collector.vllm.collect_mla_module_v3"),
             VersionRoute("0.17.0", "collector.vllm.collect_mla_module_v2"),
             VersionRoute("0.0.0", "collector.vllm.collect_mla_module_v1"),
         ),
@@ -54,6 +55,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_mla_generation_module_test_cases",
         run_func="run_mla_module_worker",
         versions=(
+            VersionRoute("0.19.0", "collector.vllm.collect_mla_module_v3"),
             VersionRoute("0.17.0", "collector.vllm.collect_mla_module_v2"),
             VersionRoute("0.0.0", "collector.vllm.collect_mla_module_v1"),
         ),
@@ -63,6 +65,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_context_module_test_cases",
         run_func="run_mla_module_worker",
         versions=(
+            VersionRoute("0.19.0", "collector.vllm.collect_mla_module_v3"),
             VersionRoute("0.17.0", "collector.vllm.collect_mla_module_v2"),
             VersionRoute("0.0.0", "collector.vllm.collect_mla_module_v1"),
         ),
@@ -72,6 +75,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsa_generation_module_test_cases",
         run_func="run_mla_module_worker",
         versions=(
+            VersionRoute("0.19.0", "collector.vllm.collect_mla_module_v3"),
             VersionRoute("0.17.0", "collector.vllm.collect_mla_module_v2"),
             VersionRoute("0.0.0", "collector.vllm.collect_mla_module_v1"),
         ),
