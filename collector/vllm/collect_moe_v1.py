@@ -419,17 +419,20 @@ def run_moe_torch(
         group_size = 128
         pack_factor = 8  # 32-bit integer packs 8 x int4
 
+        # GPTQ packs along K (reduction dimension): shape (E, K // pack_factor, N)
+        # w1: K=hidden_size, N=2*local_inter_size (gate+up)
+        # w2: K=local_inter_size, N=hidden_size (down)
         w1_packed_q = torch.randint(
             -(2**31),
             2**31 - 1,
-            (local_num_experts, hidden_size, 2 * local_inter_size // pack_factor),
+            (local_num_experts, hidden_size // pack_factor, 2 * local_inter_size),
             dtype=torch.int32,
             device=device,
         )
         w2_packed_q = torch.randint(
             -(2**31),
             2**31 - 1,
-            (local_num_experts, local_inter_size, hidden_size // pack_factor),
+            (local_num_experts, local_inter_size // pack_factor, hidden_size),
             dtype=torch.int32,
             device=device,
         )
