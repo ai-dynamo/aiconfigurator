@@ -938,8 +938,24 @@ def run_mla_module_worker(
 
 
 def _cleanup():
-    torch.cuda.empty_cache()
+    # Release vLLM's WorkspaceManager singleton scratch buffers before
+    # returning to the worker loop. ``_ensure_workspace_size`` only grows —
+    # once a task demands N bytes, the manager pins N bytes for the worker's
+    # lifetime, so a single large task turns into a permanent allocator
+    # reservation that starves subsequent small tasks into OOM.
+    #
+    # The module-level ``_manager`` is private; vLLM offers no public
+    # teardown API. Nulling it drops the Python reference to the old
+    # manager (and its workspace tensors), and the next task's
+    # ``init_workspace_manager()`` call creates a fresh instance on demand.
+    import vllm.v1.worker.workspace as _ws_mod
+
+    _ws_mod._manager = None
+    # gc.collect() must run BEFORE empty_cache() — ``empty_cache`` only
+    # releases blocks with zero live allocations, so any Python-reachable
+    # tensors need to be dropped first or the pass is a no-op.
     gc.collect()
+    torch.cuda.empty_cache()
 
 
 # ═══════════════════════════════════════════════════════════════════════
