@@ -135,9 +135,16 @@ def _get_precision_combos(phase: str):
     All strings are perf-database-compatible (not SGLang-native).
 
     SGLang precision axes:
-      gemm_type:      always "bfloat16" — model runner handles projections internally
-      kv_cache_dtype: "bfloat16" always; "fp8" on SM >= 90 (Hopper+)
-      compute_dtype:  always "bfloat16"
+      compute_dtype:  always "bfloat16" (DSA / NSA kernels run bf16 FMHA;
+                      on B200 decode with fp8 KV the trtllm path runs fp8
+                      FMHA internally, but the latency is captured under the
+                      fp8 KV row).
+      kv_cache_dtype: "bfloat16" always; "fp8" on SM >= 90 (Hopper+).
+      gemm_type:      "bfloat16" for bf16 weights; "fp8_block" on SM >= 89,
+                      in which case load_model_runner launches sglang with
+                      quantization="fp8" so the inner attention projections
+                      (q_b_proj, kv_b_proj, o_proj, wq_b, wk) and the fp8
+                      paged MQA scoring kernel fire on real fp8 weights.
 
     fp4_e2m1 omitted — SGLang supports it on SM >= 100, but KVCacheQuantMode
     enum has no fp4 entry, so perf_database cannot consume it yet.
@@ -146,7 +153,10 @@ def _get_precision_combos(phase: str):
     kv_dtypes = ["bfloat16"]
     if sm >= 90:
         kv_dtypes.append("fp8")
-    return [("bfloat16", kv, "bfloat16") for kv in kv_dtypes]
+    combos = [("bfloat16", kv, "bfloat16") for kv in kv_dtypes]
+    if sm >= 89:
+        combos += [("bfloat16", kv, "fp8_block") for kv in kv_dtypes]
+    return combos
 
 
 def _get_backends(attn_type: str):
@@ -358,6 +368,32 @@ def cleanup_distributed():
         expert_location._global_expert_location_metadata = None
 
 
+def _patch_channel_quant_contiguous():
+    """Workaround for GLM-5 / DeepSeek-V3.2 dummy-weight fp8 init crash.
+
+    sglang's ``channel_quant_to_tensor_quant`` path has a downstream ``.view(-1)``
+    that trips on non-contiguous tensors when weights come from GLM-5 dummy
+    load. Force both inputs contiguous before the call so the reshape
+    succeeds. Idempotent — safe to call repeatedly.
+    See SGLANG_DSA_COLLECTION_GAPS.md Phase 2a(ii).
+    """
+    from sglang.srt.layers.quantization import fp8_utils
+
+    orig = fp8_utils.channel_quant_to_tensor_quant
+    if getattr(orig, "_aic_contiguous_patched", False):
+        return
+
+    def patched(x_q_channel, x_s):
+        if not x_q_channel.is_contiguous():
+            x_q_channel = x_q_channel.contiguous()
+        if x_s is not None and not x_s.is_contiguous():
+            x_s = x_s.contiguous()
+        return orig(x_q_channel, x_s)
+
+    patched._aic_contiguous_patched = True
+    fp8_utils.channel_quant_to_tensor_quant = patched
+
+
 def _patch_nsa_rope_contiguity(model_runner):
     """Workaround for sglang rope contiguity bugs on Blackwell (SM>=100).
 
@@ -409,6 +445,7 @@ def load_model_runner(
     attention_backend: str,
     device: str = "cuda:0",
     tp_rank: int = 0,
+    gemm_type: str = "bfloat16",
 ):
     """Load SGLang ModelRunner with dummy weights.
 
@@ -418,6 +455,11 @@ def load_model_runner(
         kv_cache_dtype: Perf-DB-compatible string ("bfloat16" or "fp8").
             Mapped to SGLang-native string via SGLANG_KV_DTYPE.
         attention_backend: Backend string for ServerArgs (e.g. "nsa", "fa3").
+        gemm_type: Perf-DB-compatible string ("bfloat16" or "fp8_block").
+            "fp8_block" launches sglang with quantization="fp8" so the
+            attention module's linear projections and the paged MQA scoring
+            kernel fire on real fp8 weights; "bfloat16" keeps quantization
+            disabled and all projections run bf16 with dummy weights.
 
     Environment variables:
         SGLANG_TEST_NUM_LAYERS: Number of layers to load (default 2).
@@ -465,11 +507,16 @@ def load_model_runner(
         kv_cache_dtype=sglang_kv_dtype,
     )
 
-    # Disable fp8 weight quantization.  sglang auto-enables fp8 for DeepSeek
-    # models on SM>=100, but the quantization path crashes on GLM-5 weights
-    # (channel_quant_to_tensor_quant .view(-1) on non-contiguous tensor).
-    # We only need attention kernel perf with dummy weights, not quantised MoE.
-    server_args.quantization = None
+    # Quantization control: bf16 (dummy weights) vs fp8 (real fp8 weight
+    # paths so attention projections and indexer MQA scoring actually fire in
+    # fp8). The GLM-5 dummy-weight fp8 init crash
+    # (channel_quant_to_tensor_quant .view(-1) on non-contiguous tensor) is
+    # worked around by _patch_channel_quant_contiguous below.
+    if gemm_type == "fp8_block":
+        _patch_channel_quant_contiguous()
+        server_args.quantization = "fp8"
+    else:
+        server_args.quantization = None
 
     # Disable piecewise CUDA graph — its warmup compile OOMs on large models
     # (e.g. 64 GiB allocation with fp8 + 128 heads on H200).
@@ -1059,6 +1106,7 @@ def run_mla_module(
             kv_cache_dtype=kv_cache_dtype,
             attention_backend=attention_backend,
             device=device,
+            gemm_type=gemm_type,
         )
 
         run_attention_torch(
