@@ -261,8 +261,14 @@ def _build_module_test_cases(attn_type: str, mode: str):
     attention_backend is None for DSA (resolved at runtime by _get_backends()).
     All test cases are 10 elements so that collect.py's ``func(*task, device)``
     maps positional args correctly to run_mla_module_worker().
+
+    When ``AIC_DIAG_B200=1`` is set, this returns a single task
+    (heads=16, kv=fp8, gemm=bfloat16, model=DSv3.2) so a B200 diagnostic
+    run only has to pay DeepGEMM JIT + model-load cost once.
     """
     base_fname = f"{attn_type}_{mode}_module_perf.txt"
+    if os.environ.get("AIC_DIAG_B200") == "1" and attn_type == "dsa" and mode == "generation":
+        return [[0, 0, 16, "fp8", "bfloat16", "bfloat16", base_fname, "deepseek-ai/DeepSeek-V3.2", attn_type, None]]
     model_paths = [m for m, t in SUPPORTED_MODELS.items() if t == attn_type]
     cases = []
     for model_path in model_paths:
@@ -438,6 +444,74 @@ def _patch_nsa_rope_contiguity(model_runner):
         print(f"Patched rope contiguity for layer {layer}")
 
 
+def _install_diag_hooks():
+    """Instrument the Blackwell fp8 NSA decode path for root-causing the B200
+    `Unsupported h_q`-like SIGABRT at reduced heads x fp8-KV x kv_len>=256.
+
+    Gated on ``AIC_DIAG_B200=1``. Temporary; revert when the collector-setup
+    divergence is understood.
+
+    1. Forces ``CUDA_LAUNCH_BLOCKING=1`` so any illegal memory access reports
+       synchronously at the faulting kernel rather than at the next sync.
+    2. Monkey-patches ``deep_gemm.fp8_paged_mqa_logits`` (NSA indexer
+       scoring) and ``flashinfer.decode.trtllm_batch_decode_with_kv_cache_mla``
+       (B200 decode) to print input shapes + dtypes before each call.
+    """
+    if os.environ.get("AIC_DIAG_B200") != "1":
+        return
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    os.environ["TORCH_USE_CUDA_DSA"] = "1"
+
+    try:
+        import deep_gemm
+
+        _orig_mqa = deep_gemm.fp8_paged_mqa_logits
+
+        def _diag_mqa(q_fp8, kv_cache_fp8, weights, seqlens_32, block_tables, schedule_metadata, max_seq_len, **kw):
+            print(
+                f"[DIAG indexer] q_fp8={tuple(q_fp8.shape)}/{q_fp8.dtype} "
+                f"kv={tuple(kv_cache_fp8.shape)}/{kv_cache_fp8.dtype} "
+                f"weights={tuple(weights.shape)}/{weights.dtype} "
+                f"seqlens={seqlens_32.tolist()} "
+                f"block_tables={tuple(block_tables.shape)} "
+                f"max_seq_len={max_seq_len}",
+                flush=True,
+            )
+            return _orig_mqa(
+                q_fp8, kv_cache_fp8, weights, seqlens_32, block_tables, schedule_metadata, max_seq_len, **kw
+            )
+
+        deep_gemm.fp8_paged_mqa_logits = _diag_mqa
+    except Exception as e:
+        print(f"[DIAG] failed to patch deep_gemm.fp8_paged_mqa_logits: {e}", flush=True)
+
+    try:
+        import flashinfer.decode as fid
+
+        _orig_decode = fid.trtllm_batch_decode_with_kv_cache_mla
+
+        def _diag_decode(**kw):
+            q = kw.get("query")
+            kv = kw.get("kv_cache")
+            bt = kw.get("block_tables")
+            sl = kw.get("seq_lens")
+            print(
+                f"[DIAG trtllm_decode] "
+                f"query={tuple(q.shape) if q is not None else None}/{q.dtype if q is not None else None} "
+                f"kv_cache={tuple(kv.shape) if kv is not None else None}/{kv.dtype if kv is not None else None} "
+                f"block_tables={tuple(bt.shape) if bt is not None else None} "
+                f"seq_lens={sl.tolist() if sl is not None else None} "
+                f"max_seq_len={kw.get('max_seq_len')} "
+                f"sparse_mla_top_k={kw.get('sparse_mla_top_k')}",
+                flush=True,
+            )
+            return _orig_decode(**kw)
+
+        fid.trtllm_batch_decode_with_kv_cache_mla = _diag_decode
+    except Exception as e:
+        print(f"[DIAG] failed to patch flashinfer trtllm_batch_decode: {e}", flush=True)
+
+
 def load_model_runner(
     model_path: str,
     head_num: int,
@@ -473,6 +547,7 @@ def load_model_runner(
     from sglang.srt.server_args import ServerArgs
     from sglang.srt.utils import suppress_other_loggers
 
+    _install_diag_hooks()
     suppress_other_loggers()
 
     device_str = str(device)
