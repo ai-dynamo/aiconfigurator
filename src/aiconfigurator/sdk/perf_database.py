@@ -10,7 +10,7 @@ import logging
 import math
 import os
 from collections import UserDict, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Optional
 
 import numpy as np
@@ -1157,6 +1157,38 @@ DSA_MODEL_DIMS: dict[str, dict] = {
 }
 
 DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
+
+# GLM-5 fp8 collection is blocked upstream in sglang 0.5.10 (unflatten in
+# deepseek_weight_loader.py doesn't handle v_head_dim=256) and flashinfer
+# (trtllm_ragged_attention_deepseek asserts v_head_dim<=128). Until the sglang
+# bug is fixed, fall back to DeepseekV32ForCausalLM rows when the user's
+# GlmMoeDsaForCausalLM query has no collected data for the requested gemm_mode.
+# See SGLANG_DSA_COLLECTION_GAPS.md Phase 2 notes.
+_DSA_ARCH_FALLBACKS: dict[str, str] = {
+    "GlmMoeDsaForCausalLM": "DeepseekV32ForCausalLM",
+}
+_dsa_fallback_warned: set = set()
+
+
+def _resolve_dsa_arch(bucket: Mapping, requested: str, context_key: tuple) -> str:
+    """Return the architecture that has rows in bucket, falling back per
+    _DSA_ARCH_FALLBACKS when the requested architecture has none. Emits a
+    one-time WARNING per (requested_arch, fallback_arch, context_key)."""
+    if bucket.get(requested):
+        return requested
+    fallback = _DSA_ARCH_FALLBACKS.get(requested)
+    if fallback is None or fallback not in bucket or not bucket[fallback]:
+        return requested  # let the caller raise the natural error
+    warn_key = (requested, fallback, context_key)
+    if warn_key not in _dsa_fallback_warned:
+        _dsa_fallback_warned.add(warn_key)
+        logger.warning(
+            "DSA perf: no rows for architecture=%s at %s; falling back to %s. See SGLANG_DSA_COLLECTION_GAPS.md.",
+            requested,
+            dict(context_key),
+            fallback,
+        )
+    return fallback
 
 
 def load_context_dsa_module_data(dsa_file: str):
@@ -6813,7 +6845,18 @@ class PerfDatabase:
                         f"Context DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode][architecture]
+                arch_bucket = dsa_module_data[fmha_quant_mode][kvcache_quant_mode][gemm_quant_mode]
+                resolved_arch = _resolve_dsa_arch(
+                    arch_bucket,
+                    architecture,
+                    context_key=(
+                        ("phase", "context"),
+                        ("fmha", fmha_quant_mode.name),
+                        ("kv", kvcache_quant_mode.name),
+                        ("gemm", gemm_quant_mode.name),
+                    ),
+                )
+                dsa_dict = arch_bucket[resolved_arch]
                 full_s = s + prefix
                 result = self._interp_3d(num_heads, full_s, b, dsa_dict, "cubic")
                 latency = result["latency"]
@@ -6976,7 +7019,17 @@ class PerfDatabase:
                         f"Generation DSA module perf data not loaded for system='{self.system}', "
                         f"backend='{self.backend}', version='{self.version}'."
                     )
-                dsa_dict = dsa_module_data[kv_cache_dtype][gemm_quant_mode][architecture]
+                arch_bucket = dsa_module_data[kv_cache_dtype][gemm_quant_mode]
+                resolved_arch = _resolve_dsa_arch(
+                    arch_bucket,
+                    architecture,
+                    context_key=(
+                        ("phase", "generation"),
+                        ("kv", kv_cache_dtype.name),
+                        ("gemm", gemm_quant_mode.name),
+                    ),
+                )
+                dsa_dict = arch_bucket[resolved_arch]
                 result = self._interp_3d(num_heads, b, s, dsa_dict, "cubic")
                 latency = result["latency"]
                 energy = result.get("energy", 0.0)
