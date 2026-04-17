@@ -88,7 +88,7 @@ try:
     )
     from vllm.scalar_type import scalar_types as _scalar_types  # type: ignore[import]
 
-    _int4_wo_quant_type_id = _scalar_types.uint4.id
+    _int4_wo_quant_type_id = _scalar_types.uint4b8.id
 
     _gptq_marlin_moe_repack_fn = getattr(_vllm_custom_ops, "gptq_marlin_moe_repack", None)
     if _gptq_marlin_moe_repack_fn is None:
