@@ -538,7 +538,7 @@ def run_moe_torch(
                 w1_int4_scale,
                 w2_int4_scale,
                 None,  # gating_output (unused when topk_weights/ids provided)
-                tw,
+                tw.float(),  # fused_marlin_moe asserts float32
                 ti,
                 _int4_wo_quant_type_id,
                 w1_zeros=None,
