@@ -524,18 +524,31 @@ def run_moe_torch(
             num_runs = 1
 
         def _run_int4_wo_once(hs, tw, ti):
-            """Run a single int4_wo (W4A16) MoE iteration via vLLM Marlin GPTQ kernel."""
+            """Run a single int4_wo (W4A16) MoE iteration via vLLM Marlin GPTQ kernel.
+
+            fused_marlin_moe takes raw router logits (not topk_weights/topk_ids)
+            and computes topk internally.  Reconstruct a gating_output from the
+            pre-computed topk_weights/ids — non-selected entries are 0 so topk
+            still selects the same experts.
+            """
+            gating_output = torch.zeros(
+                hs.shape[0],
+                num_experts,
+                device=hs.device,
+                dtype=hs.dtype,
+            )
+            gating_output.scatter_(1, ti, tw)
             _fused_marlin_moe_fn(
                 hs,
                 w1_marlin,
                 w2_marlin,
                 w1_int4_scale,
                 w2_int4_scale,
-                tw,
-                ti,
+                gating_output,
+                topk,
+                renormalize=True,
                 w1_zeros=None,
                 w2_zeros=None,
-                num_bits=4,
                 is_k_full=True,
             )
 
