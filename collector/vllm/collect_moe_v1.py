@@ -433,8 +433,10 @@ def run_moe_torch(
             dtype=torch.int32,
             device=device,
         )
-        # Empty perm → no act-order permutation (symmetric GPTQ without reordering)
-        empty_perm = torch.empty(0, dtype=torch.int32, device=device)
+        # Empty perm → no act-order permutation (symmetric GPTQ without reordering).
+        # Shape must be (num_experts, 0): vllm 0.14.0's gptq_marlin_moe_repack
+        # loops per-expert and indexes perm[e], so dim-0 must equal num_experts.
+        empty_perm = torch.empty((local_num_experts, 0), dtype=torch.int32, device=device)
         w1_marlin = _gptq_marlin_moe_repack_fn(w1_packed_q, empty_perm, hidden_size, 2 * local_inter_size, 4)
         w2_marlin = _gptq_marlin_moe_repack_fn(w2_packed_q, empty_perm, local_inter_size, hidden_size, 4)
         del w1_packed_q, w2_packed_q
