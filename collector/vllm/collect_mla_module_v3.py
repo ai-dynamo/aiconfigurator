@@ -242,7 +242,10 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
-    return _build_module_test_cases(attn_type="dsa", mode="context")
+    cases = _build_module_test_cases(attn_type="dsa", mode="context")
+    # DEBUG (debug/mem-snapshot branch): limit to first 50 cases so the
+    # memory-leak instrumentation produces a digestible log in minutes.
+    return cases[:50]
 
 
 def get_dsa_generation_module_test_cases():
@@ -747,6 +750,11 @@ def run_mla_module(
         f"heads={num_heads}, gemm={gemm_type}, compute={compute_dtype}, kv={kv_cache_dtype}, model={model_path}"
     )
 
+    # DEBUG: memory-leak instrumentation (see debug/mem-snapshot branch).
+    global _MEMSNAP_TASK_COUNTER
+    _MEMSNAP_TASK_COUNTER += 1
+    _mem_snapshot("task_start")
+
     # 1. Create attention module
     attn_module, vllm_config = _create_attention_module(
         model_path=model_path,
@@ -760,6 +768,8 @@ def run_mla_module(
         device=device,
         is_context=is_context,
     )
+
+    _mem_snapshot("after_module_init")
 
     # 1b. Process weights (FP8 quantization + create W_UK_T / W_UV for MLA)
     _process_module_weights(attn_module, vllm_config, device)
@@ -858,6 +868,8 @@ def run_mla_module(
     ) as results:
         pass
 
+    _mem_snapshot("after_benchmark")
+
     latency = results["latency_ms"]
 
     # 6. Log results — schema aligned with TRT-LLM
@@ -907,6 +919,7 @@ def run_mla_module(
     )
 
     _cleanup()
+    _mem_snapshot("after_cleanup")
     return latency
 
 
@@ -940,6 +953,34 @@ def run_mla_module_worker(
 def _cleanup():
     torch.cuda.empty_cache()
     gc.collect()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# DEBUG: memory leak instrumentation (scratch branch debug/mem-snapshot)
+# ═══════════════════════════════════════════════════════════════════════
+
+_MEMSNAP_TASK_COUNTER = 0
+
+
+def _mem_snapshot(tag: str) -> None:
+    """Log per-task GPU memory state + largest live Python-reachable tensors."""
+    gc.collect()
+    alloc = torch.cuda.memory_allocated() / 1024**3
+    resrv = torch.cuda.memory_reserved() / 1024**3
+    tensors = [o for o in gc.get_objects() if isinstance(o, torch.Tensor) and o.is_cuda]
+    tensors.sort(key=lambda t: t.element_size() * t.numel(), reverse=True)
+    top20_bytes = sum(t.element_size() * t.numel() for t in tensors[:20])
+    top3 = [
+        f"{tuple(t.shape)}/{str(t.dtype).replace('torch.', '')}/{(t.element_size() * t.numel()) / 1024**2:.0f}M"
+        for t in tensors[:3]
+    ]
+    print(
+        f"[MEMSNAP task={_MEMSNAP_TASK_COUNTER} tag={tag}] "
+        f"alloc={alloc:.2f}G reserved={resrv:.2f}G "
+        f"py_tensors={len(tensors)} top20={top20_bytes / 1024**3:.2f}G "
+        f"top3={top3}",
+        flush=True,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════
